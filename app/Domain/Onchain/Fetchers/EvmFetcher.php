@@ -238,6 +238,34 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     }
 
     /**
+     * Is an `alchemy_getAssetTransfers` 200 body a USABLE page?
+     *
+     * The same "one verdict, one function" discipline as
+     * {@see NftEthIndexerWorker::headPollPayloadIsUsable()}: this decides the
+     * BREAKER outcome via `validate_success`, and {@see fetch_transfers_since()}
+     * decides what the caller is told. If the two could disagree, the breaker
+     * would record a success for a page the worker treats as a failed fetch —
+     * clearing the counter for a tick that failed.
+     *
+     * Mirrors exactly the conditions under which that method returns `null`
+     * after a 2xx: non-JSON body, a JSON-RPC `error` member, a missing or
+     * non-array `result`, and a `result.transfers` that is not an array. A
+     * genuinely EMPTY page is usable — an empty range is a real answer.
+     */
+    public static function transferPagePayloadIsUsable(string $body): bool
+    {
+        $json = json_decode($body, true);
+        if (!is_array($json) || isset($json['error'])) {
+            return false;
+        }
+        if (!isset($json['result']) || !is_array($json['result'])) {
+            return false;
+        }
+
+        return is_array($json['result']['transfers'] ?? []);
+    }
+
+    /**
      * Fetch ERC-721/1155 Transfer events between two block heights via
      * Alchemy's `alchemy_getAssetTransfers`. Used by NftEthIndexerWorker
      * to ingest confirmation-gated mints/transfers/burns.
@@ -333,6 +361,13 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             'label'    => 'EVM alchemy_getAssetTransfers',
             'chain_id' => $chainId,
             'outcome'  => $outcome,
+            // ⚠ SAME RULE AS THE HEAD POLL. A public RPC that does not
+            // implement this Alchemy-proprietary method answers HTTP 200 with
+            // a JSON-RPC error member. Settling that as a success credited a
+            // recovery, cleared the counter and made the failure untrippable:
+            // every tick reset to zero before the worker's verdict added one.
+            'validate_success' => static fn(string $body, int $code): bool
+                => self::transferPagePayloadIsUsable($body),
         ]);
 
         if (is_wp_error($response)) {

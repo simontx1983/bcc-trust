@@ -135,7 +135,44 @@ $old = "        return \$this->last === self::NONE || \$this->last === self::SUC
 $new = "        return \$this->last === self::NONE;";
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
-' 'BreakerChargePerLogicalRequestTest::testATwoHundredCarryingAnRpcErrorCreditsThenChargesExactlyOnce' 'M3 a genuine semantic failure is suppressed'
+' 'BreakerRetryAccountingTest::testTheReceiptReportsSuccessAndStillAllowsASemanticVerdict' 'M3 a genuine semantic failure is suppressed'
+
+# 8. RESTORE THE PREMATURE SUCCESS SETTLEMENT — credit at the status line and let
+#    the caller charge afterwards. This is the defect independent review found:
+#    the credit cleared the open state, the counter and the probe and advanced
+#    last_success, so a semantically failed HALF-OPEN probe read as recovery.
+#
+#    ⚠ KILLED BY BREAKER STATE, NOT BY A CHARGE COUNT. Before the fix the final
+#    counter was still "one more than before" on a closed chain, so a test that
+#    only counted charges would pass. The named test asserts the PHASE, the
+#    restamped cooldown, last_success and the probe lock.
+mutate "$RETRY" '
+$f = $argv[1]; $s = file_get_contents($f);
+$old = "                    if (\$isUsablePayload !== null\r\n                        && !\$isUsablePayload((string) wp_remote_retrieve_body(\$lastResponse), \$code)) {";
+$new = "                    if (false) {";
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, $new, $s));
+' 'BreakerChargePerLogicalRequestTest::testAHalfOpenProbeThatFailsSemanticallyStaysOpen' 'M8 a 2xx is credited before semantic validation'
+
+# 8b. The same mutation, against the consequence that made it invisible: without
+#     semantic validation the counter oscillates 0→1→0→1 and never trips.
+mutate "$RETRY" '
+$f = $argv[1]; $s = file_get_contents($f);
+$old = "                    if (\$isUsablePayload !== null\r\n                        && !\$isUsablePayload((string) wp_remote_retrieve_body(\$lastResponse), \$code)) {";
+$new = "                    if (false) {";
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, $new, $s));
+' 'BreakerChargePerLogicalRequestTest::testRepeatedSemanticFailuresAccumulateAndTrip' 'M8b semantic failures never accumulate'
+
+# 8c. Weaken the head-poll predicate so a JSON-RPC error object reads as usable —
+#     the single-verdict rule between the predicate and the worker's parsing.
+mutate "$WORKER" '
+$f = $argv[1]; $s = file_get_contents($f);
+$old = "        if (isset(\$json[\x27error\x27]) && is_array(\$json[\x27error\x27])) {\r\n            return false;\r\n        }\r\n        if (!isset(\$json[\x27result\x27]) || !is_string(\$json[\x27result\x27])) {";
+$new = "        if (!isset(\$json[\x27result\x27]) || !is_string(\$json[\x27result\x27])) {";
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, $new, $s));
+' 'BreakerChargePerLogicalRequestTest::testAnErrorMemberWinsOverAWellFormedResult' 'M8c the head-poll predicate ignores a JSON-RPC error'
 
 # 4. LEAK THE RECEIPT BETWEEN OPERATIONS — make the head-poll receipt static, so
 #    one tick's outcome decides the next tick's verdict.

@@ -180,22 +180,25 @@ final class BreakerChargePerLogicalRequestTest extends TestCase
     // ── 2: transport success + a genuine semantic failure ───────────────
 
     /**
-     * A 200 carrying a JSON-RPC error object. The node answered, so the
-     * transport CREDITS a success — which clears any earlier failures — and
-     * the worker's verdict then charges exactly one for an answer it cannot
-     * use.
+     * A 200 carrying a JSON-RPC error object is a FAILED request, and must
+     * add exactly one failure WITHOUT first clearing what came before.
      *
-     * ⚠ THE CREDIT IS NOT SUPPRESSED AND NEITHER IS THE VERDICT. Both are
-     * true statements about different things: the host is reachable, and the
-     * operation failed.
+     * ⚠ THIS TEST USED TO ASSERT THE OPPOSITE, AND THAT WAS THE DEFECT.
+     * It read "the success cleared 3, then the semantic verdict charged its
+     * own 1" and expected a final counter of 1. That is precisely the
+     * clear-then-recharge that made 200-level semantic failures untrippable:
+     * three earlier failures were wiped by a response that had failed.
+     *
+     * The invariant is one EFFECTIVE outcome per logical request, decided
+     * after semantic validation — so 3 + 1 = 4, and nothing was credited.
      */
-    public function testATwoHundredCarryingAnRpcErrorCreditsThenChargesExactlyOnce(): void
+    public function testATwoHundredCarryingAnRpcErrorChargesOnceAndClearsNothing(): void
     {
-        // Three prior failures, so the credit has something to clear.
         OnchainCircuitBreaker::recordFailure(self::CHAIN);
         OnchainCircuitBreaker::recordFailure(self::CHAIN);
         OnchainCircuitBreaker::recordFailure(self::CHAIN);
         self::assertSame(3, $this->charges(), 'precondition');
+        \BccBreakerStore::$options['bcc_onchain_last_success_' . self::CHAIN] = 1000;
 
         \BccWire::$always = ['code' => 200, 'body' => (string) json_encode([
             'jsonrpc' => '2.0',
@@ -205,11 +208,16 @@ final class BreakerChargePerLogicalRequestTest extends TestCase
 
         NftEthIndexerWorker::runForChain(self::CHAIN);
 
-        self::assertCount(1, \BccWire::$urls, 'a 200 is not retried');
+        self::assertCount(1, \BccWire::$urls, 'a payload-level refusal is not retried');
         self::assertSame(
-            1,
+            4,
             $this->charges(),
-            'the success cleared 3, then the semantic verdict charged its own 1'
+            'the three earlier failures survive and this request adds exactly one'
+        );
+        self::assertSame(
+            1000,
+            (int) (\BccBreakerStore::$options['bcc_onchain_last_success_' . self::CHAIN] ?? 0),
+            'a failed request must never advance last_success'
         );
     }
 
@@ -231,6 +239,201 @@ final class BreakerChargePerLogicalRequestTest extends TestCase
 
         self::assertSame([], \BccWire::$urls, 'nothing was contacted');
         self::assertSame(1, $this->charges(), 'a genuine failure is never suppressed to avoid double charging');
+    }
+
+    // ── 2b: a HALF-OPEN probe that fails semantically ───────────────────
+
+    /**
+     * ⚠ THE INVARIANT: ONE LOGICAL REQUEST FINISHES WITH ONE EFFECTIVE
+     * BREAKER OUTCOME, DECIDED AFTER SEMANTIC VALIDATION.
+     *
+     * A recovery probe that comes back HTTP 200 carrying a JSON-RPC error is
+     * a FAILED probe. Before this was fixed the transport credited it as a
+     * success the moment it saw the status line — which cleared the open
+     * state, cleared the counter, released the probe and advanced
+     * `bcc_onchain_last_success_*` — and only then did the worker recognise
+     * the failure and charge one. The chain ended CLOSED with failures=1:
+     * a broken provider accepted as recovered.
+     *
+     * Worse, it made 200-level semantic failures UNTRIPPABLE. Every one of
+     * them cleared the previous failure before adding its own, so the
+     * counter could never climb past 1 no matter how long the provider
+     * stayed broken.
+     *
+     * ── WHY THIS ONE DRIVES ApiRetry AND NOT runForChain ────────────────
+     * The worker gates on `isOpen()` and so does `ApiRetry`, so a half-open
+     * tick claims the probe lock TWICE in one session. Production's
+     * `GET_LOCK` is re-entrant per session and both claims succeed; the test
+     * double is not, so the second one is refused and the request never
+     * reaches the wire. That is a harness gap, not a product defect, and
+     * "fixing" it would change what the existing
+     * {@see BreakerAttributionTest} pins about a SECOND caller being blocked.
+     *
+     * So the half-open invariant is exercised where it lives — the real
+     * retry loop, the real breaker and the REAL predicate the worker ships,
+     * {@see NftEthIndexerWorker::headPollPayloadIsUsable()}. That the worker
+     * actually wires that predicate is proven behaviourally end-to-end by
+     * {@see testRepeatedSemanticFailuresAccumulateAndTrip()}, which goes
+     * through `runForChain` and could not pass if the wiring were missing.
+     */
+    public function testAHalfOpenProbeThatFailsSemanticallyStaysOpen(): void
+    {
+        \BccBreakerStore::seedOpen(
+            self::CHAIN,
+            OnchainCircuitBreaker::FAILURE_THRESHOLD,
+            time() - (OnchainCircuitBreaker::COOLDOWN_SECONDS + 60)
+        );
+        self::assertSame(OnchainCircuitBreaker::PHASE_HALF_OPEN, OnchainCircuitBreaker::phase(self::CHAIN), 'precondition');
+        \BccBreakerStore::$options['bcc_onchain_last_success_' . self::CHAIN] = 1000;
+
+        // HTTP 200, and the node says it cannot answer.
+        \BccWire::$always = ['code' => 200, 'body' => (string) json_encode([
+            'jsonrpc' => '2.0',
+            'id'      => 1,
+            'error'   => ['code' => -32000, 'message' => 'MATIC_MAINNET is not enabled for this app'],
+        ])];
+
+        ApiRetry::post('https://opt.example/v2/key', ['body' => '{}'], [
+            'chain_id'         => self::CHAIN,
+            'label'            => 'EVM eth_blockNumber',
+            'validate_success' => static fn(string $body, int $code): bool
+                => NftEthIndexerWorker::headPollPayloadIsUsable($body),
+        ]);
+
+        self::assertCount(1, \BccWire::$urls, 'anti-vacuity: the probe really went out');
+        self::assertSame([], \BccWire::$sleeps, 'a payload-level refusal is deterministic — not retried');
+
+        // 1. The breaker must NOT have been handed a recovery.
+        self::assertSame(
+            OnchainCircuitBreaker::PHASE_OPEN,
+            OnchainCircuitBreaker::phase(self::CHAIN),
+            'a semantically failed probe must leave the breaker OPEN, not CLOSED'
+        );
+
+        // 2. A FRESH cooldown — the chain gets its full rest before the next probe.
+        $state = \BccBreakerStore::state(self::CHAIN);
+        self::assertGreaterThanOrEqual(
+            time() - 5,
+            (int) ($state['opened_at'] ?? 0),
+            'the failed probe must restamp opened_at, restarting the cooldown'
+        );
+
+        // 3. last_success must not move — nothing succeeded.
+        self::assertSame(
+            1000,
+            (int) (\BccBreakerStore::$options['bcc_onchain_last_success_' . self::CHAIN] ?? 0),
+            'a failed probe must never advance bcc_onchain_last_success_*'
+        );
+
+        // 4. Exactly one effective charge for the one logical request.
+        self::assertSame(
+            OnchainCircuitBreaker::FAILURE_THRESHOLD + 1,
+            $this->charges(),
+            'one logical request adds exactly one failure — no clear-then-recharge'
+        );
+
+        // 5. The probe slot is free for the next window, released exactly once.
+        self::assertArrayNotHasKey(
+            'bcc_cb_probe_' . self::CHAIN,
+            \BccBreakerStore::$locks,
+            'the probe lock must be released'
+        );
+    }
+
+    /**
+     * The consequence that made the bug invisible: repeated 200-level
+     * semantic failures must ACCUMULATE and eventually trip. Before the fix
+     * the counter oscillated 0→1→0→1 forever and the breaker never opened,
+     * however long the provider stayed broken.
+     */
+    public function testRepeatedSemanticFailuresAccumulateAndTrip(): void
+    {
+        \BccWire::$always = ['code' => 200, 'body' => (string) json_encode([
+            'jsonrpc' => '2.0',
+            'id'      => 1,
+            'error'   => ['code' => -32000, 'message' => 'not enabled for this app'],
+        ])];
+
+        for ($i = 1; $i <= OnchainCircuitBreaker::FAILURE_THRESHOLD; $i++) {
+            \BccWire::$urls = [];
+            NftEthIndexerWorker::runForChain(self::CHAIN);
+            self::assertSame($i, $this->charges(), "semantic failure #{$i} must add one, not reset to one");
+        }
+
+        self::assertSame(
+            OnchainCircuitBreaker::PHASE_OPEN,
+            OnchainCircuitBreaker::phase(self::CHAIN),
+            'five semantically failed requests open the breaker, exactly like five wire failures'
+        );
+    }
+
+    /**
+     * ⚠ THE BREAKER'S VERDICT AND THE WORKER'S MUST BE THE SAME VERDICT.
+     *
+     * A body carrying BOTH a JSON-RPC `error` member and a well-formed
+     * `result` is the case where the two rules could disagree:
+     * {@see NftEthIndexerWorker::fetchHeadBlock()} checks `error` first and
+     * reports a failed tick, so the predicate must do the same. If it looked
+     * only at `result`, the breaker would record a SUCCESS — clearing the
+     * counter — for a tick the worker simultaneously recorded as degraded.
+     *
+     * One function answers both questions, and this is the fixture that
+     * proves it is actually one answer.
+     */
+    public function testAnErrorMemberWinsOverAWellFormedResult(): void
+    {
+        OnchainCircuitBreaker::recordFailure(self::CHAIN);
+        self::assertSame(1, $this->charges(), 'precondition');
+
+        $body = (string) json_encode([
+            'jsonrpc' => '2.0',
+            'id'      => 1,
+            'error'   => ['code' => -32000, 'message' => 'execution reverted'],
+            'result'  => '0x' . dechex(self::HEAD_BLOCK),
+        ]);
+
+        self::assertFalse(
+            NftEthIndexerWorker::headPollPayloadIsUsable($body),
+            'the predicate must refuse a body whose error member is set'
+        );
+
+        \BccWire::$always = ['code' => 200, 'body' => $body];
+        NftEthIndexerWorker::runForChain(self::CHAIN);
+
+        self::assertSame(
+            2,
+            $this->charges(),
+            'the tick failed, so the breaker must charge — never credit a success that clears the counter'
+        );
+        self::assertNotSame(
+            [],
+            \BCC\Trust\Onchain\Repositories\ChainCheckpointRepository::$failures,
+            'anti-vacuity: the worker really did treat this tick as failed'
+        );
+    }
+
+    /** An ORDINARY valid 200 is still a success, and still clears the chain. */
+    public function testAValidTwoHundredIsStillASuccess(): void
+    {
+        OnchainCircuitBreaker::recordFailure(self::CHAIN);
+        OnchainCircuitBreaker::recordFailure(self::CHAIN);
+        self::assertSame(2, $this->charges(), 'precondition');
+        \BccBreakerStore::$options['bcc_onchain_last_success_' . self::CHAIN] = 1000;
+
+        \BccWire::$queue = [
+            self::rpcResult('0x' . dechex(self::HEAD_BLOCK)),
+            self::transferPage([600, 601], null),
+        ];
+
+        NftEthIndexerWorker::runForChain(self::CHAIN);
+
+        self::assertSame(0, $this->charges(), 'a healthy tick still clears the counter');
+        self::assertSame(OnchainCircuitBreaker::PHASE_CLOSED, OnchainCircuitBreaker::phase(self::CHAIN));
+        self::assertGreaterThan(
+            1000,
+            (int) (\BccBreakerStore::$options['bcc_onchain_last_success_' . self::CHAIN] ?? 0),
+            'and a real success DOES advance last_success'
+        );
     }
 
     // ── 3: pagination — one page is one logical request ─────────────────

@@ -12,13 +12,19 @@ if (!defined('ABSPATH')) {
  * same request cannot charge it a second time.
  *
  * ── THE PROBLEM THIS SOLVES ─────────────────────────────────────────────
- * Twelve executable call sites charge {@see OnchainCircuitBreaker}. Four are
- * inside {@see ApiRetry}, where a wire outcome exists; the other eight are
- * domain judgements ("the validator index came back empty", "eth_blockNumber
- * returned 0"). On the paths where both fire, ONE failing operation charged
- * the breaker FIVE times — four per-attempt transport charges plus the
- * caller's verdict — against a threshold of five. A single failing head poll
- * opened the chain-wide breaker on its own.
+ * Ten executable call sites charge {@see OnchainCircuitBreaker}. TWO are
+ * inside {@see ApiRetry} — the single settlement helper and the batch wave —
+ * where a wire outcome exists; the other eight are domain judgements ("the
+ * validator index came back empty", "eth_blockNumber returned 0"). On the
+ * paths where both fire, ONE failing operation charged the breaker FIVE
+ * times — four per-attempt transport charges plus the caller's verdict —
+ * against a threshold of five. A single failing head poll opened the
+ * chain-wide breaker on its own.
+ *
+ * (ApiRetry had FOUR charge sites before this change: 429, 5xx, transport
+ * and the batch. The first three were funnelled into one helper, which is
+ * what makes "at most one charge per logical request" structural. The count
+ * is pinned by BreakerAttributionTest's caller inventory.)
  *
  * The per-attempt half is fixed inside {@see ApiRetry} by settling once when
  * the retry sequence ends. This receipt fixes the other half: the caller can

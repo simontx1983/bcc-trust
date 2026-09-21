@@ -42,9 +42,15 @@ final class ApiRetry
      * Until PR B this class called `recordFailure()` once PER ATTEMPT, so a
      * single failing request charged FOUR against a threshold of five. The
      * 2026-09-08 audit measured it exactly: chain 8 opened on a counter of
-     * 8 — 2 x 4 — inside a 23-second window. Worse, two paths added their
-     * own domain verdict on top, so ONE failing `eth_blockNumber` charged
-     * 4 + 1 = 5 and opened the chain-wide breaker by itself.
+     * 8 — 2 x 4 — inside a 23-second window.
+     *
+     * ⚠ THE OLD ARITHMETIC WAS NOT UNIFORM, AND THE DIFFERENCE MATTERS:
+     *   - a TRANSPORT-ONLY failing request charged 4, so TWO of them (8)
+     *     opened a threshold-five breaker;
+     *   - the head-poll and transfer-page paths added their own domain
+     *     verdict on top, charging 4 + 1 = 5, so ONE of them opened the
+     *     chain-wide breaker by itself.
+     * Both now charge exactly one, so both take five.
      *
      * ── WHAT DID NOT CHANGE, DELIBERATELY ───────────────────────────────
      * The retry COUNT and the backoff delays are untouched: a half-open
@@ -60,9 +66,19 @@ final class ApiRetry
      * to the breaker and then cancelled — there is no pending charge, which
      * is why an eventual success cannot leave a stale increment behind.
      *
+     * ── THE OUTCOME IS DECIDED AFTER SEMANTIC VALIDATION ────────────────
+     * A 2xx is not automatically a success. A caller that can tell a usable
+     * payload from an error carried inside a 200 supplies `validate_success`
+     * (see the parameter docs), and an unusable payload settles as the one
+     * failure for that request. Crediting at the status line and letting the
+     * caller charge afterwards is a different thing entirely: it cleared the
+     * open state, the counter and the probe first, so a failed recovery
+     * probe read as recovery and 200-level semantic failures could never
+     * accumulate past one.
+     *
      * Pinned by {@see \BCC\Trust\Onchain\Tests\Unit\BreakerRetryAccountingTest}
      * and measured against the real counter by
-     * {@see \BCC\Trust\Onchain\Tests\Integration\BreakerChargeDeltaIntegrationTest}.
+     * {@see \BCC\Trust\Onchain\Tests\Unit\BreakerChargePerLogicalRequestTest}.
      */
     const DEFAULT_MAX_RETRIES   = 3;
     const DEFAULT_BACKOFF_BASE  = 2;      // seconds
@@ -81,6 +97,9 @@ final class ApiRetry
      *     @type int    $chain_id      Chain ID for circuit breaker integration.
      *     @type callable $application_error  OPTIONAL. See below. Absent =
      *                                 today's behaviour, exactly.
+     *     @type callable $validate_success  OPTIONAL. See below. Absent =
+     *                                 today's behaviour, exactly: any 2xx is a
+     *                                 success and no response body is read.
      *     @type ProviderOutcomeReceipt $outcome  OPTIONAL. A receipt the CALLER
      *                                 owns, for THIS logical request. Filled in
      *                                 with whatever this method settles on the
@@ -88,6 +107,31 @@ final class ApiRetry
      *                                 the same request can avoid charging it a
      *                                 second time. Never read by this class.
      * }
+     *
+     * ── `validate_success`: WHEN A 200 IS NOT A SUCCESS ────────────────
+     * Alchemy answers `MATIC_MAINNET is not enabled for this app` with HTTP
+     * 200 and a JSON-RPC error object; a public RPC that does not implement
+     * an Alchemy-proprietary method does the same. The host answered, so the
+     * status line says success — and the operation failed.
+     *
+     * That mattered most on a HALF-OPEN recovery probe. `recordSuccess()`
+     * clears the open state, deletes the counter, releases the probe and
+     * advances `bcc_onchain_last_success_*`. Crediting it at the status line
+     * therefore accepted a broken provider as recovered, and then the
+     * caller's verdict added one failure to a freshly-cleared counter — so
+     * the chain sat CLOSED at failures=1 and 200-level semantic failures
+     * could NEVER reach the threshold, however long the provider stayed
+     * broken.
+     *
+     * So the CALLER may supply `fn(string $body, int $code): bool` returning
+     * TRUE when the payload is USABLE. When it returns FALSE this method
+     * settles the request as its one failure: not retried (a payload-level
+     * refusal is deterministic) and not attributed (there is no wire fault to
+     * name, so the kind stays null, exactly as the domain sites record).
+     *
+     * IT IS OPT-IN AND NARROW, and it is consulted ONLY for a 2xx — never
+     * for WP_Error, 429, 4xx or 5xx, so it cannot reclassify a transport
+     * failure or collide with `application_error`.
      *
      * ── `application_error`: WHEN A 5xx IS NOT A SERVER PROBLEM ─────────
      * A cosmos LCD reports CONTRACT-level errors as HTTP 500. Asking a
@@ -123,6 +167,13 @@ final class ApiRetry
 
         $isApplicationError = isset($options['application_error']) && is_callable($options['application_error'])
             ? $options['application_error']
+            : null;
+
+        // OPT-IN semantic validation of a 2xx body. `fn(string $body, int $code): bool`
+        // returning TRUE when the payload is USABLE. Absent = today's behaviour
+        // exactly: any 2xx is a success and no body is ever read.
+        $isUsablePayload = isset($options['validate_success']) && is_callable($options['validate_success'])
+            ? $options['validate_success']
             : null;
 
         // ⚠ DERIVED FROM OPTIONS, NEVER FROM THE URL. The only signal read is
@@ -238,6 +289,42 @@ final class ApiRetry
                 $code = (int) wp_remote_retrieve_response_code($lastResponse);
 
                 if ($code >= 200 && $code < 300) {
+                    // ⚠ THE OUTCOME IS DECIDED AFTER SEMANTIC VALIDATION, NOT
+                    // AT THE STATUS LINE. A caller that can tell a usable
+                    // payload from an error carried inside a 200 supplies
+                    // `validate_success`; when it says the body is unusable,
+                    // this request FAILED and settles as a failure.
+                    //
+                    // Crediting first and letting the caller charge afterwards
+                    // is not the same thing and was a real defect: the credit
+                    // cleared the open state, the counter and the probe, and
+                    // advanced `bcc_onchain_last_success_*`, so a failed
+                    // recovery probe was accepted as recovery and 200-level
+                    // semantic failures could never accumulate past one.
+                    if ($isUsablePayload !== null
+                        && !$isUsablePayload((string) wp_remote_retrieve_body($lastResponse), $code)) {
+                        self::log(sprintf(
+                            'SEMANTIC FAILURE (%d) %s — the host answered with an unusable payload',
+                            $code, $label
+                        ));
+
+                        // ⚠ NOT RETRIED, DELIBERATELY. The host answered; a
+                        // payload-level refusal ("this chain is not enabled
+                        // for this app") is deterministic, and retrying it
+                        // three more times is the exact waste the 2026-08-19
+                        // Dungeon measurement recorded on the 5xx path.
+                        //
+                        // ⚠ AND NOT ATTRIBUTED. There is no wire fault to
+                        // name — no transport error, no HTTP status outside
+                        // 2xx — so the kind stays null, which is what the
+                        // eight domain sites already record when they have no
+                        // wire outcome. Inventing a token here would be the
+                        // fabricated diagnosis PR 7.8 removed.
+                        self::settleFailure($chainId, null, $requestClass, $endpointFp, $receipt);
+
+                        return $lastResponse;
+                    }
+
                     // Success — record for circuit breaker. This is the ONLY
                     // outcome for the whole sequence: any earlier failed
                     // attempt was local retry state and charged nothing, so

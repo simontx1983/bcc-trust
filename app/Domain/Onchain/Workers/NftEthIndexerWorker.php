@@ -637,6 +637,12 @@ final class NftEthIndexerWorker
             'label'    => 'EVM eth_blockNumber',
             'chain_id' => (int) $chain->id,
             'outcome'  => $outcome,
+            // ⚠ THE BREAKER OUTCOME IS DECIDED HERE, NOT AT THE STATUS LINE.
+            // Alchemy answers "MATIC_MAINNET is not enabled for this app" with
+            // HTTP 200 and a JSON-RPC error object. Letting that settle as a
+            // success credited a recovery that never happened.
+            'validate_success' => static fn(string $body, int $code): bool
+                => self::headPollPayloadIsUsable($body),
         ]);
 
         if (is_wp_error($response)) {
@@ -688,6 +694,42 @@ final class NftEthIndexerWorker
             return ['block' => 0, 'error' => 'eth_blockNumber result was empty string', 'outcome' => $outcome];
         }
         return ['block' => (int) hexdec($hex), 'error' => null, 'outcome' => $outcome];
+    }
+
+    /**
+     * Is an `eth_blockNumber` 200 body a USABLE head poll?
+     *
+     * ── WHY THIS IS PUBLIC, AND WHY IT IS ONE FUNCTION ──────────────────
+     * Two things need the same answer: {@see ApiRetry}'s `validate_success`
+     * hook, which decides the BREAKER outcome for the request, and
+     * {@see fetchHeadBlock()}, which decides what to tell the operator. If
+     * they could disagree, the breaker would record a success for a response
+     * the worker then treated as a failure — which is exactly the defect this
+     * predicate exists to close. One function, one verdict.
+     *
+     * It is also the seam a test drives, so the rule under test is the rule
+     * that ships rather than a copy of it written in the test.
+     *
+     * A body is usable only when it is JSON, carries no JSON-RPC `error`
+     * member, and has a non-empty string `result`. Everything else — a
+     * plain-text "not enabled for this app", a JSON-RPC error object, a
+     * missing or empty result — means the host answered and we still have no
+     * head block.
+     */
+    public static function headPollPayloadIsUsable(string $body): bool
+    {
+        $json = json_decode($body, true);
+        if (!is_array($json)) {
+            return false;
+        }
+        if (isset($json['error']) && is_array($json['error'])) {
+            return false;
+        }
+        if (!isset($json['result']) || !is_string($json['result'])) {
+            return false;
+        }
+
+        return ltrim($json['result'], '0x') !== '';
     }
 
     /**
