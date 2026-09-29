@@ -50,6 +50,9 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Support\NftChainCapability;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
+use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
+use BCC\Trust\Onchain\ValueObjects\ContractValidationVerdict;
+use BCC\Trust\Onchain\ValueObjects\IntakeMetadata;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningState;
 
 if (!defined('ABSPATH')) {
@@ -76,9 +79,47 @@ final class ManualCollectionIntakeService
     public const REFUSED_NOT_CW721         = 'cw721_validation_failed';
     public const REFUSED_WRITE_FAILED      = 'write_failed';
 
+    /**
+     * The contract answered, and its standard is one BCC has deliberately not
+     * taken on yet — ERC-1155 (DECISION 9) or a compressed Solana NFT
+     * (DECISION 8). ⚠ Distinct from {@see REFUSED_NOT_CW721}: this IS an NFT
+     * contract, and telling an operator otherwise would be wrong.
+     */
+    public const REFUSED_UNSUPPORTED_STANDARD = 'standard_not_supported_yet';
+
+    /**
+     * ⚠⚠ THE FAIL-CLOSED REFUSAL. No answer was obtained — timeout, missing
+     * API key, open breaker, exhausted budget, a chain with no wasm module.
+     * It says NOTHING about the contract, and the operator copy must offer a
+     * retry rather than a verdict.
+     */
+    public const REFUSED_UNAVAILABLE = 'could_not_validate';
+
     /** What was actually proven about the identifier. Recorded on the row's audit. */
     public const VALIDATION_CW721 = 'cw721_contract_info';
     public const VALIDATION_NONE  = 'none';
+
+    /**
+     * A targeted per-family validation actually ran and proved the standard.
+     *
+     * Replaces the old audit value for accepted rows: `cw721_contract_info`
+     * named a Cosmos-only probe, and PR E proves EVM and Solana too.
+     */
+    public const VALIDATION_TARGETED = 'targeted_contract_validation';
+
+    /**
+     * Which provider claimed a description, recorded beside it so a reviewer
+     * can see who said it. Bounded tokens — never a host or a URL.
+     */
+    private static function descriptionSourceFor(string $chainFamily): string
+    {
+        return match ($chainFamily) {
+            'cosmos' => 'cw721_contract_info',
+            'evm'    => 'alchemy_contract_metadata',
+            'solana' => 'das_get_asset',
+            default  => 'unknown',
+        };
+    }
 
     /**
      * Add one collection.
@@ -169,48 +210,52 @@ final class ManualCollectionIntakeService
             return $result;
         }
 
-        // ── 7. Family-specific validation ───────────────────────────────
-        $validation = self::VALIDATION_NONE;
-        $name       = '';
+        // ── 7. Targeted validation, one address, family-dispatched ──────
+        //
+        // ⚠ THE REFUSAL REASON IS THE POINT. Before PR E this block was
+        // Cosmos-only and collapsed every unhappy path into one refusal, so a
+        // timed-out LCD and a contract that is genuinely not CW-721 produced
+        // the same message. An administrator acts on that message. See
+        // {@see ContractValidationVerdict} for the four-state vocabulary that
+        // keeps "we could not ask" apart from "we asked and the answer is no".
+        $verdict = (new ContractValidator())->validate($chain, $canonical);
 
-        if ($chainFamily === 'cosmos') {
-            // ONE bounded validation operation. It is NOT one HTTP request:
-            // `testCw721ContractInfo()` tries `contract_info` and, only if
-            // that yields nothing, falls back to
-            // `get_collection_info_and_extension` for SG721-shaped contracts
-            // — so up to TWO LCD queries, and no more. Saying "exactly one
-            // request" would be a claim the method does not support.
-            $info = null;
-            try {
-                $fetcher = FetcherFactory::make_for_chain($chain);
-                if ($fetcher instanceof \BCC\Trust\Onchain\Fetchers\CosmosFetcher) {
-                    $info = $fetcher->testCw721ContractInfo($canonical);
-                }
-            } catch (\Throwable $e) {
-                Logger::warning('[bcc-trust] CW-721 validation threw during manual intake', [
-                    'chain_id' => $chainId,
-                    'error'    => $e->getMessage(),
-                ]);
-                $info = null;
-            }
+        if (!$verdict->mayPersist()) {
+            // Nothing is written for INVALID, UNSUPPORTED or UNAVAILABLE.
+            // UNSUPPORTED and UNAVAILABLE can both change on a later attempt,
+            // and a stored row would outlive the condition that produced it.
+            $reason = match ($verdict->state()) {
+                ContractValidationVerdict::INVALID     => self::REFUSED_NOT_CW721,
+                ContractValidationVerdict::UNSUPPORTED => self::REFUSED_UNSUPPORTED_STANDARD,
+                default                                => self::REFUSED_UNAVAILABLE,
+            };
 
-            if (!is_array($info)) {
-                // ⚠ `null` here means EITHER "not a CW-721" OR "the LCD did
-                // not answer". The fetcher collapses transport failure and a
-                // shape mismatch into the same null, so this refusal says
-                // "could not validate" — never "this is not an NFT
-                // collection". Reporting a provider failure as a negative
-                // result is the defect issue #225 describes, and it would be
-                // worse here, where a human acts on the answer.
-                return $this->refuse(self::REFUSED_NOT_CW721, $chainId, $operatorId, $family);
-            }
+            $result = $this->refuse($reason, $chainId, $operatorId, $family);
+            $result['evidence'] = $verdict->evidence();
+            $result['standard'] = $verdict->standard();
 
-            $validation = self::VALIDATION_CW721;
-            $candidate  = isset($info['name']) && is_string($info['name']) ? trim($info['name']) : '';
-            if ($candidate !== '') {
-                $name = $candidate;
-            }
+            return $result;
         }
+
+        $validation = self::VALIDATION_TARGETED;
+        $metadata   = $verdict->metadata() ?? IntakeMetadata::unknown();
+        $standard   = $verdict->standard();
+
+        // Sanitize every field through the existing rules. ⚠ Only fields the
+        // provider ANSWERED with a value reach the writer — an UNKNOWN field
+        // writes nothing, so a failed read never overwrites a stored value
+        // with null, and `metadata_state` carries the shortfall instead.
+        $writable = $metadata->writableFields();
+        $name     = CollectionMetadataRules::sanitizeName($writable['name'] ?? null) ?? '';
+        $symbol   = CollectionMetadataRules::sanitizeSymbol($writable['symbol'] ?? null);
+        $imageUrl = CollectionMetadataRules::sanitizeImageUrl($writable['image_url'] ?? null);
+        $supply   = null;
+        if (array_key_exists('total_supply', $writable)) {
+            $supplyCheck = CollectionMetadataRules::validateTotalSupply($writable['total_supply']);
+            $supply      = ($supplyCheck['ok'] ?? false) ? ($supplyCheck['value'] ?? null) : null;
+        }
+        $description   = CollectionMetadataRules::sanitizeDescription($writable['description'] ?? null);
+        $metadataState = $metadata->state();
 
         // ── 8. Insert + checked audit, atomically ───────────────────────
         // If the audit cannot be written, the collection must not remain
@@ -221,22 +266,52 @@ final class ManualCollectionIntakeService
         try {
             /** @var int $collectionId */
             $collectionId = TransactionManager::run(function () use (
-                $chainId, $canonical, $name, $chainFamily, $chain, $operatorId, $validation
+                $chainId, $canonical, $name, $chainFamily, $chain, $operatorId, $validation,
+                $symbol, $imageUrl, $supply, $standard, $metadataState, $description
             ) {
                 $data = [
-                    'chain_id'         => $chainId,
-                    'contract_address' => $canonical,
-                    'collection_name'  => $name !== '' ? $name : null,
-                    'token_standard'   => $chainFamily === 'cosmos' ? 'CW-721' : null,
+                    'chain_id'          => $chainId,
+                    'contract_address'  => $canonical,
+                    'collection_name'   => $name !== '' ? $name : null,
+                    // The standard the validator PROVED, not one inferred from
+                    // the family. An EVM chain can carry 721 and 1155, and only
+                    // the proven value may be stored.
+                    'token_standard'    => $standard,
+                    'collection_symbol' => $symbol,
+                    'image_url'         => $imageUrl,
+                    'total_supply'      => $supply,
+                    // How far the metadata read got, and when. Computed by
+                    // IntakeMetadata — never passed in by a caller, so nothing
+                    // can describe a failed read as `complete`.
+                    'metadata_state'      => $metadataState,
+                    'metadata_checked_at' => current_time('mysql', true),
                 ];
 
                 // `addManual()` forces `is_verified = 0` and
                 // `source = 'manual'` in its own INSERT; neither is passed in,
                 // so no caller can talk it into landing a pre-verified row.
                 // `provisioning_state` takes its column default, `'none'`.
+                //
+                // ⚠ METADATA RETRIEVAL NEVER VERIFIES AND NEVER PROVISIONS.
+                // Reading a name and an image says nothing about whether this
+                // is the official contract for that collection — that is an
+                // administrator's judgement, made later on the Verify screen.
                 $rowId = CollectionRepository::addManual($data);
                 if (!is_int($rowId) || $rowId <= 0) {
                     throw new \RuntimeException('collection insert failed');
+                }
+
+                // ⚠ DESCRIPTION LANDS `pending` AND STAYS INVISIBLE. It is
+                // provider-authored text: bounded, sanitized, attributed to its
+                // source, and published only after an administrator approves it
+                // on the review screen. It is NOT the Community Description and
+                // never reaches a PeepSo group — that is PR G.
+                if ($description !== null && $description !== '') {
+                    CollectionRepository::importChainDescription(
+                        $rowId,
+                        $description,
+                        self::descriptionSourceFor($chainFamily)
+                    );
                 }
 
                 $auditId = AuditLogger::logChecked(
@@ -339,7 +414,20 @@ final class ManualCollectionIntakeService
             case self::REFUSED_DUPLICATE:
                 return 'A collection with that on-chain identity already exists on this chain.';
             case self::REFUSED_NOT_CW721:
-                return 'The contract could not be confirmed as a CW-721. This may mean it is not one, or that the chain endpoint did not answer — it is not proof either way, and nothing was added.';
+                // ⚠ Now a DECIDED negative, and the copy may say so: the
+                // contract answered, and its answers are not an NFT
+                // collection's. The old hedge ("this may mean it is not one,
+                // or that the endpoint did not answer") existed because the
+                // Cosmos path could not tell those apart. It can now, and the
+                // "could not reach" case has its own refusal below.
+                return 'The contract answered, and it is not an NFT collection contract on this chain. Nothing was added.';
+            case self::REFUSED_UNSUPPORTED_STANDARD:
+                return 'This is an NFT contract, but BCC does not support its standard yet — ERC-1155 and compressed Solana NFTs are deferred until ownership can be proven safely. Nothing was added, and this is not a judgement about the collection.';
+            case self::REFUSED_UNAVAILABLE:
+                // ⚠⚠ NEVER PHRASED AS A VERDICT. Nothing was learned about
+                // the contract, and an operator who reads this as "not an NFT"
+                // will stop pursuing a collection that is perfectly fine.
+                return 'BCC could not reach the chain to check this contract, so nothing could be confirmed either way and nothing was added. This is not a judgement about the collection — try again, and if it keeps happening check the chain endpoint and provider credentials.';
             case self::REFUSED_WRITE_FAILED:
             default:
                 return 'The collection could not be added and nothing was written. See the bcc-trust error log.';

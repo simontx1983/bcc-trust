@@ -194,6 +194,81 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     }
 
     /**
+     * DAS `getAsset` for one mint, with the failure discriminated.
+     *
+     * ── WHY THIS EXISTS ALONGSIDE fetchMetadataForMint() ────────────────
+     * That method returns null for a missing Helius key, a timeout, a non-2xx
+     * and an unparseable body alike. Manual intake cannot use it: "this mint
+     * is not a collection" and "we never reached Helius" would be the same
+     * answer, and the second must never be recorded as the first.
+     *
+     * This returns the RAW DAS result so the caller can read `compression`,
+     * `grouping[].verified` and `supply` — fields the enrichment shape drops.
+     *
+     * `kind`: `none` | `credentials_missing` | `transport` | `http_error` |
+     * `malformed` | `not_found`.
+     *
+     * @return array{ok: bool, result: ?array<string, mixed>, kind: string}
+     */
+    public function assetResult(string $mint): array
+    {
+        if ($mint === '') {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        $rpcUrl = self::resolveHeliusRpcUrl();
+        if ($rpcUrl === null) {
+            return ['ok' => false, 'result' => null, 'kind' => 'credentials_missing'];
+        }
+
+        $body = wp_json_encode([
+            'jsonrpc' => '2.0',
+            'id'      => 'validate-' . substr($mint, 0, 8),
+            'method'  => 'getAsset',
+            'params'  => ['id' => $mint],
+        ]);
+        if ($body === false) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        $response = ApiRetry::post($rpcUrl, [
+            'timeout'   => self::HTTP_TIMEOUT,
+            'headers'   => ['Content-Type' => 'application/json'],
+            'body'      => $body,
+            'sslverify' => true,
+        ], [
+            'label'    => 'Helius getAsset (validation)',
+            'chain_id' => (int) $this->chain->id,
+        ]);
+
+        if (is_wp_error($response)) {
+            return ['ok' => false, 'result' => null, 'kind' => 'transport'];
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return ['ok' => false, 'result' => null, 'kind' => 'http_error'];
+        }
+
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($json)) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        // DAS answers an unknown id with a JSON-RPC error. That IS an answer:
+        // nothing exists at this address. Distinct from transport failure.
+        if (isset($json['error'])) {
+            return ['ok' => false, 'result' => null, 'kind' => 'not_found'];
+        }
+
+        if (!isset($json['result']) || !is_array($json['result'])) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        return ['ok' => true, 'result' => $json['result'], 'kind' => 'none'];
+    }
+
+    /**
      * Fetch enrichment metadata for a single Solana mint via Helius's
      * `getAsset` DAS method. Used by V2 Phase 1c NftEnrichmentService
      * to backfill name + image_url + collection_name on persistent

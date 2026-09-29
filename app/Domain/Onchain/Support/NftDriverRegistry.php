@@ -186,7 +186,15 @@ final class NftDriverRegistry
             // which is why Avalanche and BSC keep ERC-721 gating with no
             // Alchemy key at all. Ordered AFTER alchemy_transfers: both can
             // answer ownership, and the Alchemy path is richer.
-            'operations' => [self::OP_OWNERSHIP],
+            //
+            // VALIDATION added in PR E: `EvmContractProbe` proves the token
+            // standard with ERC-165 `supportsInterface` over `eth_call`, which
+            // any EVM RPC answers — so validation does NOT need an Alchemy key,
+            // and the "accepted as entered" banner is no longer correct for
+            // EVM. ⚠ METADATA is still not claimed here: name, symbol, image
+            // and supply come from Alchemy (DECISION 7), so a chain without a
+            // key can prove the standard and still not complete an intake.
+            'operations' => [self::OP_VALIDATION, self::OP_OWNERSHIP],
             'priority'   => 20,
         ],
         self::DRIVER_DAS_RPC => [
@@ -204,11 +212,19 @@ final class NftDriverRegistry
             // Deliberately ignores the chain row: the chain's rpc_url is the
             // public endpoint by default, and getAsset needs a DAS provider.
             //
-            // VALIDATION is NOT claimed. Solana collection adds are
-            // "trusted as entered" today, exactly as they are on EVM — there
-            // is no validation entry point to point a driver at. Whoever
-            // builds one registers it then, alongside evm_rpc VALIDATION.
-            'operations' => [self::OP_METADATA],
+            // VALIDATION added in PR E, which is the "whoever builds one"
+            // this comment used to defer to. `SolanaContractProbe` calls
+            // `getAsset` on the submitted mint and requires a VERIFIED
+            // collection grouping — an unverified grouping is refused, because
+            // anyone can write a collection address into their own metadata
+            // and only the authority's signature makes the claim mean
+            // anything. The same response supplies name and image, so
+            // validation and metadata cost one call between them.
+            //
+            // ⚠ Compressed NFTs are refused as UNSUPPORTED (DECISION 8): a
+            // cNFT lives in a Merkle tree, so the balance reads holder-gating
+            // relies on cannot prove ownership of one.
+            'operations' => [self::OP_VALIDATION, self::OP_METADATA],
             'priority'   => 10,
         ],
         self::DRIVER_MAGICEDEN => [

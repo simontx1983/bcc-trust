@@ -141,6 +141,22 @@ namespace {
         }
     }
 
+    // PR E: manual intake stamps `metadata_checked_at`, so this stub set now
+    // needs the clock shim the other stub files already carry.
+    if (!function_exists('current_time')) {
+        function current_time(string $type, bool $gmt = false)
+        {
+            if ($type === 'timestamp') {
+                return time();
+            }
+            if ($type === 'Y-m-d') {
+                return gmdate('Y-m-d');
+            }
+
+            return gmdate('Y-m-d H:i:s');
+        }
+    }
+
     if (!class_exists('BccTransientStore', false)) {
         final class BccTransientStore
         {
@@ -217,6 +233,37 @@ namespace BCC\Trust\Onchain\Repositories {
             {
                 self::$added[] = $args;
                 return self::$addManualResult;
+            }
+
+            /**
+             * PR E — descriptions imported at intake, recorded for assertion.
+             *
+             * @var list<array{0: int, 1: mixed, 2: string}>
+             */
+            public static array $descriptions = [];
+
+            public static bool $importDescriptionResult = true;
+
+            public static function importChainDescription(
+                int $collectionId,
+                mixed $rawDescription,
+                string $source
+            ): bool {
+                self::$descriptions[] = [$collectionId, $rawDescription, $source];
+
+                return self::$importDescriptionResult;
+            }
+
+            /** @var list<array{0: int, 1: string, 2: string}> */
+            public static array $descriptionTransitions = [];
+
+            public static bool $setDescriptionStateResult = true;
+
+            public static function setChainDescriptionState(int $collectionId, string $from, string $to): bool
+            {
+                self::$descriptionTransitions[] = [$collectionId, $from, $to];
+
+                return self::$setDescriptionStateResult;
             }
 
             /** @var list<array{rows: list<array<string, mixed>>, ttl: int}> */
@@ -502,6 +549,11 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$bulkCalls = [];
                 self::$bulkChanged = 0;
                 self::$added = [];
+                // PR E
+                self::$descriptions = [];
+                self::$importDescriptionResult = true;
+                self::$descriptionTransitions = [];
+                self::$setDescriptionStateResult = true;
                 self::$deleted = [];
                 self::$deleteResult = true;
                 self::$rows = [];
@@ -665,11 +717,187 @@ namespace BCC\Trust\Onchain\Fetchers {
                 return self::$contractInfo;
             }
 
+            // ── PR E: the targeted-validation seam ──────────────────────
+            // `$contractInfo === null` keeps meaning "the probe could not
+            // confirm", so the existing tests' intent is preserved: it now
+            // produces a probe set the classifier reads as undecidable, which
+            // is UNAVAILABLE — the same "never claim it is not an NFT" answer
+            // those tests were written to pin.
+
+            /** @var int|null `num_tokens` count, when the probe answered. */
+            public static ?int $numTokens = 7;
+
+            /** @return list<array{probe: string, ok: bool, kind: string, excerpt: string}> */
+            public function probeCw721(string $contract): array
+            {
+                self::$probes[] = $contract;
+
+                if (self::$throws !== null) {
+                    throw self::$throws;
+                }
+
+                if (self::$contractInfo === null) {
+                    // Undecidable: transport-shaped failure on every probe.
+                    return [
+                        ['probe' => 'num_tokens', 'ok' => false, 'kind' => 'transport', 'excerpt' => 'timeout'],
+                        ['probe' => 'contract_info', 'ok' => false, 'kind' => 'transport', 'excerpt' => 'timeout'],
+                        ['probe' => 'get_collection_info_and_extension', 'ok' => false, 'kind' => 'transport', 'excerpt' => 'timeout'],
+                    ];
+                }
+
+                return [
+                    ['probe' => 'num_tokens', 'ok' => true, 'kind' => 'none', 'excerpt' => ''],
+                    ['probe' => 'contract_info', 'ok' => true, 'kind' => 'none', 'excerpt' => ''],
+                ];
+            }
+
+            /** @return array<string, mixed>|null */
+            public function fetchContractInfo(string $contract, ?callable $authorizeRequest = null): ?array
+            {
+                if (self::$throws !== null) {
+                    throw self::$throws;
+                }
+
+                if (self::$contractInfo === null) {
+                    return null;
+                }
+
+                return [
+                    'name'        => self::$contractInfo['name'] ?? null,
+                    'symbol'      => self::$contractInfo['symbol'] ?? null,
+                    'description' => self::$contractInfo['description'] ?? null,
+                    'image_url'   => self::$contractInfo['image_url'] ?? null,
+                ];
+            }
+
+            public function numTokensCountFor(string $contract): ?int
+            {
+                return self::$numTokens;
+            }
+
             public static function reset(): void
             {
                 self::$throws = null;
                 self::$contractInfo = ['name' => 'Seeded CW721', 'symbol' => 'SEED'];
                 self::$probes = [];
+                self::$numTokens = 7;
+            }
+        }
+
+        /**
+         * PR E — EVM validation seam.
+         *
+         * Defaults to a confirmed ERC-721 with readable metadata, so a test
+         * that only cares about the row it produces does not have to set it up.
+         */
+        final class EvmFetcher
+        {
+            /** interfaceId => hex word. Default: ERC-721 confirmed. */
+            public static array $interfaceAnswers = [
+                '0x80ac58cd' => '0x0000000000000000000000000000000000000000000000000000000000000001',
+            ];
+
+            /** Non-'none' makes every eth_call fail with that kind. */
+            public static string $ethCallKind = 'none';
+
+            public static string $metadataKind = 'none';
+
+            /** @var array<string, mixed>|null */
+            public static ?array $metadata = ['name' => 'Seeded ERC721', 'symbol' => 'SE721'];
+
+            public static int $calls = 0;
+
+            public ?object $chain;
+
+            public function __construct(?object $chain = null)
+            {
+                $this->chain = $chain;
+            }
+
+            /** @return array{ok: bool, result: ?string, kind: string} */
+            public function ethCallResult(string $to, string $data): array
+            {
+                self::$calls++;
+
+                if (self::$ethCallKind !== 'none') {
+                    return ['ok' => false, 'result' => null, 'kind' => self::$ethCallKind];
+                }
+
+                $iface = '0x' . substr($data, 10, 8);
+
+                return ['ok' => true, 'result' => self::$interfaceAnswers[$iface] ?? '0x', 'kind' => 'none'];
+            }
+
+            /** @return array{ok: bool, data: ?array<string, mixed>, kind: string} */
+            public function contractMetadataResult(string $contract): array
+            {
+                self::$calls++;
+
+                if (self::$metadataKind !== 'none') {
+                    return ['ok' => false, 'data' => null, 'kind' => self::$metadataKind];
+                }
+
+                return ['ok' => true, 'data' => self::$metadata ?? [], 'kind' => 'none'];
+            }
+
+            public static function reset(): void
+            {
+                self::$interfaceAnswers = [
+                    '0x80ac58cd' => '0x0000000000000000000000000000000000000000000000000000000000000001',
+                ];
+                self::$ethCallKind = 'none';
+                self::$metadataKind = 'none';
+                self::$metadata = ['name' => 'Seeded ERC721', 'symbol' => 'SE721'];
+                self::$calls = 0;
+            }
+        }
+
+        /**
+         * PR E — Solana validation seam. Defaults to a verified collection
+         * grouping with a readable name.
+         */
+        final class SolanaFetcher
+        {
+            public static string $kind = 'none';
+
+            /** @var array<string, mixed>|null */
+            public static ?array $asset = null;
+
+            public static int $calls = 0;
+
+            public ?object $chain;
+
+            public function __construct(?object $chain = null)
+            {
+                $this->chain = $chain;
+            }
+
+            /** @return array{ok: bool, result: ?array<string, mixed>, kind: string} */
+            public function assetResult(string $mint): array
+            {
+                self::$calls++;
+
+                if (self::$kind !== 'none') {
+                    return ['ok' => false, 'result' => null, 'kind' => self::$kind];
+                }
+
+                return [
+                    'ok'     => true,
+                    'result' => self::$asset ?? [
+                        'grouping' => [
+                            ['group_key' => 'collection', 'group_value' => $mint, 'verified' => true],
+                        ],
+                        'content' => ['metadata' => ['name' => 'Seeded Solana Collection']],
+                    ],
+                    'kind'   => 'none',
+                ];
+            }
+
+            public static function reset(): void
+            {
+                self::$kind = 'none';
+                self::$asset = null;
+                self::$calls = 0;
             }
         }
     }
@@ -688,10 +916,23 @@ namespace BCC\Trust\Onchain\Factories {
                 return self::$hasDriver && $chainType === 'cosmos';
             }
 
-            public static function make_for_chain(object $chain): \BCC\Trust\Onchain\Fetchers\CosmosFetcher
+            /**
+             * ⚠ PR E: dispatches BY FAMILY. It used to return a CosmosFetcher
+             * for every chain, which was harmless while only Cosmos validated
+             * anything — the EVM and Solana paths never asked the fetcher a
+             * question. Now they do, and handing an EVM chain a CosmosFetcher
+             * would make the validator refuse with `family_unsupported`, so the
+             * double has to be as family-correct as the real factory.
+             */
+            public static function make_for_chain(object $chain): object
             {
                 self::$madeCount++;
-                return new \BCC\Trust\Onchain\Fetchers\CosmosFetcher($chain);
+
+                return match ((string) ($chain->chain_type ?? 'cosmos')) {
+                    'evm'    => new \BCC\Trust\Onchain\Fetchers\EvmFetcher($chain),
+                    'solana' => new \BCC\Trust\Onchain\Fetchers\SolanaFetcher($chain),
+                    default  => new \BCC\Trust\Onchain\Fetchers\CosmosFetcher($chain),
+                };
             }
 
             public static function reset(): void

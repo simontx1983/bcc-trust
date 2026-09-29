@@ -345,8 +345,12 @@ final class NftChainCapability
      * The operations an ADMINISTRATOR can start, and therefore the only ones
      * the manual permission gates.
      *
-     * `manual_collection_discovery_enabled` is permission to START a
-     * discovery. Applying it to `metadata` or `ownership` — which run as a
+     * ⚠ `manual_collection_discovery_enabled` is permission for an
+     * administrator to submit ONE contract through manual intake. Despite the
+     * word "discovery" in its name it authorises nothing chain-wide: it starts
+     * no enumeration, resumes no scan, and cannot unfreeze the retired
+     * scanner. Its one consumer is `ManualCollectionIntakeService`, and no
+     * cron reads it. Applying it to `metadata` or `ownership` — which run as a
      * consequence of other work, never because somebody pressed a button —
      * would report those as blocked by a switch that has nothing to do with
      * them.
@@ -380,8 +384,9 @@ final class NftChainCapability
      * any configuration, per the code registry alone?
      *
      * ── WHAT THE MANUAL PERMISSION IS ALLOWED TO MEAN ───────────────────
-     * `manual_collection_discovery_enabled` is permission to START a
-     * discovery. On every EVM chain and on Solana no driver in this build
+     * `manual_collection_discovery_enabled` is permission to submit ONE
+     * contract through manual intake — never authority over a chain. On every
+     * EVM chain and on Solana no driver in this build
      * can enumerate a chain at all — the registry PROVES it by returning an
      * empty list — so the permission there would authorise something that
      * cannot happen. Storing it would leave a row saying an operator granted
@@ -466,9 +471,9 @@ final class NftChainCapability
      * incapable on the strength of a fact about one of its operations.
      *
      * (3) and (8) are operator-started operations only — a LIST, not one
-     * name. `manual_collection_discovery_enabled` is permission to START
-     * something; nothing else reads it, so nothing else may be refused by
-     * it being false OR absent.
+     * name. `manual_collection_discovery_enabled` is permission to submit ONE
+     * contract through manual intake; nothing else reads it, so nothing else
+     * may be refused by it being false OR absent.
      *
      * (1), (2) and (5) stay global: an unreadable override store means
      * operator intent is unknown for every driver on the chain, and the

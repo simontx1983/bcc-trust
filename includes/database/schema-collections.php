@@ -869,6 +869,144 @@ function bcc_onchain_community_metadata_columns(): array
     ];
 }
 
+if (!defined('BCC_TRUST_METADATA_STATE_LOCK')) {
+    define('BCC_TRUST_METADATA_STATE_LOCK', 'bcc_trust_mig_collection_metadata_state');
+}
+
+/**
+ * PR E metadata-state columns (DECISION 13, settled).
+ *
+ * ── WHY COLUMNS AND NOT AN INFERENCE ────────────────────────────────────
+ * The rejected alternative was to infer state from NULLs plus `fetched_at`.
+ * That conflates the two things this pair exists to separate:
+ *
+ *   image_url IS NULL  →  "this collection has no image"        (a fact)
+ *   image_url IS NULL  →  "we could not read its metadata"      (an attempt)
+ *
+ * One byte, two meanings, and the second one silently becomes the first the
+ * moment anything renders it. `fetched_at` does not help: it records when the
+ * ROW was touched, which a wallet-holdings refresh also updates, so a row can
+ * carry a recent timestamp and metadata nobody ever successfully read.
+ *
+ * @return array<string, string> column name => DDL fragment
+ */
+function bcc_onchain_metadata_state_columns(): array
+{
+    return [
+        // complete | partial | unavailable. NOT NULL with a safe default so a
+        // row predating the column reads as "never checked" rather than as a
+        // successful read that found nothing.
+        'metadata_state'      => "VARCHAR(16) NOT NULL DEFAULT 'unavailable'",
+        // When metadata was last ATTEMPTED — distinct from `fetched_at`, which
+        // any holdings write bumps. NULL means never attempted.
+        'metadata_checked_at' => "DATETIME DEFAULT NULL",
+    ];
+}
+
+/**
+ * Add the PR E metadata-state columns.
+ *
+ * Idempotent and fail-closed, in the same shape as the PR 7 migration above:
+ * its own advisory lock (a shared one would let a loser proceed un-migrated),
+ * an INFORMATION_SCHEMA probe per column, and an abort — never an ALTER — when
+ * that probe cannot be read.
+ *
+ * ⚠ EXISTING ROWS ARE PRESERVED. Nothing is backfilled, relabelled or
+ * deleted. Legacy `source` values (`toplist`, `discovery`) are historical
+ * provenance and are not touched (decision 6). Every existing row simply
+ * starts at `metadata_state = 'unavailable'` with a NULL `metadata_checked_at`,
+ * which is true: nobody has checked them under this scheme.
+ */
+function bcc_onchain_add_collections_metadata_state(): void
+{
+    global $wpdb;
+
+    $table = bcc_onchain_collections_table();
+
+    if (!\BCC\Core\DB\AdvisoryLock::acquire(BCC_TRUST_METADATA_STATE_LOCK, 0)) {
+        // Another request is doing this work right now. Not an error.
+        return;
+    }
+
+    try {
+        foreach (bcc_onchain_metadata_state_columns() as $column => $ddl) {
+            $exists = bcc_onchain_probe_count(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+                  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+                  LIMIT 1",
+                [$table, $column]
+            );
+
+            // ⚠ FAIL CLOSED. An unreadable probe is not evidence of absence.
+            if ($exists === null) {
+                \BCC\Core\Log\Logger::error(
+                    '[bcc-trust] PR E metadata-state migration: column probe failed; skipping',
+                    ['table' => $table, 'column' => $column]
+                );
+                return;
+            }
+
+            if ($exists > 0) {
+                continue;
+            }
+
+            // ⚠ `wpdb::query()` returns 0 for a SUCCESSFUL DDL. Only `=== false`
+            // is failure.
+            $result = $wpdb->query("ALTER TABLE {$table} ADD COLUMN {$column} {$ddl}");
+            if ($result === false) {
+                \BCC\Core\Log\Logger::error(
+                    '[bcc-trust] PR E metadata-state migration: ALTER failed',
+                    ['table' => $table, 'column' => $column, 'error' => $wpdb->last_error]
+                );
+                return;
+            }
+
+            // Re-verify rather than trusting the return value: a driver that
+            // reports success on a no-op would otherwise leave the schema
+            // short a column with nothing recording it.
+            $reVerified = bcc_onchain_probe_count(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+                  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+                  LIMIT 1",
+                [$table, $column]
+            );
+            if ($reVerified === null || $reVerified === 0) {
+                \BCC\Core\Log\Logger::error(
+                    '[bcc-trust] PR E metadata-state migration: ALTER reported success but column is absent',
+                    ['table' => $table, 'column' => $column]
+                );
+                return;
+            }
+        }
+    } finally {
+        \BCC\Core\DB\AdvisoryLock::release(BCC_TRUST_METADATA_STATE_LOCK);
+    }
+}
+
+/**
+ * Are both PR E metadata-state columns present?
+ *
+ * Reads the same declaration the migration writes, so the two cannot disagree.
+ */
+function bcc_onchain_collections_metadata_state_ready(): bool
+{
+    $table = bcc_onchain_collections_table();
+
+    foreach (array_keys(bcc_onchain_metadata_state_columns()) as $column) {
+        $exists = bcc_onchain_probe_count(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+              LIMIT 1",
+            [$table, $column]
+        );
+        if ($exists === null || $exists < 1) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 /**
  * Add the PR 7 columns and run the two normalizations.
  *

@@ -289,21 +289,36 @@ final class ManualCollectionIntakeServiceTest extends TestCase
         $result = $this->service->add('cosmos', 17, self::COSMOS_CONTRACT, self::OPERATOR);
 
         self::assertTrue($result['ok']);
-        self::assertSame(ManualCollectionIntakeService::VALIDATION_CW721, $result['validation']);
+        // PR E: one audit token for every family's targeted validation. The
+        // old `cw721_contract_info` named a Cosmos-only probe and could not
+        // describe the EVM and Solana validators that now exist.
+        self::assertSame(ManualCollectionIntakeService::VALIDATION_TARGETED, $result['validation']);
 
         $written = \BCC\Trust\Onchain\Repositories\CollectionRepository::$added[0][0];
         self::assertSame('CW-721', $written['token_standard']);
         self::assertSame('Dungeon Heroes', $written['collection_name'], 'the name is taken from the contract');
+
+        // PR E metadata state: the read succeeded for some fields, so the row
+        // records how far it got and when — not a bare NULL that a later
+        // reader would have to guess about.
+        self::assertContains($written['metadata_state'], ['complete', 'partial']);
+        self::assertNotEmpty($written['metadata_checked_at']);
     }
 
     /**
-     * ⚠ The property this whole PR keeps repeating: a provider that does not
-     * answer is NOT evidence against the contract.
+     * ⚠ The property this whole programme keeps repeating: a provider that
+     * does not answer is NOT evidence against the contract.
      *
-     * `testCw721ContractInfo()` returns null for a transport failure AND for
-     * a shape mismatch, so the refusal must be phrased as "could not
-     * confirm". Reporting a provider outage as "not an NFT collection" is
-     * issue #225's defect relocated to a surface a human acts on.
+     * ── UPDATED IN PR E, AND STRENGTHENED ───────────────────────────────
+     * This used to assert `REFUSED_NOT_CW721` with hedging copy ("could not
+     * be confirmed … not proof either way"), because the old Cosmos path
+     * collapsed a transport failure and a shape mismatch into one null and
+     * could not tell them apart. PR E can, so the hedge is no longer the best
+     * available answer: an unanswerable probe now gets its own refusal,
+     * `REFUSED_UNAVAILABLE`, whose copy says plainly that nothing was learned.
+     *
+     * The test's intent is unchanged and the assertion is now sharper: the
+     * refusal must NOT be the one that means "not an NFT".
      */
     public function testAnUnanswerableCosmosProbeRefusesWithoutClaimingTheContractIsInvalid(): void
     {
@@ -313,12 +328,17 @@ final class ManualCollectionIntakeServiceTest extends TestCase
         $result = $this->service->add('cosmos', 17, self::COSMOS_CONTRACT, self::OPERATOR);
 
         self::assertFalse($result['ok']);
-        self::assertSame(ManualCollectionIntakeService::REFUSED_NOT_CW721, $result['reason']);
+        self::assertSame(ManualCollectionIntakeService::REFUSED_UNAVAILABLE, $result['reason']);
+        self::assertNotSame(
+            ManualCollectionIntakeService::REFUSED_NOT_CW721,
+            $result['reason'],
+            'an unanswered probe must never be reported as a negative verdict'
+        );
         self::assertSame([], \BCC\Trust\Onchain\Repositories\CollectionRepository::$added);
 
         $message = ManualCollectionIntakeService::refusalMessage($result['reason']);
-        self::assertStringContainsString('could not be confirmed', $message);
-        self::assertStringContainsString('not proof either way', $message);
+        self::assertStringContainsString('could not reach the chain', $message);
+        self::assertStringContainsString('not a judgement about the collection', $message);
     }
 
     public function testAFetcherThatThrowsIsTreatedAsUnconfirmedNotAsInvalid(): void
@@ -329,10 +349,20 @@ final class ManualCollectionIntakeServiceTest extends TestCase
         $result = $this->service->add('cosmos', 17, self::COSMOS_CONTRACT, self::OPERATOR);
 
         self::assertFalse($result['ok']);
-        self::assertSame(ManualCollectionIntakeService::REFUSED_NOT_CW721, $result['reason']);
+        self::assertSame(ManualCollectionIntakeService::REFUSED_UNAVAILABLE, $result['reason']);
+        self::assertNotSame(ManualCollectionIntakeService::REFUSED_NOT_CW721, $result['reason']);
+        self::assertSame([], \BCC\Trust\Onchain\Repositories\CollectionRepository::$added);
     }
 
-    // ── EVM and Solana are accepted as entered, and say so ──────────────
+    // ── EVM and Solana are now VALIDATED, not accepted as entered ───────
+    //
+    // ⚠ PREMISE CHANGED BY PR E. These two tests previously asserted that an
+    // EVM or Solana add was recorded as `VALIDATION_NONE` — "accepted as
+    // entered" — and that no provider was contacted, because no validation
+    // driver existed. PR E builds those drivers (ERC-165 `supportsInterface`
+    // on EVM, DAS `getAsset` with a verified grouping on Solana), so both
+    // premises are now wrong. The old assertions are kept in spirit as their
+    // negations: the audit must NOT say `none`, and a provider MUST be asked.
 
     /** @return list<array{0: string, 1: int, 2: string, 3: string}> */
     public static function unvalidatedFamilies(): array
@@ -344,7 +374,7 @@ final class ManualCollectionIntakeServiceTest extends TestCase
     }
 
     #[DataProvider('unvalidatedFamilies')]
-    public function testEvmAndSolanaAddsAreRecordedAsAcceptedAsEntered(
+    public function testEvmAndSolanaAddsAreTargetedValidatedAndSaySo(
         string $family,
         int $chainId,
         string $slug,
@@ -356,18 +386,23 @@ final class ManualCollectionIntakeServiceTest extends TestCase
 
         self::assertTrue($result['ok']);
         self::assertSame(
+            ManualCollectionIntakeService::VALIDATION_TARGETED,
+            $result['validation'],
+            'PR E proves the standard on EVM and Solana; the audit must record that it did'
+        );
+        self::assertNotSame(
             ManualCollectionIntakeService::VALIDATION_NONE,
             $result['validation'],
-            'nothing in this build proves an EVM or Solana address is an NFT contract'
+            '"accepted as entered" is no longer true for these families'
         );
 
         $audit = \BCC\Trust\Core\Security\AuditLogger::$rows[0];
         self::assertSame(ManualCollectionIntakeService::AUDIT_ADDED, $audit['action']);
-        self::assertSame(ManualCollectionIntakeService::VALIDATION_NONE, $audit['meta']['validation']);
+        self::assertSame(ManualCollectionIntakeService::VALIDATION_TARGETED, $audit['meta']['validation']);
     }
 
     #[DataProvider('unvalidatedFamilies')]
-    public function testNoProviderIsContactedForAnEvmOrSolanaAdd(
+    public function testAProviderIsContactedExactlyOnceForTheSubmittedAddress(
         string $family,
         int $chainId,
         string $slug,
@@ -377,10 +412,22 @@ final class ManualCollectionIntakeServiceTest extends TestCase
 
         $this->service->add($family, $chainId, $identifier, self::OPERATOR);
 
+        $calls = $family === 'evm'
+            ? \BCC\Trust\Onchain\Fetchers\EvmFetcher::$calls
+            : \BCC\Trust\Onchain\Fetchers\SolanaFetcher::$calls;
+
+        self::assertGreaterThan(0, $calls, 'the submitted address must actually be validated');
+
+        // ⚠ ONE submission, a handful of calls about THAT address — never a
+        // walk over a chain. The ceilings are the validator's per-family
+        // budgets (EVM 3, Solana 1).
+        self::assertLessThanOrEqual($family === 'evm' ? 3 : 1, $calls);
+
+        // And no OTHER family's provider is touched.
         self::assertSame(
             [],
             \BCC\Trust\Onchain\Fetchers\CosmosFetcher::$probes,
-            'no chain is asked anything for a family with no validation driver'
+            'validating one EVM/Solana address must not reach the Cosmos path'
         );
     }
 

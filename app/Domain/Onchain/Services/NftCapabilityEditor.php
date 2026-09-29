@@ -24,7 +24,7 @@ if (!defined('ABSPATH')) {
  * may change, and nothing else:
  *
  *   `wp_bcc_chains.bcc_supports_nft_collections`         product decision
- *   `wp_bcc_chains.manual_collection_discovery_enabled`  permission to START
+ *   `wp_bcc_chains.manual_collection_discovery_enabled`  permission to submit
  *   `wp_bcc_chain_nft_capabilities`                      driver narrowing
  *
  * Above it, {@see \BCC\Trust\Onchain\Admin\NftDiscoveryPage} owns
@@ -253,7 +253,10 @@ final class NftCapabilityEditor
     // ═══════════════════════════════════════════════════════════════════
 
     /**
-     * Permit an administrator to START a chain-wide NFT collection discovery.
+     * Permit an administrator to submit ONE contract through manual intake.
+     *
+     * ⚠ NOT chain-wide authority, despite the column name. It starts no
+     * enumeration and cannot unfreeze the retired scanner.
      *
      * ── TWO REFUSALS, AND THE ORDER BETWEEN THEM IS DELIBERATE ──────────
      * STRUCTURAL FIRST. If no driver in this build can perform any

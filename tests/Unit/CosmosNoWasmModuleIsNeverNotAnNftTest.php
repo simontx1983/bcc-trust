@@ -1,0 +1,249 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BCC\Trust\Onchain\Tests\Unit;
+
+use BCC\Trust\Onchain\Services\CosmwasmClassifier;
+use BCC\Trust\Onchain\Services\Validation\CosmosContractProbe;
+use BCC\Trust\Onchain\Support\ProviderRequestBudget;
+use BCC\Trust\Onchain\ValueObjects\ContractValidationVerdict;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\TestCase;
+
+/**
+ * ⚠⚠⚠ THE NAMED EVIDENCE GATE FOR DECISION 3.
+ *
+ * A chain with no wasm module — HTTP 501, or the `not_implemented` error kind
+ * — must resolve to **UNAVAILABLE / "could not validate"** and NEVER to
+ * "not an NFT".
+ *
+ * ── WHY THIS TEST IS LOAD-BEARING ───────────────────────────────────────
+ * `cw_discovery_state = 'unsupported'` exists to durably record "this chain
+ * answered 501, stop asking". DECISION 3 removes that concept in PR H — but
+ * only **after** targeted validation proves it fails closed on its own. If the
+ * validator reported a 501 chain as `not_cw721`, removing the durable state
+ * would turn a measured chain-level fact into a stream of negative
+ * authenticity verdicts about individual collections nobody examined.
+ *
+ * ⚠ DO NOT DELETE OR WEAKEN THIS TEST TO MAKE A LATER PR PASS. It is cited by
+ * name in the retirement plan as the gate PR H depends on. If it fails, the
+ * `cw_discovery_state` dependency stays.
+ */
+#[CoversClass(CosmosContractProbe::class)]
+final class CosmosNoWasmModuleIsNeverNotAnNftTest extends TestCase
+{
+    private const CONTRACT = 'cosmos1abcdefghijklmnopqrstuvwxyz0123456789abcd';
+
+    private function budget(): ProviderRequestBudget
+    {
+        return new ProviderRequestBudget(10, 30);
+    }
+
+    /**
+     * A fetcher double whose probe set reports the chain has no wasm module.
+     */
+    private function fetcherAnsweringNotImplemented(): object
+    {
+        return new class extends FakeCosmosFetcherForValidation {
+            public function probeCw721(string $contract): array
+            {
+                return [
+                    [
+                        'probe'   => CosmwasmClassifier::PROBE_NUM_TOKENS,
+                        'ok'      => false,
+                        'kind'    => 'not_implemented',
+                        'excerpt' => 'not implemented',
+                    ],
+                ];
+            }
+        };
+    }
+
+    // ── The gate ────────────────────────────────────────────────────────
+
+    public function testAChainWithNoWasmModuleIsUnavailableNotInvalid(): void
+    {
+        $probe   = new CosmosContractProbe($this->fetcherAnsweringNotImplemented());
+        $verdict = $probe->validate(self::CONTRACT, $this->budget());
+
+        self::assertSame(
+            ContractValidationVerdict::UNAVAILABLE,
+            $verdict->state(),
+            'a chain with no wasm module tells us nothing about this contract'
+        );
+        self::assertNotSame(ContractValidationVerdict::INVALID, $verdict->state());
+        self::assertFalse($verdict->isDecided(), 'no decision was reached about the contract');
+        self::assertFalse($verdict->mayPersist(), 'nothing may be written');
+        self::assertTrue(
+            $verdict->hasEvidence(ContractValidationVerdict::EV_CHAIN_HAS_NO_WASM),
+            'the reason must be nameable, so the operator copy can explain it'
+        );
+    }
+
+    public function testTheNoWasmCheckRunsBeforeTheClassifier(): void
+    {
+        // Every probe failed, which on its own could let a classifier reach a
+        // settled negative. The 501 signal must win.
+        $fetcher = new class extends FakeCosmosFetcherForValidation {
+            public function probeCw721(string $contract): array
+            {
+                return [
+                    ['probe' => CosmwasmClassifier::PROBE_NUM_TOKENS, 'ok' => false, 'kind' => 'not_implemented', 'excerpt' => 'not implemented'],
+                    ['probe' => CosmwasmClassifier::PROBE_CONTRACT_INFO, 'ok' => false, 'kind' => 'not_implemented', 'excerpt' => 'not implemented'],
+                    ['probe' => CosmwasmClassifier::PROBE_COLLECTION_INFO, 'ok' => false, 'kind' => 'not_implemented', 'excerpt' => 'not implemented'],
+                ];
+            }
+        };
+
+        $verdict = (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $verdict->state());
+        self::assertTrue($verdict->hasEvidence(ContractValidationVerdict::EV_CHAIN_HAS_NO_WASM));
+    }
+
+    public function testNoMetadataReadIsAttemptedForANoWasmChain(): void
+    {
+        $fetcher = $this->fetcherAnsweringNotImplemented();
+        $budget  = $this->budget();
+
+        (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, $budget);
+
+        self::assertSame(
+            0,
+            $fetcher->contractInfoCalls,
+            'asking a chain with no wasm module for metadata is a guaranteed-wasted request'
+        );
+    }
+
+    // ── The contrast cases: these MUST still be able to decide ──────────
+
+    public function testAContractThatAnswersAndIsNotCw721IsInvalid(): void
+    {
+        $fetcher = new class extends FakeCosmosFetcherForValidation {
+            public function probeCw721(string $contract): array
+            {
+                // Answered, and the answers are a settled negative: the
+                // classifier's `not_cw721` shape.
+                return [
+                    ['probe' => CosmwasmClassifier::PROBE_NUM_TOKENS, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_QUERY_UNSUPPORTED, 'excerpt' => 'unknown variant'],
+                    ['probe' => CosmwasmClassifier::PROBE_CONTRACT_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_QUERY_UNSUPPORTED, 'excerpt' => 'unknown variant'],
+                    ['probe' => CosmwasmClassifier::PROBE_COLLECTION_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_QUERY_UNSUPPORTED, 'excerpt' => 'unknown variant'],
+                ];
+            }
+        };
+
+        $verdict = (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertTrue(
+            $verdict->isDecided(),
+            'a contract that refuses every CW-721 query HAS answered — this must stay decidable'
+        );
+        self::assertSame(ContractValidationVerdict::INVALID, $verdict->state());
+    }
+
+    public function testATransportFailureIsUnavailableNotInvalid(): void
+    {
+        $fetcher = new class extends FakeCosmosFetcherForValidation {
+            public function probeCw721(string $contract): array
+            {
+                return [
+                    ['probe' => CosmwasmClassifier::PROBE_NUM_TOKENS, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_TRANSPORT, 'excerpt' => 'timeout'],
+                    ['probe' => CosmwasmClassifier::PROBE_CONTRACT_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_TRANSPORT, 'excerpt' => 'timeout'],
+                    ['probe' => CosmwasmClassifier::PROBE_COLLECTION_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_TRANSPORT, 'excerpt' => 'timeout'],
+                ];
+            }
+        };
+
+        $verdict = (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $verdict->state());
+        self::assertFalse($verdict->mayPersist());
+    }
+
+    public function testAThrownFetcherIsUnavailableNotInvalid(): void
+    {
+        $fetcher = new class extends FakeCosmosFetcherForValidation {
+            public function probeCw721(string $contract): array
+            {
+                throw new \RuntimeException('connection reset');
+            }
+        };
+
+        $verdict = (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $verdict->state());
+        self::assertFalse($verdict->isDecided());
+    }
+
+    public function testAnEmptyProbeSetIsUnavailableNotInvalid(): void
+    {
+        $fetcher = new class extends FakeCosmosFetcherForValidation {
+            public function probeCw721(string $contract): array
+            {
+                return [];
+            }
+        };
+
+        $verdict = (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $verdict->state());
+    }
+
+    public function testAnExhaustedBudgetIsUnavailableAndMakesNoRequest(): void
+    {
+        $fetcher = new class extends FakeCosmosFetcherForValidation {
+            public int $probeCalls = 0;
+
+            public function probeCw721(string $contract): array
+            {
+                $this->probeCalls++;
+                return [];
+            }
+        };
+
+        // Not enough for the 3-query probe set.
+        $verdict = (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, new ProviderRequestBudget(1, 30));
+
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $verdict->state());
+        self::assertTrue($verdict->hasEvidence(ContractValidationVerdict::EV_BUDGET_EXHAUSTED));
+        self::assertSame(0, $fetcher->probeCalls, 'an exhausted budget must not reach the provider');
+    }
+}
+
+/**
+ * Base double. Overriding only what a case needs keeps each test's intent
+ * visible instead of burying it in setup.
+ */
+class FakeCosmosFetcherForValidation extends \BCC\Trust\Onchain\Fetchers\CosmosFetcher
+{
+    public int $contractInfoCalls = 0;
+
+    /** @var array{name: ?string, symbol: ?string, description: ?string, image_url: ?string}|null */
+    public ?array $contractInfo = null;
+
+    public ?int $numTokens = null;
+
+    public function __construct()
+    {
+        // Deliberately does NOT call parent::__construct(): these tests never
+        // touch transport, and a real constructor would demand a chain row.
+    }
+
+    public function probeCw721(string $contract): array
+    {
+        return [];
+    }
+
+    public function fetchContractInfo(string $contract, ?callable $authorizeRequest = null): ?array
+    {
+        $this->contractInfoCalls++;
+
+        return $this->contractInfo;
+    }
+
+    public function numTokensCountFor(string $contract): ?int
+    {
+        return $this->numTokens;
+    }
+}

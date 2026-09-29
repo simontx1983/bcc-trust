@@ -55,6 +55,18 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      */
     private ?string $endpoint_refusal = null;
 
+    /**
+     * `num_tokens` counts observed during {@see probeCw721()}, keyed by
+     * contract address.
+     *
+     * Captured so manual intake can persist `total_supply` without paying for
+     * a second query. Per-contract because one instance serves several
+     * addresses; see {@see numTokensCountFor()}.
+     *
+     * @var array<string, int|null>
+     */
+    private array $numTokensCounts = [];
+
     private int    $decimals;
     private int $timeout = 15;
 
@@ -2152,6 +2164,17 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
 
         $numTokens   = $this->wasmSmartQueryResult($contract, ['num_tokens' => new \stdClass()]);
         $numTokensOk = $numTokens['ok'] && self::hasNumTokensCount($numTokens['data']);
+
+        // ⚠ CAPTURED HERE, NOT RE-QUERIED. Manual intake wants the supply, and
+        // this is the only place the count is in hand. Reading it again from a
+        // second `num_tokens` query would double the cost of every validation
+        // for a number we already have. The probe OUTCOME shape is deliberately
+        // unchanged — CosmwasmClassifier's ProbeOutcome type is depended on by
+        // the frozen scanner, so the count rides beside it, not inside it.
+        $this->numTokensCounts[$contract] = $numTokensOk
+            ? self::readNumTokensCount($numTokens['data'])
+            : null;
+
         $outcomes[]  = [
             'probe'   => \BCC\Trust\Onchain\Services\CosmwasmClassifier::PROBE_NUM_TOKENS,
             'ok'      => $numTokensOk,
@@ -2203,6 +2226,40 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         }
 
         return $errorKind;
+    }
+
+    /**
+     * The `num_tokens` count observed during the last {@see probeCw721()} run
+     * for this contract, or null when the probe did not answer with one.
+     *
+     * ⚠ Keyed by contract, because one fetcher instance validates several
+     * addresses in a session and a shared scalar would hand contract B the
+     * supply of contract A. Absence of a key means "never probed", which reads
+     * the same as "no count" to a caller and is equally safe: both leave
+     * `total_supply` UNKNOWN rather than writing a wrong number.
+     */
+    public function numTokensCountFor(string $contract): ?int
+    {
+        return $this->numTokensCounts[$contract] ?? null;
+    }
+
+    /**
+     * PURE. Extract the count from a `num_tokens` payload.
+     *
+     * Only ever called after {@see hasNumTokensCount()} has confirmed the
+     * shape, so the cast is safe. A negative or absurd value cannot arise from
+     * that guard (it admits ints and digit-strings only).
+     *
+     * @param array<string, mixed>|null $data
+     */
+    private static function readNumTokensCount(?array $data): ?int
+    {
+        if (!self::hasNumTokensCount($data)) {
+            return null;
+        }
+        $count = $data['count'] ?? null;
+
+        return is_int($count) ? $count : (int) $count;
     }
 
     /**

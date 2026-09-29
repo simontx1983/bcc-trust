@@ -604,8 +604,11 @@ final class CollectionRepository
      *     contract_address: string,
      *     collection_name?: ?string,
      *     token_standard?: ?string,
+     *     collection_symbol?: ?string,
      *     total_supply?: ?int,
      *     image_url?: ?string,
+     *     metadata_state?: ?string,
+     *     metadata_checked_at?: ?string,
      *     show_on_profile?: int
      * } $data
      * @param int $ttlSeconds  TTL for expires_at. Defaults long (30 days) so a
@@ -648,6 +651,28 @@ final class CollectionRepository
                 ? esc_url_raw($data['image_url'])
                 : null
         );
+        $sqlSymbol   = self::sqlStringOrNull(
+            isset($data['collection_symbol']) ? sanitize_text_field((string) $data['collection_symbol']) : null
+        );
+
+        // ── PR E metadata state ─────────────────────────────────────────
+        // ⚠ These two are NOT COALESCEd on re-add, unlike every value column
+        // above. They describe the MOST RECENT attempt, not an accumulated
+        // best-known value: COALESCE would let a later failed read keep
+        // advertising an earlier `complete`, which is precisely the lie the
+        // columns exist to prevent. A caller that supplies neither leaves both
+        // untouched; a caller that supplies them overwrites.
+        $stateProvided = isset($data['metadata_state']) && is_string($data['metadata_state']);
+        $sqlState      = self::sqlStringOrNull($stateProvided ? $data['metadata_state'] : null);
+        $sqlCheckedAt  = self::sqlStringOrNull(
+            isset($data['metadata_checked_at']) && is_string($data['metadata_checked_at'])
+                ? $data['metadata_checked_at']
+                : null
+        );
+        $metaSetClause = $stateProvided
+            ? "\n                metadata_state      = VALUES(metadata_state),"
+                . "\n                metadata_checked_at = VALUES(metadata_checked_at),"
+            : '';
 
         // `show_on_profile` is a VISIBILITY decision — the member's own
         // showcase toggle ({@see setShowOnProfile}) and the operator's
@@ -665,8 +690,10 @@ final class CollectionRepository
         $result = $wpdb->query($wpdb->prepare(
             "INSERT INTO {$table}
                 (wallet_link_id, contract_address, canonical_identifier, chain_id, collection_name, token_standard,
-                 total_supply, image_url, show_on_profile, is_verified, source, fetched_at, expires_at)
-             VALUES (NULL, %s, %s, %d, {$sqlName}, {$sqlStandard}, {$sqlSupply}, {$sqlImage}, %d, 0, 'manual', %s, %s)
+                 collection_symbol, total_supply, image_url, metadata_state, metadata_checked_at,
+                 show_on_profile, is_verified, source, fetched_at, expires_at)
+             VALUES (NULL, %s, %s, %d, {$sqlName}, {$sqlStandard}, {$sqlSymbol}, {$sqlSupply}, {$sqlImage},
+                 COALESCE({$sqlState}, 'unavailable'), {$sqlCheckedAt}, %d, 0, 'manual', %s, %s)
              ON DUPLICATE KEY UPDATE
                 -- canonical_identifier is INSERT-only; see upsert().
                 -- COALESCE for the same reason as bulkUpsert: an operator
@@ -674,10 +701,11 @@ final class CollectionRepository
                 -- nothing to add, and is not asking for the stored value to
                 -- be erased. The handler already maps blanks to null before
                 -- they reach here.
-                collection_name = COALESCE(VALUES(collection_name), collection_name),
-                token_standard  = COALESCE(VALUES(token_standard), token_standard),
-                total_supply    = COALESCE(VALUES(total_supply), total_supply),
-                image_url       = COALESCE(VALUES(image_url), image_url),{$showSetClause}
+                collection_name   = COALESCE(VALUES(collection_name), collection_name),
+                token_standard    = COALESCE(VALUES(token_standard), token_standard),
+                collection_symbol = COALESCE(VALUES(collection_symbol), collection_symbol),
+                total_supply      = COALESCE(VALUES(total_supply), total_supply),
+                image_url         = COALESCE(VALUES(image_url), image_url),{$metaSetClause}{$showSetClause}
                 source          = VALUES(source),
                 fetched_at      = VALUES(fetched_at),
                 expires_at      = VALUES(expires_at)",

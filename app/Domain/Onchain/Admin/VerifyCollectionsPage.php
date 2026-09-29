@@ -33,6 +33,8 @@ use BCC\Trust\Onchain\Services\CommunityRequestService;
 use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use BCC\Trust\Onchain\Admin\Views\DiscoveryScanPanel;
 use BCC\Trust\Onchain\Support\DiscoveryReadiness;
+use BCC\Trust\Core\Security\AuditLogger;
+use BCC\Trust\Onchain\ValueObjects\ChainDescriptionState;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningFailureCode;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningState;
 
@@ -136,6 +138,27 @@ final class VerifyCollectionsPage
     public const ACTION_UNHIDE = 'bcc_vc_unhide';
 
     /**
+     * PR E — NFT Collection Description review.
+     *
+     * ⚠ THIS IS THE MISSING READER. `importChainDescription()` writes a
+     * description as `pending` and `setChainDescriptionState()` can publish
+     * one, but until PR E **nothing in production called the latter** — so an
+     * imported description could be stored and could never be approved. A
+     * review state with no reviewer is a queue that only fills up.
+     *
+     * ⚠⚠ THIS IS NOT THE COMMUNITY DESCRIPTION. This text is written by the
+     * collection's own contract or its provider, and it is published as such,
+     * labelled with its source. It never becomes a PeepSo group description —
+     * that is BCC's own voice and belongs to PR G.
+     */
+    public const ACTION_DESC_APPROVE = 'bcc_vc_desc_approve';
+    public const ACTION_DESC_REJECT  = 'bcc_vc_desc_reject';
+
+    /** Audit actions for the description review decision. */
+    public const AUDIT_DESC_APPROVED = 'admin_vc_chain_description_approved';
+    public const AUDIT_DESC_REJECTED = 'admin_vc_chain_description_rejected';
+
+    /**
      * Maximum collection ids accepted from one bulk-save submission.
      *
      * Not an arbitrary limit: listForAdminVerification() is called with a
@@ -226,6 +249,12 @@ final class VerifyCollectionsPage
         // PR 6 community intent.
         add_action('admin_post_' . self::ACTION_REQUEST_COMMUNITY, [__CLASS__, 'handleRequestCommunityPost']);
         add_action('admin_post_' . self::ACTION_WITHDRAW_REQUEST,  [__CLASS__, 'handleWithdrawRequestPost']);
+
+        // PR E — NFT Collection Description review. Registered
+        // unconditionally: this reviews provider-authored text on a manually
+        // added collection and has nothing to do with the frozen scanner.
+        add_action('admin_post_' . self::ACTION_DESC_APPROVE, [__CLASS__, 'handleDescriptionApprovePost']);
+        add_action('admin_post_' . self::ACTION_DESC_REJECT,  [__CLASS__, 'handleDescriptionRejectPost']);
 
         // NOT registered, deliberately: ACTION_ADD / ACTION_ADD_COSMOS. See
         // the constant block above — Add Collection now lives in one
@@ -394,6 +423,117 @@ final class VerifyCollectionsPage
     // ────────────────────────────────────────────────────────────────────
     // VC-B1 admin-post handlers: Hide / Unhide
     // ────────────────────────────────────────────────────────────────────
+
+    /**
+     * Approve an imported NFT Collection Description for display.
+     *
+     * ⚠ "Display" means the collection surfaces that show collection-authored
+     * text, labelled with its source. It does NOT mean a PeepSo group
+     * description, and approving one here writes nothing to any group.
+     */
+    public static function handleDescriptionApprovePost(): void
+    {
+        self::handleDescriptionReview(true);
+    }
+
+    /** Reject an imported NFT Collection Description. */
+    public static function handleDescriptionRejectPost(): void
+    {
+        self::handleDescriptionReview(false);
+    }
+
+    /**
+     * The shared review path.
+     *
+     * Same guard shape as the hide/unhide toggle: capability, POST, an id of
+     * the right shape, and a per-row nonce bound to BOTH the route and the id,
+     * so a nonce minted for one collection cannot approve another's text.
+     *
+     * The transition is a compare-and-swap from `pending`
+     * ({@see CollectionRepository::setChainDescriptionState()}), so two
+     * administrators reviewing the same row concurrently cannot both succeed —
+     * the loser matches zero rows and is reported as not applied.
+     */
+    private static function handleDescriptionReview(bool $approve): void
+    {
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
+
+        $collectionId = self::requireCollectionIdShape();
+        $route        = $approve ? self::ACTION_DESC_APPROVE : self::ACTION_DESC_REJECT;
+
+        AdminActionSupport::requireNonce($route . '_' . $collectionId);
+
+        $target = $approve
+            ? ChainDescriptionState::APPROVED
+            : ChainDescriptionState::REJECTED;
+
+        try {
+            // ⚠ FROM `pending`, ALWAYS. A description may only be published
+            // out of review — never straight from `none`, which would publish
+            // text nobody looked at.
+            $applied = CollectionRepository::setChainDescriptionState(
+                $collectionId,
+                ChainDescriptionState::PENDING,
+                $target
+            );
+
+            if (!$applied) {
+                // An EXPECTED negative: no pending description, or somebody
+                // else reviewed it first. No durable row — a record saying a
+                // decision happened would be indistinguishable later from one
+                // that did.
+                $notices = [[
+                    'type'    => 'warning',
+                    'message' => 'No pending description was found for that collection, so nothing changed. '
+                        . 'It may already have been reviewed.',
+                ]];
+            } else {
+                $auditId = AuditLogger::logChecked(
+                    $approve ? self::AUDIT_DESC_APPROVED : self::AUDIT_DESC_REJECTED,
+                    $collectionId,
+                    [
+                        'collection_id' => $collectionId,
+                        'from_state'    => ChainDescriptionState::PENDING,
+                        'to_state'      => $target,
+                    ],
+                    'collection',
+                    get_current_user_id()
+                );
+
+                if ($auditId === null) {
+                    // The state moved but the decision is unattributable.
+                    // Say so rather than reporting a clean success.
+                    $notices = [[
+                        'type'    => 'warning',
+                        'message' => 'The description state changed, but the audit record could not be written. '
+                            . 'See the bcc-trust error log.',
+                    ]];
+                } else {
+                    $notices = [[
+                        'type'    => 'success',
+                        'message' => $approve
+                            ? 'Description approved. It is shown as collection-authored text, attributed to its source. '
+                                . 'This does not change any community description.'
+                            : 'Description rejected. It stays stored for reference and is not displayed.',
+                    ]];
+                }
+            }
+        } catch (\Throwable $e) {
+            $ref = AdminActionSupport::failure(
+                $e,
+                $approve ? self::AUDIT_DESC_APPROVED . '_failed' : self::AUDIT_DESC_REJECTED . '_failed',
+                'collection',
+                $collectionId
+            );
+            $notices = [[
+                'type'    => 'error',
+                'message' => AdminActionSupport::failureMessage($ref),
+            ]];
+        }
+
+        self::finish($notices, $approve ? 'desc_approve' : 'desc_reject');
+    }
 
     public static function handleHidePost(): void
     {

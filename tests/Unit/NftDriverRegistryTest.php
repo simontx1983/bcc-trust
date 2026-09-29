@@ -144,10 +144,27 @@ final class NftDriverRegistryTest extends TestCase
             NftDriverRegistry::DRIVER_EVM_RPC,
             NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_OWNERSHIP, [])
         );
-        self::assertSame(
-            [],
+        // ⚠ PREMISE CHANGED BY PR E. This used to assert an EMPTY validation
+        // driver list, with the note "EVM validation is not implemented on
+        // this branch and must not be claimed". PR E implements it:
+        // `EvmContractProbe` proves the token standard with ERC-165
+        // `supportsInterface` over `eth_call`, which any EVM RPC answers — so
+        // `evm_rpc` now legitimately claims OP_VALIDATION, and the registry
+        // would be under-claiming if it did not.
+        self::assertContains(
+            NftDriverRegistry::DRIVER_EVM_RPC,
             NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_VALIDATION, []),
-            'EVM validation is not implemented on this branch and must not be claimed'
+            'PR E builds EVM validation on supportsInterface, so the registry must claim it'
+        );
+
+        // ⚠ Still NOT claimed: metadata. Name, symbol, image and supply come
+        // from Alchemy (DECISION 7), so a keyless EVM chain can prove the
+        // standard and still not complete an intake. Claiming metadata here
+        // would tell an operator a keyless chain is fully supported.
+        self::assertNotContains(
+            NftDriverRegistry::DRIVER_EVM_RPC,
+            NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_METADATA, []),
+            'evm_rpc proves the standard; it does not supply metadata'
         );
     }
 

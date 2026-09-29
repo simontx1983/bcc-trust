@@ -507,6 +507,12 @@ function bcc_onchain_ensure_schema(): bool {
     bcc_onchain_add_collections_community_metadata();
     $communityMetadataComplete = bcc_onchain_verify_collections_community_metadata();
 
+    // PR E: metadata_state + metadata_checked_at (DECISION 13). Verified on
+    // the same terms — an unstamped incomplete migration is retried, a stamped
+    // one never is, so the stamp must not outrun the columns.
+    bcc_onchain_add_collections_metadata_state();
+    $metadataStateComplete = bcc_onchain_collections_metadata_state_ready();
+
     // Signals table is owned by SignalRepository — included here so its
     // column-type migrations run on version bump, not just on fresh
     // activation.
@@ -524,7 +530,10 @@ function bcc_onchain_ensure_schema(): bool {
     // ALL must be complete. Every call happens above and only the results are
     // combined here — a migration must never be skipped because an earlier one
     // failed.
-    return $provisioningComplete && $discoveryRunsComplete && $communityMetadataComplete;
+    return $provisioningComplete
+        && $discoveryRunsComplete
+        && $communityMetadataComplete
+        && $metadataStateComplete;
 }
 
 // Schema migration: re-run dbDelta when any schema file changes.
