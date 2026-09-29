@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Tests\Integration;
 
 use BCC\Core\DB\AdvisoryLock;
+use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
@@ -36,9 +37,19 @@ use PHPUnit\Framework\TestCase;
  *      the provider — exhausted budget, missing driver, unsupported
  *      capability, bad configuration. Nothing releases the lock, so the chain
  *      cannot be probed by anyone until that worker's DB session closes.
- *   2. DOUBLE CLAIM. The outer check and `ApiRetry`'s own check both claim in
- *      ONE session, so the reentrant count reaches 2 while `ApiRetry` releases
- *      once. The probe is stranded even on the fully successful path.
+ *   2. DOUBLE CLAIM ON A NO-SETTLEMENT EXIT. The outer check and `ApiRetry`'s
+ *      own check both claim in ONE session, taking the reentrant count to 2.
+ *      Exits that SETTLE an outcome release twice and are fine — `recordSuccess()`
+ *      and a restamping `recordFailure()` each release, and so does the
+ *      `finally`. The exits that settle NOTHING release once and strand the
+ *      probe: a non-429 4xx, a 3xx, an `application_error` 5xx, or a callable
+ *      that throws.
+ *
+ * ⚠ AN EARLIER VERSION OF THIS FILE CLAIMED THE SUCCESSFUL PATH STRANDED THE
+ * PROBE. It does not, and saying so was an evidence error: `settleSuccess()`
+ * calls `recordSuccess()`, which releases unconditionally, and the `finally`
+ * releases again. The no-settlement exits are the real leak, and they are what
+ * the tests below drive.
  *
  * Both are written against the REAL breaker and the REAL lock, and observed
  * from a SECOND connection — the only vantage point from which "is this
@@ -97,9 +108,21 @@ final class HalfOpenProbeOwnershipIntegrationTest extends TestCase
         return $got === 1;
     }
 
+    /** The REAL breaker counter, read from the real options table. */
+    private function counter(): ?int
+    {
+        $v = get_option('_bcc_cb_counter_' . self::CHAIN, null);
+
+        return $v === null ? null : (int) $v;
+    }
+
     protected function setUp(): void
     {
         parent::setUp();
+
+        // ApiRetry::request() reads a scripted response through these two
+        // accessors; everything else it needs the bootstrap already supplies.
+        require_once __DIR__ . '/http-response-accessor-stubs.php';
 
         // Release anything this session still holds from a previous test, so
         // one leaking case cannot make the next one look broken.
@@ -294,28 +317,98 @@ final class HalfOpenProbeOwnershipIntegrationTest extends TestCase
         );
     }
 
+    // ── 4b. the real transport path, on a NO-SETTLEMENT exit ────────────
+
     /**
-     * ⚠ THE DOUBLE-CLAIM STRAND. Two claims in one session need two releases;
-     * ApiRetry issues one. This is why the outer check must not claim — and
-     * it strands the probe even when everything succeeds.
+     * ⚠ WHICH EXITS ACTUALLY STRAND — CORRECTED AFTER REVIEW.
+     *
+     * An earlier version of this file claimed the old outer preflight stranded
+     * the probe "even when the request fully succeeded", reasoning that
+     * `ApiRetry` releases once. That was wrong, and the code says so:
+     * `settleSuccess()` calls `recordSuccess()`, which releases
+     * unconditionally, and the `finally` releases again — TWO releases for two
+     * claims. Settled failures behave the same way, because `recordFailure()`
+     * releases when it restamps the cooldown, which is exactly what a failed
+     * half-open probe does.
+     *
+     * The exits that genuinely leak are the ones that settle NOTHING, where
+     * the `finally` is the only release:
+     *
+     *   - a non-429 4xx          (the common case: a 404 from an LCD)
+     *   - a 3xx or other status
+     *   - an `application_error` 5xx (the contract answered; breaker untouched)
+     *   - a callable that throws
+     *
+     * One release, two claims — stranded. This test drives the REAL
+     * `ApiRetry::request()` with a scripted 404, so the claim, the exit and the
+     * `finally` are all production code, and observes the result from a second
+     * connection.
      */
-    public function testTwoClaimsInOneSessionStrandTheProbeAfterASingleRelease(): void
+    public function testAnOldStyleMutatingPreflightStrandsTheProbeOnANoSettlementExit(): void
     {
-        $k = $this->lockName();
+        $this->seedHalfOpen();
 
-        self::assertTrue(AdvisoryLock::acquire($k, 0), 'outer preflight claims');
-        self::assertTrue(AdvisoryLock::acquire($k, 0), 'transport claims again, same session');
+        // The OLD outer preflight: mutating, and it wins the probe (claim #1).
+        self::assertFalse(
+            OnchainCircuitBreaker::isOpen(self::CHAIN),
+            'the old-style preflight claims the probe and lets the caller through'
+        );
 
-        // What ApiRetry does on a successful request: one release.
-        AdvisoryLock::release($k);
+        // The real transport path takes claim #2 and exits without settling.
+        $attempts = 0;
+        $result = ApiRetry::request(
+            static function () use (&$attempts) {
+                $attempts++;
+                return ['code' => 404, 'body' => '{"message":"no such path"}'];
+            },
+            ['chain_id' => self::CHAIN, 'label' => 'no-settlement exit']
+        );
+
+        self::assertSame(1, $attempts, 'a 404 is not retried');
+        self::assertIsArray($result);
+        self::assertSame(404, (int) $result['code']);
 
         self::assertFalse(
             $this->probeIsAvailableToAnotherWorker(),
-            'THE STRAND: after a successful request the probe is still held, because it was claimed twice'
+            'THE STRAND: two claims, one release — the chain cannot be probed by another worker'
+        );
+    }
+
+    /**
+     * The same real transport path under the NEW preflight: one claim, one
+     * release, probe free. This is the behaviour the four caller changes buy.
+     */
+    public function testTheNewPreflightLeavesTheProbeFreeAfterANoSettlementExit(): void
+    {
+        $this->seedHalfOpen();
+        $counterBefore = $this->counter();
+
+        // The NEW outer preflight: non-mutating, claims nothing.
+        self::assertFalse(OnchainCircuitBreaker::isResting(self::CHAIN));
+        self::assertTrue(
+            $this->probeIsAvailableToAnotherWorker(),
+            'the preflight itself took nothing'
         );
 
-        AdvisoryLock::release($k);
-        self::assertTrue($this->probeIsAvailableToAnotherWorker(), 'only a matching second release frees it');
+        $attempts = 0;
+        ApiRetry::request(
+            static function () use (&$attempts) {
+                $attempts++;
+                return ['code' => 404, 'body' => '{"message":"no such path"}'];
+            },
+            ['chain_id' => self::CHAIN, 'label' => 'no-settlement exit']
+        );
+
+        self::assertSame(1, $attempts, 'anti-vacuity: the transport really ran');
+        self::assertTrue(
+            $this->probeIsAvailableToAnotherWorker(),
+            'one claim, one release — the next worker can probe this chain'
+        );
+        self::assertSame(
+            $counterBefore,
+            $this->counter(),
+            'and a 4xx still charges the breaker nothing'
+        );
     }
 
     /** A throwing transport request must still leave the probe free. */

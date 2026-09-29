@@ -114,6 +114,25 @@ file_put_contents($f, str_replace($old, $new, $s));
 ' integration 'HalfOpenProbeOwnershipIntegrationTest::testTheNonMutatingCheckNeverClaimsTheProbe' \
   'M2 isResting() acquires the probe lock'
 
+# ── 2c. the same mutation, killed on the REAL TRANSPORT PATH ────────────────
+#    ⚠ THIS IS THE CONTROL THAT MATTERS FOR "an outer preflight mutates again".
+#    M1a-d catch it in the source inventory; this one catches the CONSEQUENCE —
+#    with `isResting()` claiming, the preflight + ApiRetry take two claims, a
+#    no-settlement exit (404) releases once, and the probe is stranded. Killed
+#    by a real ApiRetry request against a real MySQL/MariaDB lock, observed from
+#    a second connection.
+#
+#    (A hand-written "two acquires, one release" demonstration is background
+#    only; this control is what makes the claim load-bearing.)
+mutate "$BREAKER" '
+$f = $argv[1]; $s = file_get_contents($f);
+$old = "        return self::phaseFor(self::getState(\$chainId), time()) === self::PHASE_OPEN;";
+$new = "        return self::isOpen(\$chainId);";
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, $new, $s));
+' integration 'HalfOpenProbeOwnershipIntegrationTest::testTheNewPreflightLeavesTheProbeFreeAfterANoSettlementExit' \
+  'M2c a mutating preflight strands the probe on a no-settlement exit'
+
 # ── 2b. the same mutation, caught structurally without a database ───────────
 mutate "$BREAKER" '
 $f = $argv[1]; $s = file_get_contents($f);

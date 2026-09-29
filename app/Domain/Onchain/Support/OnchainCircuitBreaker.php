@@ -113,9 +113,24 @@ final class OnchainCircuitBreaker
      * row, a missing driver, an unsupported capability, a placeholder
      * endpoint. Nothing releases the lock on those paths, so the chain could
      * not be probed by ANY worker until that PHP process's database session
-     * closed. `GET_LOCK` is reentrant per session, so the outer claim also
-     * meant the transport layer's own claim needed two releases and got one
-     * — stranding the probe even when the request succeeded.
+     * closed.
+     *
+     * ── AND WHICH TRANSPORT EXITS THE DOUBLE CLAIM STRANDED ─────────────
+     * `GET_LOCK` is reentrant per session, so an outer claim plus
+     * {@see ApiRetry}'s own claim takes the count to TWO, and two claims need
+     * two releases. Exits that SETTLE an outcome issue two and are therefore
+     * fine: {@see recordSuccess()} releases unconditionally, a
+     * {@see recordFailure()} that restamps the cooldown releases too, and
+     * `ApiRetry`'s `finally` releases on every path.
+     *
+     * The exits that settle NOTHING issue ONE release and stranded the probe:
+     * a non-429 4xx, a 3xx, an `application_error` 5xx (the contract answered,
+     * breaker untouched) and a callable that throws.
+     *
+     * ⚠ AN EARLIER VERSION OF THIS COMMENT SAID THE SUCCESSFUL PATH WAS ALSO
+     * STRANDED. It was not — that was an evidence error, corrected here and in
+     * the tests. The early-return leak above and the no-settlement exits are
+     * the real defects, and either alone justifies moving the claim.
      *
      * So an outer check asks THIS question instead. It reads the same state
      * through the same {@see phaseFor()} arithmetic and takes no lock.
