@@ -530,6 +530,13 @@ namespace BCC\Trust\Onchain\Repositories {
                     'stateWrites'  => count(self::$stateWrites),
                     'withdrawals'  => count(self::$withdrawals),
                     'provisioning' => self::$provisioning,
+                    // PR E: the description review transition is a WRITE, so a
+                    // rolled-back transaction must undo it here too. Without
+                    // this the double would report a rollback while still
+                    // showing the state as moved — and the atomicity test
+                    // would pass against a stub that does not model it.
+                    'descStates'   => count(self::$descriptionTransitions),
+                    'descImports'  => count(self::$descriptions),
                 ];
             }
 
@@ -542,6 +549,17 @@ namespace BCC\Trust\Onchain\Repositories {
                 /** @var array<int, array{state: string, at: string|null, by: int|null, code: string|null}> $prior */
                 $prior              = $mark['provisioning'];
                 self::$provisioning = $prior;
+
+                self::$descriptionTransitions = array_slice(
+                    self::$descriptionTransitions,
+                    0,
+                    (int) ($mark['descStates'] ?? 0)
+                );
+                self::$descriptions = array_slice(
+                    self::$descriptions,
+                    0,
+                    (int) ($mark['descImports'] ?? 0)
+                );
             }
 
             public static function reset(): void

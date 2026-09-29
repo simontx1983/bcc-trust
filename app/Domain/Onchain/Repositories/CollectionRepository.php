@@ -178,6 +178,19 @@ final class CollectionRepository
 {
     use GuardsReadFailures;
 
+    /**
+     * The closed `metadata_state` vocabulary (PR E, DECISION 13).
+     *
+     * ⚠ Mirrors {@see \BCC\Trust\Onchain\ValueObjects\IntakeMetadata}'s
+     * STATE_* constants, and is enforced in {@see addManual()} before any SQL
+     * is issued. A repository that accepted whatever a service handed it would
+     * make the vocabulary a convention rather than a guarantee, and a value
+     * outside this set is not interpretable by any reader.
+     *
+     * @var list<string>
+     */
+    private const METADATA_STATES = ['complete', 'partial', 'unavailable'];
+
     /** @var string Explicit column list — must match schema-collections.php. */
     private const COLUMNS = 'id, wallet_link_id, contract_address, canonical_identifier, chain_id, collection_name,
                  token_standard, total_supply, floor_price, floor_currency, unique_holders,
@@ -662,8 +675,18 @@ final class CollectionRepository
         // advertising an earlier `complete`, which is precisely the lie the
         // columns exist to prevent. A caller that supplies neither leaves both
         // untouched; a caller that supplies them overwrites.
-        $stateProvided = isset($data['metadata_state']) && is_string($data['metadata_state']);
-        $sqlState      = self::sqlStringOrNull($stateProvided ? $data['metadata_state'] : null);
+        // ⚠⚠ THE VOCABULARY IS ENFORCED HERE, NOT TRUSTED FROM THE CALLER.
+        // `metadata_state` is a closed set, and this is the last place before
+        // the value reaches SQL. Relying on the service to pass a good one
+        // makes the guarantee depend on every future caller remembering it;
+        // enforcing it here makes an out-of-vocabulary value impossible to
+        // store no matter who calls. An unrecognised value is treated as NOT
+        // PROVIDED — so the column keeps its column default on INSERT and is
+        // left untouched on UPDATE, rather than recording a state nobody can
+        // interpret.
+        $stateRaw      = $data['metadata_state'] ?? null;
+        $stateProvided = is_string($stateRaw) && in_array($stateRaw, self::METADATA_STATES, true);
+        $sqlState      = self::sqlStringOrNull($stateProvided ? $stateRaw : null);
         $sqlCheckedAt  = self::sqlStringOrNull(
             isset($data['metadata_checked_at']) && is_string($data['metadata_checked_at'])
                 ? $data['metadata_checked_at']

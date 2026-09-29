@@ -83,7 +83,7 @@ final class SolanaContractProbe
         }
 
         // ── Verified collection grouping? ───────────────────────────────
-        if (!$this->hasVerifiedCollectionGrouping($asset, $mint)) {
+        if (!$this->hasVerifiedCollectionGrouping($asset)) {
             return ContractValidationVerdict::invalid([
                 ContractValidationVerdict::EV_PROBE_ANSWERED,
                 ContractValidationVerdict::EV_GROUPING_UNVERIFIED,
@@ -103,18 +103,29 @@ final class SolanaContractProbe
     /**
      * Is this a collection whose membership claim is authority-signed?
      *
-     * Two accepted shapes:
-     *  1. The asset carries a `collection` grouping whose `verified` flag is
-     *     true — the collection authority signed it.
-     *  2. The asset IS the collection parent: its `group_value` is its own id,
-     *     which Metaplex sized-collection parents report.
+     * ── ⚠⚠⚠ ONE ACCEPTED SHAPE: `verified === true`. ────────────────────
+     * The asset must carry a `collection` grouping whose `verified` flag is
+     * exactly true — set by the collection authority's signature.
      *
-     * ⚠ `verified` absent is NOT treated as true. Some DAS providers omit the
-     * flag; absent means unproven, and unproven is refused.
+     * ── THE SELF-REFERENCE BYPASS, AND WHY IT IS GONE ───────────────────
+     * This used to also accept `group_value === $mint` on the theory that a
+     * Metaplex sized-collection parent points at itself. That was a hole the
+     * size of the rule: metadata is writer-controlled, so anyone minting an
+     * asset can put their OWN address in their own `grouping` and satisfy it
+     * without any authority ever signing anything. A self-signed claim is
+     * exactly what `verified` exists to distinguish from a real one.
+     *
+     * ⚠ No authoritative DAS field was demonstrated that proves
+     * collection-parent status independently of the flag. Until one is — with
+     * its exact schema documented and tested — a bare self-reference does not
+     * validate. Fail closed.
+     *
+     * ⚠ `verified` ABSENT is not true either. Some providers omit the key;
+     * absent means unproven, and unproven is refused.
      *
      * @param array<string, mixed> $asset
      */
-    private function hasVerifiedCollectionGrouping(array $asset, string $mint): bool
+    private function hasVerifiedCollectionGrouping(array $asset): bool
     {
         $grouping = is_array($asset['grouping'] ?? null) ? $asset['grouping'] : [];
 
@@ -129,11 +140,10 @@ final class SolanaContractProbe
             if (!is_string($value) || $value === '') {
                 continue;
             }
+
+            // Strict identity comparison: only a real boolean true counts, so
+            // a string "false" or a 0/1 int cannot slip through.
             if (($g['verified'] ?? false) === true) {
-                return true;
-            }
-            // The collection parent pointing at itself.
-            if ($value === $mint) {
                 return true;
             }
         }

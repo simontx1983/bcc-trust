@@ -110,7 +110,24 @@ final class CosmosContractProbe
             ]);
         }
 
-        // CONFIRMED or PROBABLE → a CW-721.
+        // ── ⚠⚠ PROBABLE IS NOT PROOF ────────────────────────────────────
+        // The classifier distinguishes `confirmed_cw721` from
+        // `probable_cw721` and describes the latter as needing administrator
+        // review: evidence that leans one way, not a decision. This probe used
+        // to map both to VALID, and VALID is the single verdict that writes a
+        // collection row — so "probably" was quietly creating collections.
+        //
+        // Under the four-state contract only CONFIRMED evidence validates.
+        // Probable evidence is UNAVAILABLE: BCC reached no conclusion, the
+        // operator can retry, and the bounded evidence says the probes did
+        // not all answer.
+        if ($class !== CosmwasmClassifier::CONFIRMED) {
+            return ContractValidationVerdict::unavailable([
+                ContractValidationVerdict::EV_PROBE_ANSWERED,
+                ContractValidationVerdict::EV_PROBE_REFUSED,
+            ]);
+        }
+
         $metadata = $this->collectMetadata($contract, $outcomes, $budget);
 
         return ContractValidationVerdict::valid('CW-721', $metadata, [

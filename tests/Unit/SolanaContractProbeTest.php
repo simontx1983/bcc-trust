@@ -9,6 +9,7 @@ use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\ValueObjects\ContractValidationVerdict;
 use BCC\Trust\Onchain\ValueObjects\IntakeMetadata;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -59,17 +60,57 @@ final class SolanaContractProbeTest extends TestCase
         self::assertSame('https://example.test/d.png', $v->metadata()?->valueOf('image_url'));
     }
 
-    public function testACollectionParentPointingAtItselfIsValid(): void
+    /**
+     * ⚠⚠⚠ REPLACED AFTER REVIEW — THE SELF-REFERENCE BYPASS IS GONE.
+     *
+     * This previously asserted that `group_value === mint` validated the mint
+     * even with `verified` absent or false. That contradicted the rule this
+     * class exists to enforce: anyone can write any address into their own
+     * metadata, INCLUDING their own, so a bare self-reference is a self-signed
+     * claim. No authoritative DAS field was demonstrated that proves
+     * collection-parent status without the flag, so it fails closed.
+     */
+    public function testABareSelfReferenceWithoutTheVerifiedFlagDoesNotValidate(): void
     {
         $f = new FakeSolanaFetcherForValidation();
         $f->asset = [
             'grouping' => [['group_key' => 'collection', 'group_value' => self::MINT]],
-            'content'  => ['metadata' => ['name' => 'Parent Collection']],
+            'content'  => ['metadata' => ['name' => 'Self Signed']],
         ];
 
         $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
 
-        self::assertSame(ContractValidationVerdict::VALID, $v->state());
+        self::assertNotSame(ContractValidationVerdict::VALID, $v->state());
+        self::assertFalse($v->mayPersist());
+        self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_GROUPING_UNVERIFIED));
+    }
+
+    public function testASelfReferenceWithVerifiedFalseDoesNotValidate(): void
+    {
+        $f = new FakeSolanaFetcherForValidation();
+        $f->asset = [
+            'grouping' => [['group_key' => 'collection', 'group_value' => self::MINT, 'verified' => false]],
+            'content'  => ['metadata' => ['name' => 'Self Signed']],
+        ];
+
+        self::assertNotSame(
+            ContractValidationVerdict::VALID,
+            (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->state()
+        );
+    }
+
+    public function testOnlyAnExplicitlyVerifiedSelfReferenceValidates(): void
+    {
+        $f = new FakeSolanaFetcherForValidation();
+        $f->asset = [
+            'grouping' => [['group_key' => 'collection', 'group_value' => self::MINT, 'verified' => true]],
+            'content'  => ['metadata' => ['name' => 'Verified Parent']],
+        ];
+
+        self::assertSame(
+            ContractValidationVerdict::VALID,
+            (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->state()
+        );
     }
 
     // ── ⚠⚠ Unverified grouping ──────────────────────────────────────────
@@ -226,9 +267,10 @@ final class SolanaContractProbeTest extends TestCase
     }
 
     /**
-     * `not_found` is the one DAS failure that IS an answer about the address.
+     * ⚠ The ONE DAS error that is an answer about the address: the
+     * documented "Asset Not Found" response. Everything else is about us.
      */
-    public function testAnUnknownMintIsInvalidBecauseDasAnswered(): void
+    public function testTheDocumentedAssetNotFoundResponseIsInvalid(): void
     {
         $f = new FakeSolanaFetcherForValidation();
         $f->kind = 'not_found';
@@ -238,6 +280,80 @@ final class SolanaContractProbeTest extends TestCase
         self::assertSame(ContractValidationVerdict::INVALID, $v->state());
         self::assertTrue($v->isDecided());
         self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_NO_CODE_AT_ADDRESS));
+    }
+
+    // ⚠⚠⚠ JSON-RPC error discrimination (blocker 3)
+    //
+    // `assetResult()` previously mapped EVERY JSON-RPC error to `not_found`,
+    // and this probe maps `not_found` to INVALID. So a rate limit, an expired
+    // Helius key or an internal error all produced "this mint is not a
+    // collection" — a negative authenticity verdict manufactured from an
+    // outage. Only the documented asset-not-found signature may decide.
+
+    /** @return array<string, array{0: int, 1: string}> */
+    public static function nonDecisiveRpcErrors(): array
+    {
+        return [
+            'auth / unauthorized' => [-32401, 'Unauthorized'],
+            'rate limited'        => [-32429, 'Too many requests'],
+            'internal error'      => [-32603, 'Internal error'],
+            'method not found'    => [-32601, 'Method not found'],
+            'invalid params'      => [-32602, 'Invalid params'],
+            'parse error'         => [-32700, 'Parse error'],
+            'unknown vendor code' => [-31999, 'Something else entirely'],
+        ];
+    }
+
+    #[DataProvider('nonDecisiveRpcErrors')]
+    public function testNonAssetNotFoundRpcErrorsAreUnavailableNotInvalid(int $code, string $message): void
+    {
+        $f = new FakeSolanaFetcherForValidation();
+        $f->rpcError = ['code' => $code, 'message' => $message];
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
+
+        self::assertSame(
+            ContractValidationVerdict::UNAVAILABLE,
+            $v->state(),
+            "JSON-RPC {$code} says nothing about the mint"
+        );
+        self::assertNotSame(ContractValidationVerdict::INVALID, $v->state());
+        self::assertFalse($v->mayPersist());
+    }
+
+    public function testTheDocumentedNotFoundSignatureIsRecognised(): void
+    {
+        $f = new FakeSolanaFetcherForValidation();
+        $f->rpcError = ['code' => -32000, 'message' => 'Asset Not Found'];
+
+        self::assertSame(
+            ContractValidationVerdict::INVALID,
+            (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->state()
+        );
+    }
+
+    public function testTheSameErrorCodeWithADifferentMessageIsNotTreatedAsNotFound(): void
+    {
+        // -32000 is a generic server-error code. Without the documented
+        // message it is not evidence about the address.
+        $f = new FakeSolanaFetcherForValidation();
+        $f->rpcError = ['code' => -32000, 'message' => 'Server error: upstream timeout'];
+
+        self::assertSame(
+            ContractValidationVerdict::UNAVAILABLE,
+            (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->state()
+        );
+    }
+
+    public function testAMalformedErrorObjectIsUnavailable(): void
+    {
+        $f = new FakeSolanaFetcherForValidation();
+        $f->rpcError = ['no_code_key' => true];
+
+        self::assertSame(
+            ContractValidationVerdict::UNAVAILABLE,
+            (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->state()
+        );
     }
 
     // ── Bounded cost ────────────────────────────────────────────────────
@@ -271,6 +387,14 @@ class FakeSolanaFetcherForValidation extends \BCC\Trust\Onchain\Fetchers\SolanaF
     public int $calls = 0;
     public string $kind = 'none';
 
+    /**
+     * A raw JSON-RPC `error` object, passed through the REAL classifier so the
+     * discrimination under test is production's, not the double's.
+     *
+     * @var array<string, mixed>|null
+     */
+    public ?array $rpcError = null;
+
     /** @var array<string, mixed>|null */
     public ?array $asset = null;
 
@@ -282,6 +406,14 @@ class FakeSolanaFetcherForValidation extends \BCC\Trust\Onchain\Fetchers\SolanaF
     public function assetResult(string $mint): array
     {
         $this->calls++;
+
+        if ($this->rpcError !== null) {
+            return [
+                'ok'     => false,
+                'result' => null,
+                'kind'   => \BCC\Trust\Onchain\Fetchers\SolanaFetcher::classifyDasError($this->rpcError),
+            ];
+        }
 
         if ($this->kind !== 'none') {
             return ['ok' => false, 'result' => null, 'kind' => $this->kind];

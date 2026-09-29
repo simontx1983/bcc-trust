@@ -556,17 +556,36 @@ namespace BCC\Trust\Onchain\Repositories {
                 return self::$chains[$id] ?? null;
             }
 
+            /**
+             * ⚠ `chain_id_hex` carries the EIP-155 chain id and is the STABLE
+             * identity the PR E launch allowlist keys on. A slug is operator
+             * text and can be edited; the chain id cannot. Defaults are
+             * supplied for the chains these stubs seed by name so a test does
+             * not have to know the hex for the common cases, and any test can
+             * override the property directly.
+             */
             public static function seed(int $id, string $slug = 'ethereum', string $chainType = 'evm'): void
             {
+                $hexBySlug = [
+                    'ethereum'  => '0x1',
+                    'base'      => '0x2105',
+                    'polygon'   => '0x89',
+                    'arbitrum'  => '0xa4b1',
+                    'optimism'  => '0xa',
+                    'bsc'       => '0x38',
+                    'avalanche' => '0xa86a',
+                ];
+
                 self::$chains[$id] = (object) [
-                    'id'          => $id,
-                    'slug'        => $slug,
-                    'name'        => ucfirst($slug),
-                    'chain_type'  => $chainType,
-                    'is_active'   => 1,
-                    'description' => null,
-                    'icon_url'    => null,
-                    'color'       => null,
+                    'id'           => $id,
+                    'slug'         => $slug,
+                    'name'         => ucfirst($slug),
+                    'chain_type'   => $chainType,
+                    'chain_id_hex' => $chainType === 'evm' ? ($hexBySlug[$slug] ?? null) : null,
+                    'is_active'    => 1,
+                    'description'  => null,
+                    'icon_url'     => null,
+                    'color'        => null,
                 ];
             }
 

@@ -648,6 +648,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Support\\NftCollectionIdentifier' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/NftCollectionIdentifier.php',
         'BCC\\Trust\\Onchain\\Support\\NftCollectionIdentity' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/NftCollectionIdentity.php',
         'BCC\\Trust\\Onchain\\Support\\NftDriverRegistry' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/NftDriverRegistry.php',
+        'BCC\\Trust\\Onchain\\Support\\NftLaunchChains' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/NftLaunchChains.php',
         'BCC\\Trust\\Onchain\\Support\\NftProviderReadiness' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/NftProviderReadiness.php',
         'BCC\\Trust\\Onchain\\Support\\OnchainCircuitBreaker' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/OnchainCircuitBreaker.php',
         'BCC\\Trust\\Onchain\\Support\\ProviderOutcomeReceipt' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/ProviderOutcomeReceipt.php',

@@ -190,6 +190,84 @@ final class CosmosNoWasmModuleIsNeverNotAnNftTest extends TestCase
         self::assertSame(ContractValidationVerdict::UNAVAILABLE, $verdict->state());
     }
 
+    /**
+     * ⚠⚠ A PROBABLE CLASSIFICATION IS NOT A VALIDATION.
+     *
+     * `CosmwasmClassifier` distinguishes `confirmed_cw721` from
+     * `probable_cw721`, and describes the latter as needing administrator
+     * review — it is evidence that leans one way, not proof. Under the
+     * four-state contract only CONFIRMED evidence may produce VALID, because
+     * VALID is the one verdict that writes a row.
+     *
+     * Probable evidence resolves to UNAVAILABLE: BCC did not reach a decision
+     * about the contract, and the bounded evidence says why.
+     */
+    public function testProbableOnlyEvidenceDoesNotValidateAndCreatesNothing(): void
+    {
+        // `num_tokens` answered but neither info variant did — the classifier's
+        // documented "probable" shape.
+        $fetcher = new class extends FakeCosmosFetcherForValidation {
+            public function probeCw721(string $contract): array
+            {
+                return [
+                    ['probe' => CosmwasmClassifier::PROBE_NUM_TOKENS, 'ok' => true, 'kind' => 'none', 'excerpt' => ''],
+                    ['probe' => CosmwasmClassifier::PROBE_CONTRACT_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_QUERY_UNSUPPORTED, 'excerpt' => 'unknown variant'],
+                    ['probe' => CosmwasmClassifier::PROBE_COLLECTION_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_QUERY_UNSUPPORTED, 'excerpt' => 'unknown variant'],
+                ];
+            }
+        };
+
+        $verdict = (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertNotSame(
+            ContractValidationVerdict::VALID,
+            $verdict->state(),
+            'probable is not proof, and VALID is the verdict that writes a row'
+        );
+        self::assertFalse($verdict->mayPersist(), 'no collection may be created from probable evidence');
+        self::assertTrue(
+            $verdict->hasEvidence(ContractValidationVerdict::EV_PROBE_REFUSED),
+            'the bounded evidence must explain why validation was incomplete'
+        );
+    }
+
+    public function testProbableEvidenceDoesNotEvenAttemptAMetadataRead(): void
+    {
+        $fetcher = new class extends FakeCosmosFetcherForValidation {
+            public function probeCw721(string $contract): array
+            {
+                return [
+                    ['probe' => CosmwasmClassifier::PROBE_NUM_TOKENS, 'ok' => true, 'kind' => 'none', 'excerpt' => ''],
+                    ['probe' => CosmwasmClassifier::PROBE_CONTRACT_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_QUERY_UNSUPPORTED, 'excerpt' => 'unknown variant'],
+                    ['probe' => CosmwasmClassifier::PROBE_COLLECTION_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_QUERY_UNSUPPORTED, 'excerpt' => 'unknown variant'],
+                ];
+            }
+        };
+
+        (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertSame(0, $fetcher->contractInfoCalls, 'nothing is persisted, so nothing needs fetching');
+    }
+
+    public function testConfirmedEvidenceStillValidates(): void
+    {
+        $fetcher = new class extends FakeCosmosFetcherForValidation {
+            public function probeCw721(string $contract): array
+            {
+                return [
+                    ['probe' => CosmwasmClassifier::PROBE_NUM_TOKENS, 'ok' => true, 'kind' => 'none', 'excerpt' => ''],
+                    ['probe' => CosmwasmClassifier::PROBE_CONTRACT_INFO, 'ok' => true, 'kind' => 'none', 'excerpt' => ''],
+                ];
+            }
+        };
+        $fetcher->contractInfo = ['name' => 'Confirmed Collection', 'symbol' => 'CC', 'description' => null, 'image_url' => null];
+
+        $verdict = (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertSame(ContractValidationVerdict::VALID, $verdict->state());
+        self::assertSame('CW-721', $verdict->standard());
+    }
+
     public function testAnExhaustedBudgetIsUnavailableAndMakesNoRequest(): void
     {
         $fetcher = new class extends FakeCosmosFetcherForValidation {

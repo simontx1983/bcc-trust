@@ -194,6 +194,55 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     }
 
     /**
+     * PURE. Decide whether a DAS JSON-RPC `error` object is evidence about the
+     * ADDRESS, or merely evidence about us.
+     *
+     * ── THE ONLY DECISIVE SIGNATURE ─────────────────────────────────────
+     * Helius DAS answers an id that does not exist with code **-32000** and the
+     * message **"Asset Not Found"**. That pair — and nothing else — means the
+     * address was looked up and holds nothing.
+     *
+     * ⚠ THE CODE ALONE IS NOT ENOUGH. `-32000` is the generic JSON-RPC
+     * server-error code; Helius also returns it for upstream failures. Without
+     * the documented message the response is an outage, not an answer.
+     *
+     * Everything else — authentication (-32401), rate limiting (-32429),
+     * method errors (-32601/-32602), internal errors (-32603), parse errors
+     * (-32700), any unknown vendor code, and any malformed error object —
+     * resolves to `transport`, which the validator turns into UNAVAILABLE.
+     * That is the fail-closed default: if no uniquely safe not-found signature
+     * can be demonstrated for a response, it does not get to decide anything.
+     *
+     * @param array<string, mixed> $error the JSON-RPC `error` object
+     * @return string `not_found` only for the documented signature, else `transport`
+     */
+    public static function classifyDasError(array $error): string
+    {
+        $code = $error['code'] ?? null;
+        if (!is_int($code) || $code !== self::DAS_ERROR_SERVER) {
+            return 'transport';
+        }
+
+        $message = $error['message'] ?? null;
+        if (!is_string($message)) {
+            return 'transport';
+        }
+
+        // Compared case-insensitively on a trimmed string, but still as a
+        // whole documented phrase — a substring match would let
+        // "Upstream says: Asset Not Found in cache" decide a verdict.
+        return strcasecmp(trim($message), self::DAS_ASSET_NOT_FOUND) === 0
+            ? 'not_found'
+            : 'transport';
+    }
+
+    /** Generic JSON-RPC server-error code. NOT on its own a not-found. */
+    private const DAS_ERROR_SERVER = -32000;
+
+    /** The documented Helius DAS message for an id that does not exist. */
+    private const DAS_ASSET_NOT_FOUND = 'Asset Not Found';
+
+    /**
      * DAS `getAsset` for one mint, with the failure discriminated.
      *
      * ── WHY THIS EXISTS ALONGSIDE fetchMetadataForMint() ────────────────
@@ -255,10 +304,18 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
         }
 
-        // DAS answers an unknown id with a JSON-RPC error. That IS an answer:
-        // nothing exists at this address. Distinct from transport failure.
+        // ⚠⚠⚠ NOT EVERY JSON-RPC ERROR IS AN ANSWER ABOUT THE ADDRESS.
+        // This used to map every `error` object to `not_found`, which the
+        // validator reads as a DECIDED negative. So an expired Helius key, a
+        // rate limit and an internal error all produced "this mint is not a
+        // collection" — a negative authenticity verdict manufactured from an
+        // outage. Only the documented asset-not-found signature decides.
         if (isset($json['error'])) {
-            return ['ok' => false, 'result' => null, 'kind' => 'not_found'];
+            return [
+                'ok'     => false,
+                'result' => null,
+                'kind'   => self::classifyDasError(is_array($json['error']) ? $json['error'] : []),
+            ];
         }
 
         if (!isset($json['result']) || !is_array($json['result'])) {

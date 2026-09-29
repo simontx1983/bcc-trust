@@ -9,27 +9,29 @@ use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\ValueObjects\ContractValidationVerdict;
 use BCC\Trust\Onchain\ValueObjects\IntakeMetadata;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
  * EVM targeted validation — Ethereum and Base at launch (DECISION 7).
  *
- * ── THE TWO THINGS THAT MUST NOT HAPPEN ─────────────────────────────────
+ * ── THE THINGS THAT MUST NOT HAPPEN ─────────────────────────────────────
  *  1. An ERC-1155 silently accepted as ERC-721. Holder gating proves
  *     ownership with a per-contract balance read; on a 1155 that balance is
  *     per-token-id, so a 721-shaped check would admit someone holding a
- *     different token in the same contract. That provisions a community with
- *     the wrong members.
- *  2. A missing Alchemy key producing an accepted collection with empty
- *     metadata. An empty-but-verified-looking row is worse than no row: it
- *     looks reviewed.
+ *     different token in the same contract.
+ *  2. A collection persisted when its metadata could not be read. Both launch
+ *     chains are Alchemy-keyed, so a metadata failure is a configuration or
+ *     provider fault — not a collection that has no name and no image.
+ *  3. A malformed ERC-165 result read as an answered "no". Two of those would
+ *     manufacture INVALID out of data BCC could not parse.
  */
 #[CoversClass(EvmContractProbe::class)]
 final class EvmContractProbeTest extends TestCase
 {
     private const CONTRACT = '0x1234567890abcdef1234567890abcdef12345678';
 
-    /** ABI-encoded `true` / `false`. */
+    /** Canonical ABI-encoded booleans. */
     private const TRUE_WORD  = '0x0000000000000000000000000000000000000000000000000000000000000001';
     private const FALSE_WORD = '0x0000000000000000000000000000000000000000000000000000000000000000';
 
@@ -93,7 +95,7 @@ final class EvmContractProbeTest extends TestCase
         self::assertSame(ContractValidationVerdict::UNSUPPORTED, $v->state());
         self::assertFalse($v->isValid(), 'an 1155 must never be accepted');
         self::assertFalse($v->mayPersist(), 'no row, so nothing can provision a community from it');
-        self::assertSame('ERC-1155', $v->standard(), 'the standard is recorded so the refusal can explain itself');
+        self::assertSame('ERC-1155', $v->standard());
         self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_STANDARD_DEFERRED));
     }
 
@@ -105,14 +107,15 @@ final class EvmContractProbeTest extends TestCase
             self::IFACE_1155 => self::TRUE_WORD,
         ];
 
-        $v = (new EvmContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
-
-        self::assertNotSame('ERC-721', $v->standard());
+        self::assertNotSame(
+            'ERC-721',
+            (new EvmContractProbe($fetcher))->validate(self::CONTRACT, $this->budget())->standard()
+        );
     }
 
     // ── Decided negatives ───────────────────────────────────────────────
 
-    public function testAContractSupportingNeitherInterfaceIsInvalid(): void
+    public function testOnlyCanonicalFalseOnBothInterfacesProducesADecidedNegative(): void
     {
         $fetcher = new FakeEvmFetcherForValidation();
         $fetcher->interfaceAnswers = [
@@ -126,22 +129,64 @@ final class EvmContractProbeTest extends TestCase
         self::assertTrue($v->isDecided());
     }
 
-    public function testAnEoaWithNoCodeIsInvalidNotUnavailable(): void
+    /**
+     * ⚠ PREMISE CORRECTED AFTER REVIEW. `eth_call` against an address with no
+     * code returns bare `0x`, and this used to be read as an answered "no" →
+     * INVALID. But `0x` is also what a node returns when a call could not be
+     * executed, so it cannot carry a verdict about the contract.
+     */
+    public function testAnAddressReturningEmptyDataIsUnavailableNotInvalid(): void
     {
-        // `eth_call` against an address with no code returns bare `0x`.
         $fetcher = new FakeEvmFetcherForValidation();
-        $fetcher->interfaceAnswers = [
-            self::IFACE_721  => '0x',
-            self::IFACE_1155 => '0x',
-        ];
+        $fetcher->rawResult = '0x';
 
         $v = (new EvmContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
 
-        self::assertSame(ContractValidationVerdict::INVALID, $v->state());
-        self::assertTrue($v->isDecided(), 'an empty return IS an answer: there is no contract here');
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $v->state());
+        self::assertFalse($v->mayPersist());
     }
 
-    // ── ⚠⚠ Fail closed ──────────────────────────────────────────────────
+    // ── ⚠⚠⚠ ERC-165 return data must be canonical ───────────────────────
+
+    /** @return array<string, array{0: string}> */
+    public static function malformedInterfaceResults(): array
+    {
+        return [
+            'empty 0x'           => ['0x'],
+            'short word 0x2'     => ['0x2'],
+            'truncated word'     => ['0x00000000000000000000000000000001'],
+            'non-hex payload'    => ['0xzzzz'],
+            'overlong word'      => ['0x' . str_repeat('0', 63) . '100'],
+            'noncanonical value' => ['0x' . str_repeat('0', 62) . '02'],
+        ];
+    }
+
+    /**
+     * ⚠⚠⚠ A MALFORMED ERC-165 RESULT IS NOT AN ANSWERED "NO".
+     *
+     * Before this fix, `ethCallResult()` accepted anything starting with `0x`
+     * and `supportsInterface()` treated `0x2` or a truncated word as false.
+     * Two such reads (721 then 1155) produced INVALID — a negative
+     * authenticity verdict manufactured from unparseable data.
+     */
+    #[DataProvider('malformedInterfaceResults')]
+    public function testMalformedInterfaceDataIsUnavailableNotInvalid(string $raw): void
+    {
+        $fetcher = new FakeEvmFetcherForValidation();
+        $fetcher->rawResult = $raw;
+
+        $v = (new EvmContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertSame(
+            ContractValidationVerdict::UNAVAILABLE,
+            $v->state(),
+            "raw result {$raw} must not be read as an answered false"
+        );
+        self::assertNotSame(ContractValidationVerdict::INVALID, $v->state());
+        self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_MALFORMED_RESPONSE));
+    }
+
+    // ── ⚠⚠ Transport failures fail closed ───────────────────────────────
 
     public function testMissingCredentialsAreUnavailableNotInvalid(): void
     {
@@ -169,69 +214,83 @@ final class EvmContractProbeTest extends TestCase
     public function testAnRpcErrorIsUnavailableNotInvalid(): void
     {
         // A reverting `supportsInterface` surfaces as a JSON-RPC error. A
-        // contract that reverts has told us nothing — reading it as "false"
-        // would manufacture a negative verdict.
+        // contract that reverts has told us nothing.
         $fetcher = new FakeEvmFetcherForValidation();
         $fetcher->ethCallKind = 'rpc_error';
 
-        $v = (new EvmContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
-
-        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $v->state());
+        self::assertSame(
+            ContractValidationVerdict::UNAVAILABLE,
+            (new EvmContractProbe($fetcher))->validate(self::CONTRACT, $this->budget())->state()
+        );
     }
 
-    public function testAMalformedResponseIsUnavailableNotInvalid(): void
+    // ── ⚠⚠⚠ Metadata failure must not persist a collection ──────────────
+
+    /** @return array<string, array{0: string, 1: string}> */
+    public static function metadataFailureKinds(): array
     {
-        $fetcher = new FakeEvmFetcherForValidation();
-        $fetcher->ethCallKind = 'malformed';
-
-        $v = (new EvmContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
-
-        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $v->state());
-        self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_MALFORMED_RESPONSE));
+        return [
+            'missing credentials' => ['credentials_missing', ContractValidationVerdict::EV_CREDENTIALS_MISSING],
+            'transport timeout'   => ['transport', ContractValidationVerdict::EV_PROVIDER_TIMEOUT],
+            'http error'          => ['http_error', ContractValidationVerdict::EV_PROVIDER_ERROR],
+            'malformed body'      => ['malformed', ContractValidationVerdict::EV_MALFORMED_RESPONSE],
+        ];
     }
 
     /**
-     * ⚠ The stated brief: "do not accept an empty but apparently verified
-     * collection."
+     * ⚠⚠⚠ REPLACES the earlier test that expected VALID when metadata
+     * retrieval failed. That verdict let `ManualCollectionIntakeService`
+     * persist a row for a contract whose name, symbol, image and supply BCC
+     * had never successfully read — an empty row that looks reviewed.
      */
-    public function testAValidContractWhoseMetadataFailsKeepsEveryFieldUnknown(): void
-    {
+    #[DataProvider('metadataFailureKinds')]
+    public function testEveryMetadataFailureModeIsUnavailableAndPersistsNothing(
+        string $kind,
+        string $evidence
+    ): void {
         $fetcher = new FakeEvmFetcherForValidation();
         $fetcher->interfaceAnswers = [self::IFACE_721 => self::TRUE_WORD];
-        $fetcher->metadataKind = 'credentials_missing';
+        $fetcher->metadataKind = $kind;
 
         $v = (new EvmContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
-        $m = $v->metadata();
 
-        self::assertSame(ContractValidationVerdict::VALID, $v->state(), 'the standard WAS proved');
-        self::assertInstanceOf(IntakeMetadata::class, $m);
-        self::assertSame(
-            IntakeMetadata::STATE_UNAVAILABLE,
-            $m->state(),
-            'a failed metadata read must be recorded as unavailable, not as a collection with no name'
-        );
-        self::assertSame([], $m->writableFields(), 'nothing may be written from a failed read');
-        foreach (IntakeMetadata::FIELDS as $f) {
-            self::assertSame(IntakeMetadata::UNKNOWN, $m->stateOf($f));
-        }
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $v->state());
+        self::assertFalse($v->mayPersist(), 'no row may be written from an unreadable metadata response');
+        self::assertFalse($v->isDecided(), 'the standard was proved, but the collection was not');
+        self::assertTrue($v->hasEvidence($evidence));
     }
 
-    public function testAnAnsweredMetadataReadMissingFieldsRecordsThemAbsentNotUnknown(): void
+    /**
+     * ⚠ THE OTHER HALF OF THE RULE. A metadata response that ARRIVED and
+     * simply lacks optional fields is still VALID — "the provider answered and
+     * the field is absent" is not "metadata could not be obtained".
+     */
+    public function testAnAnsweredResponseWithAbsentOptionalFieldsIsStillValid(): void
     {
         $fetcher = new FakeEvmFetcherForValidation();
         $fetcher->interfaceAnswers = [self::IFACE_721 => self::TRUE_WORD];
-        // Alchemy answered, but this collection has no symbol and no image.
-        $fetcher->metadata = ['name' => 'Sparse Collection'];
+        $fetcher->metadata = ['name' => 'Minimal Collection'];
 
-        $m = (new EvmContractProbe($fetcher))->validate(self::CONTRACT, $this->budget())->metadata();
+        $v = (new EvmContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
 
-        self::assertInstanceOf(IntakeMetadata::class, $m);
-        self::assertSame(IntakeMetadata::KNOWN, $m->stateOf('name'));
-        self::assertSame(IntakeMetadata::ABSENT, $m->stateOf('symbol'));
-        self::assertSame(IntakeMetadata::ABSENT, $m->stateOf('image_url'));
-        // Description is never attempted on EVM, so it stays UNKNOWN.
-        self::assertSame(IntakeMetadata::UNKNOWN, $m->stateOf('description'));
-        self::assertSame(IntakeMetadata::STATE_PARTIAL, $m->state());
+        self::assertSame(ContractValidationVerdict::VALID, $v->state());
+        self::assertTrue($v->mayPersist());
+        self::assertSame(IntakeMetadata::KNOWN, $v->metadata()?->stateOf('name'));
+        self::assertSame(IntakeMetadata::ABSENT, $v->metadata()?->stateOf('image_url'));
+    }
+
+    public function testAnEmptyButSuccessfullyParsedResponseIsValid(): void
+    {
+        $fetcher = new FakeEvmFetcherForValidation();
+        $fetcher->interfaceAnswers = [self::IFACE_721 => self::TRUE_WORD];
+        $fetcher->metadata = [];
+
+        $v = (new EvmContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertSame(ContractValidationVerdict::VALID, $v->state());
+        foreach (['name', 'symbol', 'image_url', 'total_supply'] as $f) {
+            self::assertSame(IntakeMetadata::ABSENT, $v->metadata()?->stateOf($f));
+        }
     }
 
     // ── No price data, ever ─────────────────────────────────────────────
@@ -243,8 +302,8 @@ final class EvmContractProbeTest extends TestCase
         $fetcher->metadata = [
             'name'            => 'Priced Collection',
             'openSeaMetadata' => [
-                'imageUrl'       => 'https://example.test/i.png',
-                'floorPrice'     => 12.5,
+                'imageUrl'        => 'https://example.test/i.png',
+                'floorPrice'      => 12.5,
                 'twitterUsername' => '@x',
             ],
         ];
@@ -289,14 +348,20 @@ final class EvmContractProbeTest extends TestCase
 
 class FakeEvmFetcherForValidation extends \BCC\Trust\Onchain\Fetchers\EvmFetcher
 {
+    /** Canonical ABI false — the default for an unlisted interface id. */
+    public const FALSE_WORD_FAKE = '0x0000000000000000000000000000000000000000000000000000000000000000';
+
     public int $ethCalls = 0;
     public int $metadataCalls = 0;
 
-    /** interfaceId => hex result */
+    /** @var array<string, string> interfaceId => hex result */
     public array $interfaceAnswers = [];
 
-    /** Non-'none' forces every eth_call to fail with this kind. */
+    /** Non-'none' makes every eth_call fail with that kind. */
     public string $ethCallKind = 'none';
+
+    /** When set, EVERY interface call returns this raw hex verbatim. */
+    public ?string $rawResult = null;
 
     public string $metadataKind = 'none';
 
@@ -305,7 +370,7 @@ class FakeEvmFetcherForValidation extends \BCC\Trust\Onchain\Fetchers\EvmFetcher
 
     public function __construct()
     {
-        // No transport in these tests; a real constructor wants a chain row.
+        // No transport in these tests; the real constructor wants a chain row.
     }
 
     public function ethCallResult(string $to, string $data): array
@@ -316,10 +381,15 @@ class FakeEvmFetcherForValidation extends \BCC\Trust\Onchain\Fetchers\EvmFetcher
             return ['ok' => false, 'result' => null, 'kind' => $this->ethCallKind];
         }
 
-        // The bytes4 interface id is the first 4 bytes of the argument.
+        if ($this->rawResult !== null) {
+            // ⚠ Deliberately bypasses the fetcher's own shape check so the
+            // PROBE's handling of malformed data is what gets tested.
+            return ['ok' => true, 'result' => $this->rawResult, 'kind' => 'none'];
+        }
+
         $iface = '0x' . substr($data, 10, 8);
 
-        return ['ok' => true, 'result' => $this->interfaceAnswers[$iface] ?? '0x', 'kind' => 'none'];
+        return ['ok' => true, 'result' => $this->interfaceAnswers[$iface] ?? self::FALSE_WORD_FAKE, 'kind' => 'none'];
     }
 
     public function contractMetadataResult(string $contract): array

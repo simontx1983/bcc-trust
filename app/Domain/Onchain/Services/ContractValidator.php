@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\Fetchers\SolanaFetcher;
 use BCC\Trust\Onchain\Services\Validation\CosmosContractProbe;
 use BCC\Trust\Onchain\Services\Validation\EvmContractProbe;
 use BCC\Trust\Onchain\Services\Validation\SolanaContractProbe;
+use BCC\Trust\Onchain\Support\NftLaunchChains;
 use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\ValueObjects\ContractValidationVerdict;
 
@@ -83,6 +84,23 @@ final class ContractValidator
             ]);
         }
 
+        // ── ⚠⚠⚠ THE LAUNCH GATE, BEFORE ANY TRANSPORT ───────────────────
+        // DECISION 7 approves Ethereum and Base only. `EvmContractProbe` works
+        // on any EVM RPC and `NftDriverRegistry` offers the EVM drivers to
+        // every EVM chain, so without this a capability flag on Polygon would
+        // put an unapproved chain straight into intake — and on a chain with
+        // no Alchemy key it would fail at metadata time, after the provider
+        // requests had already been made. Checked here, a non-launch chain
+        // costs exactly zero requests.
+        //
+        // ⚠ EVM ONLY. Cosmos and Solana have their own gates and are not
+        // judged by this list.
+        if ($family === 'evm' && !NftLaunchChains::isLaunchChain($chain)) {
+            return ContractValidationVerdict::unsupported(null, [
+                ContractValidationVerdict::EV_FAMILY_UNSUPPORTED,
+            ]);
+        }
+
         $budget ??= new ProviderRequestBudget($this->budgetFor($family), self::RUNTIME_SECONDS);
 
         // ⚠ The factory is asked for a fetcher ONCE, and a family whose
@@ -115,6 +133,10 @@ final class ContractValidator
                 }
 
                 return (new EvmContractProbe($fetcher))->validate($address, $budget);
+
+            // ⚠ unreachable: the launch gate above already refused every EVM
+            // chain outside the allowlist. Kept adjacent so the two stay
+            // visibly paired.
 
             case 'solana':
                 if (!$fetcher instanceof SolanaFetcher) {

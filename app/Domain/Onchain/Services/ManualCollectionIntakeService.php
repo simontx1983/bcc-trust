@@ -301,11 +301,15 @@ final class ManualCollectionIntakeService
                     throw new \RuntimeException('collection insert failed');
                 }
 
-                // ⚠ DESCRIPTION LANDS `pending` AND STAYS INVISIBLE. It is
-                // provider-authored text: bounded, sanitized, attributed to its
-                // source, and published only after an administrator approves it
-                // on the review screen. It is NOT the Community Description and
-                // never reaches a PeepSo group — that is PR G.
+                // ⚠ DESCRIPTION LANDS `pending` AND IS NEVER PUBLISHED HERE.
+                // It is provider-authored text: bounded, sanitized, and
+                // attributed to its source. An administrator can approve or
+                // reject it on the review screen, but per DECISION 17 that is
+                // a REVIEW OUTCOME only — during scanner retirement the text
+                // gets no REST field, no view-model field and no public
+                // surface. The admin review screen is its only reader.
+                // It is NOT the Community Description and never reaches a
+                // PeepSo group — that is PR G.
                 if ($description !== null && $description !== '') {
                     CollectionRepository::importChainDescription(
                         $rowId,

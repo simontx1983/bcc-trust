@@ -498,6 +498,7 @@ return array(
     'BCC\\Trust\\Onchain\\Support\\NftCollectionIdentifier' => $baseDir . '/app/Domain/Onchain/Support/NftCollectionIdentifier.php',
     'BCC\\Trust\\Onchain\\Support\\NftCollectionIdentity' => $baseDir . '/app/Domain/Onchain/Support/NftCollectionIdentity.php',
     'BCC\\Trust\\Onchain\\Support\\NftDriverRegistry' => $baseDir . '/app/Domain/Onchain/Support/NftDriverRegistry.php',
+    'BCC\\Trust\\Onchain\\Support\\NftLaunchChains' => $baseDir . '/app/Domain/Onchain/Support/NftLaunchChains.php',
     'BCC\\Trust\\Onchain\\Support\\NftProviderReadiness' => $baseDir . '/app/Domain/Onchain/Support/NftProviderReadiness.php',
     'BCC\\Trust\\Onchain\\Support\\OnchainCircuitBreaker' => $baseDir . '/app/Domain/Onchain/Support/OnchainCircuitBreaker.php',
     'BCC\\Trust\\Onchain\\Support\\ProviderOutcomeReceipt' => $baseDir . '/app/Domain/Onchain/Support/ProviderOutcomeReceipt.php',

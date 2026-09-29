@@ -34,6 +34,7 @@ use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
 use BCC\Trust\Onchain\Admin\Views\DiscoveryScanPanel;
 use BCC\Trust\Onchain\Support\DiscoveryReadiness;
 use BCC\Trust\Core\Security\AuditLogger;
+use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Onchain\ValueObjects\ChainDescriptionState;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningFailureCode;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningState;
@@ -140,16 +141,29 @@ final class VerifyCollectionsPage
     /**
      * PR E — NFT Collection Description review.
      *
-     * ⚠ THIS IS THE MISSING READER. `importChainDescription()` writes a
-     * description as `pending` and `setChainDescriptionState()` can publish
-     * one, but until PR E **nothing in production called the latter** — so an
-     * imported description could be stored and could never be approved. A
-     * review state with no reviewer is a queue that only fills up.
+     * ⚠ THIS IS THE MISSING REVIEW CONTROL. `importChainDescription()` writes
+     * a description as `pending` and `setChainDescriptionState()` can move it
+     * out of review, but until PR E **nothing in production called the
+     * latter** — so an imported description could be stored and could never be
+     * reviewed. A review state with no reviewer is a queue that only fills up.
      *
-     * ⚠⚠ THIS IS NOT THE COMMUNITY DESCRIPTION. This text is written by the
-     * collection's own contract or its provider, and it is published as such,
-     * labelled with its source. It never becomes a PeepSo group description —
-     * that is BCC's own voice and belongs to PR G.
+     * ── ⚠⚠⚠ APPROVAL DOES NOT PUBLISH ANYTHING (DECISION 17, settled) ───
+     * "Approved" is a REVIEW OUTCOME, not publication. During scanner
+     * retirement the NFT Collection Description is **stored and reviewed, not
+     * published**: it gets no public REST field, no view-model field, and no
+     * place in any picker, stance panel or Hall preview. **The admin review
+     * interface is the reader.**
+     *
+     * `findApprovedChainDescription()` therefore has no public production
+     * consumer ON PURPOSE. Public display waits for a dedicated
+     * collection-detail surface where the text can be attributed to the
+     * project or on-chain provider and carry a clear statement that BCC does
+     * not endorse it. The plan is explicit that a public reader is not to be
+     * built merely to stop the field looking unused.
+     *
+     * ⚠⚠ THIS IS NOT THE COMMUNITY DESCRIPTION, and never becomes one. That
+     * text is BCC's own voice and belongs to PR G; nothing here writes a
+     * PeepSo group description.
      */
     public const ACTION_DESC_APPROVE = 'bcc_vc_desc_approve';
     public const ACTION_DESC_REJECT  = 'bcc_vc_desc_reject';
@@ -425,11 +439,12 @@ final class VerifyCollectionsPage
     // ────────────────────────────────────────────────────────────────────
 
     /**
-     * Approve an imported NFT Collection Description for display.
+     * Mark an imported NFT Collection Description as reviewed and accepted.
      *
-     * ⚠ "Display" means the collection surfaces that show collection-authored
-     * text, labelled with its source. It does NOT mean a PeepSo group
-     * description, and approving one here writes nothing to any group.
+     * ⚠ NOT a publication step. Per DECISION 17 the text is stored and
+     * reviewed but not published during scanner retirement; the admin review
+     * screen is its only reader. Approving one here writes nothing to any
+     * group, any REST payload or any view-model.
      */
     public static function handleDescriptionApprovePost(): void
     {
@@ -469,26 +484,35 @@ final class VerifyCollectionsPage
             : ChainDescriptionState::REJECTED;
 
         try {
-            // ⚠ FROM `pending`, ALWAYS. A description may only be published
-            // out of review — never straight from `none`, which would publish
-            // text nobody looked at.
-            $applied = CollectionRepository::setChainDescriptionState(
-                $collectionId,
-                ChainDescriptionState::PENDING,
-                $target
-            );
+            // ⚠⚠⚠ THE TRANSITION AND ITS AUDIT ARE ONE UNIT.
+            // Before this, the state was changed and THEN the audit written —
+            // so a failed audit left the description approved or rejected with
+            // no record of who decided it or when. An unattributable review
+            // decision is exactly what the checked-audit contract exists to
+            // prevent, and the same contract already governs manual intake.
+            //
+            // Throwing inside the transaction rolls the state change back, so
+            // the description stays `pending` and can be reviewed again.
+            $applied = TransactionManager::run(function () use ($collectionId, $target, $approve) {
+                // ⚠ FROM `pending`, ALWAYS. A description may only move out of
+                // review — never straight from `none`, which would decide text
+                // nobody looked at. Compare-and-swap, so two administrators
+                // acting at once cannot both win.
+                $moved = CollectionRepository::setChainDescriptionState(
+                    $collectionId,
+                    ChainDescriptionState::PENDING,
+                    $target
+                );
 
-            if (!$applied) {
-                // An EXPECTED negative: no pending description, or somebody
-                // else reviewed it first. No durable row — a record saying a
-                // decision happened would be indistinguishable later from one
-                // that did.
-                $notices = [[
-                    'type'    => 'warning',
-                    'message' => 'No pending description was found for that collection, so nothing changed. '
-                        . 'It may already have been reviewed.',
-                ]];
-            } else {
+                if (!$moved) {
+                    // An EXPECTED negative: nothing pending, or somebody else
+                    // reviewed it first. Not an error, and nothing to roll
+                    // back — return without writing an audit row, because a
+                    // record saying a decision happened would be
+                    // indistinguishable later from one that did.
+                    return false;
+                }
+
                 $auditId = AuditLogger::logChecked(
                     $approve ? self::AUDIT_DESC_APPROVED : self::AUDIT_DESC_REJECTED,
                     $collectionId,
@@ -502,22 +526,34 @@ final class VerifyCollectionsPage
                 );
 
                 if ($auditId === null) {
-                    // The state moved but the decision is unattributable.
-                    // Say so rather than reporting a clean success.
-                    $notices = [[
-                        'type'    => 'warning',
-                        'message' => 'The description state changed, but the audit record could not be written. '
-                            . 'See the bcc-trust error log.',
-                    ]];
-                } else {
-                    $notices = [[
-                        'type'    => 'success',
-                        'message' => $approve
-                            ? 'Description approved. It is shown as collection-authored text, attributed to its source. '
-                                . 'This does not change any community description.'
-                            : 'Description rejected. It stays stored for reference and is not displayed.',
-                    ]];
+                    throw new \RuntimeException(
+                        'checked audit write failed; rolling back the description state change'
+                    );
                 }
+
+                return true;
+            });
+
+            if (!$applied) {
+                $notices = [[
+                    'type'    => 'warning',
+                    'message' => 'No pending description was found for that collection, so nothing changed. '
+                        . 'It may already have been reviewed.',
+                ]];
+            } else {
+                $notices = [[
+                    'type'    => 'success',
+                    'message' => $approve
+                        // ⚠ "Approved" is a REVIEW OUTCOME, not publication.
+                        // DECISION 17 keeps the NFT Collection Description
+                        // stored and reviewed but NOT published during scanner
+                        // retirement: no REST field, no picker, no stance
+                        // panel, no Hall preview, no group description. The
+                        // admin review screen is the only reader.
+                        ? 'Description approved. It stays on the admin review screen and is not published anywhere '
+                            . 'yet (DECISION 17). It is never used as a community description.'
+                        : 'Description rejected. It stays stored for reference and is not shown.',
+                ]];
             }
         } catch (\Throwable $e) {
             $ref = AdminActionSupport::failure(

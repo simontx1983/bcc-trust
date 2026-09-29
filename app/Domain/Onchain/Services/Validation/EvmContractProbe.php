@@ -44,6 +44,12 @@ final class EvmContractProbe
     /** `supportsInterface(bytes4)` selector. */
     private const SELECTOR_SUPPORTS_INTERFACE = '0x01ffc9a7';
 
+    /**
+     * Why the last metadata read failed, for the UNAVAILABLE evidence token.
+     * Set only on the failing path; meaningless otherwise.
+     */
+    private string $lastMetadataKind = 'none';
+
     public function __construct(private EvmFetcher $fetcher)
     {
     }
@@ -65,7 +71,19 @@ final class EvmContractProbe
         }
 
         if ($is721['supported'] === true) {
+            // ⚠⚠⚠ METADATA IS PART OF A VALID EVM INTAKE, NOT A BONUS.
+            // DECISION 7 makes both launch chains Alchemy-keyed, so a metadata
+            // failure here is a configuration or provider fault — never a
+            // collection that happens to have no name and no image. Returning
+            // VALID would let the intake service persist a row for a contract
+            // whose metadata BCC never read: an empty row that looks reviewed.
             $metadata = $this->collectMetadata($contract, $budget);
+            if ($metadata === null) {
+                return ContractValidationVerdict::unavailable([
+                    ContractValidationVerdict::EV_INTERFACE_CONFIRMED,
+                    $this->evidenceFor($this->lastMetadataKind),
+                ]);
+            }
 
             return ContractValidationVerdict::valid('ERC-721', $metadata, [
                 ContractValidationVerdict::EV_INTERFACE_CONFIRMED,
@@ -94,11 +112,13 @@ final class EvmContractProbe
             ]);
         }
 
-        // ── 3. Answered both, supports neither ──────────────────────────
-        // An EOA (no code at the address) also lands here: `eth_call` against
-        // an address with no code returns `0x`, which `supportsInterface()`
-        // reports as an answered "no". That is a correct decided negative —
-        // there is no NFT contract at this address.
+        // ── 3. Answered both canonically, supports neither ──────────────
+        // ⚠ An address with no code does NOT land here. `eth_call` returns a
+        // bare `0x` for it, which is not a canonical ABI boolean, so
+        // `supportsInterface()` reports `malformed` and the call above already
+        // returned UNAVAILABLE. That is deliberate: `0x` is also what a node
+        // returns for a call it could not execute, so it cannot decide
+        // anything about the address.
         return ContractValidationVerdict::invalid([
             ContractValidationVerdict::EV_INTERFACE_DENIED,
         ]);
@@ -107,8 +127,21 @@ final class EvmContractProbe
     /**
      * ERC-165 `supportsInterface(bytes4)`.
      *
+     * ── ⚠⚠⚠ ONLY A CANONICAL ABI BOOLEAN IS AN ANSWER ──────────────────
+     * This used to accept anything: `ltrim($hex, '0') === '1'` read `0x2`,
+     * a truncated word and a bare `0x` as an answered **false**. Two such
+     * reads — 721 then 1155 — produced INVALID, a negative authenticity
+     * verdict manufactured out of data BCC could not parse. `0x` in
+     * particular is what a node returns both for an address with no code AND
+     * for a call it could not execute, so it cannot carry a verdict either.
+     *
+     * An ABI `bool` is exactly 32 bytes (64 hex characters), all zeroes except
+     * a final `0` or `1`. Anything else — short, long, non-hex, or a
+     * noncanonical value like `…02` — is malformed and resolves to
+     * UNAVAILABLE.
+     *
      * @return array{supported: bool, kind: string} `kind` is `none` when the
-     *         call was answered; otherwise a transport/config token and
+     *         call was answered canonically; otherwise a bounded token and
      *         `supported` is meaningless.
      */
     private function supportsInterface(string $contract, string $interfaceId): array
@@ -122,43 +155,60 @@ final class EvmContractProbe
             return ['supported' => false, 'kind' => $r['kind']];
         }
 
-        $hex = strtolower(ltrim((string) $r['result'], '0x'));
-
-        // `0x` with no payload = no code at the address. Answered, and the
-        // answer is "no such interface".
-        if ($hex === '') {
-            return ['supported' => false, 'kind' => 'none'];
+        $raw = strtolower((string) $r['result']);
+        if (!str_starts_with($raw, '0x')) {
+            return ['supported' => false, 'kind' => 'malformed'];
         }
 
-        // ABI bool: 32 bytes, 1 = true. Anything else is false.
-        return ['supported' => ltrim($hex, '0') === '1', 'kind' => 'none'];
+        $hex = substr($raw, 2);
+
+        // Exactly one 32-byte word, and every character a hex digit.
+        if (strlen($hex) !== 64 || !ctype_xdigit($hex)) {
+            return ['supported' => false, 'kind' => 'malformed'];
+        }
+
+        // Canonical booleans only: 63 zeroes then 0 or 1.
+        if ($hex === str_repeat('0', 64)) {
+            return ['supported' => false, 'kind' => 'none'];
+        }
+        if ($hex === str_repeat('0', 63) . '1') {
+            return ['supported' => true, 'kind' => 'none'];
+        }
+
+        // A 32-byte word that is neither — `…02`, a packed struct, junk.
+        return ['supported' => false, 'kind' => 'malformed'];
     }
 
     /**
      * Name, symbol, image and supply from Alchemy.
      *
-     * ⚠ FAILS CLOSED INTO UNKNOWN, NEVER INTO ABSENT. A missing key or a
-     * timeout leaves every field UNKNOWN, so `metadata_state` reports
-     * `unavailable` and the row is not mistaken for a collection that has no
-     * name and no image. **No price, floor, volume or listed-count field is
-     * read from the response**, even though Alchemy returns some of them.
+     * ⚠⚠ RETURNS NULL WHEN THE METADATA COULD NOT BE OBTAINED — a missing
+     * key, an exhausted budget, a timeout, a non-2xx or an unparseable body.
+     * The caller turns that into UNAVAILABLE and writes nothing. A response
+     * that ARRIVED and simply lacks optional fields returns an IntakeMetadata
+     * with those fields ABSENT, which is a perfectly good VALID collection.
+     *
+     * That is the distinction the brief names: "the provider answered and the
+     * field is absent" is not "metadata could not be obtained".
+     *
+     * **No price, floor, volume or listed-count field is read**, even though
+     * Alchemy returns some of them.
      */
-    private function collectMetadata(string $contract, ProviderRequestBudget $budget): IntakeMetadata
+    private function collectMetadata(string $contract, ProviderRequestBudget $budget): ?IntakeMetadata
     {
         $metadata = IntakeMetadata::unknown();
 
-        // Description is not offered by this endpoint in a form BCC trusts as
-        // collection-authored, so it is never attempted on EVM — it stays
-        // UNKNOWN rather than being recorded as absent.
         if (!$budget->canSpend(1)) {
-            return $metadata;
+            $this->lastMetadataKind = 'budget_exhausted';
+            return null;
         }
 
         $r = $this->fetcher->contractMetadataResult($contract);
         $budget->spend(1);
 
         if (!$r['ok'] || !is_array($r['data'])) {
-            return $metadata;
+            $this->lastMetadataKind = is_string($r['kind'] ?? null) ? $r['kind'] : 'malformed';
+            return null;
         }
 
         $json = $r['data'];
@@ -196,6 +246,7 @@ final class EvmContractProbe
             'credentials_missing' => ContractValidationVerdict::EV_CREDENTIALS_MISSING,
             'transport'           => ContractValidationVerdict::EV_PROVIDER_TIMEOUT,
             'malformed'           => ContractValidationVerdict::EV_MALFORMED_RESPONSE,
+            'budget_exhausted'    => ContractValidationVerdict::EV_BUDGET_EXHAUSTED,
             default               => ContractValidationVerdict::EV_PROVIDER_ERROR,
         };
     }
