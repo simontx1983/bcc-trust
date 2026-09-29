@@ -47,8 +47,27 @@ final class IntakeMetadata
     /** The provider answered, and the field genuinely has no value. */
     public const ABSENT = 'absent';
 
-    /** No answer. Says nothing about the collection. */
+    /** No answer for a field that WAS applicable. Says nothing about the collection. */
     public const UNKNOWN = 'unknown';
+
+    /**
+     * This provider/family does not supply this field at all.
+     *
+     * ── WHY THIS IS NOT "UNKNOWN" ───────────────────────────────────────
+     * UNKNOWN means "we should have been able to read this and could not" — a
+     * shortfall worth retrying. NOT_APPLICABLE means "there was never anything
+     * to read here", which is not a shortfall at all.
+     *
+     * Without the distinction, a completely successful read was permanently
+     * `partial`: EVM deliberately fetches no description, and Solana
+     * deliberately fetches no description or symbol, so those fields could
+     * never resolve and `complete` was unreachable for two of three families.
+     * A state that can never be reached tells a reader nothing.
+     *
+     * ⚠ NOT_APPLICABLE IS NEVER WRITTEN AS A VALUE, and never downgrades a
+     * successful read.
+     */
+    public const NOT_APPLICABLE = 'not_applicable';
 
     // Rolled-up states — these are the stored `metadata_state` vocabulary.
     public const STATE_COMPLETE    = 'complete';
@@ -57,6 +76,31 @@ final class IntakeMetadata
 
     /** The fields this object tracks, in a fixed order. */
     public const FIELDS = ['name', 'symbol', 'description', 'image_url', 'total_supply'];
+
+    /**
+     * Which fields each family's providers can actually supply.
+     *
+     * ── WHY THIS IS DECLARED PER FAMILY ─────────────────────────────────
+     * These are not preferences, they are what the documented APIs return:
+     *
+     *   Cosmos  `contract_info` carries name, symbol, description and image,
+     *           and the `num_tokens` probe carries supply — all five.
+     *   EVM     Alchemy `getContractMetadata` carries name, symbol, image and
+     *           totalSupply. It does NOT carry a collection description in a
+     *           form BCC treats as collection-authored, so description is not
+     *           applicable.
+     *   Solana  DAS gives the collection NFT's own name and image. It does not
+     *           give a collection-level symbol or description, and its
+     *           `supply` object describes EDITION PRINTS of that one NFT, not
+     *           the collection's item count — so neither is applicable.
+     *
+     * @var array<string, list<string>>
+     */
+    private const APPLICABLE_BY_FAMILY = [
+        'cosmos' => ['name', 'symbol', 'description', 'image_url', 'total_supply'],
+        'evm'    => ['name', 'symbol', 'image_url', 'total_supply'],
+        'solana' => ['name', 'image_url'],
+    ];
 
     /** @var array<string, array{value: mixed, state: string}> */
     private array $fields = [];
@@ -71,10 +115,45 @@ final class IntakeMetadata
     /**
      * Start with every field UNKNOWN — the honest default before anyone has
      * asked anything.
+     *
+     * ⚠ Prefer {@see forFamily()} in a probe: it marks the fields that family
+     * cannot supply as NOT_APPLICABLE up front, so a fully successful read
+     * reports `complete` instead of being permanently `partial`.
      */
     public static function unknown(): self
     {
         return new self();
+    }
+
+    /**
+     * Start with this family's unsupplyable fields already NOT_APPLICABLE.
+     *
+     * An unrecognised family gets everything UNKNOWN — the fail-closed
+     * reading, because a family nobody declared might supply anything.
+     */
+    public static function forFamily(string $family): self
+    {
+        $m = new self();
+
+        $applicable = self::APPLICABLE_BY_FAMILY[strtolower($family)] ?? self::FIELDS;
+        foreach (self::FIELDS as $f) {
+            if (!in_array($f, $applicable, true)) {
+                $m->fields[$f] = ['value' => null, 'state' => self::NOT_APPLICABLE];
+            }
+        }
+
+        return $m;
+    }
+
+    /**
+     * Which fields a family can supply — for tests and for the admin screen's
+     * "populated out of attempted" display.
+     *
+     * @return list<string>
+     */
+    public static function applicableFieldsFor(string $family): array
+    {
+        return self::APPLICABLE_BY_FAMILY[strtolower($family)] ?? self::FIELDS;
     }
 
     /**
@@ -91,6 +170,14 @@ final class IntakeMetadata
         if (!in_array($field, self::FIELDS, true)) {
             return $this;
         }
+        // ⚠ A field this family cannot supply stays NOT_APPLICABLE. If a probe
+        // somehow has a value for it, that value came from somewhere the family
+        // declaration says it cannot have — most likely the wrong object, which
+        // is exactly how the Solana member's name would become the
+        // collection's. Refuse it rather than record it.
+        if ($this->fields[$field]['state'] === self::NOT_APPLICABLE) {
+            return $this;
+        }
         $clone = clone $this;
         $empty = $value === null || (is_string($value) && trim($value) === '');
         $clone->fields[$field] = $empty
@@ -104,6 +191,11 @@ final class IntakeMetadata
     public function withUnknown(string $field): self
     {
         if (!in_array($field, self::FIELDS, true)) {
+            return $this;
+        }
+        // Same reason as withAnswered(): a field nobody attempted is not a
+        // shortfall, and marking it UNKNOWN would hold a good read at partial.
+        if ($this->fields[$field]['state'] === self::NOT_APPLICABLE) {
             return $this;
         }
         $clone = clone $this;
@@ -122,10 +214,22 @@ final class IntakeMetadata
         return $this->stateOf($field) === self::KNOWN;
     }
 
-    /** TRUE when the provider answered — whether or not there was a value. */
+    /**
+     * TRUE when this field needs no further attention: the provider answered
+     * (KNOWN or ABSENT), or it was never applicable.
+     *
+     * ⚠ NOT_APPLICABLE counts as resolved DELIBERATELY. It is not a shortfall,
+     * so it must not hold a successful read at `partial` forever.
+     */
     public function isResolved(string $field): bool
     {
         return $this->stateOf($field) !== self::UNKNOWN;
+    }
+
+    /** Does this family's provider supply this field at all? */
+    public function isApplicable(string $field): bool
+    {
+        return $this->stateOf($field) !== self::NOT_APPLICABLE;
     }
 
     /** The value, or null when ABSENT or UNKNOWN. Check the state first. */
@@ -166,28 +270,56 @@ final class IntakeMetadata
      */
     public function state(): string
     {
-        $resolved = 0;
+        $applicable = 0;
+        $resolved   = 0;
+
         foreach (self::FIELDS as $f) {
+            if ($this->fields[$f]['state'] === self::NOT_APPLICABLE) {
+                continue; // never attempted, never a shortfall
+            }
+            $applicable++;
             if ($this->fields[$f]['state'] !== self::UNKNOWN) {
                 $resolved++;
             }
+        }
+
+        // A family with nothing applicable has nothing outstanding. That is
+        // vacuously complete, not "unavailable" — `unavailable` has to mean a
+        // read that was attempted and got nowhere, or it stops being
+        // actionable.
+        if ($applicable === 0) {
+            return self::STATE_COMPLETE;
         }
 
         if ($resolved === 0) {
             return self::STATE_UNAVAILABLE;
         }
 
-        return $resolved === count(self::FIELDS)
+        return $resolved === $applicable
             ? self::STATE_COMPLETE
             : self::STATE_PARTIAL;
     }
 
-    /** How many fields were resolved, out of how many attempted. */
+    /** How many APPLICABLE fields resolved. */
     public function resolvedCount(): int
     {
         $n = 0;
         foreach (self::FIELDS as $f) {
-            if ($this->fields[$f]['state'] !== self::UNKNOWN) {
+            $st = $this->fields[$f]['state'];
+            if ($st !== self::UNKNOWN && $st !== self::NOT_APPLICABLE) {
+                $n++;
+            }
+        }
+
+        return $n;
+    }
+
+    /** How many fields this family could have supplied. */
+    public function applicableCount(): int
+    {
+        $n = 0;
+        foreach (self::FIELDS as $f) {
+            if ($this->fields[$f]['state'] !== self::NOT_APPLICABLE) {
                 $n++;
             }
         }

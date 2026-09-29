@@ -151,7 +151,7 @@ final class CosmosContractProbe
         array $outcomes,
         ProviderRequestBudget $budget
     ): IntakeMetadata {
-        $metadata = IntakeMetadata::unknown();
+        $metadata = IntakeMetadata::forFamily('cosmos');
 
         // ── Supply, from the probe set we already paid for ───────────────
         // `num_tokens` either answered or it did not; there is no third case

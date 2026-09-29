@@ -207,10 +207,12 @@ final class NftCapabilityEditorPanel
         ?>
         <h3 style="margin-bottom:4px;">Manual discovery permission</h3>
         <p style="max-width:900px;color:#646970;margin-top:0;">
-            Whether an administrator is permitted to <em>start</em> a chain-wide collection
-            discovery on this chain. <strong>It does not schedule or start anything by itself</strong>
-            — no cron reads it, because every recurring discovery hook was retired and cannot
-            re-arm. Today it applies only to administrator-started enumeration.
+            Whether an administrator is permitted to <em>submit one contract</em> on this chain
+            through manual intake. <strong>It does not schedule or start anything by
+            itself</strong> — no cron reads it, because every recurring discovery hook was
+            retired and cannot re-arm, and chain-wide discovery is frozen.
+            &#9888; This setting is named for historical reasons: despite the word
+            &ldquo;discovery&rdquo; it grants no chain-wide authority and starts no enumeration.
         </p>
 
         <?php if (!$startable): ?>
@@ -281,12 +283,13 @@ final class NftCapabilityEditorPanel
                                     NftDiscoveryPage::ACTION_CAP_MANUAL_ENABLE,
                                     $family,
                                     $chainId,
-                                    'Permit operator-started discovery',
+                                    'Permit manual collection intake',
                                     $state === true,
-                                    'Permit an administrator to start a chain-wide discovery on this chain?'
+                                    'Permit an administrator to submit ONE contract on this chain?'
                                         . "\n\n"
-                                        . 'Nothing is started or scheduled by this. Every other gate still '
-                                        . 'applies before a discovery can run.'
+                                        . 'Nothing is started or scheduled by this, and it grants no '
+                                        . 'chain-wide authority. Every other gate still applies before '
+                                        . 'a submission is accepted.'
                                 ); ?>
                             <?php endif; ?>
                             <?php self::renderFlagButton(

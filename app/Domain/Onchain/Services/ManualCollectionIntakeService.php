@@ -22,19 +22,31 @@
  * Taken from {@see \BCC\Trust\Onchain\Support\NftDriverRegistry}, which is
  * the build's own account of what exists:
  *
- *   Cosmos   `cw721_lcd` is the ONLY driver registering `OP_VALIDATION`.
- *            A real CW-721 `contract_info` query runs, and a contract that
- *            does not answer is refused.
- *   EVM      `evm_rpc` registers `OP_OWNERSHIP` only; the registry says the
- *            `supportsInterface(0x80ac58cd|0xd9b67a26)` call is "explicitly
- *            still to build". Nothing proves this address is an NFT
- *            contract.
- *   Solana   the registry says verbatim: "VALIDATION is NOT claimed. Solana
- *            collection adds are 'trusted as entered' today."
+ *   Cosmos   `cw721_lcd`. A real CW-721 `contract_info` probe runs, and a
+ *            contract that does not answer is refused.
+ *   EVM      `evm_rpc`. ERC-165 `supportsInterface(0x80ac58cd)` proves the
+ *            standard, then Alchemy supplies name/symbol/image/supply.
+ *            ⚠ Only the approved launch chains are eligible — Ethereum and
+ *            Base (DECISION 7) — enforced by
+ *            {@see \BCC\Trust\Onchain\Support\NftLaunchChains}.
+ *   Solana   `das_helius`. `getAssetsByGroup` with
+ *            `showUnverifiedCollections: false` proves the address is in use
+ *            as a certified collection group, then `getAsset` supplies the
+ *            collection's own name and image.
  *
- * So EVM and Solana rows are ACCEPTED AS ENTERED, and both the operator copy
- * and the audit record say so. A canonical address is not a verified NFT
- * collection, and this class never implies otherwise.
+ * ── ⚠⚠ HISTORICAL: THE "ACCEPTED AS ENTERED" RULE IS GONE ───────────────
+ * This docblock used to state that EVM and Solana rows were accepted with no
+ * validation at all, quoting the registry's then-accurate notes that the EVM
+ * `supportsInterface` call was "still to build" and that Solana adds were
+ * "trusted as entered". **Both were true before PR E and are false now**: PR E
+ * built both validators, so every family is checked against the chain before a
+ * row is written, and a provider failure is refused as *could not confirm*
+ * rather than accepted.
+ *
+ * A canonical address is still not a VERIFIED collection. Validation proves the
+ * contract is an NFT contract; it never proves it is the official one for a
+ * named collection. That stays an administrator's judgement on the Verify
+ * screen, and this class never implies otherwise.
  *
  * @package BCC\Trust\Onchain\Services
  * @since PR 6 — collection administration and explicit provisioning

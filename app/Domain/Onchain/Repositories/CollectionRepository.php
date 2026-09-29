@@ -675,18 +675,36 @@ final class CollectionRepository
         // advertising an earlier `complete`, which is precisely the lie the
         // columns exist to prevent. A caller that supplies neither leaves both
         // untouched; a caller that supplies them overwrites.
-        // ⚠⚠ THE VOCABULARY IS ENFORCED HERE, NOT TRUSTED FROM THE CALLER.
-        // `metadata_state` is a closed set, and this is the last place before
-        // the value reaches SQL. Relying on the service to pass a good one
-        // makes the guarantee depend on every future caller remembering it;
-        // enforcing it here makes an out-of-vocabulary value impossible to
-        // store no matter who calls. An unrecognised value is treated as NOT
-        // PROVIDED — so the column keeps its column default on INSERT and is
-        // left untouched on UPDATE, rather than recording a state nobody can
-        // interpret.
-        $stateRaw      = $data['metadata_state'] ?? null;
-        $stateProvided = is_string($stateRaw) && in_array($stateRaw, self::METADATA_STATES, true);
-        $sqlState      = self::sqlStringOrNull($stateProvided ? $stateRaw : null);
+        // ⚠⚠⚠ AN INVALID metadata_state IS REFUSED, NOT QUIETLY DROPPED.
+        //
+        // An earlier version treated an out-of-vocabulary value as "not
+        // supplied" and carried on writing the row. That hid a real defect:
+        // only BCC's own code sets this column, so a bad value is a
+        // PROGRAMMING error — a probe returning a state it invented, or a
+        // caller passing the wrong variable. Swallowing it produces a row whose
+        // metadata state silently disagrees with what the caller believed, and
+        // nothing anywhere reports that they diverged.
+        //
+        // Absent is different and stays legal: a caller with nothing to say
+        // omits the key and the column default applies.
+        if (array_key_exists('metadata_state', $data)) {
+            $stateRaw = $data['metadata_state'];
+            if (!is_string($stateRaw) || !in_array($stateRaw, self::METADATA_STATES, true)) {
+                \BCC\Core\Log\Logger::error(
+                    '[bcc-trust] addManual refused: metadata_state outside the closed vocabulary',
+                    [
+                        'chain_id' => $chainId,
+                        'allowed'  => implode('|', self::METADATA_STATES),
+                        'type'     => get_debug_type($stateRaw),
+                    ]
+                );
+
+                return false;
+            }
+        }
+
+        $stateProvided = array_key_exists('metadata_state', $data);
+        $sqlState      = self::sqlStringOrNull($stateProvided ? (string) $data['metadata_state'] : null);
         $sqlCheckedAt  = self::sqlStringOrNull(
             isset($data['metadata_checked_at']) && is_string($data['metadata_checked_at'])
                 ? $data['metadata_checked_at']

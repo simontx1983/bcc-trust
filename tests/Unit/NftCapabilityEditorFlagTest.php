@@ -262,22 +262,79 @@ final class NftCapabilityEditorFlagTest extends TestCase
     }
 
     /**
-     * ⚠️ THE PERMISSION IS REFUSED, NOT MERELY HIDDEN.
+     * ⚠⚠⚠ PREMISE INVERTED BY PR E — THESE THREE MUST NOW BE ENABLEABLE.
      *
-     * No control is rendered for these families — but the absence of a
-     * button is not a boundary. A crafted POST with a valid nonce reaches
-     * the service, and the service is where it stops. Storing the intent
-     * "for later" would leave a row asserting somebody granted a
-     * capability, which is exactly the misreading the model exists to
-     * prevent, and a restored backup or a later build could read it as
-     * consent it never was.
+     * This test used to assert that Ethereum, Base and Solana were REFUSED the
+     * manual permission, because `enableManualDiscovery()` gated on
+     * `hasOperatorStartableOperation()` — "can this chain be ENUMERATED?" — and
+     * no EVM or Solana driver claims enumeration.
+     *
+     * That was correct while the column meant "may start a chain-wide
+     * discovery". It stopped being correct when the column came to mean "may
+     * submit one contract": the gate then refused the permission on exactly the
+     * three chains manual intake exists for, making PR E's validators
+     * unreachable through the admin UI.
+     *
+     * The editor now asks `canTakeManualIntake()`, and these three pass it.
      */
     #[DataProvider('nonEnumerableFamilies')]
-    public function testManualEnableIsRefusedOnAFamilyWithNoEnumerationDriver(
+    public function testManualEnableIsAllowedOnTheApprovedManualIntakeChains(
         string $slug,
         string $chainType
     ): void {
         ChainRepository::seed(self::CHAIN_ID, $slug, false, true, false, $chainType);
+
+        $result = NftCapabilityEditor::enableManualDiscovery(self::CHAIN_ID);
+
+        $this->assertSame(
+            NftCapabilityEditor::RESULT_MANUAL_ENABLED,
+            $result,
+            "{$slug} validates one submitted contract, so the permission must be grantable"
+        );
+        $this->assertTrue($this->manual(), 'the grant was stored');
+    }
+
+    /**
+     * ⚠ GRANTING THE PERMISSION STARTS NOTHING.
+     *
+     * The whole reason the old gate felt safe was that it refused. Now that it
+     * grants, the "nothing runs" claim has to be asserted directly: no scan, no
+     * enumeration, no cron, no provider request.
+     */
+    #[DataProvider('nonEnumerableFamilies')]
+    public function testGrantingManualIntakeStartsNoWork(string $slug, string $chainType): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, false, $chainType);
+
+        NftCapabilityEditor::enableManualDiscovery(self::CHAIN_ID);
+
+        $this->assertNoWorkRan();
+    }
+
+    /**
+     * ⚠⚠ A NON-LAUNCH EVM CHAIN STILL CANNOT BE ENABLED.
+     *
+     * The EVM validator works on any EVM RPC, so without the launch allowlist
+     * this grant would succeed on Polygon and then refuse at intake. DECISION 7
+     * approves Ethereum and Base only.
+     *
+     * @return array<string, array{0: string}>
+     */
+    public static function nonLaunchEvmSlugs(): array
+    {
+        return [
+            'polygon'   => ['polygon'],
+            'arbitrum'  => ['arbitrum'],
+            'optimism'  => ['optimism'],
+            'bsc'       => ['bsc'],
+            'avalanche' => ['avalanche'],
+        ];
+    }
+
+    #[DataProvider('nonLaunchEvmSlugs')]
+    public function testManualEnableIsRefusedOnANonLaunchEvmChain(string $slug): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, false, 'evm');
 
         $result = NftCapabilityEditor::enableManualDiscovery(self::CHAIN_ID);
 
@@ -289,18 +346,15 @@ final class NftCapabilityEditorFlagTest extends TestCase
     }
 
     /**
-     * And the refusal is STRUCTURAL — it is named before the product-support
-     * gate, so an operator is not sent to turn on a switch that would not
-     * help.
+     * And the refusal is STRUCTURAL — named before the product-support gate, so
+     * an operator is not sent to turn on a switch that would not help.
      */
-    #[DataProvider('nonEnumerableFamilies')]
-    public function testTheStructuralRefusalOutranksTheProductSupportRefusal(
-        string $slug,
-        string $chainType
-    ): void {
-        // Product support ALSO off, so both refusals apply and only the
-        // more useful one may be returned.
-        ChainRepository::seed(self::CHAIN_ID, $slug, false, false, false, $chainType);
+    #[DataProvider('nonLaunchEvmSlugs')]
+    public function testTheStructuralRefusalOutranksTheProductSupportRefusal(string $slug): void
+    {
+        // Product support ALSO off, so both refusals apply and only the more
+        // useful one may be returned.
+        ChainRepository::seed(self::CHAIN_ID, $slug, false, false, false, 'evm');
 
         $this->assertSame(
             NftCapabilityEditor::RESULT_MANUAL_NO_STARTABLE,

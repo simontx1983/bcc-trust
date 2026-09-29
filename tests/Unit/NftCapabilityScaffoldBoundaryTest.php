@@ -840,7 +840,19 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
         self::assertStringNotContainsString('NftProviderReadiness', $src);
 
         // And the structural refusal comes from the model.
-        self::assertStringContainsString('hasOperatorStartableOperation', $src);
+        //
+        // ⚠ PR E changed WHICH model predicate, not whether there is one. The
+        // editor used to ask `hasOperatorStartableOperation()` — "can this chain
+        // be ENUMERATED?" — which refused the manual permission on every EVM and
+        // Solana chain, i.e. on exactly the chains manual intake serves. It now
+        // asks `canTakeManualIntake()`. The boundary this test protects is
+        // unchanged: the editor holds no verdict of its own.
+        self::assertStringContainsString('canTakeManualIntake', $src);
+        self::assertStringNotContainsString(
+            'hasOperatorStartableOperation',
+            $src,
+            'the manual permission is no longer an enumeration question'
+        );
     }
 
     // ── Withdrawn designs must not reappear ─────────────────────────────

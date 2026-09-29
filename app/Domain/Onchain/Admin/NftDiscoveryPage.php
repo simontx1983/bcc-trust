@@ -1942,20 +1942,20 @@ class NftDiscoveryPage
             // ── Manual discovery permission ─────────────────────────────
             case NftCapabilityEditor::RESULT_MANUAL_ENABLED:
                 return ['type' => 'success', 'message' =>
-                    'An administrator may now START a chain-wide discovery on that chain. Nothing was '
-                    . 'started by this action and nothing is scheduled — the permission only allows the '
-                    . 'button. Every other gate still applies: the driver must be registered and '
-                    . 'enabled, its provider configured, and the chain must not be measured as having '
-                    . 'no CosmWasm module.'];
+                    'An administrator may now SUBMIT ONE CONTRACT on that chain through manual '
+                    . 'intake. This grants no chain-wide authority: nothing was started, nothing is '
+                    . 'scheduled, and no enumeration becomes possible. Every other gate still '
+                    . 'applies — the validation driver must be registered and enabled, its provider '
+                    . 'configured, and on EVM the chain must be inside the approved launch scope.'];
 
             case NftCapabilityEditor::RESULT_MANUAL_DISABLED:
                 return ['type' => 'success', 'message' =>
-                    'The manual discovery permission was withdrawn for that chain. No administrator can '
-                    . 'start a chain-wide discovery on it. Existing collections and progress were kept.'];
+                    'The manual intake permission was withdrawn for that chain. No administrator can '
+                    . 'submit a contract on it. Existing collections were kept.'];
 
             case NftCapabilityEditor::RESULT_MANUAL_NOOP_ENABLED:
                 return ['type' => 'info', 'message' =>
-                    'That chain already permitted operator-started discovery. Nothing was changed.'];
+                    'That chain already permitted manual collection intake. Nothing was changed.'];
 
             case NftCapabilityEditor::RESULT_MANUAL_NOOP_DISABLED:
                 return ['type' => 'info', 'message' =>
@@ -3594,11 +3594,25 @@ class NftDiscoveryPage
             $eligible[] = $row;
         }
 
-        // What this family can actually PROVE about an identifier. Taken from
-        // NftDriverRegistry rather than restated, so a family that gains a
-        // validation driver stops being labelled "accepted as entered"
-        // without anyone remembering to edit this copy.
-        $hasValidation = self::family_has_validation_driver($family);
+        // ⚠ ASKED PER CHAIN, NOT PER FAMILY. Validation is no longer a family
+        // property: the EVM validator works on any EVM RPC, but DECISION 7
+        // approves only Ethereum and Base, so two chains in the same family can
+        // legitimately differ. A single family-wide answer would tell a Polygon
+        // operator their submission is validated, or an Ethereum operator that
+        // it is not.
+        // `manual_intake` is put on the row by NftDiscoveryControlPlaneSnapshot
+        // from NftChainCapability::canTakeManualIntake() — the same predicate
+        // the capability editor grants on, so the banner and the grant cannot
+        // disagree. ⚠ `!== true` because the key is bool|null and an
+        // unreadable capability must not read as validated.
+        $validatedCount = 0;
+        foreach ($eligible as $row) {
+            if (($row['manual_intake'] ?? null) === true) {
+                $validatedCount++;
+            }
+        }
+        $allValidated  = $eligible !== [] && $validatedCount === count($eligible);
+        $noneValidated = $validatedCount === 0;
 
         ?>
         <h2 style="margin-top:32px;">Add a collection</h2>
@@ -3611,19 +3625,28 @@ class NftDiscoveryPage
             requesting its community.
         </p>
 
-        <?php if ($hasValidation): ?>
+        <?php if ($allValidated): ?>
             <p style="color:#646970;max-width:60em;">
-                On this family the contract is checked with a real
-                <code>contract_info</code> query before the row is written. A contract
-                that does not answer is refused — and refused as
-                <em>could not confirm</em>, which is not the same as
-                <em>not an NFT collection</em>.
+                The submitted contract is <strong>checked against the chain</strong> before the
+                row is written — a CW-721 <code>contract_info</code> probe on Cosmos, an
+                ERC-165 <code>supportsInterface</code> call on EVM, or a verified
+                collection-group lookup on Solana. A contract that does not answer is
+                refused as <em>could not confirm</em>, which is not the same as
+                <em>not an NFT collection</em>, and nothing is written either way.
+            </p>
+        <?php elseif (!$noneValidated): ?>
+            <p style="max-width:60em;padding:8px 12px;background:#fcf9e8;border-left:4px solid #dba617;">
+                <strong>Validation differs by chain here.</strong>
+                <?php echo (int) $validatedCount; ?> of <?php echo count($eligible); ?>
+                chains below check the contract against the chain before writing the row;
+                the rest accept the identifier on shape alone. On EVM only the approved
+                launch chains are validated.
             </p>
         <?php else: ?>
             <p style="max-width:60em;padding:8px 12px;background:#fcf9e8;border-left:4px solid #dba617;">
-                <strong>Accepted as entered.</strong> On this family nothing proves the
-                address is an NFT contract — there is no validation driver for it in
-                this build. The identifier is checked for shape and canonical form
+                <strong>Not validated on the chains listed here.</strong> Nothing below proves the
+                address is an NFT contract — no chain in this list has a validation driver
+                BCC supports. The identifier is checked for shape and canonical form
                 only. A valid address is not a verified collection.
             </p>
         <?php endif; ?>
@@ -3685,20 +3708,6 @@ class NftDiscoveryPage
             </form>
         <?php endif; ?>
         <?php
-    }
-
-    /** Does any registered driver claim VALIDATION for this family's chains? */
-    private static function family_has_validation_driver(string $family): bool
-    {
-        // Only `cw721_lcd` registers OP_VALIDATION, and it serves Cosmos.
-        // Asked through the registry rather than hardcoded, so whoever builds
-        // EVM or Solana validation flips this copy by registering the driver
-        // — not by remembering that this file exists and restates the claim.
-        return $family === 'cosmos'
-            && NftDriverRegistry::driverPerformsOperation(
-                NftDriverRegistry::DRIVER_CW721_LCD,
-                NftDriverRegistry::OP_VALIDATION
-            );
     }
 
     private static function identifier_label(string $family): string

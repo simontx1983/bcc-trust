@@ -423,6 +423,53 @@ final class NftChainCapability
     }
 
     /**
+     * PURE. Can an administrator submit ONE contract on this chain through
+     * manual intake?
+     *
+     * ── ⚠⚠⚠ WHY THIS IS NOT hasOperatorStartableOperation() ─────────────
+     * That predicate asks whether the chain can be ENUMERATED, because
+     * `OPERATOR_STARTED_OPERATIONS` is `[OP_ENUMERATION]` — and no EVM or
+     * Solana driver in this build claims enumeration, by design. So while
+     * `manual_collection_discovery_enabled` was gated on it, manual intake
+     * could **never be enabled on Ethereum, Base or Solana**: the editor
+     * refused every grant on exactly the chains PR E exists to serve.
+     *
+     * The column stopped meaning "may start a chain-wide discovery" and started
+     * meaning "may submit one contract". This predicate asks that question
+     * directly instead of pretending it is the enumeration one, which is also
+     * why the enumeration constant above is left alone: two different questions
+     * now have two different predicates.
+     *
+     * ── WHAT MAKES A CHAIN ELIGIBLE ─────────────────────────────────────
+     *  1. Some driver can VALIDATE a single contract on it. Asked of the
+     *     REGISTRY, never of `chain_type`, so the day a family gains a
+     *     validator this answer moves on its own.
+     *  2. For EVM, the chain is inside the approved launch scope
+     *     (DECISION 7 — Ethereum and Base). The EVM validator works on any EVM
+     *     RPC, so without this a capability grant on Polygon would look
+     *     available and then refuse at intake.
+     *
+     * ⚠ Override-free, for the same reason as the predicate above: this asks
+     * what the CODE can do. An operator who has switched a driver off has not
+     * made the chain structurally incapable and must still be able to hold the
+     * permission while they switch it back on.
+     *
+     * @param object $chain a `ChainRow`-shaped projection
+     */
+    public static function canTakeManualIntake(object $chain): bool
+    {
+        if (NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_VALIDATION, []) === []) {
+            return false;
+        }
+
+        if (strtolower((string) ($chain->chain_type ?? '')) === 'evm') {
+            return NftLaunchChains::isLaunchChain($chain);
+        }
+
+        return true;
+    }
+
+    /**
      * EVERY operation's status for one chain, from ONE override read.
      *
      * ── WHY THIS LIVES HERE AND NOT ON THE ADMIN PAGE ───────────────────

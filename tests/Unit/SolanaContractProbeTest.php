@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
+use BCC\Trust\Onchain\Fetchers\SolanaFetcher;
 use BCC\Trust\Onchain\Services\Validation\SolanaContractProbe;
 use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\ValueObjects\ContractValidationVerdict;
@@ -13,19 +14,26 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Solana targeted validation through DAS `getAsset`.
+ * Solana validation against the DOCUMENTED Helius DAS contract.
  *
- * ── THE THREE THINGS THAT MUST NOT HAPPEN ───────────────────────────────
- *  1. An UNVERIFIED collection grouping accepted. Anyone can write a
- *     blue-chip collection's address into their own asset's metadata; only
- *     the authority's `verified` flag makes the claim mean anything. Accepting
- *     an unverified grouping lets anyone gate a community on someone else's
- *     collection.
- *  2. The MINT ADDRESS stored as the collection name. `grouping[].group_value`
- *     is base58, not a name — and the existing `fetchMetadataForMint()`
- *     returns it under the key `collection_name`, which is exactly the trap.
- *  3. A COMPRESSED NFT accepted. A cNFT lives in a Merkle tree, so the balance
- *     reads holder-gating uses cannot prove ownership (DECISION 8).
+ * ── ⚠⚠⚠ THE FIXTURES HERE ARE THE DOCUMENTED SHAPES, NOT INVENTED ONES ──
+ * An earlier version of this suite asserted a `grouping[].verified` boolean.
+ * **No such field exists.** Per the Helius `getAsset` reference and the
+ * Metaplex DAS specification, a grouping entry contains exactly `group_key`
+ * and `group_value`:
+ *
+ *     {"group_key": "collection", "group_value": "J1S9H3QjnRtBbbuD4HjPV6..."}
+ *
+ * Verification is expressed by OMISSION instead:
+ * `options.showUnverifiedCollections` defaults to false, and an unverified
+ * grouping is then left out of the results rather than returned marked false.
+ * So the question is asked with `getAssetsByGroup` — the documented method for
+ * taking a collection address as `groupValue` — and answered by whether any
+ * members come back.
+ *
+ * Error fixtures use the documented Helius codes: `-32004` not found, `-32001`
+ * authentication, `-32003` permission, `-32029` rate limit, `-32000` generic
+ * server error. The previously invented `-32401` / `-32429` are gone.
  */
 #[CoversClass(SolanaContractProbe::class)]
 final class SolanaContractProbeTest extends TestCase
@@ -37,278 +45,149 @@ final class SolanaContractProbeTest extends TestCase
         return new ProviderRequestBudget($n, 30);
     }
 
-    // ── Happy path ──────────────────────────────────────────────────────
-
-    public function testAVerifiedCollectionGroupingIsValid(): void
+    /**
+     * One documented `getAssetsByGroup` item, trimmed to the fields this probe
+     * reads. `compression.compressed` and `grouping[]` are verbatim shapes.
+     *
+     * @return array<string, mixed>
+     */
+    private static function memberItem(bool $compressed = false): array
     {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->asset = [
+        return [
+            'interface'   => 'V1_NFT',
+            'id'          => '9ZmY3nZrRMcnZWb8CyBqnUBKtVJTgdbGJKy6MmtDtBaT',
+            'compression' => [
+                'eligible'     => false,
+                'compressed'   => $compressed,
+                'data_hash'    => '',
+                'creator_hash' => '',
+                'asset_hash'   => '',
+                'tree'         => '',
+                'seq'          => 0,
+                'leaf_id'      => 0,
+            ],
+            // ⚠ Exactly two documented keys. No `verified`.
             'grouping' => [
-                ['group_key' => 'collection', 'group_value' => 'SomeOtherMint111111111111111111111111111111', 'verified' => true],
+                ['group_key' => 'collection', 'group_value' => self::MINT],
             ],
             'content' => [
-                'metadata' => ['name' => 'Degen Apes'],
-                'links'    => ['image' => 'https://example.test/d.png'],
+                'metadata' => ['name' => 'Mad Lads #8420', 'symbol' => 'MAD'],
+                'links'    => ['image' => 'https://example.test/member.png'],
             ],
+            'supply'  => ['print_max_supply' => 0, 'print_current_supply' => 0, 'edition_nonce' => 254],
+            'mutable' => true,
+            'burnt'   => false,
         ];
+    }
 
-        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
+    /**
+     * The documented `getAsset` response for the COLLECTION NFT itself, which
+     * is where the collection's own name and image come from.
+     *
+     * @return array<string, mixed>
+     */
+    private static function collectionAsset(?string $name = 'Mad Lads', ?string $image = 'https://example.test/coll.png'): array
+    {
+        $meta = [];
+        if ($name !== null) {
+            $meta['name'] = $name;
+        }
+        $links = [];
+        if ($image !== null) {
+            $links['image'] = $image;
+        }
+
+        return [
+            'interface'   => 'V1_NFT',
+            'id'          => self::MINT,
+            'compression' => ['compressed' => false],
+            'content'     => ['metadata' => $meta, 'links' => $links],
+            'supply'      => ['print_max_supply' => 0, 'print_current_supply' => 0],
+        ];
+    }
+
+    private function fetcher(): FakeSolanaFetcherForValidation
+    {
+        $f = new FakeSolanaFetcherForValidation();
+        $f->groupItems = [self::memberItem()];
+        $f->asset      = self::collectionAsset();
+
+        return $f;
+    }
+
+    // ── A verified collection group validates ───────────────────────────
+
+    public function testANonEmptyVerifiedGroupResultIsValid(): void
+    {
+        $v = (new SolanaContractProbe($this->fetcher()))->validate(self::MINT, $this->budget());
 
         self::assertSame(ContractValidationVerdict::VALID, $v->state());
         self::assertSame('SPL-Metaplex', $v->standard());
-        self::assertSame('Degen Apes', $v->metadata()?->valueOf('name'));
-        self::assertSame('https://example.test/d.png', $v->metadata()?->valueOf('image_url'));
+        self::assertTrue($v->mayPersist());
     }
 
-    /**
-     * ⚠⚠⚠ REPLACED AFTER REVIEW — THE SELF-REFERENCE BYPASS IS GONE.
-     *
-     * This previously asserted that `group_value === mint` validated the mint
-     * even with `verified` absent or false. That contradicted the rule this
-     * class exists to enforce: anyone can write any address into their own
-     * metadata, INCLUDING their own, so a bare self-reference is a self-signed
-     * claim. No authoritative DAS field was demonstrated that proves
-     * collection-parent status without the flag, so it fails closed.
-     */
-    public function testABareSelfReferenceWithoutTheVerifiedFlagDoesNotValidate(): void
+    public function testTheGroupRequestIsBoundedAndAsksForVerifiedOnly(): void
     {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->asset = [
-            'grouping' => [['group_key' => 'collection', 'group_value' => self::MINT]],
-            'content'  => ['metadata' => ['name' => 'Self Signed']],
-        ];
+        $f = $this->fetcher();
+        (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
 
-        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
-
-        self::assertNotSame(ContractValidationVerdict::VALID, $v->state());
-        self::assertFalse($v->mayPersist());
-        self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_GROUPING_UNVERIFIED));
+        self::assertSame(self::MINT, $f->lastGroupValue, 'the submitted mint is the groupValue');
+        self::assertSame(1, $f->groupCalls, 'one group lookup is all the proof this needs');
     }
 
-    public function testASelfReferenceWithVerifiedFalseDoesNotValidate(): void
+    // ── ⚠⚠ An empty result is a decided negative ────────────────────────
+
+    public function testAnEmptyGroupResultIsInvalid(): void
     {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->asset = [
-            'grouping' => [['group_key' => 'collection', 'group_value' => self::MINT, 'verified' => false]],
-            'content'  => ['metadata' => ['name' => 'Self Signed']],
-        ];
-
-        self::assertNotSame(
-            ContractValidationVerdict::VALID,
-            (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->state()
-        );
-    }
-
-    public function testOnlyAnExplicitlyVerifiedSelfReferenceValidates(): void
-    {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->asset = [
-            'grouping' => [['group_key' => 'collection', 'group_value' => self::MINT, 'verified' => true]],
-            'content'  => ['metadata' => ['name' => 'Verified Parent']],
-        ];
-
-        self::assertSame(
-            ContractValidationVerdict::VALID,
-            (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->state()
-        );
-    }
-
-    // ── ⚠⚠ Unverified grouping ──────────────────────────────────────────
-
-    public function testAnUnverifiedGroupingIsRefused(): void
-    {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->asset = [
-            'grouping' => [
-                ['group_key' => 'collection', 'group_value' => 'BlueChipMint11111111111111111111111111111111', 'verified' => false],
-            ],
-            'content' => ['metadata' => ['name' => 'Totally Legit Apes']],
-        ];
+        $f = $this->fetcher();
+        $f->groupItems = [];
 
         $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
 
         self::assertSame(ContractValidationVerdict::INVALID, $v->state());
+        self::assertTrue($v->isDecided(), 'with unverified collections excluded, empty IS an answer');
         self::assertFalse($v->mayPersist());
         self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_GROUPING_UNVERIFIED));
     }
 
-    public function testAnAbsentVerifiedFlagIsNotTreatedAsVerified(): void
-    {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->asset = [
-            'grouping' => [
-                ['group_key' => 'collection', 'group_value' => 'BlueChipMint11111111111111111111111111111111'],
-            ],
-            'content' => ['metadata' => ['name' => 'Unproven']],
-        ];
-
-        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
-
-        self::assertSame(ContractValidationVerdict::INVALID, $v->state(), 'absent is unproven, and unproven is refused');
-    }
-
-    public function testNoCollectionGroupingAtAllIsRefused(): void
-    {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->asset = ['grouping' => [], 'content' => ['metadata' => ['name' => 'Loose NFT']]];
-
-        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
-
-        self::assertSame(ContractValidationVerdict::INVALID, $v->state());
-    }
-
-    // ── ⚠⚠ Compressed NFTs (DECISION 8) ─────────────────────────────────
-
-    public function testACompressedNftIsUnsupportedNotValid(): void
-    {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->asset = [
-            'compression' => ['compressed' => true],
-            'grouping'    => [['group_key' => 'collection', 'group_value' => 'X', 'verified' => true]],
-            'content'     => ['metadata' => ['name' => 'Compressed Collection']],
-        ];
-
-        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
-
-        self::assertSame(ContractValidationVerdict::UNSUPPORTED, $v->state());
-        self::assertFalse($v->isValid());
-        self::assertFalse($v->mayPersist());
-        self::assertSame('compressed-nft', $v->standard());
-    }
-
-    public function testCompressionIsCheckedBeforeGrouping(): void
-    {
-        // A compressed asset with a perfectly verified grouping must still be
-        // refused — otherwise the grouping check would let it through.
-        $f = new FakeSolanaFetcherForValidation();
-        $f->asset = [
-            'compression' => ['compressed' => true],
-            'grouping'    => [['group_key' => 'collection', 'group_value' => self::MINT, 'verified' => true]],
-        ];
-
-        self::assertSame(
-            ContractValidationVerdict::UNSUPPORTED,
-            (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->state()
-        );
-    }
-
-    // ── ⚠⚠ The mint-as-name trap ────────────────────────────────────────
-
-    public function testTheCollectionMintAddressIsNeverStoredAsTheName(): void
-    {
-        $groupValue = 'DRiP2Pn2K6fuMLKQmt5rZWyHiUZ6WK3GChEySUpHSS4x';
-
-        $f = new FakeSolanaFetcherForValidation();
-        $f->asset = [
-            // The asset HAS a verified grouping, but carries no readable name.
-            'grouping' => [['group_key' => 'collection', 'group_value' => $groupValue, 'verified' => true]],
-            'content'  => ['metadata' => []],
-        ];
-
-        $m = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->metadata();
-
-        self::assertInstanceOf(IntakeMetadata::class, $m);
-        self::assertNotSame($groupValue, $m->valueOf('name'), 'the mint address is not a name');
-        self::assertNotSame(self::MINT, $m->valueOf('name'));
-        self::assertSame(
-            IntakeMetadata::ABSENT,
-            $m->stateOf('name'),
-            'DAS answered and there is no name — absent, and certainly not the address'
-        );
-    }
-
-    public function testTheNameComesFromContentMetadataName(): void
-    {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->asset = [
-            'grouping' => [['group_key' => 'collection', 'group_value' => 'Mint2222222222222222222222222222222222222222', 'verified' => true]],
-            'content'  => ['metadata' => ['name' => 'Okay Bears']],
-        ];
-
-        $m = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->metadata();
-
-        self::assertSame('Okay Bears', $m?->valueOf('name'));
-    }
-
-    // ── Fail closed ─────────────────────────────────────────────────────
-
-    public function testMissingHeliusCredentialsAreUnavailableNotInvalid(): void
-    {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->kind = 'credentials_missing';
-
-        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
-
-        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $v->state());
-        self::assertFalse($v->isDecided());
-        self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_CREDENTIALS_MISSING));
-    }
-
-    public function testATimeoutIsUnavailableNotInvalid(): void
-    {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->kind = 'transport';
-
-        self::assertSame(
-            ContractValidationVerdict::UNAVAILABLE,
-            (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->state()
-        );
-    }
-
-    public function testAMalformedResponseIsUnavailableNotInvalid(): void
-    {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->kind = 'malformed';
-
-        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
-
-        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $v->state());
-        self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_MALFORMED_RESPONSE));
-    }
-
     /**
-     * ⚠ The ONE DAS error that is an answer about the address: the
-     * documented "Asset Not Found" response. Everything else is about us.
+     * ⚠ The documented no-assets response. `-32004` on `getAssetsByGroup` means
+     * "No assets found for the specified group" — an answer about the address.
      */
-    public function testTheDocumentedAssetNotFoundResponseIsInvalid(): void
+    public function testTheDocumentedNoAssetsErrorIsInvalid(): void
     {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->kind = 'not_found';
+        $f = $this->fetcher();
+        $f->groupError = ['code' => -32004, 'message' => 'No assets found for the specified group.'];
 
         $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
 
         self::assertSame(ContractValidationVerdict::INVALID, $v->state());
         self::assertTrue($v->isDecided());
-        self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_NO_CODE_AT_ADDRESS));
     }
 
-    // ⚠⚠⚠ JSON-RPC error discrimination (blocker 3)
-    //
-    // `assetResult()` previously mapped EVERY JSON-RPC error to `not_found`,
-    // and this probe maps `not_found` to INVALID. So a rate limit, an expired
-    // Helius key or an internal error all produced "this mint is not a
-    // collection" — a negative authenticity verdict manufactured from an
-    // outage. Only the documented asset-not-found signature may decide.
+    // ── ⚠⚠⚠ Every other documented error fails closed ───────────────────
 
     /** @return array<string, array{0: int, 1: string}> */
-    public static function nonDecisiveRpcErrors(): array
+    public static function nonDecisiveErrors(): array
     {
         return [
-            'auth / unauthorized' => [-32401, 'Unauthorized'],
-            'rate limited'        => [-32429, 'Too many requests'],
-            'internal error'      => [-32603, 'Internal error'],
-            'method not found'    => [-32601, 'Method not found'],
-            'invalid params'      => [-32602, 'Invalid params'],
-            'parse error'         => [-32700, 'Parse error'],
-            'unknown vendor code' => [-31999, 'Something else entirely'],
+            'authentication (-32001)' => [-32001, 'Authentication failed. Missing or invalid API key.'],
+            'permission (-32003)'     => [-32003, 'You do not have permission to access this resource.'],
+            'rate limit (-32029)'     => [-32029, 'Rate limit exceeded. Please try again later.'],
+            'rate limit alt (-32005)' => [-32005, 'Rate limit exceeded'],
+            'generic server (-32000)' => [-32000, 'Server error'],
+            'internal (-32603)'       => [-32603, 'Internal error'],
+            'method (-32601)'         => [-32601, 'Method not found'],
+            'params (-32602)'         => [-32602, 'Invalid params'],
+            'unknown vendor code'     => [-31999, 'Something new Helius added'],
         ];
     }
 
-    #[DataProvider('nonDecisiveRpcErrors')]
-    public function testNonAssetNotFoundRpcErrorsAreUnavailableNotInvalid(int $code, string $message): void
+    #[DataProvider('nonDecisiveErrors')]
+    public function testNonNotFoundErrorsAreUnavailableNotInvalid(int $code, string $message): void
     {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->rpcError = ['code' => $code, 'message' => $message];
+        $f = $this->fetcher();
+        $f->groupError = ['code' => $code, 'message' => $message];
 
         $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
 
@@ -321,34 +200,53 @@ final class SolanaContractProbeTest extends TestCase
         self::assertFalse($v->mayPersist());
     }
 
-    public function testTheDocumentedNotFoundSignatureIsRecognised(): void
+    public function testAuthenticationFailureIsReportedAsMissingCredentials(): void
     {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->rpcError = ['code' => -32000, 'message' => 'Asset Not Found'];
+        $f = $this->fetcher();
+        $f->groupError = ['code' => -32001, 'message' => 'Authentication failed. Missing or invalid API key.'];
 
-        self::assertSame(
-            ContractValidationVerdict::INVALID,
-            (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->state()
-        );
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
+
+        self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_CREDENTIALS_MISSING));
     }
 
-    public function testTheSameErrorCodeWithADifferentMessageIsNotTreatedAsNotFound(): void
+    public function testRateLimitingIsReportedAsRateLimited(): void
     {
-        // -32000 is a generic server-error code. Without the documented
-        // message it is not evidence about the address.
-        $f = new FakeSolanaFetcherForValidation();
-        $f->rpcError = ['code' => -32000, 'message' => 'Server error: upstream timeout'];
+        $f = $this->fetcher();
+        $f->groupError = ['code' => -32029, 'message' => 'Rate limit exceeded. Please try again later.'];
 
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
+
+        self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_PROVIDER_RATE_LIMITED));
+    }
+
+    /**
+     * ⚠ `-32004` is only decisive for the method that documents it. Accepting
+     * it from the wrong method would let one endpoint's silence answer a
+     * question the other asked.
+     */
+    public function testTheNotFoundCodeIsNotDecisiveForAnUnrelatedMethod(): void
+    {
         self::assertSame(
-            ContractValidationVerdict::UNAVAILABLE,
-            (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->state()
+            'not_found',
+            SolanaFetcher::classifyDasError(['code' => -32004], SolanaFetcher::METHOD_ASSETS_BY_GROUP)
         );
+        self::assertSame(
+            'not_found',
+            SolanaFetcher::classifyDasError(['code' => -32004], SolanaFetcher::METHOD_GET_ASSET)
+        );
+        self::assertSame(
+            'transport',
+            SolanaFetcher::classifyDasError(['code' => -32004], 'getTokenAccounts'),
+            'a not-found from a method that does not document it decides nothing'
+        );
+        self::assertSame('transport', SolanaFetcher::classifyDasError(['code' => -32004], ''));
     }
 
     public function testAMalformedErrorObjectIsUnavailable(): void
     {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->rpcError = ['no_code_key' => true];
+        $f = $this->fetcher();
+        $f->groupError = ['no_code_key' => true];
 
         self::assertSame(
             ContractValidationVerdict::UNAVAILABLE,
@@ -356,67 +254,239 @@ final class SolanaContractProbeTest extends TestCase
         );
     }
 
+    public function testAMalformedGroupBodyIsUnavailable(): void
+    {
+        $f = $this->fetcher();
+        $f->groupKindOverride = 'malformed';
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
+
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $v->state());
+        self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_MALFORMED_RESPONSE));
+    }
+
+    // ── Compression: the SAMPLED MEMBER, and only that ──────────────────
+
+    /**
+     * ⚠⚠ PARTIAL DECISION-8 ENFORCEMENT, DELIBERATELY LABELLED AS SUCH.
+     *
+     * The sampled member's `compression.compressed` is documented, so a
+     * compressed sample is refused. But nothing in `getAssetsByGroup`
+     * aggregates by compression, so ONE sample cannot prove a mixed
+     * collection's type — see the probe's class docblock and the PR report.
+     */
+    public function testACompressedSampledMemberIsUnsupported(): void
+    {
+        $f = $this->fetcher();
+        $f->groupItems = [self::memberItem(true)];
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
+
+        self::assertSame(ContractValidationVerdict::UNSUPPORTED, $v->state());
+        self::assertFalse($v->mayPersist());
+        self::assertSame('compressed-nft', $v->standard());
+        self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_STANDARD_DEFERRED));
+    }
+
+    public function testAMemberWithNoCompressionFieldIsUnavailableNotAccepted(): void
+    {
+        $item = self::memberItem();
+        unset($item['compression']);
+
+        $f = $this->fetcher();
+        $f->groupItems = [$item];
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
+
+        self::assertSame(
+            ContractValidationVerdict::UNAVAILABLE,
+            $v->state(),
+            'the field is documented, so its absence means the shape is not what we expect'
+        );
+    }
+
+    // ── ⚠⚠ Metadata: the COLLECTION's name, never a member's ────────────
+
+    public function testTheCollectionNameComesFromTheCollectionAssetNotTheMember(): void
+    {
+        $f = $this->fetcher();
+        // The member is called "Mad Lads #8420"; the collection is "Mad Lads".
+        $m = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->metadata();
+
+        self::assertInstanceOf(IntakeMetadata::class, $m);
+        self::assertSame('Mad Lads', $m->valueOf('name'));
+        self::assertNotSame('Mad Lads #8420', $m->valueOf('name'), 'a member name is not the collection name');
+    }
+
+    public function testTheMintAddressIsNeverStoredAsTheName(): void
+    {
+        $f = $this->fetcher();
+        $f->asset = self::collectionAsset(null, null);
+
+        $m = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->metadata();
+
+        self::assertInstanceOf(IntakeMetadata::class, $m);
+        self::assertNotSame(self::MINT, $m->valueOf('name'));
+        self::assertSame(IntakeMetadata::ABSENT, $m->stateOf('name'));
+    }
+
+    /**
+     * ⚠ `supply.print_current_supply` describes EDITION PRINTS of the one
+     * collection NFT, not how many items the collection holds. Storing it as
+     * the collection's item count would be a different number from the one an
+     * operator expects, so supply is NOT_APPLICABLE on Solana.
+     */
+    public function testSolanaSupplyIsNotApplicableAndIsNeverStored(): void
+    {
+        $f = $this->fetcher();
+        $f->asset = self::collectionAsset();
+        $f->asset['supply'] = ['print_max_supply' => 500, 'print_current_supply' => 137];
+
+        $m = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->metadata();
+
+        self::assertInstanceOf(IntakeMetadata::class, $m);
+        self::assertSame(IntakeMetadata::NOT_APPLICABLE, $m->stateOf('total_supply'));
+        self::assertArrayNotHasKey('total_supply', $m->writableFields());
+        self::assertNotSame(137, $m->valueOf('total_supply'));
+    }
+
+    public function testSymbolAndDescriptionAreNotApplicableOnSolana(): void
+    {
+        $m = (new SolanaContractProbe($this->fetcher()))->validate(self::MINT, $this->budget())->metadata();
+
+        self::assertSame(IntakeMetadata::NOT_APPLICABLE, $m?->stateOf('symbol'));
+        self::assertSame(IntakeMetadata::NOT_APPLICABLE, $m?->stateOf('description'));
+    }
+
+    /**
+     * ⚠ A fully successful Solana read must be COMPLETE, not permanently
+     * partial. Before NOT_APPLICABLE existed, the three fields DAS cannot
+     * supply were UNKNOWN forever and `complete` was unreachable.
+     */
+    public function testAFullySuccessfulSolanaReadIsComplete(): void
+    {
+        $m = (new SolanaContractProbe($this->fetcher()))->validate(self::MINT, $this->budget())->metadata();
+
+        self::assertSame(IntakeMetadata::STATE_COMPLETE, $m?->state());
+        self::assertSame(2, $m?->applicableCount(), 'name and image are the applicable pair');
+    }
+
+    public function testAFailedCollectionMetadataReadIsUnavailableAndPersistsNothing(): void
+    {
+        $f = $this->fetcher();
+        $f->assetKind = 'transport';
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
+
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $v->state());
+        self::assertFalse($v->mayPersist());
+    }
+
     // ── Bounded cost ────────────────────────────────────────────────────
 
-    public function testValidationCostsExactlyOneDasCall(): void
+    public function testValidationCostsTwoDasCalls(): void
     {
-        $f = new FakeSolanaFetcherForValidation();
-        $f->asset = [
-            'grouping' => [['group_key' => 'collection', 'group_value' => self::MINT, 'verified' => true]],
-            'content'  => ['metadata' => ['name' => 'One Call']],
-        ];
-
+        $f = $this->fetcher();
         (new SolanaContractProbe($f))->validate(self::MINT, $this->budget());
 
-        self::assertSame(1, $f->calls, 'validation and metadata share one response');
+        // ⚠ TWO, not one. `showCollectionMetadata` has no documented response
+        // shape (Metaplex: "reserved for future use on this method"), so the
+        // collection's own name and image need a second `getAsset`. This is a
+        // deliberate, reported deviation from the one-call plan budget.
+        self::assertSame(1, $f->groupCalls);
+        self::assertSame(1, $f->assetCalls);
     }
 
     public function testAnExhaustedBudgetMakesNoRequest(): void
     {
-        $f = new FakeSolanaFetcherForValidation();
+        $f = $this->fetcher();
 
         $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(0, 30));
 
         self::assertSame(ContractValidationVerdict::UNAVAILABLE, $v->state());
-        self::assertSame(0, $f->calls);
+        self::assertSame(0, $f->groupCalls);
+        self::assertSame(0, $f->assetCalls);
+    }
+
+    public function testABudgetThatRunsOutBeforeMetadataIsUnavailable(): void
+    {
+        $f = $this->fetcher();
+
+        // Enough for the group lookup, not for the metadata read.
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(1, 30));
+
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $v->state());
+        self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_BUDGET_EXHAUSTED));
+        self::assertSame(1, $f->groupCalls);
+        self::assertSame(0, $f->assetCalls);
     }
 }
 
 class FakeSolanaFetcherForValidation extends \BCC\Trust\Onchain\Fetchers\SolanaFetcher
 {
-    public int $calls = 0;
-    public string $kind = 'none';
+    public int $groupCalls = 0;
+    public int $assetCalls = 0;
 
-    /**
-     * A raw JSON-RPC `error` object, passed through the REAL classifier so the
-     * discrimination under test is production's, not the double's.
-     *
-     * @var array<string, mixed>|null
-     */
-    public ?array $rpcError = null;
+    public ?string $lastGroupValue = null;
+
+    /** @var list<array<string, mixed>> */
+    public array $groupItems = [];
+
+    /** @var array<string, mixed>|null a raw JSON-RPC error object */
+    public ?array $groupError = null;
+
+    public ?string $groupKindOverride = null;
 
     /** @var array<string, mixed>|null */
     public ?array $asset = null;
+
+    public string $assetKind = 'none';
 
     public function __construct()
     {
         // No transport in these tests.
     }
 
-    public function assetResult(string $mint): array
+    public function assetsByGroupResult(string $collectionMint): array
     {
-        $this->calls++;
+        $this->groupCalls++;
+        $this->lastGroupValue = $collectionMint;
 
-        if ($this->rpcError !== null) {
+        if ($this->groupKindOverride !== null) {
+            return ['ok' => false, 'result' => null, 'kind' => $this->groupKindOverride];
+        }
+
+        if ($this->groupError !== null) {
+            // ⚠ Through the REAL classifier, with the REAL method name, so the
+            // discrimination under test is production's and not the double's.
             return [
                 'ok'     => false,
                 'result' => null,
-                'kind'   => \BCC\Trust\Onchain\Fetchers\SolanaFetcher::classifyDasError($this->rpcError),
+                'kind'   => \BCC\Trust\Onchain\Fetchers\SolanaFetcher::classifyDasError(
+                    $this->groupError,
+                    \BCC\Trust\Onchain\Fetchers\SolanaFetcher::METHOD_ASSETS_BY_GROUP
+                ),
             ];
         }
 
-        if ($this->kind !== 'none') {
-            return ['ok' => false, 'result' => null, 'kind' => $this->kind];
+        return [
+            'ok'     => true,
+            'result' => [
+                'total' => count($this->groupItems),
+                'limit' => 1,
+                'page'  => 1,
+                'items' => $this->groupItems,
+            ],
+            'kind'   => 'none',
+        ];
+    }
+
+    public function assetResult(string $mint): array
+    {
+        $this->assetCalls++;
+
+        if ($this->assetKind !== 'none') {
+            return ['ok' => false, 'result' => null, 'kind' => $this->assetKind];
         }
 
         return ['ok' => true, 'result' => $this->asset ?? [], 'kind' => 'none'];

@@ -129,6 +129,18 @@ final class NftDiscoveryControlPlaneSnapshot
 
             $matrix = NftChainCapability::operationMatrix($chain);
 
+            // ⚠ THE ONE SHARED ANSWER to "does this chain validate a submitted
+            // contract?". Carried on the row so the Add Collection copy, the
+            // capability editor and the intake service all read the SAME
+            // predicate. The page used to re-derive it from a hardcoded
+            // `$family === 'cosmos'`, which is how it kept telling EVM and
+            // Solana operators their submissions were accepted unvalidated
+            // after PR E started validating them.
+            //
+            // Per CHAIN, not per family: DECISION 7 approves only Ethereum and
+            // Base on EVM, so two chains in one family legitimately differ.
+            $matrix['manual_intake'] = NftChainCapability::canTakeManualIntake($chain);
+
             // Presentation-only facts the matrix has no business carrying.
             $matrix['is_active']   = (int) ($chain->is_active ?? 0) === 1;
             $matrix['is_testnet']  = (int) ($chain->is_testnet ?? 0) === 1;

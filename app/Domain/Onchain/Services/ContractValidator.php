@@ -57,8 +57,19 @@ final class ContractValidator
     /** EVM: 2 interface calls + 1 metadata call. */
     public const BUDGET_EVM = 3;
 
-    /** Solana: one DAS call. */
-    public const BUDGET_SOLANA = 1;
+    /**
+     * Solana: TWO DAS calls.
+     *
+     * ⚠ THE PLAN BUDGETED ONE, AND THIS DEVIATES — deliberately, and it
+     * needs sign-off. `getAssetsByGroup` proves the collection is verified but
+     * has no documented way to return the collection's own name and image
+     * (`showCollectionMetadata` is "reserved for future use on this method" in
+     * the Metaplex DAS spec and has no published response shape at Helius). The
+     * sampled member's name is the MEMBER's name, so a second `getAsset` on the
+     * submitted mint is the only documented source. See
+     * {@see \BCC\Trust\Onchain\Services\Validation\SolanaContractProbe}.
+     */
+    public const BUDGET_SOLANA = 2;
 
     /** Wall-clock ceiling for one validation, seconds. */
     public const RUNTIME_SECONDS = 20;

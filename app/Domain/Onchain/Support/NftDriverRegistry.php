@@ -128,12 +128,20 @@ final class NftDriverRegistry
      * class exists to enforce — a driver must never claim an operation the
      * code does not provide:
      *
-     *   - `evm_rpc` is registered for OWNERSHIP only. The plan also shows
-     *     VALIDATION, but the `supportsInterface(0x80ac58cd|0xd9b67a26)`
-     *     `eth_call` behind it is explicitly still "to build". OWNERSHIP is
-     *     real today (`EvmFetcher::count_holdings()` → `eth_call balanceOf`).
-     *     Whoever builds EVM validation adds VALIDATION here in the same
-     *     change, and Avalanche/BSC manual intake unblocks then — not now.
+     *   - `evm_rpc` is registered for OWNERSHIP **and, since PR E, VALIDATION**.
+     *     ⚠ HISTORICAL: this note used to say VALIDATION was "explicitly still
+     *     to build", and that whoever built it would add the operation here in
+     *     the same change. PR E is that change — `EvmContractProbe` performs the
+     *     `supportsInterface(0x80ac58cd|0xd9b67a26)` `eth_call` — so the
+     *     operation is claimed because the code now provides it.
+     *     ⚠ It does NOT follow that Avalanche/BSC manual intake unblocked, as
+     *     that old note predicted. DECISION 7 limits the approved launch scope
+     *     to Ethereum and Base, enforced separately by
+     *     {@see NftLaunchChains}. A registered driver says what the code CAN
+     *     do; the launch list says what BCC has taken on.
+     *     METADATA stays unclaimed here: name, symbol, image and supply come
+     *     from Alchemy, so a keyless chain can prove a standard and still not
+     *     complete an intake.
      *   - `user_request` is absent entirely; the community-request system it
      *     belongs to does not exist yet.
      *

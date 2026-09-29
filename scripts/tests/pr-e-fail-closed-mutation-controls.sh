@@ -17,6 +17,25 @@
 # Every file is restored from its pre-mutation bytes and verified byte-identical
 # by checksum afterwards — a mutation run that corrupts the tree is worse than
 # no mutation run at all.
+#
+# ── WHY THESE EIGHTEEN ─────────────────────────────────────────────────
+# Eight of them reintroduce defects that were actually written and actually
+# caught in review, not hypotheticals:
+#
+#   S1  the Solana probe asking getAsset — a question about ONE asset — and
+#       reading the answer as proof about a whole collection
+#   S2  gating on `grouping[].verified`, a property that DOES NOT EXIST in the
+#       DAS specification and was invented by an earlier draft of this code
+#   S3  reading the generic `-32000` server error as "Asset Not Found", which
+#       turns a provider outage into a permanent negative about an address
+#   S4  honouring `-32004` from a method that does not document it
+#   S5  letting a compressed member through, silently breaking DECISION 8
+#   S6  reading a MISSING `compression` object as "not compressed"
+#   A1  gating manual intake on ENUMERATION, which no EVM or Solana driver
+#       claims — the grant was refused on exactly the chains it exists for
+#   A2  printing "checked against the chain" for chains that are not checked
+#
+# The rest pin boundaries that were built correctly and must stay that way.
 
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
@@ -136,10 +155,16 @@ SOL_FETCH="app/Domain/Onchain/Fetchers/SolanaFetcher.php"
 COS_PROBE="app/Domain/Onchain/Services/Validation/CosmosContractProbe.php"
 VALIDATOR="app/Domain/Onchain/Services/ContractValidator.php"
 VC_PAGE="app/Domain/Onchain/Admin/VerifyCollectionsPage.php"
+DISC_PAGE="app/Domain/Onchain/Admin/NftDiscoveryPage.php"
+CAP_EDITOR="app/Domain/Onchain/Services/NftCapabilityEditor.php"
+CAPABILITY="app/Domain/Onchain/Support/NftChainCapability.php"
+INTAKE_META="app/Domain/Onchain/ValueObjects/IntakeMetadata.php"
 COL_REPO="app/Domain/Onchain/Repositories/CollectionRepository.php"
 
 echo "PR E fail-closed mutation controls"
 echo "=================================="
+
+# ══ EVM ════════════════════════════════════════════════════════════════
 
 # ── 1. EVM metadata failure changed back to VALID ───────────────────────
 mutate "evm-metadata-failure-becomes-valid" "$EVM_PROBE" \
@@ -149,35 +174,13 @@ mutate "evm-metadata-failure-becomes-valid" "$EVM_PROBE" \
             if (false) {' \
   'EvmContractProbeTest|PrEFailClosedBoundariesTest'
 
-# ── 2. EVM launch allowlist removed ─────────────────────────────────────
+# ── 2. EVM launch allowlist removed at the validator ───────────────────
 mutate "evm-launch-allowlist-removed" "$VALIDATOR" \
   "if (\$family === 'evm' && !NftLaunchChains::isLaunchChain(\$chain)) {" \
   'if (false) {' \
   'PrEFailClosedBoundariesTest'
 
-# ── 3. Solana generic RPC error changed to INVALID (not_found) ──────────
-mutate "solana-generic-error-becomes-not-found" "$SOL_FETCH" \
-  "        \$code = \$error['code'] ?? null;
-        if (!is_int(\$code) || \$code !== self::DAS_ERROR_SERVER) {
-            return 'transport';
-        }" \
-  "        return 'not_found';" \
-  'SolanaContractProbeTest'
-
-# ── 4. Unverified Solana self-reference accepted ────────────────────────
-mutate "solana-self-reference-bypass-restored" "$SOL_PROBE" \
-  "            if ((\$g['verified'] ?? false) === true) {
-                return true;
-            }" \
-  "            if ((\$g['verified'] ?? false) === true) {
-                return true;
-            }
-            if (\$value !== '') {
-                return true;
-            }" \
-  'SolanaContractProbeTest'
-
-# ── 5. Malformed ERC-165 result treated as false ────────────────────────
+# ── 3. Malformed ERC-165 result treated as false ────────────────────────
 mutate "erc165-malformed-treated-as-false" "$EVM_PROBE" \
   '        if (strlen($hex) !== 64 || !ctype_xdigit($hex)) {
             return ['"'"'supported'"'"' => false, '"'"'kind'"'"' => '"'"'malformed'"'"'];
@@ -187,7 +190,143 @@ mutate "erc165-malformed-treated-as-false" "$EVM_PROBE" \
         }' \
   'EvmContractProbeTest'
 
-# ── 6. Audit failure allowed to commit the approval ─────────────────────
+# ══ SOLANA — the model that had to be rebuilt on the documented API ═════
+
+# ── 4. The wrong DAS method entirely ───────────────────────────────────
+# getAsset answers "what is this ONE asset?". getAssetsByGroup answers "who
+# belongs to this collection, and is the grouping certified?". Substituting
+# the first for the second is how a plain NFT mint got read as a collection.
+mutate "solana-getasset-instead-of-group-method" "$SOL_PROBE" \
+  '$group = $this->fetcher->assetsByGroupResult($mint);' \
+  '$group = $this->fetcher->assetResult($mint);' \
+  'SolanaContractProbeTest'
+
+# ── 5. The invented `grouping[].verified` property required again ───────
+# ⚠ THIS PROPERTY DOES NOT EXIST. A DAS `grouping[]` entry carries exactly
+# `group_key` and `group_value`. Gating on a third field means every real
+# Helius response fails the gate, so genuine collections are refused — and
+# the code looks stricter while being strictly wrong.
+mutate "solana-invented-verified-property-required" "$SOL_PROBE" \
+  '        // ── 2. Sampled member compressed? (partial DECISION 8 — see class doc)' \
+  '        $grouping = is_array($sample['"'"'grouping'"'"'] ?? null) ? $sample['"'"'grouping'"'"'] : [];
+        $verified = false;
+        foreach ($grouping as $g) {
+            if (is_array($g) && ($g['"'"'verified'"'"'] ?? false) === true) {
+                $verified = true;
+            }
+        }
+        if (!$verified) {
+            return ContractValidationVerdict::invalid([
+                ContractValidationVerdict::EV_GROUPING_UNVERIFIED,
+            ]);
+        }
+
+        // ── 2. Sampled member compressed? (partial DECISION 8 — see class doc)' \
+  'SolanaContractProbeTest'
+
+# ── 6. The generic -32000 server error read as a decided negative ───────
+mutate "solana-generic-server-error-becomes-not-found" "$SOL_FETCH" \
+  '        if ($code === self::DAS_NOT_FOUND) {' \
+  '        if ($code === self::DAS_NOT_FOUND || $code === -32000) {' \
+  'SolanaContractProbeTest'
+
+# ── 7. not-found honoured from a method that does not document it ──────
+mutate "solana-not-found-accepted-from-any-method" "$SOL_FETCH" \
+  '            return match ($method) {
+                self::METHOD_GET_ASSET, self::METHOD_ASSETS_BY_GROUP => '"'"'not_found'"'"',
+                default => '"'"'transport'"'"',
+            };' \
+  "            return 'not_found';" \
+  'SolanaContractProbeTest'
+
+# ── 8. A compressed member accepted (DECISION 8 breached) ──────────────
+mutate "solana-compressed-member-accepted" "$SOL_PROBE" \
+  "        if ((\$compression['compressed'] ?? null) === true) {" \
+  '        if (false) {' \
+  'SolanaContractProbeTest'
+
+# ── 9. Compression UNCERTAINTY treated as "not compressed" ─────────────
+# A missing `compression` object is not evidence of an uncompressed asset;
+# it means the response is not the shape the documentation describes.
+mutate "solana-compression-absence-treated-as-supported" "$SOL_PROBE" \
+  "        if (!array_key_exists('compressed', \$compression)) {" \
+  '        if (false) {' \
+  'SolanaContractProbeTest'
+
+# ══ COSMOS ═════════════════════════════════════════════════════════════
+
+# ── 10. Cosmos PROBABLE changed back to VALID ──────────────────────────
+mutate "cosmos-probable-becomes-valid" "$COS_PROBE" \
+  '        if ($class !== CosmwasmClassifier::CONFIRMED) {' \
+  '        if (false) {' \
+  'CosmosNoWasmModuleIsNeverNotAnNftTest'
+
+# ══ THE ADMIN PATH — a boundary is worthless if unreachable or misdescribed
+
+# ── 11. Manual intake re-coupled to ENUMERATION ────────────────────────
+# No EVM or Solana driver claims enumeration, so this predicate refuses the
+# grant on exactly the three chains manual intake was built for.
+mutate "manual-intake-recoupled-to-enumeration" "$CAP_EDITOR" \
+  'if (!NftChainCapability::canTakeManualIntake($chain)) {' \
+  'if (!NftChainCapability::hasOperatorStartableOperation($chain)) {' \
+  'NftCapabilityEditorFlagTest'
+
+# ── 12. Every chain rendered as validated ──────────────────────────────
+# The over-claim: an operator told the address was "checked against the
+# chain" when nothing checked it.
+mutate "chains-rendered-as-validated-without-checking" "$DISC_PAGE" \
+  "            if ((\$row['manual_intake'] ?? null) === true) {" \
+  '            if (true) {' \
+  'ManualIntakeValidationDisclosureTest'
+
+# ── 13. An UNREADABLE capability read as validated ─────────────────────
+mutate "unreadable-capability-read-as-validated" "$DISC_PAGE" \
+  "            if ((\$row['manual_intake'] ?? null) === true) {" \
+  "            if ((\$row['manual_intake'] ?? null) !== false) {" \
+  'ManualIntakeValidationDisclosureTest'
+
+# ── 14. DECISION 7 launch scope dropped from the capability itself ─────
+mutate "launch-scope-dropped-from-intake-capability" "$CAPABILITY" \
+  "        if (strtolower((string) (\$chain->chain_type ?? '')) === 'evm') {
+            return NftLaunchChains::isLaunchChain(\$chain);
+        }" \
+  '        // launch narrowing removed' \
+  'ManualIntakeValidationDisclosureTest|NftCapabilityEditorFlagTest'
+
+# ══ METADATA STATE ═════════════════════════════════════════════════════
+
+# ── 15. A successful EVM/Solana read left permanently `partial` ────────
+# Counting fields the family never fetches as outstanding makes `complete`
+# unreachable for two of the three families — and an operator investigating
+# a `partial` row would find no missing field to explain it.
+mutate "successful-family-read-stays-partial" "$INTAKE_META" \
+  '            if ($this->fields[$f]['"'"'state'"'"'] === self::NOT_APPLICABLE) {
+                continue; // never attempted, never a shortfall
+            }
+            $applicable++;' \
+  '            $applicable++;' \
+  'IntakeMetadataFamilyStateTest'
+
+# ── 16. The family declaration never applied ───────────────────────────
+mutate "family-fields-not-marked-inapplicable" "$INTAKE_META" \
+  "                \$m->fields[\$f] = ['value' => null, 'state' => self::NOT_APPLICABLE];" \
+  "                \$m->fields[\$f] = ['value' => null, 'state' => self::UNKNOWN];" \
+  'IntakeMetadataFamilyStateTest'
+
+# ══ THE REPOSITORY — the last gate before a row exists ═════════════════
+
+# ── 17. An invalid metadata_state silently writing a row ───────────────
+# ⚠ REQUIRES A DATABASE. The unit double records arguments and issues no
+# SQL, so it would report this boundary intact no matter what the repository
+# did. Proving "no row was created" needs a real table.
+mutate "metadata-state-vocabulary-not-enforced" "$COL_REPO" \
+  '            if (!is_string($stateRaw) || !in_array($stateRaw, self::METADATA_STATES, true)) {' \
+  '            if (false) {' \
+  'integration:CollectionMetadataStateIntegrationTest'
+
+# ══ AUDIT ══════════════════════════════════════════════════════════════
+
+# ── 18. Audit failure allowed to commit the approval ───────────────────
 mutate "description-audit-failure-commits" "$VC_PAGE" \
   "                if (\$auditId === null) {
                     throw new \\RuntimeException(
@@ -198,18 +337,6 @@ mutate "description-audit-failure-commits" "$VC_PAGE" \
                     return true;
                 }' \
   'PrEFailClosedBoundariesTest'
-
-# ── 7. Cosmos PROBABLE changed back to VALID ────────────────────────────
-mutate "cosmos-probable-becomes-valid" "$COS_PROBE" \
-  '        if ($class !== CosmwasmClassifier::CONFIRMED) {' \
-  '        if (false) {' \
-  'CosmosNoWasmModuleIsNeverNotAnNftTest'
-
-# ── 8. Invalid metadata_state accepted at the repository ────────────────
-mutate "metadata-state-vocabulary-not-enforced" "$COL_REPO" \
-  '$stateProvided = is_string($stateRaw) && in_array($stateRaw, self::METADATA_STATES, true);' \
-  '$stateProvided = is_string($stateRaw);' \
-  'integration:CollectionMetadataStateIntegrationTest'
 
 echo
 echo "=================================="

@@ -420,8 +420,11 @@ final class ManualCollectionIntakeServiceTest extends TestCase
 
         // ⚠ ONE submission, a handful of calls about THAT address — never a
         // walk over a chain. The ceilings are the validator's per-family
-        // budgets (EVM 3, Solana 1).
-        self::assertLessThanOrEqual($family === 'evm' ? 3 : 1, $calls);
+        // budgets: EVM 3 (two interface calls + one Alchemy read), Solana 2
+        // (`getAssetsByGroup` for the verdict, then `getAsset` for the
+        // collection's own name and image — `showCollectionMetadata` has no
+        // documented response shape, so the second call is unavoidable).
+        self::assertLessThanOrEqual($family === 'evm' ? 3 : 2, $calls);
 
         // And no OTHER family's provider is touched.
         self::assertSame(

@@ -12,33 +12,50 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * Validate ONE submitted Solana collection mint through DAS `getAsset`.
+ * Validate ONE submitted Solana collection mint against the documented DAS API.
  *
- * ── WHAT "VALID" MEANS HERE ─────────────────────────────────────────────
- * The submitted address must be a collection NFT: an asset whose own
- * `grouping` entry for `collection` is **verified**, or which is itself the
- * verified collection parent. An unverified grouping is refused — on Solana
- * anyone can claim membership of a collection by writing its address into
- * their metadata; only the `verified` flag, set by the collection authority,
- * makes that claim trustworthy. Accepting an unverified grouping would let
- * anyone mint an asset claiming to belong to a blue-chip collection and have
- * BCC gate a community on it.
+ * ── ⚠⚠⚠ THE MODEL THIS REPLACES WAS NOT THE DOCUMENTED CONTRACT ─────────
+ * An earlier version called `getAsset` on the submitted mint and required
+ * `grouping[].verified === true`. **No such field exists.** A DAS grouping entry
+ * contains exactly `group_key` and `group_value`. The invented flag meant the
+ * "verified grouping required" rule was enforced against nothing.
  *
- * ── ⚠⚠ NEVER THE MINT-AS-NAME FIELD ────────────────────────────────────
- * {@see SolanaFetcher::fetchMetadataForMint()} returns a `collection_name`
- * key, and it holds the collection **mint address**, not a human-readable
- * name — it is `grouping[].group_value`, a base58 address. Storing it as
- * `collection_name` would fill the admin queue with rows named
- * `DRiP2Pn2K6fuMLKQmt5rZWyHiUZ6WK3GChEySUpHSS4x`. The name comes from
- * `content.metadata.name` or it stays UNKNOWN.
+ * How DAS actually expresses verification: `options.showUnverifiedCollections`
+ * defaults to **false**, and an unverified grouping is then **omitted** from
+ * results rather than returned marked false. So the real question —
+ * *is this address in use as a certified collection?* — is asked with
+ * `getAssetsByGroup`, which is the documented method for taking a collection
+ * address as `groupValue` and finding its members.
  *
- * ── COMPRESSED NFTs ARE OUT OF SCOPE (DECISION 8) ───────────────────────
- * A cNFT lives in a Merkle tree, not in a token account, so ownership cannot
- * be proven by the balance reads the holder-gating path uses. Detected and
- * refused as UNSUPPORTED — decided, and never silently accepted.
+ *   non-empty, well-formed `items`  → the address IS a verified collection group
+ *   documented no-assets response   → decided negative
+ *   anything else                   → UNAVAILABLE
  *
- * ── BOUNDED COST ────────────────────────────────────────────────────────
- * Exactly one DAS call. Validation and metadata come from the same response.
+ * ── ⛔ TWO KNOWN GAPS, REPORTED RATHER THAN PAPERED OVER ────────────────
+ *
+ * **1. This costs TWO DAS calls, not the one the plan budgeted.**
+ * `showCollectionMetadata` is listed by Helius but has **no documented
+ * response shape**, and the Metaplex DAS specification states it is "accepted
+ * by the API; reserved for future use on this method". There is therefore no
+ * documented place to read the collection's name and image from the group
+ * response. The sampled member's own `content.metadata.name` is the MEMBER's
+ * name ("Mad Lads #8420") — using it would recreate the mint-as-name defect in
+ * a new form. So the collection's own name/image come from a second call,
+ * `getAsset` on the submitted mint. **That deviates from the approved one-call
+ * Solana budget and needs sign-off.**
+ *
+ * **2. Compressed-member exclusion (DECISION 8) is only PARTIALLY enforced.**
+ * `getAssetsByGroup` items each carry the documented `compression.compressed`
+ * boolean, so the sampled member's type is known and a compressed sample is
+ * refused here. But nothing in `getAssetsByGroup` aggregates or filters by
+ * compression — `total` is a count, not a type breakdown — and a collection may
+ * legitimately mix compressed and uncompressed members. **One sample cannot
+ * prove the whole collection's type, so this code does NOT fully enforce
+ * DECISION 8 and does not claim to.** A documented route exists and costs
+ * another call: `searchAssets` accepts `grouping: ["collection", <addr>]`
+ * together with a `compressed` filter and `showGrandTotal`, which would answer
+ * "does this collection contain ANY compressed member?". Adopting it is a
+ * product decision about the Solana call budget.
  */
 final class SolanaContractProbe
 {
@@ -54,157 +71,128 @@ final class SolanaContractProbe
             ]);
         }
 
-        $r = $this->fetcher->assetResult($mint);
+        // ── 1. Is the submitted address a verified collection group? ─────
+        $group = $this->fetcher->assetsByGroupResult($mint);
         $budget->spend(1);
 
-        if (!$r['ok']) {
-            // `not_found` is the one DAS failure that IS an answer about the
-            // address: nothing exists there. Everything else is about us.
-            if ($r['kind'] === 'not_found') {
+        if (!$group['ok']) {
+            // `not_found` here is the documented "No assets found for the
+            // specified group" — an answer about the address.
+            if ($group['kind'] === 'not_found') {
                 return ContractValidationVerdict::invalid([
-                    ContractValidationVerdict::EV_NO_CODE_AT_ADDRESS,
+                    ContractValidationVerdict::EV_GROUPING_UNVERIFIED,
                 ]);
             }
 
             return ContractValidationVerdict::unavailable([
-                $this->evidenceFor($r['kind']),
+                $this->evidenceFor($group['kind']),
             ]);
         }
 
-        $asset = is_array($r['result']) ? $r['result'] : [];
+        $result = is_array($group['result']) ? $group['result'] : [];
+        $items  = is_array($result['items'] ?? null) ? $result['items'] : [];
 
-        // ── Compressed? Decided, and out of scope for v1 ─────────────────
-        $compression = is_array($asset['compression'] ?? null) ? $asset['compression'] : [];
-        if (($compression['compressed'] ?? false) === true) {
-            return ContractValidationVerdict::unsupported('compressed-nft', [
-                ContractValidationVerdict::EV_PROBE_ANSWERED,
-                ContractValidationVerdict::EV_STANDARD_DEFERRED,
-            ]);
-        }
-
-        // ── Verified collection grouping? ───────────────────────────────
-        if (!$this->hasVerifiedCollectionGrouping($asset)) {
+        if ($items === []) {
+            // Well-formed, and empty. With showUnverifiedCollections false,
+            // that means no VERIFIED membership exists for this address.
             return ContractValidationVerdict::invalid([
                 ContractValidationVerdict::EV_PROBE_ANSWERED,
                 ContractValidationVerdict::EV_GROUPING_UNVERIFIED,
             ]);
         }
 
-        return ContractValidationVerdict::valid(
-            'SPL-Metaplex',
-            $this->collectMetadata($asset),
-            [
+        $sample = is_array($items[0] ?? null) ? $items[0] : null;
+        if ($sample === null) {
+            return ContractValidationVerdict::unavailable([
+                ContractValidationVerdict::EV_MALFORMED_RESPONSE,
+            ]);
+        }
+
+        // ── 2. Sampled member compressed? (partial DECISION 8 — see class doc)
+        $compression = is_array($sample['compression'] ?? null) ? $sample['compression'] : [];
+        if (($compression['compressed'] ?? null) === true) {
+            return ContractValidationVerdict::unsupported('compressed-nft', [
                 ContractValidationVerdict::EV_PROBE_ANSWERED,
-                ContractValidationVerdict::EV_INTERFACE_CONFIRMED,
-            ]
-        );
-    }
-
-    /**
-     * Is this a collection whose membership claim is authority-signed?
-     *
-     * ── ⚠⚠⚠ ONE ACCEPTED SHAPE: `verified === true`. ────────────────────
-     * The asset must carry a `collection` grouping whose `verified` flag is
-     * exactly true — set by the collection authority's signature.
-     *
-     * ── THE SELF-REFERENCE BYPASS, AND WHY IT IS GONE ───────────────────
-     * This used to also accept `group_value === $mint` on the theory that a
-     * Metaplex sized-collection parent points at itself. That was a hole the
-     * size of the rule: metadata is writer-controlled, so anyone minting an
-     * asset can put their OWN address in their own `grouping` and satisfy it
-     * without any authority ever signing anything. A self-signed claim is
-     * exactly what `verified` exists to distinguish from a real one.
-     *
-     * ⚠ No authoritative DAS field was demonstrated that proves
-     * collection-parent status independently of the flag. Until one is — with
-     * its exact schema documented and tested — a bare self-reference does not
-     * validate. Fail closed.
-     *
-     * ⚠ `verified` ABSENT is not true either. Some providers omit the key;
-     * absent means unproven, and unproven is refused.
-     *
-     * @param array<string, mixed> $asset
-     */
-    private function hasVerifiedCollectionGrouping(array $asset): bool
-    {
-        $grouping = is_array($asset['grouping'] ?? null) ? $asset['grouping'] : [];
-
-        foreach ($grouping as $g) {
-            if (!is_array($g)) {
-                continue;
-            }
-            if (($g['group_key'] ?? null) !== 'collection') {
-                continue;
-            }
-            $value = $g['group_value'] ?? null;
-            if (!is_string($value) || $value === '') {
-                continue;
-            }
-
-            // Strict identity comparison: only a real boolean true counts, so
-            // a string "false" or a 0/1 int cannot slip through.
-            if (($g['verified'] ?? false) === true) {
-                return true;
-            }
+                ContractValidationVerdict::EV_STANDARD_DEFERRED,
+            ]);
         }
 
-        return false;
+        // ⚠ A missing `compression` object is not proof of anything. The field
+        // is documented, so its absence means the shape is not what we expect.
+        if (!array_key_exists('compressed', $compression)) {
+            return ContractValidationVerdict::unavailable([
+                ContractValidationVerdict::EV_MALFORMED_RESPONSE,
+            ]);
+        }
+
+        // ── 3. The collection's OWN name and image (second call) ─────────
+        $metadata = $this->collectCollectionMetadata($mint, $budget);
+        if ($metadata === null) {
+            return ContractValidationVerdict::unavailable([
+                ContractValidationVerdict::EV_PROBE_ANSWERED,
+                $this->evidenceFor($this->lastMetadataKind),
+            ]);
+        }
+
+        return ContractValidationVerdict::valid('SPL-Metaplex', $metadata, [
+            ContractValidationVerdict::EV_PROBE_ANSWERED,
+            ContractValidationVerdict::EV_INTERFACE_CONFIRMED,
+        ]);
     }
 
+    /** Why the metadata read failed, for the UNAVAILABLE evidence token. */
+    private string $lastMetadataKind = 'none';
+
     /**
-     * Name, image and supply from the SAME response — no second call.
+     * The COLLECTION's own name and image, from `getAsset` on the collection
+     * mint — not from a member.
      *
-     * ⚠ `description` is not attempted: DAS returns an off-chain description
-     * fetched from a URI BCC did not validate, so it is left UNKNOWN rather
-     * than recorded as absent. `symbol` likewise is frequently the per-asset
-     * symbol rather than the collection's, so it stays UNKNOWN.
-     *
-     * @param array<string, mixed> $asset
+     * ⚠ Only `name` and `image_url` are applicable on Solana. DAS exposes no
+     * collection-level symbol or description, and its `supply` object describes
+     * EDITION PRINTS of that one NFT (`print_current_supply` / `print_max_supply`)
+     * — not how many items the collection contains. Storing an edition print
+     * count as the collection's item count would be a different number from the
+     * one an operator expects to see, so `total_supply` is NOT_APPLICABLE here.
+     * If a membership count is wanted later, the documented source is the group
+     * result's own `total`, which is a separate decision.
      */
-    private function collectMetadata(array $asset): IntakeMetadata
+    private function collectCollectionMetadata(string $mint, ProviderRequestBudget $budget): ?IntakeMetadata
     {
-        $metadata = IntakeMetadata::unknown();
+        $metadata = IntakeMetadata::forFamily('solana');
 
-        $content  = is_array($asset['content'] ?? null) ? $asset['content'] : [];
-        $meta     = is_array($content['metadata'] ?? null) ? $content['metadata'] : [];
-        $links    = is_array($content['links'] ?? null) ? $content['links'] : [];
+        if (!$budget->canSpend(1)) {
+            $this->lastMetadataKind = 'budget_exhausted';
+            return null;
+        }
 
-        // ⚠ content.metadata.name — the human-readable name. NOT
-        // grouping[].group_value, which is the collection MINT ADDRESS.
-        $name = $meta['name'] ?? null;
-        $metadata = $metadata->withAnswered(
-            'name',
-            is_string($name) && trim($name) !== '' ? $name : null
-        );
+        $r = $this->fetcher->assetResult($mint);
+        $budget->spend(1);
 
+        if (!$r['ok'] || !is_array($r['result'])) {
+            $this->lastMetadataKind = is_string($r['kind'] ?? null) ? $r['kind'] : 'malformed';
+            return null;
+        }
+
+        $content = is_array($r['result']['content'] ?? null) ? $r['result']['content'] : [];
+        $meta    = is_array($content['metadata'] ?? null) ? $content['metadata'] : [];
+        $links   = is_array($content['links'] ?? null) ? $content['links'] : [];
+
+        $name  = $meta['name'] ?? null;
         $image = $links['image'] ?? null;
-        $metadata = $metadata->withAnswered(
-            'image_url',
-            is_string($image) && trim($image) !== '' ? $image : null
-        );
 
-        // Supply only where the response genuinely carries it. A sized
-        // collection reports `supply.print_current_supply`; most collection
-        // parents do not report a total at all, and inventing one from the
-        // asset count would be a different number than the operator expects.
-        $supply = is_array($asset['supply'] ?? null) ? $asset['supply'] : null;
-        if ($supply !== null) {
-            $current = $supply['print_current_supply'] ?? null;
-            $metadata = $metadata->withAnswered(
-                'total_supply',
-                is_int($current) ? $current : null
-            );
-        }
-
-        return $metadata;
+        return $metadata
+            ->withAnswered('name', is_string($name) && trim($name) !== '' ? $name : null)
+            ->withAnswered('image_url', is_string($image) && trim($image) !== '' ? $image : null);
     }
 
     private function evidenceFor(string $kind): string
     {
         return match ($kind) {
             'credentials_missing' => ContractValidationVerdict::EV_CREDENTIALS_MISSING,
+            'rate_limited'        => ContractValidationVerdict::EV_PROVIDER_RATE_LIMITED,
             'transport'           => ContractValidationVerdict::EV_PROVIDER_TIMEOUT,
             'malformed'           => ContractValidationVerdict::EV_MALFORMED_RESPONSE,
+            'budget_exhausted'    => ContractValidationVerdict::EV_BUDGET_EXHAUSTED,
             default               => ContractValidationVerdict::EV_PROVIDER_ERROR,
         };
     }

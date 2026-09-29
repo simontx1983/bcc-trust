@@ -312,7 +312,15 @@ final class NftCapabilityEditor
             return self::RESULT_UNKNOWN_CHAIN;
         }
 
-        if (!NftChainCapability::hasOperatorStartableOperation($chain)) {
+        // ⚠⚠⚠ ASKS ABOUT MANUAL INTAKE, NOT ENUMERATION.
+        // This used to call hasOperatorStartableOperation(), which asks
+        // whether the chain can be ENUMERATED. No EVM or Solana driver
+        // claims enumeration, so the grant was refused on exactly the
+        // chains manual intake exists for — Ethereum, Base and Solana could
+        // never be enabled. canTakeManualIntake() asks the real question:
+        // can some driver validate ONE contract here, and (on EVM) is the
+        // chain inside the approved launch scope.
+        if (!NftChainCapability::canTakeManualIntake($chain)) {
             return self::RESULT_MANUAL_NO_STARTABLE;
         }
 

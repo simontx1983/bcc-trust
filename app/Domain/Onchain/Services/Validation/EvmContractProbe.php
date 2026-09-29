@@ -196,7 +196,7 @@ final class EvmContractProbe
      */
     private function collectMetadata(string $contract, ProviderRequestBudget $budget): ?IntakeMetadata
     {
-        $metadata = IntakeMetadata::unknown();
+        $metadata = IntakeMetadata::forFamily('evm');
 
         if (!$budget->canSpend(1)) {
             $this->lastMetadataKind = 'budget_exhausted';

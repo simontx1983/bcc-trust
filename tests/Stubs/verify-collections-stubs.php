@@ -878,8 +878,13 @@ namespace BCC\Trust\Onchain\Fetchers {
         {
             public static string $kind = 'none';
 
-            /** @var array<string, mixed>|null */
+            /** @var array<string, mixed>|null the getAsset result */
             public static ?array $asset = null;
+
+            /** @var list<array<string, mixed>>|null getAssetsByGroup items */
+            public static ?array $groupItems = null;
+
+            public static string $groupKind = 'none';
 
             public static int $calls = 0;
 
@@ -888,6 +893,40 @@ namespace BCC\Trust\Onchain\Fetchers {
             public function __construct(?object $chain = null)
             {
                 $this->chain = $chain;
+            }
+
+            /**
+             * PR E: the documented verification path. Defaults to ONE
+             * uncompressed member, which is what a verified collection looks
+             * like with `showUnverifiedCollections` false.
+             *
+             * ⚠ `grouping[]` carries exactly `group_key` and `group_value` —
+             * there is no `verified` field in the DAS contract, and an earlier
+             * version of this double invented one.
+             *
+             * @return array{ok: bool, result: ?array<string, mixed>, kind: string}
+             */
+            public function assetsByGroupResult(string $collectionMint): array
+            {
+                self::$calls++;
+
+                if (self::$groupKind !== 'none') {
+                    return ['ok' => false, 'result' => null, 'kind' => self::$groupKind];
+                }
+
+                $items = self::$groupItems ?? [[
+                    'interface'   => 'V1_NFT',
+                    'id'          => 'SeededMember1111111111111111111111111111111',
+                    'compression' => ['compressed' => false],
+                    'grouping'    => [['group_key' => 'collection', 'group_value' => $collectionMint]],
+                    'content'     => ['metadata' => ['name' => 'Seeded Member #1']],
+                ]];
+
+                return [
+                    'ok'     => true,
+                    'result' => ['total' => count($items), 'limit' => 1, 'page' => 1, 'items' => $items],
+                    'kind'   => 'none',
+                ];
             }
 
             /** @return array{ok: bool, result: ?array<string, mixed>, kind: string} */
@@ -902,10 +941,11 @@ namespace BCC\Trust\Onchain\Fetchers {
                 return [
                     'ok'     => true,
                     'result' => self::$asset ?? [
-                        'grouping' => [
-                            ['group_key' => 'collection', 'group_value' => $mint, 'verified' => true],
+                        'compression' => ['compressed' => false],
+                        'content'     => [
+                            'metadata' => ['name' => 'Seeded Solana Collection'],
+                            'links'    => ['image' => 'https://example.test/seeded.png'],
                         ],
-                        'content' => ['metadata' => ['name' => 'Seeded Solana Collection']],
                     ],
                     'kind'   => 'none',
                 ];
@@ -915,6 +955,8 @@ namespace BCC\Trust\Onchain\Fetchers {
             {
                 self::$kind = 'none';
                 self::$asset = null;
+                self::$groupItems = null;
+                self::$groupKind = 'none';
                 self::$calls = 0;
             }
         }
