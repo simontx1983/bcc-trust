@@ -659,6 +659,56 @@ final class BreakerChargePerLogicalRequestTest extends TestCase
         self::assertSame($before, $this->charges(), 'and collects no further charges');
     }
 
+    // ── 6b: losing the probe race is not a provider failure ─────────────
+
+    /**
+     * ⚠ A REFUSAL IS NOT EVIDENCE ABOUT THE PROVIDER.
+     *
+     * During a half-open window several workers may reach the transport
+     * layer; exactly one wins the probe. The losers are turned away WITHOUT
+     * contacting anything, so charging them would invent provider failures
+     * out of our own concurrency — and on a chain that is already tripped,
+     * those phantom charges would keep restamping the cooldown and hold the
+     * breaker open indefinitely.
+     *
+     * Measured on the real counter: refusing costs nothing.
+     */
+    public function testLosingTheProbeRaceChargesNothing(): void
+    {
+        \BccBreakerStore::seedOpen(
+            self::CHAIN,
+            OnchainCircuitBreaker::FAILURE_THRESHOLD,
+            time() - (OnchainCircuitBreaker::COOLDOWN_SECONDS + 60)
+        );
+        self::assertSame(OnchainCircuitBreaker::PHASE_HALF_OPEN, OnchainCircuitBreaker::phase(self::CHAIN), 'precondition');
+
+        // Another worker already owns this chain's probe.
+        \BccBreakerStore::$locks['bcc_cb_probe_' . self::CHAIN] = true;
+        $before = $this->charges();
+
+        \BccWire::$always = ['code' => 200, 'body' => '{}'];
+        $receipt = new ProviderOutcomeReceipt();
+        $result = ApiRetry::get('https://lcd.test/p', [], [
+            'chain_id' => self::CHAIN,
+            'label'    => 'probe race',
+            'outcome'  => $receipt,
+        ]);
+
+        self::assertSame([], \BccWire::$urls, 'the loser must not contact the provider');
+        self::assertTrue(is_wp_error($result), 'it is refused');
+        self::assertSame('circuit_breaker_open', $result->get_error_code());
+        self::assertSame(
+            $before,
+            $this->charges(),
+            'being turned away by our own probe lock must not read as a provider failure'
+        );
+        self::assertSame(ProviderOutcomeReceipt::BLOCKED, $receipt->lastOutcome());
+        self::assertFalse(
+            $receipt->domainMayCharge(),
+            'and a domain verdict must not charge for a request that never happened'
+        );
+    }
+
     // ── 7: the recovery probe ───────────────────────────────────────────
 
     /**

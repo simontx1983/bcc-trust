@@ -189,7 +189,12 @@ final class NftEthIndexerWorker
         }
 
         // Step 2: circuit-breaker gate.
-        if (OnchainCircuitBreaker::isOpen($chainId)) {
+        // ⚠ NON-MUTATING. Several gates below (CU budget, missing chain row,
+        // missing driver, a non-EVM fetcher, a placeholder rpc_url) return
+        // without contacting anything, so this check must not consume the
+        // half-open recovery probe. ApiRetry claims it immediately before the
+        // request it is about to make — see issue #264.
+        if (OnchainCircuitBreaker::isResting($chainId)) {
             ChainCheckpointRepository::recordFailure(
                 $chainId,
                 ChainCheckpointRepository::STATE_BREAKER_OPEN,
