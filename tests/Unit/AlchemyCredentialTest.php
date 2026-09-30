@@ -27,7 +27,8 @@ use PHPUnit\Framework\TestCase;
  *     recording one because nobody set a constant is a permanent false negative.
  *  3. A BLOCKED REQUEST STILL CALLS THE PROVIDER. Returning the right value
  *     after firing the request spends quota and hands a credentialed URL to a
- *     provider log. Counted, not assumed — see {@see AlchemyHttpSpy}.
+ *     provider log. Proven by an ARMED FAIL-IF-CALLED sentinel at the transport seam,
+ *     not inferred from a count — see {@see TransportSentinel}.
  *  4. THE REFACTOR QUIETLY LAUNCHES CHAINS. `driverSupportsChain()` gates the
  *     Alchemy drivers on `chain_type === 'evm'` alone, so Polygon, Arbitrum and
  *     Optimism are held back ONLY by their keyless rpc_url. Resolving them from
@@ -62,7 +63,7 @@ final class AlchemyCredentialTest extends TestCase
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/alchemy-credential-stubs.php';
-        \BCC\Trust\Onchain\Support\AlchemyHttpSpy::reset();
+        \BCC\Trust\Onchain\Support\TransportSentinel::reset();
     }
 
     /** A chain row shaped like `ChainRepository` returns. */
@@ -458,15 +459,24 @@ final class AlchemyCredentialTest extends TestCase
     {
         define('BCC_ALCHEMY_API_KEY', self::KEY);
 
+        // ⚠ ARMED. Any transport attempt throws TransportAttempted rather than
+        // being inferred from a count afterwards.
+        \BCC\Trust\Onchain\Support\TransportSentinel::reset(true);
+
         $chain = self::chain('base', '0x2105');
         AlchemyCredential::rpcUrlFor($chain);
         AlchemyCredential::nftBaseFor($chain);
         AlchemyCredential::status($chain);
         AlchemyCredential::isConfigured();
+        AlchemyCredential::jsonRpcUrlFor($chain);
+        AlchemyCredential::supportsChain($chain);
         NftProviderReadiness::isReady($chain, NftDriverRegistry::DRIVER_ALCHEMY_NFT);
         NftProviderReadiness::configStatus($chain, NftDriverRegistry::DRIVER_ALCHEMY_NFT);
 
-        self::assertSame(0, \BCC\Trust\Onchain\Support\AlchemyHttpSpy::count(), 'resolution must be pure');
+        self::assertTrue(
+            \BCC\Trust\Onchain\Support\TransportSentinel::untouched(),
+            'resolution must be pure — a resolver that verified its endpoint would spend quota on every page render'
+        );
     }
 
     /**
@@ -479,26 +489,79 @@ final class AlchemyCredentialTest extends TestCase
      */
     public function testABlockedRequestMakesNoProviderCall(): void
     {
+        // ⚠⚠⚠ ARMED FAIL-IF-CALLED. The sentinel sits at
+        // `SafeHttpClient::prepareArgs()`, the FIRST statement in
+        // `ApiRetry::post()` — ahead of the circuit breaker and everything it
+        // drags in. So a request that wrongly reaches the transport throws
+        // TransportAttempted naming that seam, instead of dying later with
+        // `Class "BCC\Core\DB\AdvisoryLock" not found`, which is a failure whose
+        // message points at an unrelated class and would be produced by a dozen
+        // unrelated breakages.
+        \BCC\Trust\Onchain\Support\TransportSentinel::reset(true);
+
         // No constant, keyless row: nothing can resolve.
         $chain   = self::chain('ethereum', '0x1', self::SEEDED_TEMPLATE['ethereum'][1]);
         $fetcher = new \BCC\Trust\Onchain\Fetchers\EvmFetcher($chain);
+        $contract = '0x' . str_repeat('a', 40);
 
-        self::assertNull($fetcher->fetchContractMetadata('0x' . str_repeat('a', 40)));
-        self::assertNull($fetcher->fetchMetadataForToken('0x' . str_repeat('a', 40), '1'));
+        self::assertNull($fetcher->fetchContractMetadata($contract));
+        self::assertNull($fetcher->fetchMetadataForToken($contract, '1'));
 
-        $meta = $fetcher->contractMetadataResult('0x' . str_repeat('a', 40));
+        $meta = $fetcher->contractMetadataResult($contract);
         self::assertFalse($meta['ok']);
         self::assertSame('credentials_missing', $meta['kind'], 'a missing credential is UNAVAILABLE, never a verdict');
 
-        $call = $fetcher->ethCallResult('0x' . str_repeat('a', 40), '0x01ffc9a7');
+        $call = $fetcher->ethCallResult($contract, '0x01ffc9a7');
         self::assertFalse($call['ok']);
         self::assertSame('credentials_missing', $call['kind']);
 
-        self::assertSame(
-            0,
-            \BCC\Trust\Onchain\Support\AlchemyHttpSpy::count(),
-            'a blocked request reached the transport: ' . \BCC\Trust\Onchain\Support\AlchemyHttpSpy::count() . ' call(s)'
+        // ⚠ The sentinel must be UNTOUCHED — not merely "no wp_remote_* call".
+        // Entering the transport layer at all is the defect, even if the breaker
+        // would have stopped it one step later.
+        self::assertTrue(
+            \BCC\Trust\Onchain\Support\TransportSentinel::untouched(),
+            'a blocked request entered the transport layer at seam(s): '
+                . implode(', ', \BCC\Trust\Onchain\Support\TransportSentinel::seams())
         );
+    }
+
+    /**
+     * ⚠⚠ THE SENTINEL'S OWN PROOF: it fires, and it fires for the stated reason.
+     *
+     * Without this the suite could not distinguish "no transport attempt happened"
+     * from "the sentinel is not wired up". A tripwire that cannot be shown to trip
+     * is the false-green failure this repo has shipped before.
+     */
+    public function testTheArmedSentinelThrowsTheMomentTheTransportIsEntered(): void
+    {
+        \BCC\Trust\Onchain\Support\TransportSentinel::reset(true);
+
+        $this->expectException(\BCC\Trust\Onchain\Tests\Support\TransportAttempted::class);
+        $this->expectExceptionMessageMatches('~seam "SafeHttpClient::prepareArgs"~');
+
+        // Reaching ApiRetry at all must trip it — this is the call a regression
+        // would make before the credential gate.
+        \BCC\Trust\Onchain\Support\ApiRetry::post('https://d.example/rpc', ['body' => '{}'], ['label' => 'sentinel probe']);
+    }
+
+    /**
+     * Disarmed, the same seam RECORDS instead of throwing.
+     *
+     * ⚠ The seam is called DIRECTLY here, not through `ApiRetry::post()`. The test
+     * above already proves the seam lies on ApiRetry's path — it throws from inside
+     * that call. Disarmed, `post()` carries on past the seam into the breaker and
+     * needs `is_wp_error()`, the object cache and `AdvisoryLock`; faking all of that
+     * to re-prove something already proven would add three fakes and no coverage.
+     */
+    public function testTheDisarmedSentinelRecordsWithoutThrowing(): void
+    {
+        \BCC\Trust\Onchain\Support\TransportSentinel::reset(false);
+
+        \BCC\Core\Http\SafeHttpClient::prepareArgs('https://d.example/rpc', ['body' => '{}']);
+
+        self::assertFalse(\BCC\Trust\Onchain\Support\TransportSentinel::untouched());
+        self::assertContains('SafeHttpClient::prepareArgs', \BCC\Trust\Onchain\Support\TransportSentinel::seams());
+        self::assertSame(1, \BCC\Trust\Onchain\Support\TransportSentinel::count());
     }
 
     /**
@@ -555,13 +618,18 @@ final class AlchemyCredentialTest extends TestCase
     /** A keyless Alchemy TEMPLATE is not a usable public node. */
     public function testAKeylessTemplateIsNotTreatedAsAPublicNode(): void
     {
+        \BCC\Trust\Onchain\Support\TransportSentinel::reset(true);
+
         $chain   = self::chain('ethereum', '0x1', self::SEEDED_TEMPLATE['ethereum'][1]);
         $fetcher = new \BCC\Trust\Onchain\Fetchers\EvmFetcher($chain);
 
         $call = $fetcher->ethCallResult('0x' . str_repeat('a', 40), '0x01ffc9a7');
 
         self::assertSame('credentials_missing', $call['kind']);
-        self::assertSame(0, \BCC\Trust\Onchain\Support\AlchemyHttpSpy::count(), 'a guaranteed 401 must not be fired');
+        self::assertTrue(
+            \BCC\Trust\Onchain\Support\TransportSentinel::untouched(),
+            'a guaranteed 401 must not be fired'
+        );
     }
 
     /**

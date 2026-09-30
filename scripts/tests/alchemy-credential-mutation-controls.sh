@@ -41,9 +41,13 @@ FETCH="app/Domain/Onchain/Fetchers/EvmFetcher.php"
 READY="app/Domain/Onchain/Support/NftProviderReadiness.php"
 WORKER="app/Domain/Onchain/Workers/NftEthIndexerWorker.php"
 GUARD="scripts/endpoint-exposure-guard.php"
+# ⚠ M6d mutates the STUB file to prove the sentinel is actually wired, so the stub
+# must be snapshotted and restored like any other target. A mutated file that is
+# never restored silently poisons every later control in the run.
+STUBS="tests/Stubs/alchemy-credential-stubs.php"
 
 SNAPDIR="$(mktemp -d)"
-for f in "$CRED" "$FETCH" "$READY" "$WORKER"; do
+for f in "$CRED" "$FETCH" "$READY" "$WORKER" "$STUBS"; do
     cp "$f" "$SNAPDIR/$(basename "$f").orig" || { echo "FATAL: snapshot failed for $f"; exit 2; }
 done
 
@@ -334,6 +338,48 @@ $new = implode($E, ["        if (\$network === null || \$key === null) {", "    
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
 ' 'AlchemyCredentialTest' 'M6 an unresolvable chain falls back to the raw row'
+
+# 6c. ⚠⚠⚠ MOVE THE TRANSPORT CALL ABOVE THE CREDENTIAL GATE.
+#
+#     The control the whole sentinel exists for. `ethCallResult()` POSTs BEFORE it
+#     checks whether an endpoint resolved, which is the shape of "returns the right
+#     value but fired the request anyway" — quota spent, and a credentialed URL in
+#     the provider's logs.
+#
+#     ⚠ This must be killed by the ARMED SENTINEL throwing TransportAttempted at
+#     `SafeHttpClient::prepareArgs`, NOT by a class-not-found further down the
+#     stack. The named test asserts the sentinel is untouched, so the kill names
+#     the actual defect.
+mutate "$FETCH" '
+$f = $argv[1]; $s = file_get_contents($f);
+$E = substr_count($s, "\r\n") > 0 ? "\r\n" : "\n";
+$old = implode($E, [
+    "        \$rpcUrl = \$this->jsonRpcUrl();",
+    "        if (\$rpcUrl === null) {",
+    "            return [\x27ok\x27 => false, \x27result\x27 => null, \x27kind\x27 => \x27credentials_missing\x27];",
+    "        }",
+]);
+$new = implode($E, [
+    "        \$rpcUrl = \$this->jsonRpcUrl();",
+    "        ApiRetry::post((string) \$rpcUrl, [\x27body\x27 => \x27{}\x27], [\x27label\x27 => \x27premature\x27]);",
+    "        if (\$rpcUrl === null) {",
+    "            return [\x27ok\x27 => false, \x27result\x27 => null, \x27kind\x27 => \x27credentials_missing\x27];",
+    "        }",
+]);
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, $new, $s));
+' 'AlchemyCredentialTest::testABlockedRequestMakesNoProviderCall' 'M6c the transport is entered before the credential gate'
+
+# 6d. The sentinel must be WIRED. Disarm it and the tripwire proof fails — without
+#     this, a sentinel that silently stopped intercepting would look like a clean
+#     sheet, which is the false-green failure this repo has shipped before.
+mutate "$STUBS" '
+$f = $argv[1]; $s = file_get_contents($f);
+$old = "                if (TransportSentinel::\$active) {";
+$new = "                if (false) {";
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, $new, $s));
+' 'AlchemyCredentialTest::testTheArmedSentinelThrowsTheMomentTheTransportIsEntered' 'M6d the outer sentinel stops intercepting'
 
 # 6b. A missing credential reported as a VERDICT rather than as UNAVAILABLE.
 #     This is the one that writes a permanent false negative against a contract.
