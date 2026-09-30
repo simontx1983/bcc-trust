@@ -25,8 +25,12 @@
 # ⚠ EVERY MUTATION PROVES IT CHANGED CODE (byte diff before/after).
 # ⚠ RESTORE FROM A BYTE SNAPSHOT TAKEN ONCE, NEVER FROM GIT, and abort on a failed
 #   restore — `git checkout --` once deleted six files mid-run in an earlier PR.
-# ⚠ ANCHORS MUST MATCH THIS REPO'S CRLF. A \n-only anchor silently matches nothing
-#   and is reported as `broken`, which is the correct outcome, not a pass.
+# ⚠⚠⚠ ANCHORS MUST COMPUTE THE FILE'S LINE ENDING, NEVER ASSUME IT. This tree
+#   checks out CRLF on the dev host and LF on the CI runner, so a multi-line anchor
+#   with a hardcoded \r\n passes locally and reports `broken` in CI — which is
+#   exactly what M5b did on the first CI run of PR #269. Single-line anchors are
+#   unaffected; anything spanning a line break uses implode($E, [...]).
+#   `broken` failing the run is what surfaced it, and is not a pass.
 #
 # Usage: bash scripts/tests/endpoint-redaction-mutation-controls.sh
 set -uo pipefail
@@ -240,8 +244,10 @@ file_put_contents($f, str_replace($old, $new, $s));
 #     mark disables a driver an operator has correctly configured.
 mutate "$READY" '
 $f = $argv[1]; $s = file_get_contents($f);
-$old = "        \$markedId = isset(\$flag[\x27endpoint_id\x27]) ? trim((string) \$flag[\x27endpoint_id\x27]) : \x27\x27;\r\n        if (\$markedId === \x27\x27) {\r\n            return false;\r\n        }";
-$new = "        \$markedId = isset(\$flag[\x27endpoint_id\x27]) ? trim((string) \$flag[\x27endpoint_id\x27]) : \x27\x27;\r\n        if (\$markedId === \x27\x27) {\r\n            return isset(\$flag[\x27rpc_url\x27]);\r\n        }";
+$E = substr_count($s, "\r\n") > 0 ? "\r\n" : "\n";
+$head = "        \$markedId = isset(\$flag[\x27endpoint_id\x27]) ? trim((string) \$flag[\x27endpoint_id\x27]) : \x27\x27;";
+$old = implode($E, [$head, "        if (\$markedId === \x27\x27) {", "            return false;", "        }"]);
+$new = implode($E, [$head, "        if (\$markedId === \x27\x27) {", "            return isset(\$flag[\x27rpc_url\x27]);", "        }"]);
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
 ' 'DasMarkIdentityTest|NftProviderReadinessTest' 'M5b a legacy mark with no identity is trusted'
