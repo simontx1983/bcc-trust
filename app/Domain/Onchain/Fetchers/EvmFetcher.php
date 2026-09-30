@@ -13,6 +13,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\NftSpamContractRepository;
 use BCC\Trust\Onchain\Services\NftSpamFilter;
 use BCC\Trust\Onchain\Services\V1FetchFailureTracker;
+use BCC\Trust\Onchain\Support\AlchemyCredential;
 use BCC\Trust\Onchain\Support\AlchemyEndpoint;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
@@ -311,11 +312,23 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     ): ?array {
         $chainIdForLog = (int) ($this->chain->id ?? 0);
 
-        $rpcUrl = (string) ($this->chain->rpc_url ?? '');
-        if (!$rpcUrl || str_ends_with($rpcUrl, '/v2/')) {
+        // ⚠⚠ `jsonRpcUrl()`, not the Alchemy-only resolver, even though
+        // `alchemy_getAssetTransfers` is an Alchemy method.
+        //
+        // The old code accepted ANY non-template endpoint here, and a chain
+        // pointed at a self-hosted or third-party node would get the attempt and
+        // its failure. Requiring Alchemy would be a NEW refusal on a path this
+        // change is only supposed to re-source the credential for — and it broke
+        // 15 existing tests whose fixtures use a non-Alchemy host. Whether that
+        // refusal is desirable is a separate decision from where the key lives.
+        $rpcUrl = $this->jsonRpcUrl();
+        if ($rpcUrl === null) {
             // Misconfiguration, not an empty range — the caller must not
             // treat this as "drained".
-            \BCC\Core\Log\Logger::error('[EVM Fetcher] alchemy_getAssetTransfers: rpc_url missing or placeholder', [
+            //
+            // ⚠ `chain_id` only. The endpoint is a credential and the message
+            // names the CONSTANT an operator must set, not its value.
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] alchemy_getAssetTransfers: no endpoint for this chain (set BCC_ALCHEMY_API_KEY or configure rpc_url)', [
                 'chain_id' => $chainIdForLog,
             ]);
             return null;
@@ -540,8 +553,12 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      */
     public function fetchMetadataForToken(string $contract, string $tokenId): ?array
     {
-        $rpcUrl = (string) ($this->chain->rpc_url ?? '');
-        if (!$rpcUrl || str_ends_with($rpcUrl, '/v2/')) {
+        // ⚠ `jsonRpcUrl()` for the same reason as the transfers walk: the old code
+        // accepted any non-template endpoint here and POSTed to it. Narrowing to
+        // Alchemy-only would be a new refusal, which is not what re-sourcing the
+        // credential is for.
+        $rpcUrl = $this->jsonRpcUrl();
+        if ($rpcUrl === null) {
             return null;
         }
         $contractLc = strtolower($contract);
@@ -775,12 +792,17 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      */
     public function ethCallResult(string $to, string $data): array
     {
-        $rpcUrl = (string) ($this->chain->rpc_url ?? '');
-        // Seeded Alchemy URLs ship as "https://eth-mainnet.g.alchemy.com/v2/"
-        // with no key appended. Skip rather than fire a guaranteed 401 — and
-        // say WHY, because a missing key is a configuration problem an operator
-        // can fix, not a verdict about the contract.
-        if ($rpcUrl === '' || str_ends_with($rpcUrl, '/v2/')) {
+        // ⚠⚠ `eth_call` is STANDARD JSON-RPC, so this uses {@see jsonRpcUrl()}
+        // and NOT the Alchemy-only resolver. Avalanche and BSC run on public
+        // RPCs with no credential and keep ERC-721 gating on that basis;
+        // requiring Alchemy here would have silently removed token gating from
+        // two live chains.
+        //
+        // A keyless seeded template is still rejected — it is a guaranteed 401,
+        // and a missing key is a configuration problem an operator can fix, not
+        // a verdict about the contract.
+        $rpcUrl = $this->jsonRpcUrl();
+        if ($rpcUrl === null) {
             return ['ok' => false, 'result' => null, 'kind' => 'credentials_missing'];
         }
 
@@ -844,20 +866,21 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      */
     public function contractMetadataResult(string $contract): array
     {
-        $rpcUrl = (string) ($this->chain->rpc_url ?? '');
-        if ($rpcUrl === '') {
-            return ['ok' => false, 'data' => null, 'kind' => 'credentials_missing'];
-        }
-
         $contractLc = strtolower($contract);
         if (!preg_match('/^0x[a-f0-9]{40}$/', $contractLc)) {
             return ['ok' => false, 'data' => null, 'kind' => 'malformed'];
         }
 
-        // No Alchemy base means no key for this chain. DECISION 7 makes both
-        // launch chains keyed, so this is a misconfiguration to report, never
-        // a reason to accept an empty-but-verified-looking collection.
-        $nftV3Base = AlchemyEndpoint::nftBaseFromRpcUrl($rpcUrl);
+        // No Alchemy base means no credential for this chain. DECISION 7 makes
+        // both launch chains keyed, so this is a misconfiguration to report,
+        // never a reason to accept an empty-but-verified-looking collection.
+        //
+        // ⚠ The malformed-contract check now comes FIRST. It used to sit after
+        // an rpc_url emptiness test, so a malformed contract on an unconfigured
+        // chain reported `credentials_missing` — sending an operator to fix a
+        // credential over a caller bug. Both are still reported, and now each
+        // one names its own cause.
+        $nftV3Base = $this->alchemyNftBase();
         if ($nftV3Base === null) {
             return ['ok' => false, 'data' => null, 'kind' => 'credentials_missing'];
         }
@@ -921,14 +944,13 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     {
         $chainId = $chainId ?: (int) $this->chain->id;
 
-        $rpcUrl  = (string) ($this->chain->rpc_url ?? '');
-        $nftBase = $this->alchemyNftBaseFromRpcUrl($rpcUrl);
+        $nftBase = $this->alchemyNftBase();
         if ($nftBase === null) {
-            // Fail-loud-and-empty: chains on non-Alchemy RPCs (e.g.
-            // public-RPC Avalanche / BSC) have no V1 NFT discovery
-            // until their rpc_url is migrated to Alchemy. Logged once
-            // per call so operator can grep for the gap.
-            \BCC\Core\Log\Logger::warning('[EvmFetcher.fetch_collections] chain has non-Alchemy rpc_url; V1 NFT discovery unavailable', [
+            // Fail-loud-and-empty: chains with no Alchemy credential (e.g.
+            // public-RPC Avalanche / BSC, or an unlaunched EVM chain that is
+            // not in AlchemyCredential's map) have no V1 NFT discovery. Logged
+            // once per call so an operator can grep for the gap.
+            \BCC\Core\Log\Logger::warning('[EvmFetcher.fetch_collections] no Alchemy credential for this chain; V1 NFT discovery unavailable', [
                 'chain_id' => $chainId,
                 'chain'    => (string) ($this->chain->slug ?? ''),
             ]);
@@ -1171,10 +1193,6 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      */
     public function fetchContractMetadata(string $contract): ?array
     {
-        $rpcUrl = (string) ($this->chain->rpc_url ?? '');
-        if ($rpcUrl === '') {
-            return null;
-        }
         $contractLc = strtolower($contract);
         if (!preg_match('/^0x[a-f0-9]{40}$/', $contractLc)) {
             return null;
@@ -1195,7 +1213,7 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         // permissive of the two, and safe because the pattern is anchored at
         // both ends on a fixed `.g.alchemy.com` suffix, so a dotted label
         // still cannot escape the domain and leak the key elsewhere.
-        $nftV3Base = AlchemyEndpoint::nftBaseFromRpcUrl($rpcUrl);
+        $nftV3Base = $this->alchemyNftBase();
         if ($nftV3Base === null) {
             return null;
         }
@@ -1297,35 +1315,77 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /**
-     * Derive the Alchemy NFT API v3 base URL from the chain's JSON-RPC URL.
+     * The endpoint for a JSON-RPC call, or null when there is none.
      *
-     * Maps `https://{network}.g.alchemy.com/v2/{key}` to
-     *      `https://{network}.g.alchemy.com/nft/v3/{key}`.
+     * ── ⚠⚠ WHY THIS REPLACED READING THE COLUMN DIRECTLY ────────────────
+     * Six methods on this class opened with the same two lines:
      *
-     * Returns `null` for any URL that isn't a recognisable Alchemy v2
-     * endpoint — public RPCs (Avalanche on api.avax.network, BSC on
-     * bsc-dataseed.binance.org) flow this branch and the caller
-     * fail-loud-and-empties for the chain. Strict regex prevents
-     * api-key leakage to non-Alchemy hosts.
+     *     $rpcUrl = (string) ($this->chain->rpc_url ?? '');
+     *     if (!$rpcUrl || str_ends_with($rpcUrl, '/v2/')) { … }
      *
-     * ── THE REGEX MOVED; THE BEHAVIOUR DID NOT ──────────────────────────
-     * The pattern now lives in {@see AlchemyEndpoint}, unchanged, because a
-     * SECOND caller needs the identical answer:
-     * {@see \BCC\Trust\Onchain\Support\NftProviderReadiness} reports whether
-     * the Alchemy-backed NFT drivers are usable on a chain. Had that been
-     * written as its own copy of this regex, the capability panel and this
-     * fetcher would have been two hand-maintained definitions of one
-     * predicate — and a panel that says "Alchemy configured" while
-     * `fetch_collections()` returns `[]` for the same chain is worse than no
-     * panel, because it gets believed.
+     * Two problems. The credential came from a DATABASE COLUMN, so it was in
+     * every backup and export and on screen in any page that printed the row.
+     * And `str_ends_with($rpcUrl, '/v2/')` was a hand-rolled fifth copy of "is
+     * this a keyed Alchemy endpoint?", which {@see AlchemyEndpoint} already
+     * answers — a laxer copy, since it accepts any non-Alchemy host.
      *
-     * This method stays as the fetcher's local vocabulary; it just no longer
-     * owns the fact.
+     * {@see AlchemyCredential} now owns both: the credential comes from
+     * `wp-config.php` and, when one has to be BUILT, the host comes from a closed
+     * in-code map rather than from the row.
+     *
+     * ── ⚠⚠⚠ ALCHEMY IS PREFERRED, NOT REQUIRED ──────────────────────────
+     * `eth_call` and `eth_blockNumber` are standard and work on any node.
+     * Avalanche (`api.avax.network`) and BSC (`bsc-dataseed.binance.org`) are
+     * seeded with PUBLIC RPCs and no credential, and keep ERC-721 ownership gating
+     * on that basis — {@see \BCC\Trust\Onchain\Support\NftProviderReadiness} gates
+     * `DRIVER_EVM_RPC` on a non-empty rpc_url alone, never on Alchemy.
+     *
+     * ⚠ A first draft of this change required Alchemy here. It would have
+     * silently removed token gating from two live chains, and been credited as a
+     * security improvement; 15 existing tests caught it. Whether to narrow these
+     * paths is a separate decision from where the credential lives.
+     *
+     * The row is trusted as a FALLBACK because nothing secret is added to it — it
+     * is returned verbatim, so the "never interpolate a credential into a
+     * DB-controlled host" rule that shapes {@see AlchemyCredential::rpcUrlFor()}
+     * does not apply.
+     *
+     * ⚠⚠⚠ THE RETURN VALUE MAY BE A CREDENTIAL. POST to it. Do not log it,
+     * render it, or put it in an exception — the log lines in the callers below
+     * carry `chain_id` only, deliberately.
+     *
+     * ⚠ null means UNAVAILABLE, never INVALID. Callers must report a
+     * configuration problem, not a verdict about the contract being checked.
      */
-    private function alchemyNftBaseFromRpcUrl(string $rpcUrl): ?string
+    private function jsonRpcUrl(): ?string
     {
-        return AlchemyEndpoint::nftBaseFromRpcUrl($rpcUrl);
+        return AlchemyCredential::jsonRpcUrlFor($this->chain);
     }
+
+    /**
+     * The Alchemy NFT API v3 base for this chain, or null.
+     *
+     * Derived from the same resolver as {@see alchemyRpcUrl()}, so "can build an
+     * NFT base" and "has an Alchemy endpoint" cannot disagree.
+     *
+     * ⚠⚠⚠ ALSO A CREDENTIAL, and specifically the value whose leak began this
+     * work: `/nft/v3/<KEY>` printed by a diagnostic whose redactor knew only
+     * about `/v2/<KEY>` and query strings.
+     */
+    private function alchemyNftBase(): ?string
+    {
+        return AlchemyCredential::nftBaseFor($this->chain);
+    }
+
+    // ⚠ `alchemyNftBaseFromRpcUrl()` WAS DELETED. It was a one-line delegation
+    // to `AlchemyEndpoint::nftBaseFromRpcUrl()`, kept as "the fetcher's local
+    // vocabulary" after the regex moved out. Its last two callers now go through
+    // {@see alchemyNftBase()}, which resolves the CREDENTIAL as well as the
+    // shape, and a helper that takes a caller-supplied `$rpcUrl` is exactly the
+    // seam that let the chain row keep being the credential source.
+    //
+    // Deleted rather than left unused: a method that still accepts an arbitrary
+    // URL invites the next caller to pass `$this->chain->rpc_url` again.
 
     /**
      * GET an Alchemy NFT API v3 endpoint. Returns the decoded JSON body

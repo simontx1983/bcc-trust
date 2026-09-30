@@ -84,6 +84,14 @@ jobs:
       - name: Endpoint redaction / identity mutation controls
         run: bash scripts/tests/endpoint-redaction-mutation-controls.sh
 
+      # The credential-source half of issue #267. Two of these controls pin
+      # changes that would otherwise read as improvements: mapping every seeded
+      # Alchemy network (which silently launches Polygon, Arbitrum and Optimism,
+      # because nothing else gates them) and routing standard JSON-RPC through the
+      # Alchemy resolver (which removes ERC-721 gating from Avalanche and BSC).
+      - name: Alchemy credential-source mutation controls
+        run: bash scripts/tests/alchemy-credential-mutation-controls.sh
+
       # verify-golden.sh itself needs a live WordPress + seeded DB, which CI
       # has not got — which is exactly why it was in no workflow, and why its
       # fixtures rotted unnoticed for months (foreman_insignia from v1.36,

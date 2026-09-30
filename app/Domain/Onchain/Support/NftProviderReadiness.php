@@ -116,12 +116,23 @@ final class NftProviderReadiness
             // wallet addresses off-platform.
 
             // ── EVM ─────────────────────────────────────────────────────
-            // Both Alchemy drivers need a KEYED Alchemy endpoint. The
-            // seeded URLs (`https://eth-mainnet.g.alchemy.com/v2/`) carry no
-            // key and correctly fail; Avalanche and BSC point at public RPCs
-            // that never match at all.
+            // Both Alchemy drivers need a resolvable Alchemy endpoint, which
+            // now means `BCC_ALCHEMY_API_KEY` set AND the chain in
+            // {@see AlchemyCredential}'s closed network map — or, transitionally,
+            // a row that still carries a complete keyed URL.
+            //
+            // ⚠⚠ This is asked of {@see AlchemyCredential::rpcUrlFor()}, the
+            // SAME resolver the fetcher calls, and not re-derived here. Two
+            // definitions of "is Alchemy usable on this chain?" is how a panel
+            // ends up saying configured while `fetch_collections()` returns []
+            // for that chain — and a panel that is wrong in the permissive
+            // direction is worse than no panel, because it gets believed.
+            //
+            // The seeded keyless templates (`https://eth-mainnet.g.alchemy.com/v2/`)
+            // still correctly fail when no constant is set, and Avalanche and BSC
+            // are absent from the map so they never resolve at all.
             NftDriverRegistry::DRIVER_ALCHEMY_NFT,
-            NftDriverRegistry::DRIVER_ALCHEMY_TRANSFERS => AlchemyEndpoint::isConfigured($rpcUrl),
+            NftDriverRegistry::DRIVER_ALCHEMY_TRANSFERS => AlchemyCredential::rpcUrlFor($chain) !== null,
 
             // `eth_call balanceOf` works on any JSON-RPC endpoint, which is
             // why Avalanche and BSC keep ERC-721 gating with no Alchemy key.
@@ -236,14 +247,15 @@ final class NftProviderReadiness
             NftDriverRegistry::DRIVER_TALIS_WHITELIST
                 => ProviderConfigStatus::describing($provider, $restUrl),
 
-            // Alchemy's NFT drivers need a KEYED endpoint, so a keyless seeded
-            // template must report unconfigured even though the row is non-empty
-            // and `EndpointDescriptor` would happily describe its host.
+            // ⚠ Delegated to {@see AlchemyCredential::status()} rather than
+            // rebuilt here. It is the class that knows where the credential
+            // comes from, which chains are mapped, and — importantly — how to
+            // tell "no credential" from "this build cannot reach Alchemy for
+            // this chain at all". A keyless seeded template reports unconfigured
+            // even though the row is non-empty and `EndpointDescriptor` would
+            // happily describe its host.
             NftDriverRegistry::DRIVER_ALCHEMY_NFT,
-            NftDriverRegistry::DRIVER_ALCHEMY_TRANSFERS
-                => AlchemyEndpoint::isConfigured($rpcUrl)
-                    ? ProviderConfigStatus::describing($provider, $rpcUrl)
-                    : ProviderConfigStatus::unconfigured($provider),
+            NftDriverRegistry::DRIVER_ALCHEMY_TRANSFERS => AlchemyCredential::status($chain),
 
             NftDriverRegistry::DRIVER_EVM_RPC  => ProviderConfigStatus::describing($provider, $rpcUrl),
             NftDriverRegistry::DRIVER_DAS_RPC  => ProviderConfigStatus::describing($provider, SolanaEndpoints::rpcEndpoint($chain)),

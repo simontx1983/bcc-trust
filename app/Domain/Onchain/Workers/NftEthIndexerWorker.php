@@ -8,6 +8,7 @@ use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\Services\NftHoldingsIndexer;
+use BCC\Trust\Onchain\Support\AlchemyCredential;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
@@ -617,13 +618,31 @@ final class NftEthIndexerWorker
     private static function fetchHeadBlock(EvmFetcher $fetcher): array
     {
         $outcome = new ProviderOutcomeReceipt();
-        $chain  = $fetcher->get_chain();
-        $rpcUrl = (string) ($chain->rpc_url ?? '');
-        if ($rpcUrl === '') {
-            return ['block' => 0, 'error' => 'eth_blockNumber: rpc_url not configured for this chain', 'outcome' => $outcome];
-        }
-        if (str_ends_with($rpcUrl, '/v2/')) {
-            return ['block' => 0, 'error' => 'eth_blockNumber: rpc_url missing Alchemy API key suffix (ends with /v2/)', 'outcome' => $outcome];
+        $chain = $fetcher->get_chain();
+
+        // ⚠⚠ THE SAME RESOLVER THE TRANSFER WALK USES —
+        // {@see AlchemyCredential::jsonRpcUrlFor()}. This head block BOUNDS that
+        // walk, so taking it from a different endpoint would let the two disagree
+        // across a reorg: the checkpoint would advance to a head the transfer
+        // endpoint has not seen, and the skipped range would never be re-walked
+        // because the checkpoint says it was.
+        //
+        // ⚠ Alchemy-preferred, but NOT Alchemy-required. `eth_blockNumber` is
+        // standard and the old code accepted any non-template endpoint; a chain on
+        // a self-hosted node keeps working. Narrowing that is a separate decision
+        // from where the credential lives.
+        //
+        // ⚠ The credential now comes from `BCC_ALCHEMY_API_KEY` rather than the
+        // chain row, so the two former error strings no longer talk about an
+        // `rpc_url` suffix — they name what an operator can actually set. Neither
+        // has ever carried the endpoint value, and this one does not either.
+        $rpcUrl = AlchemyCredential::jsonRpcUrlFor($chain);
+        if ($rpcUrl === null) {
+            return [
+                'block'   => 0,
+                'error'   => 'eth_blockNumber: no endpoint for this chain (set BCC_ALCHEMY_API_KEY or configure rpc_url)',
+                'outcome' => $outcome,
+            ];
         }
 
         $body = wp_json_encode([

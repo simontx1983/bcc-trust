@@ -479,6 +479,7 @@ return array(
     'BCC\\Trust\\Onchain\\Services\\WalletLinkWriteService' => $baseDir . '/app/Domain/Onchain/Services/WalletLinkWriteService.php',
     'BCC\\Trust\\Onchain\\Services\\WalletSeedService' => $baseDir . '/app/Domain/Onchain/Services/WalletSeedService.php',
     'BCC\\Trust\\Onchain\\Services\\WalletSignalWriteService' => $baseDir . '/app/Domain/Onchain/Services/WalletSignalWriteService.php',
+    'BCC\\Trust\\Onchain\\Support\\AlchemyCredential' => $baseDir . '/app/Domain/Onchain/Support/AlchemyCredential.php',
     'BCC\\Trust\\Onchain\\Support\\AlchemyEndpoint' => $baseDir . '/app/Domain/Onchain/Support/AlchemyEndpoint.php',
     'BCC\\Trust\\Onchain\\Support\\ApiRetry' => $baseDir . '/app/Domain/Onchain/Support/ApiRetry.php',
     'BCC\\Trust\\Onchain\\Support\\Base58' => $baseDir . '/app/Domain/Onchain/Support/Base58.php',
