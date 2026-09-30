@@ -102,36 +102,24 @@ final class HeliusEndpoint
         return 'bcc_onchain_das_unsupported_' . $chainId;
     }
 
-    /**
-     * Strip query-string secrets from an RPC URL before it reaches a log or
-     * a persisted option.
-     *
-     * Helius's canonical DAS URL embeds the API key as `?api-key=…`, so the
-     * whole query string is masked — host + path are what an operator needs
-     * in order to recognise the endpoint.
-     *
-     * ── WHY THIS LIVES HERE NOW ─────────────────────────────────────────
-     * It was private to `SolanaFetcher`, which WRITES the DAS-unsupported
-     * mark. {@see NftProviderReadiness} has to decide whether a stored mark
-     * describes the endpoint currently in use, and it can only do that by
-     * putting the current endpoint through the SAME transformation the
-     * writer used. Two copies of a redaction rule would drift, and the drift
-     * would silently make every stored mark un-matchable — permanently
-     * disabling a driver, or permanently ignoring a real negative signal,
-     * with no way to tell which.
-     *
-     * ⚠️ This masks the QUERY STRING only. A credential embedded in the URL
-     * PATH (`https://host/v1/<KEY>`) is NOT redacted — see the note on
-     * {@see NftProviderReadiness::dasMarkApplies()}. That is pre-existing
-     * behaviour, preserved here byte-for-byte rather than quietly changed.
-     */
-    public static function redactEndpoint(string $url): string
-    {
-        $queryPos = strpos($url, '?');
-        if ($queryPos === false) {
-            return $url;
-        }
-
-        return substr($url, 0, $queryPos) . '?***REDACTED***';
-    }
+    // ⚠⚠⚠ `redactEndpoint()` WAS DELETED. It masked the QUERY STRING only:
+    //
+    //     'https://host/v2/SECRET'       -> unchanged
+    //     'https://host/?api-key=SECRET' -> 'https://host/?***REDACTED***'
+    //
+    // Its own docblock admitted the gap, and on 2026-09-30 a live key leaked
+    // through the third shape nobody had listed —
+    // `AlchemyEndpoint::nftBaseFromRpcUrl()` rewriting a path key into
+    // `/nft/v3/<KEY>`. That is the failure mode of allow-by-pattern redaction.
+    //
+    // Replacements, with the two jobs it was conflating pulled apart:
+    //
+    //   {@see \BCC\Trust\Onchain\Support\EndpointDescriptor::display()}
+    //       deny-by-default description — scheme + host, safe to render or log
+    //   {@see \BCC\Trust\Onchain\Support\EndpointDescriptor::identity()}
+    //       site-keyed HMAC over the whole URL, for comparison only
+    //
+    // Deleted rather than deprecated: a redactor that is safe for one
+    // credential shape and silently unsafe for another is worse than none,
+    // because callers trust the name.
 }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Support\AlchemyEndpoint;
+use BCC\Trust\Onchain\Support\EndpointDescriptor;
 use BCC\Trust\Onchain\Support\HeliusEndpoint;
 use BCC\Trust\Onchain\Support\NftCapabilityOptionState;
 use BCC\Trust\Onchain\Support\NftDriverRegistry;
@@ -70,6 +71,25 @@ final class NftProviderReadinessTest extends TestCase
             'chain_type' => $type,
             'rpc_url'    => $rpc,
             'rest_url'   => $rest,
+        ];
+    }
+
+    /**
+     * Write a DAS-unsupported mark the way the production writer does.
+     *
+     * ⚠ TWO fields, not one. `endpoint_display` renders and cannot be compared;
+     * `endpoint_id` compares and is never rendered. They replaced a single
+     * `rpc_url` that did both jobs — see {@see DasMarkIdentityTest} for why one
+     * field could not keep doing both once the description was hardened.
+     */
+    private static function markDasUnsupported(int $chainId, string $endpoint, int $code = -32601, string $msg = 'Method not found'): void
+    {
+        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey($chainId)] = [
+            'endpoint_display' => EndpointDescriptor::display($endpoint),
+            'endpoint_id'      => EndpointDescriptor::identity($endpoint),
+            'code'             => $code,
+            'message'          => $msg,
+            'detected_at'      => 1,
         ];
     }
 
@@ -299,8 +319,8 @@ final class NftProviderReadinessTest extends TestCase
      * already told us it cannot serve `getAssets*`. The mark is written only
      * on an observed -32601/-32603, so it is evidence rather than a guess.
      *
-     * The mark records the redacted endpoint, so the current one is put
-     * through the same redaction to compare.
+     * The mark records the endpoint's IDENTITY, so the current one is put
+     * through the same derivation to compare.
      */
     public function testObservedDasUnsupportedOverridesAConfiguredKey(): void
     {
@@ -313,12 +333,7 @@ final class NftProviderReadinessTest extends TestCase
         $solana   = self::chain('solana', 'solana', $endpoint, '', 42);
         self::assertTrue(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS_RPC));
 
-        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(42)] = [
-            'rpc_url'     => HeliusEndpoint::redactEndpoint($endpoint),
-            'code'        => -32601,
-            'message'     => 'Method not found',
-            'detected_at' => 1,
-        ];
+        self::markDasUnsupported(42, $endpoint);
 
         self::assertFalse(
             NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS_RPC),
@@ -346,12 +361,7 @@ final class NftProviderReadinessTest extends TestCase
         $newRpc = 'https://mainnet.helius-rpc.com/?api-key=real-key';
 
         // The old endpoint was observed to lack DAS.
-        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(42)] = [
-            'rpc_url'     => HeliusEndpoint::redactEndpoint($oldRpc),
-            'code'        => -32601,
-            'message'     => 'Method not found',
-            'detected_at' => 1,
-        ];
+        self::markDasUnsupported(42, $oldRpc);
 
         self::assertFalse(
             NftProviderReadiness::isReady(self::chain('solana', 'solana', $oldRpc, '', 42), NftDriverRegistry::DRIVER_DAS_RPC),
@@ -383,40 +393,72 @@ final class NftProviderReadinessTest extends TestCase
         self::assertTrue(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_DAS_RPC));
     }
 
-    /** @return array<string, array{0: mixed}> */
+    /**
+     * ⚠ A LEGACY mark is unattributable too. It stored a query-redacted
+     * `rpc_url` and no identity, and nothing can be recovered from it: the
+     * stored value was already lossy, so the original URL — and therefore its
+     * identity — is gone. It is ignored, not migrated.
+     *
+     * @return array<string, array{0: mixed}>
+     */
     public static function unattributableMarks(): array
     {
         return [
-            'not an array'      => ['garbage'],
-            'empty array'       => [[]],
-            'no rpc_url key'    => [['code' => -32601, 'message' => 'Method not found']],
-            'empty rpc_url'     => [['rpc_url' => '', 'code' => -32601]],
-            'whitespace rpc_url'=> [['rpc_url' => '   ', 'code' => -32601]],
+            'not an array'         => ['garbage'],
+            'empty array'          => [[]],
+            'no identity key'      => [['code' => -32601, 'message' => 'Method not found']],
+            'empty identity'       => [['endpoint_id' => '', 'code' => -32601]],
+            'whitespace identity'  => [['endpoint_id' => '   ', 'code' => -32601]],
+            'legacy redacted url'  => [['rpc_url' => 'https://das-provider.example/?***REDACTED***', 'code' => -32601]],
+            'legacy raw url'       => [['rpc_url' => 'https://das-provider.example/?api-key=k', 'code' => -32601]],
+            'display but no id'    => [['endpoint_display' => 'https://das-provider.example', 'code' => -32601]],
         ];
     }
 
     /**
-     * The redaction masks the whole query string, so the same host with a
-     * ROTATED key compares equal and keeps its refusal.
+     * ⚠⚠⚠ THE REVERSAL. A ROTATED KEY ON THE SAME HOST NO LONGER INHERITS THE
+     * REFUSAL — and this test previously asserted the opposite.
      *
-     * Deliberate and conservative: a host that has already proven it cannot
-     * serve DAS will not start serving it because the key changed, and the
-     * redaction is what keeps the secret out of the stored option.
+     * The old comparison was two query-only redactions, so `?api-key=OLD` and
+     * `?api-key=NEW` compared EQUAL, and the old docblock defended that as
+     * conservative: a host that cannot serve DAS will not start because the key
+     * changed.
+     *
+     * That defence died with the redaction it rested on. A deny-by-default
+     * description is `scheme://host`, so comparing descriptions would make every
+     * endpoint on a host equal — not just a rotated key, but a different path, a
+     * different API version, a different product. The narrow claim the old test
+     * made is not available any more; only the far too wide one is.
+     *
+     * So identity is compared instead, and identity includes the credential.
+     * The cost is real and accepted: a genuinely DAS-incapable host is re-probed
+     * once after a key rotation, and re-marks itself. The alternative — a
+     * per-host verdict — is the same conflation that splitting `das_rpc` from
+     * `das_helius` existed to undo, on a provider that demonstrably serves
+     * different things down different paths.
      */
-    public function testRotatingAKeyOnTheSameHostKeepsTheRefusal(): void
+    public function testRotatingAKeyOnTheSameHostDoesNotInheritTheRefusal(): void
     {
         define('BCC_HELIUS_API_KEY', 'real-key');
 
-        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(42)] = [
-            'rpc_url' => HeliusEndpoint::redactEndpoint('https://dead.example/?api-key=OLD'),
-            'code'    => -32601,
-        ];
+        self::markDasUnsupported(42, 'https://dead.example/?api-key=OLD');
 
-        self::assertFalse(
+        self::assertTrue(
             NftProviderReadiness::isReady(
                 self::chain('solana', 'solana', 'https://dead.example/?api-key=NEW', '', 42),
                 NftDriverRegistry::DRIVER_DAS_RPC
-            )
+            ),
+            'a mark for one credential must not attach to another on the same host'
+        );
+
+        // ⚠ The control. The reversal must be about the CREDENTIAL changing,
+        // not about the mark having stopped working altogether.
+        self::assertFalse(
+            NftProviderReadiness::isReady(
+                self::chain('solana', 'solana', 'https://dead.example/?api-key=OLD', '', 42),
+                NftDriverRegistry::DRIVER_DAS_RPC
+            ),
+            'the endpoint the mark was written for still keeps its refusal'
         );
     }
 
@@ -426,10 +468,7 @@ final class NftProviderReadinessTest extends TestCase
         define('BCC_HELIUS_API_KEY', 'real-key');
 
         $rpc = 'https://das-provider.example/?api-key=k';
-        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(42)] = [
-            'rpc_url' => HeliusEndpoint::redactEndpoint($rpc),
-            'code'    => -32601,
-        ];
+        self::markDasUnsupported(42, $rpc);
 
         self::assertTrue(
             NftProviderReadiness::isReady(self::chain('solana', 'solana', $rpc, '', 99), NftDriverRegistry::DRIVER_DAS_RPC),

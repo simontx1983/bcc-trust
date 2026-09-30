@@ -11,6 +11,7 @@ use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
+use BCC\Trust\Onchain\Support\EndpointDescriptor;
 use BCC\Trust\Onchain\Support\HeliusEndpoint;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 use BCC\Trust\Onchain\Support\SolanaEndpoints;
@@ -1494,9 +1495,12 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         if (is_array($json) && isset($json['error'])) {
             $code    = (int) ($json['error']['code'] ?? 0);
             $message = (string) ($json['error']['message'] ?? 'unknown RPC error');
+            // ⚠ The endpoint reaches a LOG here, so it gets the deny-by-default
+            // description — scheme + host and nothing else. The previous
+            // query-only redaction wrote path-embedded credentials into logs.
             \BCC\Core\Log\Logger::warning(sprintf(
                 '[Solana Fetcher] RPC %s returned error %d: %s (endpoint=%s)',
-                $method, $code, $message, self::redactRpcUrl($this->rpcUrl())
+                $method, $code, $message, EndpointDescriptor::display($this->rpcUrl())
             ));
 
             // Method-not-found / method-not-supported on DAS-family calls
@@ -1506,7 +1510,12 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             if (in_array($code, [-32601, -32603], true)
                 && str_starts_with($method, 'getAssets')
             ) {
-                self::markDasUnsupported($chainId, self::redactRpcUrl($this->rpcUrl()), $code, $message);
+                // ⚠ The RAW endpoint is passed in deliberately.
+                // markDasUnsupported() derives BOTH the display description and
+                // the comparison identity from it, and the identity needs the
+                // whole URL. Pre-redacting here is what forced display and
+                // identity to be the same lossy string in the first place.
+                self::markDasUnsupported($chainId, $this->rpcUrl(), $code, $message);
             }
             return null;
         }
@@ -1527,31 +1536,38 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      */
     private static function markDasUnsupported(int $chainId, string $rpcUrl, int $code, string $message): void
     {
+        // ⚠⚠⚠ TWO FIELDS, TWO JOBS. This used to store one `rpc_url` that was
+        // BOTH rendered on the admin Settings page AND compared by
+        // NftProviderReadiness to decide whether the mark still applied. One
+        // value cannot serve both: rendering wants it as lossy as possible,
+        // comparison wants it exact. The old compromise masked only the query
+        // string, so a path-embedded credential — Alchemy's and QuickNode's
+        // shape — was rendered verbatim in admin HTML.
+        //
+        //   endpoint_display  scheme://host. Safe to render. Useless to compare.
+        //   endpoint_id       site-keyed HMAC over the whole URL. Compares
+        //                     exactly. NEVER rendered, logged or exported.
         update_option(
             HeliusEndpoint::dasUnsupportedOptionKey($chainId),
             [
-                'rpc_url'     => $rpcUrl,
-                'code'        => $code,
-                'message'     => $message,
-                'detected_at' => time(),
+                'endpoint_display' => EndpointDescriptor::display($rpcUrl),
+                'endpoint_id'      => EndpointDescriptor::identity($rpcUrl),
+                'code'             => $code,
+                'message'          => $message,
+                'detected_at'      => time(),
             ],
             false
         );
     }
 
-    /**
-     * Strip query-string secrets from an RPC URL before it reaches logs
-     * or a persisted wp_option (the DAS-unsupported payload is rendered
-     * on the admin Settings panel). Helius's canonical DAS URL embeds
-     * the API key as `?api-key=…`, so the whole query string is masked —
-     * host + path are what an operator needs to identify the endpoint.
-     */
-    private static function redactRpcUrl(string $url): string
-    {
-        // Shared with NftProviderReadiness, which must put the CURRENT
-        // endpoint through the identical transformation to decide whether a
-        // stored mark still describes it. Two copies would drift, and the
-        // drift would silently make every stored mark un-matchable.
-        return HeliusEndpoint::redactEndpoint($url);
-    }
+    // ⚠⚠⚠ `redactRpcUrl()` WAS DELETED, along with
+    // `HeliusEndpoint::redactEndpoint()` which it delegated to. Both masked the
+    // QUERY STRING only, which left a path-embedded credential — Alchemy's and
+    // QuickNode's shape — intact in logs and in admin HTML. Use
+    // {@see EndpointDescriptor::display()} for anything an operator or a log
+    // will see, and {@see EndpointDescriptor::identity()} for comparison.
+    //
+    // They are removed rather than deprecated on purpose: a redactor that is
+    // safe for one credential shape and silently unsafe for another is worse
+    // than no redactor, because callers trust the name.
 }

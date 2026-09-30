@@ -2,6 +2,7 @@
 
 namespace BCC\Trust\Onchain\Admin;
 
+use BCC\Trust\Onchain\Support\EndpointDescriptor;
 use BCC\Trust\Onchain\Support\HeliusEndpoint;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 
@@ -515,7 +516,20 @@ class SettingsPage
             if (!is_array($flag)) {
                 continue;
             }
-            $rpc     = isset($flag['rpc_url']) ? (string) $flag['rpc_url'] : '';
+            // ⚠⚠ This reads the OPTION, not `NftProviderReadiness::endpointRefusal()`,
+            // so nothing has described the value for it. Every field it prints
+            // must therefore be made safe HERE.
+            //
+            // `display()` is applied to whatever is stored rather than to a
+            // trusted field: a legacy payload has `rpc_url` and no
+            // `endpoint_display`, and legacy `rpc_url` values are query-only
+            // redactions that can still carry a path credential. Both keys are
+            // read and both go through the describer, which reduces anything
+            // undescribable to a bounded placeholder instead of echoing it.
+            $rpc = EndpointDescriptor::display(
+                isset($flag['endpoint_display']) ? (string) $flag['endpoint_display']
+                    : (isset($flag['rpc_url']) ? (string) $flag['rpc_url'] : '')
+            );
             $code    = isset($flag['code']) ? (int) $flag['code'] : 0;
             $message = isset($flag['message']) ? (string) $flag['message'] : '';
             $when    = isset($flag['detected_at']) ? (int) $flag['detected_at'] : 0;

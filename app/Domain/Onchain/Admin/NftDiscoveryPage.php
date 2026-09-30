@@ -2230,13 +2230,21 @@ class NftDiscoveryPage
             <?php foreach ($refusals as $driver => $refusal): ?>
                 <div style="font-size:11px;color:#d63638;margin-top:4px;">
                     <?php
-                    // The stored endpoint was redacted by the writer before
-                    // it was ever persisted, so it carries no query string
-                    // and therefore no key. The provider MESSAGE is upstream
-                    // text and gets the redactor on the way out — esc_html()
-                    // stops markup executing and does nothing about a
-                    // credentialed URL or an absolute path.
-                    $endpoint = isset($refusal['rpc_url']) ? (string) $refusal['rpc_url'] : '';
+                    // ⚠ `endpoint_display` is `scheme://host` — `endpointRefusal()`
+                    // re-describes it on the way out and never exports the
+                    // comparison identity, so there is no path or query here to
+                    // carry a credential.
+                    //
+                    // The predecessor field, `rpc_url`, was a query-only
+                    // redaction, and its comment here asserted that made it
+                    // key-free. It did not: Alchemy-shaped endpoints keep the key
+                    // in the PATH, and this line rendered it.
+                    //
+                    // The provider MESSAGE is upstream text and gets the
+                    // operator-safe excerpt on the way out — esc_html() stops
+                    // markup executing and does nothing about a credentialed URL
+                    // or an absolute path.
+                    $endpoint = isset($refusal['endpoint_display']) ? (string) $refusal['endpoint_display'] : '';
                     $message  = isset($refusal['message']) ? (string) $refusal['message'] : '';
                     ?>
                     <strong><?php echo esc_html((string) $driver); ?></strong>: this endpoint has already
