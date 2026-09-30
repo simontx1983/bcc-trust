@@ -743,14 +743,45 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     /**
      * Thin JSON-RPC wrapper for read-only contract calls. Returns the
      * raw hex result string or null on any error.
+     *
+     * ⚠ LOSSY BY DESIGN, AND ONLY SAFE FOR OWNERSHIP READS. Every failure —
+     * no key, timeout, JSON-RPC error, revert — collapses to the same null.
+     * That is fine for `balanceOf`, where "no answer" and "zero" lead to the
+     * same refusal. It is NOT safe for validation, where "the contract said
+     * no" and "we never reached the contract" must stay apart. Validation uses
+     * {@see ethCallResult()} instead.
      */
     private function ethCall(string $to, string $data): ?string
     {
+        $r = $this->ethCallResult($to, $data);
+
+        return $r['ok'] ? $r['result'] : null;
+    }
+
+    /**
+     * The same read-only call, with the failure discriminated.
+     *
+     * ── WHY THIS EXISTS ─────────────────────────────────────────────────
+     * Manual contract validation must never answer "this is not an NFT"
+     * because a node timed out or an API key is missing. Those are facts about
+     * BCC's configuration, not about the submitted contract, and the four-state
+     * verdict vocabulary depends on being able to tell them apart. So this
+     * returns WHY, using a bounded token.
+     *
+     * `kind` is one of: `none` (ok), `credentials_missing`, `transport`,
+     * `rpc_error`, `malformed`.
+     *
+     * @return array{ok: bool, result: ?string, kind: string}
+     */
+    public function ethCallResult(string $to, string $data): array
+    {
         $rpcUrl = (string) ($this->chain->rpc_url ?? '');
         // Seeded Alchemy URLs ship as "https://eth-mainnet.g.alchemy.com/v2/"
-        // with no key appended. Skip rather than fire a guaranteed 401.
-        if (!$rpcUrl || str_ends_with($rpcUrl, '/v2/')) {
-            return null;
+        // with no key appended. Skip rather than fire a guaranteed 401 — and
+        // say WHY, because a missing key is a configuration problem an operator
+        // can fix, not a verdict about the contract.
+        if ($rpcUrl === '' || str_ends_with($rpcUrl, '/v2/')) {
+            return ['ok' => false, 'result' => null, 'kind' => 'credentials_missing'];
         }
 
         $body = wp_json_encode([
@@ -769,22 +800,94 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             'body'      => $body,
             'sslverify' => true,
         ], [
-            'label'    => 'EVM eth_call balanceOf',
+            'label'    => 'EVM eth_call',
             'chain_id' => (int) $this->chain->id,
         ]);
 
         if (is_wp_error($response)) {
             \BCC\Core\Log\Logger::error('[EVM Fetcher] eth_call error: ' . $response->get_error_message());
-            return null;
+            return ['ok' => false, 'result' => null, 'kind' => 'transport'];
         }
 
         $json = json_decode(wp_remote_retrieve_body($response), true);
-        if (!is_array($json) || isset($json['error'])) {
-            return null;
+        if (!is_array($json)) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+        if (isset($json['error'])) {
+            // A JSON-RPC error is the NODE refusing, not the contract
+            // answering. A reverted `supportsInterface` surfaces here too, and
+            // is deliberately not read as "false" — a contract that reverts on
+            // ERC-165 has told us nothing.
+            return ['ok' => false, 'result' => null, 'kind' => 'rpc_error'];
         }
 
         $result = $json['result'] ?? null;
-        return is_string($result) && str_starts_with($result, '0x') ? $result : null;
+        if (!is_string($result) || !str_starts_with($result, '0x')) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        return ['ok' => true, 'result' => $result, 'kind' => 'none'];
+    }
+
+    /**
+     * Alchemy `getContractMetadata`, with the failure discriminated.
+     *
+     * {@see fetchContractMetadata()} returns null for a missing key, a
+     * timeout, a non-2xx and an unparseable body alike — so a caller cannot
+     * tell "this collection has no image" from "we never asked". Intake needs
+     * that distinction to decide `metadata_state`, so this variant reports it.
+     *
+     * `kind`: `none` | `credentials_missing` | `transport` | `http_error` |
+     * `malformed`.
+     *
+     * @return array{ok: bool, data: ?array<string, mixed>, kind: string}
+     */
+    public function contractMetadataResult(string $contract): array
+    {
+        $rpcUrl = (string) ($this->chain->rpc_url ?? '');
+        if ($rpcUrl === '') {
+            return ['ok' => false, 'data' => null, 'kind' => 'credentials_missing'];
+        }
+
+        $contractLc = strtolower($contract);
+        if (!preg_match('/^0x[a-f0-9]{40}$/', $contractLc)) {
+            return ['ok' => false, 'data' => null, 'kind' => 'malformed'];
+        }
+
+        // No Alchemy base means no key for this chain. DECISION 7 makes both
+        // launch chains keyed, so this is a misconfiguration to report, never
+        // a reason to accept an empty-but-verified-looking collection.
+        $nftV3Base = AlchemyEndpoint::nftBaseFromRpcUrl($rpcUrl);
+        if ($nftV3Base === null) {
+            return ['ok' => false, 'data' => null, 'kind' => 'credentials_missing'];
+        }
+
+        $url = $nftV3Base . '/getContractMetadata?contractAddress=' . rawurlencode($contractLc);
+
+        $response = ApiRetry::get($url, [
+            'timeout'   => self::HTTP_TIMEOUT,
+            'headers'   => ['Accept' => 'application/json'],
+            'sslverify' => true,
+        ], [
+            'label'    => 'EVM alchemy_getContractMetadata',
+            'chain_id' => (int) $this->chain->id,
+        ]);
+
+        if (is_wp_error($response)) {
+            return ['ok' => false, 'data' => null, 'kind' => 'transport'];
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return ['ok' => false, 'data' => null, 'kind' => 'http_error'];
+        }
+
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($json)) {
+            return ['ok' => false, 'data' => null, 'kind' => 'malformed'];
+        }
+
+        return ['ok' => true, 'data' => $json, 'kind' => 'none'];
     }
 
     /**

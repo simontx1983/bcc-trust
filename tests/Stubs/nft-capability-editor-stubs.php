@@ -312,11 +312,28 @@ namespace BCC\Trust\Onchain\Repositories {
                 bool $manualDiscovery = true,
                 string $chainType = 'cosmos'
             ): void {
+                // ⚠ PR E: `chain_id_hex` is the EIP-155 id and the STABLE
+                // identity the launch allowlist keys on. Supplied by slug so a
+                // test does not have to know the hex for a common chain; any
+                // test can override the property directly.
+                $hexBySlug = [
+                    'ethereum'  => '0x1',
+                    'base'      => '0x2105',
+                    'polygon'   => '0x89',
+                    'arbitrum'  => '0xa4b1',
+                    'optimism'  => '0xa',
+                    'bsc'       => '0x38',
+                    'avalanche' => '0xa86a',
+                ];
+
                 self::$rows[$id] = (object) [
                     'id'                                  => $id,
                     'slug'                                => $slug,
                     'name'                                => ucfirst($slug),
                     'chain_type'                          => $chainType,
+                    'chain_id_hex'                        => $chainType === 'evm'
+                        ? ($hexBySlug[$slug] ?? null)
+                        : null,
                     'is_active'                           => 1,
                     'is_testnet'                          => 0,
                     'rpc_url'                             => 'https://rpc.' . $slug . '.example',

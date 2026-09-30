@@ -333,38 +333,48 @@ final class NftCapabilityEditorRenderTest extends TestCase
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  EVM AND SOLANA KEEP THE STRUCTURAL EXPLANATION
+    //  A CHAIN OUTSIDE VALIDATION SCOPE KEEPS THE STRUCTURAL EXPLANATION
     // ═══════════════════════════════════════════════════════════════════
+    //
+    // ⚠⚠⚠ THIS SECTION USED TO NAME ETHEREUM AND SOLANA, and asserted they
+    // must have NO enable control because nothing can enumerate them. That
+    // premise was wrong twice over: enumeration is not what the permission
+    // grants, and PR E gave both families a validation driver. The reviewer
+    // flagged these two tests as actively PINNING the blocker — they were
+    // green precisely because the renderer was wrong.
+    //
+    // The legitimate intent survives and is kept: a chain genuinely outside
+    // validation scope must get an EXPLANATION, not a blank space, because a
+    // gap where another chain has a control reads as "not set up yet" and
+    // sends an operator looking for a credential that does not exist. Only
+    // the population changed — non-launch EVM chains are the chains for which
+    // that is now true.
 
-    /** @return array<string, array{0: string, 1: string}> */
-    public static function nonEnumerableFamilies(): array
+    /** @return array<string, array{0: string}> */
+    public static function chainsOutsideValidationScope(): array
     {
         return [
-            'ethereum (evm)' => ['ethereum', 'evm'],
-            'solana'         => ['solana', 'solana'],
+            'polygon'  => ['polygon'],
+            'arbitrum' => ['arbitrum'],
+            'optimism' => ['optimism'],
         ];
     }
 
     /**
-     * ⚠️ NO MANUAL-PERMISSION CONTROL, AND THE REASON IS STRUCTURAL.
-     *
-     * A blank space where Cosmos has a control reads as "not set up yet",
-     * and an operator would go looking for the credential that turns it on.
-     * There is no such credential.
+     * ⚠️ NO MANUAL-PERMISSION CONTROL, AND THE REASON IS EXPLAINED.
      */
-    #[DataProvider('nonEnumerableFamilies')]
-    public function testEvmAndSolanaKeepTheStructuralNoEnumerationExplanation(
-        string $slug,
-        string $chainType
-    ): void {
-        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, false, $chainType);
+    #[DataProvider('chainsOutsideValidationScope')]
+    public function testAChainOutsideValidationScopeKeepsTheStructuralExplanation(string $slug): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, false, 'evm');
 
-        $_GET['family'] = $chainType;
-        $html = $this->page(['family' => $chainType, 'chain' => (string) self::CHAIN_ID]);
+        $html = $this->page(['family' => 'evm', 'chain' => (string) self::CHAIN_ID]);
 
         $this->assertStringContainsString('Not applicable to this chain.', $html);
-        $this->assertStringContainsString('no setting can add chain-wide NFT enumeration', $html);
-        $this->assertStringContainsString('getContractsForOwner', $html);
+        // The reason given must be the REAL one — validation scope, not a
+        // missing enumeration driver.
+        $this->assertStringContainsString('outside the approved launch scope', $html);
+        $this->assertStringContainsString('validates the submitted contract', $html);
         $this->assertStringNotContainsString(NftDiscoveryPage::ACTION_CAP_MANUAL_ENABLE, $html);
         $this->assertRenderChangedNothing();
     }
@@ -373,14 +383,12 @@ final class NftCapabilityEditorRenderTest extends TestCase
      * But a chain that already holds the stored value gets a way to clear
      * it — the only route out of a restored-backup state.
      */
-    #[DataProvider('nonEnumerableFamilies')]
-    public function testAStoredPermissionOnSuchAChainOffersOnlyWithdrawal(
-        string $slug,
-        string $chainType
-    ): void {
-        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, true, $chainType);
+    #[DataProvider('chainsOutsideValidationScope')]
+    public function testAStoredPermissionOnSuchAChainOffersOnlyWithdrawal(string $slug): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, true, 'evm');
 
-        $html = $this->page(['family' => $chainType, 'chain' => (string) self::CHAIN_ID]);
+        $html = $this->page(['family' => 'evm', 'chain' => (string) self::CHAIN_ID]);
 
         $this->assertStringContainsString('stored as ON', $html);
         $this->assertStringContainsString(NftDiscoveryPage::ACTION_CAP_MANUAL_DISABLE, $html);
@@ -725,5 +733,182 @@ final class NftCapabilityEditorRenderTest extends TestCase
         $html = $this->page(['bcc_nftcap' => 'totally_made_up_code']);
 
         $this->assertStringNotContainsString('totally_made_up_code', $html);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  THE PERMISSION MUST BE GRANTABLE THROUGH THE ACTUAL UI (round 4)
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // ⚠⚠⚠ THE DEFECT THESE EXIST TO CLOSE. Round 3 corrected the SERVER
+    // writer to ask `canTakeManualIntake()`, but the RENDERER still read
+    // `operator_startable` — the enumeration answer. So Ethereum, Base and
+    // Solana were grantable by a hand-built POST and ungrantable through the
+    // admin UI, and the panel printed "Not applicable to this chain… no
+    // driver in this build can enumerate it" on exactly the chains manual
+    // intake exists for. A permission reachable only by forging a request is
+    // not a permission an operator has.
+    //
+    // Renderer and writer now consume ONE answer, so they cannot disagree.
+
+    /** @return array<string, array{0: string, 1: string}> */
+    public static function manualIntakeCapableChains(): array
+    {
+        return [
+            'ethereum (launch)' => ['ethereum', 'evm'],
+            'base (launch)'     => ['base', 'evm'],
+            'solana'            => ['solana', 'solana'],
+            'cosmos'            => ['cosmos', 'cosmos'],
+        ];
+    }
+
+    /**
+     * ⚠⚠ THE HEADLINE CASE. The enable control must actually be in the HTML.
+     */
+    #[DataProvider('manualIntakeCapableChains')]
+    public function testAValidatedChainRendersTheManualIntakeEnableControl(
+        string $slug,
+        string $chainType
+    ): void {
+        // manualDiscovery false, so ENABLE is the direction offered.
+        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, false, $chainType);
+
+        $html = $this->page(['family' => $chainType, 'chain' => (string) self::CHAIN_ID]);
+
+        $this->assertStringContainsString(
+            NftDiscoveryPage::ACTION_CAP_MANUAL_ENABLE,
+            $html,
+            "{$slug} can validate one contract, so the grant must be offered in the UI"
+        );
+        $this->assertStringNotContainsString('Not applicable to this chain.', $html);
+        $this->assertRenderChangedNothing();
+    }
+
+    /**
+     * ⚠⚠ THE COPY MUST NOT BLAME ENUMERATION on a chain that validates.
+     * The old text sent an operator looking for an enumeration credential
+     * that does not exist and was never the reason.
+     */
+    #[DataProvider('manualIntakeCapableChains')]
+    public function testAValidatedChainNeverBlamesMissingEnumeration(
+        string $slug,
+        string $chainType
+    ): void {
+        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, false, $chainType);
+
+        $html = $this->page(['family' => $chainType, 'chain' => (string) self::CHAIN_ID]);
+
+        $this->assertStringNotContainsString('no setting can add chain-wide NFT enumeration', $html);
+        $this->assertStringNotContainsString('getContractsForOwner', $html);
+    }
+
+    /**
+     * ⚠ AND THE NARROWING STILL BITES. DECISION 7 approves Ethereum and Base
+     * only, so an EVM chain outside launch scope must NOT be offered the
+     * grant — the UI must not promise what the writer will refuse.
+     *
+     * @return array<string, array{0: string}>
+     */
+    public static function nonLaunchEvmSlugsForRender(): array
+    {
+        return [
+            'polygon'  => ['polygon'],
+            'arbitrum' => ['arbitrum'],
+            'optimism' => ['optimism'],
+            'bsc'      => ['bsc'],
+        ];
+    }
+
+    #[DataProvider('nonLaunchEvmSlugsForRender')]
+    public function testANonLaunchEvmChainIsNotOfferedTheGrant(string $slug): void
+    {
+        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, false, 'evm');
+
+        $html = $this->page(['family' => 'evm', 'chain' => (string) self::CHAIN_ID]);
+
+        $this->assertStringNotContainsString(
+            NftDiscoveryPage::ACTION_CAP_MANUAL_ENABLE,
+            $html,
+            "{$slug} is outside the approved EVM launch scope"
+        );
+        $this->assertStringContainsString('Not applicable to this chain.', $html);
+        $this->assertRenderChangedNothing();
+    }
+
+    /**
+     * The renderer and the writer must read the SAME predicate. Proven by
+     * agreement across every chain in the matrix rather than by inspecting
+     * either one: a second source of truth is free to drift, and this is the
+     * drift that produced the blocker.
+     */
+    #[DataProvider('manualIntakeCapableChains')]
+    public function testTheRenderedOfferAgreesWithTheCapabilityPredicate(
+        string $slug,
+        string $chainType
+    ): void {
+        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, false, $chainType);
+
+        $rows  = ChainRepository::getAll();
+        $chain = null;
+        foreach ($rows as $row) {
+            if ((int) $row->id === self::CHAIN_ID) {
+                $chain = $row;
+            }
+        }
+        self::assertNotNull($chain, 'the seeded chain must be among the canonical rows');
+        $predicate = NftChainCapability::canTakeManualIntake($chain);
+
+        $html = $this->page(['family' => $chainType, 'chain' => (string) self::CHAIN_ID]);
+        $offered = str_contains($html, NftDiscoveryPage::ACTION_CAP_MANUAL_ENABLE);
+
+        self::assertSame(
+            $predicate,
+            $offered,
+            'the panel offers exactly what the writer would accept'
+        );
+    }
+
+    /**
+     * ⚠ ENUMERATION STAYS SEPARATE AND FROZEN. Granting manual intake must not
+     * make an enumeration operation look startable, and no scanner control may
+     * appear on any of these chains.
+     */
+    #[DataProvider('manualIntakeCapableChains')]
+    public function testGrantingManualIntakeOffersNoEnumerationControl(
+        string $slug,
+        string $chainType
+    ): void {
+        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, true, $chainType);
+
+        $html = $this->page(['family' => $chainType, 'chain' => (string) self::CHAIN_ID]);
+
+        foreach (['bcc_chain_cw_pause', 'bcc_chain_cw_backfill', 'bcc_discovery_scan_request'] as $frozen) {
+            $this->assertStringNotContainsString(
+                $frozen,
+                $html,
+                'the manual permission grants no chain-wide authority'
+            );
+        }
+        $this->assertRenderChangedNothing();
+    }
+
+    /**
+     * Rendering the offer writes nothing and starts nothing.
+     *
+     * ⚠ "Zero provider calls" is proved where the calls would be made — the
+     * validator is only ever reached from an administrator's POST, which
+     * `PrEFailClosedBoundariesTest` and `ContractValidatorIsPostOnlyTest`
+     * assert. Asserting it again here against a stub that has no transport
+     * would prove only that the stub has no transport.
+     */
+    #[DataProvider('manualIntakeCapableChains')]
+    public function testRenderingTheOfferWritesNothingAndStartsNothing(
+        string $slug,
+        string $chainType
+    ): void {
+        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, false, $chainType);
+
+        $this->page(['family' => $chainType, 'chain' => (string) self::CHAIN_ID]);
+
+        $this->assertRenderChangedNothing();
     }
 }

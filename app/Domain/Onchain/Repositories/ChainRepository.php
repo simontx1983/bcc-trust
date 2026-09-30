@@ -522,7 +522,7 @@ final class ChainRepository
      *
      * Touches that column and no other. In particular it does NOT enable
      * `manual_collection_discovery_enabled`: product support is BCC's
-     * decision that a chain is in scope, and permission to START a discovery
+     * decision that a chain is in scope, and permission to submit ONE contract
      * is a second, separate grant. Fusing them would mean a product decision
      * silently armed an operator button.
      */
@@ -589,7 +589,9 @@ final class ChainRepository
     }
 
     /**
-     * GRANT the permission for an administrator to START a chain-wide NFT
+     * GRANT the permission for an administrator to submit ONE contract through
+     * manual intake. ⚠ Not chain-wide authority, despite the older wording: no
+     * enumeration starts, and the retired NFT
      * collection discovery — but only while product support still stands.
      *
      * ── THE PREDICATE IS THE POINT, AND IT IS NOT BELT-AND-BRACES ───────

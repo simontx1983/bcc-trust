@@ -834,3 +834,9 @@ bcc_onchain_add_collections_provisioning_state();
 // `floor_currency = 'SOL'`) and re-runs them, because a normalization proved
 // only against an empty table is proved against nothing.
 bcc_onchain_add_collections_community_metadata();
+
+// PR E metadata state: `metadata_state` + `metadata_checked_at` (DECISION 13).
+// Manual intake writes both on every accepted add, so a schema without them
+// fails the INSERT outright — which is how the integration suite catches a
+// migration that was written but never wired into the boot path.
+bcc_onchain_add_collections_metadata_state();

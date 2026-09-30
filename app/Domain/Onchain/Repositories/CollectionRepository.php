@@ -132,7 +132,10 @@ if (!defined('ABSPATH')) {
  *     chain_id: string,
  *     chain_slug: string,
  *     chain_type: string,
- *     explorer_url: string|null
+ *     explorer_url: string|null,
+ *     chain_description: string|null,
+ *     chain_description_state: string|null,
+ *     chain_description_source: string|null
  * }
  *
  * @phpstan-type CollectionCountByChain object{
@@ -177,6 +180,19 @@ if (!defined('ABSPATH')) {
 final class CollectionRepository
 {
     use GuardsReadFailures;
+
+    /**
+     * The closed `metadata_state` vocabulary (PR E, DECISION 13).
+     *
+     * ⚠ Mirrors {@see \BCC\Trust\Onchain\ValueObjects\IntakeMetadata}'s
+     * STATE_* constants, and is enforced in {@see addManual()} before any SQL
+     * is issued. A repository that accepted whatever a service handed it would
+     * make the vocabulary a convention rather than a guarantee, and a value
+     * outside this set is not interpretable by any reader.
+     *
+     * @var list<string>
+     */
+    private const METADATA_STATES = ['complete', 'partial', 'unavailable'];
 
     /** @var string Explicit column list — must match schema-collections.php. */
     private const COLUMNS = 'id, wallet_link_id, contract_address, canonical_identifier, chain_id, collection_name,
@@ -604,8 +620,11 @@ final class CollectionRepository
      *     contract_address: string,
      *     collection_name?: ?string,
      *     token_standard?: ?string,
+     *     collection_symbol?: ?string,
      *     total_supply?: ?int,
      *     image_url?: ?string,
+     *     metadata_state?: ?string,
+     *     metadata_checked_at?: ?string,
      *     show_on_profile?: int
      * } $data
      * @param int $ttlSeconds  TTL for expires_at. Defaults long (30 days) so a
@@ -648,6 +667,56 @@ final class CollectionRepository
                 ? esc_url_raw($data['image_url'])
                 : null
         );
+        $sqlSymbol   = self::sqlStringOrNull(
+            isset($data['collection_symbol']) ? sanitize_text_field((string) $data['collection_symbol']) : null
+        );
+
+        // ── PR E metadata state ─────────────────────────────────────────
+        // ⚠ These two are NOT COALESCEd on re-add, unlike every value column
+        // above. They describe the MOST RECENT attempt, not an accumulated
+        // best-known value: COALESCE would let a later failed read keep
+        // advertising an earlier `complete`, which is precisely the lie the
+        // columns exist to prevent. A caller that supplies neither leaves both
+        // untouched; a caller that supplies them overwrites.
+        // ⚠⚠⚠ AN INVALID metadata_state IS REFUSED, NOT QUIETLY DROPPED.
+        //
+        // An earlier version treated an out-of-vocabulary value as "not
+        // supplied" and carried on writing the row. That hid a real defect:
+        // only BCC's own code sets this column, so a bad value is a
+        // PROGRAMMING error — a probe returning a state it invented, or a
+        // caller passing the wrong variable. Swallowing it produces a row whose
+        // metadata state silently disagrees with what the caller believed, and
+        // nothing anywhere reports that they diverged.
+        //
+        // Absent is different and stays legal: a caller with nothing to say
+        // omits the key and the column default applies.
+        if (array_key_exists('metadata_state', $data)) {
+            $stateRaw = $data['metadata_state'];
+            if (!is_string($stateRaw) || !in_array($stateRaw, self::METADATA_STATES, true)) {
+                \BCC\Core\Log\Logger::error(
+                    '[bcc-trust] addManual refused: metadata_state outside the closed vocabulary',
+                    [
+                        'chain_id' => $chainId,
+                        'allowed'  => implode('|', self::METADATA_STATES),
+                        'type'     => get_debug_type($stateRaw),
+                    ]
+                );
+
+                return false;
+            }
+        }
+
+        $stateProvided = array_key_exists('metadata_state', $data);
+        $sqlState      = self::sqlStringOrNull($stateProvided ? (string) $data['metadata_state'] : null);
+        $sqlCheckedAt  = self::sqlStringOrNull(
+            isset($data['metadata_checked_at']) && is_string($data['metadata_checked_at'])
+                ? $data['metadata_checked_at']
+                : null
+        );
+        $metaSetClause = $stateProvided
+            ? "\n                metadata_state      = VALUES(metadata_state),"
+                . "\n                metadata_checked_at = VALUES(metadata_checked_at),"
+            : '';
 
         // `show_on_profile` is a VISIBILITY decision — the member's own
         // showcase toggle ({@see setShowOnProfile}) and the operator's
@@ -665,8 +734,10 @@ final class CollectionRepository
         $result = $wpdb->query($wpdb->prepare(
             "INSERT INTO {$table}
                 (wallet_link_id, contract_address, canonical_identifier, chain_id, collection_name, token_standard,
-                 total_supply, image_url, show_on_profile, is_verified, source, fetched_at, expires_at)
-             VALUES (NULL, %s, %s, %d, {$sqlName}, {$sqlStandard}, {$sqlSupply}, {$sqlImage}, %d, 0, 'manual', %s, %s)
+                 collection_symbol, total_supply, image_url, metadata_state, metadata_checked_at,
+                 show_on_profile, is_verified, source, fetched_at, expires_at)
+             VALUES (NULL, %s, %s, %d, {$sqlName}, {$sqlStandard}, {$sqlSymbol}, {$sqlSupply}, {$sqlImage},
+                 COALESCE({$sqlState}, 'unavailable'), {$sqlCheckedAt}, %d, 0, 'manual', %s, %s)
              ON DUPLICATE KEY UPDATE
                 -- canonical_identifier is INSERT-only; see upsert().
                 -- COALESCE for the same reason as bulkUpsert: an operator
@@ -674,10 +745,11 @@ final class CollectionRepository
                 -- nothing to add, and is not asking for the stored value to
                 -- be erased. The handler already maps blanks to null before
                 -- they reach here.
-                collection_name = COALESCE(VALUES(collection_name), collection_name),
-                token_standard  = COALESCE(VALUES(token_standard), token_standard),
-                total_supply    = COALESCE(VALUES(total_supply), total_supply),
-                image_url       = COALESCE(VALUES(image_url), image_url),{$showSetClause}
+                collection_name   = COALESCE(VALUES(collection_name), collection_name),
+                token_standard    = COALESCE(VALUES(token_standard), token_standard),
+                collection_symbol = COALESCE(VALUES(collection_symbol), collection_symbol),
+                total_supply      = COALESCE(VALUES(total_supply), total_supply),
+                image_url         = COALESCE(VALUES(image_url), image_url),{$metaSetClause}{$showSetClause}
                 source          = VALUES(source),
                 fetched_at      = VALUES(fetched_at),
                 expires_at      = VALUES(expires_at)",
@@ -2269,11 +2341,35 @@ final class CollectionRepository
     }
 
     /**
-     * The approved description, or null.
+     * The text of a description an administrator has REVIEWED and accepted, or null.
      *
-     * The ONLY reader a public serializer may use. It filters on the state in
-     * SQL rather than returning the text and trusting the caller to check —
-     * a caller that forgets is how unapproved text gets published.
+     * ── ⚠⚠⚠ APPROVED IS A REVIEW STATE, NOT PUBLICATION ─────────────────
+     * DECISION 17 is settled: during scanner retirement the imported NFT
+     * Collection Description is **stored and reviewed, not published**.
+     * `approved` records that a human read that exact text and vouched for it.
+     * It confers no right to display it anywhere.
+     *
+     * ⚠ THIS METHOD HAS NO PRODUCTION CONSUMER, AND THAT IS THE DESIGN.
+     * An earlier version of this docblock called it "the ONLY reader a public
+     * serializer may use", which read as standing permission to wire one up.
+     * There is no such permission. **No public REST route, view-model,
+     * serializer or template may expose this text without a future, explicitly
+     * authorized contract change** — and the plan is explicit that "a public
+     * reader is not to be built merely to avoid the field looking unused".
+     *
+     * The reader that DOES exist is the admin review screen on
+     * {@see \BCC\Trust\Onchain\Admin\VerifyCollectionsPage}, which reads the
+     * three `chain_description*` columns straight off the listing row for an
+     * administrator. It does not go through here.
+     *
+     * `PrEFailClosedBoundariesTest` scans the whole of `app/` and asserts this
+     * method has no caller outside this file, so a new one cannot be added
+     * quietly. Do not add one in this PR.
+     *
+     * ── WHY IT STILL FILTERS IN SQL ─────────────────────────────────────
+     * Whenever an authorized consumer does arrive, the state check belongs
+     * here: returning the text and trusting the caller to check the state is
+     * how unapproved text reaches a surface that should not have it.
      */
     public static function findApprovedChainDescription(int $collectionId): ?string
     {
@@ -2410,7 +2506,12 @@ final class CollectionRepository
                     c.provisioning_requested_by, c.provisioning_failure_code,
                     ({$hasCommunity}) AS has_community,
                     ({$isHidden}) AS is_hidden,
-                    c.chain_id, ch.slug AS chain_slug, ch.chain_type, ch.explorer_url
+                    c.chain_id, ch.slug AS chain_slug, ch.chain_type, ch.explorer_url,
+                    -- ⚠ DECISION 17: the imported NFT Collection Description is
+                    -- read HERE and only here. The admin review screen is its
+                    -- only reader, so these three columns exist to be shown to
+                    -- an administrator — never serialized to a public payload.
+                    c.chain_description, c.chain_description_state, c.chain_description_source
                FROM {$table} c
           LEFT JOIN {$chains} ch ON ch.id = c.chain_id
                {$whereSql}

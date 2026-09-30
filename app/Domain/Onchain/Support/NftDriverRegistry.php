@@ -128,12 +128,20 @@ final class NftDriverRegistry
      * class exists to enforce — a driver must never claim an operation the
      * code does not provide:
      *
-     *   - `evm_rpc` is registered for OWNERSHIP only. The plan also shows
-     *     VALIDATION, but the `supportsInterface(0x80ac58cd|0xd9b67a26)`
-     *     `eth_call` behind it is explicitly still "to build". OWNERSHIP is
-     *     real today (`EvmFetcher::count_holdings()` → `eth_call balanceOf`).
-     *     Whoever builds EVM validation adds VALIDATION here in the same
-     *     change, and Avalanche/BSC manual intake unblocks then — not now.
+     *   - `evm_rpc` is registered for OWNERSHIP **and, since PR E, VALIDATION**.
+     *     ⚠ HISTORICAL: this note used to say VALIDATION was "explicitly still
+     *     to build", and that whoever built it would add the operation here in
+     *     the same change. PR E is that change — `EvmContractProbe` performs the
+     *     `supportsInterface(0x80ac58cd|0xd9b67a26)` `eth_call` — so the
+     *     operation is claimed because the code now provides it.
+     *     ⚠ It does NOT follow that Avalanche/BSC manual intake unblocked, as
+     *     that old note predicted. DECISION 7 limits the approved launch scope
+     *     to Ethereum and Base, enforced separately by
+     *     {@see NftLaunchChains}. A registered driver says what the code CAN
+     *     do; the launch list says what BCC has taken on.
+     *     METADATA stays unclaimed here: name, symbol, image and supply come
+     *     from Alchemy, so a keyless chain can prove a standard and still not
+     *     complete an intake.
      *   - `user_request` is absent entirely; the community-request system it
      *     belongs to does not exist yet.
      *
@@ -186,7 +194,15 @@ final class NftDriverRegistry
             // which is why Avalanche and BSC keep ERC-721 gating with no
             // Alchemy key at all. Ordered AFTER alchemy_transfers: both can
             // answer ownership, and the Alchemy path is richer.
-            'operations' => [self::OP_OWNERSHIP],
+            //
+            // VALIDATION added in PR E: `EvmContractProbe` proves the token
+            // standard with ERC-165 `supportsInterface` over `eth_call`, which
+            // any EVM RPC answers — so validation does NOT need an Alchemy key,
+            // and the "accepted as entered" banner is no longer correct for
+            // EVM. ⚠ METADATA is still not claimed here: name, symbol, image
+            // and supply come from Alchemy (DECISION 7), so a chain without a
+            // key can prove the standard and still not complete an intake.
+            'operations' => [self::OP_VALIDATION, self::OP_OWNERSHIP],
             'priority'   => 20,
         ],
         self::DRIVER_DAS_RPC => [
@@ -204,11 +220,32 @@ final class NftDriverRegistry
             // Deliberately ignores the chain row: the chain's rpc_url is the
             // public endpoint by default, and getAsset needs a DAS provider.
             //
-            // VALIDATION is NOT claimed. Solana collection adds are
-            // "trusted as entered" today, exactly as they are on EVM — there
-            // is no validation entry point to point a driver at. Whoever
-            // builds one registers it then, alongside evm_rpc VALIDATION.
-            'operations' => [self::OP_METADATA],
+            // VALIDATION added in PR E, which is the "whoever builds one"
+            // this comment used to defer to. `SolanaContractProbe` spends
+            // THREE bounded DAS calls, each answering something the others
+            // cannot:
+            //
+            //   getAssetsByGroup  is this a VERIFIED collection group? asked
+            //                     with showUnverifiedCollections:false, because
+            //                     DAS expresses verification by OMITTING an
+            //                     unverified grouping rather than by a flag
+            //   searchAssets      does ANY compressed member exist?
+            //   getAsset          the COLLECTION's own name and image
+            //
+            // ⚠ An earlier version of this comment said validation was one
+            // `getAsset` requiring a "verified collection grouping" flag and
+            // that "the same response supplies name and image". All three
+            // claims were wrong: there is no `verified` property on a
+            // grouping, one asset cannot answer a question about a collection,
+            // and `showCollectionMetadata` has no published response shape.
+            //
+            // ⚠ Compressed NFTs are refused as UNSUPPORTED (DECISION 8): a
+            // cNFT lives in a Merkle tree, so the balance reads holder-gating
+            // relies on cannot prove ownership of one. The exclusion is
+            // enforced for the WHOLE collection via the searchAssets existence
+            // query — not sampled from one member, which is what an earlier
+            // version did while a mixed collection slipped through.
+            'operations' => [self::OP_VALIDATION, self::OP_METADATA],
             'priority'   => 10,
         ],
         self::DRIVER_MAGICEDEN => [

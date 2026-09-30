@@ -194,6 +194,412 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     }
 
     /**
+     * PURE. Decide whether a DAS JSON-RPC `error` object is evidence about the
+     * ADDRESS, or merely evidence about us.
+     *
+     * ── THE ONLY DECISIVE SIGNATURE ─────────────────────────────────────
+     * Helius documents ONE not-found code, **-32004**, and documents it
+     * per-method: "The requested asset was not found" on `getAsset`, "No
+     * assets found for the specified group" on `getAssetsByGroup`. Only that
+     * code, and only when it came back from one of those two methods, is
+     * evidence about the submitted address.
+     *
+     * ⚠ THE METHOD IS PART OF THE SIGNATURE. `$method` is therefore required
+     * to reach a negative; a -32004 arriving from anywhere else fails closed,
+     * so one endpoint's silence can never decide a question the other asked.
+     *
+     * ⚠ HELIUS PUBLISHES TWO DISAGREEING ERROR TABLES. The per-method pages
+     * list `-32029` for rate limiting and document `-32004`; the aggregated
+     * `llms.txt` lists `-32005` for rate limiting and omits `-32004` entirely.
+     * Where the sources disagree, both rate-limit codes are honoured and
+     * nothing outside the closed allowlist is read as decisive.
+     *
+     * Everything else — the generic `-32000` server error, the JSON-RPC
+     * standard codes (`-32601`/`-32602`/`-32603`/`-32700`), any unknown vendor
+     * code, and any malformed error object — resolves to `transport`, which
+     * the validator turns into UNAVAILABLE. That is the fail-closed default:
+     * an error signature that cannot be pointed to in the vendor's own
+     * documentation does not get to decide anything.
+     *
+     * @param array<string, mixed> $error  the JSON-RPC `error` object
+     * @param string               $method the DAS method that produced it
+     * @return string `not_found` only for the documented per-method signature,
+     *                `credentials_missing`, `rate_limited`, else `transport`
+     */
+    public static function classifyDasError(array $error, string $method = ''): string
+    {
+        $code = $error['code'] ?? null;
+        if (!is_int($code)) {
+            return 'transport';
+        }
+
+        // ⚠ ONLY the method-appropriate not-found code decides a negative, and
+        // ONLY for the method that documents it. `-32004` on `getAsset` means
+        // "the requested asset was not found"; on `getAssetsByGroup` it means
+        // "no assets found for the specified group". Both are answers about the
+        // submitted address. Accepting it for the WRONG method would let one
+        // endpoint's silence decide a question the other asked.
+        if ($code === self::DAS_NOT_FOUND) {
+            return match ($method) {
+                self::METHOD_GET_ASSET, self::METHOD_ASSETS_BY_GROUP => 'not_found',
+                default => 'transport',
+            };
+        }
+
+        return match ($code) {
+            self::DAS_AUTH_FAILED       => 'credentials_missing',
+            self::DAS_NO_PERMISSION     => 'credentials_missing',
+            self::DAS_RATE_LIMITED,
+            self::DAS_RATE_LIMITED_ALT  => 'rate_limited',
+            // ⚠ EVERY other code — the generic -32000 server error, the
+            // JSON-RPC standard codes, and anything undocumented or new —
+            // fails closed. Helius publishes two disagreeing error tables
+            // (the method pages list -32029 for rate limiting while
+            // `llms.txt` lists -32005 and omits -32004 entirely), so a
+            // closed allowlist of decisive codes is the only safe reading.
+            default => 'transport',
+        };
+    }
+
+    /** DAS method names, used to keep a not-found scoped to its own method. */
+    public const METHOD_GET_ASSET       = 'getAsset';
+    public const METHOD_ASSETS_BY_GROUP = 'getAssetsByGroup';
+    public const METHOD_SEARCH_ASSETS   = 'searchAssets';
+
+    /**
+     * Documented Helius DAS error codes.
+     *
+     * `-32004` is the method-specific not-found: "The requested asset was not
+     * found." (getAsset) / "No assets found for the specified group."
+     * (getAssetsByGroup).
+     */
+    private const DAS_NOT_FOUND        = -32004;
+    private const DAS_AUTH_FAILED      = -32001;
+    private const DAS_NO_PERMISSION    = -32003;
+    private const DAS_RATE_LIMITED     = -32029;
+
+    /** `llms.txt` publishes this instead of -32029. Both are treated the same. */
+    private const DAS_RATE_LIMITED_ALT = -32005;
+
+    /**
+     * DAS `getAssetsByGroup` — is this address used as a VERIFIED collection?
+     *
+     * ── WHY THIS AND NOT A `verified` FLAG ──────────────────────────────
+     * There is no `verified` flag. A DAS `grouping[]` entry contains exactly
+     * two documented fields, `group_key` and `group_value`; an earlier version
+     * of this code invented a third and gated on it.
+     *
+     * Verification is expressed differently: `options.showUnverifiedCollections`
+     * defaults to **false**, and an unverified grouping is then **omitted from
+     * the results entirely** rather than returned marked false. So the question
+     * "is this a verified collection?" is answered by asking for its members
+     * with that option off and seeing whether any come back.
+     *
+     * A non-empty, well-formed `items` array therefore proves the submitted
+     * address is in use as a certified collection group. An empty result is a
+     * decided negative. An outage, a malformed body or an undocumented shape
+     * is UNAVAILABLE.
+     *
+     * ── BOUNDED ─────────────────────────────────────────────────────────
+     * `page: 1`, `limit: 1` — one member is all the proof this question needs,
+     * and asking for more would make a 10k-item collection cost more than a
+     * 10-item one for the same answer.
+     *
+     * ⚠ `showCollectionMetadata` is NOT requested. Helius lists the option but
+     * publishes no response shape for it, and the Metaplex DAS specification
+     * says it is "accepted by the API; reserved for future use on this method".
+     * Reading a field with no documented shape is guessing. The collection's
+     * own name and image come from {@see assetResult()} instead — see the
+     * one-call-versus-two-call note on {@see \BCC\Trust\Onchain\Services\Validation\SolanaContractProbe}.
+     *
+     * @return array{ok: bool, result: ?array<string, mixed>, kind: string}
+     */
+    public function assetsByGroupResult(string $collectionMint): array
+    {
+        if ($collectionMint === '') {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        $rpcUrl = self::resolveHeliusRpcUrl();
+        if ($rpcUrl === null) {
+            return ['ok' => false, 'result' => null, 'kind' => 'credentials_missing'];
+        }
+
+        $body = wp_json_encode([
+            'jsonrpc' => '2.0',
+            'id'      => 'validate-group-' . substr($collectionMint, 0, 8),
+            'method'  => self::METHOD_ASSETS_BY_GROUP,
+            'params'  => [
+                'groupKey'   => 'collection',
+                'groupValue' => $collectionMint,
+                'page'       => 1,
+                'limit'      => 1,
+                'options'    => [
+                    // ⚠ EXPLICITLY false. It is the documented default, but
+                    // this is the whole verification mechanism — it must not
+                    // depend on a default staying put.
+                    'showUnverifiedCollections' => false,
+                ],
+            ],
+        ]);
+        if ($body === false) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        $response = ApiRetry::post($rpcUrl, [
+            'timeout'   => self::HTTP_TIMEOUT,
+            'headers'   => ['Content-Type' => 'application/json'],
+            'body'      => $body,
+            'sslverify' => true,
+        ], [
+            'label'    => 'Helius getAssetsByGroup (validation)',
+            'chain_id' => (int) $this->chain->id,
+        ]);
+
+        if (is_wp_error($response)) {
+            return ['ok' => false, 'result' => null, 'kind' => 'transport'];
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return ['ok' => false, 'result' => null, 'kind' => 'http_error'];
+        }
+
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($json)) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        if (isset($json['error'])) {
+            return [
+                'ok'     => false,
+                'result' => null,
+                'kind'   => self::classifyDasError(
+                    is_array($json['error']) ? $json['error'] : [],
+                    self::METHOD_ASSETS_BY_GROUP
+                ),
+            ];
+        }
+
+        // The documented result carries `items`, `total`, `limit`, `page`. A
+        // body without an `items` ARRAY is not the documented shape, and
+        // guessing at an undocumented one is how a renderer ends up trusting
+        // whatever a provider happened to send.
+        $result = $json['result'] ?? null;
+        if (!is_array($result) || !isset($result['items']) || !is_array($result['items'])) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        return ['ok' => true, 'result' => $result, 'kind' => 'none'];
+    }
+
+    /**
+     * DAS `searchAssets` — does this collection contain ANY compressed member?
+     *
+     * ── WHY AN EXISTENCE QUERY AND NOT A COUNT ──────────────────────────
+     * DECISION 8 puts compressed NFTs out of v1. That is a question about the
+     * WHOLE collection, and `getAssetsByGroup` cannot answer it: it returns
+     * members, so reading one member's `compression.compressed` proves only
+     * that member's type. Collections may legitimately mix compressed and
+     * uncompressed members, so a mixed collection whose sampled member happened
+     * to be uncompressed used to validate. The exclusion was sampled, not
+     * enforced.
+     *
+     * `searchAssets` documents exactly the right question. Both filters are
+     * published parameters:
+     *
+     *   `grouping`   array of strings — "Collection grouping array for
+     *                filtering Solana NFTs by their collection membership
+     *                (e.g. ["collection", "<collectionKey>"])"
+     *   `compressed` boolean — "Filter for compressed Solana NFTs (cNFTs)"
+     *
+     * ⚠ `showGrandTotal` IS NOT REQUESTED. Existence needs no count: ONE
+     * returned item already proves a compressed member exists. The option is
+     * documented as "Show total number of matching assets (slower request)",
+     * its response FIELD NAME is undocumented, and reading a guessed key is
+     * the mistake `showCollectionMetadata` already caused once.
+     *
+     * ── BOUNDED ─────────────────────────────────────────────────────────
+     * `page: 1, limit: 1`. The cost does not grow with the collection.
+     *
+     * ── FAILS CLOSED ────────────────────────────────────────────────────
+     * `ok` is true ONLY for a documented, well-formed response. Every other
+     * outcome — transport, rate limit, missing credentials, non-2xx, a body
+     * with no `items` ARRAY, any JSON-RPC error including a not-found — is
+     * `ok: false`, which the probe turns into UNAVAILABLE. Provider
+     * uncertainty must never read as "no compressed members".
+     *
+     * @return array{ok: bool, result: ?array<string, mixed>, kind: string}
+     */
+    public function compressedMembersExistResult(string $collectionMint): array
+    {
+        if ($collectionMint === '') {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        $rpcUrl = self::resolveHeliusRpcUrl();
+        if ($rpcUrl === null) {
+            return ['ok' => false, 'result' => null, 'kind' => 'credentials_missing'];
+        }
+
+        $body = wp_json_encode([
+            'jsonrpc' => '2.0',
+            'id'      => 'validate-cnft-' . substr($collectionMint, 0, 8),
+            'method'  => self::METHOD_SEARCH_ASSETS,
+            'params'  => [
+                // The documented two-element form: [group key, group value].
+                'grouping'   => ['collection', $collectionMint],
+                'compressed' => true,
+                'page'       => 1,
+                'limit'      => 1,
+            ],
+        ]);
+        if ($body === false) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        $response = ApiRetry::post($rpcUrl, [
+            'timeout'   => self::HTTP_TIMEOUT,
+            'headers'   => ['Content-Type' => 'application/json'],
+            'body'      => $body,
+            'sslverify' => true,
+        ], [
+            'label'    => 'Helius searchAssets compressed (validation)',
+            'chain_id' => (int) $this->chain->id,
+        ]);
+
+        if (is_wp_error($response)) {
+            return ['ok' => false, 'result' => null, 'kind' => 'transport'];
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return ['ok' => false, 'result' => null, 'kind' => 'http_error'];
+        }
+
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($json)) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        if (isset($json['error'])) {
+            // ⚠ EVERY error is non-decisive here, including a documented
+            // not-found. On `getAssetsByGroup` a not-found answers "is this a
+            // collection?"; here the question is "are there compressed
+            // members?", and a not-found answer to THAT would be a negative we
+            // cannot distinguish from the collection itself being unreachable.
+            // `classifyDasError` is called with no method for exactly that
+            // reason: `searchAssets` is not on its allowlist, so -32004
+            // resolves to `transport` rather than to a decided zero.
+            $kind = self::classifyDasError(
+                is_array($json['error']) ? $json['error'] : [],
+                self::METHOD_SEARCH_ASSETS
+            );
+
+            return ['ok' => false, 'result' => null, 'kind' => $kind];
+        }
+
+        $result = $json['result'] ?? null;
+        if (!is_array($result) || !isset($result['items']) || !is_array($result['items'])) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        return ['ok' => true, 'result' => $result, 'kind' => 'none'];
+    }
+
+    /**
+     * DAS `getAsset` for one mint, with the failure discriminated.
+     *
+     * ── WHY THIS EXISTS ALONGSIDE fetchMetadataForMint() ────────────────
+     * That method returns null for a missing Helius key, a timeout, a non-2xx
+     * and an unparseable body alike. Manual intake cannot use it: "this mint
+     * is not a collection" and "we never reached Helius" would be the same
+     * answer, and the second must never be recorded as the first.
+     *
+     * This returns the RAW DAS result so the caller can read `compression`,
+     * `grouping`, `supply` and `content` — fields the enrichment shape drops.
+     *
+     * ⚠ `grouping[]` carries `group_key` and `group_value` and nothing else.
+     * There is no `verified` property on it; an earlier version of this code
+     * invented one. Verification is expressed by `getAssetsByGroup` with
+     * `showUnverifiedCollections: false` omitting unverified groupings from
+     * the results — see {@see assetsByGroupResult()}.
+     *
+     * `kind`: `none` | `credentials_missing` | `transport` | `http_error` |
+     * `malformed` | `not_found`.
+     *
+     * @return array{ok: bool, result: ?array<string, mixed>, kind: string}
+     */
+    public function assetResult(string $mint): array
+    {
+        if ($mint === '') {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        $rpcUrl = self::resolveHeliusRpcUrl();
+        if ($rpcUrl === null) {
+            return ['ok' => false, 'result' => null, 'kind' => 'credentials_missing'];
+        }
+
+        $body = wp_json_encode([
+            'jsonrpc' => '2.0',
+            'id'      => 'validate-' . substr($mint, 0, 8),
+            'method'  => 'getAsset',
+            'params'  => ['id' => $mint],
+        ]);
+        if ($body === false) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        $response = ApiRetry::post($rpcUrl, [
+            'timeout'   => self::HTTP_TIMEOUT,
+            'headers'   => ['Content-Type' => 'application/json'],
+            'body'      => $body,
+            'sslverify' => true,
+        ], [
+            'label'    => 'Helius getAsset (validation)',
+            'chain_id' => (int) $this->chain->id,
+        ]);
+
+        if (is_wp_error($response)) {
+            return ['ok' => false, 'result' => null, 'kind' => 'transport'];
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return ['ok' => false, 'result' => null, 'kind' => 'http_error'];
+        }
+
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($json)) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        // ⚠⚠⚠ NOT EVERY JSON-RPC ERROR IS AN ANSWER ABOUT THE ADDRESS.
+        // This used to map every `error` object to `not_found`, which the
+        // validator reads as a DECIDED negative. So an expired Helius key, a
+        // rate limit and an internal error all produced "this mint is not a
+        // collection" — a negative authenticity verdict manufactured from an
+        // outage. Only the documented asset-not-found signature decides.
+        if (isset($json['error'])) {
+            return [
+                'ok'     => false,
+                'result' => null,
+                'kind'   => self::classifyDasError(
+                    is_array($json['error']) ? $json['error'] : [],
+                    self::METHOD_GET_ASSET
+                ),
+            ];
+        }
+
+        if (!isset($json['result']) || !is_array($json['result'])) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        return ['ok' => true, 'result' => $json['result'], 'kind' => 'none'];
+    }
+
+    /**
      * Fetch enrichment metadata for a single Solana mint via Helius's
      * `getAsset` DAS method. Used by V2 Phase 1c NftEnrichmentService
      * to backfill name + image_url + collection_name on persistent

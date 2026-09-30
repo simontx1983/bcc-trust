@@ -192,12 +192,29 @@ namespace {
         function get_permalink($post = 0): string { return 'https://example.test/?p=' . (int) $post; }
     }
     if (!function_exists('wp_create_nonce')) {
-        function wp_create_nonce($action = -1): string { return 'nonce'; }
+        /**
+         * ⚠⚠ DERIVED FROM THE ACTION, DELIBERATELY.
+         *
+         * This used to return the literal `'nonce'` for every action, which
+         * made per-row nonce binding UNTESTABLE: a screen that minted one
+         * shared nonce, or one bound to the route but not the collection id,
+         * produced byte-identical markup to a correctly bound one. A test
+         * asserting the binding would have passed either way.
+         *
+         * Real `wp_create_nonce()` is action-scoped, so the stub is too. The
+         * "nonce" prefix is kept so assertions that a nonce is ABSENT still
+         * mean what they meant.
+         */
+        function wp_create_nonce($action = -1): string
+        {
+            return 'nonce-' . substr(md5((string) $action), 0, 12);
+        }
     }
     if (!function_exists('wp_nonce_field')) {
         function wp_nonce_field($action = -1, $name = '_wpnonce', $referer = true, $echo = true): string
         {
-            $html = '<input type="hidden" name="' . esc_attr($name) . '" value="nonce">';
+            $html = '<input type="hidden" name="' . esc_attr($name) . '" value="'
+                . esc_attr(wp_create_nonce($action)) . '">';
             if ($echo) {
                 echo $html;
             }
