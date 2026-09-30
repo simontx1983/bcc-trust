@@ -56,3 +56,49 @@ namespace BCC\Trust\Onchain\Support {
         }
     }
 }
+
+/**
+ * ── ⚠⚠ THE WRITER LIVES IN A DIFFERENT NAMESPACE FROM THE READER ────────
+ * `NftProviderReadiness` reads the DAS-unsupported mark from
+ * `…\Onchain\Support`; `SolanaFetcher` WRITES it from `…\Onchain\Fetchers`.
+ * Namespace-scoped shims are resolved per namespace, so a shim installed only
+ * for the reader leaves the writer calling the real `update_option()` — which
+ * does not exist in the unit suite.
+ *
+ * That is not a theoretical gap. Two mutations that made the writer persist a
+ * credentialed URL survived the whole suite, because no test could run the
+ * writer at all. Both namespaces are shimmed here, over ONE shared store, so the
+ * round trip from writer to reader is exercised end to end.
+ */
+namespace BCC\Trust\Onchain\Fetchers {
+
+    use BCC\Trust\Onchain\Support\NftCapabilityOptionState;
+
+    if (!function_exists(__NAMESPACE__ . '\\update_option')) {
+        /** @param mixed $value */
+        function update_option(string $name, $value, $autoload = null): bool
+        {
+            if (!NftCapabilityOptionState::$active) {
+                return \function_exists('update_option') ? \update_option($name, $value, $autoload) : false;
+            }
+            NftCapabilityOptionState::$options[$name] = $value;
+
+            return true;
+        }
+    }
+
+    if (!function_exists(__NAMESPACE__ . '\\get_option')) {
+        /**
+         * @param mixed $default
+         * @return mixed
+         */
+        function get_option(string $name, $default = false)
+        {
+            if (!NftCapabilityOptionState::$active) {
+                return \function_exists('get_option') ? \get_option($name, $default) : $default;
+            }
+
+            return NftCapabilityOptionState::$options[$name] ?? $default;
+        }
+    }
+}

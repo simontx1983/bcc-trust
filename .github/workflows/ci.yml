@@ -63,6 +63,27 @@ jobs:
       - name: Architecture guardrails (incl. PHP syntax)
         run: bash scripts/arch-guardrails.sh bcc-trust
 
+      # ⚠⚠⚠ Armed 2026-09-30 after a live Alchemy API key was printed by a
+      # diagnostic and had to be rotated. The redactor in use masked the query
+      # string only; Alchemy carries its key in the PATH, and
+      # AlchemyEndpoint::nftBaseFromRpcUrl() rewrites that path into
+      # /nft/v3/<KEY> — a shape nobody had enumerated. The code was reviewed and
+      # the redactor's own docblock described the gap; neither caught it, because
+      # the defect was one line pairing a value with an output.
+      #
+      # Blocking from the first run: the tree is clean, so there is no backlog to
+      # work down and nothing to ratchet. See security issue #267.
+      - name: Endpoint-exposure guard (no credential reaches an output)
+        run: php scripts/endpoint-exposure-guard.php
+
+      # The guard above is the kind that can silently match nothing and report a
+      # pass — this repo has shipped exactly that failure before. These controls
+      # inject each leak shape into real production code and require the guard or
+      # the named test to FAIL, so a guard that stopped detecting anything turns
+      # the build red instead of green.
+      - name: Endpoint redaction / identity mutation controls
+        run: bash scripts/tests/endpoint-redaction-mutation-controls.sh
+
       # verify-golden.sh itself needs a live WordPress + seeded DB, which CI
       # has not got — which is exactly why it was in no workflow, and why its
       # fixtures rotted unnoticed for months (foreman_insignia from v1.36,

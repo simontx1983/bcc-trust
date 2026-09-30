@@ -531,7 +531,7 @@ final class NftChainCapability
      *         drivers: list<string>,
      *         readiness: array<string, bool>,
      *         ready: list<string>,
-     *         endpoint_refusals: array<string, array{rpc_url: string, code: int, message: string, detected_at: int}>,
+     *         endpoint_refusals: array<string, array{endpoint_display: string, code: int, message: string, detected_at: int}>,
      *         editable: list<array{driver_key: string, state: string, priority: int, default_priority: int, ready: bool}>
      *     }>
      * }

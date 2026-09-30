@@ -6,6 +6,7 @@ namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainNftCapabilityRepository;
+use BCC\Trust\Onchain\Support\EndpointDescriptor;
 use BCC\Trust\Onchain\Support\HeliusEndpoint;
 use BCC\Trust\Onchain\Support\NftCapabilityOptionState;
 use BCC\Trust\Onchain\Support\NftChainCapability;
@@ -93,6 +94,22 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
             'rest_url'                            => '',
             'bcc_supports_nft_collections'        => '1',
             'manual_collection_discovery_enabled' => '1',
+        ];
+    }
+
+    /**
+     * Write a DAS-unsupported mark the way the production writer does: a
+     * description that renders, and an identity that compares. Neither field can
+     * do the other's job — see {@see DasMarkIdentityTest}.
+     */
+    private static function markDasUnsupported(string $endpoint): void
+    {
+        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(self::CHAIN_ID)] = [
+            'endpoint_display' => EndpointDescriptor::display($endpoint),
+            'endpoint_id'      => EndpointDescriptor::identity($endpoint),
+            'code'             => -32601,
+            'message'          => 'Method not found',
+            'detected_at'      => 1,
         ];
     }
 
@@ -695,18 +712,21 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
     public function testAnEndpointBoundRefusalIsReportedAgainstTheEndpointThatEarnedIt(): void
     {
         $rpc = 'https://das.example/rpc';
-        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(self::CHAIN_ID)] = [
-            'rpc_url'     => HeliusEndpoint::redactEndpoint($rpc),
-            'code'        => -32601,
-            'message'     => 'Method not found',
-            'detected_at' => 1,
-        ];
+        self::markDasUnsupported($rpc);
 
         $row = self::op(self::solana($rpc), NftDriverRegistry::OP_WALLET_DISCOVERY);
 
         self::assertSame(NftChainCapability::OP_PROVIDER_UNAVAILABLE, $row['status']);
         self::assertArrayHasKey(NftDriverRegistry::DRIVER_DAS_RPC, $row['endpoint_refusals']);
-        self::assertSame(-32601, $row['endpoint_refusals'][NftDriverRegistry::DRIVER_DAS_RPC]['code']);
+
+        $refusal = $row['endpoint_refusals'][NftDriverRegistry::DRIVER_DAS_RPC];
+        self::assertSame(-32601, $refusal['code']);
+
+        // ⚠ The matrix is serialised into an admin page and a REST response, so
+        // what it carries about an endpoint is a description and nothing else.
+        self::assertSame('https://das.example', $refusal['endpoint_display']);
+        self::assertArrayNotHasKey('rpc_url', $refusal, 'the conflated field must be gone');
+        self::assertArrayNotHasKey('endpoint_id', $refusal, 'the comparison token must not be exported');
     }
 
     /**
@@ -718,12 +738,7 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
      */
     public function testRepointingTheChainClearsAStaleEndpointBoundRefusal(): void
     {
-        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(self::CHAIN_ID)] = [
-            'rpc_url'     => 'https://old.example/rpc',
-            'code'        => -32601,
-            'message'     => 'Method not found',
-            'detected_at' => 1,
-        ];
+        self::markDasUnsupported('https://old.example/rpc');
 
         $row = self::op(self::solana('https://new.example/rpc'), NftDriverRegistry::OP_WALLET_DISCOVERY);
 
@@ -737,12 +752,7 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
     {
         define('BCC_HELIUS_API_KEY', 'a-real-key');
 
-        NftCapabilityOptionState::$options[HeliusEndpoint::dasUnsupportedOptionKey(self::CHAIN_ID)] = [
-            'rpc_url'     => HeliusEndpoint::redactEndpoint('https://das.example/rpc'),
-            'code'        => -32601,
-            'message'     => 'Method not found',
-            'detected_at' => 1,
-        ];
+        self::markDasUnsupported('https://das.example/rpc');
 
         $row = self::op(self::solana('https://das.example/rpc'), NftDriverRegistry::OP_METADATA);
 

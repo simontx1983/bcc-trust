@@ -172,6 +172,136 @@ final class NftProviderReadiness
     }
 
     /**
+     * WHAT A DIAGNOSTIC IS ALLOWED TO KNOW about a driver's provider.
+     *
+     * ── ⚠⚠⚠ WHY THIS EXISTS RATHER THAN A HELPER AT EACH CALL SITE ──────
+     * {@see isReady()} answers a bool, which is correct for gating and useless
+     * for an operator staring at a red panel: "not ready" does not say whether a
+     * credential is missing, whether the endpoint is a keyless template, or
+     * whether there is any resolver for this driver at all.
+     *
+     * The obvious fix — hand the panel the resolved endpoint and let it print
+     * the interesting part — is precisely the defect this whole change exists to
+     * close. Every such call site independently decided how much of a URL was
+     * safe, and on 2026-09-30 one of them was wrong and leaked a live key.
+     *
+     * So the endpoint never leaves this method. What leaves is a
+     * {@see ProviderConfigStatus}: provider name, configured, hostname,
+     * resolver-available, and nothing else. It cannot be asked for a URL.
+     *
+     * ── ⚠⚠ IT ANSWERS A DIFFERENT QUESTION FROM isReady() ───────────────
+     * `configured` is NOT `ready`, and they must not be conflated:
+     *
+     *   das_rpc   a configured DAS endpoint that has ALREADY answered
+     *             "method not found" is configured and NOT ready
+     *   evm_rpc   a keyless public RPC is configured for `eth_call` and is
+     *             not configured for Alchemy's NFT API on the same row
+     *
+     * Readiness folds in observed negative signals and per-driver capability;
+     * this folds in neither. A panel that wants "can I run this" asks
+     * {@see isReady()}; a panel that wants "what did the operator configure"
+     * asks here. Presenting this one as readiness would re-open the dead end at
+     * {@see dasMarkApplies()}.
+     *
+     * ── RESOLVER-AVAILABLE ──────────────────────────────────────────────
+     * False when there is no code path that could produce an endpoint for this
+     * pair: an unknown driver key, or a driver that does not serve this chain
+     * type. That is a developer-facing fact, and keeping it separate from
+     * `configured` stops an operator being sent to `wp-config.php` to fix
+     * something no credential can fix.
+     *
+     * No network call is made.
+     */
+    public static function configStatus(object $chain, string $driverKey): ProviderConfigStatus
+    {
+        if (!NftDriverRegistry::isDriver($driverKey)
+            || !NftDriverRegistry::driverSupportsChain($driverKey, $chain)
+        ) {
+            return ProviderConfigStatus::unconfigured(self::providerName($driverKey), false);
+        }
+
+        $rpcUrl  = trim((string) ($chain->rpc_url  ?? ''));
+        $restUrl = trim((string) ($chain->rest_url ?? ''));
+        $provider = self::providerName($driverKey);
+
+        // ⚠ Each arm resolves the endpoint the DRIVER ACTUALLY USES, through the
+        // same resolver the driver calls. A hostname derived from the wrong
+        // column is worse than none: it reads as confirmation while naming a
+        // host the driver will never contact. That is the exact shape of the
+        // original Solana defect, where a configured Helius key was reported for
+        // a path still hitting the public RPC.
+        return match ($driverKey) {
+            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
+            NftDriverRegistry::DRIVER_TALIS_WHITELIST
+                => ProviderConfigStatus::describing($provider, $restUrl),
+
+            // Alchemy's NFT drivers need a KEYED endpoint, so a keyless seeded
+            // template must report unconfigured even though the row is non-empty
+            // and `EndpointDescriptor` would happily describe its host.
+            NftDriverRegistry::DRIVER_ALCHEMY_NFT,
+            NftDriverRegistry::DRIVER_ALCHEMY_TRANSFERS
+                => AlchemyEndpoint::isConfigured($rpcUrl)
+                    ? ProviderConfigStatus::describing($provider, $rpcUrl)
+                    : ProviderConfigStatus::unconfigured($provider),
+
+            NftDriverRegistry::DRIVER_EVM_RPC  => ProviderConfigStatus::describing($provider, $rpcUrl),
+            NftDriverRegistry::DRIVER_DAS_RPC  => ProviderConfigStatus::describing($provider, SolanaEndpoints::rpcEndpoint($chain)),
+            NftDriverRegistry::DRIVER_DAS_HELIUS => ProviderConfigStatus::describing($provider, SolanaEndpoints::metadataEndpoint()),
+
+            // A public API with no per-chain credential. Configured by
+            // definition — there is nothing an operator could set — and its host
+            // is a constant, not configuration, so there is none to report.
+            NftDriverRegistry::DRIVER_MAGICEDEN => ProviderConfigStatus::describing($provider, null),
+
+            // ⚠ A registered driver this method has no arm for. Reported as
+            // resolver-unavailable rather than unconfigured: the honest answer is
+            // that nothing here knows how to resolve it, and saying
+            // "unconfigured" would send an operator to fix a credential.
+            default => ProviderConfigStatus::unconfigured($provider, false),
+        };
+    }
+
+    /**
+     * Status for several drivers at once, preserving input order.
+     *
+     * @param list<string> $driverKeys
+     * @return array<string, ProviderConfigStatus> driver key => status
+     */
+    public static function configStatusMap(object $chain, array $driverKeys): array
+    {
+        $map = [];
+        foreach ($driverKeys as $key) {
+            $map[$key] = self::configStatus($chain, $key);
+        }
+
+        return $map;
+    }
+
+    /**
+     * The PROVIDER behind a driver key — a name, from a closed set.
+     *
+     * Several drivers share one provider (both Alchemy drivers, both DAS
+     * drivers on different endpoints), which is the whole reason the provider is
+     * named separately from the driver rather than inferred from the key.
+     */
+    private static function providerName(string $driverKey): string
+    {
+        return match ($driverKey) {
+            NftDriverRegistry::DRIVER_ALCHEMY_NFT,
+            NftDriverRegistry::DRIVER_ALCHEMY_TRANSFERS  => 'alchemy',
+            NftDriverRegistry::DRIVER_DAS_HELIUS         => 'helius',
+            NftDriverRegistry::DRIVER_DAS_RPC            => 'solana-rpc',
+            NftDriverRegistry::DRIVER_MAGICEDEN          => 'magiceden',
+            NftDriverRegistry::DRIVER_EVM_RPC            => 'evm-rpc',
+            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
+            NftDriverRegistry::DRIVER_TALIS_WHITELIST    => 'cosmos-lcd',
+            default                                      => 'unknown',
+        };
+    }
+
+    /**
      * The subset of `$driverKeys` that are ready, in the order given.
      *
      * This is the shape {@see NftChainCapability} wants: it asks the
@@ -220,18 +350,24 @@ final class NftProviderReadiness
      * treated this as the answer would resurrect exactly the failure the
      * split exists to prevent.
      *
-     * ── WHAT COMES BACK IS ALREADY REDACTED ────────────────────────────
-     * `rpc_url` is stored by {@see \BCC\Trust\Onchain\Fetchers\SolanaFetcher}
-     * having already been through {@see HeliusEndpoint::redactEndpoint()},
-     * so it carries no query string and therefore no credential. `message`
-     * is UPSTREAM PROVIDER TEXT and is NOT sanitised here — a caller that
-     * displays it must put it through
+     * ── ⚠⚠⚠ WHAT COMES BACK IS DESCRIPTION ONLY ────────────────────────
+     * `endpoint_display` is `scheme://host` and nothing else — see
+     * {@see EndpointDescriptor::display()}. The stored comparison token
+     * (`endpoint_id`) is deliberately NOT exported: it is a persisted
+     * identity, and a caller handed it could render or log it, which is
+     * precisely what splitting description from identity exists to prevent.
+     *
+     * The shape this replaced returned `rpc_url` — a query-only redaction
+     * that carried a path-embedded credential straight into admin HTML.
+     *
+     * `message` is UPSTREAM PROVIDER TEXT and is NOT sanitised here — a
+     * caller that displays it must put it through
      * {@see \BCC\Trust\Onchain\Admin\AdminActionSupport::operatorSafeExcerpt()}
      * first.
      *
      * No network call is made.
      *
-     * @return array{rpc_url: string, code: int, message: string, detected_at: int}|null
+     * @return array{endpoint_display: string, code: int, message: string, detected_at: int}|null
      *         null when no mark applies — including when the driver is not
      *         endpoint-marked at all
      */
@@ -264,11 +400,21 @@ final class NftProviderReadiness
             return null;
         }
 
+        // ⚠ `endpoint_id` is NEVER included. Only the description leaves here.
+        //
+        // The stored display value is put through `display()` AGAIN rather than
+        // trusted. It was written by this version of the writer today, but the
+        // option is long-lived: it outlives deployments, it is restored from
+        // backups, and an administrator can edit it. Re-describing costs one
+        // parse and means a hand-edited or rolled-back payload cannot smuggle a
+        // path back out through a field whose name promises there isn't one.
         return [
-            'rpc_url'     => isset($flag['rpc_url']) ? trim((string) $flag['rpc_url']) : '',
-            'code'        => isset($flag['code']) ? (int) $flag['code'] : 0,
-            'message'     => isset($flag['message']) ? (string) $flag['message'] : '',
-            'detected_at' => isset($flag['detected_at']) ? (int) $flag['detected_at'] : 0,
+            'endpoint_display' => isset($flag['endpoint_display'])
+                ? EndpointDescriptor::display((string) $flag['endpoint_display'])
+                : EndpointDescriptor::UNRECOGNISED,
+            'code'             => isset($flag['code']) ? (int) $flag['code'] : 0,
+            'message'          => isset($flag['message']) ? (string) $flag['message'] : '',
+            'detected_at'      => isset($flag['detected_at']) ? (int) $flag['detected_at'] : 0,
         ];
     }
 
@@ -289,33 +435,56 @@ final class NftProviderReadiness
      *      mark against the endpoint now in use
      *
      * The mark records the endpoint `SolanaFetcher::rpcCall()` actually
-     * POSTed to — that is `redactEndpoint(SolanaEndpoints::rpcEndpoint($chain))`,
-     * the RESOLVED endpoint, not the raw `rpc_url` column. The distinction is
-     * load-bearing: `rpcEndpoint()` falls back to the public default when the
-     * column is NULL or blank, and such a chain still makes calls. Comparing
-     * the raw nullable column would therefore never match the mark on exactly
-     * the rows most likely to carry one.
+     * POSTed to — the RESOLVED endpoint from
+     * {@see SolanaEndpoints::rpcEndpoint()}, not the raw `rpc_url` column. The
+     * distinction is load-bearing: `rpcEndpoint()` falls back to the public
+     * default when the column is NULL or blank, and such a chain still makes
+     * calls. Comparing the raw nullable column would therefore never match the
+     * mark on exactly the rows most likely to carry one.
      *
-     * So the current endpoint is put through the SAME resolution and the SAME
-     * redaction before comparing. A changed endpoint does not inherit the
-     * previous one's verdict; an unchanged endpoint keeps its refusal.
+     * So the current endpoint is put through the SAME resolution before
+     * comparing. A changed endpoint does not inherit the previous one's
+     * verdict; an unchanged endpoint keeps its refusal.
+     *
+     * ── ⚠⚠⚠ COMPARISON IS ON IDENTITY, NOT ON THE DESCRIPTION ──────────
+     * This used to compare two `redactEndpoint()` outputs, and its docblock
+     * argued the resulting query-blindness was "deliberate and conservative":
+     * a rotated key on a host already proven DAS-incapable would not suddenly
+     * serve DAS.
+     *
+     * That argument does not survive the redaction being FIXED. A deny-by-
+     * default description is `scheme://host`, so comparing descriptions makes
+     * EVERY endpoint on a host identical — not just a rotated credential, but a
+     * different path, a different API version, a different product. Under the
+     * new description the old comparison would have silently widened from
+     * "same host, different key" to "same host, anything at all", and the
+     * dead end at the top of this docblock would have come straight back for
+     * any operator whose fix was a path change on the same provider.
+     *
+     * It is also the wrong claim on its own terms. The two DAS drivers already
+     * exist BECAUSE one host serves different things down different paths; a
+     * per-host verdict is exactly the conflation `das_rpc`/`das_helius` was
+     * split to undo.
+     *
+     * So identity is its own value — {@see EndpointDescriptor::identity()}, an
+     * HMAC over the whole URL — compared with {@see hash_equals()} and never
+     * rendered or logged. Hardening the description REQUIRED pulling identity
+     * out of it; the two cannot be one field.
      *
      * ── UNATTRIBUTABLE MARKS DO NOT APPLY ───────────────────────────────
-     * A non-array option, an empty one, or one carrying no `rpc_url` cannot
-     * be tied to an endpoint. Those are treated as NOT applying, for the
-     * same reason the malformed case always was: this is a NEGATIVE signal,
-     * and an unreadable one must not permanently disable a driver an
+     * A non-array option, an empty one, or one carrying no `endpoint_id`
+     * cannot be tied to an endpoint. Those are treated as NOT applying, for
+     * the same reason the malformed case always was: this is a NEGATIVE
+     * signal, and an unreadable one must not permanently disable a driver an
      * operator has correctly configured with no way to clear it. The
      * decision is also self-correcting — if the endpoint really is
      * DAS-incapable, the very next call re-writes the mark, this time WITH
-     * an endpoint attached.
+     * an identity attached.
      *
-     * ⚠️ Comparison is on the REDACTED form, so two endpoints differing only
-     * in their query string (e.g. the same host with a rotated `?api-key=`)
-     * compare EQUAL. That is deliberate and conservative here: a rotated key
-     * on a host that has already proven it cannot serve DAS is still not
-     * going to serve DAS, and the redaction is what keeps the secret out of
-     * the stored option in the first place.
+     * ⚠ That covers LEGACY marks too, which stored `rpc_url` and no identity.
+     * They are unverifiable, so they are ignored rather than migrated. There is
+     * nothing to migrate to: the stored value was already lossy, so the
+     * original URL — and therefore its identity — cannot be recovered from it.
      *
      * No network call is made.
      */
@@ -330,11 +499,18 @@ final class NftProviderReadiness
             return false;
         }
 
-        $markedEndpoint = isset($flag['rpc_url']) ? trim((string) $flag['rpc_url']) : '';
-        if ($markedEndpoint === '') {
+        $markedId = isset($flag['endpoint_id']) ? trim((string) $flag['endpoint_id']) : '';
+        if ($markedId === '') {
             return false;
         }
 
-        return $markedEndpoint === HeliusEndpoint::redactEndpoint($currentRpcUrl);
+        // ⚠ '' when the current endpoint is unusable, which can never match a
+        // real identity — `hash_equals()` compares it and loses.
+        $currentId = EndpointDescriptor::identity($currentRpcUrl);
+        if ($currentId === '') {
+            return false;
+        }
+
+        return hash_equals($markedId, $currentId);
     }
 }
