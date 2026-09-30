@@ -33,11 +33,12 @@ final class IntakeMetadataFamilyStateTest extends TestCase
         return [
             'cosmos' => ['cosmos', ['name', 'symbol', 'description', 'image_url', 'total_supply']],
             'evm'    => ['evm', ['name', 'symbol', 'image_url', 'total_supply']],
-            // ⚠ Round 4 added `total_supply`: the verified `getAssetsByGroup`
-            // result carries a `total`, so a membership count is something
-            // Solana now ATTEMPTS. DAS still exposes no collection-level symbol
-            // or description, so those two stay NOT_APPLICABLE.
-            'solana' => ['solana', ['name', 'image_url', 'total_supply']],
+            // ⚠⚠ Round 4 added `total_supply` here; live measurement then proved
+            // the group response's `total` is the RETURNED PAGE COUNT (it tracks
+            // the requested limit exactly), so there is no bounded source of
+            // collection-wide Solana supply and the field is NOT_APPLICABLE
+            // again. DAS also exposes no collection-level symbol or description.
+            'solana' => ['solana', ['name', 'image_url']],
         ];
     }
 

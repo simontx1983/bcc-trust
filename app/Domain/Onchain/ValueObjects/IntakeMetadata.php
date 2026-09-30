@@ -99,13 +99,24 @@ final class IntakeMetadata
     private const APPLICABLE_BY_FAMILY = [
         'cosmos' => ['name', 'symbol', 'description', 'image_url', 'total_supply'],
         'evm'    => ['name', 'symbol', 'image_url', 'total_supply'],
-        // ⚠ `total_supply` IS applicable on Solana as of review round 4: the
-        // verified `getAssetsByGroup` result carries a `total`, so a membership
-        // count is something this family ATTEMPTS. When that number cannot be
-        // proved collection-wide it is UNKNOWN — a real shortfall an operator
-        // can name — which is a different thing from NOT_APPLICABLE.
-        // DAS still exposes no collection-level symbol or description.
-        'solana' => ['name', 'image_url', 'total_supply'],
+        // ⚠⚠⚠ `total_supply` IS NOT APPLICABLE ON SOLANA (v1, settled).
+        //
+        // Round 4 made it applicable on the strength of the verified
+        // `getAssetsByGroup` result carrying a `total`. Live measurement against
+        // Helius then proved that `total` is the RETURNED PAGE COUNT — it tracks
+        // the requested limit exactly (1→1, 5→5, 20→20) — and that
+        // `showGrandTotal: true` yields no usable grand-total field. So there is
+        // no bounded, documented source of collection-wide Solana supply, and a
+        // field that can never resolve must not be counted as an outstanding
+        // shortfall: doing so made `complete` permanently unreachable, which
+        // tells a reader nothing.
+        //
+        // ⚠ NOT_APPLICABLE here means "BCC does not collect this through this
+        // intake path". It is NOT zero, NOT absent, and NOT a claim about the
+        // collection's real size.
+        //
+        // DAS also exposes no collection-level symbol or description.
+        'solana' => ['name', 'image_url'],
     ];
 
     /** @var array<string, array{value: mixed, state: string}> */

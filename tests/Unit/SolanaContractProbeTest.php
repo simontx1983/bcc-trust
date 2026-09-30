@@ -336,11 +336,11 @@ final class SolanaContractProbeTest extends TestCase
      * `supply.print_current_supply` describes EDITION PRINTS of the one
      * collection NFT — a different number answering a different question.
      *
-     * ⚠ Round 4 changed the STATE, not this rule. Supply is now APPLICABLE on
-     * Solana (the group result's `total` is a real source), so an unprovable
-     * count is UNKNOWN rather than NOT_APPLICABLE. What must never happen is
-     * the print count being stored, and that is what this pins: the fixture's
-     * group total is ambiguous, so the answer is UNKNOWN — emphatically not 137.
+     * ⚠ The STATE has changed twice and the rule never has. Round 4 made supply
+     * APPLICABLE (UNKNOWN when unprovable); live measurement then proved the
+     * only candidate source was a page count, so it is NOT_APPLICABLE again.
+     * Through all of it, the print count must never be stored — which is what
+     * this pins.
      */
     public function testTheEditionPrintSupplyIsNeverStoredAsCollectionSupply(): void
     {
@@ -351,7 +351,7 @@ final class SolanaContractProbeTest extends TestCase
         $m = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->metadata();
 
         self::assertInstanceOf(IntakeMetadata::class, $m);
-        self::assertSame(IntakeMetadata::UNKNOWN, $m->stateOf('total_supply'));
+        self::assertSame(IntakeMetadata::NOT_APPLICABLE, $m->stateOf('total_supply'));
         self::assertArrayNotHasKey('total_supply', $m->writableFields());
         self::assertNotSame(137, $m->valueOf('total_supply'));
         self::assertNotSame(500, $m->valueOf('total_supply'));
@@ -370,24 +370,20 @@ final class SolanaContractProbeTest extends TestCase
      * partial. Before NOT_APPLICABLE existed, the fields DAS cannot supply were
      * UNKNOWN forever and `complete` was unreachable.
      *
-     * ⚠⚠ Round 4 made supply the THIRD applicable field, so "fully successful"
-     * now includes a provable membership count — hence the explicit group total
-     * above the page limit. The default fixture's total is ambiguous, which is
-     * `partial`, and that is correct: a field we attempted and could not read
-     * IS a shortfall. See `testAnAmbiguousOrUnusableGroupTotalLeavesSupplyUnknown`.
+     * ⚠⚠ Round 4 briefly made supply a third applicable field, which made
+     * `complete` unreachable once live measurement proved the source was a page
+     * count. Supply is NOT_APPLICABLE again, so the applicable pair is back to
+     * name and image and NO group total is needed to reach `complete`.
      */
     public function testAFullySuccessfulSolanaReadIsComplete(): void
     {
-        $f = $this->fetcher();
-        $f->groupTotal = 4200; // > limit 1, so provably collection-wide
-
-        $m = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->metadata();
+        $m = (new SolanaContractProbe($this->fetcher()))->validate(self::MINT, $this->budget())->metadata();
 
         self::assertSame(IntakeMetadata::STATE_COMPLETE, $m?->state());
         self::assertSame(
-            3,
+            2,
             $m?->applicableCount(),
-            'name, image and — since round 4 — the membership count'
+            'name and image are the applicable pair; supply is not collected here'
         );
     }
 
@@ -585,242 +581,25 @@ final class SolanaContractProbeTest extends TestCase
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  SUPPLY FROM THE GROUP TOTAL (round 4)
+    //  SUPPLY — REMOVED. `total_supply` IS NOT_APPLICABLE ON SOLANA.
     // ═══════════════════════════════════════════════════════════════════
     //
-    // ⚠⚠⚠ `total` IS NOT PROVABLY THE COLLECTION SIZE. Helius's parameter
-    // table calls it "the total number of Solana NFTs found in this collection
-    // or group", but the documented response EXAMPLE shows `"total": 1` for a
-    // one-item page, and `showGrandTotal` — "Show total number of matching
-    // assets (slower request)" — exists on the same method. If `total` were
-    // already collection-wide, that option would be redundant.
+    // Rounds 4 and 5 built a supply inference here and then a conservative
+    // guard around it: accept the group response's `total` only when the
+    // response echoed the requested `limit: 1` AND `total > limit`.
     //
-    // So only `total > limit` PROVES the value is not page-bounded: a page
-    // count can never exceed the page limit. Anything at or below the limit is
-    // indistinguishable from "items on this page" and stays UNKNOWN.
+    // ⚠⚠⚠ LIVE MEASUREMENT DISPROVED THE SOURCE, NOT THE GUARD. Against
+    // Helius, `total` tracks the requested limit exactly — 1→1, 5→5, 20→20 —
+    // so it is the RETURNED PAGE COUNT and could never have been
+    // collection-wide. `showGrandTotal: true` returned an empty result object
+    // with no `grand_total` field, so there is no second route either.
     //
-    // ⚠ `showGrandTotal`'s response FIELD NAME is undocumented, so requesting
-    // it and reading a guessed key would repeat the `showCollectionMetadata`
-    // mistake exactly.
-
-    public function testSupplyComesFromTheGroupTotalWhenItExceedsTheLimit(): void
-    {
-        $f = $this->fetcher();
-        $f->groupItems      = [self::memberItem(false)];
-        $f->groupTotal      = 4200;   // > limit 1, so it cannot be a page count
-        $f->compressedItems = [];
-        $f->asset           = self::collectionAsset();
-
-        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
-
-        self::assertSame(ContractValidationVerdict::VALID, $v->state());
-        $m = $v->metadata();
-        self::assertNotNull($m);
-        self::assertSame(IntakeMetadata::KNOWN, $m->stateOf('total_supply'));
-        self::assertSame(4200, $m->valueOf('total_supply'));
-    }
-
-    /**
-     * ⚠⚠ A `total` at or below the page limit is AMBIGUOUS, so it is UNKNOWN —
-     * not 1. Recording 1 would put a fabricated supply on every collection if
-     * `total` turns out to be the page count.
-     *
-     * @return array<string, array{0: mixed}>
-     */
-    public static function ambiguousOrUnusableTotals(): array
-    {
-        return [
-            'equal to the limit' => [1],
-            'zero'               => [0],
-            'negative'           => [-5],
-            'absurdly large'     => [PHP_INT_MAX],
-            'a string'           => ['4200'],
-            'a float'            => [4200.5],
-            'null'               => [null],
-            'an array'           => [[4200]],
-        ];
-    }
-
-    #[DataProvider('ambiguousOrUnusableTotals')]
-    public function testAnAmbiguousOrUnusableGroupTotalLeavesSupplyUnknown(mixed $total): void
-    {
-        $f = $this->fetcher();
-        $f->groupItems      = [self::memberItem(false)];
-        $f->groupTotal      = $total;
-        $f->compressedItems = [];
-        $f->asset           = self::collectionAsset();
-
-        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
-
-        self::assertSame(ContractValidationVerdict::VALID, $v->state(), 'supply is optional, not a gate');
-        $m = $v->metadata();
-        self::assertNotNull($m);
-        self::assertSame(
-            IntakeMetadata::UNKNOWN,
-            $m->stateOf('total_supply'),
-            'an unprovable count is UNKNOWN — never a number, never zero'
-        );
-        self::assertArrayNotHasKey('total_supply', $m->writableFields());
-        self::assertSame(
-            IntakeMetadata::STATE_PARTIAL,
-            $m->state(),
-            'a field we attempted and could not read IS a real shortfall'
-        );
-    }
-
-    /**
-     * ⚠⚠⚠ THE EDITION-PRINT `supply` OBJECT IS A DIFFERENT NUMBER. It describes
-     * prints of ONE master-edition NFT (`print_current_supply` /
-     * `print_max_supply`), not how many items a collection contains. Using it
-     * would show an operator a confident number that answers another question.
-     */
-    public function testTheEditionPrintSupplyObjectIsNeverUsedAsCollectionSupply(): void
-    {
-        $f = $this->fetcher();
-        $f->groupItems      = [self::memberItem(false)];
-        $f->groupTotal      = 4200;
-        $f->compressedItems = [];
-        // The collection asset carries a print supply of 7 — a decoy.
-        $asset              = self::collectionAsset();
-        $asset['supply']    = ['print_max_supply' => 7, 'print_current_supply' => 7, 'edition_nonce' => 254];
-        $f->asset           = $asset;
-
-        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
-
-        self::assertSame(4200, $v->metadata()?->valueOf('total_supply'));
-        self::assertNotSame(7, $v->metadata()?->valueOf('total_supply'));
-    }
-
-    // ── ⚠⚠⚠ THE INFERENCE ONLY HOLDS FOR limit === 1 (round 5) ──────────
-    //
-    // `total > limit` was too weak. It proves `limit` is an integer smaller
-    // than `total` — nothing more. The actual reasoning is narrower: the probe
-    // REQUESTS `limit: 1`, so a response echoing `limit: 1` is one the provider
-    // honoured, and in that response a page count can be at most 1. Any other
-    // echoed limit means the provider served a page we did not ask for, so the
-    // response is not the one the inference was reasoned about and `total`
-    // could mean something else entirely.
-    //
-    // Requiring exactly 1 keeps the conclusion tied to the request that
-    // justified it. It costs no extra provider call — the limit is already in
-    // the response we have.
-
-    public function testSupplyIsKnownOnlyWhenTheEchoedLimitIsExactlyOne(): void
-    {
-        $f = $this->fetcher();
-        $f->groupItems      = [self::memberItem(false)];
-        $f->groupTotal      = 4200;
-        $f->groupLimit      = 1; // the limit we asked for, echoed back
-        $f->compressedItems = [];
-        $f->asset           = self::collectionAsset();
-
-        $m = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30))->metadata();
-
-        self::assertSame(IntakeMetadata::KNOWN, $m?->stateOf('total_supply'));
-        self::assertSame(4200, $m?->valueOf('total_supply'));
-    }
-
-    /**
-     * Every limit that is not exactly 1 leaves supply UNKNOWN.
-     *
-     * ⚠ `2` and `500` are the dangerous ones: `4200 > 2` and `4200 > 500` both
-     * satisfied the old rule, so a provider quietly serving its own page size
-     * would have had its `total` persisted as the collection's supply.
-     *
-     * @return array<string, array{0: mixed}>
-     */
-    public static function limitsThatCannotJustifyTheInference(): array
-    {
-        return [
-            'zero'            => [0],
-            'negative'        => [-1],
-            'two'             => [2],
-            'a default page'  => [500],
-            'null'            => [null],
-            'a numeric string'=> ['1'],
-            'a float'         => [1.0],
-            'omitted'         => [FakeSolanaFetcherForValidation::OMIT],
-        ];
-    }
-
-    #[DataProvider('limitsThatCannotJustifyTheInference')]
-    public function testAnyOtherEchoedLimitLeavesSupplyUnknown(mixed $limit): void
-    {
-        $f = $this->fetcher();
-        $f->groupItems      = [self::memberItem(false)];
-        $f->groupTotal      = 4200; // would pass the old `total > limit` rule
-        $f->groupLimit      = $limit;
-        $f->compressedItems = [];
-        $f->asset           = self::collectionAsset();
-
-        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
-        $m = $v->metadata();
-
-        // ⚠ The collection is STILL VALID. An unprovable supply is a metadata
-        // shortfall, not a reason to refuse a verified collection.
-        self::assertSame(ContractValidationVerdict::VALID, $v->state());
-        self::assertTrue($v->mayPersist());
-
-        self::assertSame(
-            IntakeMetadata::UNKNOWN,
-            $m?->stateOf('total_supply'),
-            'the inference is only justified for the limit we actually requested'
-        );
-        self::assertArrayNotHasKey('total_supply', $m?->writableFields() ?? []);
-        self::assertNotSame(4200, $m?->valueOf('total_supply'));
-        self::assertSame(IntakeMetadata::STATE_PARTIAL, $m?->state());
-    }
-
-    /** And no extra provider call is made to recover it. */
-    #[DataProvider('limitsThatCannotJustifyTheInference')]
-    public function testAnUnusableLimitCostsNoExtraRequest(mixed $limit): void
-    {
-        $f = $this->fetcher();
-        $f->groupItems      = [self::memberItem(false)];
-        $f->groupTotal      = 4200;
-        $f->groupLimit      = $limit;
-        $f->compressedItems = [];
-        $f->asset           = self::collectionAsset();
-
-        (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
-
-        self::assertSame(1, $f->groupCalls, 'one group lookup, however unusable its limit');
-        self::assertSame(1, $f->compressedCalls);
-        self::assertSame(1, $f->assetCalls);
-    }
-
-    /** The conservative rule still bites when the limit IS 1. */
-    public function testATotalEqualToAnEchoedLimitOfOneIsStillUnknown(): void
-    {
-        $f = $this->fetcher();
-        $f->groupItems      = [self::memberItem(false)];
-        $f->groupTotal      = 1;
-        $f->groupLimit      = 1;
-        $f->compressedItems = [];
-        $f->asset           = self::collectionAsset();
-
-        $m = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30))->metadata();
-
-        self::assertSame(
-            IntakeMetadata::UNKNOWN,
-            $m?->stateOf('total_supply'),
-            'total 1 with limit 1 is indistinguishable from a one-item page'
-        );
-    }
-
-    /** A fully successful Solana read — name, image AND a provable supply. */
-    public function testAFullSolanaReadIsComplete(): void
-    {
-        $f = $this->fetcher();
-        $f->groupItems      = [self::memberItem(false)];
-        $f->groupTotal      = 4200;
-        $f->compressedItems = [];
-        $f->asset           = self::collectionAsset();
-
-        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
-
-        self::assertSame(IntakeMetadata::STATE_COMPLETE, $v->metadata()?->state());
-    }
+    // Every test that pinned the inference was therefore deleted rather than
+    // relaxed: they asserted the behaviour of a number this method cannot
+    // supply. The replacement guarantees — supply stays NOT_APPLICABLE, no
+    // `total`/`limit` pair changes anything, and `complete` is reachable
+    // again — live in {@see SolanaSupplyNotApplicableTest}, which also pins
+    // the removal at source level so the heuristic cannot quietly return.
 }
 
 class FakeSolanaFetcherForValidation extends \BCC\Trust\Onchain\Fetchers\SolanaFetcher

@@ -36,7 +36,7 @@ if (!defined('ABSPATH')) {
  * single administrator-submitted collection — never from cron, page render,
  * enumeration or any fan-out — and each answers a question the others cannot:
  *
- *   1. `getAssetsByGroup`  is this a VERIFIED collection group? (+ the `total`)
+ *   1. `getAssetsByGroup`  is this a VERIFIED collection group?
  *   2. `searchAssets`      does ANY compressed member exist? (DECISION 8)
  *   3. `getAsset`          the COLLECTION's own name and image
  *
@@ -66,6 +66,39 @@ if (!defined('ABSPATH')) {
  * ⚠ Only a DECISIVE ZERO continues. Provider uncertainty is never a zero: an
  * expired key reading as "no compressed members" is precisely the failure this
  * ordering exists to prevent.
+ *
+ * ── ⚠⚠⚠ NO SUPPLY IS COLLECTED ON SOLANA (v1, settled) ──────────────────
+ * `total_supply` is NOT_APPLICABLE for this family. Nothing here reads it,
+ * writes it, or infers it.
+ *
+ * **What that means, precisely:** BCC does not reliably collect Solana
+ * collection supply through this intake path. It says NOTHING about the
+ * on-chain collection, which of course has a size — only that we have no
+ * bounded, documented way to learn it here. It is not zero and not absent.
+ *
+ * **What was tried, and why it was withdrawn.** An earlier version inferred
+ * supply from this method's `total`, guarded conservatively: accept only when
+ * the response echoed the requested `limit: 1` AND `total > limit`, reasoning
+ * that a page-bounded count can never exceed its own page limit. That guard was
+ * CORRECT against the information available — Helius's parameter table describes
+ * `total` as "the total number of Solana NFTs found in this collection or
+ * group". Live measurement against Helius disproved the SOURCE, not the guard:
+ *
+ *     requested limit 1  → echoed limit 1  → total 1
+ *     requested limit 5  → echoed limit 5  → total 5
+ *     requested limit 20 → echoed limit 20 → total 20
+ *
+ * `total` tracks the requested limit exactly: it is the RETURNED PAGE COUNT, so
+ * it could never have been collection-wide. The vendor's prose is wrong and its
+ * own response example (`"total": 1`) was right. `showGrandTotal: true` returned
+ * an EMPTY result object with no `grand_total` field, so that is not a route
+ * either.
+ *
+ * The heuristic and its exact-limit guard were therefore REMOVED rather than
+ * left dormant: the guard only ever existed to protect a number this method
+ * cannot supply, and leaving it would invite a future reader to revive it.
+ * Re-deriving supply here needs a NEW documented provider capability, not a
+ * cleverer reading of this response.
  */
 final class SolanaContractProbe
 {
@@ -164,9 +197,11 @@ final class SolanaContractProbe
             ]);
         }
 
-        // ── 4. Supply, from the group result's own `total` ────────────────
-        $metadata = $this->withSupplyFromGroupTotal($metadata, $result);
-
+        // ⚠⚠⚠ NO SUPPLY IS DERIVED HERE, and `$result` is deliberately not read
+        // again. `getAssetsByGroup.total` was measured live against Helius and
+        // is the RETURNED PAGE COUNT — see the class docblock. `total_supply` is
+        // NOT_APPLICABLE on Solana, which `IntakeMetadata::forFamily('solana')`
+        // already established before the first call was made.
         return ContractValidationVerdict::valid('SPL-Metaplex', $metadata, [
             ContractValidationVerdict::EV_PROBE_ANSWERED,
             ContractValidationVerdict::EV_INTERFACE_CONFIRMED,
@@ -208,103 +243,6 @@ final class SolanaContractProbe
         return $items !== [];
     }
 
-    /**
-     * Collection supply from the verified group result's `total`.
-     *
-     * ── ⚠⚠⚠ `total` IS NOT PROVABLY THE COLLECTION SIZE ─────────────────
-     * The documentation contradicts itself. Helius's parameter table calls
-     * `total` "the total number of Solana NFTs found in this collection or
-     * group", but the documented response EXAMPLE shows `"total": 1` for a
-     * one-item page, and `showGrandTotal` — "Show total number of matching
-     * assets (slower request)" — exists on the same method. If `total` were
-     * already collection-wide, that option would be redundant.
-     *
-     * So `total > limit` is the only proof available: a page-bounded count can
-     * never EXCEED the page limit. Above the limit the value cannot be a page
-     * count and must be collection-wide; at or below it, the two readings are
-     * indistinguishable and the honest answer is UNKNOWN.
-     *
-     * This is correct under both readings, and only forgoes supply for genuine
-     * one-item collections.
-     *
-     * ⚠ `showGrandTotal` is NOT the escape hatch: its response FIELD NAME is
-     * undocumented, so reading it would repeat the `showCollectionMetadata`
-     * mistake exactly.
-     *
-     * ⚠⚠ AND NOT THE ITEM `supply` OBJECT. That describes EDITION PRINTS of one
-     * master-edition NFT (`print_current_supply` / `print_max_supply`) — a
-     * different number answering a different question. Storing it as the
-     * collection's item count would show an operator a confident wrong figure.
-     *
-     * @param array<string, mixed> $groupResult the verified `getAssetsByGroup` result
-     */
-    private function withSupplyFromGroupTotal(IntakeMetadata $metadata, array $groupResult): IntakeMetadata
-    {
-        $total = $groupResult['total'] ?? null;
-        $limit = $groupResult['limit'] ?? null;
-
-        // Integer-valued only. A string, a float, null or an array is not a
-        // count — it is a shape we do not recognise.
-        if (!is_int($total) || !is_int($limit)) {
-            return $metadata->withUnknown('total_supply');
-        }
-
-        // ⚠⚠⚠ THE ECHOED LIMIT MUST BE EXACTLY THE ONE WE REQUESTED.
-        //
-        // `$total > $limit` was too weak: it proves only that `limit` is an
-        // integer below `total`. With `limit: 500` echoed back, `total: 4200`
-        // satisfied it — and so did `limit: 0` and `limit: -1`.
-        //
-        // The real reasoning is narrower and rests entirely on OUR request.
-        // {@see SolanaFetcher::assetsByGroupResult()} asks for `limit: 1`, so a
-        // response echoing `limit: 1` is one the provider honoured, and in THAT
-        // response a page count can be at most 1 — which is what makes
-        // `total > 1` provably not a page count. A response echoing anything
-        // else served a page we did not ask for, so it is not the response the
-        // inference was reasoned about and `total` may mean something else.
-        //
-        // Requiring exactly 1 keeps the conclusion tied to the request that
-        // justifies it, and costs nothing: the limit is already in the response
-        // we hold, so no extra provider call is made to check it.
-        if ($limit !== self::REQUESTED_GROUP_LIMIT) {
-            return $metadata->withUnknown('total_supply');
-        }
-
-        // Non-negative and bounded. A negative count is nonsense, and an
-        // absurd one is more likely a sentinel than a collection.
-        if ($total < 0 || $total > self::SUPPLY_CEILING) {
-            return $metadata->withUnknown('total_supply');
-        }
-
-        // ⚠ THE DISAMBIGUATION. At or below the page limit the number cannot be
-        // distinguished from "items on this page" — so with the limit pinned at
-        // 1, only `total > 1` is provably collection-wide.
-        if ($total <= $limit) {
-            return $metadata->withUnknown('total_supply');
-        }
-
-        return $metadata->withAnswered('total_supply', $total);
-    }
-
-    /**
-     * The page limit {@see SolanaFetcher::assetsByGroupResult()} requests.
-     *
-     * ⚠ Kept as a named constant because the supply inference is only sound
-     * when the response echoes THIS value. If the request's limit ever changes,
-     * this must change with it — and the reasoning in
-     * {@see withSupplyFromGroupTotal()} must be re-derived, not just renumbered.
-     */
-    private const REQUESTED_GROUP_LIMIT = 1;
-
-    /**
-     * The largest membership count treated as a real observation.
-     *
-     * Solana's biggest collections are in the low millions; anything above this
-     * is a sentinel, an overflow or a different unit, and a number an operator
-     * would have to distrust is worse than an honest UNKNOWN.
-     */
-    private const SUPPLY_CEILING = 50_000_000;
-
     /** Why the compressed-existence query gave no answer. */
     private string $lastCompressedKind = 'none';
 
@@ -320,9 +258,11 @@ final class SolanaContractProbe
      *
      * ⚠⚠ AND DELIBERATELY NOT `supply`. The item's `supply` object describes
      * EDITION PRINTS of that one NFT (`print_current_supply` /
-     * `print_max_supply`) — not how many items the collection contains. Supply
-     * comes from the group result's `total` instead; see
-     * {@see withSupplyFromGroupTotal()}.
+     * `print_max_supply`) — not how many items the collection contains.
+     *
+     * ⚠⚠⚠ NO SUPPLY IS COLLECTED ON SOLANA AT ALL. `total_supply` is
+     * NOT_APPLICABLE for this family; see the class docblock for the live
+     * measurement that disproved the only candidate source.
      */
     private function collectCollectionMetadata(string $mint, ProviderRequestBudget $budget): ?IntakeMetadata
     {
