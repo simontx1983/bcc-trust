@@ -33,7 +33,11 @@ final class IntakeMetadataFamilyStateTest extends TestCase
         return [
             'cosmos' => ['cosmos', ['name', 'symbol', 'description', 'image_url', 'total_supply']],
             'evm'    => ['evm', ['name', 'symbol', 'image_url', 'total_supply']],
-            'solana' => ['solana', ['name', 'image_url']],
+            // ⚠ Round 4 added `total_supply`: the verified `getAssetsByGroup`
+            // result carries a `total`, so a membership count is something
+            // Solana now ATTEMPTS. DAS still exposes no collection-level symbol
+            // or description, so those two stay NOT_APPLICABLE.
+            'solana' => ['solana', ['name', 'image_url', 'total_supply']],
         ];
     }
 

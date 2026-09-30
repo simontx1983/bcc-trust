@@ -3565,8 +3565,15 @@ class NftDiscoveryPage
      *
      * ── ZERO PROVIDER CALLS HERE ────────────────────────────────────────
      * Everything below is drawn from the snapshot the page already built.
-     * Nothing is fetched, probed, or asked of a chain to draw this form; the
-     * one bounded validation happens on SUBMIT, and only for Cosmos.
+     * Nothing is fetched, probed, or asked of a chain to draw this form.
+     *
+     * The bounded validation happens on SUBMIT, and since PR E it covers
+     * Cosmos (CW-721 `contract_info`), the approved EVM launch chains
+     * (ERC-165 `supportsInterface`) and Solana (a verified DAS collection
+     * group, plus the cNFT exclusion). It is asked PER CHAIN, from
+     * `manual_intake` on the snapshot row — an earlier version of this note
+     * said Cosmos only, which stopped being true when PR E registered
+     * OP_VALIDATION for `evm_rpc` and `das_helius`.
      *
      * @param list<array<string, mixed>> $chains snapshot rows of the current family
      */

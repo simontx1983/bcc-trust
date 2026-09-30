@@ -44,7 +44,16 @@ final class ChainDescriptionState
     /** Imported, awaiting an administrator. NEVER publicly serialized. */
     public const PENDING = 'pending';
 
-    /** An administrator approved this exact text. Public APIs may return it. */
+    /**
+     * An administrator read this exact text and accepted it.
+     *
+     * ⚠⚠⚠ APPROVED IS NOT PUBLISHED. This constant's comment used to say
+     * "Public APIs may return it", which contradicts DECISION 17: during
+     * scanner retirement the description is **stored and reviewed, not
+     * published** — no public REST field, no view-model field, and the admin
+     * review screen on Verify Collections is its only reader. Approval records
+     * that a human vouched for the text, nothing more.
+     */
     public const APPROVED = 'approved';
 
     /** An administrator refused it. Kept so it is not re-queued forever. */

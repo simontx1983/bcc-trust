@@ -200,10 +200,24 @@ final class NftCapabilityEditorPanel
      */
     private static function renderManualPermission(string $family, int $chainId, array $chain): void
     {
-        $state     = $chain['manual_enabled'] ?? null;
-        $product   = $chain['bcc_supports'] ?? null;
-        $startable = ($chain['operator_startable'] ?? false) === true;
-        $measured  = ($chain['measured_unsupported'] ?? false) === true;
+        $state    = $chain['manual_enabled'] ?? null;
+        $product  = $chain['bcc_supports'] ?? null;
+        $measured = ($chain['measured_unsupported'] ?? false) === true;
+
+        // ⚠⚠⚠ THE SAME FIELD THE WRITER GRANTS ON.
+        //
+        // This read `operator_startable` — the ENUMERATION answer — while the
+        // capability editor granted on `canTakeManualIntake()`. No EVM or Solana
+        // driver claims enumeration, so this panel printed "Not applicable to
+        // this chain" and withheld the control on Ethereum, Base and Solana
+        // while the server would happily have accepted the grant. The
+        // permission was reachable only by constructing a POST by hand.
+        //
+        // `manual_intake` is put on the row by NftChainCapability from the one
+        // predicate both sides use, so the offer and the acceptance cannot
+        // disagree. `=== true` because the value is bool|null and an unreadable
+        // capability must not read as grantable.
+        $grantable = ($chain['manual_intake'] ?? null) === true;
         ?>
         <h3 style="margin-bottom:4px;">Manual discovery permission</h3>
         <p style="max-width:900px;color:#646970;margin-top:0;">
@@ -215,17 +229,18 @@ final class NftCapabilityEditorPanel
             &ldquo;discovery&rdquo; it grants no chain-wide authority and starts no enumeration.
         </p>
 
-        <?php if (!$startable): ?>
+        <?php if (!$grantable): ?>
             <div class="notice notice-info inline" style="margin:0 0 12px;max-width:900px;">
                 <p>
                     <strong>Not applicable to this chain.</strong>
-                    No driver in this build can enumerate it, and
-                    <strong>no setting can add chain-wide NFT enumeration to this family</strong>.
-                    No provider sells it: Alchemy's <code>getContractsForOwner</code> enumerates a
-                    <em>wallet's</em> contracts, which is a different question from "every collection
-                    on this chain". This is a structural limit, not a missing credential, so the
-                    permission is not offered here — and it is refused server-side even if a request
-                    for it is constructed by hand.
+                    Manual intake validates the submitted contract <em>against the chain</em> before
+                    writing anything, and this chain is outside the scope that can be validated:
+                    either no driver in this build can check a contract here, or it is an EVM chain
+                    outside the approved launch scope. Ethereum and Base are the approved EVM chains;
+                    Cosmos and Solana have their own validators.
+                    Adding a chain to that scope is a product decision, not a setting, so the
+                    permission is not offered here — and it is refused server-side on this same
+                    answer even if a request for it is constructed by hand.
                 </p>
                 <?php if ($state === true): ?>
                     <p>

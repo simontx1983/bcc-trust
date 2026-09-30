@@ -132,7 +132,10 @@ if (!defined('ABSPATH')) {
  *     chain_id: string,
  *     chain_slug: string,
  *     chain_type: string,
- *     explorer_url: string|null
+ *     explorer_url: string|null,
+ *     chain_description: string|null,
+ *     chain_description_state: string|null,
+ *     chain_description_source: string|null
  * }
  *
  * @phpstan-type CollectionCountByChain object{
@@ -2479,7 +2482,12 @@ final class CollectionRepository
                     c.provisioning_requested_by, c.provisioning_failure_code,
                     ({$hasCommunity}) AS has_community,
                     ({$isHidden}) AS is_hidden,
-                    c.chain_id, ch.slug AS chain_slug, ch.chain_type, ch.explorer_url
+                    c.chain_id, ch.slug AS chain_slug, ch.chain_type, ch.explorer_url,
+                    -- ⚠ DECISION 17: the imported NFT Collection Description is
+                    -- read HERE and only here. The admin review screen is its
+                    -- only reader, so these three columns exist to be shown to
+                    -- an administrator — never serialized to a public payload.
+                    c.chain_description, c.chain_description_state, c.chain_description_source
                FROM {$table} c
           LEFT JOIN {$chains} ch ON ch.id = c.chain_id
                {$whereSql}

@@ -18,10 +18,11 @@
 # by checksum afterwards — a mutation run that corrupts the tree is worse than
 # no mutation run at all.
 #
-# ── WHY THESE EIGHTEEN ─────────────────────────────────────────────────
-# Eight of them reintroduce defects that were actually written and actually
-# caught in review, not hypotheticals:
+# ── WHY THESE TWENTY-SEVEN ─────────────────────────────────────────────
+# THIRTEEN of them reintroduce defects that were actually written and actually
+# caught in review, not hypotheticals.
 #
+# From rounds 2–3:
 #   S1  the Solana probe asking getAsset — a question about ONE asset — and
 #       reading the answer as proof about a whole collection
 #   S2  gating on `grouping[].verified`, a property that DOES NOT EXIST in the
@@ -34,6 +35,18 @@
 #   A1  gating manual intake on ENUMERATION, which no EVM or Solana driver
 #       claims — the grant was refused on exactly the chains it exists for
 #   A2  printing "checked against the chain" for chains that are not checked
+#
+# From round 4 (numbers 19–27 below):
+#   R1  deciding compression from ONE SAMPLED MEMBER, so a mixed collection
+#       whose first sample happened to be uncompressed validated and persisted
+#   R2  folding "could not ask" into "no compressed members" — the collapse
+#       that makes an expired API key read as a clean collection
+#   R3  the RENDERER still reading the enumeration answer while the WRITER
+#       granted on canTakeManualIntake(), leaving the permission reachable
+#       only by forging a POST
+#   R4  the description review forms not existing at all, which made
+#       DECISION 17's "the admin review interface is the reader" false
+#   R5  a review nonce bound to the route but not the collection id
 #
 # The rest pin boundaries that were built correctly and must stay that way.
 
@@ -156,6 +169,7 @@ COS_PROBE="app/Domain/Onchain/Services/Validation/CosmosContractProbe.php"
 VALIDATOR="app/Domain/Onchain/Services/ContractValidator.php"
 VC_PAGE="app/Domain/Onchain/Admin/VerifyCollectionsPage.php"
 DISC_PAGE="app/Domain/Onchain/Admin/NftDiscoveryPage.php"
+CAP_PANEL="app/Domain/Onchain/Admin/Views/NftCapabilityEditorPanel.php"
 CAP_EDITOR="app/Domain/Onchain/Services/NftCapabilityEditor.php"
 CAPABILITY="app/Domain/Onchain/Support/NftChainCapability.php"
 INTAKE_META="app/Domain/Onchain/ValueObjects/IntakeMetadata.php"
@@ -207,7 +221,7 @@ mutate "solana-getasset-instead-of-group-method" "$SOL_PROBE" \
 # Helius response fails the gate, so genuine collections are refused — and
 # the code looks stricter while being strictly wrong.
 mutate "solana-invented-verified-property-required" "$SOL_PROBE" \
-  '        // ── 2. Sampled member compressed? (partial DECISION 8 — see class doc)' \
+  '        // ── 2a. Is the SAMPLED member compressed? A cheap early negative. ─' \
   '        $grouping = is_array($sample['"'"'grouping'"'"'] ?? null) ? $sample['"'"'grouping'"'"'] : [];
         $verified = false;
         foreach ($grouping as $g) {
@@ -337,6 +351,90 @@ mutate "description-audit-failure-commits" "$VC_PAGE" \
                     return true;
                 }' \
   'PrEFailClosedBoundariesTest'
+
+# ══ ROUND 4 ════════════════════════════════════════════════════════════
+#
+# Seven more, one per defect the round-4 review found or forbade. Five of the
+# seven restore something that was ACTUALLY in the tree at head c8ab9434.
+
+# ── 19. The cNFT existence query skipped entirely ──────────────────────
+# ⚠⚠⚠ This is the round-3 behaviour: decide compression from ONE sampled
+# member. A mixed collection whose first sample is uncompressed then validates
+# and is persisted, which is the DECISION 8 breach the review required closing.
+mutate "cnft-existence-query-skipped" "$SOL_PROBE" \
+  '$compressedExists = $this->compressedMembersExist($mint, $budget);' \
+  '$compressedExists = false;' \
+  'SolanaContractProbeTest'
+
+# ── 20. A compressed match treated as acceptable ───────────────────────
+mutate "compressed-match-treated-as-acceptable" "$SOL_PROBE" \
+  'if ($compressedExists === true) {' \
+  'if (false) {' \
+  'SolanaContractProbeTest'
+
+# ── 21. Provider uncertainty read as zero compressed ───────────────────
+# The dangerous collapse: `null` (could not ask / could not understand) folded
+# into the safe-looking answer. An expired Helius key would then read as "this
+# collection has no compressed members".
+mutate "compressed-uncertainty-read-as-zero" "$SOL_PROBE" \
+  '        if ($compressedExists === null) {' \
+  '        if (false) {' \
+  'SolanaContractProbeTest'
+
+# ── 22. The Solana budget cut back to two ──────────────────────────────
+# Makes the third call unaffordable, so the exclusion silently stops running.
+mutate "solana-budget-reduced-to-two" "$VALIDATOR" \
+  'public const BUDGET_SOLANA = 3;' \
+  'public const BUDGET_SOLANA = 2;' \
+  'PrEFailClosedBoundariesTest|SolanaContractProbeTest'
+
+# ── 23. Edition-print supply used as the collection's supply ───────────
+# `supply.print_current_supply` counts EDITION PRINTS of one NFT. Storing it as
+# the collection's item count answers a different question with confidence.
+mutate "edition-print-supply-used-as-collection-supply" "$SOL_PROBE" \
+  '        if ($total <= $limit) {
+            return $metadata->withUnknown('"'"'total_supply'"'"');
+        }' \
+  '        if ($total <= $limit) {
+            $print = $groupResult['"'"'print_current_supply'"'"'] ?? 0;
+            return $metadata->withAnswered('"'"'total_supply'"'"', is_int($print) ? $print : 0);
+        }' \
+  'SolanaContractProbeTest'
+
+# ── 24. The renderer back on the enumeration answer ────────────────────
+# ⚠⚠⚠ BLOCKER 1 EXACTLY. The writer grants on canTakeManualIntake(); the panel
+# read `operator_startable`. Ethereum, Base and Solana became grantable only by
+# forging a POST. `operator_startable` no longer exists on the row, so this
+# also proves the projection was genuinely renamed rather than duplicated.
+mutate "renderer-back-on-the-enumeration-answer" "$CAP_PANEL" \
+  "\$grantable = (\$chain['manual_intake'] ?? null) === true;" \
+  "\$grantable = (\$chain['operator_startable'] ?? false) === true;" \
+  'NftCapabilityEditorRenderTest'
+
+# ── 25. The description review nonce unbound from the collection id ────
+# The handler verifies `\$route . '_' . \$collectionId`. A nonce bound to the
+# route alone makes the per-row binding decorative: one row's token would
+# decide another row's text.
+mutate "description-nonce-unbound-from-the-id" "$VC_PAGE" \
+  "                    <?php wp_nonce_field(\$route . '_' . \$rowId); ?>" \
+  "                    <?php wp_nonce_field(\$route); ?>" \
+  'ChainDescriptionReviewInterfaceTest'
+
+# ── 26. The description review forms removed ───────────────────────────
+# The state PR E actually shipped in: handlers with no reachable caller, so
+# DECISION 17's "the admin review interface is the reader" was false.
+mutate "description-review-forms-removed" "$VC_PAGE" \
+  '            if (!is_object($row) || !self::descriptionAwaitsReview($row)) {' \
+  '            if (true) {' \
+  'ChainDescriptionReviewInterfaceTest'
+
+# ── 27. A decided description offered a repeat transition ──────────────
+# `approved` / `rejected` are terminal at the repository, so a control there is
+# a button that can never work and a notice the page implied would not appear.
+mutate "decided-description-offers-a-repeat-transition" "$VC_PAGE" \
+  '            <?php if (self::descriptionAwaitsReview($row)): ?>' \
+  '            <?php if (true): ?>' \
+  'ChainDescriptionReviewInterfaceTest'
 
 echo
 echo "=================================="

@@ -264,6 +264,7 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     /** DAS method names, used to keep a not-found scoped to its own method. */
     public const METHOD_GET_ASSET       = 'getAsset';
     public const METHOD_ASSETS_BY_GROUP = 'getAssetsByGroup';
+    public const METHOD_SEARCH_ASSETS   = 'searchAssets';
 
     /**
      * Documented Helius DAS error codes.
@@ -384,6 +385,120 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         // body without an `items` ARRAY is not the documented shape, and
         // guessing at an undocumented one is how a renderer ends up trusting
         // whatever a provider happened to send.
+        $result = $json['result'] ?? null;
+        if (!is_array($result) || !isset($result['items']) || !is_array($result['items'])) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        return ['ok' => true, 'result' => $result, 'kind' => 'none'];
+    }
+
+    /**
+     * DAS `searchAssets` — does this collection contain ANY compressed member?
+     *
+     * ── WHY AN EXISTENCE QUERY AND NOT A COUNT ──────────────────────────
+     * DECISION 8 puts compressed NFTs out of v1. That is a question about the
+     * WHOLE collection, and `getAssetsByGroup` cannot answer it: it returns
+     * members, so reading one member's `compression.compressed` proves only
+     * that member's type. Collections may legitimately mix compressed and
+     * uncompressed members, so a mixed collection whose sampled member happened
+     * to be uncompressed used to validate. The exclusion was sampled, not
+     * enforced.
+     *
+     * `searchAssets` documents exactly the right question. Both filters are
+     * published parameters:
+     *
+     *   `grouping`   array of strings — "Collection grouping array for
+     *                filtering Solana NFTs by their collection membership
+     *                (e.g. ["collection", "<collectionKey>"])"
+     *   `compressed` boolean — "Filter for compressed Solana NFTs (cNFTs)"
+     *
+     * ⚠ `showGrandTotal` IS NOT REQUESTED. Existence needs no count: ONE
+     * returned item already proves a compressed member exists. The option is
+     * documented as "Show total number of matching assets (slower request)",
+     * its response FIELD NAME is undocumented, and reading a guessed key is
+     * the mistake `showCollectionMetadata` already caused once.
+     *
+     * ── BOUNDED ─────────────────────────────────────────────────────────
+     * `page: 1, limit: 1`. The cost does not grow with the collection.
+     *
+     * ── FAILS CLOSED ────────────────────────────────────────────────────
+     * `ok` is true ONLY for a documented, well-formed response. Every other
+     * outcome — transport, rate limit, missing credentials, non-2xx, a body
+     * with no `items` ARRAY, any JSON-RPC error including a not-found — is
+     * `ok: false`, which the probe turns into UNAVAILABLE. Provider
+     * uncertainty must never read as "no compressed members".
+     *
+     * @return array{ok: bool, result: ?array<string, mixed>, kind: string}
+     */
+    public function compressedMembersExistResult(string $collectionMint): array
+    {
+        if ($collectionMint === '') {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        $rpcUrl = self::resolveHeliusRpcUrl();
+        if ($rpcUrl === null) {
+            return ['ok' => false, 'result' => null, 'kind' => 'credentials_missing'];
+        }
+
+        $body = wp_json_encode([
+            'jsonrpc' => '2.0',
+            'id'      => 'validate-cnft-' . substr($collectionMint, 0, 8),
+            'method'  => self::METHOD_SEARCH_ASSETS,
+            'params'  => [
+                // The documented two-element form: [group key, group value].
+                'grouping'   => ['collection', $collectionMint],
+                'compressed' => true,
+                'page'       => 1,
+                'limit'      => 1,
+            ],
+        ]);
+        if ($body === false) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        $response = ApiRetry::post($rpcUrl, [
+            'timeout'   => self::HTTP_TIMEOUT,
+            'headers'   => ['Content-Type' => 'application/json'],
+            'body'      => $body,
+            'sslverify' => true,
+        ], [
+            'label'    => 'Helius searchAssets compressed (validation)',
+            'chain_id' => (int) $this->chain->id,
+        ]);
+
+        if (is_wp_error($response)) {
+            return ['ok' => false, 'result' => null, 'kind' => 'transport'];
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return ['ok' => false, 'result' => null, 'kind' => 'http_error'];
+        }
+
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($json)) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        if (isset($json['error'])) {
+            // ⚠ EVERY error is non-decisive here, including a documented
+            // not-found. On `getAssetsByGroup` a not-found answers "is this a
+            // collection?"; here the question is "are there compressed
+            // members?", and a not-found answer to THAT would be a negative we
+            // cannot distinguish from the collection itself being unreachable.
+            // `classifyDasError` is called with no method for exactly that
+            // reason: `searchAssets` is not on its allowlist, so -32004
+            // resolves to `transport` rather than to a decided zero.
+            $kind = self::classifyDasError(
+                is_array($json['error']) ? $json['error'] : [],
+                self::METHOD_SEARCH_ASSETS
+            );
+
+            return ['ok' => false, 'result' => null, 'kind' => $kind];
+        }
+
         $result = $json['result'] ?? null;
         if (!is_array($result) || !isset($result['items']) || !is_array($result['items'])) {
             return ['ok' => false, 'result' => null, 'kind' => 'malformed'];

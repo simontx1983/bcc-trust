@@ -886,6 +886,12 @@ namespace BCC\Trust\Onchain\Fetchers {
 
             public static string $groupKind = 'none';
 
+            /** Items the compressed filter matches. Empty = decisive zero. */
+            public static array $compressedItems = [];
+
+            /** Non-'none' makes the existence query non-decisive. */
+            public static string $compressedKind = 'none';
+
             public static int $calls = 0;
 
             public ?object $chain;
@@ -929,6 +935,37 @@ namespace BCC\Trust\Onchain\Fetchers {
                 ];
             }
 
+            /**
+             * PR E round 4: the documented `searchAssets` compressed-existence
+             * query that actually enforces DECISION 8.
+             *
+             * ⚠ DEFAULTS TO A DECISIVE EMPTY RESULT — "no compressed members" —
+             * because that is what lets the happy path through. A test that
+             * wants the exclusion to bite sets `$compressedItems`; a test that
+             * wants provider uncertainty sets `$compressedKind`.
+             *
+             * ⚠⚠ It counts toward `$calls`, so budget assertions include it.
+             * Solana validation is THREE calls now, not two.
+             *
+             * @return array{ok: bool, result: ?array<string, mixed>, kind: string}
+             */
+            public function compressedMembersExistResult(string $collectionMint): array
+            {
+                self::$calls++;
+
+                if (self::$compressedKind !== 'none') {
+                    return ['ok' => false, 'result' => null, 'kind' => self::$compressedKind];
+                }
+
+                $items = self::$compressedItems;
+
+                return [
+                    'ok'     => true,
+                    'result' => ['total' => count($items), 'limit' => 1, 'page' => 1, 'items' => $items],
+                    'kind'   => 'none',
+                ];
+            }
+
             /** @return array{ok: bool, result: ?array<string, mixed>, kind: string} */
             public function assetResult(string $mint): array
             {
@@ -957,6 +994,12 @@ namespace BCC\Trust\Onchain\Fetchers {
                 self::$asset = null;
                 self::$groupItems = null;
                 self::$groupKind = 'none';
+                // ⚠ Reset these too. A leaked `$compressedItems` from one test
+                // would make the next test's collection contain a cNFT, and a
+                // leaked `$compressedKind` would make it UNAVAILABLE — both
+                // failures that look like the code under test.
+                self::$compressedItems = [];
+                self::$compressedKind = 'none';
                 self::$calls = 0;
             }
         }

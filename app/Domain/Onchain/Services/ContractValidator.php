@@ -37,7 +37,7 @@ if (!defined('ABSPATH')) {
  *
  *   Cosmos  ≤3 smart queries (the probe set) + 1 contract-info read
  *   EVM     ≤2 `eth_call`s + ≤1 Alchemy metadata call
- *   Solana  exactly 1 DAS call
+ *   Solana  3 DAS calls — verified group, cNFT existence, collection metadata
  *
  * An exhausted budget is UNAVAILABLE, never a negative verdict.
  *
@@ -58,18 +58,31 @@ final class ContractValidator
     public const BUDGET_EVM = 3;
 
     /**
-     * Solana: TWO DAS calls.
+     * Solana: THREE DAS calls. Approved in review round 4.
      *
-     * ⚠ THE PLAN BUDGETED ONE, AND THIS DEVIATES — deliberately, and it
-     * needs sign-off. `getAssetsByGroup` proves the collection is verified but
-     * has no documented way to return the collection's own name and image
-     * (`showCollectionMetadata` is "reserved for future use on this method" in
-     * the Metaplex DAS spec and has no published response shape at Helius). The
-     * sampled member's name is the MEMBER's name, so a second `getAsset` on the
-     * submitted mint is the only documented source. See
-     * {@see \BCC\Trust\Onchain\Services\Validation\SolanaContractProbe}.
+     * Each answers a question the others cannot:
+     *
+     *   1. `getAssetsByGroup`  verified collection group, and the `total`
+     *   2. `searchAssets`      does ANY compressed member exist? (DECISION 8)
+     *   3. `getAsset`          the COLLECTION's own name and image
+     *
+     * The plan budgeted one. Three are acceptable because this path runs ONLY
+     * for a single administrator-submitted collection — never from cron, page
+     * render, enumeration or any fan-out — so the cost is per deliberate human
+     * action and cannot multiply.
+     *
+     * ⚠⚠⚠ DO NOT LOWER THIS TO 2. The third call becomes unaffordable, the
+     * probe correctly reports UNAVAILABLE rather than an implied pass, and
+     * Solana manual intake stops working with no error that names the cause.
+     * A test pins the value for exactly that reason.
+     *
+     * Why calls 2 and 3 exist at all is documented on
+     * {@see \BCC\Trust\Onchain\Services\Validation\SolanaContractProbe}:
+     * `showCollectionMetadata` has no published response shape, and
+     * `getAssetsByGroup` returns members, so it cannot answer a question about
+     * the collection's type.
      */
-    public const BUDGET_SOLANA = 2;
+    public const BUDGET_SOLANA = 3;
 
     /** Wall-clock ceiling for one validation, seconds. */
     public const RUNTIME_SECONDS = 20;

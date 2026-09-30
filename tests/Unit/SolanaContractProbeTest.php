@@ -331,12 +331,18 @@ final class SolanaContractProbeTest extends TestCase
     }
 
     /**
-     * ⚠ `supply.print_current_supply` describes EDITION PRINTS of the one
-     * collection NFT, not how many items the collection holds. Storing it as
-     * the collection's item count would be a different number from the one an
-     * operator expects, so supply is NOT_APPLICABLE on Solana.
+     * ⚠⚠⚠ THE EDITION-PRINT `supply` OBJECT IS NEVER THE COLLECTION'S SUPPLY.
+     *
+     * `supply.print_current_supply` describes EDITION PRINTS of the one
+     * collection NFT — a different number answering a different question.
+     *
+     * ⚠ Round 4 changed the STATE, not this rule. Supply is now APPLICABLE on
+     * Solana (the group result's `total` is a real source), so an unprovable
+     * count is UNKNOWN rather than NOT_APPLICABLE. What must never happen is
+     * the print count being stored, and that is what this pins: the fixture's
+     * group total is ambiguous, so the answer is UNKNOWN — emphatically not 137.
      */
-    public function testSolanaSupplyIsNotApplicableAndIsNeverStored(): void
+    public function testTheEditionPrintSupplyIsNeverStoredAsCollectionSupply(): void
     {
         $f = $this->fetcher();
         $f->asset = self::collectionAsset();
@@ -345,9 +351,10 @@ final class SolanaContractProbeTest extends TestCase
         $m = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->metadata();
 
         self::assertInstanceOf(IntakeMetadata::class, $m);
-        self::assertSame(IntakeMetadata::NOT_APPLICABLE, $m->stateOf('total_supply'));
+        self::assertSame(IntakeMetadata::UNKNOWN, $m->stateOf('total_supply'));
         self::assertArrayNotHasKey('total_supply', $m->writableFields());
         self::assertNotSame(137, $m->valueOf('total_supply'));
+        self::assertNotSame(500, $m->valueOf('total_supply'));
     }
 
     public function testSymbolAndDescriptionAreNotApplicableOnSolana(): void
@@ -360,15 +367,28 @@ final class SolanaContractProbeTest extends TestCase
 
     /**
      * ⚠ A fully successful Solana read must be COMPLETE, not permanently
-     * partial. Before NOT_APPLICABLE existed, the three fields DAS cannot
-     * supply were UNKNOWN forever and `complete` was unreachable.
+     * partial. Before NOT_APPLICABLE existed, the fields DAS cannot supply were
+     * UNKNOWN forever and `complete` was unreachable.
+     *
+     * ⚠⚠ Round 4 made supply the THIRD applicable field, so "fully successful"
+     * now includes a provable membership count — hence the explicit group total
+     * above the page limit. The default fixture's total is ambiguous, which is
+     * `partial`, and that is correct: a field we attempted and could not read
+     * IS a shortfall. See `testAnAmbiguousOrUnusableGroupTotalLeavesSupplyUnknown`.
      */
     public function testAFullySuccessfulSolanaReadIsComplete(): void
     {
-        $m = (new SolanaContractProbe($this->fetcher()))->validate(self::MINT, $this->budget())->metadata();
+        $f = $this->fetcher();
+        $f->groupTotal = 4200; // > limit 1, so provably collection-wide
+
+        $m = (new SolanaContractProbe($f))->validate(self::MINT, $this->budget())->metadata();
 
         self::assertSame(IntakeMetadata::STATE_COMPLETE, $m?->state());
-        self::assertSame(2, $m?->applicableCount(), 'name and image are the applicable pair');
+        self::assertSame(
+            3,
+            $m?->applicableCount(),
+            'name, image and — since round 4 — the membership count'
+        );
     }
 
     public function testAFailedCollectionMetadataReadIsUnavailableAndPersistsNothing(): void
@@ -420,6 +440,270 @@ final class SolanaContractProbeTest extends TestCase
         self::assertSame(1, $f->groupCalls);
         self::assertSame(0, $f->assetCalls);
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  DECISION 8 — FULLY ENFORCED cNFT EXCLUSION (round 4)
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // ⚠⚠⚠ THE DEFECT THESE EXIST TO CLOSE. Round 3 decided compression from
+    // ONE sampled member. A collection may legitimately mix compressed and
+    // uncompressed members, so a mixed collection whose first sample happened
+    // to be uncompressed VALIDATED and was persisted — the exclusion was
+    // sampled, not enforced, and the class docblock said so.
+    //
+    // The authoritative question is an EXISTENCE question, and `searchAssets`
+    // documents exactly it: `grouping: ["collection", <addr>]` + `compressed:
+    // true`, bounded to page 1 / limit 1. One returned item proves at least
+    // one compressed member exists. No count is needed, so `showGrandTotal`
+    // is not requested — and its response field name is undocumented anyway.
+
+    /**
+     * ⚠⚠ THE HEADLINE CASE. Uncompressed sample, compressed member elsewhere.
+     * Round 3 returned VALID here and wrote the row.
+     */
+    public function testAMixedCollectionWithAnUncompressedFirstSampleIsUnsupported(): void
+    {
+        $f = $this->fetcher();
+        $f->groupItems      = [self::memberItem(false)]; // the sample looks fine
+        $f->compressedItems = [self::memberItem(true)];  // but one exists
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
+
+        self::assertSame(ContractValidationVerdict::UNSUPPORTED, $v->state());
+        self::assertSame('compressed-nft', $v->standard());
+        self::assertFalse($v->mayPersist(), 'a collection containing a cNFT persists nothing');
+        self::assertSame(1, $f->compressedCalls, 'the existence query must actually be made');
+    }
+
+    public function testACollectionWithNoCompressedMemberIsValid(): void
+    {
+        $f = $this->fetcher();
+        $f->groupItems      = [self::memberItem(false)];
+        $f->compressedItems = []; // decisive zero
+        $f->asset           = self::collectionAsset();
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
+
+        self::assertSame(ContractValidationVerdict::VALID, $v->state());
+        self::assertSame(1, $f->compressedCalls);
+    }
+
+    /** A compressed SAMPLE is still refused immediately — and costs no extra call. */
+    public function testACompressedSampleIsRefusedWithoutTheExistenceQuery(): void
+    {
+        $f = $this->fetcher();
+        $f->groupItems = [self::memberItem(true)];
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
+
+        self::assertSame(ContractValidationVerdict::UNSUPPORTED, $v->state());
+        self::assertSame('compressed-nft', $v->standard());
+        self::assertSame(
+            0,
+            $f->compressedCalls,
+            'an already-decided negative must not spend another provider request'
+        );
+    }
+
+    /**
+     * ⚠⚠⚠ PROVIDER UNCERTAINTY IS NEVER A ZERO. Every non-decisive outcome of
+     * the existence query is UNAVAILABLE and persists nothing — otherwise an
+     * expired key would read as "no compressed members".
+     *
+     * @return array<string, array{0: string}>
+     */
+    public static function nonDecisiveExistenceKinds(): array
+    {
+        return [
+            'transport'           => ['transport'],
+            'malformed'           => ['malformed'],
+            'rate limited'        => ['rate_limited'],
+            'credentials missing' => ['credentials_missing'],
+            'http error'          => ['http_error'],
+            'not found'           => ['not_found'],
+        ];
+    }
+
+    #[DataProvider('nonDecisiveExistenceKinds')]
+    public function testANonDecisiveExistenceQueryIsUnavailable(string $kind): void
+    {
+        $f = $this->fetcher();
+        $f->groupItems           = [self::memberItem(false)];
+        $f->compressedKind       = $kind;
+        $f->asset                = self::collectionAsset();
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
+
+        self::assertSame(
+            ContractValidationVerdict::UNAVAILABLE,
+            $v->state(),
+            "a '{$kind}' existence answer must never be read as zero compressed members"
+        );
+        self::assertFalse($v->mayPersist());
+    }
+
+    /** An undocumented response shape is not an answer either. */
+    public function testAnExistenceResponseWithoutAnItemsArrayIsUnavailable(): void
+    {
+        $f = $this->fetcher();
+        $f->groupItems            = [self::memberItem(false)];
+        $f->compressedMalformed   = true;
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
+
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $v->state());
+    }
+
+    /** The budget must actually permit the third call, or enforcement never runs. */
+    public function testTheExistenceQueryIsNotSilentlySkippedWhenTheBudgetIsTight(): void
+    {
+        $f = $this->fetcher();
+        $f->groupItems      = [self::memberItem(false)];
+        $f->compressedItems = [self::memberItem(true)];
+
+        // Exactly enough for the group lookup and nothing more.
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(1, 30));
+
+        self::assertSame(
+            ContractValidationVerdict::UNAVAILABLE,
+            $v->state(),
+            'an unaskable exclusion question is UNAVAILABLE, never an implied pass'
+        );
+        self::assertTrue($v->hasEvidence(ContractValidationVerdict::EV_BUDGET_EXHAUSTED));
+    }
+
+    public function testTheExistenceQueryAsksAboutTheSubmittedMint(): void
+    {
+        $f = $this->fetcher();
+        $f->groupItems      = [self::memberItem(false)];
+        $f->compressedItems = [];
+        $f->asset           = self::collectionAsset();
+
+        (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
+
+        self::assertSame(self::MINT, $f->lastCompressedGroupValue);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  SUPPLY FROM THE GROUP TOTAL (round 4)
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // ⚠⚠⚠ `total` IS NOT PROVABLY THE COLLECTION SIZE. Helius's parameter
+    // table calls it "the total number of Solana NFTs found in this collection
+    // or group", but the documented response EXAMPLE shows `"total": 1` for a
+    // one-item page, and `showGrandTotal` — "Show total number of matching
+    // assets (slower request)" — exists on the same method. If `total` were
+    // already collection-wide, that option would be redundant.
+    //
+    // So only `total > limit` PROVES the value is not page-bounded: a page
+    // count can never exceed the page limit. Anything at or below the limit is
+    // indistinguishable from "items on this page" and stays UNKNOWN.
+    //
+    // ⚠ `showGrandTotal`'s response FIELD NAME is undocumented, so requesting
+    // it and reading a guessed key would repeat the `showCollectionMetadata`
+    // mistake exactly.
+
+    public function testSupplyComesFromTheGroupTotalWhenItExceedsTheLimit(): void
+    {
+        $f = $this->fetcher();
+        $f->groupItems      = [self::memberItem(false)];
+        $f->groupTotal      = 4200;   // > limit 1, so it cannot be a page count
+        $f->compressedItems = [];
+        $f->asset           = self::collectionAsset();
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
+
+        self::assertSame(ContractValidationVerdict::VALID, $v->state());
+        $m = $v->metadata();
+        self::assertNotNull($m);
+        self::assertSame(IntakeMetadata::KNOWN, $m->stateOf('total_supply'));
+        self::assertSame(4200, $m->valueOf('total_supply'));
+    }
+
+    /**
+     * ⚠⚠ A `total` at or below the page limit is AMBIGUOUS, so it is UNKNOWN —
+     * not 1. Recording 1 would put a fabricated supply on every collection if
+     * `total` turns out to be the page count.
+     *
+     * @return array<string, array{0: mixed}>
+     */
+    public static function ambiguousOrUnusableTotals(): array
+    {
+        return [
+            'equal to the limit' => [1],
+            'zero'               => [0],
+            'negative'           => [-5],
+            'absurdly large'     => [PHP_INT_MAX],
+            'a string'           => ['4200'],
+            'a float'            => [4200.5],
+            'null'               => [null],
+            'an array'           => [[4200]],
+        ];
+    }
+
+    #[DataProvider('ambiguousOrUnusableTotals')]
+    public function testAnAmbiguousOrUnusableGroupTotalLeavesSupplyUnknown(mixed $total): void
+    {
+        $f = $this->fetcher();
+        $f->groupItems      = [self::memberItem(false)];
+        $f->groupTotal      = $total;
+        $f->compressedItems = [];
+        $f->asset           = self::collectionAsset();
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
+
+        self::assertSame(ContractValidationVerdict::VALID, $v->state(), 'supply is optional, not a gate');
+        $m = $v->metadata();
+        self::assertNotNull($m);
+        self::assertSame(
+            IntakeMetadata::UNKNOWN,
+            $m->stateOf('total_supply'),
+            'an unprovable count is UNKNOWN — never a number, never zero'
+        );
+        self::assertArrayNotHasKey('total_supply', $m->writableFields());
+        self::assertSame(
+            IntakeMetadata::STATE_PARTIAL,
+            $m->state(),
+            'a field we attempted and could not read IS a real shortfall'
+        );
+    }
+
+    /**
+     * ⚠⚠⚠ THE EDITION-PRINT `supply` OBJECT IS A DIFFERENT NUMBER. It describes
+     * prints of ONE master-edition NFT (`print_current_supply` /
+     * `print_max_supply`), not how many items a collection contains. Using it
+     * would show an operator a confident number that answers another question.
+     */
+    public function testTheEditionPrintSupplyObjectIsNeverUsedAsCollectionSupply(): void
+    {
+        $f = $this->fetcher();
+        $f->groupItems      = [self::memberItem(false)];
+        $f->groupTotal      = 4200;
+        $f->compressedItems = [];
+        // The collection asset carries a print supply of 7 — a decoy.
+        $asset              = self::collectionAsset();
+        $asset['supply']    = ['print_max_supply' => 7, 'print_current_supply' => 7, 'edition_nonce' => 254];
+        $f->asset           = $asset;
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
+
+        self::assertSame(4200, $v->metadata()?->valueOf('total_supply'));
+        self::assertNotSame(7, $v->metadata()?->valueOf('total_supply'));
+    }
+
+    /** A fully successful Solana read — name, image AND a provable supply. */
+    public function testAFullSolanaReadIsComplete(): void
+    {
+        $f = $this->fetcher();
+        $f->groupItems      = [self::memberItem(false)];
+        $f->groupTotal      = 4200;
+        $f->compressedItems = [];
+        $f->asset           = self::collectionAsset();
+
+        $v = (new SolanaContractProbe($f))->validate(self::MINT, new ProviderRequestBudget(5, 30));
+
+        self::assertSame(IntakeMetadata::STATE_COMPLETE, $v->metadata()?->state());
+    }
 }
 
 class FakeSolanaFetcherForValidation extends \BCC\Trust\Onchain\Fetchers\SolanaFetcher
@@ -436,6 +720,26 @@ class FakeSolanaFetcherForValidation extends \BCC\Trust\Onchain\Fetchers\SolanaF
     public ?array $groupError = null;
 
     public ?string $groupKindOverride = null;
+
+    /**
+     * The `total` the group result reports. `null` means "derive it from the
+     * item count", which is what a page-bounded reading would produce.
+     */
+    public mixed $groupTotal = null;
+
+    // ── The documented `searchAssets` compressed-existence seam ──────────
+
+    public int $compressedCalls = 0;
+
+    public ?string $lastCompressedGroupValue = null;
+
+    /** @var list<array<string, mixed>> items the compressed filter matches */
+    public array $compressedItems = [];
+
+    public ?string $compressedKind = null;
+
+    /** Return a body with no `items` ARRAY — an undocumented shape. */
+    public bool $compressedMalformed = false;
 
     /** @var array<string, mixed>|null */
     public ?array $asset = null;
@@ -472,10 +776,44 @@ class FakeSolanaFetcherForValidation extends \BCC\Trust\Onchain\Fetchers\SolanaF
         return [
             'ok'     => true,
             'result' => [
-                'total' => count($this->groupItems),
+                'total' => $this->groupTotal ?? count($this->groupItems),
                 'limit' => 1,
                 'page'  => 1,
                 'items' => $this->groupItems,
+            ],
+            'kind'   => 'none',
+        ];
+    }
+
+    /**
+     * The documented `searchAssets` existence query, as the probe consumes it.
+     *
+     * ⚠ `items` is the ONLY thing the caller may read for existence. A body
+     * without an items ARRAY is not the documented shape and must not be
+     * guessed at.
+     *
+     * @return array{ok: bool, result: ?array<string, mixed>, kind: string}
+     */
+    public function compressedMembersExistResult(string $collectionMint): array
+    {
+        $this->compressedCalls++;
+        $this->lastCompressedGroupValue = $collectionMint;
+
+        if ($this->compressedKind !== null) {
+            return ['ok' => false, 'result' => null, 'kind' => $this->compressedKind];
+        }
+
+        if ($this->compressedMalformed) {
+            return ['ok' => false, 'result' => null, 'kind' => 'malformed'];
+        }
+
+        return [
+            'ok'     => true,
+            'result' => [
+                'total' => count($this->compressedItems),
+                'limit' => 1,
+                'page'  => 1,
+                'items' => $this->compressedItems,
             ],
             'kind'   => 'none',
         ];

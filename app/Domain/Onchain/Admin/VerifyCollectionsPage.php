@@ -812,6 +812,178 @@ final class VerifyCollectionsPage
      * the scanner-cache sync — that is downstream bookkeeping, and calling
      * it the security control would be untrue.
      */
+    /** The hidden form id for one description transition. */
+    private static function descFormId(int $rowId, bool $approve): string
+    {
+        return 'vc-desc-' . ($approve ? 'ok' : 'no') . '-' . $rowId;
+    }
+
+    /**
+     * Is this row's imported description awaiting a decision?
+     *
+     * ⚠ `pending` AND non-empty text. The handler's compare-and-swap is FROM
+     * `pending`, so any other state is terminal and a control on it would be a
+     * button that can never succeed. And a `pending` marker with no text is
+     * nothing to review — offering a decision on absent text would record an
+     * administrator approving something they could not have read.
+     */
+    private static function descriptionAwaitsReview(object $row): bool
+    {
+        $state = $row->chain_description_state ?? null;
+        $text  = $row->chain_description ?? null;
+
+        return $state === ChainDescriptionState::PENDING
+            && is_string($text)
+            && trim($text) !== '';
+    }
+
+    /**
+     * The hidden approve/reject forms for every row awaiting a decision.
+     *
+     * ── ⚠⚠⚠ WHY THIS EXISTS ─────────────────────────────────────────────
+     * PR E shipped `ACTION_DESC_APPROVE` / `ACTION_DESC_REJECT`, registered
+     * them and wrote a careful handler — and NOTHING RENDERED THEM. The actions
+     * appeared only in the constant block, the registrations and the handlers,
+     * so an imported description could be stored and could never be reviewed.
+     * DECISION 17's "the admin review interface is the reader" was false: the
+     * text was unreadable by anyone, which is a different thing from
+     * unpublished.
+     *
+     * Emitted outside the table for the same reason as the other row forms:
+     * HTML forbids nested forms, and the buttons reach these through the HTML5
+     * `form=` attribute.
+     *
+     * ⚠ EACH NONCE IS BOUND TO ROUTE **AND** COLLECTION ID, matching
+     * `handleDescriptionReview()`'s `requireNonce($route . '_' . $id)` exactly.
+     * A shared nonce, or one bound to the route alone, would let a token minted
+     * for one collection decide another collection's text.
+     *
+     * @param list<object> $rows the listing rows, as rendered
+     */
+    public static function renderDescriptionReviewForms(
+        array $rows,
+        int $page,
+        string $chain,
+        string $tokenStandard,
+        string $tab
+    ): void {
+        foreach ($rows as $row) {
+            if (!is_object($row) || !self::descriptionAwaitsReview($row)) {
+                continue;
+            }
+
+            $rowId = (int) ($row->id ?? 0);
+            if ($rowId <= 0) {
+                continue;
+            }
+
+            foreach ([true, false] as $approve) {
+                $route = $approve ? self::ACTION_DESC_APPROVE : self::ACTION_DESC_REJECT;
+                ?>
+                <form id="<?php echo esc_attr(self::descFormId($rowId, $approve)); ?>" method="post"
+                      action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:none;">
+                    <input type="hidden" name="action" value="<?php echo esc_attr($route); ?>">
+                    <input type="hidden" name="collection_id" value="<?php echo $rowId; ?>">
+                    <?php wp_nonce_field($route . '_' . $rowId); ?>
+                    <?php self::renderReturnContext($page, $chain, $tokenStandard, $tab); ?>
+                </form>
+                <?php
+            }
+        }
+    }
+
+    /**
+     * The imported NFT Collection Description, as an administrator reviews it.
+     *
+     * ── WHAT IS SHOWN ───────────────────────────────────────────────────
+     * The text, where it came from, its current review state, and — only while
+     * `pending` — an Approve and a Reject control. A decided description stays
+     * visible for reference with NO transition control, because `approved` and
+     * `rejected` are terminal at the repository too.
+     *
+     * ── ⚠⚠⚠ THE TEXT IS UNTRUSTED ───────────────────────────────────────
+     * It is imported from contract metadata a contract author controls, which
+     * makes it the most attacker-influenced string on this screen — and it is
+     * rendered beside live POST forms holding valid nonces. It is escaped as
+     * plain text with `esc_html()`, never echoed raw and never passed through
+     * any markup-permitting filter. The SOURCE label is provider-influenced
+     * too and is escaped identically.
+     *
+     * ── AND IT IS NOT THE COMMUNITY DESCRIPTION ─────────────────────────
+     * Community About is the PeepSo community biography, written by community
+     * managers. Approving this text writes nothing to it.
+     */
+    public static function renderDescriptionReview(object $row): void
+    {
+        $text = $row->chain_description ?? null;
+        if (!is_string($text) || trim($text) === '') {
+            return; // nothing imported; no block, no empty scaffolding
+        }
+
+        $rowId = (int) ($row->id ?? 0);
+        $state = is_string($row->chain_description_state ?? null)
+            ? (string) $row->chain_description_state
+            : ChainDescriptionState::NONE;
+        $source = $row->chain_description_source ?? null;
+
+        $label = match ($state) {
+            ChainDescriptionState::PENDING  => 'Pending review',
+            ChainDescriptionState::APPROVED => 'Approved',
+            ChainDescriptionState::REJECTED => 'Rejected',
+            default                         => 'Not reviewed',
+        };
+        $colour = match ($state) {
+            ChainDescriptionState::PENDING  => '#dba617',
+            ChainDescriptionState::APPROVED => '#00a32a',
+            ChainDescriptionState::REJECTED => '#d63638',
+            default                         => '#646970',
+        };
+        ?>
+        <div style="margin-top:6px;padding:6px 8px;border-left:3px solid <?php echo esc_attr($colour); ?>;background:#f6f7f7;max-width:32em;">
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:<?php echo esc_attr($colour); ?>;">
+                Collection description — <?php echo esc_html($label); ?>
+            </div>
+            <div style="font-size:12px;color:#1d2327;margin-top:2px;">
+                <?php echo esc_html($text); ?>
+            </div>
+            <?php if (is_string($source) && trim($source) !== ''): ?>
+                <div style="font-size:11px;color:#646970;margin-top:2px;">
+                    Imported from <code><?php echo esc_html($source); ?></code>
+                </div>
+            <?php endif; ?>
+            <div style="font-size:11px;color:#646970;margin-top:2px;">
+                Stored for review only. It is <strong>not published anywhere</strong> and is never the
+                community&rsquo;s description.
+            </div>
+            <?php if (self::descriptionAwaitsReview($row)): ?>
+                <p style="margin:6px 0 0;">
+                    <button type="submit"
+                            form="<?php echo esc_attr(self::descFormId($rowId, true)); ?>"
+                            class="button button-small"
+                            title="Record that you read this text and accept it. It stays unpublished."
+                            onclick="return confirm(<?php echo esc_attr(AdminActionSupport::confirmLiteral(
+                                'Approve this imported collection description?' . "\n\n"
+                                . 'It records that you read and accepted this exact text. It does NOT publish it: '
+                                . 'the text stays on this admin screen and reaches no public page, API or community.'
+                            )); ?>);">
+                        Approve
+                    </button>
+                    <button type="submit"
+                            form="<?php echo esc_attr(self::descFormId($rowId, false)); ?>"
+                            class="button button-small"
+                            title="Refuse this text so it is not queued for review again."
+                            onclick="return confirm(<?php echo esc_attr(AdminActionSupport::confirmLiteral(
+                                'Reject this imported collection description?' . "\n\n"
+                                . 'The text is kept so it is not offered again, and nothing is published either way.'
+                            )); ?>);">
+                        Reject
+                    </button>
+                </p>
+            <?php endif; ?>
+        </div>
+        <?php
+    }
+
     public static function renderHideButton(int $rowId, bool $isHidden): void
     {
         $rowId  = (int) $rowId;
@@ -1797,6 +1969,15 @@ final class VerifyCollectionsPage
                                         <br>
                                         <span style="color:#646970;font-size:11px;"><?php echo esc_html($tokenStandard); ?></span>
                                     <?php endif; ?>
+                                    <?php
+                                    // DECISION 17's reader. Rendered inside the
+                                    // name cell deliberately: a new column would
+                                    // shift every cell index downstream, and the
+                                    // description belongs with the collection it
+                                    // describes rather than in a column that is
+                                    // empty for most rows.
+                                    self::renderDescriptionReview($row);
+                                    ?>
                                 </td>
                                 <td>
                                     <?php
@@ -2035,6 +2216,18 @@ final class VerifyCollectionsPage
                 $vstate,
                 $vcHiddenById,
                 $vcIntentById
+            );
+
+            // The description review forms, for the same reason and by the
+            // same mechanism. Driven from the listing rows rather than from
+            // $vcRowForms because only rows whose description is PENDING get a
+            // form at all.
+            self::renderDescriptionReviewForms(
+                is_array($listing['items'] ?? null) ? $listing['items'] : [],
+                $page,
+                $selectedChain,
+                $selectedTokenStandard,
+                $vstate
             );
             ?>
 

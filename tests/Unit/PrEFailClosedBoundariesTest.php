@@ -292,4 +292,58 @@ final class PrEFailClosedBoundariesTest extends TestCase
             . 'a public reader is not to be built merely to stop the field looking unused'
         );
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  THE PER-FAMILY CEILINGS ARE THE BOUND — ASSERT THEM (round 4)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * ⚠⚠⚠ SOLANA NEEDS THREE, AND A CEILING OF TWO SILENTLY DISABLES THE cNFT
+     * EXCLUSION.
+     *
+     * The three are: `getAssetsByGroup` (verified membership + the group
+     * total), `searchAssets` with the documented `compressed` filter (does ANY
+     * compressed member exist?), and `getAsset` on the mint (the collection's
+     * own name and image). Drop the ceiling to two and the exclusion query
+     * becomes unaffordable — which the probe correctly reports as UNAVAILABLE
+     * rather than an implied pass, so nothing is persisted and manual intake
+     * on Solana stops working entirely. That failure mode is quiet, hence this
+     * assertion.
+     *
+     * Approved in review round 4: three calls are acceptable because this path
+     * runs ONLY for one administrator-submitted collection — never from cron,
+     * page render, enumeration or any fan-out.
+     */
+    public function testTheSolanaBudgetPermitsAllThreeDocumentedCalls(): void
+    {
+        self::assertSame(3, ContractValidator::BUDGET_SOLANA);
+    }
+
+    public function testTheOtherFamilyCeilingsAreUnchanged(): void
+    {
+        self::assertSame(4, ContractValidator::BUDGET_COSMOS, 'Cosmos: 3 probes + 1 contract-info');
+        self::assertSame(3, ContractValidator::BUDGET_EVM, 'EVM: 2 eth_calls + 1 metadata');
+    }
+
+    /**
+     * Every ceiling stays SMALL. This is the property that makes "one
+     * submission cannot fan out" true of the budget as well as of the shape:
+     * there is no family whose ceiling could absorb a pagination loop.
+     */
+    public function testNoFamilyCeilingIsLargeEnoughToPaginate(): void
+    {
+        foreach (
+            [
+                'cosmos' => ContractValidator::BUDGET_COSMOS,
+                'evm'    => ContractValidator::BUDGET_EVM,
+                'solana' => ContractValidator::BUDGET_SOLANA,
+            ] as $family => $ceiling
+        ) {
+            self::assertLessThanOrEqual(
+                5,
+                $ceiling,
+                "{$family}'s ceiling must stay small enough that no walk can hide inside it"
+            );
+        }
+    }
 }

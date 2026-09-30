@@ -99,7 +99,13 @@ final class IntakeMetadata
     private const APPLICABLE_BY_FAMILY = [
         'cosmos' => ['name', 'symbol', 'description', 'image_url', 'total_supply'],
         'evm'    => ['name', 'symbol', 'image_url', 'total_supply'],
-        'solana' => ['name', 'image_url'],
+        // ⚠ `total_supply` IS applicable on Solana as of review round 4: the
+        // verified `getAssetsByGroup` result carries a `total`, so a membership
+        // count is something this family ATTEMPTS. When that number cannot be
+        // proved collection-wide it is UNKNOWN — a real shortfall an operator
+        // can name — which is a different thing from NOT_APPLICABLE.
+        // DAS still exposes no collection-level symbol or description.
+        'solana' => ['name', 'image_url', 'total_supply'],
     ];
 
     /** @var array<string, array{value: mixed, state: string}> */

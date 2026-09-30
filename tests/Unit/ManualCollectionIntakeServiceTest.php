@@ -359,10 +359,12 @@ final class ManualCollectionIntakeServiceTest extends TestCase
     // ⚠ PREMISE CHANGED BY PR E. These two tests previously asserted that an
     // EVM or Solana add was recorded as `VALIDATION_NONE` — "accepted as
     // entered" — and that no provider was contacted, because no validation
-    // driver existed. PR E builds those drivers (ERC-165 `supportsInterface`
-    // on EVM, DAS `getAsset` with a verified grouping on Solana), so both
-    // premises are now wrong. The old assertions are kept in spirit as their
-    // negations: the audit must NOT say `none`, and a provider MUST be asked.
+    // driver existed. PR E builds those drivers — ERC-165 `supportsInterface`
+    // on EVM, and on Solana a verified DAS collection group via
+    // `getAssetsByGroup` plus a `searchAssets` compressed-existence check — so
+    // both premises are now wrong. The old assertions are kept in spirit as
+    // their negations: the audit must NOT say `none`, and a provider MUST be
+    // asked.
 
     /** @return list<array{0: string, 1: int, 2: string, 3: string}> */
     public static function unvalidatedFamilies(): array
@@ -420,11 +422,21 @@ final class ManualCollectionIntakeServiceTest extends TestCase
 
         // ⚠ ONE submission, a handful of calls about THAT address — never a
         // walk over a chain. The ceilings are the validator's per-family
-        // budgets: EVM 3 (two interface calls + one Alchemy read), Solana 2
-        // (`getAssetsByGroup` for the verdict, then `getAsset` for the
-        // collection's own name and image — `showCollectionMetadata` has no
-        // documented response shape, so the second call is unavoidable).
-        self::assertLessThanOrEqual($family === 'evm' ? 3 : 2, $calls);
+        // budgets:
+        //
+        //   EVM     3 — two interface calls + one Alchemy metadata read
+        //   Solana  3 — `getAssetsByGroup` (verified group + the total),
+        //               `searchAssets` (does ANY compressed member exist —
+        //               DECISION 8, approved in review round 4), then
+        //               `getAsset` for the collection's own name and image
+        //               (`showCollectionMetadata` has no documented response
+        //               shape, so that call is unavoidable)
+        //
+        // ⚠⚠ THE CEILING IS THE POINT, NOT THE COUNT. Three bounded calls about
+        // one submitted address is acceptable; anything that grows with the
+        // collection's size is not, and no ceiling here is large enough to hide
+        // a pagination loop.
+        self::assertLessThanOrEqual(3, $calls);
 
         // And no OTHER family's provider is touched.
         self::assertSame(

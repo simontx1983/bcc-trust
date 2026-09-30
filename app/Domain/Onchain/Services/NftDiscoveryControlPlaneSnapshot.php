@@ -169,6 +169,11 @@ final class NftDiscoveryControlPlaneSnapshot
             // family. False for EVM and Solana permanently — see
             // NftDriverRegistry, which registers exactly one enumeration
             // driver and it is Cosmos-only.
+            //
+            // ⚠ ENUMERATION ONLY. This says nothing about whether a chain can
+            // take a manual add: EVM and Solana can (`manual_intake` on each
+            // row), they simply cannot be walked. Conflating the two is what
+            // made the manual permission ungrantable on those families.
             'supports_enumeration_engine' => $family === self::FAMILY_COSMOS,
         ];
     }

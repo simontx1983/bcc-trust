@@ -363,64 +363,24 @@ final class NftChainCapability
      */
     private const OPERATOR_STARTED_OPERATIONS = [NftDriverRegistry::OP_ENUMERATION];
 
-    /**
-     * The operations an administrator can start, for callers outside this
-     * class.
-     *
-     * Exposed so the capability EDITOR can ask the same question this class
-     * answers internally, rather than restating "the manual permission is
-     * about enumeration" in a second place. When a second operator-started
-     * operation is added, the constant above is still the only edit.
-     *
-     * @return list<string>
-     */
-    public static function operatorStartedOperations(): array
-    {
-        return self::OPERATOR_STARTED_OPERATIONS;
-    }
-
-    /**
-     * PURE. Could an operator-started operation EVER run on this chain, on
-     * any configuration, per the code registry alone?
-     *
-     * ── WHAT THE MANUAL PERMISSION IS ALLOWED TO MEAN ───────────────────
-     * `manual_collection_discovery_enabled` is permission to submit ONE
-     * contract through manual intake — never authority over a chain. On every
-     * EVM chain and on Solana no driver in this build
-     * can enumerate a chain at all — the registry PROVES it by returning an
-     * empty list — so the permission there would authorise something that
-     * cannot happen. Storing it would leave a row saying an operator granted
-     * a capability, which is exactly the misreading the whole model is built
-     * to prevent, and a restored backup or a later build could read it as
-     * consent it never was.
-     *
-     * So the editor refuses to grant it, and this is the predicate it asks.
-     *
-     * ── DELIBERATELY OVERRIDE-FREE, AND NOT FAMILY-KEYED ────────────────
-     * Overrides are passed as `[]` on purpose: this asks what the CODE can
-     * do, which is the same baseline {@see operationStatus()} uses to tell
-     * {@see OP_NO_DRIVER} ("nothing can") from {@see OP_DISABLED} ("you
-     * switched it off"). An operator who has disabled the only enumeration
-     * driver has not made the chain structurally incapable, and must still
-     * be able to hold the permission while they re-enable it.
-     *
-     * And it is asked of the REGISTRY, never of `chain_type`. "Which
-     * families can be enumerated" is the registry's answer to give; a
-     * hardcoded family list here would be a second one, free to disagree the
-     * day an enumeration driver is registered for a new family.
-     *
-     * @param object $chain a `ChainRow`-shaped projection
-     */
-    public static function hasOperatorStartableOperation(object $chain): bool
-    {
-        foreach (self::OPERATOR_STARTED_OPERATIONS as $operation) {
-            if (NftDriverRegistry::driversFor($chain, $operation, []) !== []) {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    // ⚠⚠⚠ `hasOperatorStartableOperation()` AND `operatorStartedOperations()`
+    // WERE DELETED IN REVIEW ROUND 4, and must not come back as the manual
+    // permission's gate.
+    //
+    // Both asked "can this chain be ENUMERATED?", and both were used to decide
+    // whether an administrator may submit ONE contract. Those are different
+    // questions with different answers: no EVM or Solana driver claims
+    // enumeration, so the enumeration answer refused manual intake on exactly
+    // the chains manual intake was built for. The editor stopped asking it in
+    // round 3; the capability PANEL went on asking it, which left the
+    // permission grantable only by forging a POST.
+    //
+    // `canTakeManualIntake()` below is the manual-intake question, and it is
+    // the only one either the writer or the renderer asks.
+    //
+    // OPERATOR_STARTED_OPERATIONS itself stays: it still marks which per-
+    // operation rows are operator-started in `operationMatrix()`, which is the
+    // genuine enumeration concept and remains frozen and separate.
 
     /**
      * PURE. Can an administrator submit ONE contract on this chain through
@@ -557,7 +517,7 @@ final class NftChainCapability
      *     overrides_available: bool,
      *     overrides_reason: string|null,
      *     stale_overrides: list<array{operation: string, driver_key: string, enabled: bool, priority: int, reason: string}>,
-     *     operator_startable: bool,
+     *     manual_intake: bool,
      *     bcc_supports: bool|null,
      *     manual_enabled: bool|null,
      *     measured_unsupported: bool,
@@ -696,11 +656,20 @@ final class NftChainCapability
             'stale_overrides'      => $available
                 ? self::staleOverrides($chain, $overrides->rows())
                 : [],
-            // Can the manual permission mean anything here AT ALL? Registry
-            // only — see hasOperatorStartableOperation(). The editor renders
-            // the structural explanation instead of a control when false, and
-            // refuses the grant server-side on the same answer.
-            'operator_startable'   => self::hasOperatorStartableOperation($chain),
+            // ⚠⚠⚠ THE ONE ANSWER THE WRITER AND THE RENDERER SHARE.
+            //
+            // This used to be `hasOperatorStartableOperation()` — "can this
+            // chain be ENUMERATED?" — under the key `operator_startable`. The
+            // capability editor was corrected to grant on
+            // canTakeManualIntake(), but the PANEL still read the enumeration
+            // answer, so Ethereum, Base and Solana were grantable by a
+            // hand-built POST and ungrantable through the admin UI, under copy
+            // blaming a missing enumeration driver. A permission reachable only
+            // by forging a request is not a permission an operator has.
+            //
+            // Renderer and writer now consume this single field, so they cannot
+            // disagree about what may be granted.
+            'manual_intake'        => self::canTakeManualIntake($chain),
             'bcc_supports'         => $bccSupports,
             'manual_enabled'       => $manualEnabled,
             'measured_unsupported' => $measuredUnsupported,

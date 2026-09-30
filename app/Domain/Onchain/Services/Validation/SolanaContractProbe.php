@@ -31,31 +31,41 @@ if (!defined('ABSPATH')) {
  *   documented no-assets response   → decided negative
  *   anything else                   → UNAVAILABLE
  *
- * ── ⛔ TWO KNOWN GAPS, REPORTED RATHER THAN PAPERED OVER ────────────────
+ * ── THREE BOUNDED DAS CALLS, BOTH DEVIATIONS APPROVED IN REVIEW ─────────
+ * The plan budgeted one. Three are approved, because this path runs ONLY for a
+ * single administrator-submitted collection — never from cron, page render,
+ * enumeration or any fan-out — and each answers a question the others cannot:
  *
- * **1. This costs TWO DAS calls, not the one the plan budgeted.**
- * `showCollectionMetadata` is listed by Helius but has **no documented
- * response shape**, and the Metaplex DAS specification states it is "accepted
- * by the API; reserved for future use on this method". There is therefore no
- * documented place to read the collection's name and image from the group
- * response. The sampled member's own `content.metadata.name` is the MEMBER's
- * name ("Mad Lads #8420") — using it would recreate the mint-as-name defect in
- * a new form. So the collection's own name/image come from a second call,
- * `getAsset` on the submitted mint. **That deviates from the approved one-call
- * Solana budget and needs sign-off.**
+ *   1. `getAssetsByGroup`  is this a VERIFIED collection group? (+ the `total`)
+ *   2. `searchAssets`      does ANY compressed member exist? (DECISION 8)
+ *   3. `getAsset`          the COLLECTION's own name and image
  *
- * **2. Compressed-member exclusion (DECISION 8) is only PARTIALLY enforced.**
- * `getAssetsByGroup` items each carry the documented `compression.compressed`
- * boolean, so the sampled member's type is known and a compressed sample is
- * refused here. But nothing in `getAssetsByGroup` aggregates or filters by
- * compression — `total` is a count, not a type breakdown — and a collection may
- * legitimately mix compressed and uncompressed members. **One sample cannot
- * prove the whole collection's type, so this code does NOT fully enforce
- * DECISION 8 and does not claim to.** A documented route exists and costs
- * another call: `searchAssets` accepts `grouping: ["collection", <addr>]`
- * together with a `compressed` filter and `showGrandTotal`, which would answer
- * "does this collection contain ANY compressed member?". Adopting it is a
- * product decision about the Solana call budget.
+ * **Why the name needs its own call.** `showCollectionMetadata` is listed by
+ * Helius but has **no documented response shape**, and the Metaplex DAS
+ * specification states it is "accepted by the API; reserved for future use on
+ * this method". The sampled member's own `content.metadata.name` is the
+ * MEMBER's name ("Mad Lads #8420") — using it would recreate the mint-as-name
+ * defect in a new form.
+ *
+ * **Why the cNFT exclusion needs its own call.** `getAssetsByGroup` returns
+ * MEMBERS, so a member's `compression.compressed` proves only that member's
+ * type, and collections may legitimately mix compressed and uncompressed
+ * members. One sample therefore cannot decide the collection, and an earlier
+ * version of this class said so while validating mixed collections anyway.
+ * `searchAssets` documents both filters needed to ask the real question —
+ * `grouping: ["collection", <addr>]` and `compressed: true` — so the question
+ * is now asked about the COLLECTION.
+ *
+ * ── STRICT v1 cNFT POLICY, FULLY ENFORCED ───────────────────────────────
+ *   any compressed member exists      → UNSUPPORTED, persist nothing
+ *   mixed compressed/uncompressed     → UNSUPPORTED (it contains one)
+ *   failed / malformed / capped /
+ *     ambiguous / undocumented answer → UNAVAILABLE, persist nothing
+ *   decisive zero compressed          → may continue
+ *
+ * ⚠ Only a DECISIVE ZERO continues. Provider uncertainty is never a zero: an
+ * expired key reading as "no compressed members" is precisely the failure this
+ * ordering exists to prevent.
  */
 final class SolanaContractProbe
 {
@@ -108,7 +118,9 @@ final class SolanaContractProbe
             ]);
         }
 
-        // ── 2. Sampled member compressed? (partial DECISION 8 — see class doc)
+        // ── 2a. Is the SAMPLED member compressed? A cheap early negative. ─
+        // Decisive when true — one compressed member is all DECISION 8 needs —
+        // and it saves the existence call on the clearest case.
         $compression = is_array($sample['compression'] ?? null) ? $sample['compression'] : [];
         if (($compression['compressed'] ?? null) === true) {
             return ContractValidationVerdict::unsupported('compressed-nft', [
@@ -125,7 +137,25 @@ final class SolanaContractProbe
             ]);
         }
 
-        // ── 3. The collection's OWN name and image (second call) ─────────
+        // ── 2b. Does ANY compressed member exist? (the authoritative test) ─
+        // ⚠⚠⚠ AN UNCOMPRESSED SAMPLE PROVES NOTHING ABOUT THE COLLECTION.
+        // This is the query that actually enforces DECISION 8.
+        $compressedExists = $this->compressedMembersExist($mint, $budget);
+        if ($compressedExists === null) {
+            // Could not ask, or could not understand the answer. NEVER a zero.
+            return ContractValidationVerdict::unavailable([
+                ContractValidationVerdict::EV_PROBE_ANSWERED,
+                $this->evidenceFor($this->lastCompressedKind),
+            ]);
+        }
+        if ($compressedExists === true) {
+            return ContractValidationVerdict::unsupported('compressed-nft', [
+                ContractValidationVerdict::EV_PROBE_ANSWERED,
+                ContractValidationVerdict::EV_STANDARD_DEFERRED,
+            ]);
+        }
+
+        // ── 3. The collection's OWN name and image (third call) ──────────
         $metadata = $this->collectCollectionMetadata($mint, $budget);
         if ($metadata === null) {
             return ContractValidationVerdict::unavailable([
@@ -134,11 +164,117 @@ final class SolanaContractProbe
             ]);
         }
 
+        // ── 4. Supply, from the group result's own `total` ────────────────
+        $metadata = $this->withSupplyFromGroupTotal($metadata, $result);
+
         return ContractValidationVerdict::valid('SPL-Metaplex', $metadata, [
             ContractValidationVerdict::EV_PROBE_ANSWERED,
             ContractValidationVerdict::EV_INTERFACE_CONFIRMED,
         ]);
     }
+
+    /**
+     * TRUE / FALSE only when the provider gave a documented answer; null when
+     * it did not.
+     *
+     * ⚠ The three-way return is the point. A bool would force "we could not
+     * ask" to collapse into one of the answers, and the safe-looking collapse
+     * (false ⇒ "no compressed members") is the one that persists a cNFT
+     * collection whenever Helius is having a bad minute.
+     */
+    private function compressedMembersExist(string $mint, ProviderRequestBudget $budget): ?bool
+    {
+        if (!$budget->canSpend(1)) {
+            $this->lastCompressedKind = 'budget_exhausted';
+            return null;
+        }
+
+        $r = $this->fetcher->compressedMembersExistResult($mint);
+        $budget->spend(1);
+
+        if (!$r['ok'] || !is_array($r['result'])) {
+            $this->lastCompressedKind = is_string($r['kind'] ?? null) ? $r['kind'] : 'malformed';
+            return null;
+        }
+
+        $items = $r['result']['items'] ?? null;
+        if (!is_array($items)) {
+            $this->lastCompressedKind = 'malformed';
+            return null;
+        }
+
+        // ONE matching item establishes existence. No count is needed, which is
+        // why `showGrandTotal` is not requested.
+        return $items !== [];
+    }
+
+    /**
+     * Collection supply from the verified group result's `total`.
+     *
+     * ── ⚠⚠⚠ `total` IS NOT PROVABLY THE COLLECTION SIZE ─────────────────
+     * The documentation contradicts itself. Helius's parameter table calls
+     * `total` "the total number of Solana NFTs found in this collection or
+     * group", but the documented response EXAMPLE shows `"total": 1` for a
+     * one-item page, and `showGrandTotal` — "Show total number of matching
+     * assets (slower request)" — exists on the same method. If `total` were
+     * already collection-wide, that option would be redundant.
+     *
+     * So `total > limit` is the only proof available: a page-bounded count can
+     * never EXCEED the page limit. Above the limit the value cannot be a page
+     * count and must be collection-wide; at or below it, the two readings are
+     * indistinguishable and the honest answer is UNKNOWN.
+     *
+     * This is correct under both readings, and only forgoes supply for genuine
+     * one-item collections.
+     *
+     * ⚠ `showGrandTotal` is NOT the escape hatch: its response FIELD NAME is
+     * undocumented, so reading it would repeat the `showCollectionMetadata`
+     * mistake exactly.
+     *
+     * ⚠⚠ AND NOT THE ITEM `supply` OBJECT. That describes EDITION PRINTS of one
+     * master-edition NFT (`print_current_supply` / `print_max_supply`) — a
+     * different number answering a different question. Storing it as the
+     * collection's item count would show an operator a confident wrong figure.
+     *
+     * @param array<string, mixed> $groupResult the verified `getAssetsByGroup` result
+     */
+    private function withSupplyFromGroupTotal(IntakeMetadata $metadata, array $groupResult): IntakeMetadata
+    {
+        $total = $groupResult['total'] ?? null;
+        $limit = $groupResult['limit'] ?? null;
+
+        // Integer-valued only. A string, a float, null or an array is not a
+        // count — it is a shape we do not recognise.
+        if (!is_int($total) || !is_int($limit)) {
+            return $metadata->withUnknown('total_supply');
+        }
+
+        // Non-negative and bounded. A negative count is nonsense, and an
+        // absurd one is more likely a sentinel than a collection.
+        if ($total < 0 || $total > self::SUPPLY_CEILING) {
+            return $metadata->withUnknown('total_supply');
+        }
+
+        // ⚠ THE DISAMBIGUATION. At or below the page limit the number cannot be
+        // distinguished from "items on this page".
+        if ($total <= $limit) {
+            return $metadata->withUnknown('total_supply');
+        }
+
+        return $metadata->withAnswered('total_supply', $total);
+    }
+
+    /**
+     * The largest membership count treated as a real observation.
+     *
+     * Solana's biggest collections are in the low millions; anything above this
+     * is a sentinel, an overflow or a different unit, and a number an operator
+     * would have to distrust is worse than an honest UNKNOWN.
+     */
+    private const SUPPLY_CEILING = 50_000_000;
+
+    /** Why the compressed-existence query gave no answer. */
+    private string $lastCompressedKind = 'none';
 
     /** Why the metadata read failed, for the UNAVAILABLE evidence token. */
     private string $lastMetadataKind = 'none';
@@ -147,14 +283,14 @@ final class SolanaContractProbe
      * The COLLECTION's own name and image, from `getAsset` on the collection
      * mint — not from a member.
      *
-     * ⚠ Only `name` and `image_url` are applicable on Solana. DAS exposes no
-     * collection-level symbol or description, and its `supply` object describes
-     * EDITION PRINTS of that one NFT (`print_current_supply` / `print_max_supply`)
-     * — not how many items the collection contains. Storing an edition print
-     * count as the collection's item count would be a different number from the
-     * one an operator expects to see, so `total_supply` is NOT_APPLICABLE here.
-     * If a membership count is wanted later, the documented source is the group
-     * result's own `total`, which is a separate decision.
+     * ⚠ This call supplies `name` and `image_url` ONLY. DAS exposes no
+     * collection-level symbol or description.
+     *
+     * ⚠⚠ AND DELIBERATELY NOT `supply`. The item's `supply` object describes
+     * EDITION PRINTS of that one NFT (`print_current_supply` /
+     * `print_max_supply`) — not how many items the collection contains. Supply
+     * comes from the group result's `total` instead; see
+     * {@see withSupplyFromGroupTotal()}.
      */
     private function collectCollectionMetadata(string $mint, ProviderRequestBudget $budget): ?IntakeMetadata
     {

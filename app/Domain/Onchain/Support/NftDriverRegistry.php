@@ -221,17 +221,30 @@ final class NftDriverRegistry
             // public endpoint by default, and getAsset needs a DAS provider.
             //
             // VALIDATION added in PR E, which is the "whoever builds one"
-            // this comment used to defer to. `SolanaContractProbe` calls
-            // `getAsset` on the submitted mint and requires a VERIFIED
-            // collection grouping — an unverified grouping is refused, because
-            // anyone can write a collection address into their own metadata
-            // and only the authority's signature makes the claim mean
-            // anything. The same response supplies name and image, so
-            // validation and metadata cost one call between them.
+            // this comment used to defer to. `SolanaContractProbe` spends
+            // THREE bounded DAS calls, each answering something the others
+            // cannot:
+            //
+            //   getAssetsByGroup  is this a VERIFIED collection group? asked
+            //                     with showUnverifiedCollections:false, because
+            //                     DAS expresses verification by OMITTING an
+            //                     unverified grouping rather than by a flag
+            //   searchAssets      does ANY compressed member exist?
+            //   getAsset          the COLLECTION's own name and image
+            //
+            // ⚠ An earlier version of this comment said validation was one
+            // `getAsset` requiring a "verified collection grouping" flag and
+            // that "the same response supplies name and image". All three
+            // claims were wrong: there is no `verified` property on a
+            // grouping, one asset cannot answer a question about a collection,
+            // and `showCollectionMetadata` has no published response shape.
             //
             // ⚠ Compressed NFTs are refused as UNSUPPORTED (DECISION 8): a
             // cNFT lives in a Merkle tree, so the balance reads holder-gating
-            // relies on cannot prove ownership of one.
+            // relies on cannot prove ownership of one. The exclusion is
+            // enforced for the WHOLE collection via the searchAssets existence
+            // query — not sampled from one member, which is what an earlier
+            // version did while a mixed collection slipped through.
             'operations' => [self::OP_VALIDATION, self::OP_METADATA],
             'priority'   => 10,
         ],
