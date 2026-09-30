@@ -629,6 +629,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Services\\WalletLinkWriteService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/WalletLinkWriteService.php',
         'BCC\\Trust\\Onchain\\Services\\WalletSeedService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/WalletSeedService.php',
         'BCC\\Trust\\Onchain\\Services\\WalletSignalWriteService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/WalletSignalWriteService.php',
+        'BCC\\Trust\\Onchain\\Support\\AlchemyCredential' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/AlchemyCredential.php',
         'BCC\\Trust\\Onchain\\Support\\AlchemyEndpoint' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/AlchemyEndpoint.php',
         'BCC\\Trust\\Onchain\\Support\\ApiRetry' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/ApiRetry.php',
         'BCC\\Trust\\Onchain\\Support\\Base58' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/Base58.php',
