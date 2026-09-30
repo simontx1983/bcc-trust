@@ -393,18 +393,19 @@ mutate "solana-budget-reduced-to-two" "$VALIDATOR" \
   'public const BUDGET_SOLANA = 2;' \
   'PrEFailClosedBoundariesTest|SolanaContractProbeTest'
 
-# ── 23. Edition-print supply used as the collection's supply ───────────
-# `supply.print_current_supply` counts EDITION PRINTS of one NFT. Storing it as
-# the collection's item count answers a different question with confidence.
+# ── 23. The edition-print `supply` object written as collection supply ──
+# `supply.print_current_supply` counts EDITION PRINTS of ONE master-edition
+# NFT. It is a different number answering a different question, and it is the
+# nearest plausible thing to reach for now that the group total is gone.
 mutate "edition-print-supply-used-as-collection-supply" "$SOL_PROBE" \
-  '        if ($total <= $limit) {
-            return $metadata->withUnknown('"'"'total_supply'"'"');
-        }' \
-  '        if ($total <= $limit) {
-            $print = $groupResult['"'"'print_current_supply'"'"'] ?? 0;
-            return $metadata->withAnswered('"'"'total_supply'"'"', is_int($print) ? $print : 0);
-        }' \
-  'SolanaContractProbeTest'
+  '        return $metadata
+            ->withAnswered('"'"'name'"'"', is_string($name) && trim($name) !== '"'"''"'"' ? $name : null)' \
+  '        $sup = is_array($r['"'"'result'"'"']['"'"'supply'"'"'] ?? null) ? $r['"'"'result'"'"']['"'"'supply'"'"'] : [];
+        $pc = $sup['"'"'print_current_supply'"'"'] ?? null;
+        if (is_int($pc)) { $metadata = $metadata->withAnswered('"'"'total_supply'"'"', $pc); }
+        return $metadata
+            ->withAnswered('"'"'name'"'"', is_string($name) && trim($name) !== '"'"''"'"' ? $name : null)' \
+  'SolanaSupplyNotApplicableTest'
 
 # ── 24. The renderer back on the enumeration answer ────────────────────
 # ⚠⚠⚠ BLOCKER 1 EXACTLY. The writer grants on canTakeManualIntake(); the panel
@@ -433,27 +434,26 @@ mutate "description-review-forms-removed" "$VC_PAGE" \
   '            if (true) {' \
   'ChainDescriptionReviewInterfaceTest'
 
-# ── 27. The exact-limit requirement on the supply inference removed ────
-# ⚠⚠⚠ `total > limit` alone proves only that `limit` is an integer below
-# `total`. With `limit: 500` echoed back, `total: 4200` passed it — and so did
-# `limit: 0` and `limit: -1`. The inference is sound ONLY for the limit the
-# probe actually requested, because that is the request the reasoning was built
-# on. Deleting the check silently re-admits any page size the provider felt
-# like serving.
-mutate "supply-exact-limit-check-removed" "$SOL_PROBE" \
-  '        if ($limit !== self::REQUESTED_GROUP_LIMIT) {
-            return $metadata->withUnknown('"'"'total_supply'"'"');
-        }' \
-  '        // exact-limit requirement removed' \
-  'SolanaContractProbeTest'
+# ── 27. `total_supply` made APPLICABLE again on Solana ─────────────────
+# ⚠⚠⚠ THE FIELD CAN NEVER RESOLVE. Live measurement proved the group
+# response's `total` is the returned PAGE COUNT, and no other bounded source
+# exists — so counting supply as an outstanding field makes `complete`
+# permanently unreachable and every Solana row permanently `partial`.
+mutate "solana-supply-made-applicable-again" "$INTAKE_META" \
+  "        'solana' => ['name', 'image_url']," \
+  "        'solana' => ['name', 'image_url', 'total_supply']," \
+  'SolanaSupplyNotApplicableTest'
 
-# ── 28. The exact-limit requirement WEAKENED rather than removed ────────
-# The subtler regression: a range check looks careful and re-admits limit 2,
-# 500 and every other page size the provider might substitute.
-mutate "supply-exact-limit-check-weakened-to-a-range" "$SOL_PROBE" \
-  'if ($limit !== self::REQUESTED_GROUP_LIMIT) {' \
-  'if ($limit < self::REQUESTED_GROUP_LIMIT) {' \
-  'SolanaContractProbeTest'
+# ── 28. Supply re-derived from the group response ──────────────────────
+# The regression this PR exists to make impossible: writing the returned page
+# count into `total_supply`. Any collection would get a supply equal to the
+# page size — a confident number nobody measured.
+mutate "solana-supply-rederived-from-group-total" "$SOL_PROBE" \
+  '        return ContractValidationVerdict::valid('"'"'SPL-Metaplex'"'"', $metadata, [' \
+  '        $t = $result['"'"'total'"'"'] ?? null;
+        if (is_int($t)) { $metadata = $metadata->withAnswered('"'"'total_supply'"'"', $t); }
+        return ContractValidationVerdict::valid('"'"'SPL-Metaplex'"'"', $metadata, [' \
+  'SolanaSupplyNotApplicableTest'
 
 # ── 29. A decided description offered a repeat transition ──────────────
 # `approved` / `rejected` are terminal at the repository, so a control there is
