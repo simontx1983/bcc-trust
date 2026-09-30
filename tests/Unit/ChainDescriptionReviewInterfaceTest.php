@@ -384,18 +384,39 @@ final class ChainDescriptionReviewInterfaceTest extends TestCase
     }
 
     /**
-     * The provider text must not reach a PUBLIC surface. Asserted against the
-     * REST/view-model layer by source inspection, because the failure mode is
-     * somebody adding a field later, not this render leaking it.
+     * No REST route, controller or DTO carries the description to a client.
+     *
+     * ── WHAT THIS COVERS, EXACTLY ───────────────────────────────────────
+     * The outward-facing serialization layers of both domains: `REST/` (route
+     * handlers and their payloads), `Controllers/` and `Core/DTO/` (the
+     * view-model shapes). Those are the places a field becomes visible to a
+     * client, and the failure mode this guards is somebody adding one later
+     * rather than this render leaking it.
+     *
+     * ⚠ An earlier version scanned only the two `REST/` directories while its
+     * name and message claimed view-model coverage as well. The name now says
+     * what is scanned, and the scan now covers what the name says.
+     *
+     * ⚠⚠ THIS IS NOT THE AUTHORITATIVE NO-CONSUMER PROOF. That is
+     * `PrEFailClosedBoundariesTest::…NoPublicConsumer…`, which token-walks the
+     * WHOLE of `app/` for callers of
+     * `CollectionRepository::findApprovedChainDescription()` with comments
+     * stripped. This one is narrower and complementary: it catches the column
+     * being read DIRECTLY off a row and serialized, which bypasses that
+     * accessor entirely and so would not appear in a caller inventory.
      */
-    public function testNoPublicSurfaceSerialisesTheDescription(): void
+    public function testNoRestControllerOrDtoSerialisesTheDescription(): void
     {
         $roots = [
             __DIR__ . '/../../app/Domain/Onchain/REST',
+            __DIR__ . '/../../app/Domain/Onchain/Controllers',
             __DIR__ . '/../../app/Domain/Core/REST',
+            __DIR__ . '/../../app/Domain/Core/Controllers',
+            __DIR__ . '/../../app/Domain/Core/DTO',
         ];
 
-        $hits = [];
+        $scanned = 0;
+        $hits    = [];
         foreach ($roots as $root) {
             if (!is_dir($root)) {
                 continue;
@@ -405,17 +426,24 @@ final class ChainDescriptionReviewInterfaceTest extends TestCase
                 if (!$f instanceof \SplFileInfo || $f->getExtension() !== 'php') {
                     continue;
                 }
+                $scanned++;
                 $src = (string) file_get_contents($f->getPathname());
-                if (str_contains($src, 'chain_description')) {
+                if (
+                    str_contains($src, 'chain_description')
+                    || str_contains($src, 'findApprovedChainDescription')
+                ) {
                     $hits[] = $f->getPathname();
                 }
             }
         }
 
+        // ⚠ Anti-vacuity: a typo'd path list would scan nothing and pass.
+        self::assertGreaterThan(20, $scanned, 'the scan must actually reach the public layers');
+
         self::assertSame(
             [],
             $hits,
-            'DECISION 17: no public REST or view-model field carries the collection description'
+            'DECISION 17: no REST route, controller or DTO exposes the collection description'
         );
     }
 }

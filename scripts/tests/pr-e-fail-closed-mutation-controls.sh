@@ -18,7 +18,7 @@
 # by checksum afterwards — a mutation run that corrupts the tree is worse than
 # no mutation run at all.
 #
-# ── WHY THESE TWENTY-SEVEN ─────────────────────────────────────────────
+# ── WHY THESE TWENTY-NINE ──────────────────────────────────────────────
 # THIRTEEN of them reintroduce defects that were actually written and actually
 # caught in review, not hypotheticals.
 #
@@ -36,7 +36,12 @@
 #       claims — the grant was refused on exactly the chains it exists for
 #   A2  printing "checked against the chain" for chains that are not checked
 #
-# From round 4 (numbers 19–27 below):
+# From round 5 (numbers 27–28 below):
+#   T1  `total > limit` as the whole supply guard, which proves only that
+#       `limit` is an integer below `total` — `limit: 500`, `0` and `-1` all
+#       satisfied it, so any page size the provider substituted was accepted
+#
+# From round 4 (numbers 19–26 and 29 below):
 #   R1  deciding compression from ONE SAMPLED MEMBER, so a mixed collection
 #       whose first sample happened to be uncompressed validated and persisted
 #   R2  folding "could not ask" into "no compressed members" — the collapse
@@ -428,7 +433,29 @@ mutate "description-review-forms-removed" "$VC_PAGE" \
   '            if (true) {' \
   'ChainDescriptionReviewInterfaceTest'
 
-# ── 27. A decided description offered a repeat transition ──────────────
+# ── 27. The exact-limit requirement on the supply inference removed ────
+# ⚠⚠⚠ `total > limit` alone proves only that `limit` is an integer below
+# `total`. With `limit: 500` echoed back, `total: 4200` passed it — and so did
+# `limit: 0` and `limit: -1`. The inference is sound ONLY for the limit the
+# probe actually requested, because that is the request the reasoning was built
+# on. Deleting the check silently re-admits any page size the provider felt
+# like serving.
+mutate "supply-exact-limit-check-removed" "$SOL_PROBE" \
+  '        if ($limit !== self::REQUESTED_GROUP_LIMIT) {
+            return $metadata->withUnknown('"'"'total_supply'"'"');
+        }' \
+  '        // exact-limit requirement removed' \
+  'SolanaContractProbeTest'
+
+# ── 28. The exact-limit requirement WEAKENED rather than removed ────────
+# The subtler regression: a range check looks careful and re-admits limit 2,
+# 500 and every other page size the provider might substitute.
+mutate "supply-exact-limit-check-weakened-to-a-range" "$SOL_PROBE" \
+  'if ($limit !== self::REQUESTED_GROUP_LIMIT) {' \
+  'if ($limit < self::REQUESTED_GROUP_LIMIT) {' \
+  'SolanaContractProbeTest'
+
+# ── 29. A decided description offered a repeat transition ──────────────
 # `approved` / `rejected` are terminal at the repository, so a control there is
 # a button that can never work and a notice the page implied would not appear.
 mutate "decided-description-offers-a-repeat-transition" "$VC_PAGE" \

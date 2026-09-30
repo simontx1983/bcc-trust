@@ -2341,11 +2341,35 @@ final class CollectionRepository
     }
 
     /**
-     * The approved description, or null.
+     * The text of a description an administrator has REVIEWED and accepted, or null.
      *
-     * The ONLY reader a public serializer may use. It filters on the state in
-     * SQL rather than returning the text and trusting the caller to check —
-     * a caller that forgets is how unapproved text gets published.
+     * ── ⚠⚠⚠ APPROVED IS A REVIEW STATE, NOT PUBLICATION ─────────────────
+     * DECISION 17 is settled: during scanner retirement the imported NFT
+     * Collection Description is **stored and reviewed, not published**.
+     * `approved` records that a human read that exact text and vouched for it.
+     * It confers no right to display it anywhere.
+     *
+     * ⚠ THIS METHOD HAS NO PRODUCTION CONSUMER, AND THAT IS THE DESIGN.
+     * An earlier version of this docblock called it "the ONLY reader a public
+     * serializer may use", which read as standing permission to wire one up.
+     * There is no such permission. **No public REST route, view-model,
+     * serializer or template may expose this text without a future, explicitly
+     * authorized contract change** — and the plan is explicit that "a public
+     * reader is not to be built merely to avoid the field looking unused".
+     *
+     * The reader that DOES exist is the admin review screen on
+     * {@see \BCC\Trust\Onchain\Admin\VerifyCollectionsPage}, which reads the
+     * three `chain_description*` columns straight off the listing row for an
+     * administrator. It does not go through here.
+     *
+     * `PrEFailClosedBoundariesTest` scans the whole of `app/` and asserts this
+     * method has no caller outside this file, so a new one cannot be added
+     * quietly. Do not add one in this PR.
+     *
+     * ── WHY IT STILL FILTERS IN SQL ─────────────────────────────────────
+     * Whenever an authorized consumer does arrive, the state check belongs
+     * here: returning the text and trusting the caller to check the state is
+     * how unapproved text reaches a surface that should not have it.
      */
     public static function findApprovedChainDescription(int $collectionId): ?string
     {

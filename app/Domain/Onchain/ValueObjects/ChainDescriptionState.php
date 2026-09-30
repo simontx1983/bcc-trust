@@ -71,10 +71,21 @@ final class ChainDescriptionState
     }
 
     /**
-     * The ONLY state whose text may leave the backend publicly.
+     * The only state that could EVER be eligible for a public surface.
+     *
+     * ⚠⚠⚠ THIS IS A NECESSARY CONDITION, NOT A PERMISSION. It answers "is this
+     * state disqualifying?" and nothing more. Under DECISION 17 the answer for
+     * every state is currently moot: the description is not published at all
+     * during scanner retirement, and `approved` means an administrator reviewed
+     * the text — not that it may be displayed.
+     *
+     * ⚠ It has **no production consumer**, deliberately. It exists so that a
+     * future, explicitly authorized public contract has one correct place to
+     * ask the question instead of inventing a state comparison inline. Its
+     * returning true for `approved` is not that authorization.
      *
      * Membership in a list, not `!== PENDING` — an unknown or corrupted value
-     * must read as "not public", and a negated check would publish it.
+     * must read as "not public", and a negated check would admit it.
      */
     public static function isPubliclyVisible(string $state): bool
     {

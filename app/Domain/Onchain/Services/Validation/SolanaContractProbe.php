@@ -249,6 +249,27 @@ final class SolanaContractProbe
             return $metadata->withUnknown('total_supply');
         }
 
+        // ⚠⚠⚠ THE ECHOED LIMIT MUST BE EXACTLY THE ONE WE REQUESTED.
+        //
+        // `$total > $limit` was too weak: it proves only that `limit` is an
+        // integer below `total`. With `limit: 500` echoed back, `total: 4200`
+        // satisfied it — and so did `limit: 0` and `limit: -1`.
+        //
+        // The real reasoning is narrower and rests entirely on OUR request.
+        // {@see SolanaFetcher::assetsByGroupResult()} asks for `limit: 1`, so a
+        // response echoing `limit: 1` is one the provider honoured, and in THAT
+        // response a page count can be at most 1 — which is what makes
+        // `total > 1` provably not a page count. A response echoing anything
+        // else served a page we did not ask for, so it is not the response the
+        // inference was reasoned about and `total` may mean something else.
+        //
+        // Requiring exactly 1 keeps the conclusion tied to the request that
+        // justifies it, and costs nothing: the limit is already in the response
+        // we hold, so no extra provider call is made to check it.
+        if ($limit !== self::REQUESTED_GROUP_LIMIT) {
+            return $metadata->withUnknown('total_supply');
+        }
+
         // Non-negative and bounded. A negative count is nonsense, and an
         // absurd one is more likely a sentinel than a collection.
         if ($total < 0 || $total > self::SUPPLY_CEILING) {
@@ -256,13 +277,24 @@ final class SolanaContractProbe
         }
 
         // ⚠ THE DISAMBIGUATION. At or below the page limit the number cannot be
-        // distinguished from "items on this page".
+        // distinguished from "items on this page" — so with the limit pinned at
+        // 1, only `total > 1` is provably collection-wide.
         if ($total <= $limit) {
             return $metadata->withUnknown('total_supply');
         }
 
         return $metadata->withAnswered('total_supply', $total);
     }
+
+    /**
+     * The page limit {@see SolanaFetcher::assetsByGroupResult()} requests.
+     *
+     * ⚠ Kept as a named constant because the supply inference is only sound
+     * when the response echoes THIS value. If the request's limit ever changes,
+     * this must change with it — and the reasoning in
+     * {@see withSupplyFromGroupTotal()} must be re-derived, not just renumbered.
+     */
+    private const REQUESTED_GROUP_LIMIT = 1;
 
     /**
      * The largest membership count treated as a real observation.
