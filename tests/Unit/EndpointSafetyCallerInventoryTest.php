@@ -89,10 +89,18 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
 
         // ── The write. One recorder, one withdrawal. ────────────────────
         'CosmosEndpointAuthorization::record' => [
+            // Reached only from `authorize()`, in this same file. The switch
+            // USED to record the proof it had just made, so that the scanner
+            // would not refuse the chain as `endpoint_unverified`; it no longer
+            // does, because the only readers of that record are scanner files
+            // and the whole class retires with them in S8.
+            //
+            // ⚠ This stays a PERMISSION list, not an equality list, which is
+            // why removing that caller did not trip
+            // `testASafetyMethodWithoutACallerIsADefect`: the internal caller
+            // keeps the method reachable. When S8 deletes the class, this entry
+            // goes with it.
             'app/Domain/Onchain/Support/CosmosEndpointAuthorization.php',
-            // The switch records the proof it just made rather than proving
-            // the same endpoint twice.
-            'app/Domain/Onchain/Services/CosmosEndpointTransition.php',
         ],
         'CosmosEndpointAuthorization::forget' => [
             // Opting a chain out withdraws the authorization with it.

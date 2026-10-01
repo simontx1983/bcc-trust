@@ -433,25 +433,91 @@ final class ChainRepository
      * Validation of WHICH urls are acceptable belongs to
      * {@see \BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy}; a
      * repository enforces shape, not policy.
+     *
+     * ── IT IS A COMPARE-AND-SWAP, NOT A BLIND UPDATE ────────────────────
+     * The write carries the state the operator reviewed, so the row moves only
+     * if it is still that row. This replaced a reviewed-digest scheme, and it
+     * is stronger for the one thing it guards — there is no recompute-then-write
+     * window at all — and NARROWER: it guards this row, not the world. Anything
+     * else the caller depends on has to be bound here too, which is why `slug`
+     * and `is_active` are predicates and not merely re-read.
+     *
+     * ⚠⚠⚠ THE COMPARISONS ARE BINARY, AND `COLLATE utf8mb4_bin` IS NOT ENOUGH.
+     * This table is created with `$wpdb->get_charset_collate()`, so `rest_url`
+     * and `slug` compare case-INSENSITIVELY. Forcing `utf8mb4_bin` fixes the
+     * case half and leaves the other: every MySQL collation except the UCA
+     * 9.0.0 (`utf8mb4_0900_*`) family — `utf8mb4_bin` included — is PAD SPACE,
+     * so TRAILING SPACES ARE IGNORED in comparison. Casting to BINARY compares
+     * byte-wise with no padding, which is the only form that makes
+     * `https://host ` and `https://host` different values.
+     * `CAST(x AS BINARY)` rather than the `BINARY x` operator, which is
+     * deprecated from MySQL 8.0.27. Proven on both engines by
+     * `CosmosEndpointSwitchCasIntegrationTest`, not by assertion.
+     *
+     * ⚠ `rest_url` IS NULLABLE, so a NULL incumbent needs `IS NULL`: an `=`
+     * predicate can never match it, and a chain sitting on a NULL endpoint is
+     * precisely the one most in need of repair. `<=>` is not used because
+     * `wpdb::prepare()` binds a PHP null as the empty string.
+     *
+     * No index concern — the row is already selected by primary key.
+     *
+     * @param array{rest_url: string|null, slug: string, is_active: int} $expected the reviewed state
+     * @return int 1 when the row moved, 0 when a predicate did not match
+     *             (nothing changed), -1 on a database error (the write did not
+     *             report success and MAY OR MAY NOT have applied)
      */
-    public static function updateRestUrl(int $chainId, string $restUrl): bool
+    public static function updateRestUrl(int $chainId, string $restUrl, array $expected): int
     {
         if ($chainId <= 0 || trim($restUrl) === '') {
-            return false;
+            return 0;
         }
 
         global $wpdb;
         $table = self::table();
 
-        $result = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table} SET rest_url = %s WHERE id = %d LIMIT 1",
-            $restUrl,
-            $chainId
-        ));
+        $expectedRestUrl = $expected['rest_url'] ?? null;
 
-        self::clearCache();
+        $incumbent = $expectedRestUrl === null
+            ? 'rest_url IS NULL'
+            : 'CAST(rest_url AS BINARY) = CAST(%s AS BINARY)';
 
-        return $result !== false;
+        $sql = "UPDATE {$table}
+                   SET rest_url = %s
+                 WHERE id = %d
+                   AND {$incumbent}
+                   AND CAST(slug AS BINARY) = CAST(%s AS BINARY)
+                   AND is_active = %d
+                 LIMIT 1";
+
+        $args = [$restUrl, $chainId];
+        if ($expectedRestUrl !== null) {
+            $args[] = $expectedRestUrl;
+        }
+        $args[] = (string) $expected['slug'];
+        $args[] = (int) $expected['is_active'];
+
+        $result = $wpdb->query($wpdb->prepare($sql, ...$args));
+
+        if ($result === false) {
+            // ⚠ The cache is busted anyway. A statement that errored may still
+            // have applied, and a cache holding the previous endpoint after a
+            // write that might have landed is the worse of the two wrongs.
+            self::clearCache();
+
+            return -1;
+        }
+
+        $affected = (int) $result;
+
+        // Only an affected count of exactly zero proves nothing changed, so
+        // only that case may keep the cache. Every other outcome busts it,
+        // including the paths where the caller's read-back or follow-ups
+        // later fail — the row has moved and no reader may keep the old host.
+        if ($affected !== 0) {
+            self::clearCache();
+        }
+
+        return $affected;
     }
 
     /**
