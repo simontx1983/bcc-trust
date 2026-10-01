@@ -316,6 +316,47 @@ final class EndpointTransitionLockAndBreakerTest extends TestCase
         self::assertSame(0, \BccTransitionWorld::$cacheBusts);
     }
 
+    /**
+     * ⚠ THE PROOF IS MADE NOW, NOT SERVED FROM AN EARLIER ONE.
+     *
+     * `CosmosEndpointVerifier::verify()` caches a success per endpoint
+     * fingerprint and consults that cache BY DEFAULT. On this path the cache
+     * is bypassed deliberately: a recorded proof says the host answered
+     * correctly at some past moment, and what authorises repointing a chain is
+     * that it answers correctly NOW. A `true` here would let an operator switch
+     * to a host that has since failed, for as long as the transient lived.
+     *
+     * The argument is asserted rather than read off the source line, because
+     * the default is the unsafe value and a dropped argument would be silent.
+     */
+    public function testTheProofBypassesTheCacheSoAnEarlierProofCannotStandIn(): void
+    {
+        $this->switchIt();
+
+        self::assertSame(
+            [false],
+            \BccTransitionWorld::$verifyCacheFlags,
+            'exactly one verification, and it must not be allowed to use the cache'
+        );
+    }
+
+    /**
+     * ANTI-VACUITY for the test above. The recorder captures `true` when `true`
+     * is what it is given — so `[false]` is a measurement of the call the
+     * service makes, not an artefact of a recorder that can only say `false`.
+     */
+    public function testTheCacheFlagRecorderWouldCaptureACachedProof(): void
+    {
+        \BccTransitionWorld::$verifyCacheFlags = [];
+
+        // The fake's own default is the UNSAFE value, which is the point.
+        \BCC\Trust\Onchain\Support\CosmosEndpointVerifier::verify((object) [
+            'id' => 8, 'slug' => 'cosmos', 'rest_url' => self::TARGET,
+        ]);
+
+        self::assertSame([true], \BccTransitionWorld::$verifyCacheFlags);
+    }
+
     public function testTheProofHappensBeforeTheWrite(): void
     {
         $this->switchIt();

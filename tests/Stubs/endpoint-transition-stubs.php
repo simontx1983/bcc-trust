@@ -50,6 +50,16 @@ if (!class_exists('BccTransitionWorld', false)) {
         /** @var int how many times the chains cache was busted */
         public static int $cacheBusts = 0;
 
+        /**
+         * The `$useCache` argument of every verification, in order.
+         *
+         * ⚠ RECORDED SEPARATELY, NOT APPENDED TO THE `verify(...)` STRING,
+         * which a test matches exactly.
+         *
+         * @var list<bool>
+         */
+        public static array $verifyCacheFlags = [];
+
         public static bool $verifyOk = true;
 
         public static string $verifyReason = 'network_mismatch';
@@ -75,6 +85,7 @@ if (!class_exists('BccTransitionWorld', false)) {
             self::$writes            = [];
             self::$audits            = [];
             self::$cacheBusts        = 0;
+            self::$verifyCacheFlags  = [];
             self::$verifyOk          = true;
             self::$verifyReason      = 'network_mismatch';
             self::$forceCasResult    = null;
@@ -222,6 +233,7 @@ if (!class_exists(CosmosEndpointVerifier::class, false)) {
         public static function verify(object $chain, bool $useCache = true): array
         {
             \BccTransitionWorld::$writes[] = 'verify(' . (string) ($chain->rest_url ?? '') . ')';
+            \BccTransitionWorld::$verifyCacheFlags[] = $useCache;
 
             if (!\BccTransitionWorld::$verifyOk) {
                 return [
