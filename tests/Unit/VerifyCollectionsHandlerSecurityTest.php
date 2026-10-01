@@ -405,28 +405,161 @@ final class VerifyCollectionsHandlerSecurityTest extends TestCase
 
     // ── Delete protection ───────────────────────────────────────────────
 
-    public function testDeleteIsBlockedWhenALiveCommunityExists(): void
+    /** Drive the Remove route for a seeded collection and swallow the PRG. */
+    private function runDelete(int $collectionId): void
     {
-        \BCC\Trust\Onchain\Repositories\CollectionRepository::seed(self::CID, 4, '0xabc');
-        \BCC\Trust\Onchain\Repositories\GatedGroupRepository::$groups['4|0xabc'] = 99;
-
-        $_POST['collection_id'] = self::CID;
+        $_POST['collection_id'] = $collectionId;
         \BccAdminTestState::$validNonceAction =
-            VerifyCollectionsPage::ACTION_DELETE . '_' . self::CID;
+            VerifyCollectionsPage::ACTION_DELETE . '_' . $collectionId;
 
         try {
             VerifyCollectionsPage::handleDeletePost();
         } catch (\BccAdminRedirect) {
-            // expected
+            // expected — every mutation ends in a redirect
         }
+    }
+
+    /** @return list<array{type: string, message: string}> */
+    private function notices(): array
+    {
+        return \BccTransientStore::$data['bcc_vc_notices_' . \BccAdminTestState::$userId] ?? [];
+    }
+
+    public function testDeleteIsBlockedWhenALiveCommunityExists(): void
+    {
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::seed(self::CID, 4, '0xabc');
+        // The AUTHORITATIVE link: `_bcc_gate_collection_id` on a published
+        // group. This fixture used to be contract-keyed; after the guard
+        // moved to the row id, a contract-keyed fixture would no longer
+        // drive it and this test would have passed while asserting nothing.
+        \BCC\Trust\Onchain\Repositories\GatedGroupRepository::$groupsByCollectionId[self::CID] = 99;
+
+        $this->runDelete(self::CID);
 
         $this->assertSame([], \BCC\Trust\Onchain\Repositories\CollectionRepository::$deleted);
         // No false success row.
         $this->assertNotContains('admin_vc_collection_deleted', \BCC\Trust\Core\Security\AuditLogger::actions());
 
-        $notices = \BccTransientStore::$data['bcc_vc_notices_' . \BccAdminTestState::$userId] ?? [];
+        $notices = $this->notices();
         $this->assertNotSame([], $notices, 'Operator must be told why it was blocked.');
         $this->assertStringContainsString('community', strtolower($notices[0]['message']));
+
+        // The community itself is untouched — the guard reads, never writes.
+        $this->assertSame(
+            [self::CID => 99],
+            \BCC\Trust\Onchain\Repositories\GatedGroupRepository::$groupsByCollectionId
+        );
+    }
+
+    /**
+     * ANTI-VACUITY CONTROL for the test above.
+     *
+     * The legacy contract-keyed link, on its own, must NOT block a delete —
+     * because it is not the authority. If the handler ever reverts to
+     * `findGroupForCollection($chainId, $contract)`, this test fails, which
+     * is the only thing that stops the repointed fixture above from going
+     * quietly inert again.
+     */
+    public function testTheLegacyContractKeyedLinkAloneDoesNotBlockADelete(): void
+    {
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::seed(self::CID, 4, '0xabc');
+        \BCC\Trust\Onchain\Repositories\GatedGroupRepository::$groups['4|0xabc'] = 99;
+        // and deliberately NO entry in $groupsByCollectionId
+
+        $this->runDelete(self::CID);
+
+        $this->assertSame(
+            [self::CID],
+            \BCC\Trust\Onchain\Repositories\CollectionRepository::$deleted,
+            'The contract-address link is legacy/display. Only the collection-id link may block.'
+        );
+        $this->assertSame(
+            1,
+            \BCC\Trust\Onchain\Repositories\GatedGroupRepository::$collectionIdReads,
+            'The guard must consult the authoritative link exactly once.'
+        );
+    }
+
+    /**
+     * The case the old guard got wrong, with real production data shape:
+     * the eight Solana gates stored a Magic Eden SYMBOL in
+     * `contract_address`. `_` is not in the base58 alphabet, so
+     * canonicalising it refuses — and the old lookup returned null WITHOUT
+     * RUNNING A QUERY, reading a live community as absent and deleting the
+     * row out from under it.
+     */
+    public function testDeleteIsBlockedForALegacySolanaSymbolRow(): void
+    {
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::seed(
+            self::CID,
+            13,
+            'alpha_gardener',
+            '4fKR1UC2UA5R5m3ZGJwisZD4tkqQ2ZEPgGeZn51bB8uy'
+        );
+        \BCC\Trust\Onchain\Repositories\GatedGroupRepository::$groupsByCollectionId[self::CID] = 6502;
+
+        $this->runDelete(self::CID);
+
+        $this->assertSame(
+            [],
+            \BCC\Trust\Onchain\Repositories\CollectionRepository::$deleted,
+            'A row whose contract_address cannot canonicalise must still be protected.'
+        );
+        $this->assertNotContains('admin_vc_collection_deleted', \BCC\Trust\Core\Security\AuditLogger::actions());
+        $this->assertStringContainsString('community', strtolower($this->notices()[0]['message'] ?? ''));
+    }
+
+    /**
+     * Divergent identity columns — `contract_address` is not what the gate
+     * resolves identity from. Divergence must not weaken the guard.
+     */
+    public function testDeleteIsBlockedWhenTheIdentityColumnsDiverge(): void
+    {
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::seed(
+            self::CID,
+            13,
+            'MadLads',
+            '8Db41NmU1i3gSPq6AZWK1tsndJPPTLRP22LDGAz8CHxD'
+        );
+        \BCC\Trust\Onchain\Repositories\GatedGroupRepository::$groupsByCollectionId[self::CID] = 6509;
+
+        $this->runDelete(self::CID);
+
+        $this->assertSame([], \BCC\Trust\Onchain\Repositories\CollectionRepository::$deleted);
+        $this->assertNotContains('admin_vc_collection_deleted', \BCC\Trust\Core\Security\AuditLogger::actions());
+    }
+
+    /**
+     * FAIL CLOSED. A read that did not run is not proof that deleting is
+     * safe — and because nothing was established about this collection, it
+     * gets NO durable audit row either, only an operator notice and a log
+     * line.
+     */
+    public function testAnUnreadableCommunityCheckBlocksTheDeleteAndAuditsNothing(): void
+    {
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::seed(self::CID, 4, '0xabc');
+        \BCC\Trust\Onchain\Repositories\GatedGroupRepository::$throwOnCollectionIdRead = true;
+
+        $this->runDelete(self::CID);
+
+        $this->assertSame(
+            [],
+            \BCC\Trust\Onchain\Repositories\CollectionRepository::$deleted,
+            'A failed read must never be read as permission to delete.'
+        );
+
+        $actions = \BCC\Trust\Core\Security\AuditLogger::actions();
+        $this->assertNotContains('admin_vc_collection_deleted', $actions);
+        $this->assertNotContains(
+            'admin_vc_collection_delete_failed',
+            $actions,
+            'An infrastructure fault asserts nothing about the collection, so it gets no durable row.'
+        );
+
+        $notices = $this->notices();
+        $this->assertNotSame([], $notices);
+        $this->assertSame('error', $notices[0]['type']);
+        $this->assertStringContainsString('could not determine', strtolower($notices[0]['message']));
     }
 
     public function testEligibleCollectionDeletesExactlyOnceAndAudits(): void
