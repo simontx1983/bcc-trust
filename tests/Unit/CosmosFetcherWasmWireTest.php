@@ -452,4 +452,85 @@ final class CosmosFetcherWasmWireTest extends TestCase
             'the signal must not leak to an address this run never probed'
         );
     }
+
+    /**
+     * A GENERIC 501 — a gateway page, not a wasmd JSON error.
+     *
+     * The body is deliberately unparseable: no `message` field, not even
+     * JSON. If the status is what drives the signal, this still marks the
+     * chain; if anything is secretly reading the body, it does not.
+     */
+    public function testAGeneric501WithANonJsonBodyStillMarksTheChain(): void
+    {
+        for ($i = 0; $i < 16; $i++) {
+            ApiRetry::$queue[] = ['code' => 501, 'body' => '<html><body>The gateway cannot fulfil this request.</body></html>'];
+        }
+
+        $fetcher = $this->makeFetcher();
+        $fetcher->probeCw721(self::FRESH);
+
+        self::assertTrue(
+            $fetcher->chainHasNoWasmFor(self::FRESH),
+            'the HTTP status is the operand, not the body'
+        );
+    }
+
+    /**
+     * ⚠ TRANSIENT SERVER ERRORS ARE NOT A STATEMENT ABOUT THE CHAIN.
+     *
+     * 500, 502 and 503 are a node or a proxy having a bad day on a chain
+     * that may well host CW-721. Marking the chain on any of them would
+     * convert an outage into a claim about the chain — and, once the stored
+     * measurement is retired, into the only explanation an operator sees.
+     *
+     * Each code gets a fresh queue and a fresh fetcher so one iteration's
+     * leftovers cannot answer the next one's probe.
+     */
+    public function testTransientServerErrorsNeverMarkTheChain(): void
+    {
+        foreach ([500, 502, 503] as $code) {
+            ApiRetry::reset();
+            for ($i = 0; $i < 16; $i++) {
+                ApiRetry::$queue[] = ['code' => $code, 'body' => (string) json_encode(['message' => 'upstream unavailable'])];
+            }
+
+            $fetcher = $this->makeFetcher();
+            $fetcher->probeCw721(self::FRESH);
+
+            self::assertFalse(
+                $fetcher->chainHasNoWasmFor(self::FRESH),
+                "HTTP {$code} is an outage, not evidence that the chain has no wasm module"
+            );
+        }
+    }
+
+    /**
+     * THE FLAG IS RECOMPUTED, NOT ACCUMULATED.
+     *
+     * The first query of every run ASSIGNS rather than ORs, so a 501 seen
+     * once cannot outlive the run that saw it. Without that, one bad probe
+     * would make a chain permanently wasm-less for the life of the
+     * instance — a latched verdict dressed up as evidence.
+     */
+    public function testTheFlagIsRecomputedOnEveryProbeOfTheSameContract(): void
+    {
+        $fetcher = $this->makeFetcher();
+
+        for ($i = 0; $i < 16; $i++) {
+            ApiRetry::$queue[] = ['code' => 501, 'body' => (string) json_encode(['message' => 'Not Implemented'])];
+        }
+        $fetcher->probeCw721(self::FRESH);
+        self::assertTrue($fetcher->chainHasNoWasmFor(self::FRESH), 'precondition: the 501 was seen');
+
+        // The same contract, on the same instance, now answering normally.
+        ApiRetry::reset();
+        $this->queueJson(['data' => ['count' => 12]]);
+        $this->queueJson(['data' => ['name' => 'Recovered', 'symbol' => 'REC']]);
+        $fetcher->probeCw721(self::FRESH);
+
+        self::assertFalse(
+            $fetcher->chainHasNoWasmFor(self::FRESH),
+            'a 501 from an earlier probe must not latch'
+        );
+    }
 }
