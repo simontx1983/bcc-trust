@@ -214,10 +214,27 @@ Both conditions, each proven by **one bounded `eth_chainId` call**:
 
 | | call | required result |
 |---|---|---|
-| the row's own endpoint | `eth_chainId` | HTTP **401 or 403** |
+| the row's own endpoint | `eth_chainId` | HTTP **401 only** |
 | the designated endpoint | `eth_chainId` | HTTP **200** *and* `result` equals the chain's `chain_id_hex` |
 
 Use after a rotation, when branch A cannot match because the values differ by design.
+
+⚠⚠⚠ **403 IS INELIGIBLE AND REQUIRES HUMAN REVIEW.** A 403 **can** indicate a
+credential that is valid but restricted — a network not enabled on the plan, a policy
+or IP restriction, a suspended account. It is therefore not evidence that the
+credential was superseded.
+
+Observed in this project: a staging key returned `403 network-not-enabled-on-plan` for
+Base while returning **200 for Ethereum in the same moment**, with that key valid and
+in active use.
+
+A row whose endpoint answers 403 is **skipped**, and the skip is recorded for a human
+to look at. Do not widen this back to 401/403: the second condition keeps the chain
+working either way, so widening buys nothing and costs the correctness of the reason
+recorded against the row.
+
+⚠ What 401 establishes is narrow: an **observed authentication rejection**. It does not
+establish the cause, and it is not by itself proof that a rotation occurred.
 
 **What branch B rules out.** A hand-configured endpoint that still works answers 200
 and is skipped. A broken or mis-installed replacement fails the second condition, so
@@ -230,21 +247,43 @@ branch A, and should not be described as one — it trades differently:
 - It **makes network calls** (2 per candidate row). Branch A makes none. A provider
   outage, a rate limit, or a transient 5xx makes branch B *refuse* — correct, but it
   means the procedure can be blocked by conditions unrelated to the rows.
-- It reasons from **observed provider behaviour**, not from a local value match. A
-  credential that is rejected for a reason other than being superseded — suspended
-  account, network disabled on the plan, IP restriction — also answers 401/403. Such
-  a row would be treated as stale and cleaned. That is acceptable *only* because the
-  second condition proves the replacement works for that same chain, so the chain
-  keeps functioning either way.
-- It cannot distinguish "superseded" from "revoked" from "never valid". It only
-  establishes "this row's credential does not authenticate, and the configured
-  replacement does."
+- It reasons from **observed provider behaviour**, not from a local value match. That is
+  why only **401** qualifies: a valid-but-restricted credential **can** answer 403, so
+  403 is excluded above. Status codes are not a reliable map to causes in either
+  direction — do not treat 401 as proving "superseded", and do not assume every
+  restricted credential presents as 403.
+- It cannot distinguish "superseded" from "revoked" from "never valid". Within 401 it
+  establishes only "this row's credential did not authenticate on this call, and the
+  configured replacement did."
 
 ⚠ Do not weaken either branch to "any keyed endpoint on the mapped host". That drops
 every identity check and would overwrite a working hand-configured endpoint.
 
 ⚠ Record which branch fired, per row, in the run output. The two have different
 evidentiary weight and a reviewer needs to know which one was relied on.
+
+### ⚠ What was executed, versus what this procedure now requires
+
+The 401-only rule above **tightens eligibility for future runs**. It is not a
+description of what the executed scripts did, and the completed cleanups are unaffected
+by it.
+
+**Production cleanup, 2026-10-01, after rotation.** The script used there accepted
+**401 or 403** for the row endpoint. In that run **only 401 was observed** — Ethereum
+and Base each answered 401 — so no row was cleaned on the strength of a 403. That run
+is where the 401/403 behaviour was actually exercised and verified.
+
+**Staging cleanup, 2026-09-30, before rotation.** This did **not** use branch B. At that
+point the row and the constant held the same value, so it matched under **branch A**
+(equality), and the script used there had no eligibility probe at all — neither 401 nor
+403 was involved, and none was observed.
+
+**Staging re-verification, 2026-10-01, after rotation — separate from the cleanup.** The
+replacement was confirmed to differ from the superseded credential by comparing against
+a digest recorded *before* the staging cleanup, and both chains were confirmed working
+from the constant. ⚠ Staging's rows were already keyless by then, so **no superseded
+endpoint remained to probe and no rejection was observed there**. Do not read staging's
+evidence as a 401 observation.
 
 ### Rollback
 
@@ -282,8 +321,12 @@ normally is not.
       **not** create a collection or call `addManual()`).
 - [ ] The superseded key no longer authenticates. If the rotation was performed with
       Alchemy's **rotation action**, that action invalidates the superseded key, so
-      there is **no separate revocation step** — the 401/403 from branch B is the
-      evidence. Confirm it rather than assuming it.
+      there is **no separate revocation step**. What establishes invalidation is the
+      **rotation action itself**. The **401 responses observed** from the superseded row
+      endpoints during the 2026-10-01 production cleanup are a **rejection signal**
+      consistent with that invalidation — corroboration, not the mechanism, and not
+      proof on their own. Confirm rather than assume, and note that a 401 shows an
+      observed authentication rejection without establishing its cause.
 
 ### ⚠⚠ Cache verification when an external object cache is present
 
