@@ -2748,6 +2748,28 @@ final class VerifyCollectionsPage
      * deletion can't silently orphan a live PeepSo group. The operator
      * must unverify (and tear the group down) first.
      *
+     * ── THE GUARD ASKS THE AUTHORITATIVE LINK, AND FAILS CLOSED ─────────
+     * It used to ask `findGroupForCollection($chainId, $contract_address)`.
+     * Two problems, both in the direction that permits a delete:
+     *
+     *   1. `_bcc_gate_contract_address` is legacy/display; the identity is
+     *      `_bcc_gate_collection_id`. Matching on the contract string means
+     *      canonicalising it first, and a value that is not a valid
+     *      identity on its chain — the marketplace symbols the eight
+     *      production Solana gates stored — returns null WITHOUT RUNNING A
+     *      QUERY. A live community read as absent.
+     *   2. A failed query also returns null, and null was read as
+     *      permission to delete.
+     *
+     * Both are closed by keying on the row id and guarding the read:
+     * {@see GatedGroupRepository::findPublishedGroupIdForCollectionId()}
+     * throws rather than answering null when it could not look. Note the
+     * row's own `contract_address` is still used for the MESSAGE and the
+     * audit meta — it just no longer decides anything.
+     *
+     * The published-community policy is unchanged: only a published
+     * `peepso-group` blocks, so a trashed group does not strand a row.
+     *
      * @return list<array{type: string, message: string}>
      */
     private static function handleDeleteCollection(int $collectionId): array
@@ -2764,7 +2786,34 @@ final class VerifyCollectionsPage
         $contract = (string) $coll->contract_address;
         $chainId  = (int) $coll->chain_id;
 
-        $groupId = GatedGroupRepository::findGroupForCollection($chainId, $contract);
+        try {
+            $groupId = GatedGroupRepository::findPublishedGroupIdForCollectionId($collectionId);
+        } catch (RepositoryReadFailure $e) {
+            // ⚠ FAIL CLOSED, AND NO DURABLE AUDIT ROW.
+            //
+            // Nothing was established about this collection, so nothing is
+            // asserted about it. An audit row here would durably record a
+            // statement about a community we never managed to look at — the
+            // same reasoning as the AJAX provision path above. The fault
+            // belongs in the application log, which the repository already
+            // wrote once; this adds the operator-facing half.
+            \BCC\Core\Log\Logger::error('[bcc-trust] Verify Collections remove: community check unreadable', [
+                'action'        => 'verify_collections_remove_community_check_failed',
+                'collection_id' => $collectionId,
+                'method'        => $e->repositoryMethod(),
+                'db_error'      => $e->dbError(),
+                'operator'      => get_current_user_id(),
+            ]);
+
+            return [[
+                'type'    => 'error',
+                'message' => 'Remove: could not determine whether this collection still has a '
+                    . 'holder community, so nothing was removed. This is a database read failure, '
+                    . 'not a statement about the collection — try again, and if it persists check '
+                    . 'the database before removing anything.',
+            ]];
+        }
+
         if ($groupId !== null) {
             return [[
                 'type'    => 'warning',
