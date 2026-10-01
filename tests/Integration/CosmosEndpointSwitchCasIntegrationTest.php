@@ -38,6 +38,14 @@ final class CosmosEndpointSwitchCasIntegrationTest extends TestCase
 
     private const TARGET = 'https://cosmos-api.polkachu.com';
 
+    /**
+     * ⚠ NOT `cosmos`. `wp_bcc_chains` carries `UNIQUE KEY slug`, and the
+     * integration bootstrap seeds 20 default chains — `cosmos` among them — so
+     * a fixture row with that slug collides, the INSERT does nothing, and every
+     * assertion below is then made against a row that was never there.
+     */
+    private const SLUG = 'cas-fixture-chain';
+
     protected function setUp(): void
     {
         $wpdb  = $GLOBALS['wpdb'];
@@ -56,7 +64,7 @@ final class CosmosEndpointSwitchCasIntegrationTest extends TestCase
     }
 
     /** Seed the one row under test. A null $restUrl exercises the NULL branch. */
-    private function seed(?string $restUrl, string $slug = 'cosmos', int $isActive = 1): void
+    private function seed(?string $restUrl, string $slug = self::SLUG, int $isActive = 1): void
     {
         $wpdb  = $GLOBALS['wpdb'];
         $table = ChainRepository::table();
@@ -72,6 +80,8 @@ final class CosmosEndpointSwitchCasIntegrationTest extends TestCase
                 $isActive
             ));
 
+            $this->assertFixtureLanded($restUrl);
+
             return;
         }
 
@@ -85,6 +95,37 @@ final class CosmosEndpointSwitchCasIntegrationTest extends TestCase
             $restUrl,
             $isActive
         ));
+
+        $this->assertFixtureLanded($restUrl);
+    }
+
+    /**
+     * ⚠⚠ FIXTURE ANTI-VACUITY. `$wpdb->query()` returns false on a constraint
+     * violation and this suite never asked. A silent INSERT failure does not
+     * make these tests fail honestly — it makes every ABSENCE assertion among
+     * them pass for the wrong reason, because an absent row is also an
+     * unchanged one. So the fixture proves itself before anything is measured.
+     */
+    private function assertFixtureLanded(?string $restUrl): void
+    {
+        $wpdb  = $GLOBALS['wpdb'];
+        $table = ChainRepository::table();
+
+        $rows = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM `{$table}` WHERE id = %d",
+            self::CHAIN_ID
+        ));
+
+        self::assertSame(
+            1,
+            $rows,
+            'fixture: exactly one row must exist to test against — ' . (string) $wpdb->last_error
+        );
+        self::assertSame(
+            $restUrl,
+            $this->storedRaw(),
+            'fixture: the seeded endpoint must be stored byte for byte'
+        );
     }
 
     /** The stored value, read straight from the column with no normalisation. */
@@ -99,6 +140,29 @@ final class CosmosEndpointSwitchCasIntegrationTest extends TestCase
         ));
 
         return $value === null ? null : (string) $value;
+    }
+
+    /**
+     * The whole row, keyed by column.
+     *
+     * ⚠ Deliberately NOT `get_row(..., ARRAY_A)`. `ARRAY_A` is a WordPress
+     * constant that the integration bootstrap does not define, and an undefined
+     * constant referenced from inside a namespace is a fatal Error, not a
+     * fallback. `get_object_vars()` needs no constant at all.
+     *
+     * @return array<string, mixed>
+     */
+    private function rowAsArray(): array
+    {
+        $wpdb  = $GLOBALS['wpdb'];
+        $table = ChainRepository::table();
+
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM `{$table}` WHERE id = %d",
+            self::CHAIN_ID
+        ));
+
+        return is_object($row) ? get_object_vars($row) : [];
     }
 
     /**
@@ -132,7 +196,7 @@ final class CosmosEndpointSwitchCasIntegrationTest extends TestCase
 
         $affected = ChainRepository::updateRestUrl(self::CHAIN_ID, self::TARGET, [
             'rest_url'  => $operand,
-            'slug'      => 'cosmos',
+            'slug'      => self::SLUG,
             'is_active' => 1,
         ]);
 
@@ -156,11 +220,11 @@ final class CosmosEndpointSwitchCasIntegrationTest extends TestCase
     public function testASlugThatDiffersOnlyInCaseRefuses(): void
     {
         $incumbent = 'https://rest.cosmos.directory/cosmoshub';
-        $this->seed($incumbent, 'cosmos');
+        $this->seed($incumbent, self::SLUG);
 
         $affected = ChainRepository::updateRestUrl(self::CHAIN_ID, self::TARGET, [
             'rest_url'  => $incumbent,
-            'slug'      => 'Cosmos',
+            'slug'      => 'Cas-Fixture-Chain',
             'is_active' => 1,
         ]);
 
@@ -171,11 +235,11 @@ final class CosmosEndpointSwitchCasIntegrationTest extends TestCase
     public function testASlugWithATrailingSpaceRefuses(): void
     {
         $incumbent = 'https://rest.cosmos.directory/cosmoshub';
-        $this->seed($incumbent, 'cosmos');
+        $this->seed($incumbent, self::SLUG);
 
         $affected = ChainRepository::updateRestUrl(self::CHAIN_ID, self::TARGET, [
             'rest_url'  => $incumbent,
-            'slug'      => 'cosmos ',
+            'slug'      => self::SLUG . ' ',
             'is_active' => 1,
         ]);
 
@@ -186,11 +250,11 @@ final class CosmosEndpointSwitchCasIntegrationTest extends TestCase
     public function testAChangedIsActiveRefuses(): void
     {
         $incumbent = 'https://rest.cosmos.directory/cosmoshub';
-        $this->seed($incumbent, 'cosmos', 1);
+        $this->seed($incumbent, self::SLUG, 1);
 
         $affected = ChainRepository::updateRestUrl(self::CHAIN_ID, self::TARGET, [
             'rest_url'  => $incumbent,
-            'slug'      => 'cosmos',
+            'slug'      => self::SLUG,
             'is_active' => 0,
         ]);
 
@@ -207,27 +271,19 @@ final class CosmosEndpointSwitchCasIntegrationTest extends TestCase
      */
     public function testItTouchesExactlyOneColumn(): void
     {
-        $wpdb      = $GLOBALS['wpdb'];
-        $table     = ChainRepository::table();
         $incumbent = 'https://rest.cosmos.directory/cosmoshub';
-        $this->seed($incumbent, 'cosmos');
+        $this->seed($incumbent, self::SLUG);
 
-        $before = (array) $wpdb->get_row($wpdb->prepare(
-            "SELECT * FROM `{$table}` WHERE id = %d",
-            self::CHAIN_ID
-        ), ARRAY_A);
+        $before = $this->rowAsArray();
 
         $affected = ChainRepository::updateRestUrl(self::CHAIN_ID, self::TARGET, [
             'rest_url'  => $incumbent,
-            'slug'      => 'cosmos',
+            'slug'      => self::SLUG,
             'is_active' => 1,
         ]);
         self::assertSame(1, $affected);
 
-        $after = (array) $wpdb->get_row($wpdb->prepare(
-            "SELECT * FROM `{$table}` WHERE id = %d",
-            self::CHAIN_ID
-        ), ARRAY_A);
+        $after = $this->rowAsArray();
 
         self::assertNotSame([], $before, 'anti-vacuity: the row was readable');
         self::assertSame(array_keys($before), array_keys($after));
@@ -245,9 +301,9 @@ final class CosmosEndpointSwitchCasIntegrationTest extends TestCase
     public function testASecondPressWithTheNowStaleIncumbentRefuses(): void
     {
         $incumbent = 'https://rest.cosmos.directory/cosmoshub';
-        $this->seed($incumbent, 'cosmos');
+        $this->seed($incumbent, self::SLUG);
 
-        $expected = ['rest_url' => $incumbent, 'slug' => 'cosmos', 'is_active' => 1];
+        $expected = ['rest_url' => $incumbent, 'slug' => self::SLUG, 'is_active' => 1];
 
         self::assertSame(1, ChainRepository::updateRestUrl(self::CHAIN_ID, self::TARGET, $expected));
         self::assertSame(
