@@ -15,7 +15,20 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/endpoint-switch-integration-stubs.php';
 
 /**
- * The endpoint switch under REAL contention, from a SECOND DATABASE CONNECTION.
+ * The endpoint switch under DETERMINISTIC two-connection contention.
+ *
+ * ⚠ THE CONTENTION IS REAL; THE SCHEDULE IS NOT A RACE. A peer connection
+ * holds the advisory lock for the whole of each submission below, so the lock
+ * state these tests meet is genuinely another session's — but WHOLE
+ * SUBMISSIONS DO NOT OVERLAP: each one runs to completion before the next
+ * begins, and the order is fixed by the test rather than by the scheduler.
+ *
+ * That is the right shape for everything here, because every property below is
+ * about what ONE submission does when it meets a lock it cannot have. It is the
+ * wrong shape for "two submissions in flight at once", and that case lives in
+ * {@see CosmosEndpointSwitchCompletesIntegrationTest::testGenuinelyOverlappingSubmissionsPermitOneVerificationAndOneWrite},
+ * where the second submission is launched from INSIDE the first one's proof and
+ * the two are genuinely interleaved.
  *
  * ── WHY A SECOND CONNECTION IS THE WHOLE POINT ──────────────────────────
  * `GET_LOCK` is scoped to a SESSION and is REENTRANT within one. A test that
@@ -408,7 +421,7 @@ final class CosmosEndpointSwitchLockContentionIntegrationTest extends TestCase
         );
     }
 
-    // ── 4. Racing submissions of one review ──────────────────────────────
+    // ── 4. Repeated submissions of one review (sequential) ───────
 
     /**
      * ⚠ AT MOST ONE VERIFICATION, across every arrival of one review.
@@ -416,10 +429,15 @@ final class CosmosEndpointSwitchLockContentionIntegrationTest extends TestCase
      * Three arrivals, all carrying the same `review_id`: one while a peer holds
      * the lock, one once it is free, one after that. Exactly one may reach the
      * proof. The other two are refused by the two independent gates — the lock,
-     * then the spent review — and the totals are what is asserted, not which
-     * arrival won.
+     * then the spent review — and the totals are what is asserted.
+     *
+     * ⚠⚠ SEQUENTIAL, AND NAMED THAT WAY ON PURPOSE. The three arrivals do not
+     * overlap; this is replay plus a held lock, not a race. What it proves is
+     * that a review is single-use however many times it is submitted. The
+     * genuinely interleaved case is in
+     * `CosmosEndpointSwitchCompletesIntegrationTest`.
      */
-    public function testRacingSubmissionsOfOneReviewReachVerificationExactlyOnce(): void
+    public function testRepeatedSubmissionsOfOneReviewReachVerificationExactlyOnce(): void
     {
         $reviewId = $this->review();
 
