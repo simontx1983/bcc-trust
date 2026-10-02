@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\OnchainPlugin;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Services\CosmosEndpointTransition;
 use BCC\Trust\Onchain\Services\CosmosEndpointReview;
+use BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy;
 use BCC\Trust\Onchain\Repositories\HallRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Services\HallProvisioningService;
@@ -34,6 +35,7 @@ use BCC\Trust\Onchain\Factories\FetcherFactory;
  * {@see NftDiscoveryPage::maybe_redirect_legacy_url()}.
  *
  * @phpstan-import-type ChainRow from ChainRepository
+ * @phpstan-import-type ReviewRecord from CosmosEndpointReview
  * @phpstan-import-type ValidatorCountByChain from ValidatorRepository
  */
 class ChainsPage
@@ -306,6 +308,7 @@ class ChainsPage
                 <?php self::render_halls_tab($chains); ?>
             <?php else: ?>
                 <?php self::render_endpoint_review_panel(); ?>
+                <?php self::render_endpoint_entry_form($chains); ?>
                 <?php self::render_identity_tab($chains); ?>
             <?php endif; ?>
         </div>
@@ -822,20 +825,16 @@ class ChainsPage
     }
 
     /**
-     * Move a governed Cosmos chain to a different APPROVED endpoint.
+     * Step 3: apply the switch the operator confirmed.
      *
-     * Every gate the brief asked for, in order:
-     *   capability → POST → scoped nonce → confirmation digest → verified
-     *   destination → single-column write → post-write re-read → cursor
-     *   clear → post-clear proof → audit row.
+     * capability → POST → route-scoped nonce → chain resolves → the service
+     * (lock → review bindings → live proof → byte-exact CAS → read-back →
+     * breaker → audit) → PRG with a result code the operator can read.
      *
-     * ⚠ THE DIGEST IS THE CONFIRMATION. It is computed from the state the
-     * operator was SHOWN — the endpoints, the exact code ids holding a
-     * cursor, and whether the code cursor was set. {@see
-     * CosmosEndpointTransition::execute()} recomputes it against live state
-     * and refuses on any difference, so a plan reviewed ten minutes ago
-     * cannot execute against a world that moved. Nothing is hard-coded: the
-     * rows cleared are the rows identified at execution time.
+     * ⚠ THE TARGET IS NOT SUBMITTED. The only operand is the review's random
+     * id, so the thing executed is the thing that was reviewed, and a
+     * replacement review retires a stale confirmation screen on its own.
+     * {@see CosmosEndpointTransition::execute()} holds the full contract.
      *
      * ⚠ NOTHING HERE TOUCHES PRODUCTION BY ITSELF. This is a button. It runs
      * where an administrator presses it and nowhere else.
@@ -862,7 +861,31 @@ class ChainsPage
             self::redirect_endpoint('missing_input', $chainId);
         }
 
-        $result = CosmosEndpointTransition::execute($chainId, $reviewId, get_current_user_id());
+        // ⚠⚠ AN ESCAPING THROWABLE WOULD BE THE WORST OUTCOME HERE. The switch
+        // may already have happened by the time anything throws, and an
+        // unhandled exception gives the operator a WordPress fatal: no notice, no
+        // redirect, no durable row, and no way to tell whether the endpoint
+        // moved. The house pattern — {@see handle_hall_create()} — records a
+        // durable failure row and hands back a correlation id, so there is
+        // something to grep for. The service audits its own post-write paths, so
+        // this is the net for everything else.
+        try {
+            $result = CosmosEndpointTransition::execute($chainId, $reviewId, get_current_user_id());
+        } catch (\Throwable $e) {
+            $correlationId = AdminActionSupport::failure(
+                $e,
+                CosmosEndpointTransition::AUDIT_ACTION,
+                'chain',
+                $chainId,
+                ['outcome' => 'unexpected_error', 'error' => $e->getMessage()]
+            );
+
+            self::redirect_endpoint(
+                'unexpected_error',
+                $chainId,
+                ['bcc_ep_ref' => $correlationId]
+            );
+        }
 
         $args = [];
         if ($result['failed_followups'] !== []) {
@@ -902,7 +925,26 @@ class ChainsPage
             self::redirect_endpoint('missing_input', $chainId);
         }
 
-        $result = CosmosEndpointTransition::review($chainId, $target, get_current_user_id());
+        // Nothing is written before the mint, so a throw here costs only the
+        // operator's click — but it must still be a notice rather than a fatal.
+        try {
+            $result = CosmosEndpointTransition::review($chainId, $target, get_current_user_id());
+        } catch (\Throwable $e) {
+            $correlationId = AdminActionSupport::failure(
+                $e,
+                CosmosEndpointTransition::AUDIT_ACTION,
+                'chain',
+                $chainId,
+                ['outcome' => 'unexpected_error', 'step' => 'review', 'error' => $e->getMessage()]
+            );
+
+            self::redirect_endpoint(
+                'unexpected_error',
+                $chainId,
+                ['bcc_ep_ref' => $correlationId]
+            );
+        }
+
         if (!$result['ok']) {
             self::redirect_endpoint($result['reason'], $chainId);
         }
@@ -957,11 +999,6 @@ class ChainsPage
     }
 
     /**
-     * Rebuild the Identity-editor notice from the PRG redirect args.
-     *
-     * @return array{type: string, message: string}|null
-     */
-    /**
      * The pending endpoint switch, awaiting confirmation.
      *
      * ⚠⚠⚠ READ-ONLY. No write, no provider call, nothing minted. The review
@@ -977,6 +1014,90 @@ class ChainsPage
      * which keeps scheme and host and discards the rest. The review
      * fingerprint is never rendered at all.
      */
+    /**
+     * STEP 1: start an endpoint switch.
+     *
+     * ⚠ THIS IS THE CONTROL THE FLOW WAS MISSING. Without it the only way to
+     * mint a review was a hand-crafted POST or WP-CLI, so the two-step gesture
+     * the design asks for could not be performed from the admin at all — the
+     * confirmation panel can only appear once a review already exists.
+     *
+     * ⚠ THE TARGET IS A CLOSED LIST, NOT A TEXT FIELD. The operator picks from
+     * this chain's policy-approved endpoints, so a free-form URL never leaves the
+     * browser. `handle_endpoint_review()` re-checks the policy regardless — this
+     * is defence in depth and a usability choice, not the enforcement.
+     *
+     * Capability is the page's own `manage_options`; the POST and the route-scoped
+     * nonce are enforced in the handler. Rendering writes nothing.
+     *
+     * @param list<ChainRow> $chains
+     */
+    private static function render_endpoint_entry_form(array $chains): void
+    {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        // One pending review per operator, so a second form would be offering to
+        // replace the confirmation already on screen.
+        if (CosmosEndpointReview::peek(get_current_user_id()) !== null) {
+            return;
+        }
+
+        $governed = [];
+        foreach ($chains as $chain) {
+            $slug = (string) ($chain->slug ?? '');
+            if ($slug !== '' && CosmosEndpointPolicy::isGoverned($slug) && (int) ($chain->is_active ?? 0) === 1) {
+                $governed[] = $chain;
+            }
+        }
+
+        if ($governed === []) {
+            return;
+        }
+        ?>
+        <div class="card" style="max-width:860px;margin-bottom:16px;padding:12px">
+            <h2 style="margin-top:0">Endpoint switch</h2>
+            <p style="margin-top:0">
+                Moving a chain to a different approved endpoint takes two steps: review,
+                then confirm. Reviewing contacts nothing and changes nothing.
+            </p>
+            <?php foreach ($governed as $chain): ?>
+                <?php
+                $slug    = (string) $chain->slug;
+                $current = CosmosEndpointPolicy::normalize((string) ($chain->rest_url ?? ''));
+                $choices = [];
+                foreach (CosmosEndpointPolicy::approvedEndpoints($slug) as $url => $role) {
+                    if ($url !== $current) {
+                        $choices[(string) $url] = (string) $role;
+                    }
+                }
+                ?>
+                <?php if ($choices !== []): ?>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
+                          style="display:flex;gap:8px;align-items:center;margin:0 0 8px">
+                        <?php wp_nonce_field(self::ACTION_ENDPOINT_REVIEW, 'bcc_chain_endpoint_review_nonce'); ?>
+                        <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_ENDPOINT_REVIEW); ?>">
+                        <input type="hidden" name="chain_id" value="<?php echo (int) $chain->id; ?>">
+                        <label style="min-width:120px">
+                            <code><?php echo esc_html($slug); ?></code>
+                        </label>
+                        <select name="target_url" required>
+                            <option value="">Choose an approved endpoint&hellip;</option>
+                            <?php foreach ($choices as $url => $role): ?>
+                                <option value="<?php echo esc_attr($url); ?>">
+                                    <?php echo esc_html($url); ?> (<?php echo esc_html($role); ?>)
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                        <button type="submit" class="button">Review switch</button>
+                    </form>
+                <?php endif; ?>
+            <?php endforeach; ?>
+        </div>
+        <?php
+    }
+
     private static function render_endpoint_review_panel(): void
     {
         $review = CosmosEndpointReview::peek(get_current_user_id());
@@ -984,17 +1105,25 @@ class ChainsPage
             return;
         }
 
-        $plan = CosmosEndpointTransition::plan((int) $review['chain_id'], (string) $review['target']);
-        if (!$plan['ok']) {
-            // The world moved since the review was recorded. Say so here
-            // rather than letting the operator confirm a plan that cannot
-            // execute.
+        $chainId = (int) $review['chain_id'];
+        $live    = ChainRepository::getById($chainId);
+
+        // ⚠⚠ A STALE REVIEW IS REFUSED, NOT REDRAWN. An earlier revision
+        // recomputed `plan()` against the live row on every render, so a hand edit
+        // between review and reload changed what the screen showed while the write
+        // still bound the ORIGINAL fingerprint — the panel told the operator it
+        // would move the chain "only if it is still on the endpoint shown above"
+        // and then refused with `from_mismatch`, because the endpoint shown was
+        // not the one bound. Everything below is drawn from the review record;
+        // the live row is read ONLY to decide whether it is still confirmable.
+        $staleReason = self::endpoint_review_stale_reason($review, $live);
+        if ($staleReason !== null) {
             ?>
             <div class="notice notice-warning">
                 <p>
                     <strong>Pending endpoint switch can no longer be confirmed.</strong>
-                    The chain or the policy changed since the plan was prepared
-                    (<code><?php echo esc_html($plan['reason']); ?></code>). Start again.
+                    The chain changed since you reviewed it
+                    (<code><?php echo esc_html($staleReason); ?></code>). Review it again.
                 </p>
             </div>
             <?php
@@ -1003,36 +1132,41 @@ class ChainsPage
         ?>
         <div class="notice notice-info" style="padding:12px">
             <h2 style="margin-top:0">Confirm endpoint switch</h2>
+            <p style="max-width:860px;margin-top:0">
+                <em>These are the values you reviewed.</em> If the chain has changed since,
+                this panel refuses the confirmation rather than showing you something else.
+            </p>
             <table class="widefat striped" style="max-width:860px;margin-bottom:12px">
                 <tbody>
                     <tr><th style="width:220px">Chain</th>
-                        <td><code><?php echo esc_html($plan['slug']); ?></code> (#<?php echo (int) $plan['chain_id']; ?>)</td></tr>
-                    <tr><th>Current endpoint</th>
+                        <td><code><?php echo esc_html((string) $review['slug']); ?></code>
+                            (#<?php echo (int) $review['chain_id']; ?>)</td></tr>
+                    <tr><th>Reviewed endpoint</th>
                         <td>
-                            <?php if ($plan['incumbent_null']): ?>
+                            <?php if ((bool) $review['incumbent_null']): ?>
                                 <em>none set</em>
-                            <?php elseif ($plan['incumbent_shown_in_full']): ?>
-                                <code><?php echo esc_html((string) $plan['incumbent_normalized']); ?></code>
+                            <?php elseif ((bool) $review['incumbent_shown_in_full']): ?>
+                                <code><?php echo esc_html((string) $review['incumbent_normalized']); ?></code>
                             <?php else: ?>
-                                <code><?php echo esc_html($plan['incumbent_display']); ?></code>
+                                <code><?php echo esc_html((string) $review['incumbent_display']); ?></code>
                                 <br><span style="color:#d63638;">Off-policy value — not shown in full.</span>
                             <?php endif; ?>
                         </td></tr>
                     <tr><th>New endpoint</th>
-                        <td><code><?php echo esc_html($plan['to']); ?></code>
-                            <?php if ($plan['to_role'] !== null): ?>
-                                &mdash; <?php echo esc_html((string) $plan['to_role']); ?>
+                        <td><code><?php echo esc_html((string) $review['target']); ?></code>
+                            <?php if (($review['to_role'] ?? null) !== null): ?>
+                                &mdash; <?php echo esc_html((string) $review['to_role']); ?>
                             <?php endif; ?>
                         </td></tr>
                     <tr><th>Must report network</th>
-                        <td><code><?php echo esc_html((string) $plan['expected_network']); ?></code></td></tr>
+                        <td><code><?php echo esc_html((string) $review['network']); ?></code></td></tr>
                 </tbody>
             </table>
 
             <p style="max-width:860px">
                 Confirming proves the new endpoint live before anything is written, then
-                moves the chain only if it is still on the endpoint shown above. The
-                circuit breaker for this chain is reset once the change is confirmed.
+                moves the chain only if it is still on the reviewed endpoint shown above.
+                The circuit breaker for this chain is reset once the change is confirmed.
             </p>
 
             <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
@@ -1046,6 +1180,40 @@ class ChainsPage
         <?php
     }
 
+    /**
+     * Why this review can no longer be confirmed, or null if it still can.
+     *
+     * ⚠ THE INCUMBENT IS COMPARED BY HMAC, NOT BY VALUE. The record never holds
+     * the raw endpoint — only `CosmosEndpointReview::fingerprint()` of it — so
+     * this is the only comparison available, and `hash_equals()` is used because
+     * the fingerprint is keyed on a site salt.
+     *
+     * @param  array<string, mixed> $review
+     * @param  ChainRow|null        $live
+     */
+    private static function endpoint_review_stale_reason(array $review, ?object $live): ?string
+    {
+        if ($live === null) {
+            return 'chain_gone';
+        }
+
+        if ((string) ($live->slug ?? '') !== (string) $review['slug']) {
+            return 'slug_changed';
+        }
+
+        if ((int) ($live->is_active ?? 0) !== (int) $review['is_active']) {
+            return 'active_changed';
+        }
+
+        $liveFp = CosmosEndpointReview::fingerprint(
+            $live->rest_url === null ? null : (string) $live->rest_url
+        );
+        if (!hash_equals((string) $review['incumbent_fp'], $liveFp)) {
+            return 'endpoint_changed';
+        }
+
+        return null;
+    }
     /**
      * Operator copy for every endpoint result code.
      *
@@ -1062,6 +1230,10 @@ class ChainsPage
         if ($result === '') {
             return null;
         }
+
+        // A log-join token, not a secret, and bounded by `sanitize_key` to the
+        // same alphabet `correlationId()` draws from.
+        $reference = isset($_GET['bcc_ep_ref']) ? sanitize_key((string) $_GET['bcc_ep_ref']) : '';
 
         $failedRaw = isset($_GET['bcc_ep_failed']) ? (string) $_GET['bcc_ep_failed'] : '';
         $failed    = [];
@@ -1145,6 +1317,16 @@ class ChainsPage
                 return ['type' => 'error', 'message' => 'Nothing changed: unknown chain.'];
             case 'missing_input':
                 return ['type' => 'error', 'message' => 'Nothing changed: the request was incomplete.'];
+            case 'unexpected_error':
+                // ⚠ DELIBERATELY SAYS NOTHING ABOUT THE ENDPOINT. An unexpected
+                // throw can happen on either side of the write, so this copy must
+                // not claim either outcome. The reference joins it to the log line
+                // and the durable `outcome => failed` row.
+                return [
+                    'type'    => 'error',
+                    'message' => AdminActionSupport::failureMessage($reference)
+                        . ' Check the chain\'s current endpoint before retrying.',
+                ];
             default:
                 return null;
         }

@@ -81,6 +81,23 @@ final class CosmosEndpointTransition
      */
     private const LOCK_PREFIX = 'bcc_cosmos_endpoint_';
 
+    /**
+     * What happened to the chain's breaker state, for the audit row.
+     *
+     * ⚠ FOUR STATES, NOT A BOOLEAN. "Nothing to clear" and "we did not dare
+     * touch it" and "the clear failed" are three different facts, and a later
+     * reader cannot tell them apart from the outcome alone. An earlier revision
+     * collapsed the last two onto `null`, so a FAILED clear was recorded as
+     * "not attempted" — the opposite of what happened.
+     */
+    private const BREAKER_CLEARED = 'cleared';
+
+    private const BREAKER_NOTHING_TO_CLEAR = 'nothing_to_clear';
+
+    private const BREAKER_NOT_ATTEMPTED = 'not_attempted';
+
+    private const BREAKER_FAILED = 'failed';
+
     // ── Step 1: review ──────────────────────────────────────────────────
 
     /**
@@ -98,14 +115,29 @@ final class CosmosEndpointTransition
             return ['ok' => false, 'reason' => $plan['reason'], 'review_id' => ''];
         }
 
+        // ⚠ THE RECORD CARRIES WHAT WAS REVIEWED, INCLUDING ITS DISPLAY FORM.
+        // The confirmation screen must describe the values the operator actually
+        // approved, not a fresh plan computed against whatever the row says when
+        // the page is reloaded. An earlier revision recomputed `plan()` on render,
+        // so a hand edit between review and reload silently changed what the
+        // screen showed while the write still bound the original fingerprint.
+        //
+        // ⚠ `incumbent_normalized` is null unless `incumbent_shown_in_full`,
+        // which is true only for a policy-approved incumbent — so this record can
+        // never hold a credential-bearing value. The raw incumbent is represented
+        // only by its HMAC.
         $reviewId = CosmosEndpointReview::mint($operatorId, [
-            'chain_id'       => $chainId,
-            'target'         => $plan['to'],
-            'slug'           => $plan['slug'],
-            'network'        => $plan['expected_network'],
-            'is_active'      => $plan['is_active'],
-            'incumbent_fp'   => $plan['incumbent_fp'],
-            'incumbent_null' => $plan['incumbent_null'],
+            'chain_id'                => $chainId,
+            'target'                  => $plan['to'],
+            'to_role'                 => $plan['to_role'],
+            'slug'                    => $plan['slug'],
+            'network'                 => $plan['expected_network'],
+            'is_active'               => $plan['is_active'],
+            'incumbent_fp'            => $plan['incumbent_fp'],
+            'incumbent_null'          => $plan['incumbent_null'],
+            'incumbent_display'       => $plan['incumbent_display'],
+            'incumbent_shown_in_full' => $plan['incumbent_shown_in_full'],
+            'incumbent_normalized'    => $plan['incumbent_normalized'],
         ]);
 
         return ['ok' => true, 'reason' => 'ready', 'review_id' => $reviewId];
@@ -116,9 +148,13 @@ final class CosmosEndpointTransition
     /**
      * The reviewable plan. Pure read; contacts nothing.
      *
-     * ⚠ `incumbent_fp` and `incumbent_raw` ARE NOT FOR DISPLAY. `rest_url` is a
-     * tainted credential column for `scripts/endpoint-exposure-guard.php`, and a
-     * hand-edited incumbent may carry userinfo or a query string. The renderer
+     * ⚠ `incumbent_fp` IS NOT FOR DISPLAY, and the raw column never leaves this
+     * method. `rest_url` is a tainted credential column for
+     * `scripts/endpoint-exposure-guard.php`, and a hand-edited incumbent may carry
+     * userinfo or a query string. An earlier revision also returned
+     * `incumbent_raw`, which nothing ever read — a tainted value handed to every
+     * caller for no purpose, and one the guard could not have followed out
+     * through a return value. The renderer
      * uses `incumbent_display` — and `incumbent_shown_in_full` says whether the
      * full normalized form may be shown, which is true only when the incumbent
      * is itself policy-approved and therefore known credential-free.
@@ -126,7 +162,7 @@ final class CosmosEndpointTransition
      * @return array{ok: bool, reason: string, chain_id: int, slug: string, is_active: int,
      *               to: string, to_role: string|null, expected_network: string|null,
      *               incumbent_display: string, incumbent_shown_in_full: bool,
-     *               incumbent_normalized: string|null, incumbent_raw: string|null,
+     *               incumbent_normalized: string|null,
      *               incumbent_fp: string, incumbent_null: bool}
      */
     public static function plan(int $chainId, string $targetUrl): array
@@ -180,7 +216,6 @@ final class CosmosEndpointTransition
             'incumbent_display'       => EndpointDescriptor::display($incumbentNull ? null : (string) $rawIncumbent),
             'incumbent_shown_in_full' => $shownInFull,
             'incumbent_normalized'    => $shownInFull ? $normalized : null,
-            'incumbent_raw'           => $incumbentNull ? null : (string) $rawIncumbent,
             'incumbent_fp'            => CosmosEndpointReview::fingerprint($incumbentNull ? null : (string) $rawIncumbent),
             'incumbent_null'          => $incumbentNull,
         ];
@@ -324,21 +359,55 @@ final class CosmosEndpointTransition
         ]);
 
         if ($affected === -1) {
-            // The statement did not report success. It may still have applied,
-            // so this must not be reported as "nothing happened".
+            // ⚠⚠ THE ROW MAY HAVE MOVED, SO THIS IS A POST-WRITE PATH AND MUST BE
+            // AUDITED. The statement did not report success, and `updateRestUrl()`
+            // has already busted the cache precisely because it may still have
+            // applied — so every later reader now takes whatever the row says. An
+            // earlier revision returned here without an audit row, which made this
+            // the ONE path where the endpoint could change with no durable record:
+            // the worst of the outcomes, and the one the block below exists for.
+            //
+            // The breaker is NOT touched: we cannot say which host the chain is on.
             Logger::error('[bcc-trust] endpoint switch write did not report success', [
                 'action'   => 'cosmos_endpoint_switch_write_unconfirmed',
                 'chain_id' => $chainId,
                 'operator' => $operatorId,
             ]);
 
-            return self::result(false, 'write_unconfirmed');
+            $failed = [];
+            if (!self::audit(
+                $chainId,
+                $slug,
+                $rawIncumbent,
+                $to,
+                $verifiedNetwork,
+                'write_unconfirmed',
+                [],
+                self::BREAKER_NOT_ATTEMPTED,
+                $operatorId
+            )) {
+                $failed[] = 'audit';
+            }
+
+            // ⚠ `ok` is false because nothing is PROVEN, not because nothing
+            // happened. The operator copy for this code says so explicitly.
+            return self::result(false, 'write_unconfirmed', $verifiedNetwork, $failed);
         }
 
         if ($affected === 0) {
             // Everything above matched a moment ago, so a racer landed between
             // the check and the write. One read to say which predicate lost.
-            $after = ChainRepository::getById($chainId);
+            //
+            // ⚠⚠ UNCACHED, OR THE QUESTION CANNOT BE ANSWERED. `getById()` serves
+            // from the cached active set and then a per-request memo, and the
+            // zero-row branch of `updateRestUrl()` deliberately does NOT bust the
+            // cache — correctly, since nothing changed. So a cached re-read returns
+            // the very row the first read put there, every comparison below is the
+            // row against itself, and `identity_changed` becomes unreachable: a
+            // concurrent rename or deactivation would be reported as a plain
+            // `from_mismatch`, telling the operator the endpoint moved when it did
+            // not. This read must go to the database.
+            $after = ChainRepository::getByIdUncached($chainId);
             $identityRaced = $after === null
                 || (string) ($after->slug ?? '') !== $slug
                 || (int) ($after->is_active ?? 0) !== (int) ($chain->is_active ?? 0);
@@ -374,13 +443,17 @@ final class CosmosEndpointTransition
         // treating false as a failed follow-up would warn the operator on every
         // ordinary switch. It is recorded as a FACT in the audit row. Only a
         // throw means the clear did not happen when it should have.
-        $failed         = [];
-        $breakerCleared = null;
+        $failed       = [];
+        $breakerState = self::BREAKER_NOT_ATTEMPTED;
         if ($confirmed) {
             try {
-                $breakerCleared = \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::forgetForEndpointChange($chainId);
+                $breakerState = \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::forgetForEndpointChange($chainId)
+                    ? self::BREAKER_CLEARED
+                    : self::BREAKER_NOTHING_TO_CLEAR;
             } catch (\Throwable $e) {
+                // ⚠ FAILED, NOT "NOT ATTEMPTED". We tried and could not.
                 $failed[] = 'breaker';
+                $breakerState = self::BREAKER_FAILED;
                 Logger::error('[bcc-trust] endpoint switch could not clear the breaker', [
                     'action'   => 'cosmos_endpoint_switch_breaker_clear_failed',
                     'chain_id' => $chainId,
@@ -401,7 +474,7 @@ final class CosmosEndpointTransition
             $verifiedNetwork,
             $outcome,
             $failed,
-            $breakerCleared,
+            $breakerState,
             $operatorId
         )) {
             $failed[] = 'audit';
@@ -423,9 +496,11 @@ final class CosmosEndpointTransition
      * is durable and widely readable, and the point of it is who changed what.
      *
      * @param  list<string> $failed
-     * @param  bool|null    $breakerCleared whether there was breaker state to clear,
-     *                      or NULL when the endpoint could not be confirmed and the
-     *                      breaker was therefore deliberately not touched.
+     * @param  string       $breakerState one of `cleared`, `nothing_to_clear`,
+     *                      `not_attempted` (the endpoint could not be confirmed, so
+     *                      the breaker was deliberately left alone) or `failed`
+     *                      (we tried and could not). `failed` also appears in
+     *                      `$failed`, so combined reporting is preserved.
      * @return bool whether the durable row was written
      */
     private static function audit(
@@ -436,7 +511,7 @@ final class CosmosEndpointTransition
         ?string $verifiedNetwork,
         string $outcome,
         array $failed,
-        ?bool $breakerCleared,
+        string $breakerState,
         int $operatorId
     ): bool {
         $meta = [
@@ -454,20 +529,43 @@ final class CosmosEndpointTransition
             'endpoint_fp'      => CosmosEndpointPolicy::fingerprint($slug, $to),
             'outcome'          => $outcome,
             'failed_followups' => $failed,
-            // ⚠ A FACT, NOT A VERDICT. `false` means there was nothing to clear,
-            // which is the ordinary case on a healthy chain; `null` means the
-            // endpoint could not be confirmed so the breaker was left alone. A
-            // later reader cannot tell those apart from the outcome alone.
-            'breaker_cleared'  => $breakerCleared,
+            // ⚠ A FACT, NOT A VERDICT, and one of FOUR of them — see the
+            // constants. `nothing_to_clear` is the ordinary case on a healthy
+            // chain and is not a failure; `not_attempted` means the endpoint could
+            // not be confirmed so the breaker was deliberately left alone; and
+            // `failed` means we tried and could not, which is a different fact
+            // from both and is also named in `failed_followups`.
+            'breaker_cleared'  => $breakerState,
             'actor'            => $operatorId,
         ];
 
-        $id = AuditLogger::logChecked(self::AUDIT_ACTION, $chainId, $meta, 'chain');
+        // ⚠ A THROWING AUDIT MUST NOT UNDO A COMPLETED SWITCH. By the time this
+        // runs the row may already have moved, so an exception out of the logger
+        // has to become a reported follow-up failure rather than an escape that
+        // leaves the operator with a fatal page and no idea what happened.
+        try {
+            $id = AuditLogger::logChecked(self::AUDIT_ACTION, $chainId, $meta, 'chain');
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] endpoint switch audit row threw', [
+                'action'   => 'cosmos_endpoint_switch_audit_threw',
+                'chain_id' => $chainId,
+                'outcome'  => $outcome,
+                'error'    => $e->getMessage(),
+            ]);
 
-        Logger::info('[bcc-trust] admin action: ' . self::AUDIT_ACTION, array_merge(
-            ['operator' => $operatorId, 'target_type' => 'chain', 'target_id' => $chainId],
-            $meta
-        ));
+            return false;
+        }
+
+        // The unredacted file-log copy. Best effort by design: the durable row is
+        // already written and its fate must not depend on this one.
+        try {
+            Logger::info('[bcc-trust] admin action: ' . self::AUDIT_ACTION, array_merge(
+                ['operator' => $operatorId, 'target_type' => 'chain', 'target_id' => $chainId],
+                $meta
+            ));
+        } catch (\Throwable $e) {
+            // Deliberately swallowed: see above.
+        }
 
         if ($id === null) {
             Logger::error('[bcc-trust] endpoint switch audit row was not written', [
@@ -486,7 +584,7 @@ final class CosmosEndpointTransition
      * @return array{ok: bool, reason: string, chain_id: int, slug: string, is_active: int,
      *               to: string, to_role: string|null, expected_network: string|null,
      *               incumbent_display: string, incumbent_shown_in_full: bool,
-     *               incumbent_normalized: string|null, incumbent_raw: string|null,
+     *               incumbent_normalized: string|null,
      *               incumbent_fp: string, incumbent_null: bool}
      */
     private static function emptyPlan(int $chainId, string $reason): array
@@ -503,7 +601,6 @@ final class CosmosEndpointTransition
             'incumbent_display'       => '',
             'incumbent_shown_in_full' => false,
             'incumbent_normalized'    => null,
-            'incumbent_raw'           => null,
             'incumbent_fp'            => '',
             'incumbent_null'          => false,
         ];

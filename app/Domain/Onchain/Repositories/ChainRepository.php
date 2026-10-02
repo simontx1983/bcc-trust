@@ -121,6 +121,46 @@ final class ChainRepository
      *  shared-cache writes, so the CACHE INVARIANT is untouched. */
     private static array $byIdMemo = [];
 
+    /**
+     * One chain, read STRAIGHT FROM THE DATABASE. No cache, no memo, no writes.
+     *
+     * ⚠⚠ THIS EXISTS FOR DIAGNOSING A LOST RACE, AND THE CACHE WOULD DEFEAT IT.
+     * {@see getById()} serves from the cached active set and then from a
+     * per-request memo, so inside one request it answers with whatever the first
+     * read put there. That is correct for ordinary reads and useless for the one
+     * question an atomic write failure raises — "what does the row say NOW, given
+     * that my predicate just failed to match it?" — because another request is
+     * exactly who changed it.
+     *
+     * ⚠ IT DELIBERATELY DOES NOT POPULATE `$byIdMemo`. A diagnostic read is not a
+     * read anyone else asked for, and seeding the memo from it would hand the rest
+     * of the request a row fetched for a different purpose.
+     *
+     * ⚠ AND IT DOES NOT BUST THE SHARED CACHE. The alternative — `clearCache()`
+     * then `getById()` — would answer the same question by throwing away a cache
+     * entry that is still valid for every other reader, to learn something only
+     * this method needs.
+     *
+     * Bounded: explicit columns (no `SELECT *`), primary key, `LIMIT 1`.
+     */
+    public static function getByIdUncached(int $chainId): ?object
+    {
+        if ($chainId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        /** @var ChainRow|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT " . self::COLUMNS . " FROM {$table} WHERE id = %d LIMIT 1",
+            $chainId
+        ));
+
+        return $row;
+    }
+
     /** @return ChainRow|null */
     public static function getById(int $chainId): ?object
     {

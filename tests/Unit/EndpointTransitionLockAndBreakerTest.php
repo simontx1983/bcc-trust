@@ -61,7 +61,13 @@ final class EndpointTransitionLockAndBreakerTest extends TestCase
     /** @return array{ok: bool, reason: string, verified_network: string|null, failed_followups: list<string>} */
     private function switchIt(?string $reviewId = null, int $chainId = self::CHAIN): array
     {
-        return CosmosEndpointTransition::execute($chainId, $reviewId ?? $this->review(), self::OPERATOR);
+        $id = $reviewId ?? $this->review();
+
+        // ⚠ The switch is a SEPARATE REQUEST from the review, so it starts with a
+        // cold cache. See `BccTransitionWorld::newRequest()`.
+        \BccTransitionWorld::newRequest();
+
+        return CosmosEndpointTransition::execute($chainId, $id, self::OPERATOR);
     }
 
     private function storedRestUrl(): ?string
@@ -422,8 +428,8 @@ final class EndpointTransitionLockAndBreakerTest extends TestCase
         // whole of this branch's life, though the design requires it and the
         // service's own comment claimed it. A vacuous assertion hid a real gap.
         $meta = \BccTransitionWorld::$audits[0]['meta'];
-        self::assertArrayHasKey('breaker_cleared', $meta);
-        self::assertNull(
+        self::assertSame(
+            'not_attempted',
             $meta['breaker_cleared'],
             'the breaker must not be touched for an endpoint we cannot confirm'
         );
@@ -439,8 +445,11 @@ final class EndpointTransitionLockAndBreakerTest extends TestCase
         self::assertSame('switched_then_superseded', $result['reason']);
         self::assertCount(1, \BccTransitionWorld::$audits);
         $meta = \BccTransitionWorld::$audits[0]['meta'];
-        self::assertArrayHasKey('breaker_cleared', $meta);
-        self::assertNull($meta['breaker_cleared'], 'a superseded endpoint is not confirmed either');
+        self::assertSame(
+            'not_attempted',
+            $meta['breaker_cleared'],
+            'a superseded endpoint is not confirmed either'
+        );
     }
 
     public function testAFailedAuditIsReportedWithoutHidingTheWrite(): void
@@ -548,8 +557,11 @@ final class EndpointTransitionLockAndBreakerTest extends TestCase
         // ⚠ RECORDED ON A CONFIRMED SWITCH. Design §7.8 #37 lists
         // `breaker_cleared` among the fields the row must carry, and a confirmed
         // switch always has an answer — false when there was nothing to clear.
-        self::assertArrayHasKey('breaker_cleared', $meta);
-        self::assertIsBool($meta['breaker_cleared'], 'a confirmed switch records a fact, not null');
+        self::assertSame(
+            'nothing_to_clear',
+            $meta['breaker_cleared'],
+            'a confirmed switch on a healthy chain records that there was nothing to clear'
+        );
 
         foreach (['cleared_families', 'code_cursor_cleared', 'watermark_kept'] as $gone) {
             self::assertArrayNotHasKey($gone, $meta, "the scanner field '{$gone}' must be gone");
@@ -638,7 +650,11 @@ final class EndpointTransitionLockAndBreakerTest extends TestCase
         $meta = \BccTransitionWorld::$audits[0]['meta'];
         self::assertSame('switched_unconfirmed', $meta['outcome']);
         self::assertSame(self::TARGET, $meta['to'], 'the trace names what was written');
-        self::assertNull($meta['breaker_cleared'] ?? null, 'unconfirmed state is left alone');
+        self::assertSame(
+            'not_attempted',
+            $meta['breaker_cleared'],
+            'unconfirmed state is left alone, and the row says so in those words'
+        );
     }
 
     // ── Replay totals (SEQUENTIAL — not a concurrency test) ──────────
@@ -702,5 +718,178 @@ final class EndpointTransitionLockAndBreakerTest extends TestCase
         $this->switchIt($first);
 
         self::assertSame(1, $this->endpointWrites());
+    }
+
+    // ══ Regressions for the review findings ══════════════════════
+
+    /**
+     * ⚠⚠ THE UNCERTAIN WRITE IS THE ONE THAT MOST NEEDS RECORDING.
+     *
+     * `updateRestUrl()` returns -1 when the statement did not report success,
+     * which does NOT mean it did not apply — and the cache has already been
+     * busted for exactly that reason. An earlier revision returned here without
+     * auditing, making this the one path where the endpoint could change with no
+     * durable record.
+     */
+    public function testAnUncertainWriteIsStillAudited(): void
+    {
+        \BccTransitionWorld::$forceCasResult = -1;
+
+        $result = $this->switchIt();
+
+        self::assertFalse($result['ok'], 'nothing is PROVEN');
+        self::assertSame('write_unconfirmed', $result['reason']);
+
+        self::assertCount(
+            1,
+            \BccTransitionWorld::$audits,
+            'a write that may have applied must leave a durable record'
+        );
+
+        $meta = \BccTransitionWorld::$audits[0]['meta'];
+        self::assertSame('write_unconfirmed', $meta['outcome'], 'and the row names the uncertainty');
+        self::assertSame(self::TARGET, $meta['to'], 'and what was attempted');
+        self::assertSame(
+            'not_attempted',
+            $meta['breaker_cleared'],
+            'the breaker is left alone: we cannot say which host the chain is on'
+        );
+    }
+
+    /**
+     * ANTI-VACUITY for the test above: the audit row must not claim the switch
+     * happened. `switched` and `write_unconfirmed` are different facts.
+     */
+    public function testAnUncertainWriteNeverRecordsItAsASuccessfulSwitch(): void
+    {
+        \BccTransitionWorld::$forceCasResult = -1;
+        $this->switchIt();
+
+        $meta = \BccTransitionWorld::$audits[0]['meta'];
+        self::assertNotSame('switched', $meta['outcome']);
+        self::assertStringNotContainsString(
+            'nothing_to_clear',
+            (string) $meta['breaker_cleared'],
+            'nothing may imply the breaker was dealt with'
+        );
+    }
+
+    /**
+     * ⚠⚠ A FAILED BREAKER CLEAR IS NOT "NOT ATTEMPTED".
+     *
+     * Both leave the breaker uncleared, and an earlier revision recorded both as
+     * `null` — so a clear that THREW was indistinguishable in the durable row
+     * from one that was deliberately never tried.
+     */
+    public function testAFailedBreakerClearIsRecordedAsFailedNotAsNotAttempted(): void
+    {
+        \BccBreakerStore::$deleteCounterThrows = true;
+
+        $result = $this->switchIt();
+
+        self::assertSame(['breaker'], $result['failed_followups'], 'still reported as a failure');
+
+        $meta = \BccTransitionWorld::$audits[0]['meta'];
+        self::assertSame(
+            'failed',
+            $meta['breaker_cleared'],
+            'a clear that threw is `failed`, never `not_attempted`'
+        );
+    }
+
+    /** The combined case must still name BOTH, with the breaker state intact. */
+    public function testACombinedBreakerAndAuditFailureKeepsBothFacts(): void
+    {
+        \BccBreakerStore::$deleteCounterThrows = true;
+        \BccTransitionWorld::$auditOk = false;
+
+        $result = $this->switchIt();
+
+        self::assertSame(['breaker', 'audit'], $result['failed_followups']);
+        self::assertSame('switched_followups_failed', $result['reason']);
+    }
+
+    /**
+     * ⚠⚠ A THROWING AUDIT MUST NOT UNDO A COMPLETED SWITCH. It becomes a
+     * reported follow-up failure, not an exception escaping into the handler
+     * after the row has already moved.
+     */
+    public function testAThrowingAuditBecomesAFollowUpFailureNotAnEscape(): void
+    {
+        \BccTransitionWorld::$auditThrows = true;
+
+        $result = $this->switchIt();
+
+        self::assertTrue($result['ok'], 'the endpoint DID change');
+        self::assertSame('switched_followups_failed', $result['reason']);
+        self::assertSame(['audit'], $result['failed_followups']);
+        self::assertSame(self::TARGET, $this->storedRestUrl());
+    }
+
+    /**
+     * ⚠⚠ THE POST-CAS DIAGNOSIS MUST SEE WHAT ANOTHER REQUEST DID.
+     *
+     * The racer renames the chain after this request has already read it. The
+     * CAS then matches nothing, and the diagnosis has to say WHICH predicate
+     * lost. Served from the cache it would compare the row against itself and
+     * always answer `from_mismatch` — telling the operator the endpoint moved
+     * when it did not.
+     */
+    public function testAConcurrentIdentityChangeIsDiagnosedAndNotReportedAsAMovedEndpoint(): void
+    {
+        \BccTransitionWorld::$forceCasResult = 0;
+        \BccTransitionWorld::$afterVerify = static function (): void {
+            // Another request renames the chain. The cache still holds the old row.
+            \BccTransitionWorld::$chains[8]->slug = 'renamed-by-a-racer';
+        };
+
+        $result = $this->switchIt();
+
+        self::assertSame(
+            'identity_changed',
+            $result['reason'],
+            'the identity predicate lost, and the refusal must say so'
+        );
+        self::assertSame([], \BccTransitionWorld::$audits, 'a pre-write refusal audits nothing');
+    }
+
+    /**
+     * FIDELITY CONTROL for the test above. If the double did not model the
+     * repository cache, that test would pass against a repository in which the
+     * bug cannot exist. This asserts the cache really is sticky and that the
+     * uncached read really does bypass it.
+     */
+    public function testTheDoubleModelsAStickyCacheOrTheDiagnosisTestProvesNothing(): void
+    {
+        $live = \BCC\Trust\Onchain\Repositories\ChainRepository::getById(8);
+        self::assertSame('cosmos', (string) $live->slug, 'the first read is the seeded slug');
+
+        \BccTransitionWorld::$chains[8]->slug = 'renamed-by-a-racer';
+
+        self::assertSame(
+            'cosmos',
+            (string) \BCC\Trust\Onchain\Repositories\ChainRepository::getById(8)->slug,
+            'getById() must still answer from the cache — that is the bug\'s habitat'
+        );
+        self::assertSame(
+            'renamed-by-a-racer',
+            (string) \BCC\Trust\Onchain\Repositories\ChainRepository::getByIdUncached(8)->slug,
+            'and getByIdUncached() must see the racer\'s write'
+        );
+    }
+
+    /** The plan must not hand callers the raw, tainted incumbent at all. */
+    public function testThePlanDoesNotCarryTheRawIncumbent(): void
+    {
+        \BccTransitionWorld::seedChain8('https://admin:hunter2@rest.cosmos.directory/cosmoshub?k=v');
+
+        $plan = CosmosEndpointTransition::plan(8, self::TARGET);
+
+        self::assertArrayNotHasKey('incumbent_raw', $plan, 'a dead field carrying a credential');
+        self::assertStringNotContainsString(
+            'hunter2',
+            (string) json_encode($plan),
+            'nothing in the plan may carry the secret'
+        );
     }
 }

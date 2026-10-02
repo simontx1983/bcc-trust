@@ -54,10 +54,45 @@ if (!defined('ABSPATH')) {
  * carries a `review_id` that no longer exists.
  *
  * @package BCC\Trust\Onchain\Services
+ * @phpstan-type ReviewRecord array{
+ *     review_id: string,
+ *     chain_id: int,
+ *     target: string,
+ *     to_role: string|null,
+ *     slug: string,
+ *     network: string|null,
+ *     is_active: int,
+ *     incumbent_fp: string,
+ *     incumbent_null: bool,
+ *     incumbent_display: string,
+ *     incumbent_shown_in_full: bool,
+ *     incumbent_normalized: string|null,
+ *     minted_at?: int,
+ * }
  */
 final class CosmosEndpointReview
 {
     /** Long enough to read a plan and press a button; short enough to expire. */
+    /**
+     * Every key a consumer reads. `peek()` refuses a record missing any of them.
+     *
+     * @var list<string>
+     */
+    private const REQUIRED_KEYS = [
+        'review_id',
+        'chain_id',
+        'target',
+        'to_role',
+        'slug',
+        'network',
+        'is_active',
+        'incumbent_fp',
+        'incumbent_null',
+        'incumbent_display',
+        'incumbent_shown_in_full',
+        'incumbent_normalized',
+    ];
+
     private const TTL = 600;
 
     private const PREFIX = 'bcc_cosmos_ep_review_';
@@ -113,16 +148,27 @@ final class CosmosEndpointReview
      *
      * Read-only: the confirmation screen uses this, and a GET must not consume.
      *
-     * @return array{chain_id: int, target: string, slug: string, network: string|null, is_active: int, incumbent_fp: string, incumbent_null: bool, review_id: string, minted_at: int}|null
+     * @return ReviewRecord|null
      */
     public static function peek(int $operatorId): ?array
     {
         $stored = get_transient(self::key($operatorId));
-        if (!is_array($stored) || !isset($stored['review_id'], $stored['chain_id'])) {
+        if (!is_array($stored)) {
             return null;
         }
 
-        /** @var array{chain_id: int, target: string, slug: string, network: string|null, is_active: int, incumbent_fp: string, incumbent_null: bool, review_id: string, minted_at: int} $stored */
+        // ⚠ VALIDATE WHAT THE CONSUMERS ACTUALLY READ. An earlier revision checked
+        // two keys and then ASSERTED nine in a `@var`, so a record of a different
+        // shape — a rolling deploy, a truncated object-cache payload — passed the
+        // guard and produced undefined-key warnings downstream. A record this
+        // process cannot fully understand is not a confirmation.
+        foreach (self::REQUIRED_KEYS as $key) {
+            if (!array_key_exists($key, $stored)) {
+                return null;
+            }
+        }
+
+        /** @var ReviewRecord $stored */
         return $stored;
     }
 

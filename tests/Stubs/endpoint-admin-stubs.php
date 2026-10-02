@@ -49,6 +49,16 @@ if (!class_exists('BccEndpointAdminState', false)) {
         /** @var list<array{chain: int, review: string}> */
         public static array $executeCalls = [];
 
+        /**
+         * Durable audit rows, so the handler's failure path can be asserted.
+         *
+         * @var list<array{action: string, meta: array<string, mixed>}>
+         */
+        public static array $auditRows = [];
+
+        /** @var list<string> */
+        public static array $logLines = [];
+
         public static function reset(): void
         {
             self::$can              = true;
@@ -59,6 +69,8 @@ if (!class_exists('BccEndpointAdminState', false)) {
             self::$transients       = [];
             self::$reviewCalls      = [];
             self::$executeCalls     = [];
+            self::$auditRows        = [];
+            self::$logLines         = [];
         }
 
         public static function seedChain(int $id, ?string $restUrl, string $slug = 'cosmos'): void
@@ -284,6 +296,82 @@ if (!class_exists(ChainRepository::class, false)) {
         public static function table(): string
         {
             return 'wp_bcc_chains';
+        }
+    }
+}
+
+}
+
+namespace BCC\Trust\Core\Security {
+
+/**
+ * Enough of `AuditLogger` for `AdminActionSupport::failure()` to write its
+ * durable `outcome => failed` row without a database.
+ */
+if (!class_exists(AuditLogger::class, false)) {
+    final class AuditLogger
+    {
+        /** @param array<string, mixed> $meta */
+        public static function log(
+            string $action,
+            ?int $targetId = null,
+            array $meta = [],
+            ?string $targetType = null,
+            ?int $userId = null
+        ): void {
+            \BccEndpointAdminState::$auditRows[] = ['action' => $action, 'meta' => $meta];
+        }
+
+        /** @param array<string, mixed> $meta */
+        public static function logChecked(
+            string $action,
+            ?int $targetId = null,
+            array $meta = [],
+            ?string $targetType = null,
+            ?int $userId = null
+        ): ?int {
+            self::log($action, $targetId, $meta, $targetType, $userId);
+
+            return count(\BccEndpointAdminState::$auditRows);
+        }
+    }
+}
+
+}
+
+namespace BCC\Core\Log {
+
+/**
+ * `AdminActionSupport` imports this one. Without it the failure path raises an
+ * `Error` instead of recording anything — which is precisely the shape the
+ * handler-throw tests exist to rule out, so it must be present or those tests
+ * would pass for the wrong reason.
+ */
+if (!class_exists(Logger::class, false)) {
+    final class Logger
+    {
+        /** @param array<string, mixed> $c */
+        public static function error(string $m, array $c = []): void
+        {
+            \BccEndpointAdminState::$logLines[] = 'error: ' . $m;
+        }
+
+        /** @param array<string, mixed> $c */
+        public static function warning(string $m, array $c = []): void
+        {
+            \BccEndpointAdminState::$logLines[] = 'warning: ' . $m;
+        }
+
+        /** @param array<string, mixed> $c */
+        public static function info(string $m, array $c = []): void
+        {
+            \BccEndpointAdminState::$logLines[] = 'info: ' . $m;
+        }
+
+        /** @param array<string, mixed> $c */
+        public static function debug(string $m, array $c = []): void
+        {
+            \BccEndpointAdminState::$logLines[] = 'debug: ' . $m;
         }
     }
 }

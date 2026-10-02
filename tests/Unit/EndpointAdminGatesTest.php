@@ -227,6 +227,7 @@ final class EndpointAdminGatesTest extends TestCase
             'lock_contended', 'already_current', 'not_governed', 'chain_inactive',
             'target_malformed', 'target_not_approved', 'target_unreachable',
             'target_identity_unreadable', 'target_network_mismatch', 'invalid_chain', 'missing_input',
+            'unexpected_error',
         ]);
     }
 
@@ -365,5 +366,83 @@ final class EndpointAdminGatesTest extends TestCase
             $src,
             'utf8mb4_bin is PAD SPACE and would ignore trailing spaces'
         );
+    }
+
+    // ══ An unexpected throw must not become a fatal page ═══════════
+
+    /**
+     * ⚠⚠ THE WORST CASE IS A THROW AFTER THE ROW MOVED. Uncaught, the operator
+     * gets "There has been a critical error": no notice, no redirect, and no way
+     * to tell whether the endpoint changed. The house pattern turns it into a
+     * durable failure row plus a reference the operator can quote.
+     */
+    public function testAnUnexpectedThrowRedirectsWithAReferenceInsteadOfFataling(): void
+    {
+        \BccEndpointAdminState::$validNonceAction = ChainsPage::ACTION_ENDPOINT_SWITCH;
+        \BccEndpointAdminState::seedChain(8, 'https://rest.cosmos.directory/cosmoshub');
+
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        $_POST = ['chain_id' => '8', 'review_id' => 'whatever'];
+
+        \BCC\Trust\Onchain\Services\CosmosEndpointTransition::$throws = true;
+
+        $e = $this->invokeHandler('handle_endpoint_switch');
+
+        self::assertInstanceOf(
+            \BccAdminRedirect::class,
+            $e,
+            'a throw must become a redirect, never an escaping exception'
+        );
+        self::assertSame(
+            'unexpected_error',
+            $e->args['bcc_endpoint'] ?? null,
+            'the operator gets a result code'
+        );
+        self::assertNotSame(
+            '',
+            (string) ($e->args['bcc_ep_ref'] ?? ''),
+            'and a reference that joins the notice to the log'
+        );
+    }
+
+    /** The durable record of the failure is written, not merely logged. */
+    public function testAnUnexpectedThrowLeavesADurableFailureRow(): void
+    {
+        \BccEndpointAdminState::$validNonceAction = ChainsPage::ACTION_ENDPOINT_SWITCH;
+        \BccEndpointAdminState::seedChain(8, 'https://rest.cosmos.directory/cosmoshub');
+
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        $_POST = ['chain_id' => '8', 'review_id' => 'whatever'];
+
+        \BCC\Trust\Onchain\Services\CosmosEndpointTransition::$throws = true;
+
+        $this->invokeHandler('handle_endpoint_switch');
+
+        self::assertCount(1, \BccEndpointAdminState::$auditRows);
+        self::assertSame(
+            'failed',
+            \BccEndpointAdminState::$auditRows[0]['meta']['outcome'] ?? null,
+            'the row says the operation failed'
+        );
+    }
+
+    /**
+     * ANTI-VACUITY: with the service NOT throwing, the same request yields the
+     * ordinary code and no failure row — so the two tests above measure the
+     * throw and not the fixture.
+     */
+    public function testWithoutAThrowTheSameRequestSucceedsAndWritesNoFailureRow(): void
+    {
+        \BccEndpointAdminState::$validNonceAction = ChainsPage::ACTION_ENDPOINT_SWITCH;
+        \BccEndpointAdminState::seedChain(8, 'https://rest.cosmos.directory/cosmoshub');
+
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        $_POST = ['chain_id' => '8', 'review_id' => 'whatever'];
+
+        $e = $this->invokeHandler('handle_endpoint_switch');
+
+        self::assertInstanceOf(\BccAdminRedirect::class, $e);
+        self::assertSame('switched', $e->args['bcc_endpoint'] ?? null);
+        self::assertSame([], \BccEndpointAdminState::$auditRows);
     }
 }

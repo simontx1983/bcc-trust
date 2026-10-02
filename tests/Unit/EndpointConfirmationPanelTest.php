@@ -66,6 +66,17 @@ final class EndpointConfirmationPanelTest extends TestCase
         return (string) ob_get_clean();
     }
 
+    private function renderEntryForm(): string
+    {
+        $m = new ReflectionMethod(ChainsPage::class, 'render_endpoint_entry_form');
+        $m->setAccessible(true);
+
+        ob_start();
+        $m->invoke(null, array_values(\BccEndpointAdminState::$chains));
+
+        return (string) ob_get_clean();
+    }
+
     private function seedAndReview(?string $incumbent): void
     {
         \BccEndpointAdminState::seedChain(self::CHAIN, $incumbent);
@@ -236,5 +247,175 @@ final class EndpointConfirmationPanelTest extends TestCase
 
         self::assertStringContainsString('can no longer be confirmed', $html);
         self::assertStringNotContainsString('name="review_id"', $html, 'no button on a dead plan');
+    }
+
+    // ══ The panel describes what was REVIEWED ══════════════════════════
+
+    /**
+     * ⚠⚠ A STALE REVIEW IS REFUSED, NOT REDRAWN.
+     *
+     * An earlier revision recomputed `plan()` against the live row on every
+     * render. So after a hand edit the panel showed the NEW endpoint while the
+     * write still bound the fingerprint of the OLD one — and the copy said it
+     * would move the chain "only if it is still on the endpoint shown above",
+     * which was then false. Worse, the value it newly displayed could be a
+     * credential-bearing one the operator never reviewed.
+     */
+    public function testAStaleReviewIsRefusedRatherThanShowingTheLiveValue(): void
+    {
+        $this->seedAndReview(self::APPROVED_INCUMBENT);
+
+        // Someone hand-edits the row to an off-policy, credential-bearing value.
+        \BccEndpointAdminState::$chains[self::CHAIN]->rest_url = self::DIRTY;
+
+        $html = $this->renderPanel();
+
+        self::assertStringContainsString('can no longer be confirmed', $html);
+        self::assertStringContainsString(
+            'endpoint_changed',
+            $html,
+            'and it names which thing moved'
+        );
+        self::assertStringNotContainsString(
+            'name="review_id"',
+            $html,
+            'no confirm button on a review that cannot execute'
+        );
+
+        foreach ([self::DIRTY, 'sup3rsecret', 'apikey=abc123xyz'] as $secret) {
+            self::assertStringNotContainsString(
+                $secret,
+                $html,
+                'and the value it never reviewed is not printed either'
+            );
+        }
+    }
+
+    /**
+     * ANTI-VACUITY for the test above: with nothing moved, the panel DOES show
+     * the reviewed endpoint and DOES offer the button.
+     */
+    public function testAnUnmovedReviewShowsTheReviewedEndpointAndTheButton(): void
+    {
+        $this->seedAndReview(self::APPROVED_INCUMBENT);
+
+        $html = $this->renderPanel();
+
+        self::assertStringContainsString(self::APPROVED_INCUMBENT, $html);
+        self::assertStringContainsString('name="review_id"', $html);
+        self::assertStringNotContainsString('can no longer be confirmed', $html);
+    }
+
+    /** A renamed chain is a different kind of staleness, and says so. */
+    public function testARenamedChainIsRefusedWithItsOwnReason(): void
+    {
+        $this->seedAndReview(self::APPROVED_INCUMBENT);
+
+        \BccEndpointAdminState::$chains[self::CHAIN]->slug = 'renamed';
+
+        $html = $this->renderPanel();
+
+        self::assertStringContainsString('slug_changed', $html);
+        self::assertStringNotContainsString('name="review_id"', $html);
+    }
+
+    /** A deactivated chain, likewise. */
+    public function testADeactivatedChainIsRefusedWithItsOwnReason(): void
+    {
+        $this->seedAndReview(self::APPROVED_INCUMBENT);
+
+        \BccEndpointAdminState::$chains[self::CHAIN]->is_active = 0;
+
+        $html = $this->renderPanel();
+
+        self::assertStringContainsString('active_changed', $html);
+    }
+
+    // ══ Step 1: the entry form ═════════════════════════════════════════
+
+    /**
+     * ⚠⚠ THIS CONTROL WAS MISSING ENTIRELY. Nothing rendered posted to
+     * `ACTION_ENDPOINT_REVIEW`, so a review could only be minted by a
+     * hand-crafted POST or WP-CLI and the two-step gesture could not be
+     * performed from the admin at all.
+     */
+    public function testTheEntryFormPostsToTheReviewActionWithItsOwnNonce(): void
+    {
+        \BccEndpointAdminState::seedChain(self::CHAIN, self::APPROVED_INCUMBENT);
+
+        $html = $this->renderEntryForm();
+
+        self::assertStringContainsString('name="action"', $html);
+        self::assertStringContainsString(ChainsPage::ACTION_ENDPOINT_REVIEW, $html);
+        self::assertStringContainsString(
+            'bcc_chain_endpoint_review_nonce',
+            $html,
+            'its own nonce field, not the switch route\'s'
+        );
+        self::assertStringNotContainsString(
+            'bcc_chain_endpoint_nonce"',
+            $html,
+            'the two routes must not share a nonce field'
+        );
+        self::assertStringContainsString('name="chain_id"', $html);
+        self::assertStringContainsString('method="post"', $html);
+    }
+
+    /**
+     * ⚠ THE TARGET IS A CLOSED LIST. A free-text field would let an operator
+     * type any URL; the handler would still refuse it, but the browser should
+     * not offer the possibility. The current endpoint is excluded, because
+     * switching to it is `already_current`.
+     */
+    public function testTheEntryFormOffersOnlyApprovedTargetsAndNoFreeTextInput(): void
+    {
+        \BccEndpointAdminState::seedChain(self::CHAIN, self::APPROVED_INCUMBENT);
+
+        $html = $this->renderEntryForm();
+
+        self::assertStringContainsString('<select name="target_url"', $html);
+        self::assertStringContainsString(self::TARGET, $html, 'the approved alternative');
+        self::assertStringNotContainsString(
+            self::APPROVED_INCUMBENT,
+            $html,
+            'the endpoint it is already on is not offered'
+        );
+        self::assertStringNotContainsString('type="text"', $html, 'no free-text target');
+        self::assertStringNotContainsString('type="url"', $html);
+    }
+
+    /** One pending review per operator, so the form stands down while one exists. */
+    public function testTheEntryFormIsAbsentWhileAReviewIsPending(): void
+    {
+        $this->seedAndReview(self::APPROVED_INCUMBENT);
+
+        self::assertSame('', $this->renderEntryForm());
+    }
+
+    public function testTheEntryFormIsAbsentWithoutTheCapability(): void
+    {
+        \BccEndpointAdminState::seedChain(self::CHAIN, self::APPROVED_INCUMBENT);
+        \BccEndpointAdminState::$can = false;
+
+        self::assertSame('', $this->renderEntryForm());
+    }
+
+    /** An ungoverned chain has no approved endpoints, so there is nothing to offer. */
+    public function testTheEntryFormIgnoresAnUngovernedChain(): void
+    {
+        \BccEndpointAdminState::seedChain(self::CHAIN, self::APPROVED_INCUMBENT, 'not-governed');
+
+        self::assertSame('', $this->renderEntryForm());
+    }
+
+    /** Rendering the form writes nothing — it is a GET surface. */
+    public function testRenderingTheEntryFormWritesNothing(): void
+    {
+        \BccEndpointAdminState::seedChain(self::CHAIN, self::APPROVED_INCUMBENT);
+
+        $before = \BccEndpointAdminState::$transients;
+        $this->renderEntryForm();
+
+        self::assertSame($before, \BccEndpointAdminState::$transients);
     }
 }

@@ -70,6 +70,13 @@ if (!class_exists('BccTransitionWorld', false)) {
         /** Make the durable audit row fail, to exercise the follow-up report. */
         public static bool $auditOk = true;
 
+        /**
+         * ⚠ DISTINCT FROM `$auditOk`. Returning null is a reported failure;
+         * THROWING is an escape that, left uncaught, would take down a request in
+         * which the endpoint may already have moved.
+         */
+        public static bool $auditThrows = false;
+
         /** Make the post-write read-back unavailable (null row). */
         public static bool $readBackAvailable = true;
 
@@ -78,6 +85,21 @@ if (!class_exists('BccTransitionWorld', false)) {
 
         /** Runs after the proof and before the CAS — the race seam. */
         public static mixed $afterVerify = null;
+
+        /**
+         * ⚠⚠ THE REPOSITORY CACHE, MODELLED ON PURPOSE.
+         *
+         * The real `ChainRepository::getById()` serves from the cached active set
+         * and then from a per-request memo, so within one request it keeps
+         * answering with whatever the FIRST read put there until something calls
+         * `clearCache()`. An earlier version of this double read the live array
+         * every time, which made it impossible to write a failing test for the
+         * post-CAS diagnosis reading a stale row — the bug was invisible here and
+         * only visible in production.
+         *
+         * @var array<int, object|null>
+         */
+        public static array $cacheSnapshot = [];
 
         public static function reset(): void
         {
@@ -90,12 +112,28 @@ if (!class_exists('BccTransitionWorld', false)) {
             self::$verifyReason      = 'network_mismatch';
             self::$forceCasResult    = null;
             self::$auditOk           = true;
+            self::$auditThrows       = false;
             self::$readBackAvailable = true;
             self::$readBackRestUrl   = null;
             self::$afterVerify       = null;
+            self::$cacheSnapshot     = [];
             \BccBreakerStore::reset();
             \BccBreakerStore::$deleteTransientFails = false;
             \BccBreakerStore::$deleteCounterThrows = false;
+        }
+
+        /**
+         * A NEW REQUEST: the caches start cold, the data does not.
+         *
+         * ⚠ THE REVIEW AND THE SWITCH ARE DIFFERENT REQUESTS in production, so the
+         * switch begins with an empty cache and reads the row as it is NOW. Without
+         * this boundary the double would carry the review request's cached row into
+         * the switch and the binding checks could never see the world move — the
+         * opposite error from the one the clone fixed.
+         */
+        public static function newRequest(): void
+        {
+            self::$cacheSnapshot = [];
         }
 
         public static function seedChain8(?string $restUrl, string $slug = 'cosmos', int $isActive = 1): void
@@ -120,7 +158,38 @@ namespace BCC\Trust\Onchain\Repositories {
 if (!class_exists(ChainRepository::class, false)) {
     final class ChainRepository
     {
+        /**
+         * ⚠ STICKY WITHIN A REQUEST, like the real one. The first answer is kept
+         * until `clearCache()` runs — which `updateRestUrl()` does on every
+         * outcome except an affected count of exactly zero.
+         */
         public static function getById(int $id): ?object
+        {
+            if (array_key_exists($id, \BccTransitionWorld::$cacheSnapshot)) {
+                return \BccTransitionWorld::$cacheSnapshot[$id];
+            }
+
+            $row = self::readThrough($id);
+            // ⚠⚠ A CLONE, NOT THE OBJECT. PHP objects are handles, so storing the
+            // row itself makes this an ALIAS of the live array: a test mutating the
+            // live row would see the change through the "cache" too, and the
+            // staleness being modelled would not exist. The fidelity control in
+            // the test file caught exactly that.
+            \BccTransitionWorld::$cacheSnapshot[$id] = is_object($row) ? clone $row : $row;
+
+            return \BccTransitionWorld::$cacheSnapshot[$id];
+        }
+
+        /**
+         * ⚠ ALWAYS LIVE, AND NEVER CACHES WHAT IT READ. This is the whole point of
+         * the method: the post-CAS diagnosis has to see what another request did.
+         */
+        public static function getByIdUncached(int $id): ?object
+        {
+            return self::readThrough($id);
+        }
+
+        private static function readThrough(int $id): ?object
         {
             if (!\BccTransitionWorld::$readBackAvailable && \BccTransitionWorld::$writes !== []) {
                 // Only the POST-write read fails; the pre-write reads must
@@ -187,6 +256,7 @@ if (!class_exists(ChainRepository::class, false)) {
         public static function clearCache(): void
         {
             \BccTransitionWorld::$cacheBusts++;
+            \BccTransitionWorld::$cacheSnapshot = [];
         }
     }
 }
@@ -206,6 +276,10 @@ if (!class_exists(AuditLogger::class, false)) {
             ?string $targetType = null,
             ?int $userId = null
         ): ?int {
+            if (\BccTransitionWorld::$auditThrows) {
+                throw new \RuntimeException('audit exploded');
+            }
+
             if (!\BccTransitionWorld::$auditOk) {
                 return null;
             }

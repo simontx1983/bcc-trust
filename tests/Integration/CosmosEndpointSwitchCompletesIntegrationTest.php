@@ -472,7 +472,11 @@ final class CosmosEndpointSwitchCompletesIntegrationTest extends TestCase
         self::assertSame([], $result['failed_followups']);
 
         $meta = $this->metaOfTheOnlyAuditRow();
-        self::assertFalse($meta['breaker_cleared'], 'recorded as a fact: there was nothing to clear');
+        self::assertSame(
+            'nothing_to_clear',
+            $meta['breaker_cleared'],
+            'recorded as a fact, in the words that distinguish it from a failure'
+        );
     }
 
     /**
@@ -509,7 +513,8 @@ final class CosmosEndpointSwitchCompletesIntegrationTest extends TestCase
             get_transient($this->breakerStateKey()),
             'the replaced host\'s breaker state must be gone'
         );
-        self::assertTrue(
+        self::assertSame(
+            'cleared',
             $this->metaOfTheOnlyAuditRow()['breaker_cleared'],
             'and the audit row must record that there WAS something to clear'
         );
@@ -809,5 +814,67 @@ final class CosmosEndpointSwitchCompletesIntegrationTest extends TestCase
 
         self::$peerConn = null;
         self::$peerWpdb = null;
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    //  7. THE UNCERTAIN WRITE
+    // ════════════════════════════════════════════════════════════════════
+
+    /**
+     * ⚠⚠ A STATEMENT THAT DID NOT REPORT SUCCESS MAY STILL HAVE APPLIED, and the
+     * cache is busted for exactly that reason — so every later reader takes
+     * whatever the row now says. An earlier revision returned from this branch
+     * without auditing, which made it the one path where the endpoint could move
+     * with no durable record.
+     *
+     * The failure is injected at the real `$wpdb`, so the UPDATE genuinely returns
+     * false the way a deadlock victim or a read-only replica would.
+     */
+    public function testAnUncertainWriteIsAuditedAgainstARealDatabase(): void
+    {
+        \BccEndpointTransportSpy::scriptNodeInfo(self::NETWORK);
+        $reviewId = $this->review();
+
+        $wpdb = $GLOBALS['wpdb'];
+        $wpdb->failQueriesMatching = '/^\s*UPDATE\s+`?wp_bcc_chains/i';
+
+        try {
+            $result = $this->submit($reviewId);
+        } finally {
+            $wpdb->clearFaultInjection();
+        }
+
+        self::assertGreaterThan(
+            0,
+            $wpdb->injectedFailures,
+            'anti-vacuity: the fault actually broke the UPDATE'
+        );
+        self::assertFalse($result['ok'], 'nothing is proven');
+        self::assertSame('write_unconfirmed', $result['reason']);
+
+        $rows = $this->auditRows();
+        self::assertCount(1, $rows, 'the uncertain write must leave a durable record');
+
+        $meta = $this->metaOfTheOnlyAuditRow();
+        self::assertSame('write_unconfirmed', $meta['outcome']);
+        self::assertSame(self::TARGET, $meta['to'], 'and names what was attempted');
+        self::assertSame(
+            'not_attempted',
+            $meta['breaker_cleared'],
+            'the breaker is left alone: we cannot say which host the chain is on'
+        );
+    }
+
+    /**
+     * ANTI-VACUITY for the test above: without the injected fault the identical
+     * submission succeeds and records `switched`. So the assertions there are
+     * about the broken statement, not about the fixture.
+     */
+    public function testTheSameSubmissionWithoutTheInjectedFaultSucceeds(): void
+    {
+        \BccEndpointTransportSpy::scriptNodeInfo(self::NETWORK);
+
+        self::assertSame('switched', $this->submit($this->review())['reason']);
+        self::assertSame('switched', $this->metaOfTheOnlyAuditRow()['outcome']);
     }
 }
