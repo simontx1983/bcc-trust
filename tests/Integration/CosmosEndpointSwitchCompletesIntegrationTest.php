@@ -839,15 +839,20 @@ final class CosmosEndpointSwitchCompletesIntegrationTest extends TestCase
         $wpdb->failQueriesMatching = '/^\s*UPDATE\s+`?wp_bcc_chains/i';
 
         try {
-            $result = $this->submit($reviewId);
+            $result   = $this->submit($reviewId);
+            // ⚠ READ THE COUNTER BEFORE THE CLEANUP. `clearFaultInjection()` resets
+            // `injectedFailures` to 0, so asserting on it after the `finally` reads
+            // zero whatever happened — which is how the first version of this test
+            // failed its own anti-vacuity check against perfectly good code.
+            $injected = $wpdb->injectedFailures;
         } finally {
             $wpdb->clearFaultInjection();
         }
 
         self::assertGreaterThan(
             0,
-            $wpdb->injectedFailures,
-            'anti-vacuity: the fault actually broke the UPDATE'
+            $injected,
+            'anti-vacuity: the fault actually broke the UPDATE; reason was ' . $result['reason']
         );
         self::assertFalse($result['ok'], 'nothing is proven');
         self::assertSame('write_unconfirmed', $result['reason']);
