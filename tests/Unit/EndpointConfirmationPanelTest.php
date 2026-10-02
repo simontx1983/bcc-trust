@@ -418,4 +418,62 @@ final class EndpointConfirmationPanelTest extends TestCase
 
         self::assertSame($before, \BccEndpointAdminState::$transients);
     }
+
+    /**
+     * ⚠⚠ A CACHED ROW MUST NOT MASK A CHANGED ONE.
+     *
+     * Found in a browser, against a real WordPress: the panel decided staleness
+     * with `ChainRepository::getById()`, which serves from a 300-second cached
+     * active set. After an out-of-band edit it therefore answered "nothing moved",
+     * showed the reviewed values and offered the button — while the row held a
+     * credential-bearing endpoint the operator had never reviewed. Flushing the
+     * transient made the refusal appear, which is what identified the cause.
+     *
+     * The double is sticky here precisely so this test can fail.
+     */
+    public function testAStaleCacheDoesNotHideAChangedEndpointFromThePanel(): void
+    {
+        $this->seedAndReview(self::APPROVED_INCUMBENT);
+
+        // Warm the modelled cache the way rendering the page would.
+        \BCC\Trust\Onchain\Repositories\ChainRepository::getById(self::CHAIN);
+
+        // Now the row changes out of band — no `updateRestUrl()`, so no cache bust.
+        \BccEndpointAdminState::$chains[self::CHAIN]->rest_url = self::DIRTY;
+
+        $html = $this->renderPanel();
+
+        self::assertStringContainsString(
+            'can no longer be confirmed',
+            $html,
+            'the panel must notice the change even with a warm cache'
+        );
+        self::assertStringNotContainsString('name="review_id"', $html);
+        self::assertStringNotContainsString('sup3rsecret', $html);
+    }
+
+    /**
+     * FIDELITY CONTROL. If the double were not sticky the test above would pass
+     * against a repository in which the bug cannot occur.
+     */
+    public function testTheAdminDoubleCachesGetByIdButNotGetByIdUncached(): void
+    {
+        \BccEndpointAdminState::seedChain(self::CHAIN, self::APPROVED_INCUMBENT);
+        $repo = \BCC\Trust\Onchain\Repositories\ChainRepository::class;
+
+        self::assertSame(self::APPROVED_INCUMBENT, (string) $repo::getById(self::CHAIN)->rest_url);
+
+        \BccEndpointAdminState::$chains[self::CHAIN]->rest_url = self::DIRTY;
+
+        self::assertSame(
+            self::APPROVED_INCUMBENT,
+            (string) $repo::getById(self::CHAIN)->rest_url,
+            'getById() must still answer from the cache'
+        );
+        self::assertSame(
+            self::DIRTY,
+            (string) $repo::getByIdUncached(self::CHAIN)->rest_url,
+            'and getByIdUncached() must see the out-of-band write'
+        );
+    }
 }

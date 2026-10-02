@@ -59,6 +59,13 @@ if (!class_exists('BccEndpointAdminState', false)) {
         /** @var list<string> */
         public static array $logLines = [];
 
+        /**
+         * The modelled repository cache. See `ChainRepository::getById()` below.
+         *
+         * @var array<int, object|null>
+         */
+        public static array $chainCache = [];
+
         public static function reset(): void
         {
             self::$can              = true;
@@ -71,10 +78,13 @@ if (!class_exists('BccEndpointAdminState', false)) {
             self::$executeCalls     = [];
             self::$auditRows        = [];
             self::$logLines         = [];
+            self::$chainCache       = [];
         }
 
         public static function seedChain(int $id, ?string $restUrl, string $slug = 'cosmos'): void
         {
+            self::$chainCache = [];
+
             self::$chains[$id] = (object) [
                 'id'        => (string) $id,
                 'slug'      => $slug,
@@ -288,7 +298,28 @@ namespace BCC\Trust\Onchain\Repositories {
 if (!class_exists(ChainRepository::class, false)) {
     final class ChainRepository
     {
+        /**
+         * ⚠ STICKY, like the real one: the first answer is kept until something
+         * clears it. A double that reads live every time cannot reproduce the
+         * staleness the panel has to defend against, and a test written against it
+         * passes while the served page is wrong — which is exactly what happened.
+         *
+         * The snapshot stores a CLONE, because PHP objects are handles: keeping the
+         * row itself would make this an alias of the live array and there would be
+         * no staleness at all.
+         */
         public static function getById(int $id): ?object
+        {
+            if (!array_key_exists($id, \BccEndpointAdminState::$chainCache)) {
+                $row = \BccEndpointAdminState::$chains[$id] ?? null;
+                \BccEndpointAdminState::$chainCache[$id] = is_object($row) ? clone $row : $row;
+            }
+
+            return \BccEndpointAdminState::$chainCache[$id];
+        }
+
+        /** Always the live row, and it never seeds the cache. */
+        public static function getByIdUncached(int $id): ?object
         {
             return \BccEndpointAdminState::$chains[$id] ?? null;
         }

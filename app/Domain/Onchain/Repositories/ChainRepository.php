@@ -142,6 +142,8 @@ final class ChainRepository
      * this method needs.
      *
      * Bounded: explicit columns (no `SELECT *`), primary key, `LIMIT 1`.
+     *
+     * @return ChainRow|null
      */
     public static function getByIdUncached(int $chainId): ?object
     {

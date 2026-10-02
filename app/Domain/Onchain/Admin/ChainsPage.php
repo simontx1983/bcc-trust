@@ -1106,7 +1106,18 @@ class ChainsPage
         }
 
         $chainId = (int) $review['chain_id'];
-        $live    = ChainRepository::getById($chainId);
+
+        // ⚠⚠ UNCACHED, FOR THE SAME REASON THE POST-CAS DIAGNOSIS IS.
+        // The only question this read answers is "has the world moved since the
+        // operator reviewed it?", and `getById()` serves from a 300-second cached
+        // active set — so for up to five minutes after an out-of-band change it
+        // answers "no". The panel would then show the reviewed values and offer the
+        // button while the row said something else, and the write would refuse with
+        // `from_mismatch`: fail-closed, but the operator misled, which is precisely
+        // what rendering from the review record was meant to stop.
+        //
+        // Found in the browser, not by a test: the double answered live.
+        $live = ChainRepository::getByIdUncached($chainId);
 
         // ⚠⚠ A STALE REVIEW IS REFUSED, NOT REDRAWN. An earlier revision
         // recomputed `plan()` against the live row on every render, so a hand edit
