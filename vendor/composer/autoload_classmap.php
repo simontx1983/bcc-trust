@@ -432,6 +432,7 @@ return array(
     'BCC\\Trust\\Onchain\\Services\\CollectionStateClassifier' => $baseDir . '/app/Domain/Onchain/Services/CollectionStateClassifier.php',
     'BCC\\Trust\\Onchain\\Services\\CommunityRequestService' => $baseDir . '/app/Domain/Onchain/Services/CommunityRequestService.php',
     'BCC\\Trust\\Onchain\\Services\\ContractValidator' => $baseDir . '/app/Domain/Onchain/Services/ContractValidator.php',
+    'BCC\\Trust\\Onchain\\Services\\CosmosEndpointReview' => $baseDir . '/app/Domain/Onchain/Services/CosmosEndpointReview.php',
     'BCC\\Trust\\Onchain\\Services\\CosmosEndpointTransition' => $baseDir . '/app/Domain/Onchain/Services/CosmosEndpointTransition.php',
     'BCC\\Trust\\Onchain\\Services\\CosmwasmClassifier' => $baseDir . '/app/Domain/Onchain/Services/CosmwasmClassifier.php',
     'BCC\\Trust\\Onchain\\Services\\CosmwasmDiscoveryHealthSnapshot' => $baseDir . '/app/Domain/Onchain/Services/CosmwasmDiscoveryHealthSnapshot.php',

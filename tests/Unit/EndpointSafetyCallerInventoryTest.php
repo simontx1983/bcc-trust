@@ -89,10 +89,18 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
 
         // ── The write. One recorder, one withdrawal. ────────────────────
         'CosmosEndpointAuthorization::record' => [
+            // Reached only from `authorize()`, in this same file. The switch
+            // USED to record the proof it had just made, so that the scanner
+            // would not refuse the chain as `endpoint_unverified`; it no longer
+            // does, because the only readers of that record are scanner files
+            // and the whole class retires with them in S8.
+            //
+            // ⚠ This stays a PERMISSION list, not an equality list, which is
+            // why removing that caller did not trip
+            // `testASafetyMethodWithoutACallerIsADefect`: the internal caller
+            // keeps the method reachable. When S8 deletes the class, this entry
+            // goes with it.
             'app/Domain/Onchain/Support/CosmosEndpointAuthorization.php',
-            // The switch records the proof it just made rather than proving
-            // the same endpoint twice.
-            'app/Domain/Onchain/Services/CosmosEndpointTransition.php',
         ],
         'CosmosEndpointAuthorization::forget' => [
             // Opting a chain out withdraws the authorization with it.
@@ -450,5 +458,58 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
         foreach (['CosmosEndpointPolicy::isGoverned(', 'CosmosEndpointPolicy::isApproved('] as $call) {
             self::assertStringContainsString($call, $code, 'the fetcher must consult the policy, not its own list');
         }
+    }
+
+    /**
+     * ⚠ ASKING PERMISSION MUST NOT BE ABLE TO OPEN THE BREAKER.
+     *
+     * The verifier is a GATE, not work. Routed through {@see ApiRetry} it would
+     * charge the circuit breaker on failure — so an operator checking whether a
+     * replacement host answers could, by asking, push the chain into a state
+     * where nothing may talk to it. Worse, the breaker it opened would be the
+     * one keyed to the chain it was trying to repair.
+     *
+     * ⚠⚠ A GREP WOULD BE WRONG HERE. The verifier's own docblock explains the
+     * decision and therefore CONTAINS the word `ApiRetry`; a text search would
+     * report the violation it is checking for. This walks tokens, so comments
+     * and docblocks are not code.
+     */
+    public function testTheLiveProofIsNotRoutedThroughTheRetryLayer(): void
+    {
+        $file = dirname(__DIR__, 2) . '/app/Domain/Onchain/Support/CosmosEndpointVerifier.php';
+        $src  = (string) file_get_contents($file);
+
+        self::assertStringContainsString(
+            'ApiRetry',
+            $src,
+            'anti-vacuity: the docblock does mention it, so a grep WOULD have failed here'
+        );
+
+        self::assertSame(
+            0,
+            self::executableReferencesTo($src, 'ApiRetry'),
+            'the verifier must not reach the retry layer in executable code'
+        );
+
+        // And the walk can see a real one: plant it as CODE, not as a comment.
+        $planted = $src . '<?php ApiRetry::request(); ';
+        self::assertGreaterThan(
+            0,
+            self::executableReferencesTo($planted, 'ApiRetry'),
+            'anti-vacuity: the token walk detects an executable reference'
+        );
+    }
+
+    /** Occurrences of a class name in EXECUTABLE code, ignoring comments and strings. */
+    private static function executableReferencesTo(string $src, string $name): int
+    {
+        $found = 0;
+        foreach (token_get_all($src) as $token) {
+            if (is_array($token) && $token[0] === T_STRING && $token[1] === $name) {
+                $found++;
+            }
+        }
+
+        return $found;
     }
 }
