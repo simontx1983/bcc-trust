@@ -417,8 +417,14 @@ final class EndpointTransitionLockAndBreakerTest extends TestCase
         self::assertGreaterThan(0, \BccTransitionWorld::$cacheBusts, 'the cache is busted even unconfirmed');
         self::assertCount(1, \BccTransitionWorld::$audits, 'a write that happened is always recorded');
         self::assertSame('switched_unconfirmed', \BccTransitionWorld::$audits[0]['meta']['outcome']);
+        // ⚠ THE KEY MUST EXIST. Written `?? null` this passed while the audit
+        // row carried no `breaker_cleared` at all — which it did not, for the
+        // whole of this branch's life, though the design requires it and the
+        // service's own comment claimed it. A vacuous assertion hid a real gap.
+        $meta = \BccTransitionWorld::$audits[0]['meta'];
+        self::assertArrayHasKey('breaker_cleared', $meta);
         self::assertNull(
-            \BccTransitionWorld::$audits[0]['meta']['breaker_cleared'] ?? null,
+            $meta['breaker_cleared'],
             'the breaker must not be touched for an endpoint we cannot confirm'
         );
     }
@@ -432,7 +438,9 @@ final class EndpointTransitionLockAndBreakerTest extends TestCase
         self::assertTrue($result['ok']);
         self::assertSame('switched_then_superseded', $result['reason']);
         self::assertCount(1, \BccTransitionWorld::$audits);
-        self::assertNull(\BccTransitionWorld::$audits[0]['meta']['breaker_cleared'] ?? null);
+        $meta = \BccTransitionWorld::$audits[0]['meta'];
+        self::assertArrayHasKey('breaker_cleared', $meta);
+        self::assertNull($meta['breaker_cleared'], 'a superseded endpoint is not confirmed either');
     }
 
     public function testAFailedAuditIsReportedWithoutHidingTheWrite(): void
@@ -536,6 +544,12 @@ final class EndpointTransitionLockAndBreakerTest extends TestCase
         self::assertArrayHasKey('endpoint_fp', $meta);
         self::assertArrayHasKey('to_role', $meta);
         self::assertSame(self::OPERATOR, $meta['actor']);
+
+        // ⚠ RECORDED ON A CONFIRMED SWITCH. Design §7.8 #37 lists
+        // `breaker_cleared` among the fields the row must carry, and a confirmed
+        // switch always has an answer — false when there was nothing to clear.
+        self::assertArrayHasKey('breaker_cleared', $meta);
+        self::assertIsBool($meta['breaker_cleared'], 'a confirmed switch records a fact, not null');
 
         foreach (['cleared_families', 'code_cursor_cleared', 'watermark_kept'] as $gone) {
             self::assertArrayNotHasKey($gone, $meta, "the scanner field '{$gone}' must be gone");

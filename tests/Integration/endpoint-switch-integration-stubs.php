@@ -17,6 +17,11 @@ declare(strict_types=1);
  * In the integration harness that function is otherwise UNDEFINED, so a
  * verification attempt is a fatal error rather than a request.
  *
+ * ⚠ NO SHARED WP FUNCTION IS DEFINED BEYOND THE TRANSPORT ITSELF. The hook
+ * registrations `prepareArgs()` would otherwise perform are disarmed at their
+ * one-shot guards instead; see `disarmHookRegistration()` for the regression
+ * that taught us the difference.
+ *
  * `wp_remote_get()` here NEVER OPENS A SOCKET. It returns a `WP_Error` unless a
  * test has explicitly scripted a response, so:
  *   - no test can reach a provider, scripted or not;
@@ -112,6 +117,34 @@ if (!class_exists('BccEndpointTransportSpy', false)) {
             $value = $cache->getValue();
             $value[$host] = ['ip' => $ip, 'expires' => time() + 3600];
             $cache->setValue(null, $value);
+
+            self::disarmHookRegistration();
+        }
+
+        /**
+         * ⚠⚠ WHY THIS EXISTS INSTEAD OF STUBBING `add_action`/`add_filter`.
+         *
+         * `prepareArgs()` registers a streams-disable filter and
+         * `injectCurlResolve()` hooks `http_api_curl`, each guarded by a
+         * one-shot static. Both are bookkeeping for a request this harness
+         * never sends.
+         *
+         * An earlier version of this file defined `add_action()` as a global
+         * no-op to keep them from fataling. That BROKE
+         * `DiscoveryMaintenanceCronIntegrationTest`, which defines its own
+         * recording `add_action()` and asserts on what registered: these stubs
+         * load first, so the `function_exists()` guard there was skipped and its
+         * subscriber list came back empty. Defining a shared WP function is not
+         * a local decision — it changes every test in the process.
+         *
+         * Flipping the one-shot guards to `true` means neither function is ever
+         * CALLED, so neither has to exist.
+         */
+        private static function disarmHookRegistration(): void
+        {
+            foreach (['streamsFilterAdded', 'hookRegistered'] as $guard) {
+                self::statics($guard)->setValue(null, true);
+            }
         }
 
         /**
@@ -192,29 +225,6 @@ if (!function_exists('wp_remote_get')) {
             'bcc_integration_no_transport',
             'Integration tests make no outbound requests, and none was scripted.'
         );
-    }
-}
-
-if (!function_exists('add_filter')) {
-    /**
-     * A no-op, reached only as a side effect of the transport path.
-     *
-     * `prepareArgs()` registers a one-shot filter disabling the Streams
-     * transport, because its CURLOPT_RESOLVE pin is cURL-only. That is
-     * bookkeeping for a request this harness never sends, so there is nothing
-     * to honour — but leaving it undefined turns verification into a fatal.
-     */
-    function add_filter(string $hook, $callback, int $priority = 10, int $args = 1): bool
-    {
-        return true;
-    }
-}
-
-if (!function_exists('add_action')) {
-    /** Likewise: `injectCurlResolve()` hooks `http_api_curl` on a real send. */
-    function add_action(string $hook, $callback, int $priority = 10, int $args = 1): bool
-    {
-        return true;
     }
 }
 

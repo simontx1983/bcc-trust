@@ -577,7 +577,13 @@ final class CosmosEndpointSwitchCompletesIntegrationTest extends TestCase
 
         // Anti-vacuity: the row really does describe this switch, so the
         // absences below are read off a populated row.
-        self::assertStringContainsString(self::TARGET, $raw);
+        //
+        // ⚠ CHECKED ON THE DECODED META, NOT THE RAW JSON. `json_encode()`
+        // escapes forward slashes, so the raw column holds
+        // `https:\/\/cosmos-api.polkachu.com` and a substring search for the
+        // URL fails. The raw scan below is for KEY NAMES, which carry no slashes.
+        self::assertSame(self::TARGET, $meta['to']);
+        self::assertStringContainsString('polkachu', $raw, 'the raw row describes this switch');
 
         foreach (['cleared_families', 'code_cursor_cleared', 'watermark_kept', 'cursor'] as $retired) {
             self::assertArrayNotHasKey($retired, $meta, "the retired field '{$retired}' must not appear");

@@ -393,7 +393,17 @@ final class CosmosEndpointTransition
         // could not be confirmed. A write that happened and was not recorded is
         // the worst of the outcomes, so the trace is written even when we cannot
         // describe the result confidently — `outcome` carries that uncertainty.
-        if (!self::audit($chainId, $slug, $rawIncumbent, $to, $verifiedNetwork, $outcome, $failed, $operatorId)) {
+        if (!self::audit(
+            $chainId,
+            $slug,
+            $rawIncumbent,
+            $to,
+            $verifiedNetwork,
+            $outcome,
+            $failed,
+            $breakerCleared,
+            $operatorId
+        )) {
             $failed[] = 'audit';
         }
 
@@ -413,6 +423,9 @@ final class CosmosEndpointTransition
      * is durable and widely readable, and the point of it is who changed what.
      *
      * @param  list<string> $failed
+     * @param  bool|null    $breakerCleared whether there was breaker state to clear,
+     *                      or NULL when the endpoint could not be confirmed and the
+     *                      breaker was therefore deliberately not touched.
      * @return bool whether the durable row was written
      */
     private static function audit(
@@ -423,6 +436,7 @@ final class CosmosEndpointTransition
         ?string $verifiedNetwork,
         string $outcome,
         array $failed,
+        ?bool $breakerCleared,
         int $operatorId
     ): bool {
         $meta = [
@@ -440,6 +454,11 @@ final class CosmosEndpointTransition
             'endpoint_fp'      => CosmosEndpointPolicy::fingerprint($slug, $to),
             'outcome'          => $outcome,
             'failed_followups' => $failed,
+            // ⚠ A FACT, NOT A VERDICT. `false` means there was nothing to clear,
+            // which is the ordinary case on a healthy chain; `null` means the
+            // endpoint could not be confirmed so the breaker was left alone. A
+            // later reader cannot tell those apart from the outcome alone.
+            'breaker_cleared'  => $breakerCleared,
             'actor'            => $operatorId,
         ];
 
