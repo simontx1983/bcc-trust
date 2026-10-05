@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Services;
 
+use BCC\Core\Log\Logger;
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
-use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Support\CosmosEndpointVerifier;
+use BCC\Trust\Onchain\Support\EndpointDescriptor;
 use BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy;
 
 if (!defined('ABSPATH')) {
@@ -14,365 +16,611 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * MOVING A COSMOS CHAIN TO A DIFFERENT APPROVED ENDPOINT — DELIBERATELY,
- * ONCE, AND ONLY BY A PERSON.
+ * The audited Cosmos REST-endpoint switch.
  *
- * ── WHY THIS IS NOT A MIGRATION ─────────────────────────────────────────
- * The obvious implementation is a versioned migration that runs on activation
- * and repoints the chain row. That would be wrong in three separate ways:
+ * ⚠ THE ONLY WAY THE ENDPOINT MOVES. Deliberately not a migration, not an
+ * activation hook and not a cron task: a provider change happens at a moment a
+ * person chose, on an environment they chose, against a plan they read.
  *
- *   - it would fire on DEPLOY, so the endpoint would change at whatever
- *     moment a release happened, with no operator watching;
- *   - it would run on every environment that received the code, including
- *     production, whose discovery is deliberately disabled;
- *   - it would have no confirmation step, so a plan reviewed against one
- *     state would execute against another.
+ * ── THREE STEPS, AND ONLY ONE OF THEM RENDERS ───────────────────────────
+ *   1. {@see review()}   POST. Pre-flight, no provider call. Records what the
+ *                        operator is about to confirm and returns an id.
+ *   2. the confirmation screen is a GET that renders {@see plan()}. It writes
+ *                        NOTHING — which is why minting happens in (1) and not
+ *                        here, where a render would have had a side effect.
+ *   3. {@see execute()}  POST. Takes the lock, re-validates every binding,
+ *                        claims the review, proves the destination, and swaps.
  *
- * So the switch is an explicit administrator action: capability, POST, a
- * scoped nonce, and a CONFIRMATION DIGEST computed from the state that was
- * reviewed. {@see execute()} recomputes that digest against live state and
- * refuses if it moved.
+ * ── WHAT IT PROTECTS ────────────────────────────────────────────────────
+ * The endpoint is not scanner state. `CosmosFetcher` dials it for validators,
+ * delegations and CW-721 holdings, and `BlockchainQueryService` unions the
+ * policy's approved hosts into the wallet SSRF allowlist — so an unaudited
+ * repoint would let one subsystem follow a host another refuses.
  *
- * ── WHAT A TRANSITION ACTUALLY HAS TO DO ────────────────────────────────
- * Almost nothing, which is the point. `pagination.key` values are minted BY A
- * NODE and are the only stored artefacts that a different endpoint may reject
- * or misread; everything else on the chain is a fact about the CHAIN.
+ *   - the target is governed, normalized and EXACTLY approved (never a prefix
+ *     or suffix match), and `normalize()` rejects credentials and queries;
+ *   - its identity is PROVEN LIVE before the row moves, with the verifier's
+ *     cache bypassed and off `ApiRetry` so asking permission cannot charge the
+ *     breaker;
+ *   - the write is a compare-and-swap on the reviewed state, so it cannot land
+ *     on a row that moved underneath it;
+ *   - the row is read back, and the breaker is only forgotten once the new
+ *     endpoint is CONFIRMED;
+ *   - every write is audited with hosts, roles and counts — never a cursor, a
+ *     contract or a provider sentence.
  *
- *   CLEARED — per-family `contracts_cursor` (opaque, node-minted)
- *   CLEARED — checkpoint `cw_code_cursor` (same, when set)
- *   KEPT    — classifications and their reasons, probe evidence,
- *             classifier_version, confirmed/probable verdicts,
- *             `cw_max_code_id` (a code id is a chain fact, not a node
- *             artefact), retry_count / next_attempt_at, contract metadata,
- *             every collection row
+ * ── WHAT IT NO LONGER DOES ──────────────────────────────────────────────
+ * It used to clear CosmWasm contract cursors under the discovery worker's own
+ * lock, because node-minted `pagination.key` values are the only stored
+ * artefacts a different endpoint can reject or misread. Every such cursor
+ * belonged to the scanner, so with the scanner frozen there is nothing of that
+ * kind left to clear: validators and holdings persist no cursor. The reviewed
+ * digest that protected those cursors is replaced by the compare-and-swap,
+ * which is stronger for the row and narrower in scope — see
+ * {@see ChainRepository::updateRestUrl()}.
  *
- * ⚠ `CosmwasmClassifier::VERSION` IS NOT BUMPED. It is the pending predicate
- * in six queries; touching it would requeue hundreds of families and throw
- * away evidence that cost real provider requests, to solve a problem an
- * endpoint change does not create.
+ * @package BCC\Trust\Onchain\Services
  */
 final class CosmosEndpointTransition
 {
     public const AUDIT_ACTION = 'admin_cosmos_endpoint_switch';
 
     /**
-     * Describe what a transition WOULD do, plus a digest of the state it was
-     * computed against.
+     * This service's OWN lock.
      *
-     * @return array{
-     *   ok: bool, reason: string, chain_id: int, slug: string,
-     *   from: string|null, to: string|null, from_role: string|null,
-     *   to_role: string|null, cursor_families: int, cursor_code_ids: list<int>,
-     *   code_cursor_set: bool, watermark: int|null, digest: string
-     * }
+     * ⚠ It used to borrow the discovery worker's own advisory-lock constant, to
+     * exclude that worker while cursors were cleared. There are no cursors now,
+     * and borrowing a constant from a class being deleted is how the two became
+     * coupled in the first place. The name is deliberately not repeated here:
+     * the decoupling is asserted by a test that greps this file.
+     *
+     * It is still needed: the switch is a critical section over several writes
+     * (the swap, the breaker, the audit) that two operators could interleave.
+     * Non-blocking — contended refuses rather than waits, because an operator
+     * can press the button again.
+     */
+    private const LOCK_PREFIX = 'bcc_cosmos_endpoint_';
+
+    /**
+     * What happened to the chain's breaker state, for the audit row.
+     *
+     * ⚠ FOUR STATES, NOT A BOOLEAN. "Nothing to clear" and "we did not dare
+     * touch it" and "the clear failed" are three different facts, and a later
+     * reader cannot tell them apart from the outcome alone. An earlier revision
+     * collapsed the last two onto `null`, so a FAILED clear was recorded as
+     * "not attempted" — the opposite of what happened.
+     */
+    private const BREAKER_CLEARED = 'cleared';
+
+    private const BREAKER_NOTHING_TO_CLEAR = 'nothing_to_clear';
+
+    private const BREAKER_NOT_ATTEMPTED = 'not_attempted';
+
+    private const BREAKER_FAILED = 'failed';
+
+    // ── Step 1: review ──────────────────────────────────────────────────
+
+    /**
+     * Record what the operator is about to confirm.
+     *
+     * No provider call: the proof belongs to {@see execute()}, where it is made
+     * under the lock against the state that will actually be written.
+     *
+     * @return array{ok: bool, reason: string, review_id: string}
+     */
+    public static function review(int $chainId, string $targetUrl, int $operatorId): array
+    {
+        $plan = self::plan($chainId, $targetUrl);
+        if (!$plan['ok']) {
+            return ['ok' => false, 'reason' => $plan['reason'], 'review_id' => ''];
+        }
+
+        // ⚠ THE RECORD CARRIES WHAT WAS REVIEWED, INCLUDING ITS DISPLAY FORM.
+        // The confirmation screen must describe the values the operator actually
+        // approved, not a fresh plan computed against whatever the row says when
+        // the page is reloaded. An earlier revision recomputed `plan()` on render,
+        // so a hand edit between review and reload silently changed what the
+        // screen showed while the write still bound the original fingerprint.
+        //
+        // ⚠ `incumbent_normalized` is null unless `incumbent_shown_in_full`,
+        // which is true only for a policy-approved incumbent — so this record can
+        // never hold a credential-bearing value. The raw incumbent is represented
+        // only by its HMAC.
+        $reviewId = CosmosEndpointReview::mint($operatorId, [
+            'chain_id'                => $chainId,
+            'target'                  => $plan['to'],
+            'to_role'                 => $plan['to_role'],
+            'slug'                    => $plan['slug'],
+            'network'                 => $plan['expected_network'],
+            'is_active'               => $plan['is_active'],
+            'incumbent_fp'            => $plan['incumbent_fp'],
+            'incumbent_null'          => $plan['incumbent_null'],
+            'incumbent_display'       => $plan['incumbent_display'],
+            'incumbent_shown_in_full' => $plan['incumbent_shown_in_full'],
+            'incumbent_normalized'    => $plan['incumbent_normalized'],
+        ]);
+
+        return ['ok' => true, 'reason' => 'ready', 'review_id' => $reviewId];
+    }
+
+    // ── Step 2: what the confirmation screen renders ─────────────────────
+
+    /**
+     * The reviewable plan. Pure read; contacts nothing.
+     *
+     * ⚠ `incumbent_fp` IS NOT FOR DISPLAY, and the raw column never leaves this
+     * method. `rest_url` is a tainted credential column for
+     * `scripts/endpoint-exposure-guard.php`, and a hand-edited incumbent may carry
+     * userinfo or a query string. An earlier revision also returned
+     * `incumbent_raw`, which nothing ever read — a tainted value handed to every
+     * caller for no purpose, and one the guard could not have followed out
+     * through a return value. The renderer
+     * uses `incumbent_display` — and `incumbent_shown_in_full` says whether the
+     * full normalized form may be shown, which is true only when the incumbent
+     * is itself policy-approved and therefore known credential-free.
+     *
+     * @return array{ok: bool, reason: string, chain_id: int, slug: string, is_active: int,
+     *               to: string, to_role: string|null, expected_network: string|null,
+     *               incumbent_display: string, incumbent_shown_in_full: bool,
+     *               incumbent_normalized: string|null,
+     *               incumbent_fp: string, incumbent_null: bool}
      */
     public static function plan(int $chainId, string $targetUrl): array
     {
-        $chain = ChainRepository::getById($chainId);
+        $chain = $chainId > 0 ? ChainRepository::getById($chainId) : null;
         if ($chain === null) {
-            return self::emptyPlan($chainId, '', 'unknown_chain');
+            return self::emptyPlan($chainId, 'invalid_chain');
         }
 
         $slug = (string) ($chain->slug ?? '');
         if (!CosmosEndpointPolicy::isGoverned($slug)) {
-            return self::emptyPlan($chainId, $slug, 'not_governed');
+            return self::emptyPlan($chainId, 'not_governed');
         }
 
-        $from = CosmosEndpointPolicy::normalize((string) ($chain->rest_url ?? ''));
-        $to   = CosmosEndpointPolicy::normalize($targetUrl);
+        if ((int) ($chain->is_active ?? 0) !== 1) {
+            return self::emptyPlan($chainId, 'chain_inactive');
+        }
 
+        $to = CosmosEndpointPolicy::normalize($targetUrl);
         if ($to === null) {
-            return self::emptyPlan($chainId, $slug, 'target_malformed');
-        }
-        if (!CosmosEndpointPolicy::isApproved($slug, $to)) {
-            return self::emptyPlan($chainId, $slug, 'target_not_approved');
-        }
-        if ($from !== null && $from === $to) {
-            return self::emptyPlan($chainId, $slug, 'already_current');
+            return self::emptyPlan($chainId, 'target_malformed');
         }
 
-        $codeIds    = CosmwasmCodeFamilyRepository::openContractCursorCodeIds($chainId);
-        $checkpoint = \BCC\Trust\Onchain\Repositories\ChainCheckpointRepository::get($chainId);
-        $codeCursor = is_object($checkpoint) ? (string) ($checkpoint->cw_code_cursor ?? '') : '';
-        $watermark  = is_object($checkpoint) ? (int) ($checkpoint->cw_max_code_id ?? 0) : null;
+        if (!CosmosEndpointPolicy::isApproved($slug, $to)) {
+            return self::emptyPlan($chainId, 'target_not_approved');
+        }
+
+        $rawIncumbent  = $chain->rest_url ?? null;
+        $incumbentNull = $rawIncumbent === null;
+        $normalized    = $incumbentNull ? null : CosmosEndpointPolicy::normalize((string) $rawIncumbent);
+
+        if ($normalized !== null && $normalized === $to) {
+            return self::emptyPlan($chainId, 'already_current');
+        }
+
+        // Shown in full ONLY when the incumbent is itself approved: the policy
+        // allowlist is closed and credential-free, so that is the one case we
+        // can state is safe to print. Everything else is redacted to scheme and
+        // host by the deny-by-default descriptor.
+        $shownInFull = $normalized !== null && CosmosEndpointPolicy::isApproved($slug, $normalized);
 
         return [
-            'ok'              => true,
-            'reason'          => 'ready',
-            'chain_id'        => $chainId,
-            'slug'            => $slug,
-            'from'            => $from,
-            'to'              => $to,
-            'from_role'       => $from !== null ? CosmosEndpointPolicy::roleFor($slug, $from) : null,
-            'to_role'         => CosmosEndpointPolicy::roleFor($slug, $to),
-            'cursor_families' => count($codeIds),
-            'cursor_code_ids' => $codeIds,
-            'code_cursor_set' => $codeCursor !== '',
-            'watermark'       => $watermark,
-            'digest'          => self::digest($chainId, $from, $to, $codeIds, $codeCursor !== ''),
+            'ok'                      => true,
+            'reason'                  => 'ready',
+            'chain_id'                => $chainId,
+            'slug'                    => $slug,
+            'is_active'               => (int) ($chain->is_active ?? 0),
+            'to'                      => $to,
+            'to_role'                 => CosmosEndpointPolicy::roleFor($slug, $to),
+            'expected_network'        => CosmosEndpointPolicy::expectedNetwork($slug),
+            'incumbent_display'       => EndpointDescriptor::display($incumbentNull ? null : (string) $rawIncumbent),
+            'incumbent_shown_in_full' => $shownInFull,
+            'incumbent_normalized'    => $shownInFull ? $normalized : null,
+            'incumbent_fp'            => CosmosEndpointReview::fingerprint($incumbentNull ? null : (string) $rawIncumbent),
+            'incumbent_null'          => $incumbentNull,
         ];
     }
 
-    /**
-     * PURE. A fingerprint of everything the operator was shown.
-     *
-     * ⚠ THE CODE IDS ARE IN THE DIGEST, NOT JUST THEIR COUNT. Two families
-     * finishing while two others stall would leave the count at two and the
-     * plan stale — a confirmation that only checked "still 2?" would pass and
-     * clear rows nobody reviewed.
-     *
-     * @param list<int> $codeIds
-     */
-    public static function digest(
-        int $chainId,
-        ?string $from,
-        ?string $to,
-        array $codeIds,
-        bool $codeCursorSet
-    ): string {
-        sort($codeIds);
-
-        return substr(hash('sha256', implode('|', [
-            $chainId,
-            (string) $from,
-            (string) $to,
-            implode(',', $codeIds),
-            $codeCursorSet ? '1' : '0',
-        ])), 0, 32);
-    }
+    // ── Step 3: the switch ───────────────────────────────────────────────
 
     /**
-     * Perform the switch, or refuse.
-     *
-     * ⚠ FAILS CLOSED ON A MOVED WORLD. The plan is recomputed here and its
-     * digest compared with the one the operator confirmed. Anything that
-     * changed in between — a cursor appearing, a family completing, the chain
-     * being repointed by someone else — aborts before a single write.
-     *
-     * ⚠ THE NEW ENDPOINT IS VERIFIED BEFORE THE ROW MOVES, not after. Writing
-     * first and checking second would leave the chain pointed at an unproven
-     * host if the check failed.
-     *
-     * ⚠ THE WHOLE OPERATION RUNS UNDER THE DISCOVERY WORKER'S OWN LOCK.
-     * {@see \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker} takes the
-     * non-blocking advisory lock `bcc_cosmwasm_chain_<id>` before it writes
-     * any cursor. Holding the SAME lock here means the plan is recomputed,
-     * compared with the reviewed digest, and acted on while no worker can add
-     * or advance a cursor underneath it — without it, a cursor written between
-     * the digest check and the clear would be wiped unreviewed or left behind
-     * to be misread by the new endpoint. Contended → refuse, never wait: an
-     * operator can simply press the button again once the pass finishes.
-     *
-     * @return array{ok: bool, reason: string, cleared_families: int, code_cursor_cleared: bool, verified_network: string|null}
+     * @return array{ok: bool, reason: string, verified_network: string|null, failed_followups: list<string>}
      */
-    public static function execute(
-        int $chainId,
-        string $targetUrl,
-        string $confirmedDigest,
-        int $actorId
-    ): array {
-        $lock = \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::ADVISORY_LOCK_PREFIX . $chainId;
+    public static function execute(int $chainId, string $reviewId, int $operatorId): array
+    {
+        $lock = self::LOCK_PREFIX . $chainId;
+
+        // ⚠ `acquire()` returns false both for "a peer holds it" and for a
+        // driver error, so the refusal cannot distinguish them. Logged rather
+        // than given a separate reason, because the operator's next move is the
+        // same either way: press it again.
         if (!\BCC\Core\DB\AdvisoryLock::acquire($lock, 0)) {
+            Logger::warning('[bcc-trust] endpoint switch lock not acquired', [
+                'action'   => 'cosmos_endpoint_switch_lock_contended',
+                'chain_id' => $chainId,
+            ]);
+
             return self::result(false, 'lock_contended');
         }
 
         try {
-            return self::executeLocked($chainId, $targetUrl, $confirmedDigest, $actorId);
+            return self::executeLocked($chainId, $reviewId, $operatorId);
         } finally {
             \BCC\Core\DB\AdvisoryLock::release($lock);
         }
     }
 
     /**
-     * The body of {@see execute()}. Callable ONLY with the worker lock held.
+     * Callable ONLY with this service's lock held.
      *
-     * @return array{ok: bool, reason: string, cleared_families: int, code_cursor_cleared: bool, verified_network: string|null}
+     * @return array{ok: bool, reason: string, verified_network: string|null, failed_followups: list<string>}
      */
-    private static function executeLocked(
-        int $chainId,
-        string $targetUrl,
-        string $confirmedDigest,
-        int $actorId
-    ): array {
-        $plan = self::plan($chainId, $targetUrl);
-        if (!$plan['ok']) {
-            return self::result(false, $plan['reason']);
-        }
-        if (!hash_equals($plan['digest'], $confirmedDigest)) {
-            // The reviewed state and the live state disagree.
-            return self::result(false, 'plan_stale');
+    private static function executeLocked(int $chainId, string $reviewId, int $operatorId): array
+    {
+        $review = CosmosEndpointReview::peek($operatorId);
+        if ($review === null) {
+            return self::result(false, 'review_token_invalid');
         }
 
-        // Prove the destination before committing to it. A probe object is
-        // used rather than the stored row precisely because the row has not
-        // moved yet.
-        $probe = (object) [
-            'id'       => $chainId,
-            'slug'     => $plan['slug'],
-            'rest_url' => $plan['to'],
-        ];
+        if ($reviewId === '' || !hash_equals((string) $review['review_id'], $reviewId)) {
+            return self::result(false, 'review_token_invalid');
+        }
+
+        if ((int) $review['chain_id'] !== $chainId) {
+            return self::result(false, 'review_chain_mismatch');
+        }
+
+        // Re-read, so every binding below is compared against the row as it is
+        // NOW rather than as the review remembers it.
+        $chain = ChainRepository::getById($chainId);
+        if ($chain === null) {
+            return self::result(false, 'invalid_chain');
+        }
+
+        $slug = (string) ($chain->slug ?? '');
+
+        // ── IDENTITY ────────────────────────────────────────────────────
+        // Policy is keyed on SLUG ALONE: the expected network, the approved
+        // endpoint set and the role all come from `POLICY[$slug]`. So slug plus
+        // `is_active` is the whole of the stored state this decision rests on,
+        // and `network` is carried as well so a policy correction between review
+        // and submit is refused rather than silently applied. `chain_type` is
+        // deliberately absent — nothing in this path reads it.
+        $identityMoved = $slug !== (string) $review['slug']
+            || (int) ($chain->is_active ?? 0) !== (int) $review['is_active']
+            || CosmosEndpointPolicy::expectedNetwork($slug) !== $review['network'];
+
+        if ($identityMoved) {
+            return self::result(false, 'identity_changed');
+        }
+
+        // ── THE INCUMBENT ───────────────────────────────────────────────
+        $rawIncumbent  = $chain->rest_url ?? null;
+        $incumbentNull = $rawIncumbent === null;
+
+        if ($incumbentNull !== (bool) $review['incumbent_null']) {
+            return self::result(false, 'from_mismatch');
+        }
+
+        if (!$incumbentNull) {
+            $fpNow = CosmosEndpointReview::fingerprint((string) $rawIncumbent);
+            if (!hash_equals((string) $review['incumbent_fp'], $fpNow)) {
+                return self::result(false, 'from_mismatch');
+            }
+        }
+
+        // ── POLICY, AGAINST THE FRESH ROW ───────────────────────────────
+        if (!CosmosEndpointPolicy::isGoverned($slug)) {
+            return self::result(false, 'not_governed');
+        }
+
+        if ((int) ($chain->is_active ?? 0) !== 1) {
+            return self::result(false, 'chain_inactive');
+        }
+
+        $to = (string) $review['target'];
+        if (!CosmosEndpointPolicy::isApproved($slug, $to)) {
+            return self::result(false, 'target_not_approved');
+        }
+
+        $normalizedIncumbent = $incumbentNull
+            ? null
+            : CosmosEndpointPolicy::normalize((string) $rawIncumbent);
+        if ($normalizedIncumbent !== null && $normalizedIncumbent === $to) {
+            return self::result(false, 'already_current');
+        }
+
+        // ── CLAIM THE REVIEW BEFORE ANY OUTBOUND REQUEST ────────────────
+        // ⚠ ORDER IS THE POINT. Consuming after the proof would let a replayed
+        // submission make a SECOND provider request before being refused. A
+        // failed claim therefore costs zero provider calls and zero writes.
+        if (!CosmosEndpointReview::consume($operatorId, $reviewId)) {
+            return self::result(false, 'review_consume_failed');
+        }
+
+        // ── PROVE THE DESTINATION ───────────────────────────────────────
+        // A probe object, not the stored row: the row has not moved yet. Cache
+        // bypassed — a proof recorded earlier is not a proof made now.
+        $probe = (object) ['id' => $chainId, 'slug' => $slug, 'rest_url' => $to];
         $verification = CosmosEndpointVerifier::verify($probe, false);
         if (!$verification['ok']) {
             return self::result(false, 'target_' . $verification['reason']);
         }
 
-        $moved = ChainRepository::updateRestUrl($chainId, (string) $plan['to']);
-        if (!$moved) {
-            return self::result(false, 'write_failed');
-        }
+        $verifiedNetwork = isset($verification['network']) && is_string($verification['network'])
+            ? $verification['network']
+            : null;
 
-        // ── post-write verification ─────────────────────────────────────
-        $after = ChainRepository::getById($chainId);
-        $now   = $after !== null ? CosmosEndpointPolicy::normalize((string) ($after->rest_url ?? '')) : null;
-        if ($now !== $plan['to']) {
-            return self::result(false, 'post_write_mismatch');
-        }
+        // ── THE SWAP ────────────────────────────────────────────────────
+        $affected = ChainRepository::updateRestUrl($chainId, $to, [
+            'rest_url'  => $incumbentNull ? null : (string) $rawIncumbent,
+            'slug'      => $slug,
+            'is_active' => (int) ($chain->is_active ?? 0),
+        ]);
 
-        $cleared = CosmwasmCodeFamilyRepository::clearContractCursors($chainId);
-        if ($cleared < 0) {
-            return self::result(false, 'cursor_clear_failed');
-        }
+        if ($affected === -1) {
+            // ⚠⚠ THE ROW MAY HAVE MOVED, SO THIS IS A POST-WRITE PATH AND MUST BE
+            // AUDITED. The statement did not report success, and `updateRestUrl()`
+            // has already busted the cache precisely because it may still have
+            // applied — so every later reader now takes whatever the row says. An
+            // earlier revision returned here without an audit row, which made this
+            // the ONE path where the endpoint could change with no durable record:
+            // the worst of the outcomes, and the one the block below exists for.
+            //
+            // The breaker is NOT touched: we cannot say which host the chain is on.
+            Logger::error('[bcc-trust] endpoint switch write did not report success', [
+                'action'   => 'cosmos_endpoint_switch_write_unconfirmed',
+                'chain_id' => $chainId,
+                'operator' => $operatorId,
+            ]);
 
-        $codeCursorCleared = false;
-        if ($plan['code_cursor_set']) {
-            $codeCursorCleared = \BCC\Trust\Onchain\Repositories\ChainCheckpointRepository::requestCwBackfillRestart(
+            $failed = [];
+            if (!self::audit(
                 $chainId,
-                'endpoint_changed'
-            );
+                $slug,
+                $rawIncumbent,
+                $to,
+                $verifiedNetwork,
+                'write_unconfirmed',
+                [],
+                self::BREAKER_NOT_ATTEMPTED,
+                $operatorId
+            )) {
+                $failed[] = 'audit';
+            }
+
+            // ⚠ `ok` is false because nothing is PROVEN, not because nothing
+            // happened. The operator copy for this code says so explicitly.
+            return self::result(false, 'write_unconfirmed', $verifiedNetwork, $failed);
         }
 
-        // ⚠ Every cursor identified in the plan must be gone. A partial clear
-        // is worse than none: the walk would resume from a key the new
-        // endpoint may reject and silently truncate the family.
-        $remaining = CosmwasmCodeFamilyRepository::countOpenContractCursors($chainId);
-        if ($remaining !== 0) {
-            return self::result(false, 'cursors_remain');
+        if ($affected === 0) {
+            // Everything above matched a moment ago, so a racer landed between
+            // the check and the write. One read to say which predicate lost.
+            //
+            // ⚠⚠ UNCACHED, OR THE QUESTION CANNOT BE ANSWERED. `getById()` serves
+            // from the cached active set and then a per-request memo, and the
+            // zero-row branch of `updateRestUrl()` deliberately does NOT bust the
+            // cache — correctly, since nothing changed. So a cached re-read returns
+            // the very row the first read put there, every comparison below is the
+            // row against itself, and `identity_changed` becomes unreachable: a
+            // concurrent rename or deactivation would be reported as a plain
+            // `from_mismatch`, telling the operator the endpoint moved when it did
+            // not. This read must go to the database.
+            $after = ChainRepository::getByIdUncached($chainId);
+            $identityRaced = $after === null
+                || (string) ($after->slug ?? '') !== $slug
+                || (int) ($after->is_active ?? 0) !== (int) ($chain->is_active ?? 0);
+
+            return self::result(false, $identityRaced ? 'identity_changed' : 'from_mismatch');
         }
 
-        // ⚠ The breaker is chain-keyed, so its counter, open state and
-        // attribution were all earned by the endpoint just replaced. Left in
-        // place they would keep counting toward opening the breaker on the NEW
-        // provider, and the admin page would describe a host that has not yet
-        // served one request. Cleared AFTER the row moved and the cursors were
-        // proven gone, so a refusal earlier in this method leaves it intact.
-        $breakerCleared = \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::forgetForEndpointChange($chainId);
+        // ⚠ FROM HERE THE SWITCH HAS HAPPENED. Nothing below can un-happen it,
+        // so nothing below may report a reason that means "nothing changed".
+        // The chains cache was already busted inside updateRestUrl().
 
-        // The complete normalized identity the chain now answers to — scheme,
-        // host, effective port, base path and expected network.
-        $endpointFp = CosmosEndpointPolicy::fingerprint($plan['slug'], (string) $plan['to']);
+        $readBack  = ChainRepository::getById($chainId);
+        $nowStored = $readBack === null
+            ? null
+            : CosmosEndpointPolicy::normalize((string) ($readBack->rest_url ?? ''));
 
-        // ⚠ RECORDED FROM THE PROOF ALREADY MADE ABOVE, not re-proven. The
-        // destination was verified live before the row moved, and the row now
-        // demonstrably points at it — so the same administrator gesture that
-        // moved the endpoint carries its authorization across.
-        //
-        // Without this, an audited switch would leave the chain refusing
-        // every scan as `endpoint_unverified` until somebody pressed a
-        // different button, and the proof that WAS performed would be thrown
-        // away. It is recorded AFTER the post-write read-back and the cursor
-        // checks, so a switch that failed any of them records nothing.
-        if ($endpointFp !== null) {
-            \BCC\Trust\Onchain\Support\CosmosEndpointAuthorization::record(
-                $chainId,
-                $endpointFp,
-                is_string($verification['network']) ? $verification['network'] : '',
-                $actorId
-            );
+        $confirmed = $readBack !== null && $nowStored === $to;
+
+        $outcome = 'switched';
+        if ($readBack === null) {
+            $outcome = 'switched_unconfirmed';
+        } elseif (!$confirmed) {
+            $outcome = 'switched_then_superseded';
         }
 
-        self::audit(
+        // ⚠ THE BREAKER IS NOT TOUCHED UNLESS THE ENDPOINT IS CONFIRMED.
+        // Forgetting clears the counter, the open state and the half-open probe
+        // for a chain — earned by whichever host is actually configured. If we
+        // cannot say which host that is, clearing would discard a real signal
+        // about a host that may still be serving.
+        // ⚠ FALSE IS NOT A FAILURE. `forgetForEndpointChange()` answers "was
+        // there anything to clear", and on a healthy chain there is not — so
+        // treating false as a failed follow-up would warn the operator on every
+        // ordinary switch. It is recorded as a FACT in the audit row. Only a
+        // throw means the clear did not happen when it should have.
+        $failed       = [];
+        $breakerState = self::BREAKER_NOT_ATTEMPTED;
+        if ($confirmed) {
+            try {
+                $breakerState = \BCC\Trust\Onchain\Support\OnchainCircuitBreaker::forgetForEndpointChange($chainId)
+                    ? self::BREAKER_CLEARED
+                    : self::BREAKER_NOTHING_TO_CLEAR;
+            } catch (\Throwable $e) {
+                // ⚠ FAILED, NOT "NOT ATTEMPTED". We tried and could not.
+                $failed[] = 'breaker';
+                $breakerState = self::BREAKER_FAILED;
+                Logger::error('[bcc-trust] endpoint switch could not clear the breaker', [
+                    'action'   => 'cosmos_endpoint_switch_breaker_clear_failed',
+                    'chain_id' => $chainId,
+                    'error'    => $e->getMessage(),
+                ]);
+            }
+        }
+
+        // ⚠ AUDITED ON EVERY POST-WRITE PATH, including the two where the row
+        // could not be confirmed. A write that happened and was not recorded is
+        // the worst of the outcomes, so the trace is written even when we cannot
+        // describe the result confidently — `outcome` carries that uncertainty.
+        if (!self::audit(
             $chainId,
-            $plan,
-            $verification['network'],
-            $cleared,
-            $codeCursorCleared,
-            $actorId,
-            $endpointFp,
-            $breakerCleared
-        );
+            $slug,
+            $rawIncumbent,
+            $to,
+            $verifiedNetwork,
+            $outcome,
+            $failed,
+            $breakerState,
+            $operatorId
+        )) {
+            $failed[] = 'audit';
+        }
 
-        return [
-            'ok'                  => true,
-            'reason'              => 'switched',
-            'cleared_families'    => $cleared,
-            'code_cursor_cleared' => $codeCursorCleared,
-            'verified_network'    => $verification['network'],
-        ];
+        if ($outcome !== 'switched') {
+            return self::result(true, $outcome, $verifiedNetwork, $failed);
+        }
+
+        return $failed === []
+            ? self::result(true, 'switched', $verifiedNetwork, [])
+            : self::result(true, 'switched_followups_failed', $verifiedNetwork, $failed);
     }
 
     /**
-     * ⚠ HOSTS AND COUNTS ONLY. No cursor value, no contract address, no
-     * provider sentence — an audit row is durable and widely readable, and
-     * the point of the row is WHO changed WHAT, not what the node said.
+     * The durable row. HOSTS, ROLES AND COUNTS ONLY.
      *
-     * @param array<string, mixed> $plan
+     * No cursor value, no contract address, no provider sentence: an audit row
+     * is durable and widely readable, and the point of it is who changed what.
+     *
+     * @param  list<string> $failed
+     * @param  string       $breakerState one of `cleared`, `nothing_to_clear`,
+     *                      `not_attempted` (the endpoint could not be confirmed, so
+     *                      the breaker was deliberately left alone) or `failed`
+     *                      (we tried and could not). `failed` also appears in
+     *                      `$failed`, so combined reporting is preserved.
+     * @return bool whether the durable row was written
      */
     private static function audit(
         int $chainId,
-        array $plan,
-        ?string $network,
-        int $cleared,
-        bool $codeCursorCleared,
-        int $actorId,
-        ?string $endpointFp,
-        bool $breakerCleared
-    ): void {
-        \BCC\Trust\Onchain\Admin\AdminActionSupport::audit(
-            self::AUDIT_ACTION,
-            'chain',
-            $chainId,
-            [
-                'from'                => $plan['from'],
-                'to'                  => $plan['to'],
-                'to_role'             => $plan['to_role'],
-                'verified_network'    => $network,
-                'cleared_families'    => $cleared,
-                'code_cursor_cleared' => $codeCursorCleared,
-                'watermark_kept'      => $plan['watermark'],
-                'digest'              => $plan['digest'],
-                'actor'               => $actorId,
-                // Bounded, non-secret: a 16-hex hash of the normalized
-                // identity. Lets a later reader prove WHICH endpoint the chain
-                // was moved to without storing anything a provider returned.
-                'endpoint_fp'         => $endpointFp,
-                'breaker_cleared'     => $breakerCleared,
-            ]
-        );
+        string $slug,
+        ?string $rawFrom,
+        string $to,
+        ?string $verifiedNetwork,
+        string $outcome,
+        array $failed,
+        string $breakerState,
+        int $operatorId
+    ): bool {
+        $meta = [
+            // The normalized incumbent when it is approved and therefore
+            // credential-free; otherwise scheme and host only. An audit row is
+            // not a place to put a value we would refuse to render.
+            'from'             => $rawFrom === null
+                ? null
+                : (CosmosEndpointPolicy::isApproved($slug, (string) CosmosEndpointPolicy::normalize($rawFrom))
+                    ? CosmosEndpointPolicy::normalize($rawFrom)
+                    : EndpointDescriptor::display($rawFrom)),
+            'to'               => $to,
+            'to_role'          => CosmosEndpointPolicy::roleFor($slug, $to),
+            'verified_network' => $verifiedNetwork,
+            'endpoint_fp'      => CosmosEndpointPolicy::fingerprint($slug, $to),
+            'outcome'          => $outcome,
+            'failed_followups' => $failed,
+            // ⚠ A FACT, NOT A VERDICT, and one of FOUR of them — see the
+            // constants. `nothing_to_clear` is the ordinary case on a healthy
+            // chain and is not a failure; `not_attempted` means the endpoint could
+            // not be confirmed so the breaker was deliberately left alone; and
+            // `failed` means we tried and could not, which is a different fact
+            // from both and is also named in `failed_followups`.
+            'breaker_cleared'  => $breakerState,
+            'actor'            => $operatorId,
+        ];
+
+        // ⚠ A THROWING AUDIT MUST NOT UNDO A COMPLETED SWITCH. By the time this
+        // runs the row may already have moved, so an exception out of the logger
+        // has to become a reported follow-up failure rather than an escape that
+        // leaves the operator with a fatal page and no idea what happened.
+        try {
+            $id = AuditLogger::logChecked(self::AUDIT_ACTION, $chainId, $meta, 'chain');
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] endpoint switch audit row threw', [
+                'action'   => 'cosmos_endpoint_switch_audit_threw',
+                'chain_id' => $chainId,
+                'outcome'  => $outcome,
+                'error'    => $e->getMessage(),
+            ]);
+
+            return false;
+        }
+
+        // The unredacted file-log copy. Best effort by design: the durable row is
+        // already written and its fate must not depend on this one.
+        try {
+            Logger::info('[bcc-trust] admin action: ' . self::AUDIT_ACTION, array_merge(
+                ['operator' => $operatorId, 'target_type' => 'chain', 'target_id' => $chainId],
+                $meta
+            ));
+        } catch (\Throwable $e) {
+            // Deliberately swallowed: see above.
+        }
+
+        if ($id === null) {
+            Logger::error('[bcc-trust] endpoint switch audit row was not written', [
+                'action'   => 'cosmos_endpoint_switch_audit_failed',
+                'chain_id' => $chainId,
+                'outcome'  => $outcome,
+            ]);
+
+            return false;
+        }
+
+        return true;
     }
 
     /**
-     * @return array{ok: bool, reason: string, chain_id: int, slug: string, from: null, to: null, from_role: null, to_role: null, cursor_families: int, cursor_code_ids: list<int>, code_cursor_set: bool, watermark: null, digest: string}
+     * @return array{ok: bool, reason: string, chain_id: int, slug: string, is_active: int,
+     *               to: string, to_role: string|null, expected_network: string|null,
+     *               incumbent_display: string, incumbent_shown_in_full: bool,
+     *               incumbent_normalized: string|null,
+     *               incumbent_fp: string, incumbent_null: bool}
      */
-    private static function emptyPlan(int $chainId, string $slug, string $reason): array
+    private static function emptyPlan(int $chainId, string $reason): array
     {
         return [
-            'ok'              => false,
-            'reason'          => $reason,
-            'chain_id'        => $chainId,
-            'slug'            => $slug,
-            'from'            => null,
-            'to'              => null,
-            'from_role'       => null,
-            'to_role'         => null,
-            'cursor_families' => 0,
-            'cursor_code_ids' => [],
-            'code_cursor_set' => false,
-            'watermark'       => null,
-            'digest'          => '',
+            'ok'                      => false,
+            'reason'                  => $reason,
+            'chain_id'                => $chainId,
+            'slug'                    => '',
+            'is_active'               => 0,
+            'to'                      => '',
+            'to_role'                 => null,
+            'expected_network'        => null,
+            'incumbent_display'       => '',
+            'incumbent_shown_in_full' => false,
+            'incumbent_normalized'    => null,
+            'incumbent_fp'            => '',
+            'incumbent_null'          => false,
         ];
     }
 
     /**
-     * @return array{ok: bool, reason: string, cleared_families: int, code_cursor_cleared: bool, verified_network: null}
+     * @param  list<string> $failed
+     * @return array{ok: bool, reason: string, verified_network: string|null, failed_followups: list<string>}
      */
-    private static function result(bool $ok, string $reason): array
-    {
+    private static function result(
+        bool $ok,
+        string $reason,
+        ?string $verifiedNetwork = null,
+        array $failed = []
+    ): array {
         return [
-            'ok'                  => $ok,
-            'reason'              => $reason,
-            'cleared_families'    => 0,
-            'code_cursor_cleared' => false,
-            'verified_network'    => null,
+            'ok'               => $ok,
+            'reason'           => $reason,
+            'verified_network' => $verifiedNetwork,
+            'failed_followups' => $failed,
         ];
     }
 }

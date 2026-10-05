@@ -582,6 +582,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Services\\CollectionStateClassifier' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/CollectionStateClassifier.php',
         'BCC\\Trust\\Onchain\\Services\\CommunityRequestService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/CommunityRequestService.php',
         'BCC\\Trust\\Onchain\\Services\\ContractValidator' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ContractValidator.php',
+        'BCC\\Trust\\Onchain\\Services\\CosmosEndpointReview' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/CosmosEndpointReview.php',
         'BCC\\Trust\\Onchain\\Services\\CosmosEndpointTransition' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/CosmosEndpointTransition.php',
         'BCC\\Trust\\Onchain\\Services\\CosmwasmClassifier' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/CosmwasmClassifier.php',
         'BCC\\Trust\\Onchain\\Services\\CosmwasmDiscoveryHealthSnapshot' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/CosmwasmDiscoveryHealthSnapshot.php',
