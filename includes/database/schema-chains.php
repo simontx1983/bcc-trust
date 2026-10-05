@@ -556,10 +556,30 @@ function bcc_onchain_add_chains_nft_capability_columns(): void {
 
     $chains_table = \BCC\Core\DB\DB::table('chains');
 
-    // Ordered so each lands directly after the existing per-chain NFT flag,
-    // keeping the three capability/permission columns adjacent in DESCRIBE.
+    // ANCHORED ON A COLUMN THAT CANNOT GO AWAY.
+    //
+    // These used to chain off `cosmwasm_nft_discovery_enabled`, which reads
+    // naturally - it keeps the capability columns adjacent to the per-chain NFT
+    // flag in DESCRIBE - and fails in a way nothing reports. The probe below
+    // gates on the column being ADDED, never on the anchor existing, so on any
+    // install whose CREATE TABLE predates the anchor (a restored backup, an old
+    // dev database, or this tree once the scanner column is finally dropped) the
+    // ALTER errors with "Unknown column", the error is logged, the loop
+    // `continue`s - and the column is NEVER ADDED.
+    //
+    // It then chains: `manual_collection_discovery_enabled` is anchored on the
+    // column that just failed to appear, so it fails too. And the consequence is
+    // silent and total: `ChainRepository::COLUMNS` names both columns, so the
+    // whole chain projection read fails and EVERY chain reports UNKNOWN.
+    //
+    // `is_active` is a base `CREATE TABLE` column - it is where
+    // `cosmwasm_nft_discovery_enabled` is itself anchored - so it is present on
+    // every schema this installer can meet. Column ORDER is cosmetic here:
+    // nothing selects by ordinal, `ChainRepository::COLUMNS` is an explicit list,
+    // there is no `SELECT *` in the tree, and `schema-drift-guard.php` compares
+    // table names and index tuples rather than column positions.
     $columns = [
-        'bcc_supports_nft_collections'        => 'cosmwasm_nft_discovery_enabled',
+        'bcc_supports_nft_collections'        => 'is_active',
         'manual_collection_discovery_enabled' => 'bcc_supports_nft_collections',
     ];
 
