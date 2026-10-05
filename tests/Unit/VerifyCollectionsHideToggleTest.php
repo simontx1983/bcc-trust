@@ -283,7 +283,18 @@ final class VerifyCollectionsHideToggleTest extends TestCase
 
     // ── HIDE ────────────────────────────────────────────────────────────
 
-    public function test_hide_writes_the_rule_and_synchronises_the_scanner_inventory(): void
+    /**
+     * ⚠ THE RULE IS WRITTEN AND THE SCANNER CACHE IS LEFT ALONE (S3).
+     *
+     * Before S3 this asserted the opposite — that the cached `denied` flag
+     * followed the rule. The coupling is gone, so the flag must now be
+     * observably UNCHANGED while the authoritative rule is observably in
+     * force. The candidate therefore stays in the scanner's emit queue, and
+     * what keeps it off a user-facing surface is the live rule re-check —
+     * see `test_the_live_rule_recheck_still_blocks_the_emit_when_the_cached_flag_goes_stale`,
+     * which this commit leaves untouched.
+     */
+    public function test_hide_writes_the_rule_and_leaves_the_scanner_cache_alone(): void
     {
         self::assertSame('0', $this->deniedFlag(), 'precondition: the candidate is visible');
         self::assertCount(
@@ -294,50 +305,62 @@ final class VerifyCollectionsHideToggleTest extends TestCase
 
         $notices = $this->post('hide_' . self::COLLECTION_ID);
 
-        // 1. the authoritative rule
+        // 1. the authoritative rule IS written
         self::assertSame(
             NftSpamContractRepository::RULE_DENY,
             NftSpamContractRepository::getRule(self::CHAIN_ID, self::CONTRACT)
         );
 
-        // 2. THE WIRING: the cached flag followed the rule without anybody
-        //    calling syncDenyFlags() from the test.
-        self::assertSame('1', $this->deniedFlag(), 'the hide never reached the scanner inventory');
-
-        // 3. and the indexed queue predicate (`denied = 0`) now skips it
+        // 2. and the scanner cache is NOT touched
         self::assertSame(
-            [],
+            '0',
+            $this->deniedFlag(),
+            'S3: the hide must not write the scanner\'s cached flag'
+        );
+        self::assertCount(
+            1,
             CosmwasmContractRepository::findEmittable(self::CHAIN_ID, 10),
-            'a hidden candidate must drop out of the emit queue, not be re-filtered on every sweep'
+            'so the candidate stays in the queue and is refused live on every pass'
         );
 
+        // 3. and the operator is told plainly that it worked
         self::assertCount(1, $notices);
         self::assertSame('success', $notices[0]['type']);
-        self::assertStringContainsString('Hid "Fixture Collection" from users', $notices[0]['message']);
+        self::assertStringContainsString(
+            'Hid "Fixture Collection" from users',
+            $notices[0]['message']
+        );
+        self::assertStringNotContainsString(
+            'scanner',
+            $notices[0]['message'],
+            'the operator copy must not mention a cache this handler no longer touches'
+        );
     }
 
-    public function test_unhide_clears_the_flag_and_returns_the_candidate_to_the_queue(): void
+    /** Unhide is the same shape: rule written, cache untouched. */
+    public function test_unhide_writes_the_rule_and_leaves_the_scanner_cache_alone(): void
     {
         $this->post('hide_' . self::COLLECTION_ID);
-        self::assertSame('1', $this->deniedFlag(), 'precondition: hidden');
 
         $notices = $this->post('unhide_' . self::COLLECTION_ID);
 
         self::assertSame(
             NftSpamContractRepository::RULE_ALLOW,
-            NftSpamContractRepository::getRule(self::CHAIN_ID, self::CONTRACT)
+            NftSpamContractRepository::getRule(self::CHAIN_ID, self::CONTRACT),
+            'unhide must genuinely permit later discovery'
         );
-        self::assertSame('0', $this->deniedFlag(), 'unhide must genuinely permit later discovery');
-        self::assertCount(
-            1,
-            CosmwasmContractRepository::findEmittable(self::CHAIN_ID, 10),
-            'the candidate is back in the emit queue'
+        self::assertSame(
+            '0',
+            $this->deniedFlag(),
+            'and it must not have written the scanner cache in either direction'
         );
 
         self::assertSame('success', $notices[0]['type']);
-        self::assertStringContainsString('Restored "Fixture Collection" for users', $notices[0]['message']);
+        self::assertStringContainsString(
+            'Restored "Fixture Collection" for users',
+            $notices[0]['message']
+        );
     }
-
     /**
      * A contract the scanner has never inventoried (a manual add, a
      * wallet-link discovery, a non-Cosmos chain) has nothing to sync, and
@@ -390,81 +413,16 @@ final class VerifyCollectionsHideToggleTest extends TestCase
      * force) and what is NOT (the scanner's cached flag and the count
      * derived from it are stale).
      */
-    public function test_a_sync_that_cannot_be_confirmed_reports_partial_completion(): void
-    {
-        CosmwasmContractRepository::$failReads = ['deniedFlag'];
-
-        $notices = $this->post('hide_' . self::COLLECTION_ID);
-
-        self::assertCount(1, $notices);
-        self::assertSame('warning', $notices[0]['type'], 'a partially-completed action is not a success');
-
-        $message = $notices[0]['message'];
-        // what DID happen
-        self::assertStringContainsString('rule was written and IS in force', $message);
-        // what did NOT
-        self::assertStringContainsString('cached flag for this contract could not be updated', $message);
-        self::assertStringContainsString('"hidden by a rule" count on this page is stale', $message);
-        // and why it is not an exposure
-        self::assertStringContainsString('re-checks the live rule on every pass', $message);
-
-        // The rule really is in force despite the warning.
-        self::assertSame(
-            NftSpamContractRepository::RULE_DENY,
-            NftSpamContractRepository::getRule(self::CHAIN_ID, self::CONTRACT)
-        );
-    }
-
-    /**
-     * Failure mode 2, the quieter one: the read works, the WRITE silently
-     * did not stick. `syncDenyFlags()` returns a row count and reports
-     * success either way, which is exactly why the handler reads the flag
-     * back instead of trusting it.
-     */
-    public function test_a_deny_flag_that_never_moved_reports_partial_completion(): void
-    {
-        CosmwasmContractRepository::$swallowSetDenied = true;
-
-        $notices = $this->post('hide_' . self::COLLECTION_ID);
-
-        self::assertSame('warning', $notices[0]['type']);
-        self::assertStringContainsString('could not be updated', $notices[0]['message']);
-        self::assertSame('0', $this->deniedFlag(), 'the flag genuinely did not move — that is the point');
-    }
-
-    public function test_the_partial_failure_is_logged_with_the_failing_method(): void
-    {
-        CosmwasmContractRepository::$failReads = ['deniedFlag'];
-
-        $this->post('hide_' . self::COLLECTION_ID);
-
-        $errors = array_values(array_filter(
-            \BCC\Core\Log\Logger::$lines,
-            static fn(array $line): bool => $line['level'] === 'error'
-        ));
-
-        self::assertNotSame([], $errors, 'a sync that could not be confirmed must leave a trace');
-        self::assertSame('deniedFlag', $errors[0]['context']['method'] ?? null);
-    }
-
-    // ── the dispatcher itself ───────────────────────────────────────────
-
-    /**
-     * THE GUARANTEE SURVIVED THE NONCE'S REMOVAL — and got stronger.
-     *
-     * This used to assert "Security check failed", because the legacy
-     * dispatcher verified `bcc_verify_collections_nonce` before refusing.
-     * VC-B3b removed that nonce: the dispatcher performs no lookup, no
-     * write, no provider call and no audit, so there was nothing left for
-     * a nonce to protect, and keeping one alive purely to decorate a
-     * warning would have preserved the exact excessive-authority token
-     * this programme spent four batches removing.
-     *
-     * What the test is actually for is unchanged and asserted below: a
-     * submission carrying a bad nonce reaches NEITHER the rule NOR the
-     * scanner flag. It is now refused for a stronger reason — the code
-     * path no longer touches either, whatever it is carrying.
-     */
+    // ⚠ THREE CASES DELETED BY S3, DELIBERATELY AND NOT QUIETLY:
+    //
+    //   test_a_sync_that_cannot_be_confirmed_reports_partial_completion
+    //   test_a_deny_flag_that_never_moved_reports_partial_completion
+    //   test_the_partial_failure_is_logged_with_the_failing_method
+    //
+    // All three asserted the behaviour of a scanner-cache push that no longer
+    // happens. Keeping them green would have meant keeping the push. They are
+    // named here so a reader of this file can see what was removed and why,
+    // rather than finding a silent gap in the numbering.
     public function test_a_bad_nonce_never_reaches_the_rule_or_the_scanner(): void
     {
         $notices = $this->postLegacy('hide_' . self::COLLECTION_ID, 'not-the-nonce');
