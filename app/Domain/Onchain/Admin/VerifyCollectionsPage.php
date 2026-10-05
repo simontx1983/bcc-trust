@@ -2396,22 +2396,32 @@ final class VerifyCollectionsPage
      * wins over the name heuristics, which is exactly what "I looked at
      * this and it's fine" means).
      *
-     * ── THE RULE IS AUTHORITY; THE SCANNER FLAG IS A CACHE ──────────────
-     * Writing the rule is not the whole job. The CosmWasm scanner keeps a
-     * `denied` flag ON ITS OWN INVENTORY so its queue predicates stay
-     * cheap and indexed, and that flag is what
-     * {@see CosmwasmContractRepository::findEmittable()} and
-     * {@see CosmwasmContractRepository::countDenied()} read. Leaving it
-     * stale means the hidden contract keeps sitting in the emit queue and
-     * the panel keeps counting it as visible — the emit path's live rule
-     * re-check catches it every single sweep, forever, instead of it
-     * being dropped once.
+     * ── THE RULE IS THE WHOLE JOB (S3) ──────────────────────────────────
+     * This handler writes the authoritative rule and nothing else. It used
+     * to also push the CosmWasm scanner's `denied` flag — a CACHE on the
+     * scanner's own inventory, kept so its queue predicates stayed cheap
+     * and indexed — and then report partial completion when that push could
+     * not be confirmed. That coupling is gone.
      *
-     * So the rule write is followed by
-     * {@see CosmwasmDiscoveryService::syncDenyFlags()} — DENY POINT 4,
-     * which had no production caller at all before this. It is called
-     * with the SINGLE affected contract; it is already bounded to 200 and
-     * needs no widening, and nothing here scans the table.
+     * ⚠ WHY REMOVING IT CHANGES NOTHING AN OPERATOR OR A MEMBER CAN SEE.
+     * The cache was only ever read by the scanner's own queue
+     * ({@see CosmwasmContractRepository::findEmittable()}) and its own count
+     * ({@see CosmwasmContractRepository::countDenied()}). The authority is
+     * `wp_bcc_nft_spam_contracts.rule`, in a DIFFERENT table, and the emit
+     * path re-checks it live on every pass — which is exactly what
+     * `test_the_live_rule_recheck_still_blocks_the_emit_when_the_cached_flag_goes_stale`
+     * asserts, and that test is unchanged by this commit. A stale flag
+     * therefore costs a candidate being reconsidered and re-refused each
+     * sweep, never a hidden collection becoming visible.
+     *
+     * And the scanner is FROZEN — `ScannerFreeze` refuses every entry point,
+     * so nothing sweeps, nothing emits and nothing reads the cache at all.
+     * The column stops being updated from here; existing values go inert and
+     * are dropped with the table in S9.
+     *
+     * ⚠ PUBLIC VISIBILITY, JOINING, MEMBERSHIP AND REVOCATION ARE UNTOUCHED.
+     * None of them ever consulted the scanner cache; they read the rule and
+     * the holdings path, neither of which this commit goes near.
      *
      * ── THE LOOKUP IS KEYED, NOT POSITIONAL ─────────────────────────────
      * {@see CollectionRepository::findManyByIds()} returns a map keyed by
@@ -2516,59 +2526,40 @@ final class VerifyCollectionsPage
             return [['type' => 'error', 'message' => 'Hide: rule write failed. Check the bcc-trust error log.']];
         }
 
-        $scannerSynced = self::syncScannerDenyFlag($chainId, $contract, $hide);
-
         // THE DURABLE RECORD (VC-B1).
         //
         // The outcome is in the ACTION NAME, not in $meta: AuditLogger::log()
         // accepts $meta and the insert array drops it, so anything encoded
-        // there is not durable. "applied" and "sync_unconfirmed" are
-        // therefore separate events rather than one event with a flag.
+        // there is not durable.
+        //
+        // ⚠ THE VOCABULARY NARROWED IN S3, AND THE OLD NAMES STAY VALID.
+        // `admin_vc_hide_sync_unconfirmed` and its unhide twin can no longer
+        // be emitted, because there is no cache push left to be unconfirmed.
+        // Rows already carrying them are ACCURATE HISTORY and must not be
+        // rewritten or reinterpreted: each one means "the rule was written
+        // and the scanner cache push could not be confirmed", which was true
+        // when it was recorded.
         //
         // The target is the COLLECTION row — never the chain. A chain id
         // stored under target_type 'collection' would be indistinguishable
         // from a real collection id in any later forensic query.
         AdminActionSupport::audit(
-            self::hideAuditAction($hide, $scannerSynced),
+            self::hideAuditAction($hide),
             'collection',
             $collectionId,
             ['chain_id' => $chainId, 'contract' => $contract, 'rule' => $rule]
         );
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections hide toggle', [
-            'action'         => 'verify_collections_hide',
-            'collection_id'  => $collectionId,
-            'chain_id'       => $chainId,
-            'contract'       => $contract,
-            'rule'           => $rule,
-            'scanner_synced' => $scannerSynced,
-            'operator'       => get_current_user_id(),
+            'action'        => 'verify_collections_hide',
+            'collection_id' => $collectionId,
+            'chain_id'      => $chainId,
+            'contract'      => $contract,
+            'rule'          => $rule,
+            'operator'      => get_current_user_id(),
         ]);
 
         $name = (string) ($row->collection_name ?? $contract);
-
-        if (!$scannerSynced) {
-            // PARTIAL COMPLETION. Naming both halves matters: the operator's
-            // intent IS in force (the rule is authoritative and every emit
-            // re-checks it live), but the scanner's cached flag and the
-            // "hidden by a rule" count derived from it are now stale, so the
-            // page they are looking at will disagree with reality.
-            return [[
-                'type'    => 'warning',
-                'message' => sprintf(
-                    '%s "%s" %s users — the %s rule was written and IS in force. '
-                        . 'What did NOT happen: the CosmWasm scanner\'s cached flag for this contract could not be updated, '
-                        . 'so its inventory still lists the contract the old way and the "hidden by a rule" count on this page is stale. '
-                        . 'Nothing is exposed by that — the emit path re-checks the live rule on every pass — but click %s again once the '
-                        . 'database error clears so the scanner stops reconsidering it. Check the bcc-trust error log.',
-                    $hide ? 'Hid' : 'Restored',
-                    $name,
-                    $hide ? 'from' : 'for',
-                    $rule,
-                    $hide ? 'Hide' : 'Unhide'
-                ),
-            ]];
-        }
 
         return [[
             'type'    => 'success',
@@ -2583,49 +2574,30 @@ final class VerifyCollectionsPage
     }
 
     /**
-     * Sync the scanner's cached deny flag for ONE contract, and report
-     * whether it actually landed.
-     *
-     * ── WHY IT VERIFIES INSTEAD OF TRUSTING THE RETURN ──────────────────
-     * {@see CosmwasmDiscoveryService::syncDenyFlags()} returns "how many
-     * flags changed", and 0 is a perfectly good answer (the flag was
-     * already right). It is therefore useless as a success signal, and it
-     * is 0 in both of the ways this can fail: its per-contract read came
-     * back empty because the query errored, or its UPDATE did not stick.
-     *
-     * So the flag is READ BACK through
-     * {@see CosmwasmContractRepository::deniedFlag()}, which throws rather
-     * than confusing "no row" with "could not read". Three outcomes:
-     *   null  → the scanner has never inventoried this contract, so there
-     *           was nothing to sync and that is a success;
-     *   ===   → the cache agrees with the rule;
-     *   !==   → the write silently did not land — report partial.
-     */
-    /**
      * The VC-B1 audit vocabulary, in one place.
      *
-     * Four names, all inside the 50-character `action` column:
+     * Four names survive S3, all inside the 50-character `action` column:
      *
-     *   admin_vc_hide_applied              (21) rule written, cache agrees
-     *   admin_vc_unhide_applied            (23) rule written, cache agrees
-     *   admin_vc_hide_sync_unconfirmed     (30) rule written, cache stale
-     *   admin_vc_unhide_sync_unconfirmed   (32) rule written, cache stale
+     *   admin_vc_hide_applied      (21) the rule was written
+     *   admin_vc_unhide_applied    (23) the rule was written
+     *   admin_vc_hide_failed       (20) the rule was NOT written
+     *   admin_vc_unhide_failed     (22) the rule was NOT written
      *
-     * "applied" covers BOTH "the scanner's flag now agrees" and "the scanner
-     * has no record of this contract, so there was nothing to sync" — the
-     * two are the same fact from the operator's side: nothing is left stale.
-     * `syncScannerDenyFlag()` already collapses them, and splitting them
-     * here would be a distinction the durable row cannot act on.
+     * ⚠ TWO RETIRED NAMES ARE STILL VALID HISTORY.
+     * `admin_vc_hide_sync_unconfirmed` and `admin_vc_unhide_sync_unconfirmed`
+     * are no longer emitted — S3 removed the scanner-cache push they
+     * described, so the condition cannot arise. Existing rows keep them AND
+     * keep their meaning: at the moment each was written, the rule HAD been
+     * written and the cache push could not be confirmed. Nothing migrates
+     * them, and a forensic reader should not read them as errors.
+     *
+     * "applied" now carries exactly one fact, which is the only fact the
+     * durable row could ever act on: the authoritative rule is in force.
      */
-    private static function hideAuditAction(bool $hide, bool $synced): string
+    private static function hideAuditAction(bool $hide): string
     {
-        if ($synced) {
-            return $hide ? 'admin_vc_hide_applied' : 'admin_vc_unhide_applied';
-        }
-
-        return $hide ? 'admin_vc_hide_sync_unconfirmed' : 'admin_vc_unhide_sync_unconfirmed';
+        return $hide ? 'admin_vc_hide_applied' : 'admin_vc_unhide_applied';
     }
-
     /**
      * The "the authoritative rule was NOT applied" event.
      *
@@ -2644,28 +2616,6 @@ final class VerifyCollectionsPage
     {
         return $hide ? 'admin_vc_hide_failed' : 'admin_vc_unhide_failed';
     }
-
-    private static function syncScannerDenyFlag(int $chainId, string $contract, bool $hide): bool
-    {
-        try {
-            \BCC\Trust\Onchain\Services\CosmwasmDiscoveryService::syncDenyFlags($chainId, [$contract]);
-
-            $flag = CosmwasmContractRepository::deniedFlag($chainId, $contract);
-        } catch (RepositoryReadFailure $e) {
-            \BCC\Core\Log\Logger::error('[bcc-trust] hide toggle: scanner deny-flag sync could not be confirmed', [
-                'action'   => 'verify_collections_hide_sync_failed',
-                'chain_id' => $chainId,
-                'contract' => $contract,
-                'method'   => $e->repositoryMethod(),
-                'db_error' => $e->dbError(),
-            ]);
-
-            return false;
-        }
-
-        return $flag === null || $flag === $hide;
-    }
-
 
     /**
      * V2 Phase 2: pre-verify CW-721 sanity check. Hits the contract's
