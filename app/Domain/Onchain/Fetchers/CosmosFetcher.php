@@ -67,6 +67,32 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      */
     private array $numTokensCounts = [];
 
+    /**
+     * Whether the CHAIN answered a wasm query with HTTP 501 during
+     * {@see probeCw721()}, keyed by contract address.
+     *
+     * ── WHY THIS IS A SIDE-CHANNEL AND NOT A PROBE-OUTCOME FIELD ────────
+     * Same reason as {@see $numTokensCounts} above: the probe OUTCOME shape
+     * is `CosmwasmClassifier`'s ProbeOutcome type, which the scanner depends
+     * on, so a new key cannot be added to it. The signal rides BESIDE the
+     * outcomes instead.
+     *
+     * ── AND WHY HTTP 501 RATHER THAN THE ERROR KIND OR THE EXCERPT ──────
+     * Because neither of those can carry it. `errorKindFromMessage()` maps
+     * every status >= 500 to KIND_NODE_ERROR, and {@see probeKind()} returns
+     * the kind alone — so the status is discarded before any consumer sees
+     * it. A reader left with only the excerpt has to look for the literal
+     * text "not implemented", which is the gateway's wording to choose, not
+     * ours. The status code is the fact.
+     *
+     * ⚠ 501 ONLY. A 500 or a 502 is a node having a bad day on a chain that
+     * may well have a wasm module; reading either as "this chain cannot host
+     * CW-721" would turn an outage into a claim about the chain.
+     *
+     * @var array<string, bool>
+     */
+    private array $chainHasNoWasm = [];
+
     private int    $decimals;
     private int $timeout = 15;
 
@@ -2165,6 +2191,10 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         $numTokens   = $this->wasmSmartQueryResult($contract, ['num_tokens' => new \stdClass()]);
         $numTokensOk = $numTokens['ok'] && self::hasNumTokensCount($numTokens['data']);
 
+        // Reset per invocation: one instance validates several contracts, and
+        // a stale true would attribute one chain's 501 to the next address.
+        $this->chainHasNoWasm[$contract] = self::saysChainHasNoWasm($numTokens);
+
         // ⚠ CAPTURED HERE, NOT RE-QUERIED. Manual intake wants the supply, and
         // this is the only place the count is in hand. Reading it again from a
         // second `num_tokens` query would double the cost of every validation
@@ -2184,6 +2214,7 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
 
         $info       = $this->wasmSmartQueryResult($contract, ['contract_info' => new \stdClass()]);
         $infoOk     = $info['ok'] && self::hasCollectionName($info['data']);
+        $this->chainHasNoWasm[$contract] = $this->chainHasNoWasm[$contract] || self::saysChainHasNoWasm($info);
         $outcomes[] = [
             'probe'   => \BCC\Trust\Onchain\Services\CosmwasmClassifier::PROBE_CONTRACT_INFO,
             'ok'      => $infoOk,
@@ -2197,6 +2228,7 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
                 ['get_collection_info_and_extension' => new \stdClass()]
             );
             $modernOk   = $modern['ok'] && self::hasCollectionName($modern['data']);
+            $this->chainHasNoWasm[$contract] = $this->chainHasNoWasm[$contract] || self::saysChainHasNoWasm($modern);
             $outcomes[] = [
                 'probe'   => \BCC\Trust\Onchain\Services\CosmwasmClassifier::PROBE_COLLECTION_INFO,
                 'ok'      => $modernOk,
@@ -2216,6 +2248,22 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * the contract implements the query - and, critically, not evidence
      * that it does not. Malformed is non-decisive, so it retries.
      */
+    /**
+     * PURE. Did this result come back as HTTP 501 — "this chain has no wasm
+     * module"?
+     *
+     * Deliberately NOT delegated to the scanner's
+     * `CosmwasmDiscoveryService::isUnsupportedChainError()`, which tests the
+     * same status: targeted validation must not acquire a dependency on a
+     * class that is being removed. Two call sites, one fact, and the
+     * scanner's copy goes away with it.
+     *
+     * @param array{ok: bool, data: array<string, mixed>|null, http_code: int, error_kind: string, message_excerpt: string} $result
+     */
+    private static function saysChainHasNoWasm(array $result): bool
+    {
+        return (int) $result['http_code'] === 501;
+    }
     private static function probeKind(bool $transportOk, bool $payloadOk, string $errorKind): string
     {
         if ($payloadOk) {
@@ -2238,6 +2286,17 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * the same as "no count" to a caller and is equally safe: both leave
      * `total_supply` UNKNOWN rather than writing a wrong number.
      */
+    /**
+     * Did the CHAIN report no wasm module while probing this contract?
+     *
+     * `false` when the last {@see probeCw721()} run saw no 501, and also when
+     * no run has happened — "we have not observed it" is not "it is absent",
+     * and the caller treats both as "keep reasoning from the outcomes".
+     */
+    public function chainHasNoWasmFor(string $contract): bool
+    {
+        return $this->chainHasNoWasm[$contract] ?? false;
+    }
     public function numTokensCountFor(string $contract): ?int
     {
         return $this->numTokensCounts[$contract] ?? null;
