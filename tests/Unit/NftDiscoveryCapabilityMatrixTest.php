@@ -333,9 +333,31 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
         }
     }
 
-    // ── Rung 3: the measured refusal, and where it sits ─────────────────
+    // ── S5: THE STORED MEASUREMENT IS NO LONGER AN INPUT ────────────────
+    //
+    // This section used to cover a rung that refused enumeration on a stored
+    // `cw_discovery_state = unsupported`, and a scoping flag that stopped the
+    // refusal spreading to the other five operations. Both are gone. What is
+    // asserted now is the removal itself: seeding the measurement must change
+    // NOTHING. The seeding is still performed, so these cases cannot pass by
+    // simply never establishing the condition they are about.
 
-    public function testAMeasuredRefusalRefusesEnumeration(): void
+    /**
+     * A chain whose wasm module answered 501 is no longer refused by the
+     * capability model — and in particular is not refused as though the
+     * CHAIN were incapable.
+     *
+     * ⚠ This is the point of S5. The stored value is DURABLE AND TERMINAL:
+     * no TTL, no re-measure path, and the rotation excluded the chain
+     * permanently, so a chain that later gained a wasm module could never
+     * clear it. The refusal could outlive the fact it described.
+     *
+     * A contract on such a chain is still refused — per request, by evidence
+     * gathered when the request is made, and as UNAVAILABLE rather than as
+     * "not an NFT". That boundary is pinned by name in
+     * CosmosNoWasmModuleIsNeverNotAnNftTest.
+     */
+    public function testAStoredMeasurementNoLongerRefusesEnumeration(): void
     {
         ChainCheckpointRepository::seedCwState(
             self::CHAIN_ID,
@@ -344,33 +366,26 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
 
         $matrix = NftChainCapability::operationMatrix(self::cosmos());
 
-        self::assertTrue($matrix['measured_unsupported']);
         self::assertSame(
-            NftChainCapability::OP_CHAIN_UNSUPPORTED,
-            $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['status']
+            NftChainCapability::OP_READY,
+            $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['status'],
+            'the stored measurement must no longer be consulted'
         );
         self::assertSame(
-            NftChainCapability::REASON_MEASURED_NO_WASM,
+            NftChainCapability::REASON_READY,
             $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['reason']
         );
     }
 
     /**
-     * ⚠️ AND IT REFUSES NOTHING ELSE.
+     * The matrix no longer PUBLISHES the measurement either.
      *
-     * `cw_discovery_state` is evidence about whether the wasm module can be
-     * WALKED to enumerate the chain. A chain with no wasm module can still
-     * validate a CW-721 contract an operator hands us, report its owner and
-     * return its metadata — those go through `cw721_lcd`, which needs an
-     * LCD endpoint and never touches the code listing.
-     *
-     * An earlier version of this model marked all six operations
-     * `CHAIN_UNSUPPORTED` from this one measurement, calling a chain wholly
-     * incapable on the strength of a fact about one of its operations. The
-     * test that covered it claimed "every operation" in its name while
-     * asserting only enumeration, so the over-reach was invisible.
+     * Asserted because a renderer reading a key that silently stopped being
+     * written would print "not measured" as though that were a finding, and
+     * `?? false` makes that failure mode invisible. The key must be absent,
+     * not false.
      */
-    public function testAMeasuredRefusalDoesNotRefuseAnyOtherOperation(): void
+    public function testTheMatrixNoLongerCarriesTheMeasurementKey(): void
     {
         ChainCheckpointRepository::seedCwState(
             self::CHAIN_ID,
@@ -379,30 +394,53 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
 
         $matrix = NftChainCapability::operationMatrix(self::cosmos());
 
-        foreach ($matrix['operations'] as $operation => $row) {
-            if ($operation === NftDriverRegistry::OP_ENUMERATION) {
-                continue;
-            }
+        self::assertArrayNotHasKey('measured_unsupported', $matrix);
 
-            self::assertNotSame(
-                NftChainCapability::OP_CHAIN_UNSUPPORTED,
-                $row['status'],
-                "{$operation} must not inherit a measurement about the code listing"
-            );
-            self::assertNotSame(NftChainCapability::REASON_MEASURED_NO_WASM, $row['reason']);
+        // Anti-vacuity: the shape is otherwise intact, so the assertion above
+        // is about one removed key rather than an empty or broken matrix.
+        self::assertArrayHasKey('verdict', $matrix);
+        self::assertArrayHasKey('operations', $matrix);
+        self::assertArrayHasKey('manual_enabled', $matrix);
+    }
+
+    /**
+     * No status or reason anywhere in the model still spells the removed
+     * vocabulary, under any spelling.
+     *
+     * The constants are gone, so a stale reference would be a fatal rather
+     * than a wrong string — but the literals could outlive them in a hand
+     * written branch, and this is cheap.
+     */
+    public function testTheRemovedVocabularyAppearsNowhereInTheMatrix(): void
+    {
+        ChainCheckpointRepository::seedCwState(
+            self::CHAIN_ID,
+            ChainCheckpointRepository::CW_STATE_UNSUPPORTED
+        );
+
+        $matrix = NftChainCapability::operationMatrix(self::cosmos());
+
+        self::assertNotSame('chain_unsupported', $matrix['verdict']);
+        foreach ($matrix['operations'] as $operation => $row) {
+            self::assertNotSame('op_chain_unsupported', $row['status'], $operation);
+            self::assertNotSame('measured_no_wasm_module', $row['reason'], $operation);
         }
     }
 
     /**
-     * Each non-enumeration operation gets the answer ITS OWN drivers and
-     * readiness dictate — the same answer it would have with no
-     * measurement present at all.
+     * EVERY operation gets the answer its own drivers and readiness dictate
+     * — the same answer it would have with no measurement present at all.
+     *
+     * ⚠ Widened by S5 from "every non-enumeration operation" to EVERY
+     * operation. While the rung existed, enumeration had to be excluded from
+     * this comparison; with the rung gone, excluding it would leave the one
+     * operation the change actually affects untested here.
      *
      * Asserted as an equality against the unmeasured chain rather than as a
      * list of "not this": that catches a measurement leaking into any
      * status, including one this test did not think to name.
      */
-    public function testNonEnumerationOperationsAreUnchangedByTheMeasurement(): void
+    public function testNoOperationIsChangedByTheStoredMeasurement(): void
     {
         $withoutMeasurement = NftChainCapability::operationMatrix(self::cosmos())['operations'];
 
@@ -412,48 +450,53 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
         );
         $withMeasurement = NftChainCapability::operationMatrix(self::cosmos())['operations'];
 
+        $compared = 0;
         foreach (NftDriverRegistry::operations() as $operation) {
-            if ($operation === NftDriverRegistry::OP_ENUMERATION) {
-                continue;
-            }
-
             self::assertSame(
                 $withoutMeasurement[$operation]['status'],
                 $withMeasurement[$operation]['status'],
-                "{$operation} changed answer because of a measurement that does not describe it"
+                "{$operation} changed answer because of a measurement nothing reads"
             );
+            self::assertSame(
+                $withoutMeasurement[$operation]['reason'],
+                $withMeasurement[$operation]['reason'],
+                "{$operation} changed its stated reason"
+            );
+            $compared++;
         }
 
-        // And the LCD-backed operations really are answering for
-        // themselves, so the equality above is not two refusals matching.
-        self::assertSame(
-            NftChainCapability::OP_READY,
-            $withMeasurement[NftDriverRegistry::OP_VALIDATION]['status']
-        );
-        self::assertSame(
-            NftChainCapability::OP_READY,
-            $withMeasurement[NftDriverRegistry::OP_METADATA]['status']
-        );
-        self::assertSame(
-            NftChainCapability::OP_READY,
-            $withMeasurement[NftDriverRegistry::OP_OWNERSHIP]['status']
-        );
+        // Anti-vacuity: an empty operation list would make the loop above
+        // assert nothing at all.
+        self::assertGreaterThanOrEqual(4, $compared);
+
+        // And these really are answering for themselves, so the equality
+        // above is not two refusals matching.
+        foreach ([
+            NftDriverRegistry::OP_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::OP_METADATA,
+            NftDriverRegistry::OP_OWNERSHIP,
+        ] as $operation) {
+            self::assertSame(
+                NftChainCapability::OP_READY,
+                $withMeasurement[$operation]['status'],
+                $operation
+            );
+        }
     }
 
     /**
-     * ⚠️ THE ORDERING THAT DIFFERS FROM `verdict()`, ON PURPOSE.
+     * An unreadable capability store still fails closed — and now it is the
+     * FIRST thing said, because the rung above it is gone.
      *
-     * `verdict()` names the measured refusal FIRST, because for a decision
-     * the thing no operator can change is the most useful thing to say.
-     *
-     * The matrix produces a DISPLAY, and a display that prints a confident
-     * "this chain has no wasm module" while the capability store is
-     * unreadable has converted "we could not read our own configuration"
-     * into a statement about the blockchain. So when the read failed, the
-     * answer is UNKNOWN and the measurement is supporting detail — it may
-     * not upgrade an unavailable read into a confident verdict.
+     * A display that printed a confident "this chain has no wasm module"
+     * while the capability store was unreadable would have converted "we
+     * could not read our own configuration" into a statement about the
+     * blockchain. S5 removed the possibility entirely rather than relying on
+     * ordering to prevent it. The measurement is seeded here anyway, so the
+     * case still proves it is not consulted on this path.
      */
-    public function testAMeasuredRefusalNeverUpgradesAnUnreadableStoreIntoAConfidentVerdict(): void
+    public function testAnUnreadableStoreIsUnknownAndTheMeasurementCannotOverrideIt(): void
     {
         ChainCheckpointRepository::seedCwState(
             self::CHAIN_ID,
@@ -466,29 +509,31 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
 
         $matrix = NftChainCapability::operationMatrix(self::cosmos());
 
-        // The measurement is still reported as evidence…
-        self::assertTrue($matrix['measured_unsupported']);
-
-        // …but the STATUS is unknown, not chain_unsupported.
         self::assertSame(
             NftChainCapability::OP_UNKNOWN,
             $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['status']
         );
 
-        // And `verdict()` is untouched by any of this: it still leads with
-        // the measurement, exactly as it always did.
-        self::assertSame(NftChainCapability::CHAIN_UNSUPPORTED, $matrix['verdict']);
+        // `verdict()` agrees, where it used to lead with the measurement.
+        self::assertSame(NftChainCapability::UNKNOWN, $matrix['verdict']);
+        self::assertFalse(NftChainCapability::isScannable($matrix['verdict']));
     }
 
     /**
-     * A `cw_*` value on a non-Cosmos row means nothing and is not read.
+     * A `cw_*` value on a non-Cosmos row still cannot mask the real reason.
      *
      * The checkpoint table is shared with the EVM indexer, so an Ethereum
-     * row can carry a stale or defaulted `cw_discovery_state`. Reading it
-     * would answer "this chain has no wasm module" — true, irrelevant, and
-     * it would MASK the real reason an EVM scan is refused.
+     * row can carry a stale or defaulted `cw_discovery_state`. While the
+     * capability model read that column, a Cosmos-scoping guard existed
+     * precisely to stop it answering "this chain has no wasm module" about
+     * Ethereum — true, irrelevant, and it would have masked the real reason.
+     *
+     * S5 removed the read, so the guard is no longer load-bearing. The
+     * OUTCOME it protected is asserted here directly, and the seeding is
+     * kept so a reintroduced read would fail this case rather than slip past
+     * a test that no longer sets up the condition.
      */
-    public function testACosmosMeasurementIsIgnoredOnAnEvmChain(): void
+    public function testACosmosMeasurementCannotMaskTheRealReasonOnAnEvmChain(): void
     {
         ChainCheckpointRepository::seedCwState(
             self::CHAIN_ID,
@@ -497,11 +542,14 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
 
         $matrix = NftChainCapability::operationMatrix(self::evm());
 
-        self::assertFalse($matrix['measured_unsupported']);
         self::assertSame(
             NftChainCapability::OP_NO_DRIVER,
             $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['status'],
             'the real reason must survive, not be masked by an irrelevant measurement'
+        );
+        self::assertSame(
+            NftChainCapability::REASON_NO_REGISTERED_DRIVER,
+            $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['reason']
         );
     }
 

@@ -1186,8 +1186,6 @@ class NftDiscoveryPage
                 return 'Ready';
             case NftChainCapability::OP_UNKNOWN:
                 return 'Unknown';
-            case NftChainCapability::OP_CHAIN_UNSUPPORTED:
-                return 'Chain cannot';
             case NftChainCapability::OP_NO_BCC_SUPPORT:
                 return 'Not supported';
             case NftChainCapability::OP_NO_DRIVER:
@@ -1262,9 +1260,6 @@ class NftDiscoveryPage
             case NftChainCapability::REASON_MANUAL_COLUMN_ABSENT:
                 return 'This install cannot store the manual-discovery permission (the column is '
                     . 'absent from the projection), so nothing can be said yet.';
-            case NftChainCapability::REASON_MEASURED_NO_WASM:
-                return 'Measured: this chain answered that it has no CosmWasm module. No operator '
-                    . 'setting can change that.';
             case NftChainCapability::REASON_PRODUCT_SUPPORT_DISABLED:
                 return 'BCC does not currently support NFT collections on this chain. This is a '
                     . 'product decision, not a technical limit, and it is not editable from this page.';

@@ -51,12 +51,14 @@ if (!defined('ABSPATH')) {
  *     registry entry means "this build can do it", not "it will work right
  *     now". `alchemy_nft` is registered on every EVM chain; whether a given
  *     chain's `rpc_url` carries an Alchemy key is a readiness question.
- *   - **Whether a Cosmos chain actually runs a wasm module** — that is
- *     MEASURED (`wp_bcc_chain_checkpoints.cw_discovery_state = 'unsupported'`,
- *     an observed HTTP 501) and lives on the checkpoint row, not on
- *     `ChainRow`. {@see NftChainCapability} folds it in as
- *     `CHAIN_UNSUPPORTED`. Re-deriving it here would be a second definition
- *     of a measured fact, and no operator action can change it anyway.
+ *   - **Whether a Cosmos chain actually runs a wasm module** — a question
+ *     this registry has never answered and still does not. It used to be
+ *     read from `wp_bcc_chain_checkpoints.cw_discovery_state` and folded in
+ *     by {@see NftChainCapability} as `CHAIN_UNSUPPORTED`; S5 removed that
+ *     dependency, because the stored value is durable and terminal with no
+ *     re-measure path, so the refusal could outlive the fact. It is now
+ *     answered per request, at validation time, by
+ *     {@see \BCC\Trust\Onchain\Services\Validation\CosmosContractProbe}.
  *
  * ── THE LOAD-BEARING NEGATIVE ───────────────────────────────────────────
  * `driversFor($chain, OP_ENUMERATION)` returns `[]` for EVERY EVM chain and

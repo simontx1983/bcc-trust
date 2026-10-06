@@ -97,11 +97,12 @@ final class NftProviderReadiness
 
         return match ($driverKey) {
             // ── Cosmos ──────────────────────────────────────────────────
-            // Both speak wasmd over the chain's LCD/REST endpoint. Whether
-            // that endpoint actually exposes a wasm module is MEASURED
-            // (checkpoint `cw_discovery_state = 'unsupported'`, an observed
-            // 501) and folded in by NftChainCapability as CHAIN_UNSUPPORTED
-            // — a different kind of fact from "we have somewhere to ask".
+            // Both speak wasmd over the chain's LCD/REST endpoint. Readiness
+            // here answers only "do we have somewhere to ask" — it has never
+            // claimed the endpoint exposes a wasm module. That used to be
+            // answered from the stored `cw_discovery_state` measurement via
+            // NftChainCapability's CHAIN_UNSUPPORTED rung; S5 removed it, so
+            // it is now answered per request at validation time.
             NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
             NftDriverRegistry::DRIVER_CW721_LCD => $restUrl !== '',
 

@@ -396,17 +396,25 @@ final class NftCapabilityEditorRenderTest extends TestCase
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  A MEASURED REFUSAL IS NOT OVERRIDDEN BY INTENT
+    //  S5: THE PAGE NO LONGER EXPLAINS A STORED MEASUREMENT
     // ═══════════════════════════════════════════════════════════════════
 
     /**
-     * ⚠️ THE PERMISSION DOES NOT BEAT A MEASUREMENT, AND THE PAGE SAYS SO.
+     * ⚠️ THE "MEASURED CAPABILITY" ROW IS GONE, AND MUST NOT COME BACK.
      *
-     * A Cosmos chain whose wasm module answered 501 keeps the control — it
-     * IS an enumerable family — but the panel labels the measured refusal
-     * prominently, and the backfill stays unavailable.
+     * This case used to assert the opposite: that a Cosmos chain whose wasm
+     * module answered 501 was labelled prominently and that the backfill
+     * control stayed unavailable. Both halves stopped being true —
+     * S4 withdrew the backfill control outright, and S5 removed the
+     * capability rung that refused on the stored measurement — so the row
+     * was deleted rather than left asserting a claim the code no longer
+     * makes.
+     *
+     * Inverted rather than deleted, because the row rendered stale copy that
+     * an operator would have acted on. A test that the sentence is ABSENT is
+     * worth more than no test at all.
      */
-    public function testAMeasuredRefusalIsLabelledAndTheBackfillStaysUnavailable(): void
+    public function testTheStoredMeasurementIsNotExplainedOnThePage(): void
     {
         ChainRepository::seed(self::CHAIN_ID, 'injective', true, true, true);
         \BCC\Trust\Onchain\Repositories\ChainCheckpointRepository::seed(
@@ -416,19 +424,23 @@ final class NftCapabilityEditorRenderTest extends TestCase
 
         $html = $this->page(['chain' => (string) self::CHAIN_ID]);
 
-        $this->assertStringContainsString('no CosmWasm module', $html);
-        $this->assertStringContainsString('will not change that', $html);
+        $this->assertStringNotContainsString('no CosmWasm module', $html);
+        $this->assertStringNotContainsString('Measured capability', $html);
+        $this->assertStringNotContainsString('will not change that', $html);
 
-        // And the capability model still refuses, so the backfill control
-        // is not offered anywhere on the page.
+        // Anti-vacuity: the panel DID render, and rendered the control this
+        // page exists for — so the absences above are about the removed row
+        // rather than about an empty page.
+        $this->assertStringContainsString('Manual discovery permission', $html);
+
+        // And the capability model no longer refuses on the measurement.
         $chain = ChainRepository::getById(self::CHAIN_ID);
         self::assertNotNull($chain);
         $matrix = NftChainCapability::operationMatrix($chain);
         $this->assertSame(
-            NftChainCapability::OP_CHAIN_UNSUPPORTED,
+            NftChainCapability::OP_READY,
             $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['status']
         );
-        $this->assertFalse(NftChainCapability::isScannable($matrix['verdict']));
         $this->assertRenderChangedNothing();
     }
 

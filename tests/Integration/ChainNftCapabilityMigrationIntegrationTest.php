@@ -594,47 +594,92 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
         self::assertCount(1, $result->rows());
     }
 
-    // ── The CosmWasm measurement is scoped to Cosmos ────────────────────
+    // ── S5: THE STORED MEASUREMENT IS NOT READ, END TO END ──────────────
 
     /**
-     * A Cosmos chain measured at HTTP 501 is CHAIN_UNSUPPORTED.
+     * ⚠⚠⚠ THE PROOF THAT THE DEPENDENCY IS GONE, AGAINST A REAL ROW.
+     *
+     * A genuine `cw_discovery_state = 'unsupported'` is written to
+     * `wp_bcc_chain_checkpoints` through the repository, and the verdict is
+     * taken before and after. They must be IDENTICAL.
+     *
+     * Asserted as an equality rather than against a named verdict on
+     * purpose: it holds whatever this environment's driver readiness
+     * produces, and it fails if the column is consulted again by any route —
+     * including one this test did not think to name. The previous version of
+     * this case asserted `CHAIN_UNSUPPORTED`, so it was the exact test S5 had
+     * to invert.
      */
-    public function testCosmosChainWithMeasured501IsChainUnsupported(): void
+    public function testACosmosChainsVerdictIsUnchangedByAStored501(): void
+    {
+        $chain  = self::fullyPermittedCosmosChain();
+        $before = NftChainCapability::forChain($chain);
+
+        self::markCwUnsupported((int) $chain->id);
+
+        // Re-project: the verdict must be recomputed from a fresh row, not
+        // served from a cache that predates the write.
+        ChainRepository::clearCache();
+        $reprojected = ChainRepository::getBySlug('cosmos');
+        self::assertNotNull($reprojected);
+
+        self::assertSame(
+            $before,
+            NftChainCapability::forChain($reprojected),
+            'a stored CosmWasm measurement must no longer change the verdict'
+        );
+
+        // And it is not the removed value under its old literal spelling.
+        self::assertNotSame('chain_unsupported', NftChainCapability::forChain($reprojected));
+    }
+
+    /**
+     * The measurement really was written, so the case above is not vacuous.
+     *
+     * Without this, a `markCwUnsupported()` that silently failed — and
+     * `$wpdb->query()` returns false without throwing — would leave the
+     * equality above comparing two identical no-ops and passing for the
+     * wrong reason.
+     */
+    public function testTheStored501IsActuallyPersisted(): void
     {
         $chain = self::fullyPermittedCosmosChain();
         self::markCwUnsupported((int) $chain->id);
 
-        self::assertSame(NftChainCapability::CHAIN_UNSUPPORTED, NftChainCapability::forChain($chain));
+        $checkpoint = ChainCheckpointRepository::get((int) $chain->id);
+        self::assertNotNull($checkpoint);
+        self::assertSame(
+            ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+            (string) $checkpoint->cw_discovery_state
+        );
     }
 
     /**
-     * AN EVM OR SOLANA CHAIN CARRYING A STALE `cw_discovery_state` IS NOT.
+     * AN EVM OR SOLANA CHAIN'S REAL REASON STILL SURVIVES.
      *
      * `cw_discovery_state` lives on `wp_bcc_chain_checkpoints`, a row shared
      * with the EVM indexer's own `state` column, so a non-Cosmos chain can
-     * carry a `cw_*` value that means nothing there. Reading it would answer
-     * "this chain has no wasm module" — true, irrelevant, and it would MASK
-     * the real reason an EVM scan is refused: no provider sells chain-wide
-     * EVM enumeration.
+     * carry a `cw_*` value that means nothing there. While the capability
+     * model read that column, a Cosmos-scoping guard existed to stop it
+     * answering "this chain has no wasm module" about Ethereum — true,
+     * irrelevant, and it would have MASKED the real reason: no provider
+     * sells chain-wide EVM enumeration.
+     *
+     * S5 removed the read, so the guard is no longer load-bearing. The
+     * OUTCOME it protected is asserted directly, and the stale value is still
+     * written so a reintroduced read would fail this case.
      *
      * @param string $slug
      */
     #[\PHPUnit\Framework\Attributes\DataProvider('nonCosmosChains')]
-    public function testNonCosmosChainIgnoresAStaleCosmWasmState(string $slug): void
+    public function testNonCosmosChainStillReportsItsStructuralReason(string $slug): void
     {
         $chain = self::fullyPermittedChain($slug);
         self::markCwUnsupported((int) $chain->id);
 
-        $verdict = NftChainCapability::forChain($chain);
-
-        self::assertNotSame(
-            NftChainCapability::CHAIN_UNSUPPORTED,
-            $verdict,
-            "{$slug} must not be classified by a CosmWasm measurement"
-        );
         self::assertSame(
             NftChainCapability::NO_ENUMERATION_DRIVER,
-            $verdict,
+            NftChainCapability::forChain($chain),
             'the honest reason is that no driver can enumerate this family'
         );
     }
