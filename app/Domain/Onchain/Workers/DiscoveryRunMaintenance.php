@@ -32,7 +32,6 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Workers;
 
-use BCC\Core\Cron\AsyncDispatcher;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Onchain\Repositories\DiscoveryRunRepository;
 use BCC\Trust\Onchain\Support\ScannerFreeze;
@@ -68,44 +67,45 @@ final class DiscoveryRunMaintenance
     /** Terminal rows pruned per tick. */
     private const PRUNE_BATCH = 200;
 
-    /**
-     * Wire the handler AND schedule the recurring event.
-     *
-     * Called from the `plugins_loaded` self-heal block in bcc-trust.php, the
-     * same shape as ValidatorMsgQueueWorker::register() — so a hook added by
-     * an update schedules itself on the next request without a reactivation.
-     *
-     * Idempotent on both halves:
-     *   • `add_action` with this array callback yields a stable WordPress
-     *     callback id, so repeating it replaces rather than appends.
-     *   • `AsyncDispatcher::registerRecurring()` returns false and schedules
-     *     nothing when `wp_next_scheduled()` already reports an event.
-     *
-     * This schedules MAINTENANCE, not discovery. `tick()` has no
-     * chain-selection logic and cannot create a run, so scheduling it can
-     * never amount to unattended scanning — the property the CW-721 comment
-     * in bcc-trust.php protects.
-     *
-     * ── AND IT CANNOT RESUME AN UNPROVEN ENDPOINT EITHER ────────────────
-     * A re-dispatched run does not go straight to a provider: it re-enters
-     * {@see DiscoveryRunExecutor}, which re-asks
-     * {@see \BCC\Trust\Onchain\Support\DiscoveryReadiness::forExecution()}
-     * before any request. If the chain has been repointed since the run was
-     * authorized, the recorded endpoint fingerprint no longer matches the
-     * configured one, readiness answers `endpoint_unverified`, and the run
-     * terminalizes with that reason having contacted nothing.
-     *
-     * ⚠ Deliberately NOT re-checked here as well. The executor already owns
-     * that decision at the last possible moment; a copy in this sweep would
-     * be a second authority for one rule — and the weaker one, since it
-     * would decide five minutes before the work rather than immediately
-     * before it. This class re-dispatches; it does not adjudicate.
-     */
-    public static function register(): void
-    {
-        add_action(self::HOOK, [self::class, 'handleSweep'], 10, 0);
-        AsyncDispatcher::registerRecurring(self::HOOK, self::INTERVAL);
-    }
+    // ── S6: register() IS GONE, AND BOTH HALVES OF IT ───────────────────
+    //
+    // It used to do exactly two things, and removing either one alone would
+    // have been worse than removing neither:
+    //
+    //   add_action(self::HOOK, [self::class, 'handleSweep'], 10, 0);
+    //   AsyncDispatcher::registerRecurring(self::HOOK, self::INTERVAL);
+    //
+    // Dropping only the schedule would leave a bound handler on an event
+    // nothing creates — the exact state PR 7A shipped by accident, where the
+    // drift detector reported the hook MISSING forever. Dropping only the
+    // add_action would leave a five-minute event firing into no handler,
+    // which is the drift a health check then has to explain. So both go, and
+    // the declaration moves from `recurring` to `cleanup_only` in
+    // includes/cron-hooks.php so the drift detector stops expecting it.
+    //
+    // A code deletion alone does NOTHING for installs that already hold the
+    // event: it lives in `wp_options.cron`, not in the code, and WordPress
+    // keeps firing it forever. includes/database/unschedule-discovery-
+    // maintenance.php clears it once per install and proves the
+    // postcondition.
+    //
+    // ⚠ The sweep was already inert before this change — `tick()` returns its
+    // zero counts under ScannerFreeze before touching anything — so S6
+    // removes a schedule whose work was already frozen. It makes that
+    // structural instead of conditional on `frozen()` continuing to return
+    // true.
+    //
+    // ⚠ `handleSweep()` and `tick()` below are now UNREACHABLE in production.
+    // They are kept deliberately: the retirement plan removes this class with
+    // the rest of the scanner leaves in a later stage, and deleting the body
+    // here would mean rewriting the tests that pin its behaviour twice.
+    //
+    // ⚠ The EXECUTOR hook (`bcc_discovery_run_execute`) is NOT touched. Its
+    // binding stays while a queued action can still exist — an unregistered
+    // callback on a scheduled event is drift a health check has to explain;
+    // a registered no-op is not. Unbinding it needs an operator to confirm
+    // the queue is drained first, and Action Scheduler's wp-cron fallback
+    // events carry `[$runId]`, which a no-argument clear would miss.
 
     /**
      * The cron entry point — same `handleX` shape as ValidatorMsgQueueWorker.

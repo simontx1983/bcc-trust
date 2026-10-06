@@ -260,6 +260,14 @@ require_once BCC_TRUST_PATH . 'includes/database/unschedule-automatic-nft-discov
 // created a public group for every chain has no handler any more, but the
 // event survives in wp_options.cron on any install that scheduled it.
 require_once BCC_TRUST_PATH . 'includes/database/unschedule-hall-provision.php';
+// S6 — one-shot removal of the retired `bcc_discovery_run_maintenance`
+// schedule. Both halves of DiscoveryRunMaintenance::register() are gone, so
+// nothing creates the event any more; but it lives in wp_options.cron, not in
+// the code, and WordPress keeps firing it on any install that already
+// scheduled it. Its own done_option: the existing unschedule migrations have
+// already completed everywhere, so folding this hook into one of them would
+// have been a no-op that never ran.
+require_once BCC_TRUST_PATH . 'includes/database/unschedule-discovery-maintenance.php';
 // PR 7.3 — adds bcc_discovery_runs.chunks_used to installs that already have
 // the table. Fresh installs get it from the CREATE TABLE; staging and
 // production both predate it, and a session ceiling cannot be enforced
@@ -287,10 +295,20 @@ add_action('plugins_loaded', 'bcc_trust_run_pending_migrations', 20, 0);
 //     history. It has no chain-selection logic, so it cannot become
 //     automatic discovery.
 //
-// Only the EXECUTOR is wired here. The maintenance sweep needs an actual
-// scheduled event, not just a handler, so its wiring lives in
-// DiscoveryRunMaintenance::register() and is invoked from the plugins_loaded
-// self-heal block below — see the note on DiscoveryRunMaintenance::HOOK.
+// Only the EXECUTOR is wired here, and after S6 it is the ONLY one.
+//
+// The maintenance sweep used to be wired and scheduled by
+// DiscoveryRunMaintenance::register() from the plugins_loaded self-heal block
+// below. S6 retired that hook: both halves of register() are gone, the
+// declaration moved to `cleanup_only`, and
+// includes/database/unschedule-discovery-maintenance.php clears the event
+// from wp_options.cron on installs that already hold one.
+//
+// ⚠ This executor binding STAYS. Freezing what creates work does not stop
+// work already queued, and an unregistered callback on a scheduled event is
+// drift a health check has to explain — a registered no-op that refuses
+// before claiming anything is not. It is unbound only once an operator has
+// confirmed the queue is drained.
 add_action(
     \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::HOOK,
     static function ($runId = 0): void {
@@ -1071,20 +1089,22 @@ add_action('plugins_loaded', static function (): void {
     // added by an update schedules itself without a reactivation.
     \BCC\Trust\Onchain\Workers\ValidatorMsgQueueWorker::register();
 
-    // PR 7A discovery-run ledger maintenance. MAINTENANCE, NOT DISCOVERY:
-    // tick() re-dispatches runs an administrator already requested, recovers
-    // expired leases and prunes terminal history. It owns no chain-selection
-    // logic and cannot create a run, so this is not the unattended scanning
-    // the CW-721 note above forbids.
+    // ⚠ S6: DiscoveryRunMaintenance::register() WAS CALLED HERE AND MUST NOT
+    // COME BACK. Self-healing a retired hook would reschedule the five-minute
+    // sweep on the very next request — the same failure shape the
+    // NftEnrichmentService note above warns about. The hook is now in
+    // `cleanup_only` and is cleared by
+    // includes/database/unschedule-discovery-maintenance.php.
     //
-    // It belongs here rather than beside the executor's add_action because a
-    // handler without a scheduled event is inert: PR 7A declared the hook in
-    // includes/cron-hooks.php and wired the callback, but nothing ever called
-    // wp_schedule_event, so the sweep never ran and the drift detector
-    // reported it permanently MISSING. The reaper is the only thing that
-    // returns an expired lease, so an unscheduled sweep would let one crashed
-    // run hold `uq_active` and block that (job_kind, chain) forever.
-    \BCC\Trust\Onchain\Workers\DiscoveryRunMaintenance::register();
+    // The reasons it originally lived here are recorded because they are what
+    // a future reader will weigh before re-adding it: the reaper was the only
+    // thing that returned an expired lease, so an unscheduled sweep could let
+    // one crashed run hold `uq_active` and block that (job_kind, chain)
+    // indefinitely. That risk is accepted and is already the live situation —
+    // the sweep has been a no-op under ScannerFreeze since the freeze landed,
+    // because tick() returns its zero counts before triaging anything. The
+    // scanner surface that created runs is gone as of S4, so nothing new can
+    // take a lease to strand.
 
     // Helius dedupe sweep has no host service class (its handler is the
     // inline closure above) so its schedule is inlined here. Same shape
