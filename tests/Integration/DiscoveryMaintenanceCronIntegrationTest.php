@@ -131,32 +131,16 @@ namespace {
         define('BCC_TRUST_MIGRATION_INCOMPLETE', 'incomplete');
     }
 
-    if (!function_exists('wp_schedule_single_event')) {
-        /**
-         * A SINGLE event, which is a different thing from a recurring one.
-         *
-         * ⚠ Core stores `'schedule' => false` and NO `interval` for these, and
-         * that difference is the whole point here: the executor queue is made
-         * of single events carrying `[$runId]`, so each is keyed by
-         * md5(serialize([$runId])) rather than md5(serialize([])). A
-         * no-argument `wp_clear_scheduled_hook()` cannot see them, which is
-         * exactly what the migration must not pretend to have cleared.
-         *
-         * @param array<int, mixed> $args
-         */
-        function wp_schedule_single_event(int $timestamp, string $hook, array $args = []): bool
-        {
-            $cron = _get_cron_array();
-            $cron[$timestamp][$hook][md5(serialize($args))] = [
-                'schedule' => false,
-                'args'     => $args,
-            ];
-            ksort($cron);
-            update_option('cron', $cron);
-
-            return true;
-        }
-    }
+    /*
+     * ⚠ NO wp_schedule_single_event() SHIM HERE.
+     *
+     * tests/Integration/bootstrap.php already defines one for bcc-core's
+     * AsyncDispatcher fallback, so a guarded definition at this point would
+     * never load — and the first version of this file learned that the hard
+     * way, by asserting a precondition that silently never held. The single
+     * event the executor-queue case needs is written straight into the cron
+     * option by DiscoveryMaintenanceCronIntegrationTest::queueSingleEvent().
+     */
 
     if (!function_exists('wp_schedule_event')) {
         /**
@@ -274,6 +258,34 @@ namespace BCC\Trust\Tests\Integration {
         }
 
         /**
+         * Put a SINGLE event into the cron option directly.
+         *
+         * ⚠ Deliberately not `wp_schedule_single_event()`. The integration
+         * bootstrap already defines that function for bcc-core's
+         * AsyncDispatcher fallback, so a guarded definition in this file's
+         * prologue would never load and the bootstrap's version does not
+         * write the `(timestamp → hook → md5(args))` shape these assertions
+         * read. Building the row here makes the precondition independent of
+         * which shim won, which is the whole point of a precondition.
+         *
+         * Core stores `'schedule' => false` and no `interval` for a single
+         * event, and keys it by its ARGS — which is exactly why the executor
+         * queue survives a no-argument `wp_clear_scheduled_hook()`.
+         *
+         * @param array<int, mixed> $args
+         */
+        private static function queueSingleEvent(int $timestamp, string $hook, array $args): void
+        {
+            $cron = \_get_cron_array();
+            $cron[$timestamp][$hook][md5(serialize($args))] = [
+                'schedule' => false,
+                'args'     => $args,
+            ];
+            ksort($cron);
+            \update_option('cron', $cron);
+        }
+
+        /**
          * @param array<int, mixed> $args
          * @return array{schedule: string|false, args: array<int, mixed>, interval?: int}|null
          */
@@ -299,31 +311,26 @@ namespace BCC\Trust\Tests\Integration {
             self::assertContains(self::HOOK, $lists['cleanup_only']);
         }
 
-        /**
-         * The generalised property the old
-         * `testEveryDeclaredRecurringHookCanBeScheduled` existed for, kept
-         * without naming the retired hook: a declared hook whose interval is
-         * unregistered can never be scheduled, and would be reported MISSING
-         * forever.
+        /*
+         * ⚠ NOT ASSERTED HERE: "every declared recurring hook has a
+         * registered interval".
+         *
+         * The old `testEveryDeclaredRecurringHookCanBeScheduled` asserted it
+         * for the ONE hook this file was about, which was legitimate because
+         * that hook was in scope. Generalising it to the whole `recurring`
+         * map is a genuinely useful invariant — a declared hook whose
+         * interval nothing registers can never be scheduled and is reported
+         * MISSING forever, which is the PR 7A failure class — but it cannot
+         * be asserted honestly from this file: the intervals come from five
+         * separate `cron_schedules` registrars (CronService,
+         * PageReadModelSync, ChainRefreshService, DisputeScheduler and a
+         * closure in Plugin.php), and the hand-written `wp_get_schedules()`
+         * in the prologue above knows only the handful this file needs.
+         *
+         * Asserting it against that stub would measure the stub. It belongs in
+         * a test that assembles the real registrars, and it is recorded as a
+         * gap rather than faked here.
          */
-        public function testEveryStillDeclaredRecurringHookHasARegisteredInterval(): void
-        {
-            /** @var array{recurring: array<string, array{interval: string}>} $lists */
-            $lists     = require dirname(__DIR__, 2) . '/includes/cron-hooks.php';
-            $schedules = \wp_get_schedules();
-
-            $checked = 0;
-            foreach ($lists['recurring'] as $hook => $meta) {
-                self::assertArrayHasKey(
-                    $meta['interval'],
-                    $schedules,
-                    $hook . ' declares an interval nothing registers'
-                );
-                $checked++;
-            }
-
-            self::assertGreaterThan(20, $checked, 'anti-vacuity: the recurring list is not empty');
-        }
 
         /**
          * The locally-defined status constants really are the runner's.
@@ -419,7 +426,7 @@ namespace BCC\Trust\Tests\Integration {
         public function testTheExecutorQueueSurvivesTheMigration(): void
         {
             \wp_schedule_event(time(), 'bcc_five_minutes', self::HOOK);
-            \wp_schedule_single_event(time() + 60, self::EXECUTOR_HOOK, [4242]);
+            self::queueSingleEvent(time() + 60, self::EXECUTOR_HOOK, [4242]);
 
             self::assertNotNull(
                 $this->scheduledEvent(self::EXECUTOR_HOOK, [4242]),
