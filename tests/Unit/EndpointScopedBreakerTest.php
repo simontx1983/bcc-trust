@@ -158,16 +158,33 @@ final class EndpointScopedBreakerTest extends TestCase
      * confirmation that only re-checked the count would clear rows nobody
      * reviewed.
      */
-    public function testTheDigestIsSensitiveToWhichRowsNotJustHowMany(): void
+    /**
+     * The reviewed digest is gone, and so is this test's subject.
+     *
+     * It asserted that the digest covered WHICH code families held a cursor
+     * and not merely how many - a real property, of a mechanism that existed
+     * to protect scanner cursors. There are no cursors now, and the staleness
+     * guard is a compare-and-swap on the stored row instead.
+     *
+     * What replaced it, and where:
+     *   - that the write refuses a moved incumbent or a moved identity:
+     *     EndpointTransitionLockAndBreakerTest
+     *   - that the comparison is BYTE-exact, which no PHP fake can show:
+     *     CosmosEndpointSwitchCasIntegrationTest, on MySQL and MariaDB
+     *
+     * Kept as a signpost rather than deleted silently, so a reader looking
+     * for the old guarantee finds out where it went.
+     */
+    public function testTheReviewedDigestWasReplacedByACompareAndSwap(): void
     {
-        $base = CosmosEndpointTransition::digest(8, 'https://a.test', 'https://b.test', [52, 77], false);
-
-        self::assertSame($base, CosmosEndpointTransition::digest(8, 'https://a.test', 'https://b.test', [77, 52], false), 'order must not matter');
-        self::assertNotSame($base, CosmosEndpointTransition::digest(8, 'https://a.test', 'https://b.test', [52, 78], false), 'a different family must change the digest');
-        self::assertNotSame($base, CosmosEndpointTransition::digest(8, 'https://a.test', 'https://b.test', [52], false));
-        self::assertNotSame($base, CosmosEndpointTransition::digest(8, 'https://a.test', 'https://b.test', [52, 77], true), 'the code cursor is part of the plan');
-        self::assertNotSame($base, CosmosEndpointTransition::digest(9, 'https://a.test', 'https://b.test', [52, 77], false));
-        self::assertNotSame($base, CosmosEndpointTransition::digest(8, 'https://a.test', 'https://c.test', [52, 77], false));
+        self::assertFalse(
+            method_exists(CosmosEndpointTransition::class, 'digest'),
+            'the digest is retired; the staleness guard is the CAS'
+        );
+        self::assertTrue(
+            method_exists(CosmosEndpointTransition::class, 'review'),
+            'and the plan is confirmed through a recorded review instead'
+        );
     }
 
     // ── the refusal verdict ─────────────────────────────────────────────
