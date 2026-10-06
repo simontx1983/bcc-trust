@@ -36,6 +36,25 @@ PHPUNIT="vendor/bin/phpunit"
 # it passed.
 #
 # PAGE is dropped too: M7 was its only user.
+#
+# ── ⚠ AND THE ANCHORS ARE NOW EOL-AGNOSTIC ────────────────────────────────
+#
+# Running the retained controls for the first time (isolated container, PHP
+# 8.2, gmp+mysqli, the COMMITTED tree) showed M2, M4, M5 and M6 reporting
+# `broken` — "the control tested nothing". Their anchor strings hard-coded
+# "\r\n", so they only matched a Windows working copy; against the committed
+# LF bytes `substr_count($s, $old)` was 0 and each mutation exited 1. Only M3
+# worked, because its anchor is a single line with no newline in it.
+#
+# These controls had therefore never run anywhere that uses the committed
+# bytes — which is every Linux checkout, and would be CI if this script were
+# ever wired in. Each anchor now derives its newline from the file it is about
+# to mutate, so the same control works from a CRLF checkout and an LF one.
+#
+# ⚠ This script is still NOT CI-wired. It must be run deliberately, and it
+# must be run against the committed bytes — `git -c core.autocrlf=false
+# archive` on a Windows clone, or any Linux checkout. A plain `git archive`
+# honours autocrlf and hands you CRLF, which is what hid this.
 BUDGET="app/Domain/Onchain/Support/ProviderRequestBudget.php"
 HOLDINGS="app/Domain/Onchain/Services/HoldingsService.php"
 MAINTENANCE="app/Domain/Onchain/Workers/DiscoveryRunMaintenance.php"
@@ -100,8 +119,9 @@ echo "── scanner-freeze mutation controls ───────────�
 # 2. Re-couple the budget primitive to the scanner: the structural test must notice.
 mutate "$BUDGET" '
 $f = $argv[1]; $s = file_get_contents($f);
-$old = "    public function __construct(int \$requests, int \$runtimeSeconds)\r\n    {\r\n        \$this->remaining = \$requests;";
-$new = "    public function __construct(int \$requests, int \$runtimeSeconds)\r\n    {\r\n        \$this->remaining = \$requests > 0 ? \$requests : CosmwasmDiscoveryGate::requestBudget();";
+$nl = strpos($s, "\r\n") !== false ? "\r\n" : "\n";
+$old = "    public function __construct(int \$requests, int \$runtimeSeconds)" . $nl . "    {" . $nl . "        \$this->remaining = \$requests;";
+$new = "    public function __construct(int \$requests, int \$runtimeSeconds)" . $nl . "    {" . $nl . "        \$this->remaining = \$requests > 0 ? \$requests : CosmwasmDiscoveryGate::requestBudget();";
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
 ' 'ProviderRequestBudgetIsNeutralTest' 'M2 the budget reads CosmwasmDiscoveryGate again'
@@ -118,8 +138,9 @@ file_put_contents($f, str_replace($old, $new, $s));
 # 4. Turn an exhausted budget into a decision against the member: fail-safe must notice.
 mutate "$HOLDINGS" '
 $f = $argv[1]; $s = file_get_contents($f);
-$old = "        if (\$reason !== null) {\r\n            return EligibilityVerdict::unknownBecause(\$min, \$best, \$reason);\r\n        }";
-$new = "        if (\$reason !== null) {\r\n            if (\$reason === EligibilityVerdict::REASON_BUDGET_EXHAUSTED) {\r\n                return EligibilityVerdict::ineligible(\$min, \$best ?? 0);\r\n            }\r\n            return EligibilityVerdict::unknownBecause(\$min, \$best, \$reason);\r\n        }";
+$nl = strpos($s, "\r\n") !== false ? "\r\n" : "\n";
+$old = "        if (\$reason !== null) {" . $nl . "            return EligibilityVerdict::unknownBecause(\$min, \$best, \$reason);" . $nl . "        }";
+$new = "        if (\$reason !== null) {" . $nl . "            if (\$reason === EligibilityVerdict::REASON_BUDGET_EXHAUSTED) {" . $nl . "                return EligibilityVerdict::ineligible(\$min, \$best ?? 0);" . $nl . "            }" . $nl . "            return EligibilityVerdict::unknownBecause(\$min, \$best, \$reason);" . $nl . "        }";
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
 ' 'NftRevocationFailSafeTest::testJoinStopsAtItsBudgetAndFailsClosed' 'M4 budget exhaustion becomes INELIGIBLE'
@@ -127,7 +148,8 @@ file_put_contents($f, str_replace($old, $new, $s));
 # 5. Restore the maintenance sweep's redispatch: the background freeze test must notice.
 mutate "$MAINTENANCE" '
 $f = $argv[1]; $s = file_get_contents($f);
-$old = "        if (ScannerFreeze::frozen()) {\r\n            return \$result;\r\n        }\r\n";
+$nl = strpos($s, "\r\n") !== false ? "\r\n" : "\n";
+$old = "        if (ScannerFreeze::frozen()) {" . $nl . "            return \$result;" . $nl . "        }" . $nl;
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, "", $s));
 ' 'ScannerBackgroundEntryPointsAreFrozenTest' 'M5 the five-minute sweep requeues and re-dispatches again'
@@ -135,7 +157,8 @@ file_put_contents($f, str_replace($old, "", $s));
 # 6. Restore executor execution: a pending Action Scheduler action would run again.
 mutate "$EXECUTOR" '
 $f = $argv[1]; $s = file_get_contents($f);
-$old = "        if (ScannerFreeze::frozen()) {\r\n            return [\x27status\x27 => \x27frozen\x27, \x27run_id\x27 => \$runId];\r\n        }\r\n";
+$nl = strpos($s, "\r\n") !== false ? "\r\n" : "\n";
+$old = "        if (ScannerFreeze::frozen()) {" . $nl . "            return [\x27status\x27 => \x27frozen\x27, \x27run_id\x27 => \$runId];" . $nl . "        }" . $nl;
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, "", $s));
 ' 'ScannerBackgroundEntryPointsAreFrozenTest' 'M6 a queued executor action claims and runs again'
