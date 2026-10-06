@@ -743,10 +743,34 @@ final class NftIndexerStatusView
 
     /**
      * Create the shared Helius webhook. Mutates EXTERNAL provider state.
+     *
+     * ── WHY requirePost() IS NOT OPTIONAL HERE ──────────────────────────
+     * `admin-post.php` dispatches `admin_post_{action}` for GET as well as
+     * POST — it reads the action out of `$_REQUEST`, and
+     * `check_admin_referer()` reads `$_REQUEST['_wpnonce']`. Several
+     * handlers in this tree are inert on GET only by accident, because they
+     * happen to read a required argument out of `$_POST`. This one reads
+     * NOTHING from the request, so nothing stopped a GET carrying a valid
+     * nonce from running to completion and creating a billable external
+     * webhook — from a replayed URL, a prefetch, a link preview or an
+     * `<img src>`. The method is checked BEFORE the nonce so a GET is
+     * refused on its method (405) rather than on its arguments.
+     *
+     * ── AND WHY THE NONCE SCOPE IS LEFT ALONE ───────────────────────────
+     * The shared webhook is a SITE SINGLETON: one
+     * `bcc_helius_shared_webhook_id` option,
+     * `provisionSharedWebhook()` no-ops and returns the existing id when it
+     * is already set, and `HeliusWebhookEndpoint::callbackUrl()` takes no
+     * parameters. There is no id to bind to, so an `<action>_<id>` target
+     * would be invented rather than discovered. Page-wide is correct here —
+     * contrast `ACTION_RUN . '_' . $chainId` and
+     * `ACTION_SET_STATE . '_' . $chainId . '_' . $newState` in this same
+     * file, where the operator really is authorising one named row.
      */
     public static function handleHeliusProvision(): void
     {
         AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
         AdminActionSupport::requireNonce(self::ACTION_HELIUS_PROVISION);
 
         try {
@@ -768,10 +792,17 @@ final class NftIndexerStatusView
     /**
      * Repoint the shared Helius webhook's address list. Mutates EXTERNAL
      * provider state. Idempotent — reports a no-op when already in sync.
+     *
+     * Same reasoning as {@see handleHeliusProvision()}: it reads nothing
+     * from the request, so only an explicit method gate keeps a GET from
+     * PATCHing the live webhook's address list. Idempotence limits the
+     * damage; it does not make the request authorised. The singleton nonce
+     * scope is likewise left as it is.
      */
     public static function handleHeliusResync(): void
     {
         AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
         AdminActionSupport::requireNonce(self::ACTION_HELIUS_RESYNC);
 
         try {
