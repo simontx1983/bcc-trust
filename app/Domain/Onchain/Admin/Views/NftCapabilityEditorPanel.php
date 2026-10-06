@@ -200,9 +200,8 @@ final class NftCapabilityEditorPanel
      */
     private static function renderManualPermission(string $family, int $chainId, array $chain): void
     {
-        $state    = $chain['manual_enabled'] ?? null;
-        $product  = $chain['bcc_supports'] ?? null;
-        $measured = ($chain['measured_unsupported'] ?? false) === true;
+        $state   = $chain['manual_enabled'] ?? null;
+        $product = $chain['bcc_supports'] ?? null;
 
         // ⚠⚠⚠ THE SAME FIELD THE WRITER GRANTS ON.
         //
@@ -269,17 +268,19 @@ final class NftCapabilityEditorPanel
                     <td style="width:200px;"><strong>Current value</strong></td>
                     <td><?php self::printTriState($state, 'Permitted', 'Not permitted'); ?></td>
                 </tr>
-                <?php if ($measured): ?>
-                    <tr>
-                        <td><strong>Measured capability</strong></td>
-                        <td style="color:#d63638;">
-                            <strong>This chain answered that it has no CosmWasm module.</strong>
-                            Granting the permission will not change that: enumeration stays refused
-                            on the measurement, the backfill control is not offered, and no operator
-                            setting can make a wasm module appear.
-                        </td>
-                    </tr>
-                <?php endif; ?>
+<?php
+                // S5 removed a "Measured capability" row here. It read
+                // `measured_unsupported` off the matrix and told the operator
+                // that enumeration stayed refused on a stored 501 measurement
+                // and that the backfill control was therefore not offered.
+                //
+                // Both halves of that sentence are now false: S4 withdrew the
+                // backfill control outright, and S5 removed the capability
+                // rung that refused on the stored measurement. The row is
+                // deleted rather than left rendering a claim the code no
+                // longer makes — a stale explanation is worse than none,
+                // because an operator acts on it.
+                ?>
                 <tr>
                     <td><strong>Change it</strong></td>
                     <td>
