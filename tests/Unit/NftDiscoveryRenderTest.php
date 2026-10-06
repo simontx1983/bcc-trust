@@ -97,7 +97,6 @@ final class NftDiscoveryRenderTest extends TestCase
         ];
     }
 
-    #[DataProvider('statusSentences')]
 
     /** @return array<string, array{0: string, 1: string}> */
     public static function unavailableStoreSentences(): array
@@ -114,7 +113,6 @@ final class NftDiscoveryRenderTest extends TestCase
      * The unreadable-store reasons are told apart, because they are told
      * apart upstream and collapsing them here would waste that.
      */
-    #[DataProvider('unavailableStoreSentences')]
 
 
 
@@ -153,10 +151,8 @@ final class NftDiscoveryRenderTest extends TestCase
      * an API key sitting in a URL, and this is the one field on the page
      * whose content we do not write.
      */
-    #[DataProvider('credentialBearingText')]
 
     /** The same discipline for the run report's recorded reasons. */
-    #[DataProvider('credentialBearingText')]
 
 
     // ═══════════════════════════════════════════════════════════════════
@@ -173,7 +169,6 @@ final class NftDiscoveryRenderTest extends TestCase
         ];
     }
 
-    #[DataProvider('partialStopReasons')]
 
 
 
@@ -192,7 +187,6 @@ final class NftDiscoveryRenderTest extends TestCase
         ];
     }
 
-    #[DataProvider('nonEnumeratingFamilies')]
 
     /** Wallet refresh is named as a separate method, and offered no button. */
     public function testWalletRefreshIsDescribedAndNeverTriggered(): void

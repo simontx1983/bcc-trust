@@ -271,10 +271,21 @@ final class CosmwasmOneShotCliTest extends TestCase
     /**
      * THE WIRING, not an invocation.
      *
-     * The class must be named in exactly ONE place in the whole plugin
-     * outside its own file and this test: inside bcc-trust.php's
-     * `if (defined('WP_CLI') && WP_CLI)` block. No add_action, no
-     * register_rest_route, no admin_post, no wp_ajax, no cron hook.
+     * ⚠ THIS CASE INVERTED AT S4, AND IS NOW STRONGER.
+     *
+     * It used to require the class to be named in exactly ONE place outside
+     * its own file — inside bcc-trust.php's
+     * `if (defined('WP_CLI') && WP_CLI)` block — because that single
+     * registration was the command's only entry point.
+     *
+     * S4 withdrew that registration. So the requirement is no longer "named
+     * once, in the right block"; it is "named NOWHERE". The command is
+     * unreachable from any bootstrap at all, web or CLI, and the class is
+     * retained only because the implementation is retained.
+     *
+     * The second half of the original assertion is unchanged and still
+     * carries the weight it always did: no add_action, register_rest_route,
+     * admin_post, wp_ajax or cron callback anywhere under app/ may name it.
      */
     public function testTheCommandIsUnreachableFromAnyWebBootstrap(): void
     {
@@ -282,37 +293,22 @@ final class CosmwasmOneShotCliTest extends TestCase
         $bootstrap = $this->codeWithoutComments((string) file_get_contents($root . '/bcc-trust.php'));
 
         self::assertSame(
-            1,
+            0,
             substr_count($bootstrap, 'CosmwasmOneShotDiscoveryCommand'),
-            'the command must be registered exactly once'
+            'S4 withdrew the registration: the bootstrap must not name the command at all'
+        );
+        self::assertStringNotContainsString(
+            "'bcc-trust cosmwasm'",
+            $bootstrap,
+            'the command name must not appear either'
         );
 
-        // Brace-match the WP-CLI guard and prove the registration is inside it.
-        $guard = "if (defined('WP_CLI') && WP_CLI) {";
-        $start = strpos($bootstrap, $guard);
-        self::assertIsInt($start, 'the WP-CLI guard block must exist verbatim');
-
-        $depth = 0;
-        $end   = null;
-        for ($i = $start + strlen($guard) - 1, $len = strlen($bootstrap); $i < $len; $i++) {
-            if ($bootstrap[$i] === '{') {
-                $depth++;
-            } elseif ($bootstrap[$i] === '}') {
-                $depth--;
-                if ($depth === 0) {
-                    $end = $i;
-                    break;
-                }
-            }
-        }
-        self::assertIsInt($end, 'the WP-CLI guard block must close');
-
-        $block = substr($bootstrap, $start, $end - $start + 1);
-        self::assertStringContainsString(
-            'CosmwasmOneShotDiscoveryCommand',
-            $block,
-            'the ONLY registration must sit inside `if (defined(\'WP_CLI\') && WP_CLI)`'
-        );
+        // Non-vacuity: the WP-CLI block still exists and still registers the
+        // commands that are not scanner entry points, so the absence above is
+        // about this command rather than a bootstrap that failed to load.
+        self::assertStringContainsString("if (defined('WP_CLI') && WP_CLI) {", $bootstrap);
+        self::assertStringContainsString("'bcc-trust push'", $bootstrap);
+        self::assertStringContainsString("'bcc-trust gate-identity'", $bootstrap);
 
         // And nothing else in the plugin mentions it — that is what rules
         // out a REST controller, an AJAX handler or a cron callback

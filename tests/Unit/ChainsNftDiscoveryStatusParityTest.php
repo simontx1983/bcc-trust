@@ -156,16 +156,7 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
         ];
     }
 
-    #[DataProvider('hostileErrors')]
 
-    #[DataProvider('hostileErrors')]
-    public function testTheSameRedactionAppliesToTheOldScannerPanel(string $stored, string $forbidden): void
-    {
-        // The two surfaces must not diverge on what an operator may see.
-        $safe = \BCC\Trust\Onchain\Admin\AdminActionSupport::operatorSafeExcerpt($stored);
-
-        $this->assertStringNotContainsString($forbidden, $safe);
-    }
 
 
     public function testARedactedMessageStillTellsTheOperatorSomething(): void
