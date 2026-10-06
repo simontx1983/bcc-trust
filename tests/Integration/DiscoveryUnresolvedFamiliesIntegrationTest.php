@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Tests\Integration;
 
-use BCC\Trust\Onchain\Admin\Views\DiscoveryScanPanel;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\DiscoveryRunRepository;
@@ -41,19 +40,6 @@ use PHPUnit\Framework\TestCase;
 final class DiscoveryUnresolvedFamiliesIntegrationTest extends TestCase
 {
 
-    /**
-     * The scan panel's markup, driven directly.
-     *
-     * The public entry point is frozen (ScannerFreeze) and emits nothing, so these
-     * assertions read the preserved private renderer that still ships. That the entry
-     * point itself emits nothing is pinned by ScannerEntryPointsAreFrozenTest.
-     */
-    private static function renderScanPanelMarkup(object $chain, bool $scannable, string $whyNot = ''): void
-    {
-        $method = new \ReflectionMethod(\BCC\Trust\Onchain\Admin\Views\DiscoveryScanPanel::class, 'renderMarkup');
-        $method->setAccessible(true);
-        $method->invoke(null, $chain, $scannable, $whyNot);
-    }
     private const CHAIN = 90805;
 
     private const OPERATOR = 4245;
@@ -128,17 +114,6 @@ final class DiscoveryUnresolvedFamiliesIntegrationTest extends TestCase
         ));
     }
 
-    private function render(): string
-    {
-        ob_start();
-        self::renderScanPanelMarkup(
-            (object) ['id' => self::CHAIN, 'slug' => 'cosmos', 'name' => 'Cosmos Hub'],
-            true,
-            ''
-        );
-
-        return (string) ob_get_clean();
-    }
 
     private function finishASession(string $stopReason): void
     {
@@ -272,125 +247,10 @@ final class DiscoveryUnresolvedFamiliesIntegrationTest extends TestCase
 
     // ── (3) THE PANEL ───────────────────────────────────────────────────
 
-    /**
-     * What an administrator actually reads.
-     */
-    public function testThePanelReportsUnresolvedRatherThanCompletion(): void
-    {
-        $this->seedExhaustedOnly(10, 1);
-        $this->finishASession('session_provider_errors');
 
-        $html = $this->render();
 
-        // ⚠ NEVER the final zero.
-        self::assertStringNotContainsString('Scan complete', $html);
-        self::assertStringNotContainsString('No supported NFT collections were confirmed', $html);
-        self::assertStringNotContainsString('<strong>Scan complete</strong>', $html);
 
-        // ⚠ NEVER a claim about the chain.
-        self::assertStringNotContainsString('has no NFT', $html);
-        self::assertStringNotContainsString('Nothing remains', $html);
-
-        // The exact count, and the word that matters.
-        self::assertStringContainsString('1 family could not be resolved', $html);
-        self::assertStringContainsString('unresolved, not a negative result', $html);
-        self::assertStringContainsString('Scan session finished.', $html);
-
-        // ⚠ AND IT IS NOT DESCRIBED AS `not_cw721`. The negative verdict
-        // belongs to the eight families that earned it, not to this one.
-        self::assertStringNotContainsString('not_cw721', $html);
-    }
-
-    /** The heading is pass/session-scoped, never the bare `Finished`. */
-    public function testTheHeadingIsSessionScoped(): void
-    {
-        $this->seedExhaustedOnly(10, 1);
-        $this->finishASession('session_provider_errors');
-
-        $html = $this->render();
-
-        self::assertStringContainsString('<strong>Session finished</strong>', $html);
-        self::assertStringNotContainsString('<strong>Finished</strong>', $html);
-    }
-
-    /**
-     * Continue is NOT offered — there is genuinely nothing to claim.
-     *
-     * ⚠ Offering it would send an operator into an empty pass forever.
-     * "Finished with unresolved work" and "more work available" are different
-     * facts, and only the second one earns a Continue button.
-     */
-    public function testContinueIsNotOfferedWhenOnlyUnresolvedFamiliesRemain(): void
-    {
-        $this->seedExhaustedOnly(10, 1);
-        $this->finishASession('session_provider_errors');
-
-        $p = DiscoveryScanProgress::forChain(self::CHAIN);
-        self::assertSame(DiscoveryScanProgress::NO, $p['more_work_available']);
-
-        $html = $this->render();
-        self::assertStringNotContainsString('>Continue scan</button>', $html);
-    }
-
-    /** Rendering this state writes nothing and schedules nothing. */
-    public function testRenderingTheUnresolvedStateWritesNothing(): void
-    {
-        $this->seedExhaustedOnly(10, 1);
-        $this->finishASession('session_provider_errors');
-
-        $wpdb   = $GLOBALS['wpdb'];
-        $before = (string) $wpdb->get_var(
-            'SELECT MD5(GROUP_CONCAT(code_id, classification, retry_count)) FROM `'
-            . CosmwasmCodeFamilyRepository::table() . '` WHERE chain_id = ' . self::CHAIN . ' ORDER BY code_id'
-        );
-        $GLOBALS['bcc_scheduled'] = [];
-
-        $this->render();
-        $this->render();
-
-        $after = (string) $wpdb->get_var(
-            'SELECT MD5(GROUP_CONCAT(code_id, classification, retry_count)) FROM `'
-            . CosmwasmCodeFamilyRepository::table() . '` WHERE chain_id = ' . self::CHAIN . ' ORDER BY code_id'
-        );
-
-        self::assertSame($before, $after, 'an unresolved family must not be rewritten by looking at it');
-        self::assertSame([], $GLOBALS['bcc_scheduled'], 'and nothing may be scheduled');
-    }
 
     // ── (4) DELAYED IS STILL DIFFERENT FROM EXHAUSTED ───────────────────
 
-    /**
-     * A delayed family is NOT unresolved — it still has a future.
-     *
-     * ⚠ The two must not collapse into one another. Delayed work comes back
-     * on its own; exhausted work needs an operator or a classifier-version
-     * bump. Reporting either as the other misleads in opposite directions.
-     */
-    public function testDelayedAndExhaustedAreNotTheSameThing(): void
-    {
-        $this->seedExhaustedOnly(10, 1);
-
-        // One of the negatives becomes merely delayed.
-        $wpdb = $GLOBALS['wpdb'];
-        $wpdb->query($wpdb->prepare(
-            'UPDATE `' . CosmwasmCodeFamilyRepository::table() . '`
-                SET classification = %s, retry_count = 1,
-                    next_attempt_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL 6 HOUR),
-                    classified_at = NULL
-              WHERE chain_id = %d AND code_id = 1',
-            CosmwasmClassifier::UNREACHABLE,
-            self::CHAIN
-        ));
-
-        $p = DiscoveryScanProgress::forChain(self::CHAIN);
-
-        self::assertSame(1, $p['delayed_families'], 'one waiting on backoff');
-        self::assertSame(1, $p['exhausted_families'], 'one out of attempts');
-        self::assertSame(0, $p['eligible_now'], 'and neither is claimable now');
-        self::assertSame(DiscoveryScanProgress::NO, $p['scan_complete']);
-
-        $html = $this->render();
-        self::assertStringContainsString('waiting to be retried later', $html);
-        self::assertStringContainsString('could not be resolved after repeated attempts', $html);
-    }
 }

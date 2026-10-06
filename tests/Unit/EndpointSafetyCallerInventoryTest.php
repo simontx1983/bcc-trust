@@ -68,11 +68,16 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
             'app/Domain/Onchain/Support/CosmosEndpointAuthorization.php',
         ],
         'CosmosEndpointAuthorization::authorize' => [
-            // admin_post: enable discovery for a chain, and the inline
-            // backfill — the only control on that page that spends provider
-            // budget.
-            'app/Domain/Onchain/Admin/NftDiscoveryPage.php',
-            // admin_post / supervised WP-CLI: request or retry a scan.
+            // ⚠ S4 REMOVED `NftDiscoveryPage.php` FROM THIS LIST.
+            // It reached `authorize()` through `prove_endpoint()`, which only
+            // `apply_cw_backfill()` and `apply_cw_discovery()` called. Both
+            // routes are withdrawn, so that page no longer performs the live
+            // probe at all — which is the point: the one control on it that
+            // spent provider budget is gone.
+            //
+            // admin_post / supervised WP-CLI: request or retry a scan. This is
+            // now the ONLY production caller, which is what keeps `authorize()`
+            // satisfying MUST_BE_CALLED below.
             'app/Domain/Onchain/Services/DiscoveryRunService.php',
         ],
 
@@ -102,10 +107,26 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
             // goes with it.
             'app/Domain/Onchain/Support/CosmosEndpointAuthorization.php',
         ],
-        'CosmosEndpointAuthorization::forget' => [
-            // Opting a chain out withdraws the authorization with it.
-            'app/Domain/Onchain/Admin/NftDiscoveryPage.php',
-        ],
+        // ⚠⚠ S4: `CosmosEndpointAuthorization::forget` IS NOW CALLERLESS.
+        //
+        // Its one production caller was `apply_cw_discovery()` — opting a chain
+        // out of scanner discovery withdrew its endpoint authorization at the
+        // same time. That route is withdrawn, so nothing calls `forget()`.
+        //
+        // Unlike `record()` above, there is NO internal caller to keep it
+        // reachable, so it cannot stay in MUST_BE_CALLED: that assertion would
+        // fail by design, which is exactly what it is for. It is removed from
+        // both lists here rather than given a synthetic caller.
+        //
+        // This is NOT "an unused safety method is fine". It is: the thing this
+        // method withdrew permission FOR no longer exists. The permission
+        // record it cleared (`bcc_cosmos_endpoint_authz_<id>`) is still read by
+        // three scanner files, so the class stays; `forget()` and the whole
+        // class retire together in S8, and the leftover options are cleaned up
+        // with the S9 migration.
+        //
+        // Recorded as production-callerless for S8:
+        //   CosmosEndpointAuthorization::forget()
     ];
 
     /**
@@ -120,7 +141,7 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
         'CosmosEndpointAuthorization::authorize',
         'CosmosEndpointAuthorization::isAuthorized',
         'CosmosEndpointAuthorization::record',
-        'CosmosEndpointAuthorization::forget',
+        // 'CosmosEndpointAuthorization::forget' — removed by S4, see above.
         'CosmosEndpointPolicy::isApproved',
         'CosmosEndpointPolicy::normalize',
         'CosmosEndpointPolicy::fingerprint',
@@ -312,7 +333,18 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
     public static function surfacesThatMustNotProbe(): array
     {
         return [
-            'the scanner panel view'  => ['app/Domain/Onchain/Admin/Views/DiscoveryScanPanel.php'],
+            // ⚠ `the scanner panel view` => Views/DiscoveryScanPanel.php was
+            // removed by S4: the file is deleted, and this rule asserts the
+            // file it names exists.
+            //
+            // ⭐ S4 ADDS THE NFT DISCOVERY PAGE, WHICH IS A NEW GUARANTEE.
+            // It was deliberately ABSENT from this list before, because it was
+            // allowed to probe: `prove_endpoint()` reached the live verifier
+            // from `apply_cw_backfill()` and `apply_cw_discovery()`. Both
+            // routes are withdrawn, so the page now probes nothing — and
+            // listing it here turns that from "we deleted the caller" into
+            // "a caller cannot come back without failing a test".
+            'the nft discovery page'  => ['app/Domain/Onchain/Admin/NftDiscoveryPage.php'],
             'the chains page'         => ['app/Domain/Onchain/Admin/ChainsPage.php'],
             'the verify page'         => ['app/Domain/Onchain/Admin/VerifyCollectionsPage.php'],
             'the health snapshot'     => ['app/Domain/Onchain/Services/CosmwasmDiscoveryHealthSnapshot.php'],

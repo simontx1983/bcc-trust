@@ -23,15 +23,45 @@ PHP="${PHP:-php -d extension=mysqli -d memory_limit=2G}"
 PHPUNIT="vendor/bin/phpunit"
 [ -f "$PHPUNIT" ] || { echo "FATAL: phpunit not installed"; exit 2; }
 
-SCAN_ACTIONS="app/Domain/Onchain/Admin/DiscoveryScanActions.php"
+# ── S4: TWO MUTATION TARGETS NO LONGER EXIST ──────────────────────────────
+#
+# SCAN_ACTIONS (Admin/DiscoveryScanActions.php) is DELETED, and the
+# `if (!ScannerFreeze::frozen())` block M7 mutated in NftDiscoveryPage.php is
+# gone with the six CosmWasm routes. Controls M1 and M7 are removed below.
+#
+# They could not simply be left: each `mutate` call asserts its anchor text
+# occurs exactly once and exits 1 otherwise, which this harness counts as
+# `broken` — and `broken` fails the run just as a surviving mutation does. A
+# control whose target has been deleted tests nothing and must not look like
+# it passed.
+#
+# PAGE is dropped too: M7 was its only user.
+#
+# ── ⚠ AND THE ANCHORS ARE NOW EOL-AGNOSTIC ────────────────────────────────
+#
+# Running the retained controls for the first time (isolated container, PHP
+# 8.2, gmp+mysqli, the COMMITTED tree) showed M2, M4, M5 and M6 reporting
+# `broken` — "the control tested nothing". Their anchor strings hard-coded
+# "\r\n", so they only matched a Windows working copy; against the committed
+# LF bytes `substr_count($s, $old)` was 0 and each mutation exited 1. Only M3
+# worked, because its anchor is a single line with no newline in it.
+#
+# These controls had therefore never run anywhere that uses the committed
+# bytes — which is every Linux checkout, and would be CI if this script were
+# ever wired in. Each anchor now derives its newline from the file it is about
+# to mutate, so the same control works from a CRLF checkout and an LF one.
+#
+# ⚠ This script is still NOT CI-wired. It must be run deliberately, and it
+# must be run against the committed bytes — `git -c core.autocrlf=false
+# archive` on a Windows clone, or any Linux checkout. A plain `git archive`
+# honours autocrlf and hands you CRLF, which is what hid this.
 BUDGET="app/Domain/Onchain/Support/ProviderRequestBudget.php"
 HOLDINGS="app/Domain/Onchain/Services/HoldingsService.php"
 MAINTENANCE="app/Domain/Onchain/Workers/DiscoveryRunMaintenance.php"
 EXECUTOR="app/Domain/Onchain/Workers/DiscoveryRunExecutor.php"
-PAGE="app/Domain/Onchain/Admin/NftDiscoveryPage.php"
 
 SNAPDIR="$(mktemp -d)"
-for f in "$SCAN_ACTIONS" "$BUDGET" "$HOLDINGS" "$MAINTENANCE" "$EXECUTOR" "$PAGE"; do
+for f in "$BUDGET" "$HOLDINGS" "$MAINTENANCE" "$EXECUTOR"; do
     cp "$f" "$SNAPDIR/$(basename "$f").orig" || { echo "FATAL: snapshot failed for $f"; exit 2; }
 done
 
@@ -86,19 +116,12 @@ mutate () {
 
 echo "── scanner-freeze mutation controls ─────────────────────────────────────"
 
-# 1. Restore one frozen scanner route: the absence test must notice.
-mutate "$SCAN_ACTIONS" '
-$f = $argv[1]; $s = file_get_contents($f);
-$old = "        if (\\BCC\\Trust\\Onchain\\Support\\ScannerFreeze::frozen()) {\r\n            return;\r\n        }\r\n\r\n";
-if (substr_count($s, $old) !== 1) { exit(1); }
-file_put_contents($f, str_replace($old, "", $s));
-' 'ScannerEntryPointsAreFrozenTest' 'M1 the three scan routes register again'
-
 # 2. Re-couple the budget primitive to the scanner: the structural test must notice.
 mutate "$BUDGET" '
 $f = $argv[1]; $s = file_get_contents($f);
-$old = "    public function __construct(int \$requests, int \$runtimeSeconds)\r\n    {\r\n        \$this->remaining = \$requests;";
-$new = "    public function __construct(int \$requests, int \$runtimeSeconds)\r\n    {\r\n        \$this->remaining = \$requests > 0 ? \$requests : CosmwasmDiscoveryGate::requestBudget();";
+$nl = strpos($s, "\r\n") !== false ? "\r\n" : "\n";
+$old = "    public function __construct(int \$requests, int \$runtimeSeconds)" . $nl . "    {" . $nl . "        \$this->remaining = \$requests;";
+$new = "    public function __construct(int \$requests, int \$runtimeSeconds)" . $nl . "    {" . $nl . "        \$this->remaining = \$requests > 0 ? \$requests : CosmwasmDiscoveryGate::requestBudget();";
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
 ' 'ProviderRequestBudgetIsNeutralTest' 'M2 the budget reads CosmwasmDiscoveryGate again'
@@ -115,8 +138,9 @@ file_put_contents($f, str_replace($old, $new, $s));
 # 4. Turn an exhausted budget into a decision against the member: fail-safe must notice.
 mutate "$HOLDINGS" '
 $f = $argv[1]; $s = file_get_contents($f);
-$old = "        if (\$reason !== null) {\r\n            return EligibilityVerdict::unknownBecause(\$min, \$best, \$reason);\r\n        }";
-$new = "        if (\$reason !== null) {\r\n            if (\$reason === EligibilityVerdict::REASON_BUDGET_EXHAUSTED) {\r\n                return EligibilityVerdict::ineligible(\$min, \$best ?? 0);\r\n            }\r\n            return EligibilityVerdict::unknownBecause(\$min, \$best, \$reason);\r\n        }";
+$nl = strpos($s, "\r\n") !== false ? "\r\n" : "\n";
+$old = "        if (\$reason !== null) {" . $nl . "            return EligibilityVerdict::unknownBecause(\$min, \$best, \$reason);" . $nl . "        }";
+$new = "        if (\$reason !== null) {" . $nl . "            if (\$reason === EligibilityVerdict::REASON_BUDGET_EXHAUSTED) {" . $nl . "                return EligibilityVerdict::ineligible(\$min, \$best ?? 0);" . $nl . "            }" . $nl . "            return EligibilityVerdict::unknownBecause(\$min, \$best, \$reason);" . $nl . "        }";
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
 ' 'NftRevocationFailSafeTest::testJoinStopsAtItsBudgetAndFailsClosed' 'M4 budget exhaustion becomes INELIGIBLE'
@@ -124,7 +148,8 @@ file_put_contents($f, str_replace($old, $new, $s));
 # 5. Restore the maintenance sweep's redispatch: the background freeze test must notice.
 mutate "$MAINTENANCE" '
 $f = $argv[1]; $s = file_get_contents($f);
-$old = "        if (ScannerFreeze::frozen()) {\r\n            return \$result;\r\n        }\r\n";
+$nl = strpos($s, "\r\n") !== false ? "\r\n" : "\n";
+$old = "        if (ScannerFreeze::frozen()) {" . $nl . "            return \$result;" . $nl . "        }" . $nl;
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, "", $s));
 ' 'ScannerBackgroundEntryPointsAreFrozenTest' 'M5 the five-minute sweep requeues and re-dispatches again'
@@ -132,25 +157,16 @@ file_put_contents($f, str_replace($old, "", $s));
 # 6. Restore executor execution: a pending Action Scheduler action would run again.
 mutate "$EXECUTOR" '
 $f = $argv[1]; $s = file_get_contents($f);
-$old = "        if (ScannerFreeze::frozen()) {\r\n            return [\x27status\x27 => \x27frozen\x27, \x27run_id\x27 => \$runId];\r\n        }\r\n";
+$nl = strpos($s, "\r\n") !== false ? "\r\n" : "\n";
+$old = "        if (ScannerFreeze::frozen()) {" . $nl . "            return [\x27status\x27 => \x27frozen\x27, \x27run_id\x27 => \$runId];" . $nl . "        }" . $nl;
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, "", $s));
 ' 'ScannerBackgroundEntryPointsAreFrozenTest' 'M6 a queued executor action claims and runs again'
-
-# 7. Restore the two per-chain scanner opt-in routes.
-mutate "$PAGE" '
-$f = $argv[1]; $s = file_get_contents($f);
-$old = "        if (!ScannerFreeze::frozen()) {\r\n            add_action(\r\n                \x27admin_post_\x27 . self::ACTION_CW_DISCOVERY_ENABLE,";
-$new = "        if (true) {\r\n            add_action(\r\n                \x27admin_post_\x27 . self::ACTION_CW_DISCOVERY_ENABLE,";
-if (substr_count($s, $old) !== 1) { exit(1); }
-file_put_contents($f, str_replace($old, $new, $s));
-' 'ScannerEntryPointsAreFrozenTest' 'M7 the per-chain scanner opt-in routes register again'
-echo "──────────────────────────────────────────────────────────────────────────"
 echo "killed=$killed survived=$survived wrong_reason=$wrong broken=$broken"
 
 # Every file must be byte-identical to its pre-run snapshot.
 clean=1
-for f in "$SCAN_ACTIONS" "$BUDGET" "$HOLDINGS" "$MAINTENANCE" "$EXECUTOR" "$PAGE"; do
+for f in "$BUDGET" "$HOLDINGS" "$MAINTENANCE" "$EXECUTOR"; do
     if ! cmp -s "$SNAPDIR/$(basename "$f").orig" "$f"; then
         echo "FATAL: $f is NOT byte-identical to its snapshot"
         clean=0

@@ -54,17 +54,27 @@ if (!defined('ABSPATH')) {
  * place — only its tick is a no-op. An unregistered callback on a scheduled
  * event is drift a health check has to explain; a registered no-op is not.
  *
- * ── TEMPORARY SCAFFOLDING, TO BE DELETED WITH THE SCANNER ───────────────
- * Freezing a renderer would have deleted its DOM coverage, so each frozen
- * renderer keeps its markup in a PRIVATE twin that the existing tests drive
- * directly: `CosmwasmScannerPanel::renderMarkup()` /
- * `::renderCandidateDetailMarkup()`, `DiscoveryScanPanel::renderMarkup()` and
- * `NftDiscoveryPage::render_cw_operation_control_markup()`.
+ * ── S4: THE SCAFFOLDING IS GONE, AND SO IS THE OPERATOR SURFACE ─────────
+ * This docblock used to describe four private `*Markup()` twins —
+ * `CosmwasmScannerPanel::renderMarkup()` / `::renderCandidateDetailMarkup()`,
+ * `DiscoveryScanPanel::renderMarkup()` and
+ * `NftDiscoveryPage::render_cw_operation_control_markup()` — which existed so
+ * that freezing a renderer did not delete its DOM coverage. It called them
+ * scaffolding and said the deletion PR must remove them with the panels and
+ * the tests that drive them. S4 is that step for the SURFACE: all four twins,
+ * both panel classes, the two admin-route classes and the eleven entry points
+ * they served are deleted, along with the tests whose only subject was the
+ * markup.
  *
- * ⚠ These twins are SCAFFOLDING, not architecture. They exist only to keep
- * the retained markup under test while it is unreachable, and the scanner-
- * deletion PR MUST delete them along with the panels, the tests that drive
- * them and this class. Do not add more of them, and do not build on them.
+ * ⚠ WHAT THIS CLASS STILL DOES. Two background entry points remain frozen —
+ * the five-minute maintenance sweep and the async executor — and `frozen()`
+ * is what keeps the RETAINED scanner implementation inert: the worker, the
+ * sweep, the executor and the one-shot CLI class all still consult it. The
+ * implementation is untouched by S4 and is deleted in the leaf-removal stage,
+ * which is when this class goes with it.
+ *
+ * The maintenance HOOK also stays registered and its schedule is left in
+ * place, for the reason stated above.
  *
  * Guarded by ScannerEntryPointsAreFrozenTest and
  * ScannerBackgroundEntryPointsAreFrozenTest.
@@ -79,25 +89,35 @@ final class ScannerFreeze
      * an inventory of operator-facing routes alone would have described a
      * freeze that a five-minute cron and a queued async action walked straight
      * through.
+     *
+     * ── S4: ELEVEN ENTRY POINTS LEFT THIS LIST BY BEING DELETED ─────────
+     * This inventory used to carry eleven more names — eight admin-post
+     * routes, one `wp_ajax_` action and one `cli:` command:
+     *
+     *   admin_post_bcc_discovery_scan_request / _retry / _cancel
+     *   wp_ajax_bcc_discovery_run_status
+     *   admin_post_bcc_chain_cw_pause / _resume / _backfill / _retry
+     *   admin_post_bcc_chain_cw_discovery_enable / _disable
+     *   cli:bcc-trust cosmwasm
+     *
+     * None of them is frozen any more, because none of them exists. A freeze
+     * list names what is reachable in principle and refused in practice; a
+     * deleted route is neither. Keeping them would describe a guard standing
+     * over nothing, and the inventory test would assert against routes no
+     * file registers.
+     *
+     * ⚠ THE TWO THAT REMAIN ARE STILL LOAD-BEARING. The five-minute sweep and
+     * the async executor are deliberately left registered — an unregistered
+     * callback on a scheduled event is drift a health check has to explain,
+     * and a queued action that lands on nothing is worse than one refused.
+     * They retire in their own stage, once the queue is confirmed empty.
+     *
+     * ⚠⚠ `frozen()` IS UNCHANGED AND MUST STAY THAT WAY. The retained scanner
+     * readers — the worker, the maintenance sweep, the executor and the
+     * one-shot CLI class — still consult it, and it is what keeps them inert.
+     * S4 withdrew the surface, not the freeze.
      */
     public const FROZEN_ENTRY_POINTS = [
-        // ── Operator-facing: admin-post routes and the run-status AJAX call ──
-        'admin_post_bcc_discovery_scan_request',
-        'admin_post_bcc_discovery_scan_retry',
-        'admin_post_bcc_discovery_scan_cancel',
-        'wp_ajax_bcc_discovery_run_status',
-        'admin_post_bcc_chain_cw_pause',
-        'admin_post_bcc_chain_cw_resume',
-        'admin_post_bcc_chain_cw_backfill',
-        'admin_post_bcc_chain_cw_retry',
-        // Per-chain scanner opt-in. `cosmwasm_nft_discovery_enabled` is read only by the
-        // scanner (gate, eligibility, one-shot CLI, health snapshot); no ownership,
-        // manual-intake or capability path consumes it. The separate manual controls
-        // (`bcc_supports_nft_collections`, `manual_collection_discovery_enabled`) are
-        // different columns with their own routes and are NOT frozen.
-        'admin_post_bcc_chain_cw_discovery_enable',
-        'admin_post_bcc_chain_cw_discovery_disable',
-
         // ── Background: the paths that need no operator at all ──────────────
         // The five-minute sweep requeues expired leases, terminalizes exhausted
         // runs, finds dispatchable ones and enqueues the executor. Its callback
@@ -107,9 +127,6 @@ final class ScannerFreeze
         // that already exists, so an action queued before this deployment fires
         // and is refused before the claim.
         'async:bcc_discovery_run_execute',
-
-        // ── Command line ────────────────────────────────────────────────────
-        'cli:bcc-trust cosmwasm',
     ];
 
     /**

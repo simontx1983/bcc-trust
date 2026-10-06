@@ -302,60 +302,6 @@ final class DiscoveryReadinessTest extends TestCase
 
     // ── the page renders only the supported set ─────────────────────────
 
-    /**
-     * The scan surface is FILTERED, and filtered by the product switch.
-     *
-     * ── WHY THIS IS ASSERTED OVER THE REAL PAGE SOURCE ──────────────────
-     * `VerifyCollectionsPage::render()` needs the whole admin bootstrap —
-     * capabilities, tabs, four repository reads — so unit-rendering it
-     * would test the harness. What must not regress is narrower and is
-     * checkable directly: the render loop iterates a set produced by
-     * `isNftDiscoverySurface()`, not `ChainRepository::getActive('cosmos')`
-     * whole. PR 7 shipped the unfiltered version and put a Scan button on
-     * Jackal and Osmosis.
-     *
-     * ⚠ Asserted over COMMENT-STRIPPED source: the explanation above the
-     * loop legitimately mentions `getActive`, and matching prose would make
-     * the comment the failure.
-     */
-    public function testTheAdminPageRendersOnlyTheSupportedScanSurface(): void
-    {
-        $src = (string) file_get_contents(
-            dirname(__DIR__, 2) . '/app/Domain/Onchain/Admin/VerifyCollectionsPage.php'
-        );
-
-        $code = '';
-        foreach (token_get_all($src) as $token) {
-            if (is_array($token) && in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true)) {
-                continue;
-            }
-            $code .= is_array($token) ? $token[1] : $token;
-        }
-
-        // The filter exists and is the product-support one.
-        self::assertStringContainsString(
-            'DiscoveryReadiness::isNftDiscoverySurface',
-            $code,
-            'the scan surface must be filtered by product support'
-        );
-
-        // And the panel loop consumes the FILTERED set, never the raw
-        // active-cosmos list. This is the assertion that fails if the
-        // filter is computed and then ignored.
-        self::assertMatchesRegularExpression(
-            '/foreach\s*\(\s*\$scanChains\s+as\s+\$scanChain\s*\)/',
-            $code,
-            'the render loop must iterate the filtered set'
-        );
-        self::assertDoesNotMatchRegularExpression(
-            '/foreach\s*\(\s*ChainRepository::getActive\(\s*[\'"]cosmos[\'"]\s*\)\s+as\s+\$scanChain\s*\)/',
-            $code,
-            'the render loop must not iterate every active cosmos chain'
-        );
-
-        // The readiness reason reaches the panel rather than a hardcoded one.
-        self::assertStringContainsString('DiscoveryReadiness::forSummaryRow', $code);
-    }
 
     // ── (22) no chain identity is hardcoded ─────────────────────────────
 

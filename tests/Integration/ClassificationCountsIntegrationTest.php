@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Tests\Integration;
 
-use BCC\Trust\Onchain\Admin\Views\DiscoveryScanPanel;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
 use BCC\Trust\Onchain\Repositories\DiscoveryRunRepository;
@@ -35,19 +34,6 @@ use PHPUnit\Framework\TestCase;
 final class ClassificationCountsIntegrationTest extends TestCase
 {
 
-    /**
-     * The scan panel's markup, driven directly.
-     *
-     * The public entry point is frozen (ScannerFreeze) and emits nothing, so these
-     * assertions read the preserved private renderer that still ships. That the entry
-     * point itself emits nothing is pinned by ScannerEntryPointsAreFrozenTest.
-     */
-    private static function renderScanPanelMarkup(object $chain, bool $scannable, string $whyNot = ''): void
-    {
-        $method = new \ReflectionMethod(\BCC\Trust\Onchain\Admin\Views\DiscoveryScanPanel::class, 'renderMarkup');
-        $method->setAccessible(true);
-        $method->invoke(null, $chain, $scannable, $whyNot);
-    }
     private const CHAIN = 90807;
 
     private const OPERATOR = 4247;
@@ -236,45 +222,6 @@ final class ClassificationCountsIntegrationTest extends TestCase
 
     // ── (3) WHAT THE OPERATOR READS ─────────────────────────────────────
 
-    /** ⚠ THE LIVE REGRESSION, RENDERED: 12 confirmed, 1 probable — not 13. */
-    public function testThePanelReportsTwelveConfirmedAndOneProbable(): void
-    {
-        $this->seedLiveShape();
-
-        $created = DiscoveryRunRepository::insertQueued(
-            DiscoveryJobKind::COSMWASM_DISCOVERY,
-            DiscoveryScanMode::INCREMENTAL,
-            self::CHAIN,
-            self::OPERATOR
-        );
-        self::assertIsArray($created);
-        $token = DiscoveryRunRepository::claim((int) $created['id']);
-        self::assertIsString($token);
-        self::assertTrue(DiscoveryRunRepository::markSucceeded(
-            (int) $created['id'],
-            $token,
-            'session_chunk_ceiling',
-            true,
-            ['requests_used' => 772, 'families_seen' => 197, 'collections_emitted' => 6]
-        ));
-
-        ob_start();
-        self::renderScanPanelMarkup(
-            (object) ['id' => self::CHAIN, 'slug' => 'cosmos', 'name' => 'Cosmos Hub'],
-            true,
-            ''
-        );
-        $html = (string) ob_get_clean();
-
-        self::assertStringContainsString('12 NFT collection families confirmed.', $html);
-        self::assertStringContainsString('1 possible NFT collection family needs administrator review.', $html);
-        self::assertStringContainsString('1 possible collection family needs your review', $html);
-
-        // ⚠ THE FALSE SENTENCE, IN EVERY PHRASING.
-        self::assertStringNotContainsString('13 NFT collection families', $html);
-        self::assertStringNotContainsString('13 NFT collection families are confirmed so far', $html);
-        self::assertStringNotContainsString('13 NFT collection families confirmed', $html);
-    }
 
     /**
      * ⚠ A PROBABLE-ONLY COMPLETE CHAIN MUST NOT CLAIM "NO NFT COLLECTIONS".

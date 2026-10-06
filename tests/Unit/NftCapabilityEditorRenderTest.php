@@ -507,7 +507,13 @@ final class NftCapabilityEditorRenderTest extends TestCase
                 'an editor form must never post to a work-starting route'
             );
         }
-        $this->assertStringNotContainsString(NftDiscoveryPage::ACTION_CW_BACKFILL, $panel);
+        // ⚠ S4 REMOVED a trailing belt-and-braces line here that asserted the
+        // panel did not contain `NftDiscoveryPage::ACTION_CW_BACKFILL`. That
+        // constant is deleted with the backfill route, so the line would not
+        // compile — and the guarantee it guarded is now stronger than it was:
+        // the loop above requires EVERY form action to start `bcc_nft_cap_`,
+        // which no longer has a work-starting route on the page to be confused
+        // with in the first place.
     }
 
     /** Render just the panel, so the assertion is about the editor's own forms. */

@@ -1900,15 +1900,15 @@ add_action('plugins_loaded', function (): void {
     // a capability check, POST-only, with a route-and-chain-scoped nonce.
     \BCC\Trust\Onchain\Admin\NftDiscoveryPage::register_actions();
     \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_ajax();
-    // PR 7A: read-only run status. No UI ships in this PR; the endpoint
-    // exists so the read model is exercised and proven before PR 7
-    // renders it.
-    \BCC\Trust\Onchain\Admin\DiscoveryRunStatusEndpoint::register();
-
-    // PR 7: the administrator "Scan On-Chain for Easy Discovery" actions.
-    // A thin POST/nonce/capability shell over the PR 7A ledger — it owns no
-    // discovery logic, contacts no provider, and never chooses a scan mode.
-    \BCC\Trust\Onchain\Admin\DiscoveryScanActions::register();
+    // ── S4: THE SCAN SURFACE IS GONE, NOT FROZEN ────────────────────────
+    //
+    // `DiscoveryRunStatusEndpoint::register()` (the run-status AJAX read) and
+    // `DiscoveryScanActions::register()` (the three admin-post scan routes)
+    // used to be called here. Both classes are deleted: the routes they
+    // registered were already unreachable behind ScannerFreeze, so this
+    // removes dead registration code rather than changing what a request can
+    // reach. The run LEDGER and its service are retained — only the ways an
+    // operator could reach them are withdrawn.
     \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_actions();
     \BCC\Trust\Onchain\Admin\WebhooksPage::register_actions();
     \BCC\Trust\Onchain\Admin\HolderGroupsPage::register_actions();
@@ -2185,21 +2185,16 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust vmq',
         \BCC\Trust\Onchain\CLI\ValidatorMsgQueueCommand::class
     );
-    // ONE supervised CosmWasm discovery pass, for ONE chain, watched by a
-    // human. THIS IS THE ONLY ENTRY POINT IT HAS: there is deliberately no
-    // REST route, no admin-post handler, no AJAX action and no cron hook
-    // that reaches CosmwasmOneShotDiscoveryCommand. Since the scheduled
-    // passes were retired it is also the only way an incremental pass runs
-    // at all — an operator names a chain, watches it, and reads a summary
-    // that pass alone produced.
-    // FROZEN (see ScannerFreeze): the one-shot pass is the last way to START a full-chain
-    // discovery run, so the command is not registered. The class is untouched and still tested.
-    if (!\BCC\Trust\Onchain\Support\ScannerFreeze::frozen()) {
-        \WP_CLI::add_command(
-            'bcc-trust cosmwasm',
-            \BCC\Trust\Onchain\CLI\CosmwasmOneShotDiscoveryCommand::class
-        );
-    }
+    // ── S4: `bcc-trust cosmwasm` IS NO LONGER REGISTERED ────────────────
+    //
+    // The one-shot supervised pass was the last way to START a full-chain
+    // CosmWasm discovery run. Its registration sat behind
+    // `!ScannerFreeze::frozen()`, so the command was already absent from
+    // `wp help bcc-trust`; S4 withdraws the registration itself.
+    //
+    // `CosmwasmOneShotDiscoveryCommand` the CLASS is deliberately RETAINED,
+    // along with the rest of the scanner implementation — S4 withdraws the
+    // surface only. The leaves are deleted in S8.
     // PR 5b — the eight-row Solana gate-identity repair. THIS IS ITS ONLY
     // ENTRY POINT: there is deliberately no REST route, no admin-post
     // handler, no AJAX action and no cron hook that reaches it. It writes

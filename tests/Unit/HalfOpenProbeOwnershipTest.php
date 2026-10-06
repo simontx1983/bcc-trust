@@ -162,8 +162,12 @@ final class HalfOpenProbeOwnershipTest extends TestCase
             \BCC\Trust\Onchain\Support\ScannerFreeze::frozen(),
             'ScannerFreeze must still report frozen'
         );
+        // ⚠ WAS 13, IS 2 (S4). This assertion exists so a breaker PR cannot
+        // quietly change the freeze inventory; it is not a claim that 13 is
+        // the right number forever. S4 deleted the eleven operator entry
+        // points, leaving the maintenance sweep and the async executor.
         self::assertCount(
-            13,
+            2,
             \BCC\Trust\Onchain\Support\ScannerFreeze::FROZEN_ENTRY_POINTS,
             'the frozen entry-point inventory must be unchanged by this PR'
         );

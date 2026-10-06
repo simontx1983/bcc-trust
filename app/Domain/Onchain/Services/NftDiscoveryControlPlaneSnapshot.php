@@ -30,11 +30,13 @@ if (!defined('ABSPATH')) {
  * ── ONE READ PER AUTHORITY, PER RENDER ──────────────────────────────────
  *   • `ChainRepository::getAll()`   ONE bounded read (LIMIT 200), all chains
  *   • `NftChainCapability::operationMatrix()`  ONE override read per chain
- *   • `CosmwasmDiscoveryHealthSnapshot::buildSummary()`  ONCE, Cosmos only
  *
- * The CosmWasm summary is fetched once for the whole page rather than once
- * per chain, and the CW engine section and the capability matrix are both
- * fed from it. Two reads would be two chances to disagree.
+ * ── S4: THE SCANNER SUMMARY IS NO LONGER READ ───────────────────────────
+ * This list used to carry a third entry,
+ * `CosmwasmDiscoveryHealthSnapshot::buildSummary()` — four bounded aggregates,
+ * fetched once per render for the Cosmos family. It fed `cw_chains`, which fed
+ * the CosmWasm / CW-721 Discovery section. That section is withdrawn, so the
+ * read is gone with it and this builder no longer touches the scanner at all.
  *
  * ── IT IS READ-ONLY, AND THAT IS LOAD-BEARING ───────────────────────────
  * Nothing here writes, schedules, enables, seeds or busts a cache. Looking
@@ -107,12 +109,17 @@ final class NftDiscoveryControlPlaneSnapshot
      * is told how many chains were read, and renders "no chains of this
      * family are registered" rather than anything about capability.
      *
+     * ── S4: `cw_chains` AND `supports_enumeration_engine` ARE GONE ──────
+     * Both existed solely to drive the CosmWasm / CW-721 Discovery section on
+     * the NFT Discovery page. That section is withdrawn, so the snapshot no
+     * longer fetches the scanner's health summary at all — which also removes
+     * the second of the two `CosmwasmDiscoveryHealthSnapshot::buildSummary()`
+     * calls that ran on every page load and whose result was then discarded.
+     *
      * @return array{
      *     family: string,
      *     label: string,
-     *     chains: list<array<string, mixed>>,
-     *     cw_chains: list<array<string, mixed>>,
-     *     supports_enumeration_engine: bool
+     *     chains: list<array<string, mixed>>
      * }
      */
     public static function buildForFamily(string $family): array
@@ -150,90 +157,17 @@ final class NftDiscoveryControlPlaneSnapshot
             $rows[] = $matrix;
         }
 
-        // The CosmWasm engine section, from the SAME authority the old
-        // Chains sub-tab used and the scanner panel still uses. Fetched
-        // exactly once, and only for the family that has an engine.
-        $cwChains = [];
-        if ($family === self::FAMILY_COSMOS) {
-            $summary  = CosmwasmDiscoveryHealthSnapshot::buildSummary();
-            $cwChains = is_array($summary['chains'] ?? null) ? $summary['chains'] : [];
-            $cwChains = self::annotateWithEnumerationStatus($cwChains, $rows);
-        }
-
+        // ⚠ `manual_intake` ON EACH ROW IS UNAFFECTED by S4. It is the shared
+        // answer to "does this chain validate a submitted contract?", read by
+        // the Add Collection copy, the capability editor and the intake
+        // service alike, and it is per CHAIN rather than per family. Removing
+        // the enumeration keys below does not touch it: enumeration is about
+        // whether a chain can be WALKED, which is a different question from
+        // whether a submitted contract is checked.
         return [
-            'family'                      => $family,
-            'label'                       => self::familyLabel($family),
-            'chains'                      => $rows,
-            'cw_chains'                   => $cwChains,
-            // Whether ANY engine in this build can enumerate a chain of this
-            // family. False for EVM and Solana permanently — see
-            // NftDriverRegistry, which registers exactly one enumeration
-            // driver and it is Cosmos-only.
-            //
-            // ⚠ ENUMERATION ONLY. This says nothing about whether a chain can
-            // take a manual add: EVM and Solana can (`manual_intake` on each
-            // row), they simply cannot be walked. Conflating the two is what
-            // made the manual permission ungrantable on those families.
-            'supports_enumeration_engine' => $family === self::FAMILY_COSMOS,
+            'family' => $family,
+            'label'  => self::familyLabel($family),
+            'chains' => $rows,
         ];
-    }
-
-    /**
-     * Carry each chain's ENUMERATION status onto its CosmWasm engine row.
-     *
-     * ── WHY THE JOIN HAPPENS HERE ───────────────────────────────────────
-     * The engine section offers the one provider-consuming control on the
-     * page, and that control may only be offered when the capability model
-     * says the enumeration operation is ready. The two facts arrive from
-     * two different authorities — the health snapshot and the capability
-     * matrix — and something has to put them on one row.
-     *
-     * Doing it in the renderer would mean the renderer deciding which
-     * chain's status applies to which row, which is a verdict, which is
-     * exactly what the renderer is not allowed to do. So the join is done
-     * here, by chain id, and the page prints what it is handed.
-     *
-     * ── AN UNMATCHED ROW FAILS CLOSED ───────────────────────────────────
-     * A CosmWasm row whose chain id is not in the matrix set (a chain read
-     * by one authority and not the other, or an id of 0) is annotated
-     * `OP_UNKNOWN`. It is NOT dropped — hiding a chain an operator can see
-     * elsewhere is its own kind of lie — and it is not defaulted to ready.
-     *
-     * @param list<array<string, mixed>> $cwChains
-     * @param list<array<string, mixed>> $matrices
-     * @return list<array<string, mixed>>
-     */
-    private static function annotateWithEnumerationStatus(array $cwChains, array $matrices): array
-    {
-        $statusByChain = [];
-        foreach ($matrices as $matrix) {
-            $chainId = (int) ($matrix['chain_id'] ?? 0);
-            if ($chainId <= 0) {
-                continue;
-            }
-
-            $operations = is_array($matrix['operations'] ?? null) ? $matrix['operations'] : [];
-            $enumeration = is_array($operations['enumeration'] ?? null) ? $operations['enumeration'] : [];
-
-            $statusByChain[$chainId] = [
-                'status' => is_string($enumeration['status'] ?? null)
-                    ? (string) $enumeration['status']
-                    : NftChainCapability::OP_UNKNOWN,
-                'reason' => is_string($enumeration['reason'] ?? null) ? (string) $enumeration['reason'] : '',
-            ];
-        }
-
-        $out = [];
-        foreach ($cwChains as $row) {
-            $chainId = (int) ($row['chain_id'] ?? 0);
-            $found   = $statusByChain[$chainId] ?? null;
-
-            $row['enumeration_status'] = $found['status'] ?? NftChainCapability::OP_UNKNOWN;
-            $row['enumeration_reason'] = $found['reason'] ?? '';
-
-            $out[] = $row;
-        }
-
-        return $out;
     }
 }

@@ -297,7 +297,17 @@ final class ScannerBackgroundEntryPointsAreFrozenTest extends TestCase
     {
         self::assertContains('cron:bcc_discovery_run_maintenance', ScannerFreeze::FROZEN_ENTRY_POINTS);
         self::assertContains('async:bcc_discovery_run_execute', ScannerFreeze::FROZEN_ENTRY_POINTS);
-        self::assertContains('admin_post_bcc_chain_cw_discovery_enable', ScannerFreeze::FROZEN_ENTRY_POINTS);
-        self::assertContains('admin_post_bcc_chain_cw_discovery_disable', ScannerFreeze::FROZEN_ENTRY_POINTS);
+
+        // ⚠ S4 REMOVED the two per-chain opt-in routes from this assertion.
+        // They used to be asserted present here, which was right while they
+        // existed and were refused. They are DELETED now, so the inventory
+        // must not claim to cover them — a freeze list naming a route no file
+        // registers describes a guard standing over nothing.
+        //
+        // These two background entry points are the whole of what is still
+        // frozen, and that exact composition is pinned by
+        // ScannerEntryPointsAreFrozenTest::testTheInventoryIsNowOnlyTheBackgroundPair.
+        self::assertNotContains('admin_post_bcc_chain_cw_discovery_enable', ScannerFreeze::FROZEN_ENTRY_POINTS);
+        self::assertNotContains('admin_post_bcc_chain_cw_discovery_disable', ScannerFreeze::FROZEN_ENTRY_POINTS);
     }
 }

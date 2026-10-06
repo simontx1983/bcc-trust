@@ -317,14 +317,19 @@ final class NftDiscoveryBoundaryTest extends TestCase
 
         sort($callers);
 
+        // ⚠ S4 REMOVED `NftDiscoveryPage.php` FROM THIS LIST, which is the
+        // whole point of the step: the admin page was one of the two things
+        // that could START a backfill, and its route is withdrawn. What is
+        // left is the worker that DECLARES the method and the ledger executor
+        // that performs a historical run an administrator asked for through
+        // DiscoveryRunService.
         self::assertSame(
             [
-                'app/Domain/Onchain/Admin/NftDiscoveryPage.php',
                 'app/Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php',
                 'app/Domain/Onchain/Workers/DiscoveryRunExecutor.php',
             ],
             $callers,
-            'the admin page and the ledger executor start a backfill; the worker declares it'
+            'only the ledger executor starts a backfill now; the worker declares it'
         );
 
         // ── WHY THE EXECUTOR IS ALLOWED HERE, AND STILL BOUNDED ─────────
@@ -501,32 +506,6 @@ final class NftDiscoveryBoundaryTest extends TestCase
         }
     }
 
-    /**
-     * Saving configuration cannot start work.
-     *
-     * The editor's forms and the backfill route are on the same page, so the
-     * cheapest possible mistake is a form whose `action` names the wrong
-     * one. Nothing in the editor's view may mention the backfill route, the
-     * worker, or the discovery service at all.
-     */
-    public function testTheEditorNeverSubmitsToTheBackfillRoute(): void
-    {
-        $panel = self::code('app/Domain/Onchain/Admin/Views/NftCapabilityEditorPanel.php');
-
-        foreach ([
-            'ACTION_CW_BACKFILL',
-            'bcc_chain_cw_backfill',
-            'CosmwasmDiscoveryWorker',
-            'CosmwasmDiscoveryService',
-            'runBackfillForChain',
-        ] as $work) {
-            self::assertStringNotContainsString(
-                $work,
-                $panel,
-                'saving capability configuration must never be able to start a discovery'
-            );
-        }
-    }
 
     /**
      * No bulk, family-wide or automatic control exists.
@@ -559,30 +538,24 @@ final class NftDiscoveryBoundaryTest extends TestCase
     //  THE MOVE CHANGED NO ROUTE STRING
     // ═══════════════════════════════════════════════════════════════════
 
-    /**
-     * A form rendered before this PR still posts to a route that exists.
-     *
-     * The six routes moved class; their STRINGS did not. Changing one would
-     * break every open tab, every bookmark, and — quietly — the audit
-     * vocabulary, which is what "which chain was this?" is answered from.
-     */
-    public function testEveryMovedRouteKeptItsExactString(): void
-    {
-        self::assertSame('bcc_chain_cw_pause', NftDiscoveryPage::ACTION_CW_PAUSE);
-        self::assertSame('bcc_chain_cw_resume', NftDiscoveryPage::ACTION_CW_RESUME);
-        self::assertSame('bcc_chain_cw_backfill', NftDiscoveryPage::ACTION_CW_BACKFILL);
-        self::assertSame('bcc_chain_cw_retry', NftDiscoveryPage::ACTION_CW_RETRY);
-        self::assertSame('bcc_chain_cw_discovery_enable', NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE);
-        self::assertSame('bcc_chain_cw_discovery_disable', NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE);
-    }
 
     /** And the nonce is still scoped to route AND chain. */
     public function testTheNonceIsStillScopedToRouteAndChain(): void
     {
         $code = self::code('app/Domain/Onchain/Admin/NftDiscoveryPage.php');
 
+        // Still true, and still the guarantee that matters: the retained
+        // capability handlers bind their nonce to the ROUTE and the CHAIN, so
+        // a nonce minted for one direction on one chain cannot authorise
+        // anything else.
         self::assertStringContainsString("requireNonce(\$route . '_' . \$chainId)", $code);
-        self::assertStringContainsString("wp_nonce_field(\$route . '_' . \$chainId)", $code);
+
+        // ⚠ S4 REMOVED the matching `wp_nonce_field($route . '_' . $chainId)`
+        // assertion. That call sat in the withdrawn CosmWasm render family;
+        // the capability FORMS are rendered by NftCapabilityEditorPanel, a
+        // different file, so asserting it here would be asserting against
+        // markup this page no longer emits. The render-side nonce scoping is
+        // covered by NftCapabilityEditorRenderTest.
     }
 
     /** The Chains page no longer answers any of them. */
@@ -602,30 +575,6 @@ final class NftDiscoveryBoundaryTest extends TestCase
         }
     }
 
-    /** Exactly one class registers them, so they cannot be double-bound. */
-    public function testExactlyOneClassRegistersTheMovedRoutes(): void
-    {
-        $registrars = [];
-        $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator(self::root() . '/app', \FilesystemIterator::SKIP_DOTS)
-        );
-
-        foreach ($iterator as $file) {
-            if (!$file instanceof \SplFileInfo || $file->getExtension() !== 'php') {
-                continue;
-            }
-
-            $path = str_replace('\\', '/', $file->getPathname());
-            $rel  = substr($path, strlen(str_replace('\\', '/', self::root())) + 1);
-            $code = self::code($rel);
-
-            if (str_contains($code, "admin_post_' . self::ACTION_CW_BACKFILL")) {
-                $registrars[] = $rel;
-            }
-        }
-
-        self::assertSame(['app/Domain/Onchain/Admin/NftDiscoveryPage.php'], $registrars);
-    }
 
     // ═══════════════════════════════════════════════════════════════════
     //  FAMILY NAVIGATION IS NOT A SECOND CHAIN REGISTRY
