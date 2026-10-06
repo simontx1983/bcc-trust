@@ -788,6 +788,21 @@ namespace BCC\Trust\Onchain\Fetchers {
                 ];
             }
 
+            /**
+             * The HTTP-501 side-channel the real fetcher now carries.
+             *
+             * Defaults FALSE: these fixtures model a chain that HAS a wasm
+             * module and a contract that may or may not answer. A default of
+             * true would turn every undecidable probe in this file into
+             * "the chain has no wasm module", which is a different claim.
+             */
+            public static bool $chainHasNoWasm = false;
+
+            public function chainHasNoWasmFor(string $contract): bool
+            {
+                return self::$chainHasNoWasm;
+            }
+
             public function numTokensCountFor(string $contract): ?int
             {
                 return self::$numTokens;
@@ -799,6 +814,7 @@ namespace BCC\Trust\Onchain\Fetchers {
                 self::$contractInfo = ['name' => 'Seeded CW721', 'symbol' => 'SEED'];
                 self::$probes = [];
                 self::$numTokens = 7;
+                self::$chainHasNoWasm = false;
             }
         }
 
