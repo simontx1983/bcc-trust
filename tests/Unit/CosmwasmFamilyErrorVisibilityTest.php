@@ -360,49 +360,9 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
     // was carried across verbatim rather than dropped as redundant. It now
     // sits on the same page as the Retry control that acts on it.
 
-    /** The operator sees the count, and is told the work is retryable. */
-    public function testTheStatusRowReportsTheUnresolvedCount(): void
-    {
-        $html = self::renderStatusRow($this->row(familiesErrored: 15));
 
-        self::assertStringContainsString('15 code families have unresolved discovery errors', $html);
-        self::assertStringContainsString('remain eligible for retry', $html);
-    }
 
-    /** One error is one sentence, not "1 code families". */
-    public function testTheSingularSentenceSurvivedTheMove(): void
-    {
-        $html = self::renderStatusRow($this->row(familiesErrored: 1));
 
-        self::assertStringContainsString('1 code family has unresolved discovery errors', $html);
-        self::assertStringContainsString('remains eligible for retry', $html);
-    }
-
-    /** A clean chain says nothing about errors. */
-    public function testTheStatusRowIsSilentWhenThereAreNoFamilyErrors(): void
-    {
-        $html = self::renderStatusRow($this->row(familiesErrored: 0));
-
-        self::assertStringNotContainsString('unresolved discovery errors', $html);
-    }
-
-    /**
-     * THE GUARANTEE, STATED AS A GUARANTEE.
-     *
-     * PR #196's real claim is not "some string appears" — it is that a
-     * chain holding family errors is never presented as a clean one. So
-     * this renders both and asserts they differ, which no amount of copy
-     * editing on either surface can accidentally satisfy.
-     */
-    public function testAChainWithFamilyErrorsIsNotRenderedLikeACleanOne(): void
-    {
-        $errored = self::renderStatusRow($this->row(familiesErrored: 15));
-        $clean   = self::renderStatusRow($this->row(familiesErrored: 0));
-
-        self::assertNotSame($clean, $errored, 'errored and clean must not render identically');
-        self::assertStringContainsString('15 errored', $errored);
-        self::assertStringNotContainsString('errored', $clean);
-    }
 
     /**
      * The panel that used to carry this no longer offers the method, so a
@@ -417,18 +377,4 @@ final class CosmwasmFamilyErrorVisibilityTest extends TestCase
         );
     }
 
-    /** @param array<string, mixed> $row */
-    private static function renderStatusRow(array $row): string
-    {
-        $m = new \ReflectionMethod(
-            \BCC\Trust\Onchain\Admin\NftDiscoveryPage::class,
-            'render_cw_status_row'
-        );
-        $m->setAccessible(true);
-
-        ob_start();
-        $m->invoke(null, $row);
-
-        return (string) ob_get_clean();
-    }
 }

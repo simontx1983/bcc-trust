@@ -43,74 +43,7 @@ final class NftDiscoveryRenderTest extends TestCase
         $_POST = [];
     }
 
-    /**
-     * One chain, one operation, rendered through the production matrix
-     * renderer.
-     *
-     * @param array<string, mixed> $operation
-     */
-    private function matrix(array $operation, string $key = NftDriverRegistry::OP_ENUMERATION): string
-    {
-        $snapshot = [
-            'family'                      => 'cosmos',
-            'label'                       => 'Cosmos',
-            'supports_enumeration_engine' => true,
-            'cw_chains'                   => [],
-            'chains'                      => [[
-                'chain_id'   => 4,
-                'slug'       => 'cosmos',
-                'name'       => 'Cosmos Hub',
-                'is_active'  => true,
-                'is_testnet' => false,
-                'operations' => [$key => array_merge([
-                    'operation'         => $key,
-                    'status'            => NftChainCapability::OP_READY,
-                    'reason'            => NftChainCapability::REASON_READY,
-                    'operator_started'  => true,
-                    'registered'        => [],
-                    'drivers'           => [],
-                    'readiness'         => [],
-                    'ready'             => [],
-                    'endpoint_refusals' => [],
-                ], $operation)],
-            ]],
-        ];
 
-        $m = new \ReflectionMethod(NftDiscoveryPage::class, 'render_capability_matrix');
-        $m->setAccessible(true);
-
-        ob_start();
-        $m->invoke(null, $snapshot);
-
-        return (string) ob_get_clean();
-    }
-
-    /** @param array<string, mixed> $run */
-    private function runReport(array $run): string
-    {
-        $m = new \ReflectionMethod(NftDiscoveryPage::class, 'render_run_report');
-        $m->setAccessible(true);
-
-        ob_start();
-        $m->invoke(null, array_merge([
-            'chain_id'    => 4,
-            'outcome'     => 'ran',
-            'stop_reason' => 'pass_completed',
-            'partial'     => false,
-            'requests'    => ['used' => 3, 'remaining' => 17],
-            'pages'       => ['code' => 1, 'contracts' => 2, 'total' => 3],
-            'classified'  => ['families' => 4, 'contracts' => 5],
-            'collections' => ['emitted' => 6, 'denied' => 0],
-            'errors'      => [],
-            'delta'       => [
-                'families_before' => 0, 'families_after' => 4,
-                'contracts_before' => 0, 'contracts_after' => 5,
-                'state_before' => 'idle', 'state_after' => 'backfilling',
-            ],
-        ], $run));
-
-        return (string) ob_get_clean();
-    }
 
     private static function text(string $html): string
     {
@@ -165,17 +98,6 @@ final class NftDiscoveryRenderTest extends TestCase
     }
 
     #[DataProvider('statusSentences')]
-    public function testEachRefusalPrintsItsOwnExplanation(
-        string $status,
-        string $reason,
-        string $label,
-        string $sentence
-    ): void {
-        $text = self::text($this->matrix(['status' => $status, 'reason' => $reason]));
-
-        self::assertStringContainsString($label, $text);
-        self::assertStringContainsString($sentence, $text);
-    }
 
     /** @return array<string, array{0: string, 1: string}> */
     public static function unavailableStoreSentences(): array
@@ -193,51 +115,8 @@ final class NftDiscoveryRenderTest extends TestCase
      * apart upstream and collapsing them here would waste that.
      */
     #[DataProvider('unavailableStoreSentences')]
-    public function testAnUnreadableStoreSaysWhichWayItFailed(string $detail, string $sentence): void
-    {
-        $text = self::text($this->matrix([
-            'status' => NftChainCapability::OP_UNKNOWN,
-            'reason' => NftChainCapability::REASON_OVERRIDES_UNAVAILABLE . ':' . $detail,
-        ]));
 
-        self::assertStringContainsString('Unknown', $text);
-        self::assertStringContainsString($sentence, $text);
-    }
 
-    /**
-     * An unrecognised status renders as Unknown, never as a permission.
-     *
-     * Scoped to the TABLE BODY: the page's own footer explains what "Ready"
-     * means, so a whole-page search for the word would match that prose and
-     * pass or fail for the wrong reason.
-     */
-    public function testAnUnrecognisedStatusRendersAsUnknown(): void
-    {
-        $html = $this->matrix(['status' => 'op_ready_v2', 'reason' => 'whatever']);
-
-        self::assertSame(1, preg_match('#<tbody>(.*)</tbody>#s', $html, $m));
-        $body = self::text($m[1]);
-
-        self::assertStringContainsString('Unknown', $body);
-        self::assertStringNotContainsString('Ready', $body);
-        self::assertStringNotContainsString('op_ready_v2', $body, 'never printed raw');
-    }
-
-    /** Ready drivers are ticked, unready ones crossed — per driver. */
-    public function testEachDriverIsMarkedReadyOrNotIndividually(): void
-    {
-        $html = $this->matrix([
-            'status'    => NftChainCapability::OP_PROVIDER_UNAVAILABLE,
-            'reason'    => NftChainCapability::REASON_NO_READY_DRIVER,
-            'drivers'   => [NftDriverRegistry::DRIVER_DAS_RPC, NftDriverRegistry::DRIVER_DAS_HELIUS],
-            'ready'     => [NftDriverRegistry::DRIVER_DAS_HELIUS],
-        ], NftDriverRegistry::OP_WALLET_DISCOVERY);
-
-        self::assertStringContainsString(NftDriverRegistry::DRIVER_DAS_RPC, $html);
-        self::assertStringContainsString(NftDriverRegistry::DRIVER_DAS_HELIUS, $html);
-        self::assertStringContainsString('✗', $html);
-        self::assertStringContainsString('✓', $html);
-    }
 
     // ═══════════════════════════════════════════════════════════════════
     //  NOTHING UPSTREAM ARRIVES UNREDACTED
@@ -275,62 +154,15 @@ final class NftDiscoveryRenderTest extends TestCase
      * whose content we do not write.
      */
     #[DataProvider('credentialBearingText')]
-    public function testAnEndpointRefusalMessageIsRedactedBeforeItIsEscaped(
-        string $message,
-        string $secret
-    ): void {
-        $html = $this->matrix([
-            'status'            => NftChainCapability::OP_PROVIDER_UNAVAILABLE,
-            'reason'            => NftChainCapability::REASON_NO_READY_DRIVER,
-            'drivers'           => [NftDriverRegistry::DRIVER_DAS_RPC],
-            'endpoint_refusals' => [
-                NftDriverRegistry::DRIVER_DAS_RPC => [
-                    'rpc_url'     => 'https://das.example/rpc',
-                    'code'        => -32601,
-                    'message'     => $message,
-                    'detected_at' => 1,
-                ],
-            ],
-        ], NftDriverRegistry::OP_WALLET_DISCOVERY);
-
-        self::assertStringNotContainsString($secret, $html);
-        self::assertStringNotContainsString($secret, html_entity_decode($html));
-    }
 
     /** The same discipline for the run report's recorded reasons. */
     #[DataProvider('credentialBearingText')]
-    public function testRunReportErrorsAreRedactedBeforeTheyAreEscaped(
-        string $message,
-        string $secret
-    ): void {
-        $html = $this->runReport(['partial' => true, 'errors' => [$message]]);
 
-        self::assertStringNotContainsString($secret, $html);
-        self::assertStringNotContainsString($secret, html_entity_decode($html));
-    }
-
-    /** Redacting must not leave the operator with nothing. */
-    public function testARedactedReasonStillTellsTheOperatorSomething(): void
-    {
-        $html = $this->runReport([
-            'partial' => true,
-            'errors'  => ['code listing unreachable — cursor kept for the next pass'],
-        ]);
-
-        self::assertStringContainsString('code listing unreachable', $html);
-    }
 
     // ═══════════════════════════════════════════════════════════════════
     //  A PARTIAL RUN IS NEVER SHOWN AS A COMPLETE ONE
     // ═══════════════════════════════════════════════════════════════════
 
-    public function testACompletedSliceSaysSliceNotChainScanned(): void
-    {
-        $text = self::text($this->runReport([]));
-
-        self::assertStringContainsString('ran to its own conclusion', $text);
-        self::assertStringContainsString('not that the chain is fully scanned', $text);
-    }
 
     /** @return array<string, array{0: string}> */
     public static function partialStopReasons(): array
@@ -342,61 +174,10 @@ final class NftDiscoveryRenderTest extends TestCase
     }
 
     #[DataProvider('partialStopReasons')]
-    public function testACutShortSliceSaysSoBeforeAnyNumber(string $stop): void
-    {
-        $text = self::text($this->runReport(['partial' => true, 'stop_reason' => $stop]));
 
-        self::assertStringContainsString('Stopped early', $text);
-        self::assertStringContainsString('a slice, not a complete scan', $text);
 
-        // Before any count, so an operator who stops reading stops on the
-        // caveat rather than on a number.
-        self::assertLessThan(
-            strpos($text, 'Requests'),
-            strpos($text, 'Stopped early'),
-            'the caveat must precede the figures'
-        );
-    }
 
-    public function testABudgetStopAndAClockStopAreNamedApart(): void
-    {
-        $budget = self::text($this->runReport(['partial' => true, 'stop_reason' => 'request_budget_exhausted']));
-        $clock  = self::text($this->runReport(['partial' => true, 'stop_reason' => 'runtime_deadline_reached']));
 
-        self::assertStringContainsString('stopped on the request budget', $budget);
-        self::assertStringContainsString('stopped on the time limit', $clock);
-    }
-
-    /** A pass that never ran prints no figures to be misread as results. */
-    public function testALockedPassPrintsNoCounts(): void
-    {
-        $text = self::text($this->runReport([
-            'outcome'     => 'locked',
-            'stop_reason' => 'lock_contended',
-            'partial'     => true,
-        ]));
-
-        self::assertStringContainsString('Nothing ran', $text);
-        self::assertStringNotContainsString('Requests', $text);
-        self::assertStringNotContainsString('Collections', $text);
-    }
-
-    public function testAFailedPassSaysNothingWasVerifiedOrEnabled(): void
-    {
-        $text = self::text($this->runReport([
-            'outcome'     => 'failed',
-            'stop_reason' => 'execution_failed',
-            'partial'     => true,
-        ]));
-
-        self::assertStringContainsString('The pass failed', $text);
-    }
-
-    /** Everything a slice finds arrives unverified, and the report says so. */
-    public function testTheReportSaysEverythingFoundIsUnverified(): void
-    {
-        self::assertStringContainsString('all unverified', self::text($this->runReport([])));
-    }
 
     // ═══════════════════════════════════════════════════════════════════
     //  EVM / SOLANA: A STRUCTURAL LIMIT, SAID PLAINLY
@@ -412,37 +193,6 @@ final class NftDiscoveryRenderTest extends TestCase
     }
 
     #[DataProvider('nonEnumeratingFamilies')]
-    public function testFamiliesWithNoEngineSayThereIsNoSettingThatWouldAddOne(
-        string $family,
-        string $label
-    ): void {
-        $m = new \ReflectionMethod(NftDiscoveryPage::class, 'render_no_enumeration_notice');
-        $m->setAccessible(true);
-
-        ob_start();
-        $m->invoke(null, [
-            'family' => $family,
-            'label'  => $label,
-            'chains' => [],
-            'cw_chains' => [],
-            'supports_enumeration_engine' => false,
-        ]);
-        $text = self::text((string) ob_get_clean());
-
-        self::assertStringContainsString('no chain-wide NFT collection discovery for ' . $label, $text);
-        self::assertStringContainsString('there is no setting that would add one', $text);
-        self::assertStringContainsString('structural limit', $text);
-
-        // And it must not imply the chains are incapable of NFTs at all.
-        foreach ([
-            'does not support NFTs',
-            'cannot do NFT',
-            'not eligible',
-            'unsupported for NFTs',
-        ] as $slander) {
-            self::assertStringNotContainsString($slander, $text);
-        }
-    }
 
     /** Wallet refresh is named as a separate method, and offered no button. */
     public function testWalletRefreshIsDescribedAndNeverTriggered(): void

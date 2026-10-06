@@ -18,21 +18,22 @@ namespace BCC\Trust\Onchain\Admin;
 
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Onchain\OnchainPlugin;
-use BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel;
+// ── S4: SIX IMPORTS WENT WITH THE SCANNER PANELS ────────────────────────
+//
+// CosmwasmScannerPanel, DiscoveryScanPanel, DiscoveryReadiness,
+// CosmwasmContractRepository, CosmwasmCodeFamilyRepository and
+// CosmwasmDiscoveryHealthSnapshot were all reachable only from the two
+// withdrawn panels and the data gathering that fed them. This page no longer
+// names the scanner in executable code at all.
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
-use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
-use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\CollectionDemandService;
 use BCC\Trust\Onchain\Services\CollectionStateClassifier;
 use BCC\Trust\Onchain\Services\CommunityRequestService;
-use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
-use BCC\Trust\Onchain\Admin\Views\DiscoveryScanPanel;
-use BCC\Trust\Onchain\Support\DiscoveryReadiness;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Onchain\ValueObjects\ChainDescriptionState;
@@ -1491,67 +1492,6 @@ final class VerifyCollectionsPage
         $stateCounts       = $stateCountsResult['counts'];
         $countsAvailable   = $stateCountsResult['available'];
 
-        // CosmWasm scanner context for the rows about to render.
-        //
-        // TWO bounded batch reads for the WHOLE page, issued once the row
-        // set is final — not one lookup per row. The first pulls the
-        // scanner's inventory row for every visible contract; the second
-        // pulls the code families those rows point at, for the checksum.
-        // Rows the scanner has never seen (manual adds, wallet-link
-        // discoveries, non-Cosmos chains) simply have no entry and render
-        // no scanner detail.
-        $scannerCandidates = [];
-        $scannerFamilies   = [];
-        $scannerChainIds   = [];
-        $scannerAddresses  = [];
-        foreach ($listing['items'] as $listRow) {
-            if ((string) ($listRow->chain_type ?? '') !== 'cosmos') {
-                continue;
-            }
-            $scannerChainIds[]  = (int) $listRow->chain_id;
-            $scannerAddresses[] = (string) $listRow->contract_address;
-        }
-        if ($scannerAddresses !== []) {
-            // Both reads FAIL CLOSED. A row with no scanner entry renders no
-            // scanner detail at all — which is correct when the collection
-            // genuinely came from another path, and a lie when the lookup
-            // simply failed. So a failed read drops the detail for the whole
-            // page and SAYS SO, rather than quietly presenting every row as
-            // "the scanner has never seen this".
-            try {
-                $codeIds = [];
-                foreach (CosmwasmContractRepository::findManyForChains($scannerChainIds, $scannerAddresses) as $candidate) {
-                    $scannerCandidates[(int) $candidate->chain_id . '|' . strtolower((string) $candidate->contract_address)] = $candidate;
-                    $codeIds[] = (int) $candidate->code_id;
-                }
-                if ($codeIds !== []) {
-                    foreach (CosmwasmCodeFamilyRepository::findManyForChains($scannerChainIds, $codeIds) as $family) {
-                        $scannerFamilies[(int) $family->chain_id . '|' . (int) $family->code_id] = $family;
-                    }
-                }
-            } catch (RepositoryReadFailure $e) {
-                $scannerCandidates = [];
-                $scannerFamilies   = [];
-
-                \BCC\Core\Log\Logger::error('[bcc-trust] Verify Collections: scanner detail read failed', [
-                    'action'   => 'verify_collections_scanner_detail_failed',
-                    'method'   => $e->repositoryMethod(),
-                    'db_error' => $e->dbError(),
-                ]);
-
-                $notices[] = [
-                    'type'    => 'error',
-                    'message' => 'The CosmWasm scanner detail could not be loaded for this page (a database read failed), '
-                        . 'so the per-row scanner evidence is hidden rather than shown as "not seen by the scanner". '
-                        . 'The collection rows themselves are unaffected. Check the bcc-trust error log.',
-                ];
-            }
-        }
-
-        // FOUR bounded aggregates for every chain — see the class docblock
-        // on CosmwasmDiscoveryHealthSnapshot. Not a per-chain loop.
-        $scannerSummary = CosmwasmDiscoveryHealthSnapshot::buildSummary();
-
         // Pill chains: intersection of PILL_CHAIN_SLUGS (filterable) and
         // the active chains registry, in the configured order. A
         // missing/disabled chain silently drops its pill.
@@ -1589,72 +1529,6 @@ final class VerifyCollectionsPage
                     <p><?php echo esc_html($notice['message']); ?></p>
                 </div>
             <?php endforeach; ?>
-
-            <?php CosmwasmScannerPanel::render($scannerSummary); ?>
-
-            <?php
-            // ── PR 7 / 7.1: the per-chain Scan control ──────────────────
-            // One panel per chain BCC actually offers NFT discovery on,
-            // rendered beneath the existing scanner summary rather than on
-            // a competing screen.
-            //
-            // ⚠ PR 7.1 — THE SURFACE IS FILTERED BY PRODUCT SUPPORT.
-            // PR 7 rendered a panel for every active Cosmos chain, which
-            // put a Scan button on validator-only chains like Jackal and
-            // Osmosis. That is not a chain "waiting for a toggle": BCC does
-            // not offer NFT discovery there at all, and a disabled button
-            // is a standing invitation to ask why it cannot be enabled.
-            // `bcc_supports_nft_collections` is the owner-controlled answer
-            // and it decides whether the surface exists.
-            //
-            // ⚠ `$readiness` is a DISPLAY decision only. The real refusal is
-            // re-decided by DiscoveryRunService on every request AND by
-            // DiscoveryRunExecutor immediately before provider work, so a
-            // user who re-enables the button in their browser — or forges
-            // the POST outright — gets a bounded refusal, not a scan.
-            $scanChains = array_values(array_filter(
-                ChainRepository::getActive('cosmos'),
-                static fn(object $c): bool => DiscoveryReadiness::isNftDiscoverySurface($c)
-            ));
-
-            // ⚠ NO NEW QUERY. `$scannerSummary` was already built above and
-            // carries, per chain, the eligibility verdict and the backfill
-            // timestamp this decision needs — from ONE bounded checkpoint
-            // read. Re-reading each chain's checkpoint here would put a
-            // per-row query back on a page whose discipline is a fixed
-            // number of reads, which is why CosmwasmScannerPanelOwnershipTest
-            // forbids the checkpoint-repository import in this file.
-            $summaryByChain = [];
-            foreach (($scannerSummary['chains'] ?? []) as $summaryRow) {
-                if (isset($summaryRow['chain_id'])) {
-                    $summaryByChain[(int) $summaryRow['chain_id']] = $summaryRow;
-                }
-            }
-
-            foreach ($scanChains as $scanChain) {
-                $readiness = DiscoveryReadiness::forSummaryRow(
-                    $scanChain,
-                    $summaryByChain[(int) $scanChain->id] ?? []
-                );
-
-                DiscoveryScanPanel::render(
-                    $scanChain,
-                    $readiness['eligible'],
-                    $readiness['eligible'] ? '' : $readiness['reason']
-                );
-            }
-
-            if ($scanChains === []) {
-                // Honest empty state. Silence here would read as a broken
-                // page rather than as a deliberate product position.
-                echo '<p class="description" style="margin:12px 0 0;">'
-                    . esc_html__(
-                        'No chain currently has NFT collection support enabled, so there is nothing to scan. Support is enabled per chain from BCC System → NFT Discovery.',
-                        'bcc-trust'
-                    )
-                    . '</p>';
-            }
-            ?>
 
             <?php
             // Four collection-state sub-tabs. Switching state resets
@@ -2167,23 +2041,6 @@ final class VerifyCollectionsPage
                                     </button>
                                 </td>
                             </tr>
-                            <?php
-                            // Scanner detail sub-row. Pre-fetched above; no
-                            // query here. Absent for anything the CosmWasm
-                            // scanner has no record of.
-                            $scannerKey = (int) $row->chain_id . '|' . strtolower((string) $row->contract_address);
-                            if (isset($scannerCandidates[$scannerKey])) {
-                                $candidateRow = $scannerCandidates[$scannerKey];
-                                $familyKey    = (int) $row->chain_id . '|' . (int) $candidateRow->code_id;
-                                CosmwasmScannerPanel::renderCandidateDetail(
-                                    $row,
-                                    $candidateRow,
-                                    $scannerFamilies[$familyKey] ?? null,
-                                    $rowVerified,
-                                    self::TABLE_COLSPAN
-                                );
-                            }
-                            ?>
                         <?php endforeach; endif; ?>
                     </tbody>
                 </table>

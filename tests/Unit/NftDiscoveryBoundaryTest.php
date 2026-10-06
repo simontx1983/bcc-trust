@@ -501,32 +501,6 @@ final class NftDiscoveryBoundaryTest extends TestCase
         }
     }
 
-    /**
-     * Saving configuration cannot start work.
-     *
-     * The editor's forms and the backfill route are on the same page, so the
-     * cheapest possible mistake is a form whose `action` names the wrong
-     * one. Nothing in the editor's view may mention the backfill route, the
-     * worker, or the discovery service at all.
-     */
-    public function testTheEditorNeverSubmitsToTheBackfillRoute(): void
-    {
-        $panel = self::code('app/Domain/Onchain/Admin/Views/NftCapabilityEditorPanel.php');
-
-        foreach ([
-            'ACTION_CW_BACKFILL',
-            'bcc_chain_cw_backfill',
-            'CosmwasmDiscoveryWorker',
-            'CosmwasmDiscoveryService',
-            'runBackfillForChain',
-        ] as $work) {
-            self::assertStringNotContainsString(
-                $work,
-                $panel,
-                'saving capability configuration must never be able to start a discovery'
-            );
-        }
-    }
 
     /**
      * No bulk, family-wide or automatic control exists.
@@ -559,22 +533,6 @@ final class NftDiscoveryBoundaryTest extends TestCase
     //  THE MOVE CHANGED NO ROUTE STRING
     // ═══════════════════════════════════════════════════════════════════
 
-    /**
-     * A form rendered before this PR still posts to a route that exists.
-     *
-     * The six routes moved class; their STRINGS did not. Changing one would
-     * break every open tab, every bookmark, and — quietly — the audit
-     * vocabulary, which is what "which chain was this?" is answered from.
-     */
-    public function testEveryMovedRouteKeptItsExactString(): void
-    {
-        self::assertSame('bcc_chain_cw_pause', NftDiscoveryPage::ACTION_CW_PAUSE);
-        self::assertSame('bcc_chain_cw_resume', NftDiscoveryPage::ACTION_CW_RESUME);
-        self::assertSame('bcc_chain_cw_backfill', NftDiscoveryPage::ACTION_CW_BACKFILL);
-        self::assertSame('bcc_chain_cw_retry', NftDiscoveryPage::ACTION_CW_RETRY);
-        self::assertSame('bcc_chain_cw_discovery_enable', NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE);
-        self::assertSame('bcc_chain_cw_discovery_disable', NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE);
-    }
 
     /** And the nonce is still scoped to route AND chain. */
     public function testTheNonceIsStillScopedToRouteAndChain(): void

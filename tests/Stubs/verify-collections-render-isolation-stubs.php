@@ -539,21 +539,3 @@ namespace BCC\Trust\Onchain\Services {
         }
     }
 }
-
-namespace BCC\Trust\Onchain\Admin\Views {
-    if (!class_exists(CosmwasmScannerPanel::class, false)) {
-        final class CosmwasmScannerPanel
-        {
-            /** @param array<string, mixed> $summary */
-            public static function render(array $summary): void { echo '<div data-fake="scanner-panel"></div>'; }
-            public static function renderCandidateDetail(object $collection, object $candidate, ?object $family, bool $isVerified, int $colspan): void {}
-        }
-    }
-
-    if (!class_exists(DiscoveryScanPanel::class, false)) {
-        final class DiscoveryScanPanel
-        {
-            public static function render(object $chain, bool $scannable, string $whyNot = ''): void { echo '<div data-fake="scan-panel"></div>'; }
-        }
-    }
-}

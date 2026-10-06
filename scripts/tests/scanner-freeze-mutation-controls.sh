@@ -23,15 +23,26 @@ PHP="${PHP:-php -d extension=mysqli -d memory_limit=2G}"
 PHPUNIT="vendor/bin/phpunit"
 [ -f "$PHPUNIT" ] || { echo "FATAL: phpunit not installed"; exit 2; }
 
-SCAN_ACTIONS="app/Domain/Onchain/Admin/DiscoveryScanActions.php"
+# ── S4: TWO MUTATION TARGETS NO LONGER EXIST ──────────────────────────────
+#
+# SCAN_ACTIONS (Admin/DiscoveryScanActions.php) is DELETED, and the
+# `if (!ScannerFreeze::frozen())` block M7 mutated in NftDiscoveryPage.php is
+# gone with the six CosmWasm routes. Controls M1 and M7 are removed below.
+#
+# They could not simply be left: each `mutate` call asserts its anchor text
+# occurs exactly once and exits 1 otherwise, which this harness counts as
+# `broken` — and `broken` fails the run just as a surviving mutation does. A
+# control whose target has been deleted tests nothing and must not look like
+# it passed.
+#
+# PAGE is dropped too: M7 was its only user.
 BUDGET="app/Domain/Onchain/Support/ProviderRequestBudget.php"
 HOLDINGS="app/Domain/Onchain/Services/HoldingsService.php"
 MAINTENANCE="app/Domain/Onchain/Workers/DiscoveryRunMaintenance.php"
 EXECUTOR="app/Domain/Onchain/Workers/DiscoveryRunExecutor.php"
-PAGE="app/Domain/Onchain/Admin/NftDiscoveryPage.php"
 
 SNAPDIR="$(mktemp -d)"
-for f in "$SCAN_ACTIONS" "$BUDGET" "$HOLDINGS" "$MAINTENANCE" "$EXECUTOR" "$PAGE"; do
+for f in "$BUDGET" "$HOLDINGS" "$MAINTENANCE" "$EXECUTOR"; do
     cp "$f" "$SNAPDIR/$(basename "$f").orig" || { echo "FATAL: snapshot failed for $f"; exit 2; }
 done
 
@@ -86,14 +97,6 @@ mutate () {
 
 echo "── scanner-freeze mutation controls ─────────────────────────────────────"
 
-# 1. Restore one frozen scanner route: the absence test must notice.
-mutate "$SCAN_ACTIONS" '
-$f = $argv[1]; $s = file_get_contents($f);
-$old = "        if (\\BCC\\Trust\\Onchain\\Support\\ScannerFreeze::frozen()) {\r\n            return;\r\n        }\r\n\r\n";
-if (substr_count($s, $old) !== 1) { exit(1); }
-file_put_contents($f, str_replace($old, "", $s));
-' 'ScannerEntryPointsAreFrozenTest' 'M1 the three scan routes register again'
-
 # 2. Re-couple the budget primitive to the scanner: the structural test must notice.
 mutate "$BUDGET" '
 $f = $argv[1]; $s = file_get_contents($f);
@@ -136,21 +139,11 @@ $old = "        if (ScannerFreeze::frozen()) {\r\n            return [\x27status
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, "", $s));
 ' 'ScannerBackgroundEntryPointsAreFrozenTest' 'M6 a queued executor action claims and runs again'
-
-# 7. Restore the two per-chain scanner opt-in routes.
-mutate "$PAGE" '
-$f = $argv[1]; $s = file_get_contents($f);
-$old = "        if (!ScannerFreeze::frozen()) {\r\n            add_action(\r\n                \x27admin_post_\x27 . self::ACTION_CW_DISCOVERY_ENABLE,";
-$new = "        if (true) {\r\n            add_action(\r\n                \x27admin_post_\x27 . self::ACTION_CW_DISCOVERY_ENABLE,";
-if (substr_count($s, $old) !== 1) { exit(1); }
-file_put_contents($f, str_replace($old, $new, $s));
-' 'ScannerEntryPointsAreFrozenTest' 'M7 the per-chain scanner opt-in routes register again'
-echo "──────────────────────────────────────────────────────────────────────────"
 echo "killed=$killed survived=$survived wrong_reason=$wrong broken=$broken"
 
 # Every file must be byte-identical to its pre-run snapshot.
 clean=1
-for f in "$SCAN_ACTIONS" "$BUDGET" "$HOLDINGS" "$MAINTENANCE" "$EXECUTOR" "$PAGE"; do
+for f in "$BUDGET" "$HOLDINGS" "$MAINTENANCE" "$EXECUTOR"; do
     if ! cmp -s "$SNAPDIR/$(basename "$f").orig" "$f"; then
         echo "FATAL: $f is NOT byte-identical to its snapshot"
         clean=0

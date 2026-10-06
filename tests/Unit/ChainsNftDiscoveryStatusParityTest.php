@@ -103,41 +103,9 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
         ], $overrides);
     }
 
-    /** @param list<array<string, mixed>> $rows */
-    private function render(array $rows): string
-    {
-        ob_start();
-        NftDiscoveryPage::render_cw_discovery_section($rows);
-
-        return (string) ob_get_clean();
-    }
 
     // ── The inventory ───────────────────────────────────────────────────
 
-    public function testEveryMigratedStatusValueRenders(): void
-    {
-        $html = $this->render([$this->sentinelRow(['last_error' => 'SENTINEL-UPSTREAM-ERROR'])]);
-
-        // Derived labels: printed as supplied, not recomputed.
-        $this->assertStringContainsString('SENTINEL-STATE-LABEL', $html);
-        $this->assertStringContainsString('SENTINEL-PROGRESS-LABEL', $html);
-
-        // Classification queue.
-        $this->assertStringContainsString('7771', $html, 'families_pending');
-        $this->assertStringContainsString('773', $html, 'cw721Total of the supplied breakdown (331+442)');
-
-        // Inventory.
-        $this->assertStringContainsString('5551', $html, 'contracts_inspected');
-        $this->assertStringContainsString('6661', $html, 'contracts_denied');
-        $this->assertStringContainsString('4441', $html, 'candidates');
-
-        // Freshness.
-        $this->assertStringContainsString('9991', $html, 'last_discovery_age_seconds');
-        $this->assertStringContainsString('2026-08-19 11:22:33', $html, 'metadata_refreshed_at');
-
-        // Errors.
-        $this->assertStringContainsString('SENTINEL-UPSTREAM-ERROR', $html, 'last_error');
-    }
 
     public function testTheMigratedKeySetIsExactlyTheTwelveIdentified(): void
     {
@@ -155,61 +123,12 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
 
     // ── PR #196 ─────────────────────────────────────────────────────────
 
-    public function testFamiliesErroredRendersAndIsVisuallyDistinct(): void
-    {
-        $html = $this->render([$this->sentinelRow(['families_errored' => 8881])]);
 
-        $this->assertStringContainsString('8881', $html);
-        $this->assertStringContainsString('errored', $html);
-        // Stated in the alert colour, not folded into a neutral total.
-        $this->assertMatchesRegularExpression('/#d63638[^<]*>\s*8881/s', $html);
-    }
 
-    public function testAChainWithFamilyErrorsIsNotShownAsClean(): void
-    {
-        $clean   = $this->render([$this->sentinelRow(['families_errored' => 0])]);
-        $errored = $this->render([$this->sentinelRow(['families_errored' => 8881])]);
-
-        $this->assertStringNotContainsString('errored', $clean, 'a clean chain must not claim errors');
-        $this->assertStringContainsString('errored', $errored);
-        $this->assertNotSame($clean, $errored, 'the two states must be distinguishable on screen');
-    }
-
-    public function testFamiliesErroredFailsClosedOnRubbishInput(): void
-    {
-        foreach ([null, 'not-a-number', [], false] as $rubbish) {
-            $html = $this->render([$this->sentinelRow(['families_errored' => $rubbish])]);
-            $this->assertStringNotContainsString(
-                'errored',
-                $html,
-                'an unreadable count must read as zero errored, never as an invented alarm'
-            );
-        }
-    }
 
     // ── last_error handling ─────────────────────────────────────────────
 
-    public function testLastErrorIsEscapedAndKeptBehindADisclosure(): void
-    {
-        $hostile = '<script>alert(1)</script> & "quoted" <b>bold</b>';
-        $html    = $this->render([$this->sentinelRow(['last_error' => $hostile])]);
 
-        // Escaped, not injected.
-        $this->assertStringNotContainsString('<script>', $html);
-        $this->assertStringContainsString('&lt;script&gt;', $html);
-
-        // Same treatment the panel gives it: labelled as upstream, behind a
-        // disclosure, not pasted inline as though we wrote it.
-        $this->assertStringContainsString('<details>', $html);
-        $this->assertStringContainsString('Last recorded reason', $html);
-    }
-
-    public function testNoErrorMeansNoDisclosureAtAll(): void
-    {
-        $html = $this->render([$this->sentinelRow(['last_error' => null])]);
-
-        $this->assertStringNotContainsString('Last recorded reason', $html);
-    }
 
     /**
      * NEGATIVE: prohibited detail must not survive to either surface.
@@ -238,14 +157,6 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
     }
 
     #[DataProvider('hostileErrors')]
-    public function testProhibitedDetailNeverReachesTheNftDiscoveryPage(string $stored, string $forbidden): void
-    {
-        $html = $this->render([$this->sentinelRow(['last_error' => $stored])]);
-
-        $this->assertStringNotContainsString($forbidden, $html);
-        // …and not merely because it was HTML-escaped into a different shape.
-        $this->assertStringNotContainsString($forbidden, html_entity_decode($html, ENT_QUOTES));
-    }
 
     #[DataProvider('hostileErrors')]
     public function testTheSameRedactionAppliesToTheOldScannerPanel(string $stored, string $forbidden): void
@@ -256,24 +167,6 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
         $this->assertStringNotContainsString($forbidden, $safe);
     }
 
-    /**
-     * POSITIVE: the useful half survives. A redactor that returned "[error]"
-     * for everything would pass every negative test above and be useless.
-     */
-    public function testControlledOperationalReasonsSurviveIntact(): void
-    {
-        foreach ([
-            'wasm module not available (HTTP 501)',
-            'resumed pagination cursor returned an empty final page — restarting walk',
-            'incremental reverse read did not reach the watermark within its page budget',
-        ] as $reason) {
-            $safe = \BCC\Trust\Onchain\Admin\AdminActionSupport::operatorSafeExcerpt($reason);
-            $this->assertSame($reason, $safe, 'a controlled operational reason must not be redacted');
-
-            $html = $this->render([$this->sentinelRow(['last_error' => $reason])]);
-            $this->assertStringContainsString($reason, html_entity_decode($html, ENT_QUOTES));
-        }
-    }
 
     public function testARedactedMessageStillTellsTheOperatorSomething(): void
     {
@@ -288,226 +181,19 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
 
     // ── families_by_classification: the MEANINGFUL rendered values ──────
 
-    /**
-     * The panel renders three values from the breakdown — CW-721 total,
-     * settled non-NFT, and pending. Parity means all three, not just the
-     * total. Asserting the key was "supplied" would prove nothing.
-     */
-    public function testTheClassificationBreakdownMatchesThePanelsThreeValues(): void
-    {
-        $html = $this->render([$this->sentinelRow([
-            'families_by_classification' => [
-                'confirmed_cw721' => 111,
-                'probable_cw721'  => 222,
-                'not_cw721'       => 3331,
-            ],
-            'families_pending' => 4441,
-        ])]);
 
-        // CW-721 total = confirmed + probable, via the snapshot's own helper.
-        $this->assertStringContainsString('333 CW-721', $html);
-        // Settled non-NFT, read by its classifier constant.
-        $this->assertStringContainsString('3331 non-NFT', $html);
-        // Still awaiting classification.
-        $this->assertStringContainsString('4441 pending', $html);
-    }
 
-    public function testAnAbsentBreakdownRendersZerosRatherThanBlanks(): void
-    {
-        $html = $this->render([$this->sentinelRow([
-            'families_by_classification' => [],
-            'families_pending'           => 0,
-        ])]);
-
-        $this->assertStringContainsString('0 CW-721', $html);
-        $this->assertStringContainsString('0 non-NFT', $html);
-        $this->assertStringContainsString('0 pending', $html);
-    }
-
-    public function testTheBreakdownIsNeverDumpedAsARawArray(): void
-    {
-        $html = $this->render([$this->sentinelRow([
-            'families_by_classification' => ['confirmed_cw721' => 1, 'not_cw721' => 2],
-        ])]);
-
-        $this->assertStringNotContainsString('Array', $html);
-        $this->assertStringNotContainsString('confirmed_cw721', $html, 'internal keys are not operator vocabulary');
-    }
 
     // ── The renderer derives nothing ────────────────────────────────────
 
-    public function testASuppliedVerdictWinsOverAnythingTheRendererCouldInfer(): void
-    {
-        // Opted in and not paused — a renderer that re-derived would say
-        // "Eligible". The supplied verdict says otherwise and must win.
-        $html = $this->render([$this->sentinelRow([
-            'eligibility'        => CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED,
-            'eligibility_reason' => 'SENTINEL-REASON-ALLOWLIST',
-        ])]);
 
-        $this->assertStringContainsString(
-            CosmwasmDiscoveryHealthSnapshot::eligibilityLabel(
-                CosmwasmDiscoveryHealthSnapshot::ELIGIBILITY_ALLOWLIST_EXCLUDED
-            ),
-            $html
-        );
-        $this->assertStringContainsString('SENTINEL-REASON-ALLOWLIST', $html);
-    }
 
-    public function testTheSectionRendererTouchesNoRepositoryOrSnapshot(): void
-    {
-        $this->render([$this->sentinelRow()]);
-
-        $this->assertSame(
-            0,
-            CosmwasmDiscoveryHealthSnapshot::$summaryCalls,
-            'handed completed rows, the renderer must not fetch status of its own accord'
-        );
-        $this->assertSame([], ChainRepository::$discoveryWrites);
-        $this->assertSame(0, ChainRepository::$cacheBusts);
-        $this->assertSame(0, CosmwasmDiscoveryWorker::$passes, 'rendering must never start scanner work');
-    }
-
-    public function testTheTabFetchesTheSharedSummaryExactlyOnce(): void
-    {
-        CosmwasmDiscoveryHealthSnapshot::$chains = [$this->sentinelRow()];
-
-        // Through the REAL pair the page runs: the builder fetches the
-        // shared summary once for the whole family, and the renderer prints
-        // the finished rows it is handed. One read per render is the whole
-        // point — two would be two chances to disagree.
-        $snapshot = NftDiscoveryControlPlaneSnapshot::buildForFamily(
-            NftDiscoveryControlPlaneSnapshot::FAMILY_COSMOS
-        );
-
-        ob_start();
-        NftDiscoveryPage::render_cw_discovery_section($snapshot['cw_chains']);
-        ob_get_clean();
-
-        $this->assertSame(1, CosmwasmDiscoveryHealthSnapshot::$summaryCalls);
-    }
 
     // ── Scope: still engine-specific, still not slander ──────────────────
 
-    public function testNonCosmwasmChainsAreAbsentWithoutBeingCalledIncapable(): void
-    {
-        CosmwasmDiscoveryHealthSnapshot::$chains = [$this->sentinelRow()];
-
-        $snapshot = NftDiscoveryControlPlaneSnapshot::buildForFamily(
-            NftDiscoveryControlPlaneSnapshot::FAMILY_COSMOS
-        );
-
-        ob_start();
-        NftDiscoveryPage::render_cw_discovery_section($snapshot['cw_chains']);
-        $html = (string) ob_get_clean();
-
-        $text = preg_replace('/\s+/', ' ', strip_tags($html)) ?? '';
-
-        // No non-CosmWasm chain appears as a ROW. The table body is the
-        // part that carries verdicts, so that is where their absence
-        // matters; the prose may name them, and does.
-        $this->assertSame(1, preg_match('#<tbody>(.*)</tbody>#s', $html, $m));
-        $body = strtolower(strip_tags($m[1]));
-        $this->assertStringNotContainsString('ethereum', $body);
-        $this->assertStringNotContainsString('solana', $body);
-        $this->assertStringNotContainsString('helius', $body);
-
-        // And where the prose DOES name them, it says out-of-scope, never
-        // incapable.
-        $this->assertStringContainsString('not being described as unable to support NFTs', $text);
-        $this->assertStringContainsString('not managed by this engine', $text);
-        foreach ([
-            'Solana is not eligible',
-            'EVM chains are not eligible',
-            'does not support NFTs',
-            'cannot do NFT discovery',
-        ] as $slander) {
-            $this->assertStringNotContainsString($slander, $text);
-        }
-    }
 
     // ── VC-B3a adds NO controls ─────────────────────────────────────────
 
-    /**
-     * THE STATUS ROW IS STILL READ-ONLY. The scope moved; the rule did not.
-     *
-     * These two assertions were written in VC-B3a, when the section held
-     * nothing but the discovery opt-in, and they said "no scanner control
-     * exists anywhere in this section". VC-B3b deliberately adds four —
-     * that is the batch. Deleting the guard would have been a real loss of
-     * coverage, and raising its counts would have made it assert nothing.
-     *
-     * So it now targets the STATUS ROW itself, which is where the original
-     * concern actually lives: status is a read-only presentation of the
-     * snapshot, and a control mixed into it would be a mutation offered
-     * inside a display an operator reads as a report. Controls belong in
-     * the separate operations row, asserted below and owned in full by
-     * ChainsCwScannerOperationsDomTest.
-     */
-    public function testTheStatusRowCarriesNoMutationControl(): void
-    {
-        $html = $this->renderStatusRow($this->sentinelRow(['last_error' => 'x']));
 
-        foreach ([
-            NftDiscoveryPage::ACTION_CW_PAUSE,
-            NftDiscoveryPage::ACTION_CW_RESUME,
-            NftDiscoveryPage::ACTION_CW_BACKFILL,
-            NftDiscoveryPage::ACTION_CW_RETRY,
-            NftDiscoveryPage::ACTION_CW_DISCOVERY_ENABLE,
-            NftDiscoveryPage::ACTION_CW_DISCOVERY_DISABLE,
-        ] as $route) {
-            $this->assertStringNotContainsString($route, $html, 'status display must offer no route');
-        }
 
-        $this->assertSame(0, substr_count($html, '<form'), 'no form inside the status display');
-        $this->assertSame(0, substr_count($html, '<button'), 'no button inside the status display');
-        $this->assertSame(0, substr_count($html, '<input'), 'no input inside the status display');
-        $this->assertSame(0, substr_count($html, 'data-nonce-action'), 'no nonce inside the status display');
-    }
-
-    /**
-     * And the controls really are in their own row — so the separation
-     * above is a structural fact, not an accident of where the sentinel
-     * happened to put them.
-     */
-    public function testTheControlsLiveInASeparateRowFromTheStatus(): void
-    {
-        $html = $this->render([$this->sentinelRow()]);
-
-        $doc = new \DOMDocument();
-        libxml_use_internal_errors(true);
-        $doc->loadHTML('<!DOCTYPE html><html><body>' . $html . '</body></html>');
-        libxml_clear_errors();
-
-        $statusRows = 0;
-        $opsRows    = 0;
-        foreach ($doc->getElementsByTagName('tr') as $tr) {
-            if (!$tr instanceof \DOMElement) {
-                continue;
-            }
-            $class = $tr->getAttribute('class');
-            if (str_contains($class, 'bcc-cw-status-row')) {
-                $statusRows++;
-                $this->assertSame(0, $tr->getElementsByTagName('form')->length);
-            }
-            if (str_contains($class, 'bcc-cw-operations-row')) {
-                $opsRows++;
-            }
-        }
-
-        $this->assertSame(1, $statusRows, 'one status row per chain');
-        $this->assertSame(1, $opsRows, 'one operations row per chain');
-    }
-
-    /** @param array<string, mixed> $row */
-    private function renderStatusRow(array $row): string
-    {
-        $m = new \ReflectionMethod(NftDiscoveryPage::class, 'render_cw_status_row');
-        $m->setAccessible(true);
-
-        ob_start();
-        $m->invoke(null, $row);
-
-        return (string) ob_get_clean();
-    }
 }

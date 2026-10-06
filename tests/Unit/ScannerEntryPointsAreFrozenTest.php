@@ -4,11 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit {
 
-    use BCC\Trust\Onchain\Admin\DiscoveryRunStatusEndpoint;
-    use BCC\Trust\Onchain\Admin\DiscoveryScanActions;
     use BCC\Trust\Onchain\Admin\NftDiscoveryPage;
-    use BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel;
-    use BCC\Trust\Onchain\Admin\Views\DiscoveryScanPanel;
     use BCC\Trust\Onchain\Support\ScannerFreeze;
     use PHPUnit\Framework\Attributes\CoversNothing;
     use PHPUnit\Framework\Attributes\Group;
@@ -19,25 +15,36 @@ namespace BCC\Trust\Onchain\Tests\Unit {
     require_once __DIR__ . '/../Stubs/onchain-admin-action-stubs.php';
 
     /**
-     * Full-chain discovery is FROZEN: no entry point registers, no control renders.
+     * The scanner's OPERATOR SURFACE is gone, and what is not a run still works.
      *
-     * ── WHAT IS ASSERTED, AND WHY BOTH HALVES MATTER ────────────────────
-     * A freeze is only worth the name if it is provable in both directions:
+     * ── WHAT CHANGED AT S4, AND WHY THESE ASSERTIONS CHANGED WITH IT ────
+     * This suite used to prove a FREEZE: eleven entry points existed, were
+     * registered only behind `!ScannerFreeze::frozen()`, and therefore never
+     * registered at all. S4 deleted them, so the same facts now need different
+     * assertions:
      *
-     *   1. Nothing that can START, CONTINUE, RETRY, CANCEL or INSPECT a run
-     *      is reachable — the three admin-post scan routes, the run-status
-     *      AJAX action, the four CosmWasm run controls, their buttons and
-     *      nonces, and the one-shot CLI command.
-     *   2. Everything that is NOT a full-chain run still works — manual Add
-     *      Collection and its nonce, the capability controls, chain
-     *      discovery enable/disable (configuration, which starts nothing),
-     *      and the legacy-URL redirect. Asserting only absence would pass
-     *      just as well if the whole page had been deleted.
+     *   • `testNoScannerEntryPointCallbackIsRegistered` still asserts the ten
+     *     route strings are unregistered — but it is now a REGRESSION guard
+     *     against someone re-adding them, not evidence that a guard works.
+     *   • `testTheWithdrawnSurfaceIsDeleted` is new and is the positive half:
+     *     the four surface files and the withdrawn members are ABSENT. Without
+     *     it, "no route registers" would pass just as well if S4 had only
+     *     commented out a call.
+     *   • The CLI case INVERTED. It used to require the registration to still
+     *     be present and guarded; it now requires it to be gone.
+     *   • `testTheScannerImplementationIsPreserved` shrank from eight files to
+     *     four. S4 withdraws the SURFACE; the services, workers, executor and
+     *     one-shot CLI class are retained and still consulted via `frozen()`.
+     *   • The old inventory-parity case was deleted. It compared the
+     *     non-`cli:`/`cron:`/`async:` half of `FROZEN_ENTRY_POINTS` against the
+     *     hook list here; after S4 both halves are empty of hooks, so it
+     *     asserted `[] === []`. `testTheInventoryIsNowOnlyTheBackgroundPair`
+     *     replaces it with something that can fail.
      *
-     * The implementation is deliberately still here: services, workers, the
-     * CLI class, the panels and their markup are untouched and still tested.
-     * What this PR removes is the way to reach them, so the freeze is a
-     * one-line revert rather than a restoration from history.
+     * ⚠ The freeze itself is NOT retired. Two background entry points remain
+     * frozen and the retained implementation still depends on `frozen()`
+     * returning true. That is asserted here and in
+     * ScannerBackgroundEntryPointsAreFrozenTest.
      */
     #[CoversNothing]
     #[Group('unit')]
@@ -45,8 +52,17 @@ namespace BCC\Trust\Onchain\Tests\Unit {
     #[PreserveGlobalState(false)]
     final class ScannerEntryPointsAreFrozenTest extends TestCase
     {
-        /** Hooks that must NOT exist while the scanner is frozen. */
-        private const FROZEN_HOOKS = [
+        /**
+         * Route strings that must never be registered again.
+         *
+         * All ten are DELETED as of S4 — the constants that named them, the
+         * handlers behind them and the two classes that registered three of
+         * them are gone. They are still enumerated by their literal strings
+         * precisely because the constants no longer exist: a literal cannot
+         * be refactored away, so re-introducing any of these routes under its
+         * old name fails here.
+         */
+        private const WITHDRAWN_ROUTES = [
             'admin_post_bcc_discovery_scan_request',
             'admin_post_bcc_discovery_scan_retry',
             'admin_post_bcc_discovery_scan_cancel',
@@ -55,13 +71,11 @@ namespace BCC\Trust\Onchain\Tests\Unit {
             'admin_post_bcc_chain_cw_resume',
             'admin_post_bcc_chain_cw_backfill',
             'admin_post_bcc_chain_cw_retry',
-            // `cosmwasm_nft_discovery_enabled` is read only by the scanner, so these two
-            // configure a retired subsystem. The manual controls below are different columns.
             'admin_post_bcc_chain_cw_discovery_enable',
             'admin_post_bcc_chain_cw_discovery_disable',
         ];
 
-        /** Hooks that must SURVIVE the freeze — none of them starts a run. */
+        /** Hooks that must SURVIVE — none of them starts a run. */
         private const KEPT_HOOKS = [
             'admin_post_bcc_nftd_add_collection',
             'admin_post_bcc_nft_cap_product_enable',
@@ -70,12 +84,48 @@ namespace BCC\Trust\Onchain\Tests\Unit {
             'admin_post_bcc_nft_cap_stale_remove',
         ];
 
-        /** @return list<string> */
+        /**
+         * Files the surface withdrawal deleted outright.
+         *
+         * @var list<string>
+         */
+        private const DELETED_FILES = [
+            'app/Domain/Onchain/Admin/DiscoveryScanActions.php',
+            'app/Domain/Onchain/Admin/DiscoveryRunStatusEndpoint.php',
+            'app/Domain/Onchain/Admin/Views/DiscoveryScanPanel.php',
+            'app/Domain/Onchain/Admin/Views/CosmwasmScannerPanel.php',
+        ];
+
+        /**
+         * Members of the retained page that the withdrawal removed.
+         *
+         * @var list<string>
+         */
+        private const DELETED_PAGE_MEMBERS = [
+            'handle_cw_pause',
+            'handle_cw_resume',
+            'handle_cw_backfill',
+            'handle_cw_retry',
+            'handle_cw_discovery_enable',
+            'handle_cw_discovery_disable',
+            'render_cw_discovery_section',
+            'render_cw_operation_control',
+            'render_cw_discovery_button',
+            'render_run_report',
+        ];
+
+        /**
+         * Register everything this page still registers.
+         *
+         * ⚠ It no longer calls `DiscoveryScanActions::register()` or
+         * `DiscoveryRunStatusEndpoint::register()` — those classes are deleted,
+         * so naming them here would be a fatal error rather than a test.
+         *
+         * @return list<string>
+         */
         private function registerEverything(): array
         {
             $GLOBALS['bcc_test_registered_actions'] = [];
-            DiscoveryScanActions::register();
-            DiscoveryRunStatusEndpoint::register();
             NftDiscoveryPage::register_actions();
 
             return array_values(array_map('strval', $GLOBALS['bcc_test_registered_actions'] ?? []));
@@ -83,15 +133,22 @@ namespace BCC\Trust\Onchain\Tests\Unit {
 
         public function testTheFreezeIsOn(): void
         {
-            self::assertTrue(ScannerFreeze::frozen(), 'the scanner surface is frozen in this build');
+            self::assertTrue(
+                ScannerFreeze::frozen(),
+                'the retained scanner implementation still depends on this being true'
+            );
         }
 
         public function testNoScannerEntryPointCallbackIsRegistered(): void
         {
             $registered = $this->registerEverything();
 
-            foreach (self::FROZEN_HOOKS as $hook) {
-                self::assertNotContains($hook, $registered, "$hook must not be registered while the scanner is frozen");
+            foreach (self::WITHDRAWN_ROUTES as $route) {
+                self::assertNotContains(
+                    $route,
+                    $registered,
+                    "$route was withdrawn by S4 and must not be registered again"
+                );
             }
         }
 
@@ -102,40 +159,72 @@ namespace BCC\Trust\Onchain\Tests\Unit {
 
             self::assertNotSame([], $registered, 'registration must actually have happened');
             foreach (self::KEPT_HOOKS as $hook) {
-                self::assertContains($hook, $registered, "$hook is not a run control and must survive the freeze");
+                self::assertContains($hook, $registered, "$hook is not a run control and must survive");
             }
         }
 
-        public function testTheFrozenEntryPointInventoryMatchesWhatIsAsserted(): void
+        /**
+         * THE POSITIVE HALF: the surface is absent because it was deleted.
+         *
+         * `assertNotContains` above cannot distinguish "the route was removed"
+         * from "registration was commented out". This can.
+         */
+        public function testTheWithdrawnSurfaceIsDeleted(): void
         {
-            // Only the `add_action` hooks are comparable here; `cli:`, `cron:` and `async:`
-            // entries name entry points that are not WordPress action hooks and are asserted
-            // by ScannerBackgroundEntryPointsAreFrozenTest instead.
-            $declared = array_values(array_filter(
-                ScannerFreeze::FROZEN_ENTRY_POINTS,
-                static fn(string $e): bool => !preg_match('/^(cli|cron|async):/', $e)
-            ));
-            sort($declared);
-            $asserted = self::FROZEN_HOOKS;
-            sort($asserted);
+            $root = __DIR__ . '/../../';
 
-            self::assertSame($asserted, $declared, 'the documented inventory and the guard must not drift apart');
+            foreach (self::DELETED_FILES as $file) {
+                self::assertFileDoesNotExist(
+                    $root . $file,
+                    "$file is part of the withdrawn surface and must not come back"
+                );
+            }
+
+            foreach (self::DELETED_PAGE_MEMBERS as $member) {
+                self::assertFalse(
+                    method_exists(NftDiscoveryPage::class, $member),
+                    "NftDiscoveryPage::$member() was withdrawn by S4"
+                );
+            }
+
+            // Anti-vacuity: the page itself still exists and still has the
+            // members the capability and manual-intake surfaces need, so the
+            // assertions above are about specific removals rather than a class
+            // that failed to load.
+            foreach (['register_actions', 'render_page', 'handle_add_collection', 'handle_cap_product_enable'] as $kept) {
+                self::assertTrue(
+                    method_exists(NftDiscoveryPage::class, $kept),
+                    "NftDiscoveryPage::$kept() is retained and must still exist"
+                );
+            }
         }
 
-        public function testNoScannerControlOrContinuationMarkupRenders(): void
+        /**
+         * The freeze inventory is now exactly the two background entry points.
+         *
+         * Replaces the old parity case, which compared the hook half of
+         * `FROZEN_ENTRY_POINTS` against the list in this file. Both are empty
+         * of hooks after S4, so that comparison could no longer fail.
+         */
+        public function testTheInventoryIsNowOnlyTheBackgroundPair(): void
         {
-            $chain = (object) ['id' => 8, 'slug' => 'cosmos', 'name' => 'Cosmos Hub', 'chain_type' => 'cosmos'];
+            $declared = ScannerFreeze::FROZEN_ENTRY_POINTS;
+            sort($declared);
 
-            ob_start();
-            DiscoveryScanPanel::render($chain, true, '');
-            CosmwasmScannerPanel::render(['status' => 'healthy', 'discovery_enabled' => true]);
-            NftDiscoveryPage::render_cw_operation_control(NftDiscoveryPage::ACTION_CW_PAUSE, 8, 'cosmos');
-            NftDiscoveryPage::render_cw_operation_control(NftDiscoveryPage::ACTION_CW_RESUME, 8, 'cosmos');
-            NftDiscoveryPage::render_cw_operation_control(NftDiscoveryPage::ACTION_CW_BACKFILL, 8, 'cosmos');
-            NftDiscoveryPage::render_cw_operation_control(NftDiscoveryPage::ACTION_CW_RETRY, 8, 'cosmos');
-            $markup = (string) ob_get_clean();
+            self::assertSame(
+                ['async:bcc_discovery_run_execute', 'cron:bcc_discovery_run_maintenance'],
+                $declared,
+                'only the maintenance sweep and the async executor are still frozen'
+            );
 
-            self::assertSame('', $markup, 'no scanner control, continuation link or nonce may render');
+            // And none of the withdrawn routes is still described as frozen.
+            foreach (self::WITHDRAWN_ROUTES as $route) {
+                self::assertNotContains(
+                    $route,
+                    ScannerFreeze::FROZEN_ENTRY_POINTS,
+                    "$route is deleted, so the freeze must not claim to cover it"
+                );
+            }
         }
 
         /** Manual Add Collection is not a full-chain run and must still render, nonce and all. */
@@ -155,36 +244,52 @@ namespace BCC\Trust\Onchain\Tests\Unit {
 
             self::assertStringContainsString('Add a collection', $markup, 'the manual intake surface still renders');
             self::assertNotSame('', trim($markup));
-            // And it is not quietly rendering a scanner control instead.
-            foreach (['bcc_chain_cw_pause', 'bcc_chain_cw_backfill', 'bcc_discovery_scan_request'] as $frozen) {
-                self::assertStringNotContainsString($frozen, $markup);
+            // And it is not quietly rendering a withdrawn scanner control instead.
+            foreach (['bcc_chain_cw_pause', 'bcc_chain_cw_backfill', 'bcc_discovery_scan_request'] as $withdrawn) {
+                self::assertStringNotContainsString($withdrawn, $markup);
             }
         }
 
         /**
-         * The CLI command is registered only when the freeze is off, and the
-         * neighbouring commands prove the check is specific rather than a
-         * blanket guard around the whole block.
+         * ⚠ THIS CASE INVERTED AT S4.
+         *
+         * It used to require `'bcc-trust cosmwasm'` to still be present in
+         * bcc-trust.php and sitting behind `ScannerFreeze::frozen()`. The
+         * registration is deleted, so the requirement is now its absence —
+         * with the neighbouring command proving the file was actually read and
+         * the CLI block still exists.
          */
         public function testTheScannerCliCommandIsNotRegistered(): void
         {
             $source = (string) file_get_contents(__DIR__ . '/../../bcc-trust.php');
             self::assertNotSame('', $source);
 
-            $pos = strpos($source, "'bcc-trust cosmwasm'");
-            self::assertIsInt($pos, 'the one-shot command registration must still be in the file, guarded');
+            self::assertStringNotContainsString(
+                "'bcc-trust cosmwasm'",
+                $source,
+                'the one-shot discovery command must no longer be registered'
+            );
+            self::assertStringNotContainsString(
+                'CosmwasmOneShotDiscoveryCommand::class',
+                $source,
+                'nothing in the bootstrap may name the one-shot command any more'
+            );
 
-            $before = substr($source, max(0, $pos - 600), min(600, $pos));
-            self::assertStringContainsString('ScannerFreeze::frozen()', $before, 'the scanner CLI registration is behind the freeze');
-
-            // Non-vacuity: a command that is NOT frozen must not be behind the guard.
-            $pushPos = strpos($source, "'bcc-trust push'");
-            self::assertIsInt($pushPos);
-            $beforePush = substr($source, max(0, $pushPos - 600), min(600, $pushPos));
-            self::assertStringNotContainsString('ScannerFreeze::frozen()', $beforePush, 'unrelated CLI commands are untouched');
+            // Non-vacuity: the CLI block is still there and still registers the
+            // commands that are not scanner entry points.
+            self::assertStringContainsString("'bcc-trust push'", $source);
+            self::assertStringContainsString("'bcc-trust gate-identity'", $source);
         }
 
-        /** Freeze, not delete: the next PR removes the implementation, this one must not. */
+        /**
+         * Withdraw the surface, not the implementation.
+         *
+         * Four files, down from eight: the two admin-route classes and the two
+         * panel views are deleted (asserted absent above). These four are the
+         * retained implementation, and they stay inert because `frozen()`
+         * returns true — which is why the deletion of the surface did not make
+         * the freeze redundant.
+         */
         public function testTheScannerImplementationIsPreserved(): void
         {
             $root = __DIR__ . '/../../';
@@ -193,19 +298,8 @@ namespace BCC\Trust\Onchain\Tests\Unit {
                 'app/Domain/Onchain/Services/CosmwasmDiscoveryService.php',
                 'app/Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php',
                 'app/Domain/Onchain/Workers/DiscoveryRunExecutor.php',
-                'app/Domain/Onchain/Admin/DiscoveryScanActions.php',
-                'app/Domain/Onchain/Admin/DiscoveryRunStatusEndpoint.php',
-                'app/Domain/Onchain/Admin/Views/DiscoveryScanPanel.php',
-                'app/Domain/Onchain/Admin/Views/CosmwasmScannerPanel.php',
             ] as $file) {
-                self::assertFileExists($root . $file, 'the implementation must be frozen, not deleted');
-            }
-
-            // The handlers behind the frozen routes are still there to be re-registered.
-            self::assertTrue(method_exists(DiscoveryScanActions::class, 'handle'));
-            self::assertTrue(method_exists(DiscoveryRunStatusEndpoint::class, 'handle'));
-            foreach (['handle_cw_pause', 'handle_cw_resume', 'handle_cw_backfill', 'handle_cw_retry'] as $m) {
-                self::assertTrue(method_exists(NftDiscoveryPage::class, $m), "$m must survive the freeze");
+                self::assertFileExists($root . $file, 'the implementation is retained, not deleted');
             }
         }
 
