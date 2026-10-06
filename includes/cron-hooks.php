@@ -65,11 +65,12 @@ return [
         // `cleanup_only` below: a five-minute loop that selected every
         // active chain and called providers with no administrator-created
         // run cannot coexist with the operator-initiated discovery rule.
-        // PR 7A. MAINTENANCE, NOT DISCOVERY. It re-dispatches runs an
-        // administrator already requested, recovers expired leases and
-        // prunes terminal history. It has NO chain-selection logic, so it
-        // cannot become recurring automatic scanning.
-        'bcc_discovery_run_maintenance'         => ['interval' => 'bcc_five_minutes',             'description' => 'discovery run ledger maintenance (re-dispatch, lease recovery, retention)'],
+        // ⚠ `bcc_discovery_run_maintenance` was here from PR 7A until S6. It
+        // is now in `cleanup_only` below. Leaving it in THIS list after
+        // deleting its scheduler would report it permanently MISSING, because
+        // this map is what populates the `bcc_expected_cron_hooks` drift
+        // detector — the same trap PR 7A fell into from the other direction,
+        // declaring a hook nothing scheduled.
         'bcc_watch_batch_sweep'                 => ['interval' => 'bcc_minute',                   'description' => 'WatchBatchAggregator sweep (WatchBatchAggregator::SWEEP_HOOK / ::SWEEP_INTERVAL)'],
         // Disputes domain
         'bcc_disputes_auto_resolve'             => ['interval' => 'daily',                        'description' => 'dispute auto-resolve sweep'],
@@ -135,6 +136,33 @@ return [
         // includes/database/unschedule-hall-provision.php clears it on
         // installs that are never deactivated.
         'bcc_hall_provision',
+        // S6 — the discovery-run ledger maintenance sweep, every five minutes
+        // from PR 7A until the scanner retirement. MAINTENANCE, never
+        // discovery: it re-dispatched runs an administrator had already
+        // requested, recovered expired leases and pruned terminal history,
+        // with no chain-selection logic of its own.
+        //
+        // Retired because the surface that CREATED those runs is gone (S4),
+        // so there is nothing left to re-dispatch, and because the sweep had
+        // in any case been a no-op since the freeze — tick() returns its zero
+        // counts before triaging anything.
+        //
+        // ⚠ Retention goes with it. `DiscoveryRunRepository::pruneTerminal()`
+        // has exactly one production caller, this sweep, so terminal run
+        // history is no longer pruned. That is deliberate: the rows are kept
+        // for the table-drop stage rather than deleted while the surface is
+        // being withdrawn.
+        //
+        // ⚠ NOT the executor. `bcc_discovery_run_execute` is a one-shot async
+        // hook, has never been in either list here, and keeps its binding
+        // while a queued action can still exist.
+        //
+        // Listed here rather than merely deleted from `recurring` because
+        // installs that ran an earlier build still carry the event in
+        // `wp_options.cron`. Deactivation and uninstall clear it from this
+        // list; includes/database/unschedule-discovery-maintenance.php clears
+        // it on installs that are never deactivated.
+        'bcc_discovery_run_maintenance',
         // Scale-hardening / legacy drains still worth clearing on long-lived installs.
         'bcc_pull_batch_sweep',
         // Retired hooks (kept for uninstall hygiene on installs that scheduled them pre-retirement).

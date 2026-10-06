@@ -214,6 +214,23 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_hall_provision_unscheduled',
                 'callback'    => 'bcc_trust_unschedule_hall_provision',
             ],
+            // S6 — clears the retired `bcc_discovery_run_maintenance`
+            // schedule. Its OWN done_option and its OWN callback, for the
+            // same reason the Hall entry has them: the hook list is unrelated
+            // to the discovery hooks above, and folding it into either
+            // existing unschedule migration would be a silent no-op because
+            // both have already completed on every install, so the runner
+            // short-circuits before reaching the new hook.
+            //
+            // ⚠ Clears ONE hook and no data. The executor hook
+            // (`bcc_discovery_run_execute`) is deliberately left scheduled
+            // and bound. Fail-closed: COMPLETE only once wp_next_scheduled()
+            // proves the event is gone.
+            [
+                'id'          => 'unschedule_discovery_maintenance_v1',
+                'done_option' => 'bcc_trust_discovery_maintenance_unscheduled',
+                'callback'    => 'bcc_trust_unschedule_discovery_maintenance',
+            ],
             // PR 7.3 — bcc_discovery_runs.chunks_used, the durable chunk
             // counter that bounds one administrator-authorized session.
             //

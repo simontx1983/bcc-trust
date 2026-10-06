@@ -112,6 +112,52 @@ namespace {
         }
     }
 
+    /*
+     * The migration's return vocabulary.
+     *
+     * ⚠ Defined here rather than by requiring includes/database/migration-runner.php,
+     * which would register every migration in the plugin and run none of them —
+     * side effects this test has no business taking on.
+     *
+     * ⚠ That means the literals are duplicated, and a rename in the runner
+     * would NOT break these assertions on its own: the test would compare its
+     * own copy against itself and pass. `testTheMigrationVocabularyMatchesTheRunner`
+     * below closes that hole by reading the runner source.
+     */
+    if (!defined('BCC_TRUST_MIGRATION_COMPLETE')) {
+        define('BCC_TRUST_MIGRATION_COMPLETE', 'complete');
+    }
+    if (!defined('BCC_TRUST_MIGRATION_INCOMPLETE')) {
+        define('BCC_TRUST_MIGRATION_INCOMPLETE', 'incomplete');
+    }
+
+    if (!function_exists('wp_schedule_single_event')) {
+        /**
+         * A SINGLE event, which is a different thing from a recurring one.
+         *
+         * ⚠ Core stores `'schedule' => false` and NO `interval` for these, and
+         * that difference is the whole point here: the executor queue is made
+         * of single events carrying `[$runId]`, so each is keyed by
+         * md5(serialize([$runId])) rather than md5(serialize([])). A
+         * no-argument `wp_clear_scheduled_hook()` cannot see them, which is
+         * exactly what the migration must not pretend to have cleared.
+         *
+         * @param array<int, mixed> $args
+         */
+        function wp_schedule_single_event(int $timestamp, string $hook, array $args = []): bool
+        {
+            $cron = _get_cron_array();
+            $cron[$timestamp][$hook][md5(serialize($args))] = [
+                'schedule' => false,
+                'args'     => $args,
+            ];
+            ksort($cron);
+            update_option('cron', $cron);
+
+            return true;
+        }
+    }
+
     if (!function_exists('wp_schedule_event')) {
         /**
          * Core does NOT deduplicate recurring events — callers guard with
@@ -177,28 +223,38 @@ namespace {
 namespace BCC\Trust\Tests\Integration {
 
     use BCC\Trust\Onchain\Repositories\DiscoveryRunRepository;
-    use BCC\Trust\Onchain\Workers\DiscoveryRunMaintenance;
     use BccCronIntegrationHooks;
     use PHPUnit\Framework\TestCase;
 
     /**
-     * PR 7A.1 — the maintenance sweep is actually SCHEDULED.
+     * S6 — the maintenance sweep is RETIRED, against the real cron
+     * representation and a real MySQL.
+     *
+     * ── WHAT THIS FILE USED TO PROVE, AND WHY IT INVERTED ───────────────
+     * PR 7A.1 wrote it to prove the sweep was actually SCHEDULED: PR 7A had
+     * passed a full green suite while shipping a hook bound to an event
+     * nothing created, precisely because nothing inspected that state. Every
+     * case called `DiscoveryRunMaintenance::register()`.
+     *
+     * S6 deletes `register()`, so those cases cannot even load. What replaces
+     * them is the same discipline pointed the other way: assert the STATE, in
+     * the `cron` option itself, rather than trusting that a call was made.
      *
      * ── WHY THIS IS NOT A UNIT TEST ─────────────────────────────────────
-     * The unit test proves `register()` behaves correctly. This one proves
-     * the *state* that behaviour is supposed to produce actually exists in
-     * WordPress' own representation — the `cron` option — and that arming
-     * the sweep writes nothing to the ledger in a real MySQL. PR 7A passed
-     * a full green suite while shipping a hook that was never scheduled,
-     * precisely because nothing inspected that state.
+     * The unit test reads source and asserts the registration sites are gone.
+     * This one proves the migration removes a REAL event from the real cron
+     * option, leaves sibling hooks and the executor queue untouched, and
+     * writes nothing to the run ledger in a real database.
      *
-     * `AsyncDispatcher` is the real bcc-core class here (the integration
-     * bootstrap autoloads BCC\Core\* from the adjacent checkout), so the
-     * idempotency guard under test is production code.
+     * The cron functions in the prologue are NOT method doubles — they are a
+     * faithful reimplementation of the core `(timestamp -> hook ->
+     * md5(args))` option shape, so the assertions below read actual
+     * scheduled-event state. The migration under test is production code.
      */
     final class DiscoveryMaintenanceCronIntegrationTest extends TestCase
     {
-        private const HOOK = 'bcc_discovery_run_maintenance';
+        private const HOOK          = 'bcc_discovery_run_maintenance';
+        private const EXECUTOR_HOOK = 'bcc_discovery_run_execute';
 
         protected function setUp(): void
         {
@@ -206,6 +262,8 @@ namespace BCC\Trust\Tests\Integration {
             BccCronIntegrationHooks::reset();
             \update_option('cron', []);
             $GLOBALS['wpdb']->query('DELETE FROM `' . DiscoveryRunRepository::table() . '`');
+
+            require_once dirname(__DIR__, 2) . '/includes/database/unschedule-discovery-maintenance.php';
         }
 
         protected function tearDown(): void
@@ -215,120 +273,178 @@ namespace BCC\Trust\Tests\Integration {
             parent::tearDown();
         }
 
-        /** @return array{schedule: string|false, args: array<int, mixed>, interval?: int}|null */
-        private function scheduledEvent(): ?array
+        /**
+         * @param array<int, mixed> $args
+         * @return array{schedule: string|false, args: array<int, mixed>, interval?: int}|null
+         */
+        private function scheduledEvent(string $hook = self::HOOK, array $args = []): ?array
         {
             foreach (\_get_cron_array() as $hooks) {
-                if (isset($hooks[self::HOOK][md5(serialize([]))])) {
-                    return $hooks[self::HOOK][md5(serialize([]))];
+                if (isset($hooks[$hook][md5(serialize($args))])) {
+                    return $hooks[$hook][md5(serialize($args))];
                 }
             }
 
             return null;
         }
 
-        public function testTheEventIsAbsentBeforeRegistration(): void
+        // ── The declaration moved ───────────────────────────────────────
+
+        public function testTheHookIsNoLongerDeclaredRecurring(): void
         {
-            self::assertNull($this->scheduledEvent(), 'precondition: the PR 7A state');
-            self::assertFalse(\wp_next_scheduled(self::HOOK));
-        }
-
-        public function testRegistrationWritesARealEventIntoTheCronOption(): void
-        {
-            DiscoveryRunMaintenance::register();
-
-            $event = $this->scheduledEvent();
-            self::assertNotNull($event, 'the event must exist in WordPress\' own cron array');
-            self::assertSame([], $event['args']);
-
-            $next = \wp_next_scheduled(self::HOOK);
-            self::assertIsInt($next);
-            self::assertGreaterThan(0, $next);
-        }
-
-        public function testTheRecurrenceIsBccFiveMinutes(): void
-        {
-            DiscoveryRunMaintenance::register();
-
-            $event = $this->scheduledEvent();
-            self::assertNotNull($event);
-            self::assertSame('bcc_five_minutes', $event['schedule']);
-            self::assertSame(300, $event['interval'] ?? null, 'five minutes, in seconds, from wp_get_schedules()');
-        }
-
-        public function testRepeatedRegistrationLeavesExactlyOneEvent(): void
-        {
-            DiscoveryRunMaintenance::register();
-            DiscoveryRunMaintenance::register();
-            DiscoveryRunMaintenance::register();
-
-            $occurrences = 0;
-            foreach (\_get_cron_array() as $hooks) {
-                foreach ($hooks[self::HOOK] ?? [] as $_) {
-                    $occurrences++;
-                }
-            }
-
-            self::assertSame(1, $occurrences, 'exactly one pending event');
-
-            // ⚠ The event count ALONE is not enough. Core keys the cron array
-            // by (timestamp, hook, args), so three unguarded schedules inside
-            // one second collapse to a single slot and the count above stays 1
-            // even with no guard at all — a mutation control proved it. The
-            // guard is only observable in the CALL count.
-            self::assertCount(
-                1,
-                BccCronIntegrationHooks::$scheduleCalls,
-                'registerRecurring must short-circuit before calling wp_schedule_event again'
-            );
-            self::assertSame(self::HOOK, BccCronIntegrationHooks::$scheduleCalls[0]['hook']);
-        }
-
-        public function testRepeatedRegistrationBindsOneSubscriber(): void
-        {
-            DiscoveryRunMaintenance::register();
-            DiscoveryRunMaintenance::register();
-
-            $ids = [];
-            foreach (BccCronIntegrationHooks::$actions as $a) {
-                if ($a['hook'] === self::HOOK) {
-                    $ids[$a['id']] = true;
-                }
-            }
-
-            self::assertSame(
-                [DiscoveryRunMaintenance::class . '::handleSweep'],
-                array_keys($ids)
-            );
-        }
-
-        public function testEveryDeclaredRecurringHookCanBeScheduled(): void
-        {
-            /** @var array{recurring: array<string, array{interval: string}>} $lists */
+            /** @var array{recurring: array<string, array{interval: string}>, cleanup_only: list<string>} $lists */
             $lists = require dirname(__DIR__, 2) . '/includes/cron-hooks.php';
 
-            self::assertArrayHasKey(self::HOOK, $lists['recurring']);
+            self::assertArrayNotHasKey(self::HOOK, $lists['recurring']);
+            self::assertContains(self::HOOK, $lists['cleanup_only']);
+        }
 
-            $interval = $lists['recurring'][self::HOOK]['interval'];
-            self::assertArrayHasKey(
-                $interval,
-                \wp_get_schedules(),
-                'a declared hook whose interval is unregistered can never be scheduled'
+        /**
+         * The generalised property the old
+         * `testEveryDeclaredRecurringHookCanBeScheduled` existed for, kept
+         * without naming the retired hook: a declared hook whose interval is
+         * unregistered can never be scheduled, and would be reported MISSING
+         * forever.
+         */
+        public function testEveryStillDeclaredRecurringHookHasARegisteredInterval(): void
+        {
+            /** @var array{recurring: array<string, array{interval: string}>} $lists */
+            $lists     = require dirname(__DIR__, 2) . '/includes/cron-hooks.php';
+            $schedules = \wp_get_schedules();
+
+            $checked = 0;
+            foreach ($lists['recurring'] as $hook => $meta) {
+                self::assertArrayHasKey(
+                    $meta['interval'],
+                    $schedules,
+                    $hook . ' declares an interval nothing registers'
+                );
+                $checked++;
+            }
+
+            self::assertGreaterThan(20, $checked, 'anti-vacuity: the recurring list is not empty');
+        }
+
+        /**
+         * The locally-defined status constants really are the runner's.
+         *
+         * Without this, the two copies would only ever be compared against
+         * each other and a rename would go unnoticed here.
+         */
+        public function testTheMigrationVocabularyMatchesTheRunner(): void
+        {
+            $src = (string) file_get_contents(
+                dirname(__DIR__, 2) . '/includes/database/migration-runner.php'
             );
 
-            DiscoveryRunMaintenance::register();
-
-            // The production symptom: declared hooks that are not scheduled
-            // are what the drift detector reports as MISSING.
-            self::assertNotFalse(
-                \wp_next_scheduled(self::HOOK),
-                'the declared hook must no longer be missing'
+            self::assertStringContainsString(
+                "define('BCC_TRUST_MIGRATION_COMPLETE', '" . BCC_TRUST_MIGRATION_COMPLETE . "')",
+                $src
+            );
+            self::assertStringContainsString(
+                "define('BCC_TRUST_MIGRATION_INCOMPLETE', '" . BCC_TRUST_MIGRATION_INCOMPLETE . "')",
+                $src
             );
         }
 
-        public function testDeactivationClearsTheEvent(): void
+        // ── The migration, against the real cron option ─────────────────
+
+        /**
+         * THE POINT OF THE WHOLE STAGE.
+         *
+         * A code deletion stops future installs creating the event. It does
+         * nothing for installs that already hold one, because the event is in
+         * `wp_options.cron`, not in the code.
+         */
+        public function testTheMigrationClearsARealEventFromTheCronOption(): void
         {
-            DiscoveryRunMaintenance::register();
+            \wp_schedule_event(time(), 'bcc_five_minutes', self::HOOK);
+
+            self::assertNotNull($this->scheduledEvent(), 'precondition: a real event exists');
+            self::assertNotFalse(\wp_next_scheduled(self::HOOK));
+
+            self::assertSame(
+                BCC_TRUST_MIGRATION_COMPLETE,
+                \bcc_trust_unschedule_discovery_maintenance()
+            );
+
+            self::assertNull($this->scheduledEvent(), 'gone from the cron array');
+            self::assertFalse(\wp_next_scheduled(self::HOOK), 'and gone from the lookup');
+        }
+
+        public function testTheMigrationIsANoOpWhenNothingIsScheduled(): void
+        {
+            self::assertNull($this->scheduledEvent(), 'precondition: a fresh install');
+
+            self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, \bcc_trust_unschedule_discovery_maintenance());
+            self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, \bcc_trust_unschedule_discovery_maintenance());
+        }
+
+        /**
+         * ISOLATION. The migration clears ONE hook by name. A sibling
+         * five-minute job sharing the same timestamp bucket in the cron array
+         * must be untouched — an over-broad clear would silently disarm
+         * unrelated production work.
+         */
+        public function testTheMigrationLeavesSiblingHooksAlone(): void
+        {
+            $now = time();
+            \wp_schedule_event($now, 'bcc_five_minutes', self::HOOK);
+            \wp_schedule_event($now, 'bcc_five_minutes', 'bcc_trust_process_recalculations');
+            \wp_schedule_event($now, 'bcc_five_minutes', 'bcc_helius_dedupe_sweep');
+
+            \bcc_trust_unschedule_discovery_maintenance();
+
+            self::assertFalse(\wp_next_scheduled(self::HOOK), 'the retired hook is cleared');
+            self::assertNotFalse(
+                \wp_next_scheduled('bcc_trust_process_recalculations'),
+                'the recalc queue worker must survive'
+            );
+            self::assertNotFalse(
+                \wp_next_scheduled('bcc_helius_dedupe_sweep'),
+                'the Helius dedupe sweep must survive'
+            );
+        }
+
+        /**
+         * THE EXECUTOR QUEUE IS NOT DRAINED BY THIS MIGRATION.
+         *
+         * Its wp-cron fallback events carry `[$runId]`, so they are a
+         * different event identity. The migration must leave every one of
+         * them in place: freezing what creates work does not stop work
+         * already queued, and a migration that appeared to have drained the
+         * queue while leaving the events behind would be worse than one that
+         * never claimed to.
+         */
+        public function testTheExecutorQueueSurvivesTheMigration(): void
+        {
+            \wp_schedule_event(time(), 'bcc_five_minutes', self::HOOK);
+            \wp_schedule_single_event(time() + 60, self::EXECUTOR_HOOK, [4242]);
+
+            self::assertNotNull(
+                $this->scheduledEvent(self::EXECUTOR_HOOK, [4242]),
+                'precondition: a queued executor action exists'
+            );
+
+            \bcc_trust_unschedule_discovery_maintenance();
+
+            self::assertFalse(\wp_next_scheduled(self::HOOK));
+            self::assertNotNull(
+                $this->scheduledEvent(self::EXECUTOR_HOOK, [4242]),
+                'the argument-bearing executor event must still be there'
+            );
+        }
+
+        // ── Deactivation still clears it ────────────────────────────────
+
+        /**
+         * Carried over: deactivation clears from the declared hook list,
+         * which is why the hook moved to `cleanup_only` rather than being
+         * deleted from the file outright.
+         */
+        public function testDeactivationClearsTheEventViaTheDeclaredList(): void
+        {
+            \wp_schedule_event(time(), 'bcc_five_minutes', self::HOOK);
             self::assertNotFalse(\wp_next_scheduled(self::HOOK));
 
             /** @var array{recurring: array<string, array{interval: string}>, cleanup_only: list<string>} $lists */
@@ -341,35 +457,38 @@ namespace BCC\Trust\Tests\Integration {
 
             self::assertFalse(
                 \wp_next_scheduled(self::HOOK),
-                'deactivation must clear the maintenance event via the declared list'
+                'deactivation must clear the retired event via the declared list'
             );
             self::assertNull($this->scheduledEvent());
         }
 
+        // ── And it is not an act of discovery ───────────────────────────
+
         /**
-         * Arming the sweep is not an act of discovery.
+         * Asserted against a real table: the migration must not create,
+         * delete or otherwise touch a discovery run.
          *
-         * Asserted against a real table: with zero runs, registration must not
-         * create one, and must not touch the executor.
+         * Retention stopping is a consequence of retiring the sweep — the
+         * sweep was the only production caller of
+         * `DiscoveryRunRepository::pruneTerminal()` — not something the
+         * migration does on its way past.
          */
-        public function testRegistrationWritesNothingToTheLedger(): void
+        public function testTheMigrationWritesNothingToTheLedger(): void
         {
-            $table  = DiscoveryRunRepository::table();
+            $table = DiscoveryRunRepository::table();
+
             $before = (int) $GLOBALS['wpdb']->get_var("SELECT COUNT(*) FROM `{$table}`");
             self::assertSame(0, $before);
 
-            DiscoveryRunMaintenance::register();
+            \wp_schedule_event(time(), 'bcc_five_minutes', self::HOOK);
+            \bcc_trust_unschedule_discovery_maintenance();
 
             $after = (int) $GLOBALS['wpdb']->get_var("SELECT COUNT(*) FROM `{$table}`");
-            self::assertSame(0, $after, 'registration must not insert a discovery run');
+            self::assertSame(0, $after, 'the migration must not insert or remove a discovery run');
 
-            self::assertFalse(
-                \wp_next_scheduled('bcc_discovery_run_execute'),
-                'the executor is a one-shot and must never be scheduled'
-            );
-
+            // And it bound no handler on its way through.
             $hooks = array_column(BccCronIntegrationHooks::$actions, 'hook');
-            self::assertSame([self::HOOK], array_values(array_unique($hooks)));
+            self::assertNotContains(self::HOOK, $hooks, 'nothing may re-bind the retired sweep');
         }
     }
 }
