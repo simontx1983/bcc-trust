@@ -52,6 +52,14 @@ final class OnchainAdminIndexerActionsTest extends TestCase
 
         $_POST = [];
         $_GET  = [];
+
+        // Every route in this file is POST-only. `admin-post.php` dispatches
+        // on `$_REQUEST['action']` and `check_admin_referer()` reads
+        // `$_REQUEST['_wpnonce']`, so without an explicit method gate a GET
+        // carrying a valid nonce reaches the handler. The default here is
+        // POST so the existing cases keep testing what they were written to
+        // test; the GET refusals are pinned separately below.
+        $_SERVER['REQUEST_METHOD'] = 'POST';
     }
 
     // ── Registration ────────────────────────────────────────────────────────
@@ -269,6 +277,103 @@ final class OnchainAdminIndexerActionsTest extends TestCase
     }
 
     // ── Helius (external provider state) ────────────────────────────────────
+
+    /**
+     * ── THE METHOD GATE ─────────────────────────────────────────────────
+     * The two Helius handlers read NOTHING from the request, so unlike
+     * their siblings in this file they were not even accidentally inert on
+     * GET: a GET carrying a valid nonce ran to completion and mutated
+     * billable external provider state. Each case below hands the handler a
+     * VALID nonce deliberately — the point is that the METHOD alone refuses
+     * it, so a replayed or prefetched URL is not enough.
+     *
+     * Written out per route rather than via a data provider: a dynamic
+     * static call/property would obscure which handler failed, and reads
+     * poorly under static analysis.
+     */
+    public function testHeliusProvisionRefusesGetEvenWithAValidNonce(): void
+    {
+        \BccAdminTestState::$validNonceAction = 'bcc_helius_provision';
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+
+        try {
+            NftIndexerStatusView::handleHeliusProvision();
+            $this->fail('A GET must not reach the provider.');
+        } catch (\BccAdminDie $e) {
+            $this->assertSame(405, $e->status, 'Refused on its METHOD, not its arguments.');
+        }
+
+        $this->assertSame(
+            0,
+            \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::$provisionCalls,
+            'A GET must cost zero provider calls.'
+        );
+        $this->assertSame([], \BCC\Trust\Core\Security\AuditLogger::actions(), 'No audit row.');
+        $this->assertSame(
+            [],
+            \BccAdminTestState::$nonceChecks,
+            'The method is checked BEFORE the nonce — refused on shape, not credentials.'
+        );
+    }
+
+    public function testHeliusResyncRefusesGetEvenWithAValidNonce(): void
+    {
+        \BccAdminTestState::$validNonceAction = 'bcc_helius_resync';
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+
+        try {
+            NftIndexerStatusView::handleHeliusResync();
+            $this->fail('A GET must not reach the provider.');
+        } catch (\BccAdminDie $e) {
+            $this->assertSame(405, $e->status);
+        }
+
+        $this->assertSame(
+            0,
+            \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::$resyncCalls,
+            'A GET must cost zero provider calls.'
+        );
+        $this->assertSame([], \BCC\Trust\Core\Security\AuditLogger::actions());
+        $this->assertSame([], \BccAdminTestState::$nonceChecks);
+    }
+
+    public function testHeliusProvisionStillWorksOverAuthorizedPost(): void
+    {
+        \BccAdminTestState::$validNonceAction = 'bcc_helius_provision';
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+
+        try {
+            NftIndexerStatusView::handleHeliusProvision();
+        } catch (\BccAdminRedirect) {
+            // expected — every mutation ends in a redirect
+        }
+
+        $this->assertSame(
+            1,
+            \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::$provisionCalls,
+            'An authorized POST must still reach the provider exactly once.'
+        );
+        $this->assertNotSame([], \BccAdminTestState::$nonceChecks, 'The nonce is still verified.');
+    }
+
+    public function testHeliusResyncStillWorksOverAuthorizedPost(): void
+    {
+        \BccAdminTestState::$validNonceAction = 'bcc_helius_resync';
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+
+        try {
+            NftIndexerStatusView::handleHeliusResync();
+        } catch (\BccAdminRedirect) {
+            // expected
+        }
+
+        $this->assertSame(
+            1,
+            \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::$resyncCalls,
+            'An authorized POST must still reach the provider exactly once.'
+        );
+        $this->assertNotSame([], \BccAdminTestState::$nonceChecks);
+    }
 
     public function testHeliusProvisionRequiresItsOwnNonce(): void
     {
