@@ -130,31 +130,6 @@ final class ChainsNftDiscoveryStatusParityTest extends TestCase
 
 
 
-    /**
-     * NEGATIVE: prohibited detail must not survive to either surface.
-     *
-     * `cw_last_error` demonstrably carries `$e->getMessage()` and raw LCD
-     * response bodies — CosmwasmClassifier::sanitizeExcerpt() only strips
-     * control characters and truncates, so the stored text is arbitrary.
-     * esc_html() would render every one of these perfectly safely and still
-     * disclose them.
-     *
-     * @return array<string, array{0: string, 1: string}>
-     */
-    public static function hostileErrors(): array
-    {
-        return [
-            'credentialed url' => ['GET https://cosmos-api.polkachu.com.com/path?api_key=SUPERSECRET99 failed', 'SUPERSECRET99'],
-            'bare url'         => ['could not reach https://rpc.internal.example:26657/status', 'rpc.internal.example'],
-            'windows path'     => ['failed opening C:\\Users\\simon\\secrets\\key.pem', 'C:\\Users\\simon'],
-            'posix path'       => ['include failed in /home/deploy/app/wp-config.php', '/home/deploy'],
-            'sql'              => ['SELECT * FROM wp_bcc_chains WHERE id = 4', 'wp_bcc_chains'],
-            'exception class'  => ['GuzzleHttp\\Exception\\ConnectException: node down', 'ConnectException'],
-            'stack frame'      => ['#0 /var/www/app/Worker.php(88): run()', 'Worker.php'],
-            'api key param'    => ['auth failed: api_key=abc123def456ghi789', 'abc123def456ghi789'],
-            'long hex token'   => ['signature 0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071 rejected', '0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071'],
-        ];
-    }
 
 
 

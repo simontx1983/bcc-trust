@@ -54,60 +54,8 @@ final class NftDiscoveryRenderTest extends TestCase
     //  EVERY REFUSAL NAMES WHAT WOULD CHANGE IT
     // ═══════════════════════════════════════════════════════════════════
 
-    /** @return array<string, array{0: string, 1: string, 2: string, 3: string}> */
-    public static function statusSentences(): array
-    {
-        return [
-            'no driver is permanent' => [
-                NftChainCapability::OP_NO_DRIVER,
-                NftChainCapability::REASON_NO_REGISTERED_DRIVER,
-                'No driver',
-                'Credentials would not change it',
-            ],
-            'not configured is fixable' => [
-                NftChainCapability::OP_PROVIDER_UNAVAILABLE,
-                NftChainCapability::REASON_NO_READY_DRIVER,
-                'Not configured',
-                'missing endpoint or credential',
-            ],
-            'disabled is an override row' => [
-                NftChainCapability::OP_DISABLED,
-                NftChainCapability::REASON_ALL_DRIVERS_DISABLED,
-                'Disabled',
-                'switched off by a driver-override row',
-            ],
-            'manual permission' => [
-                NftChainCapability::OP_MANUAL_DISABLED,
-                NftChainCapability::REASON_MANUAL_PERMISSION_DISABLED,
-                'Not permitted',
-                'read-only in this build',
-            ],
-            'product decision' => [
-                NftChainCapability::OP_NO_BCC_SUPPORT,
-                NftChainCapability::REASON_PRODUCT_SUPPORT_DISABLED,
-                'Not supported',
-                'product decision, not a technical limit',
-            ],
-            'measured' => [
-                NftChainCapability::OP_CHAIN_UNSUPPORTED,
-                NftChainCapability::REASON_MEASURED_NO_WASM,
-                'Chain cannot',
-                'No operator setting can change that',
-            ],
-        ];
-    }
 
 
-    /** @return array<string, array{0: string, 1: string}> */
-    public static function unavailableStoreSentences(): array
-    {
-        return [
-            'overflow'   => ['overflow', 'may be a subset'],
-            'read failed' => ['read_failed', 'could not be read'],
-            'malformed'  => ['malformed', 'malformed'],
-            'invalid'    => ['invalid_chain', 'could not be used'],
-        ];
-    }
 
     /**
      * The unreadable-store reasons are told apart, because they are told
@@ -120,28 +68,6 @@ final class NftDiscoveryRenderTest extends TestCase
     //  NOTHING UPSTREAM ARRIVES UNREDACTED
     // ═══════════════════════════════════════════════════════════════════
 
-    /** @return array<string, array{0: string, 1: string}> */
-    public static function credentialBearingText(): array
-    {
-        return [
-            'keyed url' => [
-                'DAS failed at https://mainnet.helius-rpc.com/?api-key=SUPERSECRETKEY123',
-                'SUPERSECRETKEY123',
-            ],
-            'bearer token' => [
-                'Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789ABCDEF',
-                'abcdefghijklmnopqrstuvwxyz0123456789ABCDEF',
-            ],
-            'absolute path' => [
-                'failed in /home/deploy/app/public/wp-content/plugins/bcc-trust/x.php:12',
-                '/home/deploy/app/public',
-            ],
-            'sql' => [
-                'SELECT id, secret FROM wp_bcc_chains WHERE slug = "cosmos"',
-                'wp_bcc_chains',
-            ],
-        ];
-    }
 
     /**
      * A provider's own words about a refused endpoint go through the
@@ -160,14 +86,6 @@ final class NftDiscoveryRenderTest extends TestCase
     // ═══════════════════════════════════════════════════════════════════
 
 
-    /** @return array<string, array{0: string}> */
-    public static function partialStopReasons(): array
-    {
-        return [
-            'budget' => ['request_budget_exhausted'],
-            'clock'  => ['runtime_deadline_reached'],
-        ];
-    }
 
 
 
@@ -178,14 +96,6 @@ final class NftDiscoveryRenderTest extends TestCase
     //  EVM / SOLANA: A STRUCTURAL LIMIT, SAID PLAINLY
     // ═══════════════════════════════════════════════════════════════════
 
-    /** @return array<string, array{0: string, 1: string}> */
-    public static function nonEnumeratingFamilies(): array
-    {
-        return [
-            'evm'    => ['evm', 'EVM'],
-            'solana' => ['solana', 'Solana'],
-        ];
-    }
 
 
     /** Wallet refresh is named as a separate method, and offered no button. */
