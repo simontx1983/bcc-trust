@@ -36,6 +36,8 @@ if (!defined('ABSPATH')) {
 
 final class GatedGroupRepository {
 
+    use GuardsReadFailures;
+
     public const META_KIND       = '_bcc_group_kind';
     public const META_CHAIN_ID   = '_bcc_gate_chain_id';
     public const META_CONTRACT   = '_bcc_gate_contract_address';
@@ -131,6 +133,85 @@ final class GatedGroupRepository {
             'peepso-group',
             'publish'
         ));
+
+        return $row !== null ? (int) $row : null;
+    }
+
+    /**
+     * Reverse lookup on the AUTHORITATIVE link: find the published gated
+     * group for a collection ROW ID. Returns the WP post ID, or null only
+     * when there provably is no such group. Bounded LIMIT 1.
+     *
+     * ── WHY THIS EXISTS ALONGSIDE findGroupForCollection() ──────────────
+     * `_bcc_gate_collection_id` is the identity (see the class docblock).
+     * `findGroupForCollection()` matches on `_bcc_gate_contract_address`,
+     * which is legacy/display, and to do that it has to canonicalise a
+     * string first — so it answers null for a value that is not a valid
+     * identity on its chain. For a DISPLAY caller that is harmless. For a
+     * caller asking "is it safe to destroy this row?" it is the wrong
+     * answer in the dangerous direction: the eight production Solana gates
+     * stored a marketplace SYMBOL there, which canonicalises to nothing, so
+     * the lookup returns null WITHOUT RUNNING A QUERY and a live community
+     * reads as absent.
+     *
+     * Keying on the row id removes the string from the question entirely —
+     * no family lookup, no canonicalisation, nothing to fail.
+     *
+     * ── IT IS THE SAME RULE AS THE ADMIN LISTING ────────────────────────
+     * The predicate below is {@see CollectionStateClassifier::sqlHasCommunity()}
+     * narrowed to one id: `_bcc_gate_collection_id` = the row id, joined to
+     * `_bcc_group_kind = 'holders'` and to a PUBLISHED `peepso-group`. A
+     * trashed or draft group is not a live community, exactly as PR 6
+     * decided. They are deliberately two expressions of one rule, so an
+     * integration test cross-checks them rather than trusting the comment.
+     *
+     * ── AND IT FAILS CLOSED ─────────────────────────────────────────────
+     * `get_var()` hands back null for "no row" AND for "the query did not
+     * run", and this method's answer gates a delete. So the read is
+     * guarded: a failed read throws instead of returning a null that the
+     * caller would read as permission. Null from here means ONE thing.
+     *
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function findPublishedGroupIdForCollectionId(int $collectionId): ?int {
+        if ($collectionId <= 0) {
+            // A bad id is a substantive answer, not a fault: no row can
+            // have it, so no group can point at it.
+            return null;
+        }
+
+        global $wpdb;
+
+        // `meta_value` is a string column holding a decimal integer, and a
+        // `%d` bind compares '79' = 79 correctly. This mirrors how
+        // sqlHasCommunity() compares `pm_coll.meta_value = c.id` and how
+        // findGroupForCollection() above binds the chain id, so all three
+        // agree. No COLLATE clause is needed or wanted here — unlike the
+        // contract lookup, this comparison is numeric, so the case
+        // sensitivity of wp_postmeta's collation cannot affect it.
+        $row = $wpdb->get_var($wpdb->prepare(
+            "SELECT pm_coll.post_id
+               FROM {$wpdb->postmeta} pm_coll
+          INNER JOIN {$wpdb->postmeta} pm_kind ON pm_kind.post_id = pm_coll.post_id
+          INNER JOIN {$wpdb->posts}    p       ON p.ID            = pm_coll.post_id
+              WHERE pm_coll.meta_key   = %s
+                AND pm_coll.meta_value = %d
+                AND pm_kind.meta_key   = %s
+                AND pm_kind.meta_value = %s
+                AND p.post_type        = %s
+                AND p.post_status      = %s
+              LIMIT 1",
+            self::META_COLLECTION,
+            $collectionId,
+            self::META_KIND,
+            self::KIND_HOLDERS,
+            'peepso-group',
+            'publish'
+        ));
+
+        // ⚠ Order matters: guard BEFORE interpreting the result, so a
+        // failed read can never be cast to null and handed back.
+        self::guardReadOrThrow(__FUNCTION__);
 
         return $row !== null ? (int) $row : null;
     }

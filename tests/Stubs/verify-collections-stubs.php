@@ -211,7 +211,8 @@ namespace BCC\Trust\Onchain\Repositories {
 
             /** @var list<int> */
             public static array $deleted = [];
-            public static bool $deleteResult = true;
+            /** Rows affected, matching production's `int` return (0 = nothing deleted). */
+            public static int $deleteResult = 1;
 
             /** @var array<int, object> */
             public static array $rows = [];
@@ -276,7 +277,7 @@ namespace BCC\Trust\Onchain\Repositories {
                 return self::$upsertWritten;
             }
 
-            public static function deleteById(int $id): bool
+            public static function deleteById(int $id): int
             {
                 self::$deleted[] = $id;
                 return self::$deleteResult;
@@ -317,12 +318,20 @@ namespace BCC\Trust\Onchain\Repositories {
 
             public static bool $findByChainContractReturnsNull = false;
 
-            public static function seed(int $id, int $chainId = 4, string $contract = '0xabc'): void
-            {
+            public static function seed(
+                int $id,
+                int $chainId = 4,
+                string $contract = '0xabc',
+                ?string $canonical = null
+            ): void {
                 self::$rows[$id] = (object) [
                     'id'               => $id,
                     'chain_id'         => $chainId,
                     'contract_address' => $contract,
+                    // Present so a test can seed a row whose two identity
+                    // columns DIVERGE — the legacy-alias shape. Defaults to
+                    // the contract, which is the ordinary case.
+                    'canonical_identifier' => $canonical ?? $contract,
                     'name'             => 'Seeded',
                     // VC-B1: the hide handler names the collection back to
                     // the operator, falling back to the contract.
@@ -573,7 +582,7 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$descriptionTransitions = [];
                 self::$setDescriptionStateResult = true;
                 self::$deleted = [];
-                self::$deleteResult = true;
+                self::$deleteResult = 1;
                 self::$rows = [];
                 self::$upsertWritten = 1;
                 self::$upsertCalls = [];
@@ -592,17 +601,62 @@ namespace BCC\Trust\Onchain\Repositories {
     if (!class_exists(GatedGroupRepository::class, false)) {
         final class GatedGroupRepository
         {
-            /** @var array<string, int> */
+            /**
+             * LEGACY, contract-keyed: "<chainId>|<contract>" => groupId.
+             *
+             * ⚠ This fixture no longer drives the delete guard. It is kept
+             * so a test can PROVE that — seed only this one and the guard
+             * must still permit the delete, which is what fails if the
+             * handler ever reverts to the contract-keyed lookup.
+             *
+             * @var array<string, int>
+             */
             public static array $groups = [];
+
+            /**
+             * AUTHORITATIVE, collection-id-keyed: collectionId => groupId.
+             * Mirrors `_bcc_gate_collection_id` on a PUBLISHED peepso-group.
+             *
+             * @var array<int, int>
+             */
+            public static array $groupsByCollectionId = [];
+
+            /** Make the authoritative read FAIL, so fail-closed is testable. */
+            public static bool $throwOnCollectionIdRead = false;
+
+            public static int $collectionIdReads = 0;
 
             public static function findGroupForCollection(int $chainId, string $contract): ?int
             {
                 return self::$groups[$chainId . '|' . $contract] ?? null;
             }
 
+            public static function findPublishedGroupIdForCollectionId(int $collectionId): ?int
+            {
+                // Mirrors production ordering: a bad id is answered before
+                // any read, so it cannot be mistaken for a read failure.
+                if ($collectionId <= 0) {
+                    return null;
+                }
+
+                self::$collectionIdReads++;
+
+                if (self::$throwOnCollectionIdRead) {
+                    throw new RepositoryReadFailure(
+                        'findPublishedGroupIdForCollectionId',
+                        'SQLSTATE[HY000] stub'
+                    );
+                }
+
+                return self::$groupsByCollectionId[$collectionId] ?? null;
+            }
+
             public static function reset(): void
             {
-                self::$groups = [];
+                self::$groups                   = [];
+                self::$groupsByCollectionId     = [];
+                self::$throwOnCollectionIdRead  = false;
+                self::$collectionIdReads        = 0;
             }
         }
     }
@@ -788,6 +842,21 @@ namespace BCC\Trust\Onchain\Fetchers {
                 ];
             }
 
+            /**
+             * The HTTP-501 side-channel the real fetcher now carries.
+             *
+             * Defaults FALSE: these fixtures model a chain that HAS a wasm
+             * module and a contract that may or may not answer. A default of
+             * true would turn every undecidable probe in this file into
+             * "the chain has no wasm module", which is a different claim.
+             */
+            public static bool $chainHasNoWasm = false;
+
+            public function chainHasNoWasmFor(string $contract): bool
+            {
+                return self::$chainHasNoWasm;
+            }
+
             public function numTokensCountFor(string $contract): ?int
             {
                 return self::$numTokens;
@@ -799,6 +868,7 @@ namespace BCC\Trust\Onchain\Fetchers {
                 self::$contractInfo = ['name' => 'Seeded CW721', 'symbol' => 'SEED'];
                 self::$probes = [];
                 self::$numTokens = 7;
+                self::$chainHasNoWasm = false;
             }
         }
 
