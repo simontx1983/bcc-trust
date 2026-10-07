@@ -701,42 +701,73 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
     }
 
     /**
-     * AN EVM OR SOLANA CHAIN'S REAL REASON STILL SURVIVES.
+     * A STALE `cw_*` VALUE ON A NON-COSMOS ROW CHANGES NOTHING.
      *
      * `cw_discovery_state` lives on `wp_bcc_chain_checkpoints`, a row shared
      * with the EVM indexer's own `state` column, so a non-Cosmos chain can
      * carry a `cw_*` value that means nothing there. While the capability
      * model read that column, a Cosmos-scoping guard existed to stop it
      * answering "this chain has no wasm module" about Ethereum — true,
-     * irrelevant, and it would have MASKED the real reason: no provider
-     * sells chain-wide EVM enumeration.
+     * irrelevant, and it would have MASKED the real reason.
      *
      * S5 removed the read, so the guard is no longer load-bearing. The
-     * OUTCOME it protected is asserted directly, and the stale value is still
+     * OUTCOME it protected is asserted here, and the stale value is still
      * written so a reintroduced read would fail this case.
      *
      * @param string $slug
      */
     #[\PHPUnit\Framework\Attributes\DataProvider('nonCosmosChains')]
-    public function testNonCosmosChainStillReportsItsStructuralReason(string $slug): void
+    public function testNonCosmosChainIsUnaffectedByAStaleCosmWasmState(string $slug): void
     {
-        $chain = self::fullyPermittedChain($slug);
+        $chain  = self::fullyPermittedChain($slug);
+        $before = NftChainCapability::operationMatrix($chain)['operations'];
+
         self::markCwUnsupported((int) $chain->id);
 
-        // ⚠ S7: the original asserted `NO_ENUMERATION_DRIVER` — that no driver
-        // could enumerate this family. The operation is gone, so the
-        // equivalent surviving structural refusal is used instead: no driver
-        // in this build serves a curated feed on EVM or Solana either, and
-        // that answer must come from the registry rather than from the stale
-        // `cw_discovery_state` this case still seeds.
-        $curated = NftChainCapability::operationMatrix($chain)['operations'][NftDriverRegistry::OP_CURATED_FEED];
+        ChainRepository::clearCache();
+        $reprojected = ChainRepository::getBySlug($slug);
+        self::assertNotNull($reprojected);
+        $after = NftChainCapability::operationMatrix($reprojected)['operations'];
 
+        // ⚠ S7: the original asserted `NO_ENUMERATION_DRIVER` — that no driver
+        // could enumerate this family — and the operation is gone.
+        //
+        // My first replacement asserted `OP_NO_DRIVER` for `curated_feed`,
+        // claiming no driver serves a curated feed on EVM or Solana. That is
+        // FALSE for Solana: `magiceden` declares curated_feed there, and CI
+        // caught it. There is in fact NO single operation that both families
+        // structurally lack, so pinning one named refusal cannot work here.
+        //
+        // The property this case actually exists for is family-agnostic: a
+        // stale `cw_discovery_state` on a non-Cosmos row must not influence
+        // the answer AT ALL. Asserted as an equality over every operation,
+        // which is both true for both families and stronger than any single
+        // named status — it catches a leak into any row rather than one.
+        $compared = 0;
+        foreach ($before as $operation => $row) {
+            self::assertSame(
+                $row['status'],
+                $after[$operation]['status'],
+                $slug . '/' . $operation . ' changed because of an irrelevant CosmWasm measurement'
+            );
+            self::assertSame(
+                $row['reason'],
+                $after[$operation]['reason'],
+                $slug . '/' . $operation . ' changed its stated reason'
+            );
+            $compared++;
+        }
+
+        self::assertSame(5, $compared, 'five operations must have been compared');
+
+        // Anti-vacuity: the stale value really was written, so the equality
+        // above is not comparing two identical no-ops.
+        $checkpoint = ChainCheckpointRepository::get((int) $chain->id);
+        self::assertNotNull($checkpoint);
         self::assertSame(
-            NftChainCapability::OP_NO_DRIVER,
-            $curated['status'],
-            'the honest reason is structural: no driver in this build serves this family'
+            ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
+            (string) $checkpoint->cw_discovery_state
         );
-        self::assertSame(NftChainCapability::REASON_NO_REGISTERED_DRIVER, $curated['reason']);
     }
 
     /** @return array<string, array{0: string}> */
