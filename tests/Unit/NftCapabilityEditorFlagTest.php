@@ -362,34 +362,6 @@ final class NftCapabilityEditorFlagTest extends TestCase
         );
     }
 
-    /**
-     * ⚠️ AND THE STORED PERMISSION WOULD NOT HAVE HELPED ANYWAY.
-     *
-     * Proven by writing the flag directly — as a restored backup would —
-     * and showing the capability model still refuses enumeration for a
-     * structural reason. This is the claim that makes the refusal above a
-     * correctness fix rather than a policy: no setting can add chain-wide
-     * enumeration to these families.
-     */
-    #[DataProvider('nonEnumerableFamilies')]
-    public function testEvenAStoredPermissionLeavesTheChainNonEnumerable(
-        string $slug,
-        string $chainType
-    ): void {
-        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, true, $chainType);
-
-        $chain = ChainRepository::getById(self::CHAIN_ID);
-        self::assertNotNull($chain);
-
-        $matrix = NftChainCapability::operationMatrix($chain);
-        $enumeration = $matrix['operations'][NftDriverRegistry::OP_ENUMERATION];
-
-        $this->assertSame(NftChainCapability::OP_NO_DRIVER, $enumeration['status']);
-        $this->assertSame(NftChainCapability::REASON_NO_REGISTERED_DRIVER, $enumeration['reason']);
-        $this->assertSame([], $enumeration['registered'], 'the registry offers nothing to enumerate with');
-        $this->assertSame(NftChainCapability::NO_ENUMERATION_DRIVER, $matrix['verdict']);
-        $this->assertFalse(NftChainCapability::isScannable($matrix['verdict']));
-    }
 
     /**
      * ⚠️ BUT A STORED-WRONG VALUE CAN STILL BE CLEARED.

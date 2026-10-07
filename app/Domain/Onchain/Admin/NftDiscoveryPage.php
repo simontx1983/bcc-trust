@@ -1161,8 +1161,8 @@ class NftDiscoveryPage
     private static function operation_label(string $operation): string
     {
         switch ($operation) {
-            case NftDriverRegistry::OP_ENUMERATION:
-                return 'Chain enumeration';
+            // ⚠ No `enumeration` arm: S7 removed the operation. An arm here
+            // would label a column the matrix no longer produces.
             case NftDriverRegistry::OP_CURATED_FEED:
                 return 'Curated feed';
             case NftDriverRegistry::OP_WALLET_DISCOVERY:

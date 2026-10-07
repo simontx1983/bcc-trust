@@ -126,8 +126,8 @@ final class NftCapabilityEditorRouteTest extends TestCase
     private function validDriverRequest(
         string $route,
         int $chainId = self::CHAIN_ID,
-        string $operation = NftDriverRegistry::OP_ENUMERATION,
-        string $driverKey = NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION
+        string $operation = NftDriverRegistry::OP_VALIDATION,
+        string $driverKey = NftDriverRegistry::DRIVER_CW721_LCD
     ): void {
         $_POST['chain_id']   = (string) $chainId;
         $_POST['operation']  = $operation;
@@ -354,8 +354,8 @@ final class NftCapabilityEditorRouteTest extends TestCase
     {
         $this->validDriverRequest($route, self::CHAIN_ID);
         \BccAdminTestState::$validNonceAction = $route . '_' . self::OTHER_CHAIN_ID
-            . '_' . NftDriverRegistry::OP_ENUMERATION
-            . '_' . NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION;
+            . '_' . NftDriverRegistry::OP_VALIDATION
+            . '_' . NftDriverRegistry::DRIVER_CW721_LCD;
 
         $die = $this->driveExpectingDeath($route);
 
@@ -363,14 +363,14 @@ final class NftCapabilityEditorRouteTest extends TestCase
         $this->assertNothingHappened('the nonce named a different chain');
     }
 
-    /** ⚠️ A nonce for `metadata` must not authorise a change to `enumeration`. */
+    /** ⚠️ A nonce for `metadata` must not authorise a change to `validation`. */
     #[DataProvider('driverRoutes')]
     public function testADriverNonceForAnotherOperationIsRefused(string $route): void
     {
         $this->validDriverRequest($route);
         \BccAdminTestState::$validNonceAction = $route . '_' . self::CHAIN_ID
             . '_' . NftDriverRegistry::OP_METADATA
-            . '_' . NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION;
+            . '_' . NftDriverRegistry::DRIVER_CW721_LCD;
 
         $die = $this->driveExpectingDeath($route);
 
@@ -378,14 +378,23 @@ final class NftCapabilityEditorRouteTest extends TestCase
         $this->assertNothingHappened('the nonce named a different operation');
     }
 
-    /** ⚠️ And a nonce for `cw721_lcd` must not authorise a change to another driver. */
+    /**
+     * ⚠️ And a nonce naming a DIFFERENT driver must not authorise this one.
+     *
+     * ⚠ The nonce must name a driver the request does not use. Before S7 the
+     * request defaulted to `cosmwasm_enumeration` and this nonce named
+     * `cw721_lcd`; re-pointing the default to `cw721_lcd` made both sides
+     * identical, so the request became legitimate and the test passed for the
+     * wrong reason. `talis_whitelist` restores the mismatch — a different
+     * driver on the same chain family.
+     */
     #[DataProvider('driverRoutes')]
     public function testADriverNonceForAnotherDriverIsRefused(string $route): void
     {
         $this->validDriverRequest($route);
         \BccAdminTestState::$validNonceAction = $route . '_' . self::CHAIN_ID
-            . '_' . NftDriverRegistry::OP_ENUMERATION
-            . '_' . NftDriverRegistry::DRIVER_CW721_LCD;
+            . '_' . NftDriverRegistry::OP_VALIDATION
+            . '_' . NftDriverRegistry::DRIVER_TALIS_WHITELIST;
 
         $die = $this->driveExpectingDeath($route);
 
@@ -422,7 +431,7 @@ final class NftCapabilityEditorRouteTest extends TestCase
     public function testAnArrayShapedOperationIsRefused(string $route): void
     {
         $this->validDriverRequest($route);
-        $_POST['operation'] = [NftDriverRegistry::OP_ENUMERATION];
+        $_POST['operation'] = [NftDriverRegistry::OP_VALIDATION];
 
         $die = $this->driveExpectingDeath($route);
 
@@ -434,7 +443,7 @@ final class NftCapabilityEditorRouteTest extends TestCase
     public function testAnArrayShapedDriverKeyIsRefused(string $route): void
     {
         $this->validDriverRequest($route);
-        $_POST['driver_key'] = [NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION];
+        $_POST['driver_key'] = [NftDriverRegistry::DRIVER_CW721_LCD];
 
         $die = $this->driveExpectingDeath($route);
 
@@ -624,7 +633,7 @@ final class NftCapabilityEditorRouteTest extends TestCase
     public function testAnUnknownDriverIsRefusedByTheDomain(): void
     {
         $route = NftDiscoveryPage::ACTION_CAP_DRIVER_DISABLE;
-        $this->validDriverRequest($route, self::CHAIN_ID, NftDriverRegistry::OP_ENUMERATION, 'moonbeam_nft');
+        $this->validDriverRequest($route, self::CHAIN_ID, NftDriverRegistry::OP_VALIDATION, 'moonbeam_nft');
 
         $args = $this->driveExpectingRedirect($route);
 
@@ -701,11 +710,15 @@ final class NftCapabilityEditorRouteTest extends TestCase
     public function testAValidDriverOnTheWrongOperationIsRefused(): void
     {
         $route = NftDiscoveryPage::ACTION_CAP_DRIVER_DISABLE;
+        // ⚠ `talis_whitelist`, not `cw721_lcd`: cw721_lcd DECLARES metadata,
+        // so that pair is a valid triple and this test would pass by
+        // accepting the request rather than refusing it. talis declares
+        // curated_feed only.
         $this->validDriverRequest(
             $route,
             self::CHAIN_ID,
             NftDriverRegistry::OP_METADATA,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION
+            NftDriverRegistry::DRIVER_TALIS_WHITELIST
         );
 
         $args = $this->driveExpectingRedirect($route);
@@ -714,7 +727,7 @@ final class NftCapabilityEditorRouteTest extends TestCase
         $this->assertNothingHappened('that driver does not perform that operation');
 
         $this->assertTrue(NftDriverRegistry::driverSupportsChain(
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             (object) ['chain_type' => 'cosmos', 'slug' => 'osmosis']
         ));
     }

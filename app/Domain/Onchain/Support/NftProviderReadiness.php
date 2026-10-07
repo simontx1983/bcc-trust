@@ -97,13 +97,16 @@ final class NftProviderReadiness
 
         return match ($driverKey) {
             // ── Cosmos ──────────────────────────────────────────────────
-            // Both speak wasmd over the chain's LCD/REST endpoint. Readiness
-            // here answers only "do we have somewhere to ask" — it has never
-            // claimed the endpoint exposes a wasm module. That used to be
-            // answered from the stored `cw_discovery_state` measurement via
-            // NftChainCapability's CHAIN_UNSUPPORTED rung; S5 removed it, so
-            // it is now answered per request at validation time.
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            // cw721_lcd speaks wasmd over the chain's LCD/REST endpoint.
+            // Readiness here answers only "do we have somewhere to ask" — it
+            // has never claimed the endpoint exposes a wasm module. That used
+            // to be answered from the stored `cw_discovery_state` measurement
+            // via NftChainCapability's CHAIN_UNSUPPORTED rung; S5 removed it,
+            // so it is now answered per request at validation time.
+            //
+            // ⚠ S7: this arm carried `cosmwasm_enumeration` too. The arm is
+            // retained with one key, not deleted — cw721_lcd serves
+            // validation, metadata and ownership on Cosmos and is unaffected.
             NftDriverRegistry::DRIVER_CW721_LCD => $restUrl !== '',
 
             // Talis reads Injective's whitelist contract over the same LCD.
@@ -243,7 +246,8 @@ final class NftProviderReadiness
         // original Solana defect, where a configured Helius key was reported for
         // a path still hitting the public RPC.
         return match ($driverKey) {
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            // ⚠ S7 dropped `cosmwasm_enumeration` from this arm. Both
+            // remaining keys resolve the same LCD/REST endpoint.
             NftDriverRegistry::DRIVER_CW721_LCD,
             NftDriverRegistry::DRIVER_TALIS_WHITELIST
                 => ProviderConfigStatus::describing($provider, $restUrl),
@@ -307,7 +311,7 @@ final class NftProviderReadiness
             NftDriverRegistry::DRIVER_DAS_RPC            => 'solana-rpc',
             NftDriverRegistry::DRIVER_MAGICEDEN          => 'magiceden',
             NftDriverRegistry::DRIVER_EVM_RPC            => 'evm-rpc',
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            // ⚠ S7 dropped `cosmwasm_enumeration` from this arm.
             NftDriverRegistry::DRIVER_CW721_LCD,
             NftDriverRegistry::DRIVER_TALIS_WHITELIST    => 'cosmos-lcd',
             default                                      => 'unknown',

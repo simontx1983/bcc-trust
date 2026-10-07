@@ -222,7 +222,7 @@ final class NftCapabilityEditorRenderTest extends TestCase
         $html = $this->page(['chain' => (string) self::CHAIN_ID]);
 
         // Injective's real drivers.
-        $this->assertStringContainsString(NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION, $html);
+        $this->assertStringContainsString(NftDriverRegistry::DRIVER_CW721_LCD, $html);
         $this->assertStringContainsString(NftDriverRegistry::DRIVER_TALIS_WHITELIST, $html);
         $this->assertStringContainsString(NftDriverRegistry::DRIVER_CW721_LCD, $html);
 
@@ -257,8 +257,8 @@ final class NftCapabilityEditorRenderTest extends TestCase
 
         ChainNftCapabilityRepository::seedRow(
             self::CHAIN_ID,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             false,
             10
         );
@@ -266,8 +266,8 @@ final class NftCapabilityEditorRenderTest extends TestCase
 
         ChainNftCapabilityRepository::seedRow(
             self::CHAIN_ID,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             true,
             250
         );
@@ -439,7 +439,7 @@ final class NftCapabilityEditorRenderTest extends TestCase
         $matrix = NftChainCapability::operationMatrix($chain);
         $this->assertSame(
             NftChainCapability::OP_READY,
-            $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['status']
+            $matrix['operations'][NftDriverRegistry::OP_VALIDATION]['status']
         );
         $this->assertRenderChangedNothing();
     }
