@@ -564,8 +564,8 @@ final class NftProviderReadinessTest extends TestCase
         $withRest    = self::chain('cosmos', 'cosmos', '', 'https://rest.example');
         $withoutRest = self::chain('cosmos', 'cosmos', 'https://rpc.example', '');
 
-        self::assertTrue(NftProviderReadiness::isReady($withRest, NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION));
-        self::assertFalse(NftProviderReadiness::isReady($withoutRest, NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION));
+        self::assertTrue(NftProviderReadiness::isReady($withRest, NftDriverRegistry::DRIVER_CW721_LCD));
+        self::assertFalse(NftProviderReadiness::isReady($withoutRest, NftDriverRegistry::DRIVER_CW721_LCD));
     }
 
     /** Whitespace is not an endpoint. */
@@ -574,7 +574,7 @@ final class NftProviderReadinessTest extends TestCase
         self::assertFalse(
             NftProviderReadiness::isReady(
                 self::chain('cosmos', 'cosmos', '', '   '),
-                NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION
+                NftDriverRegistry::DRIVER_CW721_LCD
             )
         );
     }
@@ -595,7 +595,7 @@ final class NftProviderReadinessTest extends TestCase
 
         self::assertFalse(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_EVM_RPC));
         self::assertFalse(NftProviderReadiness::isReady($cosmos, NftDriverRegistry::DRIVER_ALCHEMY_NFT));
-        self::assertFalse(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION));
+        self::assertFalse(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_CW721_LCD));
     }
 
     #[DataProvider('unknownDriverKeys')]

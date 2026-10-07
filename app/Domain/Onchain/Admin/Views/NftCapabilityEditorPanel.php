@@ -223,9 +223,15 @@ final class NftCapabilityEditorPanel
             Whether an administrator is permitted to <em>submit one contract</em> on this chain
             through manual intake. <strong>It does not schedule or start anything by
             itself</strong> — no cron reads it, because every recurring discovery hook was
-            retired and cannot re-arm, and chain-wide discovery is frozen.
+            retired and cannot re-arm.
             &#9888; This setting is named for historical reasons: despite the word
-            &ldquo;discovery&rdquo; it grants no chain-wide authority and starts no enumeration.
+            &ldquo;discovery&rdquo; it grants no chain-wide authority. Chain-wide enumeration
+            is not frozen but <strong>removed</strong> — no operation and no driver for it
+            exists in this build, on any chain family, under any credentials.
+            &#9888; This permission is read <em>only</em> by manual intake, which refuses a
+            submission when it is not granted. It no longer appears as a reason against any
+            row in the capability table above, because the operation it used to gate there
+            is gone.
         </p>
 
         <?php if (!$grantable): ?>
@@ -704,8 +710,8 @@ final class NftCapabilityEditorPanel
     private static function operationLabel(string $operation): string
     {
         switch ($operation) {
-            case NftDriverRegistry::OP_ENUMERATION:
-                return 'Chain enumeration';
+            // ⚠ No `enumeration` arm: S7 removed the operation. An arm here
+            // would label a heading the matrix no longer produces.
             case NftDriverRegistry::OP_CURATED_FEED:
                 return 'Curated feed';
             case NftDriverRegistry::OP_WALLET_DISCOVERY:

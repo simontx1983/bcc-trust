@@ -45,9 +45,17 @@ final class NftCapabilityEditorOverrideTest extends TestCase
 {
     private const CHAIN_ID = 4;
 
-    /** Injective: the one chain carrying BOTH an enumeration and a curated driver. */
-    private const OP  = NftDriverRegistry::OP_ENUMERATION;
-    private const DRV = NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION;
+    /**
+     * The example (operation, driver) pair this file writes overrides for.
+     *
+     * ⚠ Was `(enumeration, cosmwasm_enumeration)` until S7 removed both. The
+     * replacement is the same SHAPE — one driver, cosmos-only, declaring this
+     * operation — so every override-CRUD assertion below keeps its meaning.
+     * Injective still carries both this pair and a curated-feed driver, which
+     * is the property several cases here rely on.
+     */
+    private const OP  = NftDriverRegistry::OP_VALIDATION;
+    private const DRV = NftDriverRegistry::DRIVER_CW721_LCD;
 
     protected function setUp(): void
     {
@@ -590,8 +598,17 @@ final class NftCapabilityEditorOverrideTest extends TestCase
             'unknown driver'    => ['cosmos', NftDriverRegistry::OP_METADATA, 'moonbeam_nft'],
             'retired das'       => ['solana', NftDriverRegistry::OP_OWNERSHIP, 'das'],
             'wrong family'      => ['cosmos', NftDriverRegistry::OP_METADATA, NftDriverRegistry::DRIVER_ALCHEMY_NFT],
-            'wrong operation'   => ['cosmos', NftDriverRegistry::OP_METADATA, NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION],
-            'evm enumeration'   => ['evm', NftDriverRegistry::OP_ENUMERATION, NftDriverRegistry::DRIVER_ALCHEMY_NFT],
+            // ⚠ `talis_whitelist`, not `cw721_lcd`: cw721_lcd DOES declare
+            // metadata, so it would not be an impossible triple. The pair this
+            // row used before S7 (`cosmwasm_enumeration` + metadata) was
+            // impossible for exactly this reason, and the replacement has to
+            // preserve that rather than look similar.
+            'wrong operation'   => ['cosmos', NftDriverRegistry::OP_METADATA, NftDriverRegistry::DRIVER_TALIS_WHITELIST],
+            // Was 'evm enumeration' — enabling chain-wide enumeration on
+            // Ethereum, the single most valuable row an attacker could write.
+            // That operation no longer exists, so the equivalent is planting a
+            // cosmos-only LCD driver on an EVM chain.
+            'cosmos lcd on evm' => ['evm', NftDriverRegistry::OP_VALIDATION, NftDriverRegistry::DRIVER_CW721_LCD],
         ];
     }
 
@@ -633,24 +650,51 @@ final class NftCapabilityEditorOverrideTest extends TestCase
     {
         ChainRepository::seed(self::CHAIN_ID, 'ethereum', false, true, true, 'evm');
 
-        // "Enable chain-wide enumeration on Ethereum" — the single most
-        // valuable row an attacker could write, planted directly.
+        // ⚠ Was "enable chain-wide enumeration on Ethereum" — the single most
+        // valuable row an attacker could write. S7 removed that operation, so
+        // the equivalent plant is a COSMOS-ONLY driver enabled on an EVM
+        // chain: a row that, if honoured, would point an Ethereum validation
+        // at a wasmd LCD.
         ChainNftCapabilityRepository::seedRow(
             self::CHAIN_ID,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             true,
             0
         );
 
-        $this->assertSame([], $this->effectiveDrivers(NftDriverRegistry::OP_ENUMERATION));
+        // ⚠ NOT `assertSame([])`. EVM validation legitimately HAS a driver
+        // (`evm_rpc`) from the registry, so an empty list would be the wrong
+        // claim — the pre-S7 version could assert emptiness only because no
+        // EVM chain had any enumeration driver at all. The property under test
+        // is that the PLANTED row granted nothing, so that is what is
+        // asserted: the cosmos-only driver is absent, and the registry's own
+        // answer is untouched.
+        $effective = $this->effectiveDrivers(NftDriverRegistry::OP_VALIDATION);
+
+        $this->assertNotContains(
+            NftDriverRegistry::DRIVER_CW721_LCD,
+            $effective,
+            'a planted cosmos-only driver must not become effective on an EVM chain'
+        );
+        $this->assertSame(
+            [NftDriverRegistry::DRIVER_EVM_RPC],
+            $effective,
+            'and the registry answer for this family is exactly what it was'
+        );
 
         $matrix = NftChainCapability::operationMatrix($this->chain());
-        $this->assertSame(
-            NftChainCapability::OP_NO_DRIVER,
-            $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['status']
+        $this->assertNotSame(
+            NftChainCapability::OP_UNKNOWN,
+            $matrix['operations'][NftDriverRegistry::OP_VALIDATION]['status'],
+            'the plant must not make the row unreadable either'
         );
-        $this->assertSame(NftChainCapability::NO_ENUMERATION_DRIVER, $matrix['verdict']);
+
+        // ⚠ The chain-level `verdict` assertion that stood here is gone with
+        // the key itself — S7 removed it from the matrix shape. The row-level
+        // status above is the surviving, and stronger, assertion: it names the
+        // operation the plant targeted.
+        $this->assertArrayNotHasKey('verdict', $matrix);
     }
 
     /** `das_rpc` and `das_helius` stay two drivers with two answers. */
@@ -719,8 +763,12 @@ final class NftCapabilityEditorOverrideTest extends TestCase
                 'solana', NftDriverRegistry::OP_OWNERSHIP, 'das',
                 NftChainCapability::STALE_UNKNOWN_DRIVER,
             ],
+            // ⚠ `talis_whitelist` because it declares curated_feed ONLY, so
+            // metadata genuinely lacks it. `cw721_lcd` would not work here —
+            // it declares metadata — and the pre-S7 `cosmwasm_enumeration`
+            // worked precisely because enumeration was its only operation.
             'driver lacks operation' => [
-                'cosmos', NftDriverRegistry::OP_METADATA, NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+                'cosmos', NftDriverRegistry::OP_METADATA, NftDriverRegistry::DRIVER_TALIS_WHITELIST,
                 NftChainCapability::STALE_DRIVER_LACKS_OPERATION,
             ],
             'driver lacks chain' => [
@@ -877,10 +925,14 @@ final class NftCapabilityEditorOverrideTest extends TestCase
             $this->rows()
         );
         sort($remaining);
-        $this->assertSame(
-            [self::OP . '/' . self::DRV, 'levitation/moonbeam_nft'],
-            $remaining
-        );
+        // ⚠ The expected list is SORTED, so its order follows the operation
+        // name. It read `[enumeration/..., levitation/...]` before S7; with
+        // the pair re-pointed to `validation/...` the alphabetical order
+        // flips. Sorting both sides keeps the assertion about CONTENT rather
+        // than about which name happens to sort first.
+        $expected = [self::OP . '/' . self::DRV, 'levitation/moonbeam_nft'];
+        sort($expected);
+        $this->assertSame($expected, $remaining);
     }
 
     // ═══════════════════════════════════════════════════════════════════

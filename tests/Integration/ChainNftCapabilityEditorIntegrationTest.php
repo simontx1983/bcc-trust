@@ -476,8 +476,8 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
     {
         $result = ChainNftCapabilityRepository::upsertOverride(
             self::$chainId,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             false,
             10
         );
@@ -490,8 +490,8 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
         $this->assertTrue($overrides->isAvailable());
         $this->assertSame(
             [[
-                'operation'  => NftDriverRegistry::OP_ENUMERATION,
-                'driver_key' => NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+                'operation'  => NftDriverRegistry::OP_VALIDATION,
+                'driver_key' => NftDriverRegistry::DRIVER_CW721_LCD,
                 'enabled'    => false,
                 'priority'   => 10,
             ]],
@@ -512,8 +512,8 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
         for ($i = 0; $i < 5; $i++) {
             ChainNftCapabilityRepository::upsertOverride(
                 self::$chainId,
-                NftDriverRegistry::OP_ENUMERATION,
-                NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+                NftDriverRegistry::OP_VALIDATION,
+                NftDriverRegistry::DRIVER_CW721_LCD,
                 $i % 2 === 0,
                 10 + $i
             );
@@ -584,8 +584,8 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
     {
         ChainNftCapabilityRepository::upsertOverride(
             self::$chainId,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             false,
             10
         );
@@ -598,8 +598,8 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
         // have applied.
         $repeat = ChainNftCapabilityRepository::upsertOverride(
             self::$chainId,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             false,
             10
         );
@@ -619,8 +619,8 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
     {
         ChainNftCapabilityRepository::upsertOverride(
             self::$chainId,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             false,
             10
         );
@@ -628,8 +628,8 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
 
         $changed = ChainNftCapabilityRepository::upsertOverride(
             self::$chainId,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             false,
             20
         );
@@ -648,8 +648,8 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
     {
         ChainNftCapabilityRepository::upsertOverride(
             self::$chainId,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             false,
             10
         );
@@ -657,8 +657,8 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
 
         $changed = ChainNftCapabilityRepository::upsertOverride(
             self::$chainId,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             true,
             10
         );
@@ -723,7 +723,7 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
     public function testDeleteRemovesOnlyTheExactRow(): void
     {
         foreach ([
-            [NftDriverRegistry::OP_ENUMERATION, NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION],
+            [NftDriverRegistry::OP_VALIDATION, NftDriverRegistry::DRIVER_CW721_LCD],
             [NftDriverRegistry::OP_METADATA, NftDriverRegistry::DRIVER_CW721_LCD],
             [NftDriverRegistry::OP_OWNERSHIP, NftDriverRegistry::DRIVER_CW721_LCD],
         ] as [$operation, $driver]) {
@@ -756,8 +756,8 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
     {
         $result = ChainNftCapabilityRepository::deleteOverride(
             self::$chainId,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD
         );
 
         $this->assertFalse($result->isFailure());
@@ -811,10 +811,10 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
         // And it changes nothing about what the chain can do.
         $withRow = NftDriverRegistry::driversFor(
             $chain,
-            NftDriverRegistry::OP_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
             $overrides->rows()
         );
-        $withoutRow = NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_ENUMERATION, []);
+        $withoutRow = NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_VALIDATION, []);
         $this->assertSame($withoutRow, $withRow, 'an unrecognised row grants and blocks nothing');
 
         // The model lists it as stale rather than hiding it.
@@ -832,23 +832,23 @@ final class ChainNftCapabilityEditorIntegrationTest extends TestCase
         $chain = ChainRepository::getById(self::$chainId);
         self::assertNotNull($chain);
 
-        $before = NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_ENUMERATION, []);
-        $this->assertContains(NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION, $before);
+        $before = NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_VALIDATION, []);
+        $this->assertContains(NftDriverRegistry::DRIVER_CW721_LCD, $before);
 
         ChainNftCapabilityRepository::upsertOverride(
             self::$chainId,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             false,
             10
         );
 
         $after = NftDriverRegistry::driversFor(
             $chain,
-            NftDriverRegistry::OP_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
             ChainNftCapabilityRepository::getForChain(self::$chainId)->rows()
         );
-        $this->assertNotContains(NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION, $after);
+        $this->assertNotContains(NftDriverRegistry::DRIVER_CW721_LCD, $after);
     }
 
     /** The generation counter moves, so a read-side cache would see the write. */

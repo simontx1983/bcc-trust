@@ -60,18 +60,24 @@ if (!defined('ABSPATH')) {
  *     answered per request, at validation time, by
  *     {@see \BCC\Trust\Onchain\Services\Validation\CosmosContractProbe}.
  *
- * ── THE LOAD-BEARING NEGATIVE ───────────────────────────────────────────
- * `driversFor($chain, OP_ENUMERATION)` returns `[]` for EVERY EVM chain and
- * for Solana. That is not an omission and not a configuration gap — no
- * provider offers chain-wide NFT contract enumeration on those families at
- * all. Alchemy enumerates a WALLET's contracts (`getContractsForOwner`),
- * which is a completely different question from "every collection on this
- * chain".
+ * ── THE LOAD-BEARING NEGATIVE, AND WHAT S7 DID WITH IT ──────────────────
+ * This registry used to declare an `enumeration` operation whose answer was
+ * `[]` for EVERY EVM chain and for Solana — not an omission and not a
+ * configuration gap, but the fact that no provider offers chain-wide NFT
+ * contract enumeration on those families at all. Alchemy enumerates a
+ * WALLET's contracts (`getContractsForOwner`), a completely different
+ * question from "every collection on this chain".
  *
- * Expressing that as an empty list rather than a comment is the point: the
- * registry PROVES the refusal, so `NO_ENUMERATION_DRIVER` is computed rather
- * than asserted, and no amount of Alchemy credentials can turn it into a
- * yes.
+ * S7 removed the operation outright, because its one driver —
+ * `cosmwasm_enumeration`, the only chain-wide enumeration driver that ever
+ * existed — went with the scanner. The negative is no longer expressed as an
+ * empty driver list on a surviving operation; it is expressed by the
+ * operation not existing. Nothing in this build enumerates a chain, on any
+ * family, under any credentials.
+ *
+ * ⚠ The distinction still matters for anyone tempted to add one back: a
+ * wallet-scoped lookup is NOT chain enumeration, and `wallet_discovery`
+ * below is where that question already lives.
  *
  * @see NftChainCapability   the verdict that consumes this
  * @see NftProviderReadiness the per-driver runtime half
@@ -94,7 +100,16 @@ final class NftDriverRegistry
     // contract and count holdings on its public RPC today, while metadata
     // and wallet discovery are unavailable.
 
-    public const OP_ENUMERATION      = 'enumeration';
+    // ⚠ `OP_ENUMERATION` ('enumeration') was REMOVED IN S7 and must not come
+    // back. It named chain-wide CW-721 enumeration — walking a chain's wasm
+    // code families to find every contract — which was the whole of what the
+    // retired scanner did. Its only driver went with it (see below), so the
+    // operation had nothing that could perform it.
+    //
+    // Re-adding the constant would re-create an operation with no driver,
+    // which `driversFor()` answers `[]` for on every chain, which the
+    // capability model then reports as a permanent structural refusal on
+    // every row. That is noise, not information.
     public const OP_CURATED_FEED     = 'curated_feed';
     public const OP_WALLET_DISCOVERY = 'wallet_discovery';
     public const OP_VALIDATION       = 'validation';
@@ -103,7 +118,16 @@ final class NftDriverRegistry
 
     // ── DRIVER KEYS ─────────────────────────────────────────────────────
 
-    public const DRIVER_COSMWASM_ENUMERATION = 'cosmwasm_enumeration';
+    // ⚠ `DRIVER_COSMWASM_ENUMERATION` ('cosmwasm_enumeration') was REMOVED IN
+    // S7, the same way `stargaze_marketplace` was removed in PR 7.12. It was
+    // the only chain-wide enumeration driver that ever existed, implemented by
+    // CosmwasmDiscoveryWorker + CosmwasmDiscoveryService::listCodeFamilies —
+    // both retired with the scanner.
+    //
+    // Its `driverSupportsChain()` and `NftProviderReadiness` match arms were
+    // SHARED with `cw721_lcd`, so those arms survive with one key instead of
+    // two. Adding a key back here without an implementation would make
+    // readiness answer "configured" for work nothing can perform.
     public const DRIVER_TALIS_WHITELIST      = 'talis_whitelist';
     public const DRIVER_CW721_LCD            = 'cw721_lcd';
     public const DRIVER_ALCHEMY_NFT          = 'alchemy_nft';
@@ -157,12 +181,10 @@ final class NftDriverRegistry
      * @var array<string, array{operations: list<string>, priority: int}>
      */
     private const REGISTRY = [
-        self::DRIVER_COSMWASM_ENUMERATION => [
-            // CosmwasmDiscoveryWorker + CosmwasmDiscoveryService::listCodeFamilies.
-            // The ONLY chain-wide enumeration driver that exists anywhere.
-            'operations' => [self::OP_ENUMERATION],
-            'priority'   => 10,
-        ],
+        // ⚠ The `cosmwasm_enumeration` entry was here until S7. It was the only
+        // entry that declared `OP_ENUMERATION`, so removing it removed the
+        // operation's entire implementation — which is why the operation went
+        // with it rather than surviving as a question nothing can answer.
         self::DRIVER_TALIS_WHITELIST => [
             // EvmFetcher-independent: fetchTopCollectionsInjectiveViaTalisWhitelist.
             'operations' => [self::OP_CURATED_FEED],
@@ -258,14 +280,17 @@ final class NftDriverRegistry
     ];
 
     /**
-     * The six operations, in their canonical order.
+     * The five operations, in their canonical order.
+     *
+     * ⚠ SIX until S7. `enumeration` led this list and is gone; the order of
+     * the remaining five is unchanged, so any consumer that indexed by NAME is
+     * unaffected and any consumer that indexed by POSITION was already wrong.
      *
      * @return list<string>
      */
     public static function operations(): array
     {
         return [
-            self::OP_ENUMERATION,
             self::OP_CURATED_FEED,
             self::OP_WALLET_DISCOVERY,
             self::OP_VALIDATION,
@@ -357,7 +382,9 @@ final class NftDriverRegistry
         $slug = (string) ($chain->slug ?? '');
 
         return match ($driverKey) {
-            self::DRIVER_COSMWASM_ENUMERATION,
+            // ⚠ This arm carried `cosmwasm_enumeration` alongside `cw721_lcd`
+            // until S7. The arm SURVIVES with one key: cw721_lcd serves
+            // validation, metadata and ownership on Cosmos and is retained.
             self::DRIVER_CW721_LCD            => $type === 'cosmos',
             self::DRIVER_TALIS_WHITELIST      => $type === 'cosmos' && $slug === self::SLUG_INJECTIVE,
             // ⚠ No arm for the former `stargaze_marketplace` driver: PR

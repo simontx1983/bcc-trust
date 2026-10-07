@@ -200,7 +200,7 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
             ChainNftCapabilityOverrides::REASON_OVERFLOW
         );
 
-        $row = self::op(self::cosmos(), NftDriverRegistry::OP_ENUMERATION);
+        $row = self::op(self::cosmos(), NftDriverRegistry::OP_VALIDATION);
 
         self::assertSame(NftChainCapability::OP_UNKNOWN, $row['status']);
         self::assertFalse(NftChainCapability::isOperationReady($row['status']));
@@ -223,7 +223,7 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
         self::assertNull($matrix['overrides_reason']);
         self::assertSame(
             NftChainCapability::OP_READY,
-            $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['status']
+            $matrix['operations'][NftDriverRegistry::OP_VALIDATION]['status']
         );
     }
 
@@ -248,21 +248,6 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
         }
     }
 
-    /**
-     * The MANUAL column is scoped: it is permission to START a discovery,
-     * so an install that cannot store it cannot say whether one may be
-     * started — and that is the whole of what it cannot say.
-     */
-    public function testAnAbsentManualColumnMakesTheStartedOperationUnknown(): void
-    {
-        $chain = self::cosmos();
-        unset($chain->manual_collection_discovery_enabled);
-
-        $row = self::op($chain, NftDriverRegistry::OP_ENUMERATION);
-
-        self::assertSame(NftChainCapability::OP_UNKNOWN, $row['status']);
-        self::assertSame(NftChainCapability::REASON_MANUAL_COLUMN_ABSENT, $row['reason']);
-    }
 
     /**
      * ⚠️ AND IT LEAVES THE OTHERS ALONE.
@@ -282,7 +267,7 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
         $matrix = NftChainCapability::operationMatrix($chain)['operations'];
 
         foreach (NftDriverRegistry::operations() as $operation) {
-            if ($operation === NftDriverRegistry::OP_ENUMERATION) {
+            if ($operation === NftDriverRegistry::OP_VALIDATION) {
                 continue;
             }
 
@@ -308,30 +293,6 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
         );
     }
 
-    /**
-     * Permission FALSE refuses the started operation and, again, only it.
-     */
-    public function testManualPermissionFalseRefusesOnlyTheStartedOperation(): void
-    {
-        $matrix = NftChainCapability::operationMatrix(self::cosmos(true, false))['operations'];
-
-        self::assertSame(
-            NftChainCapability::OP_MANUAL_DISABLED,
-            $matrix[NftDriverRegistry::OP_ENUMERATION]['status']
-        );
-
-        foreach ([
-            NftDriverRegistry::OP_METADATA,
-            NftDriverRegistry::OP_OWNERSHIP,
-            NftDriverRegistry::OP_VALIDATION,
-        ] as $operation) {
-            self::assertSame(
-                NftChainCapability::OP_READY,
-                $matrix[$operation]['status'],
-                "{$operation} must not be refused by the manual-START permission"
-            );
-        }
-    }
 
     // ── S5: THE STORED MEASUREMENT IS NO LONGER AN INPUT ────────────────
     //
@@ -368,12 +329,12 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
 
         self::assertSame(
             NftChainCapability::OP_READY,
-            $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['status'],
+            $matrix['operations'][NftDriverRegistry::OP_VALIDATION]['status'],
             'the stored measurement must no longer be consulted'
         );
         self::assertSame(
             NftChainCapability::REASON_READY,
-            $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['reason']
+            $matrix['operations'][NftDriverRegistry::OP_VALIDATION]['reason']
         );
     }
 
@@ -396,11 +357,16 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
 
         self::assertArrayNotHasKey('measured_unsupported', $matrix);
 
-        // Anti-vacuity: the shape is otherwise intact, so the assertion above
-        // is about one removed key rather than an empty or broken matrix.
-        self::assertArrayHasKey('verdict', $matrix);
+        // ⚠ `verdict` was one of the anti-vacuity keys here until S7 removed
+        // it too. Replaced with keys that still exist, because the point of
+        // these three lines is to prove the matrix is intact — an anti-vacuity
+        // check that asserts a removed key would fail for the opposite reason
+        // to the one it was written for.
+        self::assertArrayNotHasKey('verdict', $matrix);
         self::assertArrayHasKey('operations', $matrix);
         self::assertArrayHasKey('manual_enabled', $matrix);
+        self::assertArrayHasKey('bcc_supports', $matrix);
+        self::assertArrayHasKey('manual_intake', $matrix);
     }
 
     /**
@@ -420,7 +386,11 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
 
         $matrix = NftChainCapability::operationMatrix(self::cosmos());
 
-        self::assertNotSame('chain_unsupported', $matrix['verdict']);
+        // ⚠ The chain-level `verdict` assertion that stood here is gone: S7
+        // removed the key with the enumeration operation it was composed from.
+        // `testTheMatrixNoLongerCarriesTheMeasurementKey` and the per-row
+        // checks below carry the coverage.
+        self::assertArrayNotHasKey('verdict', $matrix);
         foreach ($matrix['operations'] as $operation => $row) {
             self::assertNotSame('op_chain_unsupported', $row['status'], $operation);
             self::assertNotSame('measured_no_wasm_module', $row['reason'], $operation);
@@ -472,7 +442,7 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
         // And these really are answering for themselves, so the equality
         // above is not two refusals matching.
         foreach ([
-            NftDriverRegistry::OP_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
             NftDriverRegistry::OP_VALIDATION,
             NftDriverRegistry::OP_METADATA,
             NftDriverRegistry::OP_OWNERSHIP,
@@ -511,12 +481,15 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
 
         self::assertSame(
             NftChainCapability::OP_UNKNOWN,
-            $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['status']
+            $matrix['operations'][NftDriverRegistry::OP_VALIDATION]['status']
         );
 
-        // `verdict()` agrees, where it used to lead with the measurement.
-        self::assertSame(NftChainCapability::UNKNOWN, $matrix['verdict']);
-        self::assertFalse(NftChainCapability::isScannable($matrix['verdict']));
+        // ⚠ Two chain-level assertions stood here — that `verdict()` agreed
+        // with the row, and that the result was not scannable. S7 removed the
+        // key and both functions, so what remains is the row-level status
+        // above, which is the assertion that was doing the work: it names the
+        // operation, where the verdict only summarised one of them.
+        self::assertArrayNotHasKey('verdict', $matrix);
     }
 
     /**
@@ -542,14 +515,20 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
 
         $matrix = NftChainCapability::operationMatrix(self::evm());
 
+        // ⚠ `curated_feed`, not `validation`: EVM HAS a validation driver
+        // (`evm_rpc`), so validation is not a structural refusal there and
+        // this case would assert the wrong thing. Only `talis_whitelist`
+        // serves curated feeds, and only on Injective, so curated_feed is the
+        // surviving structural "no" on an EVM chain — the same shape the
+        // removed enumeration operation had.
         self::assertSame(
             NftChainCapability::OP_NO_DRIVER,
-            $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['status'],
+            $matrix['operations'][NftDriverRegistry::OP_CURATED_FEED]['status'],
             'the real reason must survive, not be masked by an irrelevant measurement'
         );
         self::assertSame(
             NftChainCapability::REASON_NO_REGISTERED_DRIVER,
-            $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['reason']
+            $matrix['operations'][NftDriverRegistry::OP_CURATED_FEED]['reason']
         );
     }
 
@@ -565,42 +544,18 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
 
     // ── Rung 5 vs 6: structural absence vs an operator switch ───────────
 
-    /**
-     * THE DISTINCTION THIS WHOLE CLASS EXISTS FOR.
-     *
-     * `no_driver` is permanent: no provider sells chain-wide NFT contract
-     * enumeration on EVM or Solana, so no credential and no override will
-     * ever change it. `disabled` is an override row, and deleting it will.
-     *
-     * Fusing them would leave a chain looking one API key away from
-     * something nobody sells.
-     */
-    public function testEveryEvmChainHasNoEnumerationDriverPermanently(): void
-    {
-        $row = self::op(self::evm('https://eth-mainnet.g.alchemy.com/v2/realkey'), NftDriverRegistry::OP_ENUMERATION);
 
-        self::assertSame(NftChainCapability::OP_NO_DRIVER, $row['status']);
-        self::assertSame(NftChainCapability::REASON_NO_REGISTERED_DRIVER, $row['reason']);
-        self::assertSame([], $row['registered'], 'the registry offers nothing to disable');
-    }
-
-    public function testSolanaAlsoHasNoEnumerationDriverPermanently(): void
-    {
-        $row = self::op(self::solana('https://mainnet.helius-rpc.com/?api-key=k'), NftDriverRegistry::OP_ENUMERATION);
-
-        self::assertSame(NftChainCapability::OP_NO_DRIVER, $row['status']);
-    }
 
     public function testADriverDisabledByAnOverrideIsReportedAsDisabledNotAbsent(): void
     {
         ChainNftCapabilityRepository::seedLoaded(self::CHAIN_ID, [[
-            'operation'  => NftDriverRegistry::OP_ENUMERATION,
-            'driver_key' => NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            'operation'  => NftDriverRegistry::OP_VALIDATION,
+            'driver_key' => NftDriverRegistry::DRIVER_CW721_LCD,
             'enabled'    => false,
             'priority'   => 0,
         ]]);
 
-        $row = self::op(self::cosmos(), NftDriverRegistry::OP_ENUMERATION);
+        $row = self::op(self::cosmos(), NftDriverRegistry::OP_VALIDATION);
 
         self::assertSame(NftChainCapability::OP_DISABLED, $row['status']);
         self::assertSame(NftChainCapability::REASON_ALL_DRIVERS_DISABLED, $row['reason']);
@@ -608,7 +563,7 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
         // The baseline proves the registry DID offer one — which is the
         // whole basis for calling this "disabled" rather than "absent".
         self::assertSame(
-            [NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION],
+            [NftDriverRegistry::DRIVER_CW721_LCD],
             $row['registered']
         );
         self::assertSame([], $row['drivers']);
@@ -616,14 +571,6 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
 
     // ── Rung 7: the manual permission ───────────────────────────────────
 
-    public function testManualPermissionOffRefusesTheOperatorStartedOperation(): void
-    {
-        $row = self::op(self::cosmos(true, false), NftDriverRegistry::OP_ENUMERATION);
-
-        self::assertSame(NftChainCapability::OP_MANUAL_DISABLED, $row['status']);
-        self::assertSame(NftChainCapability::REASON_MANUAL_PERMISSION_DISABLED, $row['reason']);
-        self::assertTrue($row['operator_started']);
-    }
 
     /**
      * …and NOT the ones nobody starts by pressing a button.
@@ -653,35 +600,16 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
         }
     }
 
-    /**
-     * Provider readiness ALONE never makes an operator-started operation
-     * available.
-     *
-     * A perfectly configured LCD endpoint on a chain nobody granted the
-     * permission for is still a refusal, and it is refused with a reason
-     * that names the permission rather than the endpoint.
-     */
-    public function testAConfiguredProviderDoesNotSubstituteForThePermission(): void
-    {
-        $row = self::op(self::cosmos(true, false, 'https://cosmos-api.polkachu.com'), NftDriverRegistry::OP_ENUMERATION);
-
-        self::assertSame(NftChainCapability::OP_MANUAL_DISABLED, $row['status']);
-        self::assertSame(
-            [NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION],
-            $row['ready'],
-            'the driver really is ready — and it is still refused'
-        );
-    }
 
     // ── Rung 8: configured, or not ──────────────────────────────────────
 
     public function testADriverWithNoEndpointIsProviderUnavailableNotAbsent(): void
     {
-        $row = self::op(self::cosmos(true, true, ''), NftDriverRegistry::OP_ENUMERATION);
+        $row = self::op(self::cosmos(true, true, ''), NftDriverRegistry::OP_VALIDATION);
 
         self::assertSame(NftChainCapability::OP_PROVIDER_UNAVAILABLE, $row['status']);
         self::assertSame(NftChainCapability::REASON_NO_READY_DRIVER, $row['reason']);
-        self::assertSame([NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION], $row['drivers']);
+        self::assertSame([NftDriverRegistry::DRIVER_CW721_LCD], $row['drivers']);
         self::assertSame([], $row['ready']);
     }
 
@@ -689,7 +617,7 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
 
     public function testAFullyPermittedAndConfiguredCosmosChainIsReady(): void
     {
-        $row = self::op(self::cosmos(), NftDriverRegistry::OP_ENUMERATION);
+        $row = self::op(self::cosmos(), NftDriverRegistry::OP_VALIDATION);
 
         self::assertSame(NftChainCapability::OP_READY, $row['status']);
         self::assertSame(NftChainCapability::REASON_READY, $row['reason']);

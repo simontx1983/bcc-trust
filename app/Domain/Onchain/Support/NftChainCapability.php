@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace BCC\Trust\Onchain\Support;
 
 use BCC\Trust\Onchain\Repositories\ChainNftCapabilityRepository;
-use BCC\Trust\Onchain\Repositories\ChainRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -79,161 +78,56 @@ if (!defined('ABSPATH')) {
  *   DERIVED   {@see NftProviderReadiness} — what the CONFIG allows, per
  *             driver, at read time. Never stored.
  *
- * ── EXACTLY ONE VERDICT MEANS YES ───────────────────────────────────────
- * `SCANNABLE`. Every other value — including the one that means "we could
- * not tell" — is a NO. {@see isScannable()} is an identity test against that
- * single value rather than a list of exclusions, so a verdict from a newer
+ * ── EXACTLY ONE STATUS MEANS YES ────────────────────────────────────────
+ * `OP_READY`. Every other value — including the one that means "we could not
+ * tell" — is a NO. {@see isOperationReady()} is an identity test against that
+ * single value rather than a list of exclusions, so a status from a newer
  * build, a typo, an empty string, or a value a partially-populated row never
- * set is NOT scannable. That direction costs a refusal; the other direction
- * costs an operator concluding a chain is covered when it is not.
+ * set is NOT ready. That direction costs a refusal; the other direction costs
+ * an operator concluding a chain is covered when it is not.
+ *
+ * ⚠ The same rule used to be stated about a chain-level `SCANNABLE` verdict
+ * and `isScannable()`. S7 removed that whole API with the enumeration
+ * operation it described; the per-operation statuses below are what remains,
+ * and they inherit the identity-test discipline unchanged.
  */
 final class NftChainCapability
 {
-    // ── THE VERDICTS ────────────────────────────────────────────────────
-
-    /** Nothing is blocking it: an administrator may start a discovery. */
-    public const SCANNABLE = 'scannable';
-
-    /**
-     * A column is absent from the projection — a pre-migration install, or
-     * a stale pre-migration transient.
-     *
-     * A SEPARATE value from {@see NO_BCC_SUPPORT} because the two are
-     * different facts: one says somebody decided no, the other says nobody
-     * has been able to decide anything yet. Both are NOT scannable, and
-     * telling somebody they declined something they were never offered
-     * sends them looking for a switch that is not there.
-     */
-    public const UNKNOWN = 'unknown';
-
-    /** PRODUCT DECISION: `bcc_supports_nft_collections = 0`. */
-    public const NO_BCC_SUPPORT = 'no_bcc_support';
-
-    /**
-     * STRUCTURAL: no driver in this build can enumerate this chain.
-     *
-     * True for every EVM chain and for Solana, permanently, because no
-     * provider offers chain-wide NFT contract enumeration on those families.
-     * This is NOT a configuration gap and NOT the same as
-     * {@see PROVIDER_UNAVAILABLE}: no amount of Alchemy or Helius
-     * credentials can change it. Alchemy enumerates a WALLET's contracts,
-     * which is a different question.
-     */
-    public const NO_ENUMERATION_DRIVER = 'no_enumeration_driver';
-
-    /** OPERATOR PERMISSION: `manual_collection_discovery_enabled = 0`. */
-    public const MANUAL_DISABLED = 'manual_disabled';
-
-    /**
-     * An enumerating driver EXISTS for this chain, but none of them is
-     * currently configured — a missing LCD endpoint, an unkeyed RPC URL, an
-     * absent Helius credential.
-     *
-     * Distinct from {@see NO_ENUMERATION_DRIVER} on purpose, and the
-     * distinction is the load-bearing one in this class: "we cannot do this
-     * at all" and "we could, once you finish configuring it" send an
-     * operator to two completely different places. Fusing them would let a
-     * chain look one API key away from something no provider sells.
-     */
-    public const PROVIDER_UNAVAILABLE = 'provider_unavailable';
-
-    /**
-     * PURE. The verdict for one chain.
-     *
-     * ── ORDER IS EXPLANATION, NOT LOGIC ─────────────────────────────────
-     * Every condition is an AND, so the SET of scannable chains is the same
-     * whatever order they are asked in. The order chosen is the one that
-     * produces the most useful SENTENCE when the answer is no:
-     *
-     *   1. UNKNOWN                 we cannot read the overrides, or a
-     *                              permission column is absent — either way
-     *                              nobody can say anything yet
-     *   2. NO_BCC_SUPPORT          a product decision, not a technical one
-     *   3. NO_ENUMERATION_DRIVER   the code cannot, on any configuration
-     *   4. MANUAL_DISABLED         a permission, one click away
-     *   5. PROVIDER_UNAVAILABLE    configuration, and possibly spend
-     *   6. SCANNABLE
-     *
-     * S5 removed a rung above (1) — `CHAIN_UNSUPPORTED`, read from a stored
-     * 501 measurement — and deliberately put nothing in its place.
-     *
-     * (3) precedes (4) deliberately: telling an operator to flip a
-     * permission on a chain nothing can enumerate sends them to a switch
-     * that will not help. (4) precedes (5) for the same reason in reverse —
-     * a permission the operator controls outright is worth naming before
-     * work that may require provisioning a paid network.
-     *
-     * ── EVERY UNSURE BRANCH RETURNS A REFUSAL ───────────────────────────
-     * A null opt-in (column absent from the projection) is a NO, not a
-     * skipped filter. An unresolvable chain is a NO. An empty driver list is
-     * a NO. There is no branch that falls through to "no restriction" — that
-     * fall-through is the fail-OPEN shape this codebase already shipped once.
-     *
-     * @param bool $overridesAvailable   did we actually establish what this chain's
-     *                                   driver overrides are? `false` = the override
-     *                                   store was missing, failed, malformed or
-     *                                   truncated, so `$enumerationDrivers` cannot be
-     *                                   trusted and the verdict must fail closed.
-     * @param bool|null   $bccSupportsNft       null = the column is absent from the projection
-     * @param bool|null   $manualEnabled        null = the column is absent from the projection
-     * @param list<string> $enumerationDrivers  ordered, from {@see NftDriverRegistry}
-     * @param list<string> $readyEnumerationDrivers subset of the above that
-     *                                          {@see NftProviderReadiness} accepts
-     * @return string one of the six verdict constants on this class
-     */
-    public static function verdict(
-        bool $overridesAvailable,
-        ?bool $bccSupportsNft,
-        ?bool $manualEnabled,
-        array $enumerationDrivers,
-        array $readyEnumerationDrivers
-    ): string {
-        // An unreadable override store is named FIRST, and BEFORE every reason
-        // derived from the driver list — because when the overrides are
-        // unknown, that list is exactly what we cannot trust. Reporting
-        // NO_ENUMERATION_DRIVER or SCANNABLE from registry defaults here would
-        // silently restore a driver an operator had disabled.
-        //
-        // S5 removed a rung above this one that refused a chain on a STORED
-        // 501 measurement. Nothing took its place on purpose: see the class
-        // docblock for why no "incapable but unmeasured" verdict was invented.
-        if (!$overridesAvailable) {
-            return self::UNKNOWN;
-        }
-        if ($bccSupportsNft === null || $manualEnabled === null) {
-            return self::UNKNOWN;
-        }
-        if ($bccSupportsNft === false) {
-            return self::NO_BCC_SUPPORT;
-        }
-        if ($enumerationDrivers === []) {
-            return self::NO_ENUMERATION_DRIVER;
-        }
-        if ($manualEnabled === false) {
-            return self::MANUAL_DISABLED;
-        }
-        if ($readyEnumerationDrivers === []) {
-            return self::PROVIDER_UNAVAILABLE;
-        }
-
-        return self::SCANNABLE;
-    }
-
-    /**
-     * PURE. Is this verdict the one that permits starting a discovery?
-     *
-     * Identity test against ONE value, never a list of exclusions — see the
-     * class docblock for why that direction is the safe one.
-     */
-    public static function isScannable(string $verdict): bool
-    {
-        return $verdict === self::SCANNABLE;
-    }
-
-    // ── THE PER-OPERATION STATUSES ──────────────────────────────────────
+    // ── S7: THE CHAIN-LEVEL VERDICT API IS GONE ─────────────────────────
     //
-    // {@see verdict()} answers ONE question — may a discovery be started —
-    // and its seven values are unchanged and untouched by everything below.
+    // Removed here: the six verdict constants (SCANNABLE, UNKNOWN,
+    // NO_BCC_SUPPORT, NO_ENUMERATION_DRIVER, MANUAL_DISABLED,
+    // PROVIDER_UNAVAILABLE), `verdict()`, `isScannable()`, `forChain()` and
+    // `forChainId()` — 197 lines.
+    //
+    // They all answered ONE question: "may an administrator start a chain-wide
+    // NFT discovery here?" S7 removed `OP_ENUMERATION` and its only driver, so
+    // that question no longer has a subject. `forChain()` asked the registry
+    // for ordered ENUMERATION drivers, which is not an operation any more.
+    //
+    // This was not optional collateral. With the operation gone there were
+    // only two possibilities: delete this API, or keep a `verdict()` that
+    // answers NO_ENUMERATION_DRIVER for every chain forever from a lookup that
+    // can never hit — a constant dressed as a computed answer, which is the
+    // stale-explanation shape S5 and S6 spent their effort removing.
+    //
+    // Safe because it was already dead: a comment-stripped, receiver-aware
+    // scan found ZERO references to any of the ten symbols anywhere in `app/`,
+    // `includes/` or the bootstrap. The only live uses were a closed internal
+    // loop (forChainId → forChain → verdict) reachable from tests alone, plus
+    // one write of a `verdict` key into `operationMatrix()` that nothing read.
+    //
+    // ── WHAT SURVIVES, AND WHY IT IS THE PART THAT MATTERED ─────────────
+    // The PER-OPERATION statuses below. They answer "can this chain do THIS
+    // operation", which is the question the admin surface actually renders and
+    // the one that still has subjects: curated feed, wallet discovery,
+    // validation, metadata, ownership.
+    //
+    // {@see canTakeManualIntake()} is likewise untouched. It never consulted
+    // the verdict — that was the defect fixed in an earlier round — so manual
+    // intake is unaffected by this removal.
+    //
+    // ── THE PER-OPERATION STATUSES ──────────────────────────────────────
     //
     // The admin control plane asks a WIDER question: for each of the six
     // operations in {@see NftDriverRegistry::operations()}, what can this
@@ -336,13 +230,29 @@ final class NftChainCapability
      * would report those as blocked by a switch that has nothing to do with
      * them.
      *
-     * Exactly one entry today. It is a list rather than a comparison so
-     * that adding a second operator-started operation is one line here and
-     * nothing anywhere else.
+     * ⚠ REMOVED IN S7, along with the two rungs it scoped.
      *
-     * @var list<string>
+     * Its single entry was `OP_ENUMERATION`. S7 removed that operation
+     * because its only driver went with the scanner, which left the list
+     * empty — and an `in_array()` against an empty list is provably always
+     * false, as PHPStan pointed out. So the list went too, rather than
+     * staying as a comment-shaped promise that re-adding an operator-started
+     * operation would be a one-liner.
+     *
+     * The two rungs that consumed it — `manual column absent` and `manual
+     * permission off` — are deleted from `operationStatus()` for the same
+     * reason: with nothing operator-started, neither could ever fire.
+     * `manual_collection_discovery_enabled` therefore no longer refuses any
+     * row IN THE CAPABILITY MODEL.
+     *
+     * ⚠⚠⚠ That is NOT the same as the permission ceasing to matter. Manual
+     * intake still reads it directly, through
+     * {@see manualDiscoveryState()} → {@see \BCC\Trust\Onchain\Services\ManualCollectionIntakeService},
+     * which refuses with `manual_discovery_disabled` when it is not 1. The
+     * column still gates the only thing it ever actually gated; what changed
+     * is that the per-operation MATRIX no longer has an operation to apply it
+     * to. The editor's copy says so in as many words.
      */
-    private const OPERATOR_STARTED_OPERATIONS = [NftDriverRegistry::OP_ENUMERATION];
 
     // ⚠⚠⚠ `hasOperatorStartableOperation()` AND `operatorStartedOperations()`
     // WERE DELETED IN REVIEW ROUND 4, and must not come back as the manual
@@ -417,7 +327,7 @@ final class NftChainCapability
      * Same reason the rest of this class exists. The page needs the driver
      * list, the readiness map and a reason per operation; assembling those
      * in a renderer would be a second definition of "can this chain do X",
-     * free to disagree with {@see verdict()} on the row directly above it.
+     * free to disagree with the per-operation status on the row beside it.
      *
      * It is also why {@see ChainNftCapabilityRepository::getForChain()} is
      * called exactly ONCE per render here — the six rows an operator sees
@@ -462,11 +372,11 @@ final class NftChainCapability
      * operator intent is unknown for every driver on the chain, and the
      * product decision is about the chain rather than any one operation.
      *
-     * ── AND THE ORDERING THAT DIFFERS FROM verdict() ────────────────────
+     * ── AND THE ORDERING, WHICH ONCE DIFFERED FROM THE VERDICT ─────
      * (1)–(3) come BEFORE (4), which is the deliberate departure from
-     * {@see verdict()}, which names the measured refusal first.
+     * the removed chain-level verdict, which named the measured refusal first.
      *
-     * The reason is what each answer is FOR. `verdict()` produces a decision,
+     * The reason is what each answer is FOR. The verdict produced a decision,
      * and for a decision the measured 501 is the most useful thing to say
      * first: nothing an operator does can change it. This produces a
      * DISPLAY, and a display that prints a confident "this chain has no wasm
@@ -476,7 +386,7 @@ final class NftChainCapability
      * may not upgrade an unreadable read into a confident verdict.
      *
      * (5) before (6) before (7) before (8) is the same escalation
-     * `verdict()` documents: structural, then operator-recorded, then
+     * the removed verdict documented: structural, then operator-recorded, then
      * permission, then configuration.
      *
      * ── IT DECIDES NOTHING AND WRITES NOTHING ───────────────────────────
@@ -496,7 +406,6 @@ final class NftChainCapability
      *     manual_intake: bool,
      *     bcc_supports: bool|null,
      *     manual_enabled: bool|null,
-     *     verdict: string,
      *     operations: array<string, array{
      *         operation: string,
      *         status: string,
@@ -551,7 +460,20 @@ final class NftChainCapability
                 }
             }
 
-            $operatorStarted = in_array($operation, self::OPERATOR_STARTED_OPERATIONS, true);
+            // ⚠ PERMANENTLY FALSE as of S7, and asserted as such by
+            // NftDiscoveryCapabilityMatrixTest. It was
+            // `in_array($operation, OPERATOR_STARTED_OPERATIONS, true)` over a
+            // list whose single entry was `OP_ENUMERATION`. With the operation
+            // removed the list was empty, which made the call provably always
+            // false — PHPStan said so — so the list and the two rungs it
+            // scoped are gone rather than left as dead weight.
+            //
+            // The KEY is retained because it is a true statement about every
+            // row and one test pins it. It becomes a computed value again the
+            // day an operation is genuinely started by an operator, which is a
+            // deliberate change rather than the one-liner the empty list
+            // pretended it would be.
+            $operatorStarted = false;
 
             // S5 removed a second scope here. A `$measurementApplies` flag
             // narrowed the stored `cw_discovery_state` refusal to
@@ -559,14 +481,14 @@ final class NftChainCapability
             // wasm module to metadata, ownership and validation had reported
             // a chain as wholly incapable on the strength of one measurement
             // about one operation. Both the flag and the rung it guarded are
-            // gone; `$operatorStarted` below is the only remaining scope, and
-            // it answers a different question — permission to START.
+            // gone. S7 then removed the OTHER scope too — `$operatorStarted` —
+            // so `operationStatus()` now has no per-operation scoping at all:
+            // every rung applies to every row.
             [$status, $reason] = self::operationStatus(
                 $available,
                 $overrides->reason(),
                 $bccSupports,
                 $manualEnabled,
-                $operatorStarted,
                 $registered,
                 $drivers,
                 $ready
@@ -595,9 +517,28 @@ final class NftChainCapability
             ];
         }
 
-        // The UNCHANGED enumeration verdict, composed from the same inputs
-        // so the page and any future job starter cannot disagree.
-        $enumeration = $operations[NftDriverRegistry::OP_ENUMERATION] ?? null;
+        // ── S7: THE CHAIN-LEVEL `verdict` KEY IS GONE ───────────────────
+        //
+        // It was composed from the ENUMERATION row:
+        //
+        //     $enumeration = $operations[OP_ENUMERATION] ?? null;
+        //     'verdict' => self::verdict($available, $bccSupports,
+        //                                $manualEnabled,
+        //                                $enumeration['drivers'] ?: [],
+        //                                $enumeration['ready']   ?: []);
+        //
+        // With the operation removed that lookup can never hit, so the `??
+        // null` would silently feed `[]`/`[]` into verdict() and it would
+        // answer NO_ENUMERATION_DRIVER for every chain, forever, from a key
+        // that does not exist. A constant dressed as a computed answer.
+        //
+        // The key had ONE writer — this line — and ZERO readers anywhere in
+        // app/, so removing it changes no rendered output. Verified by a
+        // comment-stripped scan, not assumed.
+        //
+        // Removing this key orphaned `verdict()` entirely, so `verdict()`,
+        // `isScannable()`, `forChain()`, `forChainId()` and the six verdict
+        // constants went with it — see the note at the top of the class.
 
         return [
             'chain_id'             => $chainId,
@@ -631,13 +572,6 @@ final class NftChainCapability
             'manual_intake'        => self::canTakeManualIntake($chain),
             'bcc_supports'         => $bccSupports,
             'manual_enabled'       => $manualEnabled,
-            'verdict'              => self::verdict(
-                $available,
-                $bccSupports,
-                $manualEnabled,
-                is_array($enumeration) ? $enumeration['drivers'] : [],
-                is_array($enumeration) ? $enumeration['ready'] : []
-            ),
             'operations'           => $operations,
         ];
     }
@@ -774,7 +708,7 @@ final class NftChainCapability
      * PURE. One operation's status and sub-reason.
      *
      * Every unsure branch refuses. There is no fall-through to "no
-     * restriction" — see {@see verdict()} for why that shape is the one
+     * restriction" — see the class docblock for why that shape is the one
      * this codebase has already shipped once and will not ship again.
      *
      * @param list<string> $registered registry defaults, override-free
@@ -787,7 +721,6 @@ final class NftChainCapability
         ?string $overridesReason,
         ?bool $bccSupportsNft,
         ?bool $manualEnabled,
-        bool $operatorStarted,
         array $registered,
         array $drivers,
         array $ready
@@ -812,9 +745,9 @@ final class NftChainCapability
         // feeds and wallet discovery do not consult this column and are not
         // refused by its absence; reporting them unknown would blame five
         // working operations on a switch none of them reads.
-        if ($operatorStarted && $manualEnabled === null) {
-            return [self::OP_UNKNOWN, self::REASON_MANUAL_COLUMN_ABSENT];
-        }
+        // ⚠ S7 removed a rung here: `$operatorStarted && $manualEnabled === null`
+        // → OP_UNKNOWN / REASON_MANUAL_COLUMN_ABSENT. With no operation
+        // started by an operator it could never fire.
 
         // ── S5: THE STORED-MEASUREMENT RUNG USED TO SIT HERE ────────────
         //
@@ -840,9 +773,10 @@ final class NftChainCapability
         if ($drivers === []) {
             return [self::OP_DISABLED, self::REASON_ALL_DRIVERS_DISABLED];
         }
-        if ($operatorStarted && $manualEnabled === false) {
-            return [self::OP_MANUAL_DISABLED, self::REASON_MANUAL_PERMISSION_DISABLED];
-        }
+        // ⚠ S7 removed a rung here too: `$operatorStarted && $manualEnabled === false`
+        // → OP_MANUAL_DISABLED / REASON_MANUAL_PERMISSION_DISABLED. Same
+        // reason. The permission is still enforced, but by manual intake
+        // itself rather than by this ladder.
         if ($ready === []) {
             return [self::OP_PROVIDER_UNAVAILABLE, self::REASON_NO_READY_DRIVER];
         }
@@ -853,69 +787,13 @@ final class NftChainCapability
     /**
      * PURE. Is this operation status the one that permits acting?
      *
-     * Identity test against ONE value, for the same reason
-     * {@see isScannable()} is: a status from a newer build, a typo or an
-     * empty string must read as NOT permitted.
+     * Identity test against ONE value, for the same reason the removed
+     * `isScannable()` was: a status from a newer build, a typo or an empty
+     * string must read as NOT permitted.
      */
     public static function isOperationReady(string $status): bool
     {
         return $status === self::OP_READY;
-    }
-
-    /**
-     * Composed entry point: resolve every input for one chain and return the
-     * verdict.
-     *
-     * NOTHING IN PRODUCTION CALLS THIS YET — PR 2 is a scaffold. It exists
-     * so the admin surface and the job starter that land later share this
-     * resolution instead of each assembling their own, which is precisely
-     * how the two-definitions drift starts.
-     *
-     * An unresolvable chain returns {@see UNKNOWN}: a chain we cannot read
-     * is one we cannot make any claim about, and `UNKNOWN` is not scannable.
-     */
-    public static function forChainId(int $chainId): string
-    {
-        $chain = ChainRepository::getById($chainId);
-        if ($chain === null) {
-            return self::UNKNOWN;
-        }
-
-        return self::forChain($chain);
-    }
-
-    /**
-     * Composed entry point for an already-resolved chain row.
-     *
-     * Follows the sequence the verdict documents: ask the registry for
-     * ordered ENUMERATION drivers FIRST, then evaluate readiness for exactly
-     * those drivers — never a chain-wide readiness flag. That ordering is
-     * what keeps `NO_ENUMERATION_DRIVER` and `PROVIDER_UNAVAILABLE`
-     * distinguishable.
-     *
-     * @param object $chain a `ChainRow`-shaped projection
-     */
-    public static function forChain(object $chain): string
-    {
-        $chainId = (int) ($chain->id ?? 0);
-
-        // Overrides FIRST. If we cannot establish them, the driver list is
-        // untrustworthy and every conclusion drawn from it would be a guess
-        // in the permissive direction.
-        $overrides = ChainNftCapabilityRepository::getForChain($chainId);
-
-        $enumeration = $overrides->isAvailable()
-            ? NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_ENUMERATION, $overrides->rows())
-            : [];
-        $ready = NftProviderReadiness::readyDrivers($chain, $enumeration);
-
-        return self::verdict(
-            $overrides->isAvailable(),
-            self::bccNftSupportState($chain),
-            self::manualDiscoveryState($chain),
-            $enumeration,
-            $ready
-        );
     }
 
     /**
@@ -929,8 +807,8 @@ final class NftChainCapability
      * PRESENCE check comes first and answers `null`.
      *
      * The third answer is kept rather than collapsed to `false` here, and
-     * collapsed by whoever needs a boolean: {@see verdict()} turns it into
-     * {@see UNKNOWN}. Mirrors
+     * collapsed by whoever needs a boolean: {@see operationStatus()} turns it
+     * into `OP_UNKNOWN`. Mirrors
      * {@see \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::discoveryOptInState()},
      * which established this pattern for the CosmWasm opt-in column.
      *
