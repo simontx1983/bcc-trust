@@ -410,11 +410,27 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
      *
      * PR 2 ships the model; PR 4/5 wire it. Until then the only places the
      * permission column may appear are the class that interprets it, the
-     * projection that carries it, and the migration that creates it.
+     * projection that carries it, the migration that creates it — and, since
+     * S9b, the migration that CHECKS IT SURVIVED.
      *
      * The failure this guards against is a well-meaning "while I'm here"
      * edit that makes some existing worker consult the column — which would
      * turn an inert scaffold into live behaviour in a PR reviewed as inert.
+     *
+     * ⚠ WHY `drop-scanner-schema.php` IS ON THESE LISTS, AND WHY IT IS NOT
+     * A WEAKENING. It names both capability columns in one place only: an
+     * `INFORMATION_SCHEMA` postcondition probe that refuses to report
+     * COMPLETE unless every RETAINED column is still present on the two
+     * surviving parent tables. It never selects, interprets or writes their
+     * values — there is no `UPDATE`, no `SELECT … FROM wp_bcc_chains` and no
+     * capability decision anywhere in the file.
+     *
+     * That probe is there because the alternative is worse: S9b drops eight
+     * columns from those same two tables, and a DROP aimed one column over
+     * would otherwise be reported as a clean completion, with no symptom
+     * until a projection read failed and cached an error sentinel. Listing
+     * the retained columns literally is the point — deriving them from the
+     * projection constant would pass if the constant were wrong too.
      */
     public function testOnlyTheCapabilityModelReadsTheManualPermission(): void
     {
@@ -422,10 +438,71 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
             [
                 'app/Domain/Onchain/Repositories/ChainRepository.php',
                 'app/Domain/Onchain/Support/NftChainCapability.php',
+                // S9b: an INFORMATION_SCHEMA postcondition probe, never a read.
+                'includes/database/drop-scanner-schema.php',
                 'includes/database/schema-chains.php',
             ],
             self::filesContaining('manual_collection_discovery_enabled')
         );
+    }
+
+    /**
+     * ⚠ THE COUNTERWEIGHT TO PUTTING `drop-scanner-schema.php` ON THE THREE
+     * LISTS ABOVE.
+     *
+     * Widening an exact-list guard is only honest if something else holds
+     * the line the list used to hold. The line is: that file may NAME the
+     * capability columns, and may not READ OR WRITE them.
+     *
+     * So this asserts the shape directly, on comment-stripped source, rather
+     * than trusting the docblock: the migration issues no `UPDATE` and no
+     * `SET` at all, selects nothing from the chains or checkpoints tables,
+     * and reaches the columns only through `INFORMATION_SCHEMA`. A
+     * "while I'm here" edit that typed an `UPDATE wp_bcc_chains SET …` into
+     * the migration — the exact failure the parent guard exists for — fails
+     * here instead.
+     */
+    public function testTheDropMigrationOnlyProbesTheCapabilityColumns(): void
+    {
+        $path = self::root() . '/includes/database/drop-scanner-schema.php';
+        self::assertFileExists($path);
+
+        $src = self::codeWithoutComments($path);
+
+        // Anti-vacuity: the file really does name both columns, so the
+        // assertions below are about something.
+        foreach (['bcc_supports_nft_collections', 'manual_collection_discovery_enabled'] as $column) {
+            self::assertStringContainsString(
+                $column,
+                $src,
+                'anti-vacuity: the postcondition probe must name ' . $column
+            );
+        }
+
+        // And it reaches them ONLY as schema metadata.
+        self::assertStringContainsString(
+            'INFORMATION_SCHEMA.COLUMNS',
+            $src,
+            'the only legitimate way this file may touch a capability column'
+        );
+
+        foreach (['UPDATE ', ' SET ', 'INSERT INTO', 'DELETE FROM `'] as $write) {
+            self::assertStringNotContainsString(
+                $write,
+                $src,
+                'the drop migration must not write row data: found "' . $write . '"'
+            );
+        }
+
+        // No value read either. It may DROP from these tables and probe
+        // their schema; it may not project from them.
+        foreach (['SELECT * FROM', 'FROM `{$chainsTbl}`', 'FROM `{$checkpointTbl}`'] as $read) {
+            self::assertStringNotContainsString(
+                $read,
+                $src,
+                'the drop migration must not read rows from a surviving parent: found "' . $read . '"'
+            );
+        }
     }
 
     public function testOnlyTheCapabilityModelReadsTheProductSupportColumn(): void
@@ -434,6 +511,8 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
             [
                 'app/Domain/Onchain/Repositories/ChainRepository.php',
                 'app/Domain/Onchain/Support/NftChainCapability.php',
+                // S9b: an INFORMATION_SCHEMA postcondition probe, never a read.
+                'includes/database/drop-scanner-schema.php',
                 'includes/database/schema-chains.php',
             ],
             self::filesContaining('bcc_supports_nft_collections')
@@ -641,6 +720,7 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
                 [
                     'app/Domain/Onchain/Repositories/ChainRepository.php',
                     'app/Domain/Onchain/Support/NftChainCapability.php',
+                    'includes/database/drop-scanner-schema.php',
                     'includes/database/schema-chains.php',
                 ],
                 $path . ' names a capability column but is not a repository, the model or the schema'

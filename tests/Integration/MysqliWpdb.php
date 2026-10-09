@@ -103,6 +103,39 @@ final class MysqliWpdb
         $this->postmeta = $prefix . 'postmeta';
     }
 
+    /**
+     * WordPress's LIKE escaper. `addcslashes($text, '_%\\')` is the real
+     * implementation, byte for byte.
+     *
+     * ⚠ ADDED FOR S9b, AND IT WAS A HARD REQUIREMENT, NOT A CONVENIENCE.
+     * `bcc_trust_drop_scanner_schema()` builds its leftover-option sweep as
+     * `esc_like($prefix) . '%'`, so without this method the migration
+     * cannot be called at all under the integration bootstrap — the sweep
+     * would have been structurally untestable and the one destructive
+     * migration in the scanner retirement would have had no real-engine
+     * coverage of its final step.
+     */
+    public function esc_like(string $text): string
+    {
+        return addcslashes($text, '_%\\');
+    }
+
+    /**
+     * The connection's own escaper, as `wpdb::_real_escape()`.
+     *
+     * Used by the backup export in `scripts/scanner-schema-backup.php` to
+     * render row values as SQL literals. It must be the REAL
+     * `mysqli_real_escape_string` against THIS connection rather than
+     * `addslashes`, because the two disagree on exactly the inputs the
+     * export has to survive — quotes, backslashes, NUL, newline, CR and
+     * Ctrl-Z — and a backup whose encoder is approximated in tests is a
+     * backup whose encoder is untested.
+     */
+    public function _real_escape(string $data): string
+    {
+        return $this->db->real_escape_string($data);
+    }
+
     public function get_charset_collate(): string
     {
         return 'DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci';
@@ -256,8 +289,17 @@ final class MysqliWpdb
      * WordPress does not execute it and the caller sees "no rows"; mysqli would
      * instead throw a ValueError, which would misreport the failure as a crash
      * in the test rather than the silent empty result production actually gets.
+     *
+     * ⚠ `$output` ADDED FOR S9b. Production passes `ARRAY_A` in a dozen
+     * repositories and `ARRAY_N` for `SHOW CREATE TABLE`, and PHP silently
+     * IGNORES a surplus argument to a user-defined method — so before this
+     * parameter existed, every such call got objects here and arrays in
+     * production, and a test over one of those paths was asserting against
+     * a shape production never returns. The backup export reads rows as
+     * `ARRAY_A` and captures DDL as `ARRAY_N`, so it could not have been
+     * covered honestly without this.
      */
-    public function get_results(string $sql): array
+    public function get_results(string $sql, string $output = 'OBJECT'): array
     {
         $this->last_error = '';
         if (trim($sql) === '') {
@@ -284,8 +326,18 @@ final class MysqliWpdb
             return [];
         }
         $rows = [];
-        while ($row = $res->fetch_object()) {
-            $rows[] = $row;
+        if ($output === 'ARRAY_A') {
+            while ($row = $res->fetch_assoc()) {
+                $rows[] = $row;
+            }
+        } elseif ($output === 'ARRAY_N') {
+            while ($row = $res->fetch_row()) {
+                $rows[] = $row;
+            }
+        } else {
+            while ($row = $res->fetch_object()) {
+                $rows[] = $row;
+            }
         }
         $res->free();
         return $rows;

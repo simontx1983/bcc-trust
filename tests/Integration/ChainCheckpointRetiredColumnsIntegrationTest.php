@@ -28,17 +28,29 @@ use PHPUnit\Framework\TestCase;
  * index tuples and has no column-level parity at all, so the `cw_*` drop is
  * invisible to it in both directions. These cases are the check.
  *
- * ── WHAT S9a CHANGED, AND WHAT IT DELIBERATELY DID NOT ──────────────────
+ * ── THE TWO STEPS, AND WHY THE ORDER IS THE SAFETY ARGUMENT ─────────────
  * S9a removed the seven `cw_*` columns from the SELECT list and deleted the
  * twelve `cw_*` writers that went callerless when S8 removed the scanner.
- * It left the COLUMNS on the table, the `schema-*.php` installers intact and
- * the five `CW_STATE_*` constants in place — because the column still holds
- * exactly those literals on both staging and production. Only the drop is
- * S9b.
+ * ⚠ S9a's "retired column absent" meant absent from the RETURNED
+ * PROJECTION ONLY: it left the columns on the table, the `schema-*.php`
+ * installers intact and the five `CW_STATE_*` constants in place, so it was
+ * a pure, reversible code change with no data at stake.
  *
- * So the pair of cases below is the whole point: today's shape (columns
- * present) and tomorrow's (columns absent) must behave identically.
+ * S9b is the second step and the destructive one. It removed the columns and
+ * `idx_cw_discovery` from `CREATE TABLE`, deleted the three sibling
+ * `schema-*.php` files and the `CW_STATE_*` constants, and added
+ * `bcc_trust_drop_scanner_schema()` to drop all of it from existing
+ * installs.
  *
+ * Doing those in the other order is the failure this file exists to prevent:
+ * a `SELECT` naming a dropped column fails the WHOLE read, `ChainRepository`
+ * and this repository's read guard turn that into "unavailable", and the
+ * operator-visible symptom is every chain idle with nothing in the log.
+ *
+ * So the pair of cases below is still the whole point — columns present and
+ * columns absent must behave identically — except that since S9b the
+ * PRESENT shape is the one that has to be constructed. See
+ * `addRetiredColumns()`.
  * ⚠ THIS CLASS MUTATES `wp_bcc_chain_checkpoints`, which the rest of the
  * integration suite shares. `tearDown()` drops the table and re-runs the
  * real installer. PHPUnit runs this suite sequentially in one process, so no
@@ -62,6 +74,17 @@ final class ChainCheckpointRetiredColumnsIntegrationTest extends TestCase
         'cw_metadata_refreshed_at',
         'cw_last_error',
     ];
+
+    /**
+     * The composite index S9b drops, and the reason the drop has an ORDER.
+     *
+     * `KEY idx_cw_discovery (cw_discovery_state, cw_last_discovery_at)` spans
+     * two of the columns above, so it has to go before either of them.
+     * `schema-drift-guard.php` DOES compare index tuples — but only for
+     * indexes on tables it still finds declared, and it is column-blind, so
+     * it would not have told anyone which column was missing.
+     */
+    private const RETIRED_INDEX = 'idx_cw_discovery';
 
     /**
      * Columns the retained readers and writers genuinely need. Shared with
@@ -116,10 +139,89 @@ final class ChainCheckpointRetiredColumnsIntegrationTest extends TestCase
      * is what a migration that must tolerate a partially-dropped table looks
      * like, and because a combined statement hides which column failed.
      */
+    /**
+     * Rebuild the PRE-S9b shape: the seven columns and the index over two of
+     * them.
+     *
+     * ⚠⚠ THIS USED TO BE THE SHIPPED SHAPE, SO IT USED TO NEED NO HELPER.
+     * `bcc_onchain_create_chain_checkpoints_table()` created the columns and
+     * S9a left them alone; §1 below just read them. S9b removed them from
+     * `CREATE TABLE`, so the "columns present" case now has to construct its
+     * own subject — and it must, because that shape is still real:
+     *
+     *   - an install sits in it between the S9b code deploy and the
+     *     migration completing (which may legitimately take several
+     *     requests — the migration returns INCOMPLETE and retries), and
+     *   - a restored backup is in it by construction.
+     *
+     * Deliberately NOT by reviving an installer. The schema pass runs on the
+     * same first request as `bcc_trust_drop_scanner_schema()`, so any
+     * installer that re-added these columns would undo the drop within that
+     * request. A fixture `ALTER` cannot: it exists only here.
+     *
+     * ⚠ THE INDEX IS PART OF THE SHAPE, not decoration. `idx_cw_discovery`
+     * spans `cw_discovery_state` and `cw_last_discovery_at`, which is why
+     * `dropRetiredColumns()` below has to remove it FIRST — dropping either
+     * column while it exists fails with `ERROR 1072`. That is the exact
+     * failure the first S9b restore rehearsal hit.
+     */
+    private function addRetiredColumns(): void
+    {
+        $wpdb  = $GLOBALS['wpdb'];
+        $table = $this->table();
+
+        foreach (self::RETIRED_COLUMNS as $column) {
+            if ($this->hasColumn($column)) {
+                continue;
+            }
+            $type = match ($column) {
+                'cw_discovery_state' => "VARCHAR(20) NOT NULL DEFAULT 'idle'",
+                'cw_code_cursor'     => 'VARCHAR(255) DEFAULT NULL',
+                'cw_max_code_id'     => 'BIGINT UNSIGNED NOT NULL DEFAULT 0',
+                'cw_last_error'      => 'VARCHAR(255) DEFAULT NULL',
+                default              => 'DATETIME DEFAULT NULL',
+            };
+            self::assertNotFalse(
+                $wpdb->query("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$type}"),
+                "fixture: {$column} must be addable"
+            );
+        }
+
+        if (!$this->hasIndex(self::RETIRED_INDEX)) {
+            self::assertNotFalse(
+                $wpdb->query(
+                    "ALTER TABLE `{$table}` ADD KEY `" . self::RETIRED_INDEX
+                    . '` (`cw_discovery_state`, `cw_last_discovery_at`)'
+                ),
+                'fixture: the composite index must be addable'
+            );
+        }
+    }
+
+    private function hasIndex(string $index): bool
+    {
+        $wpdb = $GLOBALS['wpdb'];
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            'SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND INDEX_NAME = %s',
+            $this->table(),
+            $index
+        )) > 0;
+    }
+
     private function dropRetiredColumns(): void
     {
         $wpdb  = $GLOBALS['wpdb'];
         $table = $this->table();
+
+        // ⚠ THE INDEX FIRST. It spans two of the columns below, so dropping
+        // either of them while it exists fails with `ERROR 1072: Key column
+        // 'cw_discovery_state' doesn't exist in table`. The real migration
+        // drops it first for the same reason.
+        if ($this->hasIndex(self::RETIRED_INDEX)) {
+            $wpdb->query('ALTER TABLE `' . $table . '` DROP INDEX `' . self::RETIRED_INDEX . '`');
+        }
 
         foreach (self::RETIRED_COLUMNS as $column) {
             if (!$this->hasColumn($column)) {
@@ -157,24 +259,48 @@ final class ChainCheckpointRetiredColumnsIntegrationTest extends TestCase
         foreach (self::RETAINED_COLUMNS as $c) {
             self::assertContains($c, $columns, "retained column {$c} must be on the shipped table");
         }
+        // ⚠⚠ INVERTED IN S9b, AND THE OLD FORM IS WORTH KEEPING ON THE
+        // RECORD because it was the pin that made the two-deploy split
+        // enforceable. It read:
+        //
+        //     assertContains($c, $columns,
+        //         "S9a must NOT have dropped {$c} — the drop is S9b, behind a backup")
+        //
+        // That was exactly right at the time: S9a's whole claim was that the
+        // columns stayed on the table while the PROJECTION stopped naming
+        // them, and this case is what stopped the two steps being collapsed
+        // into one. S9b is that second step, so the shipped table no longer
+        // carries them and the assertion flips.
         foreach (self::RETIRED_COLUMNS as $c) {
-            self::assertContains(
+            self::assertNotContains(
                 $c,
                 $columns,
-                "S9a must NOT have dropped {$c} — the drop is S9b, behind a backup"
+                "S9b removed {$c} from CREATE TABLE; a fresh install must not have it"
             );
         }
+        self::assertFalse(
+            $this->hasIndex(self::RETIRED_INDEX),
+            'and the index over two of them must be gone from CREATE TABLE too'
+        );
     }
 
     // ══ 1. Today's shape — the columns are present ══════════════════════
 
     public function testTheProjectionReadsWithTheRetiredColumnsPresent(): void
     {
+        // Since S9b the installer no longer creates these, so the shape has
+        // to be built. See addRetiredColumns() for why it is still worth
+        // testing and why it is a fixture rather than a revived installer.
+        $this->addRetiredColumns();
         $this->seedRow();
 
         self::assertTrue(
             $this->hasColumn('cw_discovery_state'),
             'precondition: this case is about the columns being PRESENT'
+        );
+        self::assertTrue(
+            $this->hasIndex(self::RETIRED_INDEX),
+            'precondition: and about the index being present with them'
         );
 
         $row = ChainCheckpointRepository::get(self::CHAIN_ID);
@@ -205,6 +331,11 @@ final class ChainCheckpointRetiredColumnsIntegrationTest extends TestCase
     public function testTheProjectionReadsWithTheRetiredColumnsAbsent(): void
     {
         $this->seedRow();
+        // ⚠ ADD, THEN DROP. Since S9b the installer no longer creates these
+        // columns, so a bare dropRetiredColumns() would be a NO-OP and this
+        // case would pass without ever exercising a drop. Building the
+        // pre-S9b shape first keeps the transition real.
+        $this->addRetiredColumns();
         $this->dropRetiredColumns();
 
         foreach (self::RETIRED_COLUMNS as $c) {
@@ -239,6 +370,11 @@ final class ChainCheckpointRetiredColumnsIntegrationTest extends TestCase
     public function testTheRetainedWritersWorkWithTheRetiredColumnsAbsent(): void
     {
         $this->seedRow();
+        // ⚠ ADD, THEN DROP. Since S9b the installer no longer creates these
+        // columns, so a bare dropRetiredColumns() would be a NO-OP and this
+        // case would pass without ever exercising a drop. Building the
+        // pre-S9b shape first keeps the transition real.
+        $this->addRetiredColumns();
         $this->dropRetiredColumns();
 
         // ensureExists() on a fresh id, with the columns already gone: the
@@ -290,6 +426,11 @@ final class ChainCheckpointRetiredColumnsIntegrationTest extends TestCase
     public function testTheProgressionHistorySurvivesTheDrop(): void
     {
         $this->seedRow();
+        // ⚠ ADD, THEN DROP. Since S9b the installer no longer creates these
+        // columns, so a bare dropRetiredColumns() would be a NO-OP and this
+        // case would pass without ever exercising a drop. Building the
+        // pre-S9b shape first keeps the transition real.
+        $this->addRetiredColumns();
         $this->dropRetiredColumns();
 
         ChainCheckpointRepository::recordSuccess(self::CHAIN_ID, 10, 20);

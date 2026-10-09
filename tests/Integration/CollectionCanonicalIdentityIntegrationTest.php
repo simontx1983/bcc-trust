@@ -725,10 +725,15 @@ final class CollectionCanonicalIdentityIntegrationTest extends TestCase
         $chains = ChainRepository::table();
         self::assertSame(
             0,
+            // ⚠ `cosmwasm_nft_discovery_enabled` WAS A THIRD TERM HERE AND
+            // S9b DROPPED THE COLUMN. Leaving it would not have failed — it
+            // would have been WORSE: the query errors, `get_var()` returns
+            // null, `(int) null` is 0, and `assertSame(0, 0)` passes. The
+            // whole assertion would have gone silently vacuous, including
+            // for the two RETAINED flags it is actually here to protect.
             (int) $wpdb->get_var("SELECT COUNT(*) FROM `{$chains}` WHERE bcc_supports_nft_collections = 1
-                                    OR manual_collection_discovery_enabled = 1
-                                    OR cosmwasm_nft_discovery_enabled = 1"),
-            'no discovery flag may be turned on'
+                                    OR manual_collection_discovery_enabled = 1"),
+            'no capability flag may be turned on'
         );
     }
 

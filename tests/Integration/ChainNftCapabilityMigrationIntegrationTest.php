@@ -619,161 +619,33 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
         self::assertCount(1, $result->rows());
     }
 
-    // ── S5: THE STORED MEASUREMENT IS NOT READ, END TO END ──────────────
-
-    /**
-     * ⚠⚠⚠ THE PROOF THAT THE DEPENDENCY IS GONE, AGAINST A REAL ROW.
-     *
-     * A genuine `cw_discovery_state = 'unsupported'` is written to
-     * `wp_bcc_chain_checkpoints` through the repository, and the capability
-     * answer is taken before and after. They must be IDENTICAL.
-     *
-     * Asserted as an equality rather than against a named value on purpose:
-     * it holds whatever this environment's driver readiness produces, and it
-     * fails if the column is consulted again by any route — including one
-     * this test did not think to name. The S4-era version asserted
-     * `CHAIN_UNSUPPORTED`, so it was the exact test S5 had to invert.
-     *
-     * ⚠ S7 widened it. It compared one chain-level verdict; it now compares
-     * EVERY per-operation status and reason, because the verdict is gone and
-     * because a per-operation comparison catches a leak into any single row
-     * rather than only into the summary.
-     */
-    public function testACosmosChainsCapabilityIsUnchangedByAStored501(): void
-    {
-        $chain  = self::fullyPermittedCosmosChain();
-        $before = NftChainCapability::operationMatrix($chain)['operations'];
-
-        self::markCwUnsupported((int) $chain->id);
-
-        // Re-project: the answer must be recomputed from a fresh row, not
-        // served from a cache that predates the write.
-        ChainRepository::clearCache();
-        $reprojected = ChainRepository::getBySlug('cosmos');
-        self::assertNotNull($reprojected);
-
-        $after = NftChainCapability::operationMatrix($reprojected)['operations'];
-
-        self::assertSame(
-            array_keys($before),
-            array_keys($after),
-            'the operation set itself must not change'
-        );
-
-        $compared = 0;
-        foreach ($before as $operation => $row) {
-            self::assertSame(
-                $row['status'],
-                $after[$operation]['status'],
-                $operation . ' changed status because of a measurement nothing reads'
-            );
-            self::assertSame(
-                $row['reason'],
-                $after[$operation]['reason'],
-                $operation . ' changed its stated reason'
-            );
-            $compared++;
-        }
-
-        // Anti-vacuity: an empty operation map would compare nothing at all.
-        self::assertSame(5, $compared, 'five operations must have been compared');
-    }
-
-    /**
-     * The measurement really was written, so the case above is not vacuous.
-     *
-     * Without this, a `markCwUnsupported()` that silently failed — and
-     * `$wpdb->query()` returns false without throwing — would leave the
-     * equality above comparing two identical no-ops and passing for the
-     * wrong reason.
-     */
-    public function testTheStored501IsActuallyPersisted(): void
-    {
-        $chain = self::fullyPermittedCosmosChain();
-        self::markCwUnsupported((int) $chain->id);
-
-        self::assertSame(
-            ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
-            self::storedCwDiscoveryState((int) $chain->id),
-            'the measurement must be on the row, read without the projection'
-        );
-    }
-
-    /**
-     * A STALE `cw_*` VALUE ON A NON-COSMOS ROW CHANGES NOTHING.
-     *
-     * `cw_discovery_state` lives on `wp_bcc_chain_checkpoints`, a row shared
-     * with the EVM indexer's own `state` column, so a non-Cosmos chain can
-     * carry a `cw_*` value that means nothing there. While the capability
-     * model read that column, a Cosmos-scoping guard existed to stop it
-     * answering "this chain has no wasm module" about Ethereum — true,
-     * irrelevant, and it would have MASKED the real reason.
-     *
-     * S5 removed the read, so the guard is no longer load-bearing. The
-     * OUTCOME it protected is asserted here, and the stale value is still
-     * written so a reintroduced read would fail this case.
-     *
-     * @param string $slug
-     */
-    #[\PHPUnit\Framework\Attributes\DataProvider('nonCosmosChains')]
-    public function testNonCosmosChainIsUnaffectedByAStaleCosmWasmState(string $slug): void
-    {
-        $chain  = self::fullyPermittedChain($slug);
-        $before = NftChainCapability::operationMatrix($chain)['operations'];
-
-        self::markCwUnsupported((int) $chain->id);
-
-        ChainRepository::clearCache();
-        $reprojected = ChainRepository::getBySlug($slug);
-        self::assertNotNull($reprojected);
-        $after = NftChainCapability::operationMatrix($reprojected)['operations'];
-
-        // ⚠ S7: the original asserted `NO_ENUMERATION_DRIVER` — that no driver
-        // could enumerate this family — and the operation is gone.
-        //
-        // My first replacement asserted `OP_NO_DRIVER` for `curated_feed`,
-        // claiming no driver serves a curated feed on EVM or Solana. That is
-        // FALSE for Solana: `magiceden` declares curated_feed there, and CI
-        // caught it. There is in fact NO single operation that both families
-        // structurally lack, so pinning one named refusal cannot work here.
-        //
-        // The property this case actually exists for is family-agnostic: a
-        // stale `cw_discovery_state` on a non-Cosmos row must not influence
-        // the answer AT ALL. Asserted as an equality over every operation,
-        // which is both true for both families and stronger than any single
-        // named status — it catches a leak into any row rather than one.
-        $compared = 0;
-        foreach ($before as $operation => $row) {
-            self::assertSame(
-                $row['status'],
-                $after[$operation]['status'],
-                $slug . '/' . $operation . ' changed because of an irrelevant CosmWasm measurement'
-            );
-            self::assertSame(
-                $row['reason'],
-                $after[$operation]['reason'],
-                $slug . '/' . $operation . ' changed its stated reason'
-            );
-            $compared++;
-        }
-
-        self::assertSame(5, $compared, 'five operations must have been compared');
-
-        // Anti-vacuity: the stale value really was written, so the equality
-        // above is not comparing two identical no-ops.
-        self::assertSame(
-            ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
-            self::storedCwDiscoveryState((int) $chain->id),
-            'the stale value must be on the row, read without the projection'
-        );
-    }
-
-    /** @return array<string, array{0: string}> */
-    public static function nonCosmosChains(): array
-    {
-        return ['evm' => ['ethereum'], 'solana' => ['solana']];
-    }
-
+    // ── S5's "THE STORED MEASUREMENT IS NOT READ" CASES: REMOVED (S9b) ──
+    //
+    // Three cases lived here and they were good ones. They wrote a genuine
+    // `cw_discovery_state = 'unsupported'` to `wp_bcc_chain_checkpoints` and
+    // asserted that EVERY per-operation capability status and reason was
+    // byte-identical before and after — the end-to-end proof that S5 had
+    // really severed the capability model from the stored measurement. A
+    // fourth asserted the write had landed, so the equality could not pass by
+    // comparing two no-ops. One covered a non-Cosmos row, where a stale
+    // `cw_*` value means nothing and must not mask the real reason.
+    //
+    // ⚠ S9b DROPPED THE COLUMN, so there is no stored measurement to write.
+    // These are not cases that merely became redundant — they became
+    // IMPOSSIBLE TO EXPRESS: their fixture step was an UPDATE against
+    // `cw_discovery_state`, which no longer exists on the table.
+    //
+    // Keeping them would have meant asserting that a value nothing can store
+    // changes nothing, which is exactly the vacuous shape this suite refuses
+    // elsewhere. The successor guarantee — that the projection does not name
+    // the column at all — is pinned by
+    // `ChainsCapabilityColumnAnchorIntegrationTest` and
+    // `ChainCheckpointRetiredColumnsIntegrationTest`, both of which run
+    // against a real engine with the columns present AND dropped.
+    //
+    // The 19 cases below are untouched: they cover the two RETAINED
+    // capability columns, the override table and its unique key, projection
+    // caching, and the fail-closed override reads.
     // ── Helpers ─────────────────────────────────────────────────────────
 
     /** A chain row with both capability columns set to 1, freshly projected. */
@@ -799,59 +671,7 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
         return self::fullyPermittedChain('cosmos');
     }
 
-    /**
-     * Record the measured HTTP 501 on a chain's checkpoint row.
-     *
-     * ⚠ WRITES THE COLUMN DIRECTLY SINCE S9a. This called
-     * `ChainCheckpointRepository::setCwDiscoveryState()`, which S9a deleted
-     * along with the other eleven `cw_*` writers that went callerless when
-     * S8 removed the scanner. The COLUMN is still on the table until S9b,
-     * and the property these cases pin — that a stored measurement changes
-     * no capability answer — is unaffected by which code does the writing.
-     *
-     * Writing it by hand is in fact the stronger arrangement: the value now
-     * reaches the row without passing through any production code at all, so
-     * the equality below cannot be satisfied by a writer that quietly
-     * stopped writing.
-     */
-    private static function markCwUnsupported(int $chainId): void
-    {
-        ChainCheckpointRepository::ensureExists($chainId);
 
-        $wpdb    = $GLOBALS['wpdb'];
-        $updated = $wpdb->update(
-            ChainCheckpointRepository::table(),
-            ['cw_discovery_state' => ChainCheckpointRepository::CW_STATE_UNSUPPORTED],
-            ['chain_id' => $chainId],
-            ['%s'],
-            ['%d']
-        );
-
-        // `$wpdb->update()` returns false on error and 0 when the row already
-        // held the value. Both are acceptable here; what is NOT acceptable is
-        // the row being absent, which `ensureExists()` above rules out.
-        self::assertNotFalse($updated, 'the stale measurement must be writable');
-    }
-
-    /**
-     * Read `cw_discovery_state` WITHOUT the repository projection.
-     *
-     * S9a removed the seven `cw_*` columns from
-     * `ChainCheckpointRepository::COLUMNS`, so `get()` no longer returns the
-     * field. These cases still need to prove the value landed, so they go
-     * straight to the table — which is also what makes them independent of
-     * the projection they are testing around.
-     */
-    private static function storedCwDiscoveryState(int $chainId): ?string
-    {
-        $wpdb = $GLOBALS['wpdb'];
-        $value = $wpdb->get_var($wpdb->prepare(
-            'SELECT cw_discovery_state FROM `' . ChainCheckpointRepository::table() . '` WHERE chain_id = %d',
-            $chainId
-        ));
-
-        return $value === null ? null : (string) $value;
-    }
 
     /**
      * Nothing else about a chain changes because these columns exist.

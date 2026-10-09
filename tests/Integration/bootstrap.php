@@ -25,6 +25,25 @@ use BCC\Trust\Tests\Integration\MysqliWpdb;
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/MysqliWpdb.php';
 
+// WP core row-format constants for `$wpdb->get_results()`.
+//
+// ⚠ ADDED FOR S9b, AND THEY CLOSE A REAL FIDELITY GAP. A dozen production
+// repositories pass `ARRAY_A`, and `SHOW CREATE TABLE` is read as `ARRAY_N`.
+// `MysqliWpdb::get_results()` took only `$sql` until now, and PHP silently
+// IGNORES a surplus argument to a user-defined method — so those calls were
+// not erroring, they were quietly getting objects here and arrays in
+// production. The double now honours the argument, and these are the names
+// it is passed by. WordPress's own values are these exact strings.
+if (!defined('OBJECT')) {
+    define('OBJECT', 'OBJECT');
+}
+if (!defined('ARRAY_A')) {
+    define('ARRAY_A', 'ARRAY_A');
+}
+if (!defined('ARRAY_N')) {
+    define('ARRAY_N', 'ARRAY_N');
+}
+
 // Point ABSPATH at a tiny stub tree so the schema installers'
 // `require_once ABSPATH . 'wp-admin/includes/upgrade.php'` resolves to an empty
 // file (dbDelta is stubbed below) instead of pulling in WordPress core.
@@ -144,6 +163,44 @@ if (!function_exists('get_option')) {
             $GLOBALS['__bcc_test_options'][$key] = $value;
         }
         return true;
+    }
+
+    /**
+     * ⚠ DELIBERATELY WRITES THROUGH TO THE REAL `wp_options` TABLE.
+     *
+     * The other three stubs above are array-backed, but this bootstrap also
+     * creates a genuine `wp_options` (see the rate-limiter note below), and
+     * the scanner-schema drop migration reads the option NAMES it sweeps
+     * straight out of `{$wpdb->options}` with a LIKE, then deletes each one
+     * through `delete_option()`. An array-only stub would let that sweep
+     * report success while every row it was meant to remove stayed in the
+     * table — the sweep would be structurally untestable.
+     *
+     * So this deletes from both representations, which is also the only way
+     * the two cannot disagree. Nothing called `delete_option()` in the
+     * integration suite before this, so there is no prior behaviour to change.
+     *
+     * @see bcc_trust_drop_scanner_schema()
+     */
+    function delete_option(string $key): bool
+    {
+        $existed = isset($GLOBALS['__bcc_test_options'][$key]);
+        unset($GLOBALS['__bcc_test_options'][$key]);
+
+        global $wpdb;
+        // NOT `instanceof wpdb` - the integration harness runs on the
+        // MysqliWpdb double, which is deliberately not a subclass.
+        if (is_object($wpdb) && isset($wpdb->options)) {
+            $deleted = $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$wpdb->options} WHERE option_name = %s",
+                $key
+            ));
+            if (is_int($deleted) && $deleted > 0) {
+                return true;
+            }
+        }
+
+        return $existed;
     }
     // ── PR 7.2: the i18n surface an operator-facing service reaches for ──
     //
@@ -720,7 +777,7 @@ require_once dirname(__DIR__, 2) . '/includes/database/schema-nft-spam-contracts
 bcc_onchain_create_nft_spam_contracts_table();
 
 require_once dirname(__DIR__, 2) . '/includes/database/schema-cosmwasm-code-families.php';
-bcc_onchain_create_cosmwasm_code_families_table();
+
 
 require_once dirname(__DIR__, 2) . '/includes/database/schema-cosmwasm-contracts.php';
 
@@ -728,8 +785,8 @@ require_once dirname(__DIR__, 2) . '/includes/database/schema-cosmwasm-contracts
 // exercise the real table — uq_active, the claim compare-and-swap and the
 // lease reaper are all database behaviour that a double cannot prove.
 require_once dirname(__DIR__, 2) . '/includes/database/schema-discovery-runs.php';
-bcc_onchain_create_discovery_runs_table();
-bcc_onchain_create_cosmwasm_contracts_table();
+
+
 
 // ── Stubs the validator-message-queue worker/repo need ──────────────────────
 if (!function_exists('wp_generate_uuid4')) {
