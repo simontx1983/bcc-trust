@@ -1937,8 +1937,58 @@ final class VerifyCollectionsPage
                                         <span style="color:#646970;" title="BCC keeps no holdings index for this chain, so it does not count linked holders here. Counts are never fetched from outside services while this page loads.">Not calculated</span>
                                     <?php endswitch; ?>
                                 </td>
-                                <td><?php echo number_format_i18n((int) ($row->unique_holders ?? 0)); ?></td>
-                                <td class="bcc-vc-community">
+                                  <td>
+                                      <?php
+                                      // ⚠ NULL IS NOT ZERO. `unique_holders` is
+                                      // `INT UNSIGNED DEFAULT NULL` and is only populated for
+                                      // chains BCC counts marketplace-wide, so `?? 0` printed a
+                                      // confident "0 holders" for "we have no figure".
+                                      //
+                                      // The cell immediately above already refuses exactly this
+                                      // ("FOUR STATES, AND NONE OF THEM IS A FABRICATED ZERO"),
+                                      // and the demand sort comparator maps null to -1 rather
+                                      // than 0 for the same reason. This cell was the one place
+                                      // that still conflated them.
+                                      if ($row->unique_holders === null) {
+                                          echo '<span style="color:#646970;" title="BCC has no marketplace-wide holder figure for this collection. This is not a count of zero.">&mdash;</span>';
+                                      } else {
+                                          echo number_format_i18n((int) $row->unique_holders);
+                                      }
+                                      ?>
+                                  </td>
+                                  <td class="bcc-vc-community">
+                                      <?php
+                                      // ⚠ RENDER THE CAUSE THE CLASSIFIER ALREADY COMPUTES.
+                                      // CollectionStateClassifier::attentionCause() and
+                                      // causeLabel() existed with no production caller — the
+                                      // page printed one static paragraph listing all six
+                                      // causes and left the operator to infer which applied to
+                                      // each row. The classifier docblock claims each row is
+                                      // "rendered with its cause"; this makes that true.
+                                      //
+                                      // Shown only on the Needs-attention tab, where it is the
+                                      // question being asked. All four inputs are already on
+                                      // the projected row, so there is no extra query.
+                                      if ($vstate === CollectionStateClassifier::TAB_NEEDS_ATTENTION) {
+                                          $cause = CollectionStateClassifier::attentionCause(
+                                              (int) ($row->is_verified ?? 0) === 1,
+                                              $row->canonical_identifier !== null,   // matches the tab predicate exactly:
+                                              // CollectionStateClassifier uses
+                                              // `canonical_identifier IS NOT NULL`, so an
+                                              // empty string must NOT be treated as unresolved
+                                              // or the rendered cause could disagree with the
+                                              // predicate that selected the row onto this tab.
+                                              (int) ($row->has_community ?? 0) === 1,
+                                              (string) ($row->provisioning_state ?? ProvisioningState::NONE)
+                                          );
+                                          if ($cause !== null) {
+                                              printf(
+                                                  '<div style="font-weight:600;margin-bottom:2px;">%s</div>',
+                                                  esc_html(CollectionStateClassifier::causeLabel($cause))
+                                              );
+                                          }
+                                      }
+                                      ?>
                                     <?php
                                     // PR 6: community existence is PROJECTED by
                                     // listForAdminState(), so the old per-row
@@ -1994,8 +2044,26 @@ final class VerifyCollectionsPage
                                             '<span style="color:#d63638;">Failed: %s</span>',
                                             esc_html(ProvisioningFailureCode::label($code))
                                         );
-                                    } elseif ($rowVerified) {
-                                        echo '<span style="color:#646970;">No community requested</span>';
+                                      } elseif ($rowState === ProvisioningState::PROVISIONED) {
+                                          // ⚠ `provisioned` WITH NO LIVE COMMUNITY IS A
+                                          // CONTRADICTION, not an absence. The community was
+                                          // trashed or deleted out from under the row.
+                                          //
+                                          // This arm used to fall through to "No community
+                                          // requested" below, which is the mis-render
+                                          // CollectionStateClassifier::attentionCause()
+                                          // explicitly warns against: it "would invite an
+                                          // operator to create a second one". The adjacent
+                                          // identity-unresolved arm above already applies that
+                                          // reasoning; this state was the one that did not.
+                                          printf(
+                                              '<span style="color:#d63638;">%s</span>',
+                                              esc_html(CollectionStateClassifier::causeLabel(
+                                                  CollectionStateClassifier::CAUSE_CONTRADICTORY_STATE
+                                              ))
+                                          );
+                                      } elseif ($rowVerified) {
+                                          echo '<span style="color:#646970;">No community requested</span>';
                                     } else {
                                         echo '<span style="color:#999;">&mdash;</span>';
                                     }
