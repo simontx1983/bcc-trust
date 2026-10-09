@@ -115,6 +115,34 @@ final class ChainCosmwasmDiscoveryFlagIntegrationTest extends TestCase
         ChainRepository::clearCache();
     }
 
+    /**
+     * ⚠ LEAVE THE SHARED TABLE AS WE FOUND IT.
+     *
+     * `setUp()` alone is not enough, and getting this wrong is what the CI
+     * run on 80fdc608 caught: case (3) writes
+     * `bcc_supports_nft_collections = 1` and asserts on it, and with no
+     * tearDown that value survived into
+     * `ChainNftCapabilityEditorIntegrationTest`, whose
+     * `testTheInstallerEnablesNothingAndSeedsNoOverride` then found one chain
+     * with product support where it requires none.
+     *
+     * A `setUp()` reset protects this file's own cases from each other; only
+     * a tearDown protects the suites that run after it. `wp_bcc_chains` is
+     * shared, PHPUnit runs this suite sequentially in one process, and both
+     * columns are flags whose shipped state is 0.
+     */
+    protected function tearDown(): void
+    {
+        $wpdb = $GLOBALS['wpdb'];
+        $wpdb->query(
+            'UPDATE `' . ChainRepository::table() . '` SET ' . self::COLUMN . ' = 0, '
+            . self::OBSERVABLE_COLUMN . ' = 0'
+        );
+        ChainRepository::clearCache();
+
+        parent::tearDown();
+    }
+
     /** @return array<string, mixed>|null the INFORMATION_SCHEMA row */
     private function columnDefinition(): ?array
     {
