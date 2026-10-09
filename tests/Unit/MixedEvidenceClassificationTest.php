@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Services\CosmwasmClassifier;
-use BCC\Trust\Onchain\Services\CosmwasmEvidenceNarrator;
+
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -269,42 +269,5 @@ final class MixedEvidenceClassificationTest extends TestCase
 
     // ── operator prose ──────────────────────────────────────────────────
 
-    /**
-     * ⚠ THE NEW SENTENCES MUST NOT MENTION THE NODE. That is the entire
-     * point of the reason split: an operator reading it must not be sent to
-     * investigate a provider that answered every time.
-     */
-    public function testAmbiguousReasonsNeverMentionTheNodeOrTheChain(): void
-    {
-        foreach ([
-            CosmwasmClassifier::REASON_MIXED_EVIDENCE_AMBIGUOUS,
-            CosmwasmClassifier::REASON_PARTIAL_EVIDENCE_AMBIGUOUS,
-        ] as $reason) {
-            $sentence = CosmwasmEvidenceNarrator::reasonSentence(
-                CosmwasmClassifier::UNREACHABLE,
-                $reason
-            );
 
-            self::assertNotSame('', trim($sentence), 'the reason must have real prose, not a fallback');
-            foreach (['node', 'chain node', 'unreachable', 'offline', 'down'] as $forbidden) {
-                self::assertStringNotContainsStringIgnoringCase(
-                    $forbidden,
-                    $sentence,
-                    "ambiguous evidence must not be described with '{$forbidden}'"
-                );
-            }
-            self::assertStringContainsStringIgnoringCase('tried again', $sentence);
-        }
-    }
-
-    /** The genuine node reason still says so, so the split is observable. */
-    public function testNodeReasonStillNamesTheNode(): void
-    {
-        $sentence = CosmwasmEvidenceNarrator::reasonSentence(
-            CosmwasmClassifier::UNREACHABLE,
-            CosmwasmClassifier::REASON_NODE_UNREACHABLE
-        );
-
-        self::assertStringContainsStringIgnoringCase('node', $sentence);
-    }
 }

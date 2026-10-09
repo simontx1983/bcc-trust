@@ -9,7 +9,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Services\NftCapabilityEditor;
 use BCC\Trust\Onchain\Support\NftChainCapability;
 use BCC\Trust\Onchain\Support\NftDriverRegistry;
-use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
+
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -53,7 +53,7 @@ final class NftCapabilityEditorFlagTest extends TestCase
         \BCC\Trust\Core\Security\AuditLogger::reset();
         ChainRepository::reset();
         ChainNftCapabilityRepository::reset();
-        CosmwasmDiscoveryWorker::reset();
+
     }
 
     /** @return list<string> */
@@ -81,7 +81,14 @@ final class NftCapabilityEditorFlagTest extends TestCase
      */
     private function assertNoWorkRan(): void
     {
-        $this->assertSame(0, CosmwasmDiscoveryWorker::$passes, 'no discovery ran');
+        // ⚠ S8 DROPPED THE `CosmwasmDiscoveryWorker::$passes` CHECK HERE.
+        // It asserted "no discovery ran", and after S8 there is no discovery
+        // that could run — the class is deleted. Keeping it would be an
+        // assertion that passes because its subject cannot exist.
+        //
+        // The two checks that remain are the ones with teeth, and they are
+        // about RETAINED code: a capability edit must construct no provider
+        // budget, and must not touch the CosmWasm opt-in column.
         $this->assertSame([], \BCC\Trust\Onchain\Support\ProviderRequestBudget::$constructions, 'no budget built');
         $this->assertSame([], ChainRepository::$discoveryWrites, 'the CosmWasm opt-in was not touched');
     }

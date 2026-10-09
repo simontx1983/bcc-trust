@@ -312,7 +312,9 @@ add_action('plugins_loaded', 'bcc_trust_run_pending_migrations', 20, 0);
 add_action(
     \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::HOOK,
     static function ($runId = 0): void {
-        // The FROZEN entry point, not execute() itself — see ScannerFreeze.
+        // The registered refusal. There is no execute() behind it any more:
+        // S8 deleted the implementation, so this cannot be switched back on
+        // by configuration — only by writing a new scanner.
         \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::handleQueuedAction((int) $runId);
     },
     10,
@@ -1078,12 +1080,11 @@ add_action('plugins_loaded', static function (): void {
     // cleanup-only list and is cleared by
     // includes/database/unschedule-automatic-nft-discovery.php.
     // NOTHING SCHEDULES CW-721 DISCOVERY, AND NOTHING MAY.
-    // CosmwasmDiscoveryWorker deliberately has no register() and owns no
-    // cron hooks: chain-wide discovery is operator-initiated, one named
-    // chain at a time. Re-adding a self-healing registration here would
-    // silently restore unattended chain sweeps on every request — which is
-    // precisely what the anti-drift block above is built to do, and
-    // precisely what discovery must not have.
+    // There is no longer anything to schedule: S8 deleted
+    // CosmwasmDiscoveryWorker with the rest of the chain-wide scanner. The
+    // note stays because the hazard it describes belongs to this BLOCK, not
+    // to that class — a self-healing registration added here would run on
+    // every request, which is exactly how the retired sweeps behaved.
     // Validator-messaging backlog delivery + its recovery sweep. Same
     // self-healing shape: registering from plugins_loaded means a hook
     // added by an update schedules itself without a reactivation.
@@ -1100,11 +1101,10 @@ add_action('plugins_loaded', static function (): void {
     // a future reader will weigh before re-adding it: the reaper was the only
     // thing that returned an expired lease, so an unscheduled sweep could let
     // one crashed run hold `uq_active` and block that (job_kind, chain)
-    // indefinitely. That risk is accepted and is already the live situation —
-    // the sweep has been a no-op under ScannerFreeze since the freeze landed,
-    // because tick() returns its zero counts before triaging anything. The
-    // scanner surface that created runs is gone as of S4, so nothing new can
-    // take a lease to strand.
+    // indefinitely. That risk is accepted and is now moot — the surface that
+    // created runs went in S4, and S8 deleted DiscoveryRunMaintenance itself
+    // along with the ledger repository, so there is no sweep to schedule and
+    // nothing left that could take a lease to strand.
 
     // Helius dedupe sweep has no host service class (its handler is the
     // inline closure above) so its schedule is inlined here. Same shape
@@ -1924,11 +1924,11 @@ add_action('plugins_loaded', function (): void {
     //
     // `DiscoveryRunStatusEndpoint::register()` (the run-status AJAX read) and
     // `DiscoveryScanActions::register()` (the three admin-post scan routes)
-    // used to be called here. Both classes are deleted: the routes they
-    // registered were already unreachable behind ScannerFreeze, so this
-    // removes dead registration code rather than changing what a request can
-    // reach. The run LEDGER and its service are retained — only the ways an
-    // operator could reach them are withdrawn.
+    // used to be called here. Both classes went in S4: the routes they
+    // registered were already unreachable, so that removed dead registration
+    // code rather than changing what a request can reach. S8 has since
+    // deleted the run ledger repository and its service too; the TABLES are
+    // still declared and are dropped in S9.
     \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_actions();
     \BCC\Trust\Onchain\Admin\WebhooksPage::register_actions();
     \BCC\Trust\Onchain\Admin\HolderGroupsPage::register_actions();
@@ -2205,16 +2205,12 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust vmq',
         \BCC\Trust\Onchain\CLI\ValidatorMsgQueueCommand::class
     );
-    // ── S4: `bcc-trust cosmwasm` IS NO LONGER REGISTERED ────────────────
+    // ── `bcc-trust cosmwasm` IS GONE ────────────────────────────────────
     //
     // The one-shot supervised pass was the last way to START a full-chain
-    // CosmWasm discovery run. Its registration sat behind
-    // `!ScannerFreeze::frozen()`, so the command was already absent from
-    // `wp help bcc-trust`; S4 withdraws the registration itself.
-    //
-    // `CosmwasmOneShotDiscoveryCommand` the CLASS is deliberately RETAINED,
-    // along with the rest of the scanner implementation — S4 withdraws the
-    // surface only. The leaves are deleted in S8.
+    // CosmWasm discovery run. S4 withdrew its registration; S8 deleted
+    // `CosmwasmOneShotDiscoveryCommand` and the whole scanner implementation
+    // behind it. There is no command, no class and no code path left.
     // PR 5b — the eight-row Solana gate-identity repair. THIS IS ITS ONLY
     // ENTRY POINT: there is deliberately no REST route, no admin-post
     // handler, no AJAX action and no cron hook that reaches it. It writes

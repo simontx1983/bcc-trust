@@ -1307,14 +1307,15 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * a genuinely broken node identical to today's, and the second variant is
      * the only other place the answer can come from.
      *
-     * @param  callable():bool|null $authorizeRequest Consulted immediately
-     *         BEFORE each wire request. Returning false means "the caller's
-     *         request budget is out": the pair stops and asks for nothing, so
-     *         a metered caller can never exceed its budget mid-pair. Null —
-     *         every non-discovery caller — is unmetered, exactly as before.
+     * ⚠ THE `$authorizeRequest` BUDGET CALLBACK IS GONE (S8). Its only
+     * metered caller was discovery emission, which charged a
+     * ProviderRequestBudget before each of the up-to-two wire requests. That
+     * caller is deleted, every surviving caller passed null, so the parameter
+     * was always null and the guard it fed could never fire.
+     *
      * @return array<string, mixed>|null
      */
-    private function cw721CollectionInfoQuery(string $contractAddress, ?callable $authorizeRequest = null): ?array
+    private function cw721CollectionInfoQuery(string $contractAddress): ?array
     {
         $variants = [
             \BCC\Trust\Onchain\Services\CosmwasmClassifier::PROBE_CONTRACT_INFO,
@@ -1322,10 +1323,6 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         ];
 
         foreach ($variants as $variant) {
-            if ($authorizeRequest !== null && !$authorizeRequest()) {
-                return null;
-            }
-
             $result = $this->wasmSmartQueryResult($contractAddress, [$variant => new \stdClass()]);
             if ($result['ok'] && is_array($result['data'])) {
                 return $result['data'];
@@ -1370,14 +1367,9 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * principle, though it's rare). Returns null on transport failure
      * WITHOUT caching so a flaky LCD doesn't poison the window.
      *
-     * @param  callable():bool|null $authorizeRequest Passed straight to
-     *         {@see cw721CollectionInfoQuery()}: consulted before EACH of the
-     *         up-to-two metadata requests so a metered caller (discovery
-     *         emission) charges its budget per request and can stop between
-     *         them. A cache hit asks for nothing and therefore costs nothing.
      * @return array{name: ?string, symbol: ?string, description: ?string, image_url: ?string}|null
      */
-    public function fetchContractInfo(string $contract, ?callable $authorizeRequest = null): ?array
+    public function fetchContractInfo(string $contract): ?array
     {
         if ($contract === '') {
             return null;
@@ -1398,7 +1390,7 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             return $cached;
         }
 
-        $data = $this->cw721CollectionInfoQuery($contract, $authorizeRequest);
+        $data = $this->cw721CollectionInfoQuery($contract);
         if ($data === null) {
             // Don't cache transport failures.
             return null;
@@ -1786,380 +1778,29 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         return $collections;
     }
 
-    // ── CW-721 discovery via wasmd code-ID enumeration ───────────────────────
-
-    /**
-     * Server-side page size for `/cosmwasm/wasm/v1/code/{id}/contracts`.
-     * wasmd caps a page at 100 regardless of the `pagination.limit` asked
-     * for, so requesting more just wastes the round trip.
-     */
-    private const CW721_PAGE_SIZE = 100;
-
-    /**
-     * RETIRED (2026-08, CosmWasm discovery):
-     *
-     *   BCC_CW721_DISCOVERY_ENABLED      fail-OPEN kill switch
-     *   BCC_CW721_PAGE_CAP               per-cycle page cap
-     *   bcc_trust_cw721_scan_{chainId}   option-backed page cursor
-     *   bcc_trust_cw721_code_ids_{id}    7-day code-ID transient
-     *   CW721_CODE_ID_SAMPLE             curated-row sampling width
-     *
-     * All five belonged to ONE mechanism: learn a chain's CW-721 code IDs
-     * by sampling ALREADY-CURATED collections, cache the answer for a
-     * week, and page through only those code IDs. It was a closed loop —
-     * nothing under an un-curated code family was ever sampled, so it was
-     * never enumerated, so a chain with zero curated collections
-     * discovered nothing, forever.
-     *
-     * The mechanism is GONE, not disabled: the option cursor and the
-     * transient are deleted by
-     * includes/database/cleanup-cw721-scan-options.php, and their state
-     * is superseded by `wp_bcc_chain_checkpoints.cw_*` (per-chain
-     * progress) plus `wp_bcc_cosmwasm_code_families` (per-family
-     * inventory + enumeration cursor). Discovery now belongs to
-     * {@see \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker}, gated by
-     * {@see \BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate} — which
-     * fails CLOSED. There is exactly one gate family and one cursor
-     * store; two parallel discovery systems is precisely what this
-     * replaced.
-     *
-     * `BCC_CW721_CODE_IDS` survives with a NARROWED meaning — a priority
-     * / recovery hint that reorders work and can no longer restrict it.
-     * See {@see \BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate::priorityCodeIds()}.
-     */
-
-    /**
-     * Historical note - chain-native CW-721 discovery lives in the worker.
-     *
-     * This class used to run the whole discovery loop inline: derive code
-     * IDs by sampling curated collections, cache them for a week, page
-     * through `/cosmwasm/wasm/v1/code/{id}/contracts` behind an
-     * option-backed cursor, and emit rows. That loop was CLOSED - a code
-     * family with no curated collection under it was never sampled, so it
-     * was never enumerated, so a chain with zero curated collections
-     * discovered nothing.
-     *
-     * Discovery is now owned by
-     * {@see \BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker}: one
-     * resumable historical backfill per chain, then incremental-only
-     * passes, all behind the fail-CLOSED
-     * {@see \BCC\Trust\Onchain\Support\CosmwasmDiscoveryGate}. This
-     * fetcher keeps only the WIRE primitives the worker drives
-     * ({@see listCodeFamilies()}, {@see listContractsForCodeId()},
-     * {@see probeCw721()}, {@see fetchContractCodeId()}) - no cursor, no
-     * cache, no policy.
-     *
-     * `fetch_top_collections` therefore does no code-ID work at all for
-     * these chains. That is deliberate on two counts: emitting rows from
-     * exactly ONE place keeps a second discovery system from growing
-     * back, and this method is reachable from an admin button and a
-     * generic refresh sweep - both REQUEST paths, where the locked
-     * decision is that no discovery work happens.
-     */
-
-    /**
-     * PURE. LCD path for the wasm module's metadata about one instantiated
-     * contract. Shared by the single-fetch and batched-sample paths so both
-     * always hit the same endpoint.
-     */
-    private static function wasmContractPath(string $contract): string
-    {
-        return '/cosmwasm/wasm/v1/contract/' . rawurlencode($contract);
-    }
-
-    /**
-     * PURE. `{contract_info: {code_id: "434", …}}` → 434.
-     *
-     * wasmd serialises uint64 as a JSON STRING, so the cast is load-bearing.
-     *
-     * @param array<string, mixed>|null $data
-     */
-    private static function parseWasmCodeId(?array $data): ?int
-    {
-        if ($data === null) {
-            return null;
-        }
-
-        $info = $data['contract_info'] ?? null;
-        if (!is_array($info)) {
-            return null;
-        }
-
-        $raw = $info['code_id'] ?? null;
-        if (!is_int($raw) && !is_string($raw) && !is_float($raw)) {
-            return null;
-        }
-
-        $codeId = (int) $raw;
-
-        return $codeId > 0 ? $codeId : null;
-    }
-
-    /**
-     * One page of `/cosmwasm/wasm/v1/code/{id}/contracts`.
-     *
-     * STRUCTURED result: unlike the old private helper, a failure is no
-     * longer folded into an empty page. "This code id has no (more)
-     * contracts" and "the node did not answer" are different facts, and
-     * conflating them is how a node hiccup used to look like a settled
-     * family. `error_kind` carries the discriminator; see
-     * {@see \BCC\Trust\Onchain\Services\CosmwasmClassifier::errorKindFromMessage()}.
-     *
-     * `$reverse` is the incremental TAIL mode, the mirror of
-     * {@see listCodeFamilies()}'s: wasmd's contracts-by-code index is
-     * ordered by instantiation, so `pagination.reverse=true` returns the
-     * NEWEST instantiations first and the walk can stop as soon as it
-     * meets an address already inventoried. The opaque `$startKey`
-     * remains the mode used by the resumable historical walk.
-     *
-     * `pagination.offset` IS NOT USED HERE AND MUST NOT BE REINTRODUCED —
-     * see the measurement recorded on {@see listCodeFamilies()}.
-     *
-     * @return array{contracts: list<string>, next_key: string|null, ok: bool, http_code: int, error_kind: string, message_excerpt: string}
-     */
-    public function listContractsForCodeId(int $codeId, ?string $startKey = null, bool $reverse = false): array
-    {
-        if ($codeId <= 0) {
-            return [
-                'contracts'       => [],
-                'next_key'        => null,
-                'ok'              => false,
-                'http_code'       => 0,
-                'error_kind'      => \BCC\Trust\Onchain\Services\CosmwasmClassifier::KIND_NOT_FOUND,
-                'message_excerpt' => 'invalid code id',
-            ];
-        }
-
-        $params = ['pagination.limit' => self::CW721_PAGE_SIZE];
-        if ($startKey !== null && $startKey !== '') {
-            $params['pagination.key'] = $startKey;
-        } elseif ($reverse) {
-            $params['pagination.reverse'] = 'true';
-        }
-
-        $result = $this->lcdGetResult('/cosmwasm/wasm/v1/code/' . $codeId . '/contracts', $params);
-        if (!$result['ok']) {
-            return [
-                'contracts'       => [],
-                'next_key'        => null,
-                'ok'              => false,
-                'http_code'       => $result['http_code'],
-                'error_kind'      => $result['error_kind'],
-                'message_excerpt' => $result['message_excerpt'],
-            ];
-        }
-
-        $page = self::parseContractsPage($result['data']);
-
-        return [
-            'contracts'       => $page['contracts'],
-            'next_key'        => $page['next_key'],
-            'ok'              => true,
-            'http_code'       => 200,
-            'error_kind'      => \BCC\Trust\Onchain\Services\CosmwasmClassifier::KIND_NONE,
-            'message_excerpt' => '',
-        ];
-    }
-
-    /**
-     * PURE. `{contracts: [...], pagination: {next_key: "..."}}` -> the page.
-     *
-     * An absent, null or empty-string `next_key` all mean "last page" - the
-     * LCD is inconsistent about which it sends, so all three normalize to
-     * null.
-     *
-     * @param array<string, mixed>|null $data
-     * @return array{contracts: list<string>, next_key: string|null}
-     */
-    private static function parseContractsPage(?array $data): array
-    {
-        $empty = ['contracts' => [], 'next_key' => null];
-
-        if ($data === null) {
-            return $empty;
-        }
-
-        $raw = $data['contracts'] ?? null;
-        if (!is_array($raw)) {
-            return $empty;
-        }
-
-        $contracts = [];
-        foreach ($raw as $addr) {
-            if (is_string($addr) && $addr !== '') {
-                $contracts[] = $addr;
-            }
-        }
-
-        return ['contracts' => $contracts, 'next_key' => self::parseNextKey($data)];
-    }
-
-    /**
-     * PURE. Extract `pagination.next_key`, normalising absent / null /
-     * empty-string to null (the LCD is inconsistent about which it sends).
-     *
-     * @param array<string, mixed> $data
-     */
-    private static function parseNextKey(array $data): ?string
-    {
-        $pagination = $data['pagination'] ?? null;
-        if (!is_array($pagination)) {
-            return null;
-        }
-        $candidate = $pagination['next_key'] ?? null;
-
-        return is_string($candidate) && $candidate !== '' ? $candidate : null;
-    }
-
-    /**
-     * One page of the wasm CODE LISTING, `/cosmwasm/wasm/v1/code`.
-     *
-     * This is the endpoint that breaks the closed loop: it enumerates
-     * EVERY stored code id on the chain, whether or not we have ever
-     * curated a collection under it. It also carries `data_hash` (the
-     * binary's sha256), so one request yields both the inventory and the
-     * checksum used for twin classification.
-     *
-     * WE DELIBERATELY NEVER CALL `/cosmwasm/wasm/v1/code/{id}` - that
-     * endpoint returns the ENTIRE WASM BINARY base64-encoded in its
-     * `data` field. We do not download wasm binaries.
-     *
-     * Two modes, both bounded:
-     *   - `$pageKey` - opaque `pagination.key`, used by the resumable
-     *     HISTORICAL backfill (ascending).
-     *   - `$reverse` - `pagination.reverse=true`, used by the incremental
-     *     TAIL read. Returns the NEWEST code ids first, which is exactly
-     *     the shape of the question "what has been uploaded since we last
-     *     looked?"
-     *
-     * `pagination.count_total` is deliberately NOT requested: only one of
-     * the nine cosmos chains honours it (measured), so a total is not a
-     * number we may rely on - and progress is never a percentage.
-     *
-     * ── `pagination.offset` IS BROKEN HERE. DO NOT REINTRODUCE IT. ──────
-     * An earlier revision of this method used `pagination.offset` for the
-     * tail read. MEASURED 2026-08-06 against the live LCDs, any non-zero
-     * offset returns an EMPTY list with HTTP 200:
-     *
-     *     cosmoshub  offset=0 -> [1,2]   offset=1 -> []   offset=5 -> []
-     *     juno       offset=0 -> [1,2]   offset=1 -> []
-     *     osmosis    offset=0 -> [1,2]   offset=1 -> []
-     *     injective  offset=0 -> [1,2]   offset=1 -> []
-     *     jackal     offset=2 -> [3,4]                    (the ONLY chain that honours it)
-     *
-     * That is the worst possible failure shape: an empty 200 is not an
-     * error, so a retry never fires and the tail read concludes "no new
-     * code ids" FOREVER while reporting healthy. It would have silently
-     * killed daily discovery on the four biggest chains — and a
-     * small-chain test would have passed, because Jackal works.
-     *
-     * `pagination.reverse=true` was measured working on all four:
-     *     cosmoshub -> [713,712,711]   juno      -> [5149,5148,5147]
-     *     osmosis   -> [1900,1899,1898] injective -> [2081,2080,2079]
-     *
-     * @return array{families: list<array{code_id: int, checksum: string|null}>, next_key: string|null, max_code_id: int, min_code_id: int, ok: bool, http_code: int, error_kind: string, message_excerpt: string}
-     */
-    public function listCodeFamilies(?string $pageKey = null, bool $reverse = false, int $limit = 100): array
-    {
-        $params = ['pagination.limit' => max(1, min(200, $limit))];
-        if ($pageKey !== null && $pageKey !== '') {
-            $params['pagination.key'] = $pageKey;
-        } elseif ($reverse) {
-            $params['pagination.reverse'] = 'true';
-        }
-
-        $result = $this->lcdGetResult('/cosmwasm/wasm/v1/code', $params);
-        if (!$result['ok']) {
-            return [
-                'families'        => [],
-                'next_key'        => null,
-                'max_code_id'     => 0,
-                'min_code_id'     => 0,
-                'ok'              => false,
-                'http_code'       => $result['http_code'],
-                'error_kind'      => $result['error_kind'],
-                'message_excerpt' => $result['message_excerpt'],
-            ];
-        }
-
-        $parsed = self::parseCodeInfosPage($result['data']);
-
-        return [
-            'families'        => $parsed['families'],
-            'next_key'        => $parsed['next_key'],
-            'max_code_id'     => $parsed['max_code_id'],
-            'min_code_id'     => $parsed['min_code_id'],
-            'ok'              => true,
-            'http_code'       => 200,
-            'error_kind'      => \BCC\Trust\Onchain\Services\CosmwasmClassifier::KIND_NONE,
-            'message_excerpt' => '',
-        ];
-    }
-
-    /**
-     * PURE. `{code_infos: [{code_id, data_hash, ...}], pagination:{next_key}}`
-     * -> the inventory page.
-     *
-     * wasmd serialises uint64 as a JSON STRING, so the code-id cast is
-     * load-bearing. `data_hash` is hex (case varies by node) and is
-     * lowercased here so checksum comparison is stable across nodes.
-     *
-     * `min_code_id` is what the reverse tail walk compares against the
-     * stored watermark: the page is descending, so its LOWEST id is how
-     * far back this page reached.
-     *
-     * @param array<string, mixed>|null $data
-     * @return array{families: list<array{code_id: int, checksum: string|null}>, next_key: string|null, max_code_id: int, min_code_id: int}
-     */
-    private static function parseCodeInfosPage(?array $data): array
-    {
-        $empty = ['families' => [], 'next_key' => null, 'max_code_id' => 0, 'min_code_id' => 0];
-        if ($data === null) {
-            return $empty;
-        }
-
-        $raw = $data['code_infos'] ?? null;
-        if (!is_array($raw)) {
-            return $empty;
-        }
-
-        $families  = [];
-        $maxCodeId = 0;
-        $minCodeId = 0;
-        foreach ($raw as $info) {
-            if (!is_array($info)) {
-                continue;
-            }
-            $rawId = $info['code_id'] ?? null;
-            if (!is_int($rawId) && !is_string($rawId) && !is_float($rawId)) {
-                continue;
-            }
-            $codeId = (int) $rawId;
-            if ($codeId <= 0) {
-                continue;
-            }
-            $hash = $info['data_hash'] ?? null;
-            $checksum = is_string($hash) && $hash !== ''
-                ? substr(strtolower($hash), 0, 64)
-                : null;
-
-            $families[] = ['code_id' => $codeId, 'checksum' => $checksum];
-            if ($codeId > $maxCodeId) {
-                $maxCodeId = $codeId;
-            }
-            if ($minCodeId === 0 || $codeId < $minCodeId) {
-                $minCodeId = $codeId;
-            }
-        }
-
-        return [
-            'families'    => $families,
-            'next_key'    => self::parseNextKey($data),
-            'max_code_id' => $maxCodeId,
-            'min_code_id' => $minCodeId,
-        ];
-    }
-
+    // ── CW-721 discovery: REMOVED ────────────────────────────────────────
+    //
+    // This fetcher used to carry the wire primitives for chain-wide CW-721
+    // enumeration — `listCodeFamilies()`, `listContractsForCodeId()`,
+    // `fetchContractCodeId()`, their three page parsers, the code-ID parser
+    // and the wasm contract path helper. S8 deleted all eight, along with the
+    // worker, gate, services and repositories that drove them, and
+    // `CW721_PAGE_SIZE` with them.
+    //
+    // Two long docblocks stood here recording the history of the 2026-08
+    // retirement of an EARLIER closed-loop mechanism (the BCC_CW721_* env
+    // vars, an option-backed page cursor, a 7-day code-ID transient) and of
+    // how discovery then moved to the worker. Both described code that no
+    // longer exists in any form, so they are gone too. The narrative belongs
+    // in docs/cosmwasm-discovery.md, which S10 converts to a retirement note.
+    //
+    // ⚠ WHAT SURVIVES HERE IS NOT DISCOVERY. `probeCw721()`,
+    // `chainHasNoWasmFor()`, `numTokensCountFor()`, `fetchContractInfo()`,
+    // `testCw721ContractInfo()`, `fetchTokenMetadata()` and `cw721OwnerOf()`
+    // are the bounded, operator-initiated primitives behind targeted
+    // validation (CosmosContractProbe), the piece endpoint
+    // (NftPieceViewModelBuilder) and holdings — one submitted contract at a
+    // time, never chain-wide. They are retained deliberately.
     /**
      * Run the CW-721 probe set against one contract.
      *
@@ -2359,28 +2000,6 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         return is_string($name) && $name !== '';
     }
 
-    /**
-     * The code id a contract is CURRENTLY running.
-     *
-     * CosmWasm contracts can be MIGRATED to a different code id while
-     * keeping their address, so this is what the monthly pass compares
-     * against the recorded code id. Returns null when the contract does
-     * not exist or the node did not answer - both mean "do not record a
-     * migration", which fails safe.
-     */
-    public function fetchContractCodeId(string $contract): ?int
-    {
-        if ($contract === '') {
-            return null;
-        }
-
-        $result = $this->lcdGetResult(self::wasmContractPath($contract), []);
-        if (!$result['ok']) {
-            return null;
-        }
-
-        return self::parseWasmCodeId($result['data']);
-    }
 
     // ── Internal Helpers ─────────────────────────────────────────────────────
 

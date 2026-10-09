@@ -241,31 +241,6 @@ namespace {
                 \BCC\Core\Http\SafeHttpClient::$next = new \WP_Error('http_request_failed', 'scripted');
             }
 
-            /**
-             * Record a proof for a chain, exactly as the production recorder
-             * would — same class, same option, same fingerprint algorithm.
-             *
-             * Returns false when the chain is ungoverned or its endpoint is
-             * not approved, because in those cases there is nothing a proof
-             * could say. A test that gets false and expected true has a
-             * fixture pointed somewhere the policy does not allow.
-             */
-            public static function approve(int $chainId, string $slug, string $url): bool
-            {
-                $fingerprint = \BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy::fingerprint($slug, $url);
-                if ($fingerprint === null
-                    || !\BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy::isApproved($slug, $url)
-                ) {
-                    return false;
-                }
-
-                return \BCC\Trust\Onchain\Support\CosmosEndpointAuthorization::record(
-                    $chainId,
-                    $fingerprint,
-                    (string) \BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy::expectedNetwork($slug),
-                    1
-                );
-            }
 
             /** Forget every recorded proof and every scripted answer. */
             public static function reset(): void
