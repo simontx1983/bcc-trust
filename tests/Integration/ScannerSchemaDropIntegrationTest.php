@@ -536,8 +536,16 @@ final class ScannerSchemaDropIntegrationTest extends TestCase
             ChainCheckpointRepository::addCuUsage((int) $ck->chain_id, 7),
             'the CU budget writer must still work'
         );
+        // ⚠ STATE_HEALTHY, not 'idle'. `setState()` validates against the four
+        // STATE_* literals and returns false for anything else, so 'idle'
+        // would have failed this assertion for a reason that has nothing to
+        // do with the drop — and 'idle' is a `cw_discovery_state` value, which
+        // is exactly the confusion this whole retirement is removing.
         self::assertTrue(
-            ChainCheckpointRepository::setState((int) $ck->chain_id, 'idle'),
+            ChainCheckpointRepository::setState(
+                (int) $ck->chain_id,
+                ChainCheckpointRepository::STATE_HEALTHY
+            ),
             'the state writer must still work'
         );
     }

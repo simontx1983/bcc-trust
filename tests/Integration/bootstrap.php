@@ -776,15 +776,15 @@ bcc_onchain_create_chain_checkpoints_table();
 require_once dirname(__DIR__, 2) . '/includes/database/schema-nft-spam-contracts.php';
 bcc_onchain_create_nft_spam_contracts_table();
 
-require_once dirname(__DIR__, 2) . '/includes/database/schema-cosmwasm-code-families.php';
-
-
-require_once dirname(__DIR__, 2) . '/includes/database/schema-cosmwasm-contracts.php';
-
-// PR 7A discovery-run ledger. Required here so the integration suite can
-// exercise the real table — uq_active, the claim compare-and-swap and the
-// lease reaper are all database behaviour that a double cannot prove.
-require_once dirname(__DIR__, 2) . '/includes/database/schema-discovery-runs.php';
+// ⚠ S9b REMOVED THREE require_once LINES HERE, and removing the CREATE calls
+// without them is what turned both integration jobs red on f530bd82:
+// `schema-cosmwasm-code-families.php`, `schema-cosmwasm-contracts.php` and
+// `schema-discovery-runs.php` are deleted, so the bootstrap died on
+// `Failed opening required …` before a single test ran.
+//
+// Nothing re-creates those tables now. `ScannerSchemaDropIntegrationTest`
+// builds its own faithful-enough copies in setUp(), because the migration
+// only ever DROPs them, and drops them again in tearDown().
 
 
 
