@@ -45,7 +45,7 @@ if (!defined('ABSPATH')) {
  *     description: string|null,
  *     is_testnet: string,
  *     is_active: string,
- *     cosmwasm_nft_discovery_enabled: string,
+
  *     bcc_supports_nft_collections: string,
  *     manual_collection_discovery_enabled: string,
  *     created_at: string
@@ -54,8 +54,7 @@ if (!defined('ABSPATH')) {
 final class ChainRepository
 {
     /** @var string Explicit column list — must match schema-chains.php
-     *  (CREATE TABLE + the description ALTER + the
-     *  cosmwasm_nft_discovery_enabled ALTER + the NFT capability ALTERs)
+     *  (CREATE TABLE + the description ALTER + the NFT capability ALTERs)
      *  + schema-blog-chain-tags.php's ALTER (color).
      *
      *  `bcc_supports_nft_collections` and `manual_collection_discovery_enabled`
@@ -65,11 +64,30 @@ final class ChainRepository
      *  fail-closed answer, and a completely SILENT one. Dropping either
      *  column from this projection would therefore make every chain
      *  permanently un-scannable with no error anywhere. Pinned by
-     *  ChainNftCapabilityMigrationIntegrationTest. */
+     *  ChainNftCapabilityMigrationIntegrationTest.
+     *
+     *  ⚠ `cosmwasm_nft_discovery_enabled` LEFT THIS LIST IN S9a, AND THE
+     *  COLUMN IS STILL ON THE TABLE. It was the per-chain opt-in for the
+     *  chain-wide CosmWasm scanner. S8 deleted its only writer
+     *  (`setCosmwasmNftDiscoveryEnabled`) and every reader; a
+     *  comment-stripped sweep over `app/`, `includes/` and the bootstrap
+     *  finds no `->cosmwasm_nft_discovery_enabled` anywhere.
+     *
+     *  It is removed from the SELECT first, and dropped from the table
+     *  later in S9b, precisely BECAUSE of the warning above: a projection
+     *  that names a dropped column fails, and this class caches an error
+     *  sentinel, so the symptom would be every chain reporting UNKNOWN with
+     *  nothing in the log. Doing it in this order means S9b's drop cannot
+     *  produce that.
+     *
+     *  ⚠ `bcc_onchain_add_chains_cosmwasm_discovery_column()` is RETAINED by
+     *  S9a and still re-adds the column on a schema pass. That is correct
+     *  while the column is expected to exist; it must be deleted in the same
+     *  commit as the drop, or the installer puts the column straight back. */
     private const COLUMNS = 'id, slug, name, chain_type, chain_id_hex, rpc_url, rest_url,
                  explorer_url, native_token, decimals, bech32_prefix, icon_url, color,
                  marketplace_template, description, is_testnet, is_active,
-                 cosmwasm_nft_discovery_enabled, bcc_supports_nft_collections,
+                 bcc_supports_nft_collections,
                  manual_collection_discovery_enabled, created_at';
 
     /** @var string Object-cache / transient group. */
