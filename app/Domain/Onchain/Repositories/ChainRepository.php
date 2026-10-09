@@ -562,47 +562,6 @@ final class ChainRepository
         return $affected;
     }
 
-    /**
-     * Turn the per-chain CosmWasm NFT-discovery opt-in on or off.
-     *
-     * THE ONLY WRITE PATH for `cosmwasm_nft_discovery_enabled`, and it
-     * busts the chains cache as part of the write rather than leaving that
-     * to the caller. That is not politeness — {@see getActive()} serves the
-     * scanner's eligibility read from a 5-minute object-cache/transient
-     * pair, so a toggle that did not invalidate would leave the worker
-     * scanning a just-disabled chain (or ignoring a just-enabled one) for
-     * up to the whole TTL, with the admin screen showing the new value the
-     * entire time. Putting the invalidation here means no future caller can
-     * forget it.
-     *
-     * Bounded to a single row by primary key. Touches exactly one column —
-     * an operator flipping discovery must never be able to disturb chain
-     * identity, RPC config or `is_active`.
-     *
-     * @return bool true when the UPDATE executed without a DB error.
-     */
-    public static function setCosmwasmNftDiscoveryEnabled(int $chainId, bool $enabled): bool
-    {
-        if ($chainId <= 0) {
-            return false;
-        }
-
-        global $wpdb;
-        $table = self::table();
-
-        $result = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table}
-                SET cosmwasm_nft_discovery_enabled = %d
-              WHERE id = %d
-              LIMIT 1",
-            $enabled ? 1 : 0,
-            $chainId
-        ));
-
-        self::clearCache();
-
-        return $result !== false;
-    }
 
     // ── The NFT capability columns ───────────────────────────────────────
     //

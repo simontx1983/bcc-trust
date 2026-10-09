@@ -5,8 +5,6 @@ declare(strict_types=1);
 namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
-use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
-use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
 use PHPUnit\Framework\Attributes\CoversNothing;
 use PHPUnit\Framework\TestCase;
@@ -42,11 +40,18 @@ use ReflectionMethod;
 #[CoversNothing]
 final class RepositoryReadGuardCoverageTest extends TestCase
 {
-    /** Every repository that uses {@see GuardsReadFailures}. */
+    /**
+     * Every repository that uses {@see GuardsReadFailures}.
+     *
+     * ⚠ S8 REMOVED TWO ENTRIES: `CosmwasmCodeFamilyRepository` and
+     * `CosmwasmContractRepository` are deleted files, so their rows here —
+     * and in both policy lists below — would assert a guard on code that no
+     * longer exists. The checkpoint repository is the surviving user of the
+     * trait, and `test_every_read_in_a_guarded_repository_is_guarded()` carries a
+     * denominator that fails if the sweep goes empty.
+     */
     private const GUARDED_REPOSITORIES = [
         ChainCheckpointRepository::class,
-        CosmwasmCodeFamilyRepository::class,
-        CosmwasmContractRepository::class,
     ];
 
     /** The `$wpdb` calls that return data and can silently return nothing. */
@@ -69,19 +74,6 @@ final class RepositoryReadGuardCoverageTest extends TestCase
             // idle, never scanned".
             'readAll',
         ],
-        CosmwasmCodeFamilyRepository::class => [
-            'countsByChainAndClassification',
-            'pendingCountsByChain',
-            'findManyForChains',
-        ],
-        CosmwasmContractRepository::class => [
-            'inventoryByChain',
-            'findManyForChains',
-            // Confirms an operator hide/unhide actually reached the
-            // scanner cache; "could not read" must not read as "nothing
-            // to sync".
-            'deniedFlag',
-        ],
     ];
 
     /**
@@ -97,16 +89,6 @@ final class RepositoryReadGuardCoverageTest extends TestCase
         ChainCheckpointRepository::class => [
             'get',
             'nextCwDiscoveryChain',
-        ],
-        CosmwasmCodeFamilyRepository::class => [
-            'findPendingClassification',
-            'findEnumerable',
-            'findDueForMetadataCheck',
-        ],
-        CosmwasmContractRepository::class => [
-            'knownMap',
-            'findPendingClassification',
-            'findEmittable',
         ],
     ];
 
@@ -137,10 +119,18 @@ final class RepositoryReadGuardCoverageTest extends TestCase
             }
         }
 
+        // ⚠ WAS 15, IS 4 (S8), AND THE DROP IS NOT A WEAKENING OF TASTE.
+        // The threshold was a denominator over THREE repositories; S8 deleted
+        // two of them. `ChainCheckpointRepository` carries five read-bearing
+        // methods (get, readAll, recordSuccess, addCuUsage,
+        // nextCwDiscoveryChain), so 4 is the largest value that still fails
+        // if the sweep stops finding them. Leaving 15 would have failed for
+        // the wrong reason, and raising nothing would have let the sweep go
+        // silently empty.
         self::assertGreaterThan(
-            15,
+            4,
             $inspected,
-            'the sweep found implausibly few reads — the repositories were probably restructured out from under it'
+            'the sweep found implausibly few reads — the repository was probably restructured out from under it'
         );
     }
 

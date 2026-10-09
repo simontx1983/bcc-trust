@@ -6,13 +6,13 @@ namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Admin\ChainsPage;
 use BCC\Trust\Onchain\Services\CosmosEndpointTransition;
-use BCC\Trust\Onchain\Support\CosmwasmScanEligibility;
+
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 use BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy;
 use BCC\Trust\Onchain\ValueObjects\ProviderFailureKind;
 use BCC\Trust\Onchain\ValueObjects\ProviderRequestClass;
 use PHPUnit\Framework\Attributes\CoversClass;
-use PHPUnit\Framework\Attributes\DataProvider;
+
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -189,46 +189,6 @@ final class EndpointScopedBreakerTest extends TestCase
 
     // ── the refusal verdict ─────────────────────────────────────────────
 
-    /** @return array<string, array{bool|null, string}> */
-    public static function verifications(): array
-    {
-        return [
-            'verified'      => [true,  CosmwasmScanEligibility::ELIGIBLE],
-            'not governed'  => [null,  CosmwasmScanEligibility::ELIGIBLE],
-            'unverified'    => [false, CosmwasmScanEligibility::ENDPOINT_UNVERIFIED],
-        ];
-    }
-
-    #[DataProvider('verifications')]
-    public function testAnUnverifiedEndpointRefusesTheScan(?bool $verified, string $expected): void
-    {
-        self::assertSame(
-            $expected,
-            CosmwasmScanEligibility::verdict(8, 'backfilled', true, null, $verified)
-        );
-    }
-
-    public function testEndpointUnverifiedIsNotScannable(): void
-    {
-        self::assertFalse(CosmwasmScanEligibility::isScannable(CosmwasmScanEligibility::ENDPOINT_UNVERIFIED));
-        self::assertTrue(CosmwasmScanEligibility::isScannable(CosmwasmScanEligibility::ELIGIBLE));
-    }
-
-    /**
-     * More actionable answers win. An operator who has not opted in should be
-     * told that, not sent chasing an endpoint.
-     */
-    public function testMoreActionableRefusalsTakePrecedence(): void
-    {
-        self::assertSame(
-            CosmwasmScanEligibility::NOT_OPTED_IN,
-            CosmwasmScanEligibility::verdict(8, 'backfilled', false, null, false)
-        );
-        self::assertSame(
-            CosmwasmScanEligibility::ALLOWLIST_EXCLUDED,
-            CosmwasmScanEligibility::verdict(8, 'backfilled', true, [99], false)
-        );
-    }
 
     // ── the switch is a button, not a migration ─────────────────────────
 

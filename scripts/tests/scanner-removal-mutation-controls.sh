@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Mutation controls for "Detach ownership budgets and freeze full-chain discovery".
+# Mutation controls for ownership budgets and the retired discovery executor.
 #
 # Each control breaks ONE guarantee in executable code and runs the test NAMED for
 # that guarantee. Verdicts:
@@ -14,20 +14,13 @@
 # ⚠ RESTORE FROM A BYTE SNAPSHOT TAKEN ONCE, NEVER FROM GIT, and abort on a failed
 #   restore — `git checkout --` once deleted six files mid-run in an earlier PR.
 #
-# Usage: bash scripts/tests/scanner-freeze-mutation-controls.sh
-set -uo pipefail
-
-cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 2
-
-PHP="${PHP:-php -d extension=mysqli -d memory_limit=2G}"
-PHPUNIT="vendor/bin/phpunit"
-[ -f "$PHPUNIT" ] || { echo "FATAL: phpunit not installed"; exit 2; }
-
+# Usage: bash scripts/tests/scanner-removal-mutation-controls.sh
+#
 # ── S4: TWO MUTATION TARGETS NO LONGER EXIST ──────────────────────────────
 #
 # SCAN_ACTIONS (Admin/DiscoveryScanActions.php) is DELETED, and the
 # `if (!ScannerFreeze::frozen())` block M7 mutated in NftDiscoveryPage.php is
-# gone with the six CosmWasm routes. Controls M1 and M7 are removed below.
+# gone with the six CosmWasm routes. Controls M1 and M7 were removed then.
 #
 # They could not simply be left: each `mutate` call asserts its anchor text
 # occurs exactly once and exits 1 otherwise, which this harness counts as
@@ -35,9 +28,34 @@ PHPUNIT="vendor/bin/phpunit"
 # control whose target has been deleted tests nothing and must not look like
 # it passed.
 #
-# PAGE is dropped too: M7 was its only user.
+# ── S8: THREE MORE WENT, ONE WAS REPLACED, AND THE FILE WAS RENAMED ───────
 #
-# ── ⚠ AND THE ANCHORS ARE NOW EOL-AGNOSTIC ────────────────────────────────
+# This script was `scanner-freeze-mutation-controls.sh`. There is no freeze to
+# control any more — S8 deleted `ScannerFreeze` along with the scanner — so the
+# name was a claim the file could no longer make.
+#
+#   M2 REMOVED. It re-coupled `ProviderRequestBudget` to
+#      `CosmwasmDiscoveryGate::requestBudget()` and named
+#      `ProviderRequestBudgetIsNeutralTest`. The gate, the test and the
+#      coupling it guarded against are all deleted. Its planted positive
+#      planted a string that has stopped existing.
+#
+#   M5 REMOVED. It mutated `DiscoveryRunMaintenance`, which is a deleted file.
+#
+#   M6 REPLACED, NOT DELETED — see M6 below. It used to strip
+#      `if (ScannerFreeze::frozen())` out of `handleQueuedAction()`. That block
+#      is gone, but the guarantee it protected is MORE important now, not less:
+#      the executor hook is still bound, so a queued action still fires into
+#      that method, and its refusal is the only thing standing between a
+#      surviving queued action and an error. The replacement breaks the
+#      refusal in the way that can actually regress — by making it
+#      conditional again.
+#
+#   M3 and M4 KEPT VERBATIM. They mutate `HoldingsService`, which is retained
+#      production code serving ownership, group gates and revocation. Nothing
+#      about S8 touches them.
+#
+# ── ⚠ AND THE ANCHORS ARE EOL-AGNOSTIC ────────────────────────────────────
 #
 # Running the retained controls for the first time (isolated container, PHP
 # 8.2, gmp+mysqli, the COMMITTED tree) showed M2, M4, M5 and M6 reporting
@@ -55,13 +73,19 @@ PHPUNIT="vendor/bin/phpunit"
 # must be run against the committed bytes — `git -c core.autocrlf=false
 # archive` on a Windows clone, or any Linux checkout. A plain `git archive`
 # honours autocrlf and hands you CRLF, which is what hid this.
-BUDGET="app/Domain/Onchain/Support/ProviderRequestBudget.php"
+set -uo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 2
+
+PHP="${PHP:-php -d extension=mysqli -d memory_limit=2G}"
+PHPUNIT="vendor/bin/phpunit"
+[ -f "$PHPUNIT" ] || { echo "FATAL: phpunit not installed"; exit 2; }
+
 HOLDINGS="app/Domain/Onchain/Services/HoldingsService.php"
-MAINTENANCE="app/Domain/Onchain/Workers/DiscoveryRunMaintenance.php"
 EXECUTOR="app/Domain/Onchain/Workers/DiscoveryRunExecutor.php"
 
 SNAPDIR="$(mktemp -d)"
-for f in "$BUDGET" "$HOLDINGS" "$MAINTENANCE" "$EXECUTOR"; do
+for f in "$HOLDINGS" "$EXECUTOR"; do
     cp "$f" "$SNAPDIR/$(basename "$f").orig" || { echo "FATAL: snapshot failed for $f"; exit 2; }
 done
 
@@ -114,17 +138,7 @@ mutate () {
     fi
 }
 
-echo "── scanner-freeze mutation controls ─────────────────────────────────────"
-
-# 2. Re-couple the budget primitive to the scanner: the structural test must notice.
-mutate "$BUDGET" '
-$f = $argv[1]; $s = file_get_contents($f);
-$nl = strpos($s, "\r\n") !== false ? "\r\n" : "\n";
-$old = "    public function __construct(int \$requests, int \$runtimeSeconds)" . $nl . "    {" . $nl . "        \$this->remaining = \$requests;";
-$new = "    public function __construct(int \$requests, int \$runtimeSeconds)" . $nl . "    {" . $nl . "        \$this->remaining = \$requests > 0 ? \$requests : CosmwasmDiscoveryGate::requestBudget();";
-if (substr_count($s, $old) !== 1) { exit(1); }
-file_put_contents($f, str_replace($old, $new, $s));
-' 'ProviderRequestBudgetIsNeutralTest' 'M2 the budget reads CosmwasmDiscoveryGate again'
+echo "── scanner-removal mutation controls ────────────────────────────────────"
 
 # 3. Change ONE ownership budget: the test named for that surface must notice.
 mutate "$HOLDINGS" '
@@ -145,28 +159,29 @@ if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
 ' 'NftRevocationFailSafeTest::testJoinStopsAtItsBudgetAndFailsClosed' 'M4 budget exhaustion becomes INELIGIBLE'
 
-# 5. Restore the maintenance sweep's redispatch: the background freeze test must notice.
-mutate "$MAINTENANCE" '
-$f = $argv[1]; $s = file_get_contents($f);
-$nl = strpos($s, "\r\n") !== false ? "\r\n" : "\n";
-$old = "        if (ScannerFreeze::frozen()) {" . $nl . "            return \$result;" . $nl . "        }" . $nl;
-if (substr_count($s, $old) !== 1) { exit(1); }
-file_put_contents($f, str_replace($old, "", $s));
-' 'ScannerBackgroundEntryPointsAreFrozenTest' 'M5 the five-minute sweep requeues and re-dispatches again'
-
-# 6. Restore executor execution: a pending Action Scheduler action would run again.
+# 6. Make the executor refusal CONDITIONAL again.
+#
+# The hook stays bound until an operator confirms the Action Scheduler queue is
+# drained, so a queued action still fires into handleQueuedAction(). S8 made its
+# refusal unconditional precisely so there is no flag to flip; this control
+# reintroduces a flag and expects the inventory test to say so.
 mutate "$EXECUTOR" '
 $f = $argv[1]; $s = file_get_contents($f);
 $nl = strpos($s, "\r\n") !== false ? "\r\n" : "\n";
-$old = "        if (ScannerFreeze::frozen()) {" . $nl . "            return [\x27status\x27 => \x27frozen\x27, \x27run_id\x27 => \$runId];" . $nl . "        }" . $nl;
+$old = "        return [\x27status\x27 => \x27retired\x27, \x27run_id\x27 => \$runId];";
+$new = "        if (\\BCC\\Trust\\Onchain\\Support\\ScannerFreeze::frozen()) {" . $nl
+     . "            return [\x27status\x27 => \x27retired\x27, \x27run_id\x27 => \$runId];" . $nl
+     . "        }" . $nl . $nl
+     . "        return [\x27status\x27 => \x27ran\x27, \x27run_id\x27 => \$runId];";
 if (substr_count($s, $old) !== 1) { exit(1); }
-file_put_contents($f, str_replace($old, "", $s));
-' 'ScannerBackgroundEntryPointsAreFrozenTest' 'M6 a queued executor action claims and runs again'
+file_put_contents($f, str_replace($old, $new, $s));
+' 'ScannerRemovedInventoryTest' 'M6 the executor refusal becomes conditional on a flag again'
+
 echo "killed=$killed survived=$survived wrong_reason=$wrong broken=$broken"
 
 # Every file must be byte-identical to its pre-run snapshot.
 clean=1
-for f in "$BUDGET" "$HOLDINGS" "$MAINTENANCE" "$EXECUTOR"; do
+for f in "$HOLDINGS" "$EXECUTOR"; do
     if ! cmp -s "$SNAPDIR/$(basename "$f").orig" "$f"; then
         echo "FATAL: $f is NOT byte-identical to its snapshot"
         clean=0

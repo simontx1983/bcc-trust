@@ -67,35 +67,55 @@ final class DiscoveryMaintenanceCronRetiredTest extends TestCase
         return $code;
     }
 
-    // ── The registration sites are gone, BOTH of them ───────────────────
+    // ── The whole worker is gone, registration sites included ───────────
 
     /**
-     * ⚠ BOTH HALVES, ASSERTED SEPARATELY.
-     *
-     * `register()` did two things, and removing either one alone would have
-     * been worse than removing neither: without the schedule a bound handler
-     * waits on an event nothing creates (the PR 7A bug, reported MISSING
-     * forever); without the handler a five-minute event fires into nothing,
-     * which is drift a health check then has to explain.
+     * Why S6 asserted the two registration halves separately, recorded
+     * because it is the reasoning a future reader needs before re-adding
+     * anything here: `register()` did two things, and removing either one
+     * alone would have been worse than removing neither. Without the
+     * schedule a bound handler waits on an event nothing creates (the PR 7A
+     * bug, reported MISSING forever); without the handler a five-minute
+     * event fires into nothing, which is drift a health check then has to
+     * explain. S8 removed both by removing the file.
      */
-    public function testTheRegisterMethodIsGoneEntirely(): void
+    /**
+     * ⚠ S8 REPLACED TWO CASES HERE WITH ONE STRONGER ONE.
+     *
+     * S6 asserted that `DiscoveryRunMaintenance.php` still existed but no
+     * longer carried `register()`, `registerRecurring()`, `wp_schedule_event`
+     * or `add_action` — with an explicit anti-vacuity guard that the file was
+     * "still the worker, not an empty shell".
+     *
+     * S8 deleted the file. That guard then did exactly its job and failed,
+     * which is how this was caught: without it, `assertStringNotContainsString`
+     * over an empty string would have passed for the wrong reason and both
+     * cases would have gone quietly vacuous.
+     *
+     * "The file does not exist" implies everything the four string checks
+     * asserted and cannot be satisfied by an empty shell, so it replaces them.
+     * The hook-side cases below are untouched: they are about `wp_options.cron`
+     * and the migration, which still matter.
+     */
+    public function testTheMaintenanceWorkerFileIsGoneEntirely(): void
     {
-        $code = self::codeOf('app/Domain/Onchain/Workers/DiscoveryRunMaintenance.php');
+        $root = dirname(__DIR__, 2);
 
-        self::assertStringNotContainsString('function register', $code);
-        self::assertStringNotContainsString('registerRecurring', $code);
-        self::assertStringNotContainsString('wp_schedule_event', $code);
-    }
+        self::assertFileDoesNotExist(
+            $root . '/app/Domain/Onchain/Workers/DiscoveryRunMaintenance.php',
+            'the maintenance sweep was deleted in S8 and must not come back'
+        );
+        self::assertFalse(
+            class_exists(\BCC\Trust\Onchain\Workers\DiscoveryRunMaintenance::class),
+            'and nothing may reintroduce the class under that name'
+        );
 
-    public function testNothingInTheWorkerBindsTheSweepHandler(): void
-    {
-        $code = self::codeOf('app/Domain/Onchain/Workers/DiscoveryRunMaintenance.php');
-
-        self::assertStringNotContainsString('add_action', $code);
-
-        // Anti-vacuity: the file is still the worker, not an empty shell.
-        self::assertStringContainsString('class DiscoveryRunMaintenance', $code);
-        self::assertStringContainsString('function tick', $code);
+        // Anti-vacuity: the sibling it was deleted alongside IS still here, so
+        // this is not an assertion over a tree that failed to load.
+        self::assertFileExists(
+            $root . '/app/Domain/Onchain/Workers/DiscoveryRunExecutor.php',
+            'denominator: the retained executor must still be on disk'
+        );
     }
 
     /**

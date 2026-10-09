@@ -130,9 +130,13 @@ final class HalfOpenProbeOwnershipTest extends TestCase
             'EVM indexer tick'        => ['Domain/Onchain/Workers/NftEthIndexerWorker.php'],
             'validator index cron'    => ['Domain/Onchain/Services/ChainRefreshService.php'],
             'enrichment scheduler'    => ['Domain/Onchain/Services/EnrichmentScheduler.php'],
-            // Retained but frozen since #261. It must be fixed in place, NOT
-            // unfrozen and NOT deleted: the freeze is a separate guarantee.
-            'cosmwasm discovery (frozen)' => ['Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php'],
+            // ⚠ `cosmwasm discovery` WAS HERE AND IS NOT COMING BACK.
+            // It read `['Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php']`
+            // and carried the note "retained but frozen since #261 — fix in
+            // place, do NOT unfreeze and do NOT delete". S8 deleted the
+            // worker, so the row would now fail on its own "the caller must
+            // still exist" guard. Three outer preflights remain, which is the
+            // whole population of `isResting()` callers.
         ];
     }
 
@@ -155,23 +159,6 @@ final class HalfOpenProbeOwnershipTest extends TestCase
         );
     }
 
-    /** The frozen scanner stays frozen — this PR moves a check, it does not open a door. */
-    public function testTheScannerEntryPointsAreStillFrozen(): void
-    {
-        self::assertTrue(
-            \BCC\Trust\Onchain\Support\ScannerFreeze::frozen(),
-            'ScannerFreeze must still report frozen'
-        );
-        // ⚠ WAS 13, IS 2 (S4). This assertion exists so a breaker PR cannot
-        // quietly change the freeze inventory; it is not a claim that 13 is
-        // the right number forever. S4 deleted the eleven operator entry
-        // points, leaving the maintenance sweep and the async executor.
-        self::assertCount(
-            2,
-            \BCC\Trust\Onchain\Support\ScannerFreeze::FROZEN_ENTRY_POINTS,
-            'the frozen entry-point inventory must be unchanged by this PR'
-        );
-    }
 
     // ── the reader is genuinely side-effect free ────────────────────────
 

@@ -202,7 +202,7 @@ final class LegacyAliasRouteCompatibilityTest extends TestCase
 
         self::assertSame(
             [
-                'app/Domain/Onchain/Services/CosmwasmDiscoveryService.php',
+        
                 'app/Domain/Onchain/Services/ManualCollectionIntakeService.php',
                 'app/Domain/Onchain/Services/NftPieceViewModelBuilder.php',
             ],

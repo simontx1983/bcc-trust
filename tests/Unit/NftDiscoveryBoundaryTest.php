@@ -41,7 +41,11 @@ final class NftDiscoveryBoundaryTest extends TestCase
         'app/Domain/Onchain/Admin/NftDiscoveryPage.php',
         'app/Domain/Onchain/Admin/Views/NftCapabilityEditorPanel.php',
         'app/Domain/Onchain/Services/NftDiscoveryControlPlaneSnapshot.php',
-        'app/Domain/Onchain/Support/CosmwasmPassStopReason.php',
+        // ⚠ `CosmwasmPassStopReason.php` LEFT THIS LIST IN S8 — the file is
+        // deleted. Every rule here reads the file it names, so a stale entry
+        // turns each sweep into a warning over an empty string rather than a
+        // guard. The three survivors are the capability page, its panel and
+        // the snapshot that feeds them.
     ];
 
     /**
@@ -317,36 +321,38 @@ final class NftDiscoveryBoundaryTest extends TestCase
 
         sort($callers);
 
-        // ⚠ S4 REMOVED `NftDiscoveryPage.php` FROM THIS LIST, which is the
-        // whole point of the step: the admin page was one of the two things
-        // that could START a backfill, and its route is withdrawn. What is
-        // left is the worker that DECLARES the method and the ledger executor
-        // that performs a historical run an administrator asked for through
-        // DiscoveryRunService.
+        // ⚠ THIS LIST IS NOW EMPTY, AND THAT IS THE ASSERTION.
+        //
+        // History, because the shrinking is the record of the retirement:
+        // PR 7A allowed two callers — the worker that DECLARED
+        // `runBackfillForChain()` and the ledger executor that performed a
+        // historical run an administrator had asked for. S4 removed a third,
+        // `NftDiscoveryPage.php`, when the admin route was withdrawn. S8
+        // deleted the worker and reduced the executor to its registered
+        // refusal, so nothing declares the method and nothing calls it.
+        //
+        // Kept as an exact empty-array assertion rather than deleted: a
+        // reintroduced chain-wide backfill would land here first, and the
+        // sweep below proves the search really ran.
         self::assertSame(
-            [
-                'app/Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php',
-                'app/Domain/Onchain/Workers/DiscoveryRunExecutor.php',
-            ],
+            [],
             $callers,
-            'only the ledger executor starts a backfill now; the worker declares it'
+            'nothing may start a chain-wide backfill: the runner was deleted in S8'
         );
 
-        // ── WHY THE EXECUTOR IS ALLOWED HERE, AND STILL BOUNDED ─────────
-        // PR 7A added it deliberately: a HISTORICAL run is a backfill, and
-        // the executor is what performs one. The bound did not move, it
-        // relocated — the executor reaches this method only for a run whose
-        // `scan_mode` is historical, and a run only exists because a NAMED
-        // administrator asked for it through DiscoveryRunService.
-        //
-        // The supervised CLI is deliberately NOT on this list: it pins
-        // INCREMENTAL precisely so a backfill stays unreachable from a
-        // terminal, which CosmwasmOneShotCliTest enforces separately.
-        self::assertStringNotContainsString(
-            'runBackfillForChain(',
-            self::code('app/Domain/Onchain/CLI/CosmwasmOneShotDiscoveryCommand.php'),
-            'the supervised CLI must never reach a backfill'
+        // Anti-vacuity. An empty result is the pass condition above, so the
+        // sweep MUST prove it read the tree — otherwise a broken iterator or
+        // a moved root would look like success.
+        $scanned = 0;
+        $probe = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator(self::root() . '/app', \FilesystemIterator::SKIP_DOTS)
         );
+        foreach ($probe as $file) {
+            if ($file instanceof \SplFileInfo && $file->getExtension() === 'php') {
+                $scanned++;
+            }
+        }
+        self::assertGreaterThan(400, $scanned, 'denominator: the app tree must actually have been walked');
     }
 
     // ═══════════════════════════════════════════════════════════════════

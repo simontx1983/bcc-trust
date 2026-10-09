@@ -206,7 +206,11 @@ namespace {
 
 namespace BCC\Trust\Tests\Integration {
 
-    use BCC\Trust\Onchain\Repositories\DiscoveryRunRepository;
+    // ⚠ S8 DELETED `DiscoveryRunRepository`. The TABLE it named is still
+    // declared and is dropped in S9, so this suite still has to clean it
+    // between cases — it just resolves the name through bcc-core directly
+    // now, exactly as the repository did (`DB::table('discovery_runs')`).
+    use BCC\Core\DB\DB;
     use BccCronIntegrationHooks;
     use PHPUnit\Framework\TestCase;
 
@@ -245,7 +249,7 @@ namespace BCC\Trust\Tests\Integration {
             parent::setUp();
             BccCronIntegrationHooks::reset();
             \update_option('cron', []);
-            $GLOBALS['wpdb']->query('DELETE FROM `' . DiscoveryRunRepository::table() . '`');
+            $GLOBALS['wpdb']->query('DELETE FROM `' . DB::table('discovery_runs') . '`');
 
             require_once dirname(__DIR__, 2) . '/includes/database/unschedule-discovery-maintenance.php';
         }
@@ -253,7 +257,7 @@ namespace BCC\Trust\Tests\Integration {
         protected function tearDown(): void
         {
             \update_option('cron', []);
-            $GLOBALS['wpdb']->query('DELETE FROM `' . DiscoveryRunRepository::table() . '`');
+            $GLOBALS['wpdb']->query('DELETE FROM `' . DB::table('discovery_runs') . '`');
             parent::tearDown();
         }
 
@@ -482,7 +486,7 @@ namespace BCC\Trust\Tests\Integration {
          */
         public function testTheMigrationWritesNothingToTheLedger(): void
         {
-            $table = DiscoveryRunRepository::table();
+            $table = DB::table('discovery_runs');
 
             $before = (int) $GLOBALS['wpdb']->get_var("SELECT COUNT(*) FROM `{$table}`");
             self::assertSame(0, $before);

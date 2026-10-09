@@ -6,7 +6,7 @@ namespace BCC\Trust\Onchain\Tests\Unit {
 
     use BCC\Trust\Onchain\Admin\ChainSweepActions;
     use BCC\Trust\Onchain\Services\ChainRefreshService;
-    use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
+
     use BCC\Trust\Tests\Support\CronHealState;
     use PHPUnit\Framework\Attributes\CoversNothing;
     use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -103,14 +103,24 @@ namespace BCC\Trust\Onchain\Tests\Unit {
         /**
          * And the self-healing entry point itself is gone.
          *
-         * Asserted as a MISSING METHOD rather than as "it schedules
-         * nothing": an empty register() is one edit away from scheduling
-         * again, and the whole failure mode was that re-arming looked
-         * harmless.
+         * ⚠ S8 CHANGED WHAT THIS ASSERTS, BECAUSE THE OLD FORM WENT VACUOUS.
+         * It was `assertFalse(method_exists(CosmwasmDiscoveryWorker::class,
+         * 'register'))`, chosen so that an empty `register()` would still
+         * fail. S8 deleted the whole class, so `method_exists` now returns
+         * false because the CLASS is missing, not because the method is —
+         * it would keep passing even if someone reintroduced the worker with
+         * a scheduling `register()` under a different name.
+         *
+         * So it now asserts the stronger fact directly: the class does not
+         * exist at all. The bootstrap checks below are unchanged and still
+         * carry their original weight.
          */
         public function testTheSelfHealingRegistrationIsGone(): void
         {
-            self::assertFalse(method_exists(CosmwasmDiscoveryWorker::class, 'register'));
+            self::assertFalse(
+                class_exists(\BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::class),
+                'the discovery worker was deleted in S8 and must not come back'
+            );
 
             $bootstrap = (string) file_get_contents(dirname(__DIR__, 2) . '/bcc-trust.php');
             self::assertStringNotContainsString('CosmwasmDiscoveryWorker::register()', $bootstrap);
@@ -347,19 +357,45 @@ namespace BCC\Trust\Onchain\Tests\Unit {
             }
         }
 
-        /** The supervised WP-CLI pass is still callable. */
-        public function testTheOneShotCliPathRemainsCallable(): void
+        /**
+         * The supervised WP-CLI pass is GONE — this case used to assert the
+         * opposite, and S8 inverted it rather than deleting it.
+         *
+         * ⚠ IT ASSERTED A FACT THAT S8 MADE FALSE. When the four automatic
+         * hooks were retired in 2026-08, the supervised one-shot command was
+         * deliberately kept as the single operator-initiated way to run a
+         * full-chain pass, and this case existed to stop the retirement from
+         * taking it with them. S4 withdrew its registration and S8 deleted
+         * the command and the worker behind it, so the original claim is now
+         * simply untrue.
+         *
+         * Inverted rather than removed because the direction of travel is
+         * the point: a reader of this file should be able to see that the
+         * escape hatch the 2026-08 retirement preserved was itself closed
+         * later, deliberately, and is not supposed to reappear.
+         */
+        public function testTheOneShotCliPathIsGoneToo(): void
         {
-            self::assertTrue(class_exists(
-                \BCC\Trust\Onchain\CLI\CosmwasmOneShotDiscoveryCommand::class
-            ));
-            self::assertTrue(method_exists(
-                CosmwasmDiscoveryWorker::class,
-                'runSupervisedSingleChainPass'
-            ));
+            self::assertFalse(
+                class_exists(\BCC\Trust\Onchain\CLI\CosmwasmOneShotDiscoveryCommand::class),
+                'the one-shot discovery command was deleted in S8'
+            );
+            self::assertFalse(
+                class_exists(\BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker::class),
+                'and so was the worker it drove'
+            );
 
-            $bootstrap = (string) file_get_contents(dirname(__DIR__, 2) . '/bcc-trust.php');
-            self::assertStringContainsString('bcc-trust cosmwasm', $bootstrap, 'the command must stay registered');
+            // ⚠ THE "NOT REGISTERED UNDER ITS OLD NAME" CHECK LIVES IN
+            // `ScannerRemovedInventoryTest::testTheRetiredCliCommandIsNotRegistered`,
+            // NOT HERE, AND THAT IS NOT A STYLE CHOICE.
+            //
+            // Asserting it on the raw bytes of bcc-trust.php fails on the
+            // RETIREMENT COMMENT that records the removal — the prose names the
+            // subcommand in order to say it is gone. The inventory test strips
+            // comments with `token_get_all()` before looking, so it can tell a
+            // docblock from a registration; a raw `file_get_contents` cannot.
+            //
+            // This case keeps the part that needs no source reading at all.
         }
 
         // ── (8) the admin no longer offers collection discovery ─────────

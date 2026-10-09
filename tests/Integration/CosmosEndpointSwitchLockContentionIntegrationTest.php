@@ -7,7 +7,8 @@ namespace BCC\Trust\Tests\Integration;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Services\CosmosEndpointReview;
 use BCC\Trust\Onchain\Services\CosmosEndpointTransition;
-use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
+// ⚠ `CosmwasmDiscoveryWorker` IS GONE (S8); ITS LOCK NAME IS PINNED BELOW AS
+// A LITERAL. See HISTORICAL_SCANNER_LOCK_PREFIX.
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
@@ -130,9 +131,32 @@ final class CosmosEndpointSwitchLockContentionIntegrationTest extends TestCase
         return self::$peerWpdb;
     }
 
+    /**
+     * The lock name the DELETED chain-wide scanner used.
+     *
+     * ⚠ A LITERAL, NOT A CONSTANT REFERENCE, AND DELIBERATELY SO. It was
+     * `CosmwasmDiscoveryWorker::ADVISORY_LOCK_PREFIX` until S8 deleted that
+     * class. The decoupling guarantee it supports has outlived the scanner:
+     * the endpoint switch must own a lock name of its own, so that a future
+     * chain-wide feature reusing the historical `bcc_cosmwasm_chain_<id>`
+     * name cannot block an operator from repointing an endpoint.
+     *
+     * Pinning the string here is what keeps that testable with the class
+     * gone. The plan's own reasoning for the switch taking its own name was
+     * that "borrowing a doomed constant is how the two drifted into coupling
+     * in the first place" — so this file borrows nothing.
+     */
+    private const HISTORICAL_SCANNER_LOCK_PREFIX = 'bcc_cosmwasm_chain_';
+
     private function endpointLockName(): string
     {
         return 'bcc_cosmos_endpoint_' . $this->chainId;
+    }
+
+    /** The historical scanner lock for this chain, by name only. */
+    private function historicalScannerLockName(): string
+    {
+        return self::HISTORICAL_SCANNER_LOCK_PREFIX . $this->chainId;
     }
 
     /** Take a named lock ON THE PEER, so the switch's own session cannot have it. */
@@ -242,7 +266,7 @@ final class CosmosEndpointSwitchLockContentionIntegrationTest extends TestCase
 
         // Nothing may be holding either lock when a test begins.
         $this->peerReleases($this->endpointLockName());
-        $this->peerReleases(CosmwasmDiscoveryWorker::ADVISORY_LOCK_PREFIX . $this->chainId);
+        $this->peerReleases($this->historicalScannerLockName());
 
         self::assertTrue(
             $this->lockIsFree($this->endpointLockName()),
@@ -253,7 +277,7 @@ final class CosmosEndpointSwitchLockContentionIntegrationTest extends TestCase
     protected function tearDown(): void
     {
         $this->peerReleases($this->endpointLockName());
-        $this->peerReleases(CosmwasmDiscoveryWorker::ADVISORY_LOCK_PREFIX . $this->chainId);
+        $this->peerReleases($this->historicalScannerLockName());
 
         CosmosEndpointReview::forget(self::OPERATOR);
         $this->setRestUrl($this->snapshot['rest_url'], $this->snapshot['is_active']);
@@ -568,7 +592,7 @@ final class CosmosEndpointSwitchLockContentionIntegrationTest extends TestCase
     public function testAPeerHoldingTheScannerLockDoesNotBlockTheSwitch(): void
     {
         $reviewId = $this->review();
-        $this->peerTakes(CosmwasmDiscoveryWorker::ADVISORY_LOCK_PREFIX . $this->chainId);
+        $this->peerTakes($this->historicalScannerLockName());
 
         $result = $this->submit($reviewId);
 

@@ -63,70 +63,29 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
             // The one place the switch proves its destination before moving
             // the row to it.
             'app/Domain/Onchain/Services/CosmosEndpointTransition.php',
-            // The recorder, which is itself only reached from the actions
-            // classified under `CosmosEndpointAuthorization::authorize`.
-            'app/Domain/Onchain/Support/CosmosEndpointAuthorization.php',
         ],
-        'CosmosEndpointAuthorization::authorize' => [
-            // ⚠ S4 REMOVED `NftDiscoveryPage.php` FROM THIS LIST.
-            // It reached `authorize()` through `prove_endpoint()`, which only
-            // `apply_cw_backfill()` and `apply_cw_discovery()` called. Both
-            // routes are withdrawn, so that page no longer performs the live
-            // probe at all — which is the point: the one control on it that
-            // spent provider budget is gone.
-            //
-            // admin_post / supervised WP-CLI: request or retry a scan. This is
-            // now the ONLY production caller, which is what keeps `authorize()`
-            // satisfying MUST_BE_CALLED below.
-            'app/Domain/Onchain/Services/DiscoveryRunService.php',
-        ],
-
-        // ── The recorded check. NO NETWORK. Callable from anywhere. ─────
+        // ⚠ S8 REMOVED THE RECORDER AND THE THREE ENTRIES BELOW IT.
         //
-        // This list is long ON PURPOSE: the whole design is that checking is
-        // cheap enough for renders, snapshots and per-chunk worker loops.
-        // It is still enumerated, so that a new reader is a decision.
-        'CosmosEndpointAuthorization::isAuthorized' => [
-            'app/Domain/Onchain/Support/DiscoveryReadiness.php',
-            'app/Domain/Onchain/Services/CosmwasmDiscoveryHealthSnapshot.php',
-            'app/Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php',
-        ],
-
-        // ── The write. One recorder, one withdrawal. ────────────────────
-        'CosmosEndpointAuthorization::record' => [
-            // Reached only from `authorize()`, in this same file. The switch
-            // USED to record the proof it had just made, so that the scanner
-            // would not refuse the chain as `endpoint_unverified`; it no longer
-            // does, because the only readers of that record are scanner files
-            // and the whole class retires with them in S8.
-            //
-            // ⚠ This stays a PERMISSION list, not an equality list, which is
-            // why removing that caller did not trip
-            // `testASafetyMethodWithoutACallerIsADefect`: the internal caller
-            // keeps the method reachable. When S8 deletes the class, this entry
-            // goes with it.
-            'app/Domain/Onchain/Support/CosmosEndpointAuthorization.php',
-        ],
-        // ⚠⚠ S4: `CosmosEndpointAuthorization::forget` IS NOW CALLERLESS.
+        // `CosmosEndpointVerifier::verify` used to have a second authorized
+        // caller: `CosmosEndpointAuthorization.php`, which probed in order to
+        // record the proof it had just made. S2 dropped that `record()` call
+        // from the switch, and S8 deleted the class, so the switch's own
+        // `CosmosEndpointTransition` is the ONLY caller left — which is what
+        // keeps `verify()` satisfying MUST_BE_CALLED.
         //
-        // Its one production caller was `apply_cw_discovery()` — opting a chain
-        // out of scanner discovery withdrew its endpoint authorization at the
-        // same time. That route is withdrawn, so nothing calls `forget()`.
+        // Gone with the class: `authorize` (whose last caller was
+        // `DiscoveryRunService`, also deleted), `isAuthorized` (whose three
+        // callers were the readiness composer, the health snapshot and the
+        // discovery worker, all deleted) and `record`.
         //
-        // Unlike `record()` above, there is NO internal caller to keep it
-        // reachable, so it cannot stay in MUST_BE_CALLED: that assertion would
-        // fail by design, which is exactly what it is for. It is removed from
-        // both lists here rather than given a synthetic caller.
-        //
-        // This is NOT "an unused safety method is fine". It is: the thing this
-        // method withdrew permission FOR no longer exists. The permission
-        // record it cleared (`bcc_cosmos_endpoint_authz_<id>`) is still read by
-        // three scanner files, so the class stays; `forget()` and the whole
-        // class retire together in S8, and the leftover options are cleaned up
-        // with the S9 migration.
-        //
-        // Recorded as production-callerless for S8:
-        //   CosmosEndpointAuthorization::forget()
+        // ⚠ THIS IS NOT "A SAFETY METHOD LOST ITS CALLER AND WE SHRUGGED".
+        // The thing those methods granted and withdrew permission FOR — a
+        // chain-wide scan refusing as `endpoint_unverified` — no longer
+        // exists in any form. `CosmosEndpointVerifier` and
+        // `CosmosEndpointPolicy` both survive, and their entries below are
+        // unchanged: the verifier because the audited switch still proves its
+        // destination live, the policy because `CosmosFetcher::refusalFor()`
+        // and the wallet SSRF allowlist both read it.
     ];
 
     /**
@@ -138,10 +97,17 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
      */
     private const MUST_BE_CALLED = [
         'CosmosEndpointVerifier::verify',
-        'CosmosEndpointAuthorization::authorize',
-        'CosmosEndpointAuthorization::isAuthorized',
-        'CosmosEndpointAuthorization::record',
-        // 'CosmosEndpointAuthorization::forget' — removed by S4, see above.
+        // ⚠ S8 REMOVED THE THREE `CosmosEndpointAuthorization` ENTRIES with
+        // the class itself. `authorize()`, `isAuthorized()` and `record()`
+        // are not unprotected now — they do not exist. `forget()` had
+        // already gone callerless in S4. Every reader of the record it kept
+        // (`bcc_cosmos_endpoint_authz_<id>`) was a scanner file, and all of
+        // them are deleted, so the option is written by nothing and read by
+        // nothing; the leftover rows are cleaned up with the S9 migration.
+        //
+        // What carries the proof forward instead: the audit row's
+        // `endpoint_fp`, written by the switch, which is what a later reader
+        // needs in order to know WHICH endpoint was verified.
         'CosmosEndpointPolicy::isApproved',
         'CosmosEndpointPolicy::normalize',
         'CosmosEndpointPolicy::fingerprint',
@@ -227,8 +193,12 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
             'the sweep must actually be reading the plugin; a handful of files means the root moved'
         );
 
+        // ⚠ WAS `CosmosEndpointAuthorization.php` UNTIL S8 DELETED IT. The
+        // denominator has to name a file that still exists, or this guard
+        // starts failing for the wrong reason. The verifier is the right
+        // replacement: it is the subject of the first MUST_BE_CALLED entry.
         self::assertArrayHasKey(
-            'app/Domain/Onchain/Support/CosmosEndpointAuthorization.php',
+            'app/Domain/Onchain/Support/CosmosEndpointVerifier.php',
             $sources,
             'the file under inventory must be among the files scanned'
         );
@@ -347,11 +317,15 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
             'the nft discovery page'  => ['app/Domain/Onchain/Admin/NftDiscoveryPage.php'],
             'the chains page'         => ['app/Domain/Onchain/Admin/ChainsPage.php'],
             'the verify page'         => ['app/Domain/Onchain/Admin/VerifyCollectionsPage.php'],
-            'the health snapshot'     => ['app/Domain/Onchain/Services/CosmwasmDiscoveryHealthSnapshot.php'],
-            'the maintenance sweep'   => ['app/Domain/Onchain/Workers/DiscoveryRunMaintenance.php'],
+            // ⚠ S8 REMOVED FOUR ENTRIES, AND NOT BECAUSE THE RULE RELAXED.
+            // The health snapshot, the maintenance sweep, the discovery
+            // worker and the readiness composer are DELETED FILES. This rule
+            // asserts the file it names exists, so a stale entry would fail
+            // as a missing denominator rather than guard anything.
+            //
+            // The run executor stays: its file still exists, reduced to the
+            // registered refusal, and it must not grow a probe.
             'the run executor'        => ['app/Domain/Onchain/Workers/DiscoveryRunExecutor.php'],
-            'the discovery worker'    => ['app/Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php'],
-            'the readiness composer'  => ['app/Domain/Onchain/Support/DiscoveryReadiness.php'],
         ];
     }
 
@@ -363,18 +337,22 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
 
         $code = $sources[$path];
 
-        foreach ([
+        // ⚠ THE SECOND NEEDLE WAS DROPPED IN S8, NOT RELAXED.
+        // It was `CosmosEndpointAuthorization::authorize(`, and S8 deleted
+        // that class — so asserting no file calls it is a test that passes
+        // because the path cannot exist, which is exactly the kind of
+        // assertion this suite is not allowed to keep. That the class is gone
+        // everywhere is asserted directly by `ScannerRemovedInventoryTest`.
+        //
+        // One live call remains to guard, and it is the one that matters:
+        // `verify()` issues the uncached outbound request.
+        self::assertStringNotContainsString(
             'CosmosEndpointVerifier::verify(',
-            'CosmosEndpointAuthorization::authorize(',
-        ] as $liveCall) {
-            self::assertStringNotContainsString(
-                $liveCall,
-                $code,
-                $path . ' must not make a live endpoint request: it renders, or it runs on a timer, '
-                . 'or it runs once per worker chunk. Read the recorded proof instead '
-                . '(CosmosEndpointAuthorization::isAuthorized).'
-            );
-        }
+            $code,
+            $path . ' must not make a live endpoint request: it renders, or it runs on a timer. '
+            . 'The live proof belongs to the audited endpoint switch, which is an explicit, '
+            . 'capability-checked, nonce-checked operator gesture.'
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -532,6 +510,49 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
         );
     }
 
+    /**
+     * The live proof must not override `SafeHttpClient`'s redirect-zero default.
+     *
+     * ⚠ RESCUED IN S8 FROM `EndpointVerificationWorkflowTest`, which S8
+     * deleted: 16 of its 18 cases were about the retired
+     * `CosmosEndpointAuthorization` record and the scanner's
+     * "is this endpoint proven before scanning" gate, and the two that were
+     * not still drove through `DiscoveryRunService`, which is also deleted.
+     *
+     * This claim had NO other home. `CosmosEndpointPolicyTest` covers the URL
+     * shape but is pure-function and never goes near the wire, and the only
+     * behavioural driver left is an integration test. So it is pinned here
+     * structurally rather than dropped — weaker than the behavioural original,
+     * and deliberately not silently lost.
+     *
+     * Why it matters: the verifier resolves a host an operator typed and is
+     * the one place that deliberately dials an endpoint that is not yet
+     * trusted. Following a redirect there would let the approved host hand the
+     * request to one that was never approved, and the method's own comment
+     * ("with redirects disabled a redirect is simply not a 200") is written
+     * on the assumption that it does not.
+     */
+    public function testTheLiveProofDoesNotFollowRedirects(): void
+    {
+        $src  = (string) file_get_contents(
+            dirname(__DIR__, 2) . '/app/Domain/Onchain/Support/CosmosEndpointVerifier.php'
+        );
+        $body = self::methodBodyOf($src, 'verify');
+
+        self::assertNotSame('', $body, 'denominator: verify() must be extracted');
+        self::assertStringContainsString(
+            'SafeHttpClient::get',
+            $body,
+            'anti-vacuity: this really is the method that makes the request'
+        );
+        self::assertStringNotContainsString(
+            'redirection',
+            $body,
+            'the verifier must leave SafeHttpClient at its redirect-zero default: following a '
+            . 'redirect would let an approved host hand the probe to one that was never approved'
+        );
+    }
+
     /** Occurrences of a class name in EXECUTABLE code, ignoring comments and strings. */
     private static function executableReferencesTo(string $src, string $name): int
     {
@@ -543,5 +564,59 @@ final class EndpointSafetyCallerInventoryTest extends TestCase
         }
 
         return $found;
+    }
+
+    /**
+     * One method's body, by a balanced TOKEN walk rather than a brace count.
+     *
+     * Comments are stripped first, so a docblock that mentions `redirection`
+     * in prose cannot fail the caller above — and braces inside strings,
+     * heredocs or interpolation cannot end the walk early.
+     */
+    private static function methodBodyOf(string $src, string $method): string
+    {
+        $stripped = '';
+        foreach (token_get_all($src) as $t) {
+            if (is_array($t) && ($t[0] === T_COMMENT || $t[0] === T_DOC_COMMENT)) {
+                continue;
+            }
+            $stripped .= is_array($t) ? $t[1] : $t;
+        }
+
+        $tokens = token_get_all($stripped);
+        $n      = count($tokens);
+
+        for ($i = 0; $i < $n; $i++) {
+            if (!is_array($tokens[$i]) || $tokens[$i][0] !== T_FUNCTION) {
+                continue;
+            }
+            $j = $i + 1;
+            while ($j < $n && is_array($tokens[$j]) && $tokens[$j][0] === T_WHITESPACE) {
+                $j++;
+            }
+            if (!is_array($tokens[$j]) || $tokens[$j][0] !== T_STRING || $tokens[$j][1] !== $method) {
+                continue;
+            }
+            while ($j < $n && $tokens[$j] !== '{') {
+                $j++;
+            }
+            $depth = 0;
+            $body  = '';
+            for (; $j < $n; $j++) {
+                $text = is_array($tokens[$j]) ? $tokens[$j][1] : $tokens[$j];
+                if ($text === '{') {
+                    $depth++;
+                }
+                if ($text === '}') {
+                    $depth--;
+                    if ($depth === 0) {
+                        return $body;
+                    }
+                }
+                $body .= $text;
+            }
+        }
+
+        return '';
     }
 }

@@ -154,8 +154,23 @@ final class ChainCosmwasmDiscoveryFlagIntegrationTest extends TestCase
         $wpdb    = $GLOBALS['wpdb'];
         $chainId = $this->firstChainId();
 
-        // An operator has deliberately enabled one chain.
-        ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, true);
+        // An operator had deliberately enabled one chain.
+        //
+        // ⚠ PLANTED WITH A DIRECT WRITE, NOT A SETTER (S8). This used to call
+        // `ChainRepository::setCosmwasmNftDiscoveryEnabled()`, which S8
+        // deleted along with the scanner that was its only caller. The
+        // guarantee under test is NOT the setter — it is that re-running the
+        // ALTER never flips a value it finds, which still matters for every
+        // install carrying a non-default row until S9 drops the column.
+        // Planting the row directly is what keeps that testable.
+        $planted = $wpdb->update(
+            ChainRepository::table(),
+            [self::COLUMN => 1],
+            ['id' => $chainId],
+            ['%d'],
+            ['%d']
+        );
+        self::assertSame(1, $planted, 'precondition: the non-default value must actually be planted');
 
         bcc_onchain_add_chains_cosmwasm_discovery_column();
         bcc_onchain_add_chains_cosmwasm_discovery_column();
@@ -270,139 +285,10 @@ final class ChainCosmwasmDiscoveryFlagIntegrationTest extends TestCase
         self::assertTrue($this->cachedFlag($chainId));
     }
 
-    public function testTheRepositoryToggleTakesEffectImmediatelyInBothDirections(): void
-    {
-        $chainId = $this->firstChainId();
 
-        self::assertFalse($this->cachedFlag($chainId), 'precondition: disabled and cached');
 
-        self::assertTrue(ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, true));
-        self::assertTrue($this->cachedFlag($chainId), 'enabling must be visible without a manual cache bust');
 
-        // The disable direction is the one with teeth: a stale cache here
-        // means the worker keeps spending requests on a chain an operator
-        // just told it to stop scanning.
-        self::assertTrue(ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, false));
-        self::assertFalse($this->cachedFlag($chainId), 'disabling must take effect at once');
-    }
 
-    public function testTheToggleTouchesOnlyTheChainItNames(): void
-    {
-        $wpdb    = $GLOBALS['wpdb'];
-        $chainId = $this->firstChainId();
-
-        ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, true);
-
-        $enabledIds = array_map('intval', $wpdb->get_col(
-            'SELECT id FROM `' . ChainRepository::table() . '` WHERE ' . self::COLUMN . ' = 1'
-        ));
-        self::assertSame([$chainId], $enabledIds);
-    }
-
-    public function testTheToggleRejectsANonPositiveChainId(): void
-    {
-        self::assertFalse(ChainRepository::setCosmwasmNftDiscoveryEnabled(0, true));
-        self::assertFalse(ChainRepository::setCosmwasmNftDiscoveryEnabled(-1, true));
-    }
-
-    /**
-     * EVERY OTHER COLUMN, BYTE FOR BYTE.
-     *
-     * The other tests in this file name the columns somebody thought of.
-     * This one enumerates the table from INFORMATION_SCHEMA and compares
-     * the whole row, so a column added later is covered the day it is
-     * added rather than the day somebody remembers to extend a list — and
-     * so an UPDATE that grew a second SET clause cannot pass by touching
-     * something nobody is asserting on.
-     *
-     * The chain row is shared property: `is_active` gates every reader,
-     * `rpc_url`/`rest_url` are what wallet linking and holdings dial, and
-     * the identity fields are what a Hall renders. An operator switching
-     * the SCANNER off for a chain must not be able to disturb any of it.
-     */
-    public function testTheToggleLeavesEveryOtherColumnByteIdentical(): void
-    {
-        $chainId = $this->firstChainId();
-
-        $before = $this->rowSnapshot($chainId);
-        self::assertNotSame([], $before, 'the chain row must be readable to be compared');
-        self::assertArrayHasKey(self::COLUMN, $before);
-        self::assertGreaterThan(
-            5,
-            count($before),
-            'a snapshot of one or two columns would make the comparison below vacuous'
-        );
-        self::assertSame('0', (string) $before[self::COLUMN], 'precondition: ships disabled');
-
-        self::assertTrue(ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, true));
-
-        $after = $this->rowSnapshot($chainId);
-        self::assertSame('1', (string) $after[self::COLUMN], 'the one column that was supposed to move');
-
-        unset($before[self::COLUMN], $after[self::COLUMN]);
-        self::assertSame(
-            $before,
-            $after,
-            'enabling discovery must change exactly one column of wp_bcc_chains'
-        );
-
-        // Named explicitly as well, because these are the ones whose loss
-        // would surface far away from the scanner.
-        self::assertSame('1', (string) $after['is_active'], 'the chain must stay active');
-        self::assertArrayHasKey('rest_url', $after);
-        self::assertArrayHasKey('rpc_url', $after);
-        self::assertArrayHasKey('icon_url', $after);
-        self::assertArrayHasKey('color', $after);
-        self::assertArrayHasKey('description', $after);
-
-        // …and the disable direction, from the enabled state.
-        $enabled = $this->rowSnapshot($chainId);
-        self::assertTrue(ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, false));
-        $disabled = $this->rowSnapshot($chainId);
-
-        self::assertSame('0', (string) $disabled[self::COLUMN]);
-        unset($enabled[self::COLUMN], $disabled[self::COLUMN]);
-        self::assertSame($enabled, $disabled, 'disabling discovery must change exactly one column too');
-    }
-
-    /**
-     * And the chain is still a chain afterwards.
-     *
-     * Same claim as testADisabledChainIsStillReturnedByEveryGeneralAccessor
-     * but taken around BOTH edges of the toggle rather than from a resting
-     * state: the accessors are re-checked immediately after a write, i.e.
-     * against the cache the write just invalidated, which is where a
-     * botched invalidation would actually show up.
-     */
-    public function testEveryAccessorStillResolvesTheChainAfterEitherDirection(): void
-    {
-        $wpdb    = $GLOBALS['wpdb'];
-        $chainId = $this->firstChainId();
-
-        $slug = (string) $wpdb->get_var($wpdb->prepare(
-            'SELECT slug FROM `' . ChainRepository::table() . '` WHERE id = %d',
-            $chainId
-        ));
-        self::assertNotSame('', $slug);
-
-        foreach ([true, false] as $enabled) {
-            self::assertTrue(ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, $enabled));
-
-            $direction = $enabled ? 'after enabling' : 'after disabling';
-
-            self::assertNotNull(ChainRepository::getById($chainId), "getById {$direction}");
-            self::assertNotNull(ChainRepository::getBySlug($slug), "getBySlug {$direction}");
-            self::assertSame($chainId, ChainRepository::resolveId($slug), "resolveId {$direction}");
-            self::assertSame($chainId, ChainRepository::resolveIdAnyState($slug), "resolveIdAnyState {$direction}");
-
-            $activeIds = array_map(static fn(object $c): int => (int) $c->id, ChainRepository::getActive());
-            self::assertContains($chainId, $activeIds, "getActive {$direction}");
-
-            // The projection still carries the flag, and it reads back as
-            // the value just written — the accessors and the toggle agree.
-            self::assertSame($enabled, $this->cachedFlag($chainId), "cached projection {$direction}");
-        }
-    }
 
     /**
      * Every column of one chain row, keyed by column name.
@@ -470,99 +356,6 @@ final class ChainCosmwasmDiscoveryFlagIntegrationTest extends TestCase
 
     // ── (4) disabling discovery disturbs nothing else ───────────────────
 
-    public function testADisabledChainIsStillReturnedByEveryGeneralAccessor(): void
-    {
-        $wpdb    = $GLOBALS['wpdb'];
-        $chainId = $this->firstChainId();
 
-        $slug = (string) $wpdb->get_var($wpdb->prepare(
-            'SELECT slug FROM `' . ChainRepository::table() . '` WHERE id = %d',
-            $chainId
-        ));
 
-        // Belt and braces: explicitly disabled, not merely defaulted.
-        ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, false);
-
-        // These are the accessors wallet linking (getBySlug — WalletLink*
-        // Services, WalletSeedService), holdings (getById/getBySlug —
-        // HoldingsService), the fetcher factory (getById), Halls
-        // (getBySlug / resolveIdAnyState — HallsService) and the admin
-        // screens (getAll) actually call. None of them may lose a chain
-        // because the SCANNER was told to leave it alone.
-        self::assertNotNull(ChainRepository::getById($chainId), 'getById');
-        self::assertNotNull(ChainRepository::getBySlug($slug), 'getBySlug');
-        self::assertSame($chainId, ChainRepository::resolveId($slug), 'resolveId');
-        self::assertSame($chainId, ChainRepository::resolveIdAnyState($slug), 'resolveIdAnyState');
-
-        $activeIds = array_map(static fn(object $c): int => (int) $c->id, ChainRepository::getActive());
-        self::assertContains($chainId, $activeIds, 'getActive');
-
-        $allIds = array_map(static fn(object $c): int => (int) $c->id, ChainRepository::getAll());
-        self::assertContains($chainId, $allIds, 'getAll');
-
-        // is_active is the flag every one of those readers filters on, and
-        // it must be completely untouched by the discovery opt-in.
-        self::assertSame(
-            1,
-            (int) $wpdb->get_var($wpdb->prepare(
-                'SELECT is_active FROM `' . ChainRepository::table() . '` WHERE id = %d',
-                $chainId
-            )),
-            'disabling discovery must not deactivate the chain'
-        );
-    }
-
-    public function testADisabledChainStillResolvesThroughTheJoinsOtherTablesUse(): void
-    {
-        $wpdb    = $GLOBALS['wpdb'];
-        $chainId = $this->firstChainId();
-        ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, false);
-
-        // WalletRepository, ValidatorRepository, CollectionRepository and
-        // NftSelectionRepository all reach chains via
-        // `ChainRepository::table()` in a JOIN rather than through the
-        // cached projection. The shape below is theirs: join on chain_id,
-        // project slug + chain_type. Nothing in it filters on the new
-        // column, and this fails if something ever starts to.
-        $row = $wpdb->get_row($wpdb->prepare(
-            'SELECT c.slug AS slug, c.chain_type AS chain_type
-               FROM `' . ChainRepository::table() . '` c
-              WHERE c.id = %d AND c.is_active = 1
-              LIMIT 1',
-            $chainId
-        ));
-
-        self::assertNotNull($row, 'a chain with discovery off must still join');
-        self::assertNotSame('', (string) $row->slug);
-    }
-
-    public function testTheIdentityEditorAndTheDiscoveryToggleDoNotOverwriteEachOther(): void
-    {
-        $wpdb    = $GLOBALS['wpdb'];
-        $chainId = $this->firstChainId();
-
-        ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, true);
-        ChainRepository::updateIdentity($chainId, 'About this chain.', 'https://cdn.example/i.png', '#123456');
-
-        $row = $wpdb->get_row($wpdb->prepare(
-            'SELECT description, icon_url, color, ' . self::COLUMN . ' AS flag
-               FROM `' . ChainRepository::table() . '` WHERE id = %d',
-            $chainId
-        ));
-        self::assertNotNull($row);
-        self::assertSame('About this chain.', (string) $row->description);
-        self::assertSame(1, (int) $row->flag, 'saving identity must not clear the discovery opt-in');
-
-        // …and the reverse: the toggle must not blank the identity fields.
-        ChainRepository::setCosmwasmNftDiscoveryEnabled($chainId, false);
-
-        $after = $wpdb->get_row($wpdb->prepare(
-            'SELECT description, icon_url, color FROM `' . ChainRepository::table() . '` WHERE id = %d',
-            $chainId
-        ));
-        self::assertNotNull($after);
-        self::assertSame('About this chain.', (string) $after->description);
-        self::assertSame('https://cdn.example/i.png', (string) $after->icon_url);
-        self::assertSame('#123456', (string) $after->color);
-    }
 }

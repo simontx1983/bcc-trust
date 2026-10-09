@@ -533,7 +533,7 @@ final class NftCapabilityScaffoldBoundaryTest extends TestCase
                 // THIS object, never the capability model, so no worker
                 // appears in this list. That indirection is the point, not
                 // a way around the rule.
-                'app/Domain/Onchain/Support/DiscoveryReadiness.php',
+        
             ],
             self::filesContaining('NftChainCapability::'),
             'only the NFT discovery control plane and its editor may consult the capability model'

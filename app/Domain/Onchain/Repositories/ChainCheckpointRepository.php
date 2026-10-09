@@ -4,7 +4,7 @@ namespace BCC\Trust\Onchain\Repositories;
 
 use BCC\Core\DB\DB;
 use BCC\Core\Log\Logger;
-use BCC\Trust\Onchain\ValueObjects\CosmwasmEnumerationFailure;
+
 
 if (!defined('ABSPATH')) {
     exit;
@@ -156,25 +156,6 @@ final class ChainCheckpointRepository
         return self::readAll(false);
     }
 
-    /**
-     * Every chain's checkpoint row, FAIL-CLOSED.
-     *
-     * Same one query as {@see getAll()} — deliberately NOT a second query
-     * — under the opposite policy, because the two callers want opposite
-     * things from a failed read. The worker-side dashboards degrade to
-     * "no rows yet"; the CosmWasm scanner panel
-     * ({@see \BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot::buildSummary()})
-     * must not, because an empty checkpoint set there renders as every
-     * chain sitting `idle` and never scanned — a specific, wrong,
-     * reassuring claim.
-     *
-     * @return list<CheckpointRow>
-     * @throws RepositoryReadFailure when the read did not run
-     */
-    public static function getAllOrFail(): array
-    {
-        return self::readAll(true);
-    }
 
     /**
      * The single checkpoint-listing read behind {@see getAll()} and
@@ -542,50 +523,6 @@ final class ChainCheckpointRepository
 
     // ── CosmWasm discovery (per-chain worker state + progress) ──────────
 
-    /**
-     * Set the durable per-chain discovery state, optionally recording a
-     * sanitized error excerpt.
-     *
-     * `$error` is capped at 255 chars — the same convention
-     * {@see recordFailure()} uses. Raw LCD bodies are never stored.
-     */
-    /**
-     * Record WHY the last CosmWasm ENUMERATION attempt failed, and nothing else.
-     *
-     * ── WHY THIS IS NOT `setCwDiscoveryState()` ─────────────────────────
-     * The code-tail path has no settled state to write. It must not guess
-     * one: passing the row's current state back in requires reading a
-     * checkpoint that may be null, and inventing a state there would let a
-     * transport blip silently move a chain between `backfilling` and
-     * `backfilled`. This method touches ONE column, so it cannot.
-     *
-     * ⚠ THE TOKEN IS VALIDATED, NOT TRUSTED. Only a member of
-     * {@see CosmwasmEnumerationFailure::codes()} is ever written, so no
-     * caller — present or future — can route a provider sentence, an
-     * exception message or a URL into this column by passing it here.
-     *
-     * Cleared on the next successful enumeration by
-     * {@see recordCwBackfillProgress()} and {@see advanceCwCodeWatermark()},
-     * both of which already set `cw_last_error = NULL`.
-     */
-    public static function recordCwEnumerationFailure(int $chainId, string $code): bool
-    {
-        if ($chainId <= 0 || !CosmwasmEnumerationFailure::isValid($code)) {
-            return false;
-        }
-
-        global $wpdb;
-
-        $updated = $wpdb->update(
-            self::table(),
-            ['cw_last_error' => $code],
-            ['chain_id' => $chainId],
-            ['%s'],
-            ['%d']
-        );
-
-        return is_int($updated) && $updated >= 0;
-    }
 
     /**
      * Clear the enumeration-failure token after a CONFIRMED successful
