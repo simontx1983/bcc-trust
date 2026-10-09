@@ -47,6 +47,20 @@ final class ChainCosmwasmDiscoveryFlagIntegrationTest extends TestCase
     private const COLUMN = 'cosmwasm_nft_discovery_enabled';
 
     /**
+     * A RETAINED projected flag, used where a case needs to observe the
+     * cached projection rather than the retired column.
+     *
+     * ⚠ S9a removed `cosmwasm_nft_discovery_enabled` from
+     * `ChainRepository::COLUMNS`, so it is no longer observable through the
+     * projection at all. The cache-invalidation property that case (3) pins
+     * is about `ChainRepository::clearCache()` and is entirely unaffected by
+     * which column it watches — it just needs one that is actually projected.
+     * `bcc_supports_nft_collections` is retained, is a tinyint flag
+     * defaulting to 0, and stays in COLUMNS by explicit design note.
+     */
+    private const OBSERVABLE_COLUMN = 'bcc_supports_nft_collections';
+
+    /**
      * The registry exactly as the REAL installer left it, captured before
      * any test in this class normalises the column.
      *
@@ -89,7 +103,44 @@ final class ChainCosmwasmDiscoveryFlagIntegrationTest extends TestCase
         $wpdb->query(
             'UPDATE `' . ChainRepository::table() . '` SET ' . self::COLUMN . ' = 0'
         );
+        // ⚠ S9a ALSO RESETS THE OBSERVABLE FLAG. Case (3) watches
+        // `bcc_supports_nft_collections` through the cached projection now,
+        // and this suite shares `wp_bcc_chains` with tests that deliberately
+        // permit a chain. Without this, that case's "precondition: disabled"
+        // would depend on execution order — which is exactly the kind of
+        // flake that gets a real failure dismissed later.
+        $wpdb->query(
+            'UPDATE `' . ChainRepository::table() . '` SET ' . self::OBSERVABLE_COLUMN . ' = 0'
+        );
         ChainRepository::clearCache();
+    }
+
+    /**
+     * ⚠ LEAVE THE SHARED TABLE AS WE FOUND IT.
+     *
+     * `setUp()` alone is not enough, and getting this wrong is what the CI
+     * run on 80fdc608 caught: case (3) writes
+     * `bcc_supports_nft_collections = 1` and asserts on it, and with no
+     * tearDown that value survived into
+     * `ChainNftCapabilityEditorIntegrationTest`, whose
+     * `testTheInstallerEnablesNothingAndSeedsNoOverride` then found one chain
+     * with product support where it requires none.
+     *
+     * A `setUp()` reset protects this file's own cases from each other; only
+     * a tearDown protects the suites that run after it. `wp_bcc_chains` is
+     * shared, PHPUnit runs this suite sequentially in one process, and both
+     * columns are flags whose shipped state is 0.
+     */
+    protected function tearDown(): void
+    {
+        $wpdb = $GLOBALS['wpdb'];
+        $wpdb->query(
+            'UPDATE `' . ChainRepository::table() . '` SET ' . self::COLUMN . ' = 0, '
+            . self::OBSERVABLE_COLUMN . ' = 0'
+        );
+        ChainRepository::clearCache();
+
+        parent::tearDown();
     }
 
     /** @return array<string, mixed>|null the INFORMATION_SCHEMA row */
@@ -230,19 +281,54 @@ final class ChainCosmwasmDiscoveryFlagIntegrationTest extends TestCase
         );
     }
 
-    // ── (2) the column is in the cached projection ──────────────────────
+    // ── (2) the column is NOT in the cached projection (S9a) ────────────
 
-    public function testTheCachedProjectionCarriesTheColumn(): void
+    /**
+     * ⚠⚠ THIS CASE WAS INVERTED IN S9a, AND THE OLD FORM WAS A DELIBERATE
+     * PIN AGAINST EXACTLY THIS CHANGE — so the inversion needs its reason
+     * on the record.
+     *
+     * It asserted that every projected chain row CARRIED
+     * `cosmwasm_nft_discovery_enabled`, with the message: "the worker reads
+     * an absent column as INELIGIBLE, so dropping it from
+     * ChainRepository::COLUMNS would silently stop all discovery".
+     *
+     * That reasoning was correct and is now void: **there is no worker.** S8
+     * deleted `CosmwasmDiscoveryWorker`, and a comment-stripped sweep over
+     * `app/` and `includes/` finds the column named in exactly one
+     * executable place — `schema-chains.php`, the installer that ADDS it,
+     * which S9a retains on purpose. Nothing reads it.
+     *
+     * So the property worth pinning is the opposite one, and it is what makes
+     * S9b's drop safe: the projection must NOT name a column it no longer
+     * needs, because a `SELECT` naming a dropped column fails the whole read
+     * and `ChainRepository` caches an error sentinel.
+     *
+     * ⚠ The COLUMN itself is still on the table — case (1) above still
+     * asserts the installer adds it. Only the projection stopped asking.
+     */
+    public function testTheCachedProjectionNoLongerCarriesTheRetiredColumn(): void
     {
         $chains = ChainRepository::getActive();
         self::assertNotSame([], $chains, 'the seeded registry must produce active chains');
 
         foreach ($chains as $chain) {
-            self::assertTrue(
-                array_key_exists(self::COLUMN, get_object_vars($chain)),
-                'every projected chain row must carry ' . self::COLUMN
-                    . ' — the worker reads an absent column as INELIGIBLE, so dropping it '
-                    . 'from ChainRepository::COLUMNS would silently stop all discovery'
+            $vars = get_object_vars($chain);
+
+            self::assertArrayNotHasKey(
+                self::COLUMN,
+                $vars,
+                self::COLUMN . ' is back in the projection — S9b drops that column, and a '
+                    . 'projection naming a dropped column fails silently behind the error sentinel'
+            );
+
+            // Anti-vacuity: the row must be a real projection, not an empty
+            // object that would satisfy the assertion above for free.
+            self::assertArrayHasKey('slug', $vars, 'the projected row must be populated');
+            self::assertArrayHasKey(
+                self::OBSERVABLE_COLUMN,
+                $vars,
+                'the RETAINED capability flag must still be projected'
             );
         }
 
@@ -250,7 +336,15 @@ final class ChainCosmwasmDiscoveryFlagIntegrationTest extends TestCase
         // the same COLUMNS constant, and must agree.
         $byId = ChainRepository::getById($this->firstChainId());
         self::assertNotNull($byId);
-        self::assertTrue(array_key_exists(self::COLUMN, get_object_vars($byId)));
+        $vars = get_object_vars($byId);
+        self::assertArrayNotHasKey(self::COLUMN, $vars);
+        self::assertArrayHasKey(self::OBSERVABLE_COLUMN, $vars);
+
+        // And the column really is still ON THE TABLE — S9a drops nothing.
+        self::assertNotNull(
+            $this->columnDefinition(),
+            'S9a must not have dropped the column; that is S9b, behind a backup'
+        );
     }
 
     // ── (3) the toggle invalidates the cache ────────────────────────────
@@ -267,15 +361,20 @@ final class ChainCosmwasmDiscoveryFlagIntegrationTest extends TestCase
         // screen or wp-cli one-liner would do if it did not go through the
         // repository.
         $wpdb->query($wpdb->prepare(
-            'UPDATE `' . ChainRepository::table() . '` SET ' . self::COLUMN . ' = 1 WHERE id = %d',
+            'UPDATE `' . ChainRepository::table() . '` SET ' . self::OBSERVABLE_COLUMN . ' = 1 WHERE id = %d',
             $chainId
         ));
 
-        // THE HAZARD IS REAL: the cached projection has not moved, so the
-        // scanner would keep acting on the old answer for the whole TTL.
-        // (Stated in the enable direction here because it is observable;
-        // the direction that MATTERS is the mirror image — a just-disabled
-        // chain that keeps getting scanned.)
+        // THE HAZARD IS REAL: the cached projection has not moved, so every
+        // reader keeps acting on the old answer for the whole TTL.
+        //
+        // ⚠ The original note said "the scanner would keep acting on the old
+        // answer". There is no scanner — S8 deleted it. The hazard survives
+        // it unchanged, because the flag now watched here
+        // (`bcc_supports_nft_collections`) gates whether a chain can take a
+        // collection at all, and `NftChainCapability` reads it through this
+        // same cached projection. A stale "permitted" answer is the one that
+        // matters, exactly as a stale "scan me" answer used to be.
         self::assertFalse(
             $this->cachedFlag($chainId),
             'this assertion is what makes the invalidation below worth having'
@@ -348,7 +447,13 @@ final class ChainCosmwasmDiscoveryFlagIntegrationTest extends TestCase
             }
             $vars = get_object_vars($chain);
 
-            return (int) ($vars[self::COLUMN] ?? 0) === 1;
+            // ⚠ READS THE RETAINED FLAG SINCE S9a. This read `self::COLUMN`,
+            // which the projection no longer carries, so it would silently
+            // return 0 for every chain and the invalidation case below would
+            // pass for the wrong reason in one direction and fail in the
+            // other. The property under test is `clearCache()`, not which
+            // flag is watched.
+            return (int) ($vars[self::OBSERVABLE_COLUMN] ?? 0) === 1;
         }
 
         self::fail("chain {$chainId} is not in the active projection");

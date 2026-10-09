@@ -359,9 +359,11 @@ final class ChainsCapabilityColumnAnchorIntegrationTest extends TestCase
         bcc_onchain_add_chains_nft_capability_columns();
         bcc_onchain_add_chains_cosmwasm_discovery_column();
         ChainRepository::clearCache();
-
-        // `ChainRepository::COLUMNS` names all three, so the projection only
-        // reads at all once every one of them exists.
+        // ⚠ WAS "names all three" UNTIL S9a. `ChainRepository::COLUMNS` now
+        // names the two CAPABILITY columns and no longer names
+        // `cosmwasm_nft_discovery_enabled`. Both installers still run here
+        // because this case is about the ANCHOR, and the anchor question is
+        // only interesting when both columns are being added.
 
         $wpdb = $GLOBALS['wpdb'];
         $id = (int) $wpdb->get_var($wpdb->prepare(
@@ -376,5 +378,133 @@ final class ChainsCapabilityColumnAnchorIntegrationTest extends TestCase
         self::assertSame('anchor-fixture', (string) $row->slug);
         self::assertSame('0', (string) $row->bcc_supports_nft_collections);
         self::assertSame('0', (string) $row->manual_collection_discovery_enabled);
+    }
+
+    // ══ 2. S9a — the projection no longer depends on the retired column ══
+    //
+    // These three cases are the forward-looking half, and they are the reason
+    // S9 is split into two deploys. S9b will DROP
+    // `cosmwasm_nft_discovery_enabled`. Dropping a column that
+    // `ChainRepository::COLUMNS` still names does not degrade gracefully: the
+    // whole projection read fails, this class caches an ERROR_SENTINEL, and
+    // the operator-visible symptom is every chain reporting UNKNOWN with
+    // nothing in the log. So the projection has to stop naming the column
+    // BEFORE the column goes, and that has to be proved against a real
+    // engine — `schema-drift-guard.php` compares table names and index
+    // tuples only and is column-blind, so CI cannot catch this on its own.
+
+    /**
+     * ⚠⚠ THE S9b REHEARSAL. The retired column is ABSENT and the projection
+     * must still read.
+     *
+     * Built by running ONLY the capability installer against the older
+     * schema, so the table reaches exactly the shape S9b will produce: the
+     * two capability columns present, `cosmwasm_nft_discovery_enabled` never
+     * added. Before S9a this case could not pass.
+     */
+    public function testTheChainProjectionReadsWithTheRetiredScannerColumnAbsent(): void
+    {
+        $this->createOlderSchemaTable();
+        $this->seedRow();
+
+        // Deliberately NOT calling bcc_onchain_add_chains_cosmwasm_discovery_column().
+        bcc_onchain_add_chains_nft_capability_columns();
+        ChainRepository::clearCache();
+
+        self::assertFalse(
+            $this->hasColumn(self::RETIRED_ANCHOR),
+            'precondition: the retired column must really be absent'
+        );
+        self::assertTrue(
+            $this->hasColumn('bcc_supports_nft_collections'),
+            'anti-vacuity: the capability columns must really be present'
+        );
+
+        $wpdb = $GLOBALS['wpdb'];
+        $id = (int) $wpdb->get_var($wpdb->prepare(
+            'SELECT id FROM `' . $this->table() . '` WHERE slug = %s',
+            'anchor-fixture'
+        ));
+        self::assertGreaterThan(0, $id, 'anti-vacuity: the fixture row has an id');
+
+        $row = ChainRepository::getById($id);
+
+        self::assertIsObject($row, 'the projection must read with the retired column gone');
+        self::assertSame('anchor-fixture', (string) $row->slug);
+        self::assertSame('0', (string) $row->bcc_supports_nft_collections);
+        self::assertSame('0', (string) $row->manual_collection_discovery_enabled);
+
+        // And the row must NOT carry the retired property, because the
+        // projection does not ask for it.
+        self::assertFalse(
+            property_exists($row, self::RETIRED_ANCHOR),
+            'the projection must not surface a column it no longer selects'
+        );
+
+        // getAll() uses the same COLUMNS list and is what the admin surfaces
+        // read, so it has to survive the drop too.
+        self::assertNotSame([], ChainRepository::getAll(), 'getAll() must read as well');
+    }
+
+    /**
+     * And with the column still PRESENT — today's production shape — the
+     * projection reads identically.
+     *
+     * This is the other half of the pair: S9a must not have traded one
+     * breakage for another. Production is on this shape right now.
+     */
+    public function testTheChainProjectionReadsWithTheRetiredScannerColumnPresent(): void
+    {
+        $this->createOlderSchemaTable();
+        $this->seedRow();
+
+        bcc_onchain_add_chains_nft_capability_columns();
+        bcc_onchain_add_chains_cosmwasm_discovery_column();
+        ChainRepository::clearCache();
+
+        self::assertTrue(
+            $this->hasColumn(self::RETIRED_ANCHOR),
+            'precondition: the retired column must really be present'
+        );
+
+        $wpdb = $GLOBALS['wpdb'];
+        $id = (int) $wpdb->get_var($wpdb->prepare(
+            'SELECT id FROM `' . $this->table() . '` WHERE slug = %s',
+            'anchor-fixture'
+        ));
+        $row = ChainRepository::getById($id);
+
+        self::assertIsObject($row, 'the projection must read with the column present');
+        self::assertSame('anchor-fixture', (string) $row->slug);
+        self::assertFalse(
+            property_exists($row, self::RETIRED_ANCHOR),
+            'present-but-unselected must look exactly like absent to a caller'
+        );
+    }
+
+    /**
+     * The structural pin: the SELECT list must not name the retired column.
+     *
+     * The two cases above would both keep passing if someone re-added the
+     * column to `COLUMNS` while it still existed — and S9b's drop would then
+     * break production silently. This reads the constant itself.
+     */
+    public function testTheProjectionConstantDoesNotNameTheRetiredColumn(): void
+    {
+        $reflected = new \ReflectionClass(ChainRepository::class);
+        $columns   = (string) $reflected->getConstant('COLUMNS');
+
+        self::assertNotSame('', $columns, 'anti-vacuity: the constant must be readable');
+        self::assertStringContainsString(
+            'bcc_supports_nft_collections',
+            $columns,
+            'anti-vacuity: this really is the projection list'
+        );
+        self::assertStringNotContainsString(
+            self::RETIRED_ANCHOR,
+            $columns,
+            'the retired scanner column must not return to the projection: S9b drops it, '
+            . 'and a projection naming a dropped column fails silently behind the error sentinel'
+        );
     }
 }

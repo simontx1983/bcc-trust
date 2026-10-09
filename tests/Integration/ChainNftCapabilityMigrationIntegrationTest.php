@@ -692,11 +692,10 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
         $chain = self::fullyPermittedCosmosChain();
         self::markCwUnsupported((int) $chain->id);
 
-        $checkpoint = ChainCheckpointRepository::get((int) $chain->id);
-        self::assertNotNull($checkpoint);
         self::assertSame(
             ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
-            (string) $checkpoint->cw_discovery_state
+            self::storedCwDiscoveryState((int) $chain->id),
+            'the measurement must be on the row, read without the projection'
         );
     }
 
@@ -762,11 +761,10 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
 
         // Anti-vacuity: the stale value really was written, so the equality
         // above is not comparing two identical no-ops.
-        $checkpoint = ChainCheckpointRepository::get((int) $chain->id);
-        self::assertNotNull($checkpoint);
         self::assertSame(
             ChainCheckpointRepository::CW_STATE_UNSUPPORTED,
-            (string) $checkpoint->cw_discovery_state
+            self::storedCwDiscoveryState((int) $chain->id),
+            'the stale value must be on the row, read without the projection'
         );
     }
 
@@ -801,14 +799,58 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
         return self::fullyPermittedChain('cosmos');
     }
 
-    /** Record the measured HTTP 501 on a chain's checkpoint row. */
+    /**
+     * Record the measured HTTP 501 on a chain's checkpoint row.
+     *
+     * ⚠ WRITES THE COLUMN DIRECTLY SINCE S9a. This called
+     * `ChainCheckpointRepository::setCwDiscoveryState()`, which S9a deleted
+     * along with the other eleven `cw_*` writers that went callerless when
+     * S8 removed the scanner. The COLUMN is still on the table until S9b,
+     * and the property these cases pin — that a stored measurement changes
+     * no capability answer — is unaffected by which code does the writing.
+     *
+     * Writing it by hand is in fact the stronger arrangement: the value now
+     * reaches the row without passing through any production code at all, so
+     * the equality below cannot be satisfied by a writer that quietly
+     * stopped writing.
+     */
     private static function markCwUnsupported(int $chainId): void
     {
         ChainCheckpointRepository::ensureExists($chainId);
-        ChainCheckpointRepository::setCwDiscoveryState(
-            $chainId,
-            ChainCheckpointRepository::CW_STATE_UNSUPPORTED
+
+        $wpdb    = $GLOBALS['wpdb'];
+        $updated = $wpdb->update(
+            ChainCheckpointRepository::table(),
+            ['cw_discovery_state' => ChainCheckpointRepository::CW_STATE_UNSUPPORTED],
+            ['chain_id' => $chainId],
+            ['%s'],
+            ['%d']
         );
+
+        // `$wpdb->update()` returns false on error and 0 when the row already
+        // held the value. Both are acceptable here; what is NOT acceptable is
+        // the row being absent, which `ensureExists()` above rules out.
+        self::assertNotFalse($updated, 'the stale measurement must be writable');
+    }
+
+    /**
+     * Read `cw_discovery_state` WITHOUT the repository projection.
+     *
+     * S9a removed the seven `cw_*` columns from
+     * `ChainCheckpointRepository::COLUMNS`, so `get()` no longer returns the
+     * field. These cases still need to prove the value landed, so they go
+     * straight to the table — which is also what makes them independent of
+     * the projection they are testing around.
+     */
+    private static function storedCwDiscoveryState(int $chainId): ?string
+    {
+        $wpdb = $GLOBALS['wpdb'];
+        $value = $wpdb->get_var($wpdb->prepare(
+            'SELECT cw_discovery_state FROM `' . ChainCheckpointRepository::table() . '` WHERE chain_id = %d',
+            $chainId
+        ));
+
+        return $value === null ? null : (string) $value;
     }
 
     /**
