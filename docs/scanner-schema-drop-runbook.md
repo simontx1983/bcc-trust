@@ -542,7 +542,7 @@ The migration is idempotent at every step and fail-closed in both directions, so
 - `wp_options`: `bcc_trust_cw721_scan_options_cleaned` ⚠ — this matches the prefix an earlier draft swept. It is another migration's **completion marker**, and the measured "1 row under `bcc_trust_cw721_scan_%`" on both environments **is that marker**. Deleting it would make `cleanup_cw721_scan_options_v1` run again.
 - every other table in the schema.
 
-### 13.2 ⚠⚠ Automatic startup work during rollback — two traps
+### 13.2 ⚠⚠ Automatic startup work during rollback — three traps
 
 Reverting the S9b code does **not** put the data back, and two automatic behaviours make the state look better than it is.
 
@@ -561,19 +561,126 @@ Measured on staging 2026-10-09: `bcc_trust_scanner_schema_dropped` **ABSENT** (n
 
 ### 13.3 Recovery — explicit schema and data, never an inferred one
 
-**The restore does not depend on any plugin version.** This is the property S9a bought: the retained projections no longer name these columns, so restored tables and columns are **inert** to post-S9b code. It reads neither, so it neither breaks nor needs rolling back.
+**The restore does not depend on any plugin version.** This is the property S9a
+bought: the retained projections no longer name these columns, so restored
+tables and columns are **inert** to post-S9b code. It reads neither, so it
+neither breaks nor needs rolling back.
 
-⚠ **Do not rely on an older plugin to recreate the schema.** It would create the tables *empty* (Trap 1) and its `CREATE TABLE` is not guaranteed to match what the environment actually had — production's `cosmwasm_nft_discovery_enabled` sits `AFTER description`, which no installer produces. Use the captured artefact and nothing else.
+⚠⚠ **RESTORE WITH THE POST-S9b CODE IN PLACE. DO NOT REVERT THE CODE FIRST.**
+Tested 2026-10-09 in isolated MariaDB 11.8.9, and reverting first **breaks the
+restore**:
 
-Order, and the order is load-bearing:
+A code revert restores the three `schema-*.php` files and
+`bcc_onchain_add_chains_cosmwasm_discovery_column()`. The stamp returns to
+`1a0bf150b1`, differs from the stored value, dbDelta runs, and it re-creates
+the three tables **empty** and re-adds the chains column — **appended**, at a
+different ordinal. The artefact then hits
 
-1. **Three tables** — the artefact's `CREATE TABLE` statements, verbatim.
-2. **Eight columns** — the artefact's `ALTER … ADD COLUMN … AFTER …` statements, in the order the artefact lists them.
-3. **The index** — `ALTER … ADD KEY idx_cw_discovery …`, **after** step 2. Before it, this fails with `ERROR 1072`; reproduced in the 2026-10-09 rehearsal and asserted in both directions by the test suite.
-4. **Rows** — the artefact's `INSERT`s for the three tables, then its `UPDATE`s for the retired-column values on the surviving parent rows. `UPDATE`, not `INSERT`: those rows survived the drop and must not be duplicated.
-5. **Verify** (§7). Counts, digests, column count, column **order**, and index column order.
-6. **`wp cache flush`.**
-7. Only if the data must be *used* again — which nothing currently does — restore the pre-S9b plugin tree. A separate, optional decision, not a precondition of getting the rows back.
+```
+ERROR 1060 (42S21) at line 120: Duplicate column name 'cosmwasm_nft_discovery_enabled'
+```
+
+and `mariadb` **aborts the rest of the file**. Measured outcome of that abort:
+
+| | after the aborted restore | expected |
+|---|---|---|
+| `wp_bcc_cosmwasm_code_families` | **0 rows** | 742 |
+| `wp_bcc_cosmwasm_contracts` | **0 rows** | 3,762 |
+| `cw_*` columns | 7 of 7 present | 7 |
+| `idx_cw_discovery` | **absent** | present |
+| `cw_discovery_state` non-default values | **0** | 1 |
+
+⚠ **That is the worst possible state: the structures are there and the data is
+not.** It looks restored. Nothing errors afterwards. Only a digest comparison
+finds it.
+
+#### ⚠ 13.3.1 Run this precondition check BEFORE the restore
+
+Not optional, and it is what turns a mid-file abort into a refusal before any
+statement runs:
+
+```sql
+SELECT COUNT(*) FROM information_schema.TABLES
+ WHERE TABLE_SCHEMA = DATABASE()
+   AND TABLE_NAME IN ('wp_bcc_cosmwasm_code_families',
+                      'wp_bcc_cosmwasm_contracts',
+                      'wp_bcc_discovery_runs');          -- must be 0
+
+SELECT COUNT(*) FROM information_schema.COLUMNS
+ WHERE TABLE_SCHEMA = DATABASE()
+   AND ((TABLE_NAME = 'wp_bcc_chain_checkpoints' AND COLUMN_NAME LIKE 'cw\_%')
+     OR (TABLE_NAME = 'wp_bcc_chains' AND COLUMN_NAME = 'cosmwasm_nft_discovery_enabled'));
+                                                          -- must be 0
+
+SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.STATISTICS
+ WHERE TABLE_SCHEMA = DATABASE() AND INDEX_NAME = 'idx_cw_discovery';
+                                                          -- must be 0
+
+SELECT (SELECT COUNT(*) FROM wp_bcc_chains) AS chains,
+       (SELECT COUNT(*) FROM wp_bcc_chain_checkpoints) AS checkpoints;
+                                                          -- must be 21 and 8
+```
+
+**All three counts must be 0 and both parent row counts must be intact.** If
+anything is non-zero, something has already partially restored or a revert has
+re-added it. Resolve that first — drop exactly what is present — and re-run the
+check. ⚠ Do **not** reach for an ad-hoc `DROP INDEX … ; DROP COLUMN …`
+sequence: a `DROP INDEX` on an already-absent index raises `ERROR 1091` and
+aborts the rest of the statement, leaving the columns in place. Drop only what
+the check reports as present.
+
+The artefact's statements are deliberately **not** `IF NOT EXISTS`. A restore
+that silently steps over an unexpectedly-present column would hide exactly the
+mismatch this check exists to find, and `ADD COLUMN IF NOT EXISTS` is MariaDB
+syntax that MySQL does not accept.
+
+#### ⚠⚠ 13.3.2 Confirm the cleanup migration cannot re-run during the restore
+
+**Check `bcc_trust_scanner_schema_dropped` before restoring.**
+
+- **Present** → the migration reported `COMPLETE`.
+  `bcc_trust_execute_migration()` returns immediately when the `done_option` is
+  set, so the migration **cannot** run again and cannot re-drop what you
+  restore. This is the safe state, and it is the normal one after a successful
+  execution.
+- **ABSENT** → ⛔ **do not restore yet.** The migration is still pending and the
+  runner attempts it on **every request**, so anything restored is re-dropped
+  almost immediately. Let it finish first — it is idempotent and will — and
+  only then decide whether the data is wanted back.
+
+And the schema pass cannot interfere either: `bcc-trust.php` gates it on
+`if ($stored === BCC_TRUST_SCHEMA_VERSION) { return; }`, so with the stored
+stamp at `db054e2c71` and post-S9b code computing `db054e2c71`, **no dbDelta
+runs at all** and nothing re-creates the tables under you.
+
+#### 13.3.3 Order, and the order is load-bearing
+
+1. **Precondition check** (§13.3.1) — all three counts 0, parents intact.
+2. **Done-option check** (§13.3.2) — `bcc_trust_scanner_schema_dropped` present.
+3. **Three tables** — the artefact's `CREATE TABLE` statements, verbatim.
+4. **Eight columns** — the artefact's `ALTER … ADD COLUMN … AFTER …`, in the
+   order the artefact lists them. The `AFTER` clauses restore the original
+   ordinals; a replay without them appends.
+5. **The index** — `ADD KEY idx_cw_discovery …`, **after** step 4. Before it,
+   `ERROR 1072`.
+6. **Rows** — the `INSERT`s for the three tables, then the `UPDATE`s for the
+   retired-column values on the surviving parent rows. `UPDATE`, not `INSERT`:
+   those rows survived the drop and must not be duplicated.
+7. **Verify** (§7). Counts, digests, column count, column **order**, index
+   column order.
+8. **`wp cache flush`.**
+9. Only if the data must be *used* again — which nothing currently does —
+   restore the pre-S9b plugin tree. A separate, optional decision, and
+   ⚠ **after** the data is back and verified, never before.
+
+**Unrelated data is untouched by all of this.** The artefact contains no
+`DELETE`, no `TRUNCATE` and no `DROP` except `DROP TABLE IF EXISTS` for the
+three tables it then re-creates. Its only writes to the two surviving parents
+are `ADD COLUMN`, `ADD KEY`, and `UPDATE … WHERE <primary key>` against rows
+that already exist. Verified in the rehearsal: with preconditions met the
+restore completes with exit 0 and **30/30** checks, including that all 21 chain
+rows, all 8 checkpoint rows and every unrelated column, index and value on both
+parents are unchanged.
 
 ### 13.4 ⚠⚠⚠ The unpinned-main production hazard
 
