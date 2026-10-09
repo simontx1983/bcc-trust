@@ -66,24 +66,25 @@ final class ChainRepository
      *  permanently un-scannable with no error anywhere. Pinned by
      *  ChainNftCapabilityMigrationIntegrationTest.
      *
-     *  ⚠ `cosmwasm_nft_discovery_enabled` LEFT THIS LIST IN S9a, AND THE
-     *  COLUMN IS STILL ON THE TABLE. It was the per-chain opt-in for the
+     *  ⚠ `cosmwasm_nft_discovery_enabled` LEFT THIS LIST IN S9a AND THE
+     *  COLUMN WAS DROPPED IN S9b. It was the per-chain opt-in for the
      *  chain-wide CosmWasm scanner. S8 deleted its only writer
      *  (`setCosmwasmNftDiscoveryEnabled`) and every reader; a
      *  comment-stripped sweep over `app/`, `includes/` and the bootstrap
      *  finds no `->cosmwasm_nft_discovery_enabled` anywhere.
      *
-     *  It is removed from the SELECT first, and dropped from the table
-     *  later in S9b, precisely BECAUSE of the warning above: a projection
-     *  that names a dropped column fails, and this class caches an error
-     *  sentinel, so the symptom would be every chain reporting UNKNOWN with
-     *  nothing in the log. Doing it in this order means S9b's drop cannot
-     *  produce that.
+     *  The ORDER was the safety argument, and it is worth keeping on the
+     *  record: removed from the SELECT in S9a while the column stayed, and
+     *  only then dropped in S9b. Reversed, a projection naming a dropped
+     *  column fails, this class caches an error sentinel, and the symptom is
+     *  every chain reporting UNKNOWN with nothing in the log.
      *
-     *  ⚠ `bcc_onchain_add_chains_cosmwasm_discovery_column()` is RETAINED by
-     *  S9a and still re-adds the column on a schema pass. That is correct
-     *  while the column is expected to exist; it must be deleted in the same
-     *  commit as the drop, or the installer puts the column straight back. */
+     *  ⚠ `bcc_onchain_add_chains_cosmwasm_discovery_column()` WAS DELETED IN
+     *  THE SAME COMMIT AS THE DROP, and it had to be. It re-added the column
+     *  on every schema pass, and the schema pass runs on the SAME first
+     *  request as `bcc_trust_drop_scanner_schema()` — so leaving it would
+     *  have put the column straight back inside that request. Pinned by
+     *  ScannerSchemaDropIntegrationTest::testNothingReAddsTheDroppedColumnOrTables. */
     private const COLUMNS = 'id, slug, name, chain_type, chain_id_hex, rpc_url, rest_url,
                  explorer_url, native_token, decimals, bech32_prefix, icon_url, color,
                  marketplace_template, description, is_testnet, is_active,

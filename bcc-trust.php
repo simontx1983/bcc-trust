@@ -269,10 +269,14 @@ require_once BCC_TRUST_PATH . 'includes/database/unschedule-hall-provision.php';
 // have been a no-op that never ran.
 require_once BCC_TRUST_PATH . 'includes/database/unschedule-discovery-maintenance.php';
 // PR 7.3 — adds bcc_discovery_runs.chunks_used to installs that already have
-// the table. Fresh installs get it from the CREATE TABLE; staging and
-// production both predate it, and a session ceiling cannot be enforced
-// without somewhere durable to count chunks.
-require_once BCC_TRUST_PATH . 'includes/database/add-discovery-run-chunks-used.php';
+// ⚠⚠⚠ S9b — the destructive scanner-schema drop. Three tables and eight
+// columns holding real rows. Runs through the migration runner below, NOT
+// dbDelta, and requires a fresh verified backup immediately before the
+// deploy that lands it — see docs/scanner-schema-drop-runbook.md.
+//
+// `add-discovery-run-chunks-used.php` was required here and is deleted in
+// the same change: it added a column to a table this migration drops.
+require_once BCC_TRUST_PATH . 'includes/database/drop-scanner-schema.php';
 // Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
 // and its registry, and runs the two backfills above on the ordinary
 // plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a
@@ -352,16 +356,15 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-nft-spam-contracts.php';
 // drivers the code registry already offers and can never grant a new one.
 // Empty on every install — an absent row means "registry default".
 require_once BCC_TRUST_PATH . 'includes/database/schema-chain-nft-capabilities.php';
-// CosmWasm CW-721 discovery (2026-08) — durable code-family inventory +
-// contract inventory. See each schema file's docblock for the five-table
-// division of responsibility and why non-NFT / inconclusive candidates
-// must NOT live on wp_bcc_onchain_collections.
-require_once BCC_TRUST_PATH . 'includes/database/schema-cosmwasm-code-families.php';
-require_once BCC_TRUST_PATH . 'includes/database/schema-cosmwasm-contracts.php';
-// PR 7A: the durable discovery-run ledger. Execution history for
-// administrator-requested scans — NOT a second progress table: it stores
-// counts of work done and never a cursor.
-require_once BCC_TRUST_PATH . 'includes/database/schema-discovery-runs.php';
+// ⚠ S9b DELETED THREE SCHEMA FILES HERE: schema-cosmwasm-code-families.php,
+// schema-cosmwasm-contracts.php and schema-discovery-runs.php. Their tables
+// are dropped by drop-scanner-schema.php, and removing the files is what
+// stops dbDelta re-creating them on the next schema pass.
+//
+// ⚠ That removal is also what moves BCC_TRUST_SCHEMA_VERSION from
+// `1a0bf150b1` to `db054e2c71` — the stamp is a content hash over
+// glob('includes/database/schema-*.php'). So the drop and the schema pass
+// fire on the same first request after deploy.
 // V2 Phase 1b — Helius webhook replay protection (LRU)
 require_once BCC_TRUST_PATH . 'includes/database/schema-helius-seen-signatures.php';
 // V1.5 §D6 — crypto-blog composer chain-tag join + bcc_onchain_chains.color
@@ -478,11 +481,9 @@ function bcc_onchain_ensure_schema(): bool {
     bcc_onchain_create_nft_holdings_table();
     bcc_onchain_create_chain_checkpoints_table();
     bcc_onchain_create_nft_spam_contracts_table();
-    // CosmWasm CW-721 discovery. Order matters only in the sense that the
-    // checkpoint table above gains its cw_* columns from the same dbDelta
-    // pass; these two are independent of everything else.
-    bcc_onchain_create_cosmwasm_code_families_table();
-    bcc_onchain_create_cosmwasm_contracts_table();
+    // ⚠ S9b: the two CosmWasm discovery tables are no longer created. The
+    // checkpoint table above no longer declares cw_* columns either, so that
+    // dbDelta pass is now unrelated to the scanner.
     // V2 Phase 1b Helius replay protection
     bcc_onchain_create_helius_seen_signatures_table();
     // V2 Phase 6 (§H1) NFT-piece detail metadata cache
@@ -498,11 +499,12 @@ function bcc_onchain_ensure_schema(): bool {
     // Runs after the color ALTER above; column order is anchored to the base
     // marketplace_template column, so ordering here is not load-bearing.
     bcc_onchain_add_chains_description_column();
-    // Per-chain CosmWasm NFT-discovery opt-in. Same idempotent,
-    // INFORMATION_SCHEMA-gated shape as the description ALTER above.
-    // DEFAULT 0 with NO backfill: running this migration enables discovery
-    // on exactly zero chains.
-    bcc_onchain_add_chains_cosmwasm_discovery_column();
+    // ⚠⚠ S9b DELETED `bcc_onchain_add_chains_cosmwasm_discovery_column()`,
+    // AND THAT DELETION IS LOAD-BEARING. It re-added
+    // `cosmwasm_nft_discovery_enabled` on every schema pass. Left in place it
+    // would have put the column straight back on the first request after the
+    // drop migration removed it — the schema pass and the migration both run
+    // on that same request.
     // Per-chain NFT capability model (PR 2). Two TINYINT(1) NOT NULL
     // DEFAULT 0 columns — BCC product support, and permission to start an
     // administrator-initiated discovery — plus the narrow-only driver
@@ -512,12 +514,10 @@ function bcc_onchain_ensure_schema(): bool {
     bcc_onchain_add_chains_nft_capability_columns();
     bcc_onchain_create_chain_nft_capabilities_table();
 
-    // PR 7A discovery-run ledger. Verified rather than assumed: its return
-    // value joins the completion signal below, so a dbDelta that silently
-    // skipped a column or the active-run unique index cannot be followed by
-    // a schema-version stamp claiming the schema is current.
-    bcc_onchain_create_discovery_runs_table();
-    $discoveryRunsComplete = bcc_onchain_verify_discovery_runs_schema();
+    // ⚠ S9b: the discovery-run ledger is dropped, so neither its create nor
+    // its verify runs, and `$discoveryRunsComplete` has left the completion
+    // signal below. A table that does not exist cannot be verified, and a
+    // gate that waited on it would never be satisfiable.
 
     // PR 7 community-focused collection metadata: four bounded scalar columns
     // plus the empty-image and retired-market normalizations. Verified for the
@@ -551,7 +551,6 @@ function bcc_onchain_ensure_schema(): bool {
     // combined here — a migration must never be skipped because an earlier one
     // failed.
     return $provisioningComplete
-        && $discoveryRunsComplete
         && $communityMetadataComplete
         && $metadataStateComplete;
 }

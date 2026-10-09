@@ -231,18 +231,34 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_discovery_maintenance_unscheduled',
                 'callback'    => 'bcc_trust_unschedule_discovery_maintenance',
             ],
-            // PR 7.3 — bcc_discovery_runs.chunks_used, the durable chunk
-            // counter that bounds one administrator-authorized session.
+            // ⚠⚠⚠ S9b — THE ONE DESTRUCTIVE MIGRATION IN THE SCANNER
+            // RETIREMENT. It drops three tables and eight columns holding
+            // real rows; everything before it was a pure code revert.
             //
-            // Fresh installs get it from the CREATE TABLE; every install that
-            // already has the table needs the explicit ALTER. Fail-closed:
-            // COMPLETE only once INFORMATION_SCHEMA confirms the column, so a
-            // failed or unreadable ALTER retries on the next boot rather than
-            // leaving the executor writing to a column that is not there.
+            // `add_discovery_run_chunks_used_v1` USED TO BE REGISTERED HERE
+            // and was removed in the same change. It added
+            // `bcc_discovery_runs.chunks_used` — a column on a table this
+            // migration drops — so leaving it registered would have had the
+            // runner re-create nothing useful and, worse, kept a migration
+            // pointing at a table that no longer exists. Its done_option
+            // (`bcc_trust_discovery_run_chunks_used_added`) is left in
+            // wp_options deliberately: it is a completion marker, not state,
+            // and deleting it would make a re-registered migration re-run.
+            //
+            // Fail-closed in both directions: any DB error or unreadable
+            // probe returns INCOMPLETE so the runner retries without
+            // stamping, and COMPLETE is returned only after every
+            // postcondition is RE-PROBED — including that the retained
+            // columns on the two surviving parent tables are still there.
+            //
+            // ⚠ A FRESH, VERIFIED BACKUP IS REQUIRED IMMEDIATELY BEFORE THIS
+            // RUNS. See docs/scanner-schema-drop-runbook.md. The recorded
+            // rehearsal proves the restore path; it is not a backup of the
+            // rows this destroys.
             [
-                'id'          => 'add_discovery_run_chunks_used_v1',
-                'done_option' => 'bcc_trust_discovery_run_chunks_used_added',
-                'callback'    => 'bcc_trust_add_discovery_run_chunks_used',
+                'id'          => 'drop_scanner_schema_v1',
+                'done_option' => 'bcc_trust_scanner_schema_dropped',
+                'callback'    => 'bcc_trust_drop_scanner_schema',
             ],
         ];
     }

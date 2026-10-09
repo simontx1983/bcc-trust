@@ -31,15 +31,18 @@ if (!defined('ABSPATH')) {
  * this class's SELECT list and deleted the twelve writers that had gone
  * callerless with the scanner.
  *
- * The COLUMNS remain on the table on purpose. Dropping them is S9b, a
- * separate deploy behind a verified backup, because they hold real values
- * — `cw_discovery_state` is non-empty on every checkpoint row on both
- * staging and production. Until then this class simply does not ask for
- * them, which is what makes that later drop safe rather than silent.
+ * S9b then dropped them, in a separate deploy behind a verified backup,
+ * because they held real values — `cw_discovery_state` was non-empty on
+ * every checkpoint row on both staging and production. This class had
+ * already stopped asking for them, which is what made that drop safe rather
+ * than silent.
  *
  * The per-code-family and per-contract tables those columns pointed at
- * (`wp_bcc_cosmwasm_code_families`, `wp_bcc_cosmwasm_contracts`) are also
- * still declared, and go in the same S9b step.
+ * (`wp_bcc_cosmwasm_code_families`, `wp_bcc_cosmwasm_contracts`) went in the
+ * same step, along with `idx_cw_discovery`, which spanned two of the columns
+ * and therefore had to be dropped before either of them.
+ * See `includes/database/drop-scanner-schema.php` and
+ * `docs/scanner-schema-drop-runbook.md`.
  *
  * @phpstan-type CheckpointRow object{
  *     chain_id: string,
@@ -64,31 +67,16 @@ final class ChainCheckpointRepository
     public const STATE_BREAKER_OPEN = 'breaker_open';
     public const STATE_DISABLED     = 'disabled';
 
-    // ── CosmWasm discovery per-chain state ──────────────────────────────
+    // ── CosmWasm discovery per-chain state: RETIRED (S9b) ───────────────
     //
-    // ⚠ RETAINED BY S9a ON PURPOSE, THOUGH NO PRODUCTION CODE READS THEM.
-    // These five literals are the exact values the `cw_discovery_state`
-    // column still holds, so while that column exists they are an accurate
-    // description of live data rather than dead vocabulary. They retire in
-    // S9b, in the same change that drops the column — at which point the
-    // drop migration can name the literals directly if it wants a breakdown.
-
-    /** Never started, or between passes. */
-    public const CW_STATE_IDLE = 'idle';
-    /** Historical backfill in progress (resumable via cw_code_cursor). */
-    public const CW_STATE_BACKFILLING = 'backfilling';
-    /** Historical backfill drained; incremental-only from here. */
-    public const CW_STATE_BACKFILLED = 'backfilled';
-    /**
-     * The chain has no wasm module. DURABLE AND TERMINAL for the routine
-     * sweeps — cryptoorgchain answers the wasmd endpoints with HTTP 501
-     * (measured), and retrying it forever would burn budget on a
-     * guaranteed failure. Distinct from an LCD that is merely DOWN
-     * (kujira, 502 — measured), which keeps its state and is retried.
-     */
-    public const CW_STATE_UNSUPPORTED = 'unsupported';
-    /** Operator pause. Nothing runs for this chain until resumed. */
-    public const CW_STATE_PAUSED = 'paused';
+    // Five literals lived here — idle | backfilling | backfilled |
+    // unsupported | paused — the exact values `cw_discovery_state` held.
+    // S9a kept them deliberately, on the grounds that while the column
+    // existed they described live data rather than dead vocabulary.
+    //
+    // S9b dropped the column, so there is no live data left to describe and
+    // the only remaining readers were test doubles that declare their own
+    // copies. The drop migration names the literals it needs directly.
 
 
     /**
@@ -100,8 +88,8 @@ final class ChainCheckpointRepository
     public const MAX_PROGRESSION_ENTRIES = 5;
 
     /**
-     * ⚠ S9a REMOVED THE SEVEN `cw_*` COLUMNS FROM THIS SELECT LIST, AND THE
-     * COLUMNS THEMSELVES ARE STILL ON THE TABLE.
+     * ⚠ S9a REMOVED THE SEVEN `cw_*` COLUMNS FROM THIS SELECT LIST WHILE
+     * THEY WERE STILL ON THE TABLE; S9b DROPPED THEM.
      *
      * That asymmetry is the whole point of splitting S9 into two deploys.
      * S8 deleted every reader of those fields — a comment-stripped token sweep
@@ -115,9 +103,10 @@ final class ChainCheckpointRepository
      * read, and because the chains projection caches an error sentinel the
      * operator-visible symptom is every chain reporting UNKNOWN.
      *
-     * The columns still hold real values until S9b — `cw_discovery_state` is
-     * non-empty on all eight checkpoint rows on both staging and production —
-     * so S9b is a data-destroying step and needs the backup, not a formality.
+     * The columns held real values right up to the drop — `cw_discovery_state`
+     * was non-empty on all eight checkpoint rows on both staging and
+     * production — so S9b was a data-destroying step that needed its backup,
+     * not a formality.
      */
     private const COLUMNS = 'chain_id, last_processed_block, head_block, state, cu_used_today,'
         . ' cu_budget_reset_at, last_run_at, last_error, block_progression_history';

@@ -124,6 +124,48 @@ final class ChainsCapabilityColumnAnchorIntegrationTest extends TestCase
         }
     }
 
+    /**
+     * Add the retired scanner column to the fixture table.
+     *
+     * ⚠⚠ THIS REPLACES `bcc_onchain_add_chains_cosmwasm_discovery_column()`,
+     * WHICH S9b DELETED — and it is deliberately a fixture `ALTER`, not a
+     * revived installer.
+     *
+     * The installer had to go: the schema pass runs on the SAME first request
+     * as `bcc_trust_drop_scanner_schema()`, so anything that re-adds the
+     * column would put it back before that request ended.
+     *
+     * But the SHAPE is still real and still worth testing, which is why these
+     * cases were not deleted with it:
+     *
+     *   - every install sits in it between the S9b code landing and the
+     *     migration completing, and the migration is explicitly allowed to
+     *     return INCOMPLETE and retry on a later request;
+     *   - a restored backup is in it by construction (the restore re-adds
+     *     exactly this column, by design — see
+     *     `docs/scanner-schema-drop-runbook.md` §6);
+     *   - and the claim under test — that the projection reads the same with
+     *     the column present and absent — is only meaningful if BOTH shapes
+     *     can be built.
+     *
+     * Reproducing it with one line of DDL keeps the pair of cases honest
+     * without keeping alive the function that would undo the drop. The
+     * definition matches what the deleted installer used and what production
+     * carries today.
+     */
+    private function addRetiredAnchorColumn(): void
+    {
+        $wpdb = $GLOBALS['wpdb'];
+
+        self::assertNotFalse(
+            $wpdb->query(
+                'ALTER TABLE `' . $this->table() . '` ADD COLUMN `'
+                . self::RETIRED_ANCHOR . '` TINYINT(1) NOT NULL DEFAULT 0'
+            ),
+            'fixture: the retired column must be addable'
+        );
+    }
+
     /** One row of real-looking data, so preservation can be asserted. */
     private function seedRow(): void
     {
@@ -316,23 +358,40 @@ final class ChainsCapabilityColumnAnchorIntegrationTest extends TestCase
     // ══ 4. Fresh install ═══════════════════════════════════════════════
 
     /**
-     * The baseline, and the anti-vacuity for everything above: on a fresh
-     * install the three columns come from the base `CREATE TABLE`, so the
-     * installer has nothing to add and the anchor is never consulted.
+     * ⚠ WAS `testAFreshInstallHasAllThreeColumnsWithoutAnyAlter` UNTIL S9b.
+     *
+     * It asserted that a fresh install got all THREE columns from the base
+     * `CREATE TABLE` with no ALTER — the retired scanner flag included. S9b
+     * removed `cosmwasm_nft_discovery_enabled` from `CREATE TABLE`, so a
+     * fresh install now gets TWO, and the third must be ABSENT.
+     *
+     * Keeping the old form was not an option and neither was deleting it:
+     * the property is still exactly the one worth pinning. The capability
+     * columns must come from the base declaration on a fresh install, so the
+     * ALTER migration is a no-op there — that is what makes the anchor fix
+     * (#280) hold and what stops a fresh install depending on migration
+     * order at all. Only the count changed.
      */
-    public function testAFreshInstallHasAllThreeColumnsWithoutAnyAlter(): void
+    public function testAFreshInstallHasTheTwoCapabilityColumnsAndNotTheRetiredOne(): void
     {
         $wpdb = $GLOBALS['wpdb'];
         $wpdb->query('DROP TABLE IF EXISTS `' . $this->table() . '`');
 
         bcc_onchain_create_chains_table();
 
-        foreach (array_merge([self::RETIRED_ANCHOR], self::CAPABILITY_COLUMNS) as $column) {
+        foreach (self::CAPABILITY_COLUMNS as $column) {
             self::assertTrue(
                 $this->hasColumn($column),
                 $column . ' must come from the base CREATE TABLE on a fresh install'
             );
         }
+
+        self::assertFalse(
+            $this->hasColumn(self::RETIRED_ANCHOR),
+            self::RETIRED_ANCHOR . ' was dropped in S9b and must NOT come back from '
+            . 'the base CREATE TABLE — a fresh install that still had it would be '
+            . 'immediately out of step with every migrated one'
+        );
 
         // Running the capability installer on top is still a no-op.
         $before = $this->columns();
@@ -357,7 +416,7 @@ final class ChainsCapabilityColumnAnchorIntegrationTest extends TestCase
         // run in either order reaches the same schema. Under the old anchor this
         // order could not work at all.
         bcc_onchain_add_chains_nft_capability_columns();
-        bcc_onchain_add_chains_cosmwasm_discovery_column();
+        $this->addRetiredAnchorColumn();
         ChainRepository::clearCache();
         // ⚠ WAS "names all three" UNTIL S9a. `ChainRepository::COLUMNS` now
         // names the two CAPABILITY columns and no longer names
@@ -407,7 +466,8 @@ final class ChainsCapabilityColumnAnchorIntegrationTest extends TestCase
         $this->createOlderSchemaTable();
         $this->seedRow();
 
-        // Deliberately NOT calling bcc_onchain_add_chains_cosmwasm_discovery_column().
+        // Deliberately NOT calling $this->addRetiredAnchorColumn() — this is the
+        // post-S9b shape, where nothing adds that column at all.
         bcc_onchain_add_chains_nft_capability_columns();
         ChainRepository::clearCache();
 
@@ -459,7 +519,7 @@ final class ChainsCapabilityColumnAnchorIntegrationTest extends TestCase
         $this->seedRow();
 
         bcc_onchain_add_chains_nft_capability_columns();
-        bcc_onchain_add_chains_cosmwasm_discovery_column();
+        $this->addRetiredAnchorColumn();
         ChainRepository::clearCache();
 
         self::assertTrue(
