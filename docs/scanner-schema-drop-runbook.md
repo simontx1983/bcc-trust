@@ -231,8 +231,11 @@ until the docs change lands.
 
 | order | check 1a (documented-Active ⊆ declared) | check 1b (declared ⊆ documented) |
 |---|---|---|
-| **docs RETIRED first**, then this PR | RETIRED is not Active, so not checked ✅ | the three are in the doc as RETIRED/ORPHAN ✅ |
-| this PR first, then docs | three documented-Active tables undeclared ❌ | ✅ |
+| **docs RETIRED first**, then this PR | RETIRED is not Active, so not checked �
+ | the three are in the doc as RETIRED/ORPHAN �
+ |
+| this PR first, then docs | three documented-Active tables undeclared ❌ | �
+ |
 
 RETIRED is treated as ORPHAN by the guard — expected absent from code, and
 INFO-only — so the window where the docs say RETIRED while `main` still
@@ -317,7 +320,16 @@ three tables in full, plus `chain_id` + the seven `cw_*` values from
 
 Columns are **named**, not positional, precisely because of the column-order
 divergence above. NULL is emitted unquoted; everything else is escaped through the
-connection's own escaper. The encoding is covered against NULLs, empty strings,
+connection's own escaper.
+
+⚠⚠ **The `ADD COLUMN` statements carry an explicit `AFTER`, and the first
+version did not.** `SHOW CREATE TABLE` lists columns in order but each line has
+no positional clause, so a verbatim replay **appends**. The 2026-10-09 rehearsal
+restored `cosmwasm_nft_discovery_enabled` at ordinal 21 instead of 19 — every
+value correct, only the position moved — and the order-sensitive digest caught
+it. The capture now derives each column's anchor from the same captured DDL and
+emits the statements in ascending declaration order, so a contiguous run
+restores front to back and every anchor exists when its statement runs. The encoding is covered against NULLs, empty strings,
 quotes, backslashes, newlines, CR, NUL, Ctrl-Z, trailing spaces and the `0x1e` /
 `0x1f` control bytes by
 `ScannerSchemaBackupExportIntegrationTest::testEveryAdversarialValueRoundTripsThroughTheExport()`.
@@ -464,7 +476,124 @@ Run **all** of it. Each line is a separate claim.
 
 ---
 
-## 10. Related
+## 11. The exact execution sequence
+
+Fourteen steps. Each has a stop condition; **a stop means stop, not "proceed carefully"**. Steps 1–6 are reversible at no cost. Step 9 is the point of no return for data.
+
+| # | Step | Stop if |
+|---|---|---|
+| 1 | Confirm the umbrella docs change is **merged to umbrella `main`** and the three `Status` cells read `RETIRED`. | Not merged. §3.5 — the reverse order turns umbrella CI red. |
+| 2 | Confirm bcc-trust `main` is the base the PR was reviewed against, and the PR head is unchanged. | Head moved, or `main` advanced underneath it without a re-run. |
+| 3 | Confirm all three bcc-trust CI jobs are green on **that exact head**. | Any job red, or green on a different SHA. |
+| 4 | Recompute the post-change stamp (§3.1) and confirm `db054e2c71 (52 inputs)`, with `c1ecd1d9` reproducing `1a0bf150b1 (55 inputs)` as the control. | Either value differs — the tree is not what was reviewed. |
+| 5 | Read `bcc_trust_schema_version` on the target environment and confirm it is `1a0bf150b1`. | Anything else — the environment is not pre-S9b. |
+| 6 | Confirm `bcc_trust_scanner_schema_dropped` is **ABSENT**. | Present — the migration already ran here. |
+| 7 | **Take a fresh backup** (§5) and **restore-verify it** (§6, §7) in an isolated database. | Any digest, count, column, index or order mismatch. |
+| 8 | Confirm the executor queue is still quiet: `bcc_discovery_run_execute` all `complete`, `wp_bcc_discovery_runs WHERE active_marker = 1` = 0, against a non-zero denominator. | Anything pending, failed or in-progress. |
+| 9 | **Merge the PR.** Staging auto-deploys; the migration executes there. | — this is the destructive step. |
+| 10 | On the first request after deploy, confirm the migration reported **COMPLETE**: `bcc_trust_scanner_schema_dropped` is now present. | Absent after several requests — see §12. |
+| 11 | Confirm the stamp advanced to `db054e2c71`. | Still `1a0bf150b1` — the files-only rsync did not land. |
+| 12 | Verify the postconditions (§13.1): exact drops, exact survivals. | Any retained structure missing. |
+| 13 | Verify the retained features (`docs/s9b-retained-feature-verification.md`). | Any capability regressed. |
+| 14 | Leave production alone. A production dispatch is a **separate** decision with its own backup. | — |
+
+⚠ **Steps 7 and 9 must be in the same maintenance window, with no deploy in between.** If anything intervened, go back to step 7.
+
+---
+
+## 12. Partial failure: what each failure point does, and what to do
+
+The migration is idempotent at every step and fail-closed in both directions, so a partial application is a **resumable state, not a repair job**. It returns `INCOMPLETE` without writing its `done_option`, and the runner attempts it again on the next request.
+
+| Failure point | What the migration does | What the operator does |
+|---|---|---|
+| Inventory read fails (`SHOW TABLES` / `COUNT(*)`) | Returns `INCOMPLETE` before any mutation. Nothing dropped. | Nothing. It retries. Investigate DB health. |
+| `INFORMATION_SCHEMA` column probe unreadable | Returns `INCOMPLETE`. ⚠ Treats the probe as **UNVERIFIED, never "already absent"** — the one confusion that could stamp `done` over a database it never read. Nothing dropped. | Nothing. It retries. |
+| Index drop fails | `INCOMPLETE`. Index may remain; **no column dropped yet**, because the index goes first. | Nothing. The retry re-probes and resumes. |
+| A `DROP COLUMN` fails | `INCOMPLETE`. Index gone, some columns gone, the failing one and the rest still present, **no table dropped** (tables come after columns). | Nothing. The retry drops only what is still there. Read the logged pre-mutation inventory to see how far it got. |
+| A `DROP TABLE` fails | `INCOMPLETE`. All columns gone, some tables gone. | Nothing. The retry resumes. |
+| Option sweep read fails | `INCOMPLETE`. Schema already fully dropped. | Nothing. The sweep is hygiene; the retry completes it. |
+| Postcondition re-probe unreadable | `INCOMPLETE` **even though the drops succeeded** — `query()` returning success proves the statement did not error, not that the schema moved. | Nothing. The retry re-probes and reports `COMPLETE`. |
+| Postcondition shows something still present | `INCOMPLETE`, with the remaining names logged. | Read the log. The named structure resisted its `DROP`; investigate before forcing anything. |
+| A **retained** column is missing afterwards | `INCOMPLETE`, with the expected and present lists logged. | ⚠ **Stop and restore.** This is a mistake in the migration, not drift. §13.3. |
+| Nothing ever reaches `COMPLETE` | The `done_option` stays unwritten and the migration retries forever — harmless but noisy. | Investigate the logged reason. Do **not** hand-write the `done_option`; that is the one action that makes the state unverifiable. |
+
+⚠ **Do not hand-repair a half-applied schema.** Every step is gated on its own existence probe, so the only correct response to a partial application is to let it retry. Manual `ALTER`s make the logged inventory stop matching reality.
+
+---
+
+## 13. Postconditions, recovery, and the rollback traps
+
+### 13.1 Exact postconditions
+
+**Must be GONE:**
+
+- tables `wp_bcc_cosmwasm_code_families`, `wp_bcc_cosmwasm_contracts`, `wp_bcc_discovery_runs`
+- `wp_bcc_chain_checkpoints`: `cw_discovery_state`, `cw_code_cursor`, `cw_max_code_id`, `cw_backfill_completed_at`, `cw_last_discovery_at`, `cw_metadata_refreshed_at`, `cw_last_error` — column count **16 → 9**
+- `wp_bcc_chains`: `cosmwasm_nft_discovery_enabled` — column count **21 → 20**
+- index `idx_cw_discovery`
+- `wp_options` rows matching `bcc_cosmos_endpoint_authz_%` (staging: 1, production: 0)
+
+**Must REMAIN, and the migration refuses to report `COMPLETE` otherwise:**
+
+- `wp_bcc_chain_checkpoints`: `chain_id`, `last_processed_block`, `head_block`, `state`, `cu_used_today`, `cu_budget_reset_at`, `last_run_at`, `last_error`, `block_progression_history` — and its `PRIMARY` key
+- `wp_bcc_chains`: all 20 remaining columns, incl. `bcc_supports_nft_collections` and `manual_collection_discovery_enabled`; and all four indexes — `PRIMARY`, `slug` (unique), `chain_type`, `is_active`
+- **every row** of both parents: 8 checkpoints, 21 chains. The migration issues no `DELETE` and no `UPDATE` against either.
+- `wp_options`: `bcc_trust_cw721_scan_options_cleaned` ⚠ — this matches the prefix an earlier draft swept. It is another migration's **completion marker**, and the measured "1 row under `bcc_trust_cw721_scan_%`" on both environments **is that marker**. Deleting it would make `cleanup_cw721_scan_options_v1` run again.
+- every other table in the schema.
+
+### 13.2 ⚠⚠ Automatic startup work during rollback — two traps
+
+Reverting the S9b code does **not** put the data back, and two automatic behaviours make the state look better than it is.
+
+**Trap 1 — rollback RE-CREATES the three tables, EMPTY.** The reverted build restores the three `schema-*.php` files, so the stamp returns to `1a0bf150b1`, differs from the stored `db054e2c71`, and `bcc_onchain_ensure_schema()` runs `dbDelta` on the next request. It creates all three tables with their full structure and **zero rows**, and re-adds `cosmwasm_nft_discovery_enabled` via the restored installer.
+
+So after a rollback the tables **exist**. An operator checking `SHOW TABLES` will see them and may conclude the data survived. **It did not.** Check `COUNT(*)` and the digest, never presence.
+
+**Trap 2 — the cleanup cannot repeat itself, and that cuts both ways.** `bcc_trust_execute_migration()` returns immediately when the `done_option` is set. Once `bcc_trust_scanner_schema_dropped` exists:
+
+- *Good:* no rollback, redeploy or restore can make the drop run a second time. Restored data is safe from being re-destroyed by a deploy.
+- *⚠ Bad:* rolling forward again after a restore will **not** re-drop. The restored tables persist while the code expects them gone, and nothing complains — `schema-drift-guard.php` treats a `RETIRED`-but-present table as an **ORPHAN, INFO-only**, so CI stays green. Re-dropping is then an explicit decision, taken by removing the `done_option` deliberately and re-running — not something that happens on its own.
+
+Measured on staging 2026-10-09: `bcc_trust_scanner_schema_dropped` **ABSENT** (not yet run); `bcc_trust_discovery_run_chunks_used_added` **present**, so the migration S9b removes will not re-run against a missing table after a rollback; `bcc_trust_migrations_all_done_signature` present and autoloaded, and it includes the registry ids, so S9b invalidates it and forces one re-evaluation.
+
+**Trap 3 — the cached error sentinel.** If a projection ever named a dropped column, `ChainRepository` caches `ERROR_SENTINEL` in the `bcc_chains` group. A code revert alone leaves the poisoned entry serving. Always `wp cache flush` after reverting.
+
+### 13.3 Recovery — explicit schema and data, never an inferred one
+
+**The restore does not depend on any plugin version.** This is the property S9a bought: the retained projections no longer name these columns, so restored tables and columns are **inert** to post-S9b code. It reads neither, so it neither breaks nor needs rolling back.
+
+⚠ **Do not rely on an older plugin to recreate the schema.** It would create the tables *empty* (Trap 1) and its `CREATE TABLE` is not guaranteed to match what the environment actually had — production's `cosmwasm_nft_discovery_enabled` sits `AFTER description`, which no installer produces. Use the captured artefact and nothing else.
+
+Order, and the order is load-bearing:
+
+1. **Three tables** — the artefact's `CREATE TABLE` statements, verbatim.
+2. **Eight columns** — the artefact's `ALTER … ADD COLUMN … AFTER …` statements, in the order the artefact lists them.
+3. **The index** — `ALTER … ADD KEY idx_cw_discovery …`, **after** step 2. Before it, this fails with `ERROR 1072`; reproduced in the 2026-10-09 rehearsal and asserted in both directions by the test suite.
+4. **Rows** — the artefact's `INSERT`s for the three tables, then its `UPDATE`s for the retired-column values on the surviving parent rows. `UPDATE`, not `INSERT`: those rows survived the drop and must not be duplicated.
+5. **Verify** (§7). Counts, digests, column count, column **order**, and index column order.
+6. **`wp cache flush`.**
+7. Only if the data must be *used* again — which nothing currently does — restore the pre-S9b plugin tree. A separate, optional decision, not a precondition of getting the rows back.
+
+### 13.4 ⚠⚠⚠ The unpinned-main production hazard
+
+`.github/workflows/deploy.yml` gates production on the **branch**, comparing `github.ref` to `refs/heads/main`. It does **not** pin a SHA.
+
+Consequences:
+
+- A production `workflow_dispatch` deploys whatever `main`'s tip is **at that moment** — not the SHA last reviewed, not the SHA last deployed.
+- Once this PR merges, `main`'s tip contains the destructive migration. **Any** production dispatch after that point — including one intended for an unrelated fix — carries S9b with it and executes the drop on production on the next request.
+- Holding production back therefore means **not dispatching at all**, not "dispatching carefully".
+- Rolling production back means a tarball restore or a revert commit on `main`; there is no "deploy the previous SHA" path.
+
+Production was last deployed 2026-10-07 (run `37567853867`) and is at `d84c2ac1a9` — **four releases behind** `main`. The gap is deliberate and must stay deliberate: the next production dispatch, whenever it happens and for whatever reason, is also an S9b release unless `main` is changed first.
+
+Before any production dispatch after this merges: take and restore-verify a production backup, confirm the production executor queue is quiet (⚠ **still unmeasured on production** as of 2026-10-09 — only staging has been measured), and treat it as an S9b execution window.
+
+
+---
+
+## 14. Related
 
 - `includes/database/drop-scanner-schema.php` — the migration
 - `scripts/scanner-schema-backup.php` — the backup and digest functions

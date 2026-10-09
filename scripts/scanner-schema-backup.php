@@ -286,6 +286,17 @@ if (!function_exists('bcc_trust_backup_sql_literal')) {
             return [];
         }
 
+        // The table's column names in declaration order, read from the same
+        // DDL, so the ORDER below comes from the captured bytes rather than a
+        // second query that could disagree with them.
+        $order = [];
+        foreach (explode("\n", str_replace("\r\n", "\n", $ddl)) as $line) {
+            $line = trim($line);
+            if (preg_match('/^`((?:[^`]|``)+)`\s/', $line, $m) === 1) {
+                $order[] = str_replace('``', '`', $m[1]);
+            }
+        }
+
         $out = [];
         foreach (explode("\n", str_replace("\r\n", "\n", $ddl)) as $line) {
             $line = rtrim(trim($line), ',');
@@ -294,10 +305,51 @@ if (!function_exists('bcc_trust_backup_sql_literal')) {
                 if (strncmp($line, $needle . ' ', strlen($needle) + 1) !== 0) {
                     continue;
                 }
+
+                // ⚠⚠ THE `AFTER` CLAUSE IS NOT COSMETIC, AND OMITTING IT WAS A
+                // REAL GAP THAT THE 2026-10-09 STAGING REHEARSAL CAUGHT.
+                //
+                // `SHOW CREATE TABLE` lists columns in order but each line
+                // carries no positional clause, so a verbatim replay APPENDS.
+                // On staging `cosmwasm_nft_discovery_enabled` sits at ordinal
+                // 19, `AFTER description` — an earlier release added it with a
+                // different anchor — so a restore without `AFTER` put it back
+                // at ordinal 21, behind the two retained capability columns.
+                // Every VALUE was correct and only the position moved, which
+                // is precisely the kind of difference that is invisible until
+                // something depends on it.
+                //
+                // Two reasons to fix it rather than to loosen the check:
+                //
+                //  1. A `SELECT *` consumer, or any `INSERT … VALUES` written
+                //     without a column list, is position-dependent. This
+                //     artefact names its own columns, but a restore has to be
+                //     safe for queries it did not write.
+                //  2. The verification digest concatenates columns in ordinal
+                //     order, so it is order-sensitive BY DESIGN. Making it
+                //     order-insensitive to accommodate a lossy restore would
+                //     have thrown away a real check to hide a real defect.
+                //
+                // The columns are emitted in ascending declaration order by
+                // the caller, so each `AFTER` target already exists by the
+                // time its statement runs — including when several retired
+                // columns are contiguous and each anchors on the one before.
+                $idx    = array_search($column, $order, true);
+                $anchor = ($idx === false || $idx === 0) ? null : ($order[$idx - 1] ?? null);
+                $after  = $anchor === null
+                    ? ' FIRST'
+                    : ' AFTER `' . str_replace('`', '``', $anchor) . '`';
+
                 $out[$column] = 'ALTER TABLE `' . str_replace('`', '``', $table)
-                    . '` ADD COLUMN ' . $line . ';';
+                    . '` ADD COLUMN ' . $line . $after . ';';
             }
         }
+
+        // Ascending declaration order, so a contiguous run of retired columns
+        // restores front to back and every anchor is present when needed.
+        uksort($out, static function (string $a, string $b) use ($order): int {
+            return (int) array_search($a, $order, true) <=> (int) array_search($b, $order, true);
+        });
 
         return $out;
     }

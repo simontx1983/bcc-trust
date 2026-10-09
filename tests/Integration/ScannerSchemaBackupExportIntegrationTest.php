@@ -116,6 +116,26 @@ final class ScannerSchemaBackupExportIntegrationTest extends TestCase
             // fingerprint cannot get away with treating NULL positionally.
             [23, null, 'b only'],
             [24, 'a only', null],
+
+            // ── UNICODE ─────────────────────────────────────────────────
+            // ⚠ ADDED AFTER THE 2026-10-09 STAGING REHEARSAL, WHICH FOUND
+            // THIS CORPUS HAD NONE. Measured against the restored staging
+            // data: 17 chain rows carry non-ASCII `description` text, so
+            // Unicode is not hypothetical for this backup — it is most of
+            // what the largest text column actually holds, and it was the
+            // one value class the real data exercised that this suite did
+            // not.
+            //
+            // `OCTET_LENGTH` is what the digest length-prefixes with, so a
+            // multi-byte value's prefix is its BYTE count, not its character
+            // count. Rows 27 and 31 make that difference observable.
+            [25, 'Ethereum — the settlement layer', 'em dash U+2014'],
+            [26, 'KölnÑandú 东京 القاهرة', 'Latin-1 supplement + CJK + Arabic'],
+            [27, '🚀 four-byte utf8mb4', 'astral plane — the mb3/mb4 trap'],
+            [28, "zero\u{200B}width", 'U+200B zero-width space, invisible in a diff'],
+            [29, "combin\u{0301}ing", 'U+0301 combining acute'],
+            [30, "\u{00A0}nbsp\u{00A0}", 'U+00A0 no-break space, leading AND trailing'],
+            [31, "rtl \u{202E}override", 'U+202E bidi override'],
         ];
     }
 
@@ -384,6 +404,88 @@ final class ScannerSchemaBackupExportIntegrationTest extends TestCase
             $fp[22],
             "'trailing ' and 'trailing' differ by one byte that VARCHAR `=` ignores "
             . 'under most collations; OCTET_LENGTH does not, which is why it is in the formula'
+        );
+    }
+
+    /**
+     * ⚠ UNICODE, AND IT IS NOT A FORMALITY HERE.
+     *
+     * Measured against the restored staging backup on 2026-10-09: **17 of 21
+     * chain rows carry non-ASCII `description` text.** Unicode is most of what
+     * the largest text column in this backup actually holds, and it was the
+     * one value class the real data exercised that this suite did not.
+     *
+     * Three distinct properties, because they fail separately:
+     *
+     *  1. Multi-byte values ROUND TRIP byte-exactly (covered by the main
+     *     round-trip case, which now carries rows 25-31).
+     *  2. They are DISTINGUISHED from each other — a digest that normalised,
+     *     transliterated or truncated would collapse them.
+     *  3. A 4-byte character stays 4 bytes. `utf8mb3` silently replaces
+     *     astral-plane characters, and the symptom is a question mark, not an
+     *     error — so the assertion is on the BYTE length exceeding the
+     *     CHARACTER length, which only holds if the column really is mb4.
+     */
+    public function testUnicodeSurvivesAndIsDistinguished(): void
+    {
+        $wpdb = $GLOBALS['wpdb'];
+
+        $this->createTable(self::SRC);
+        $this->seed(self::SRC);
+
+        $unicodeIds = [25, 26, 27, 28, 29, 30, 31];
+        $fp         = $this->fingerprints(self::SRC, ['a']);
+
+        foreach ($unicodeIds as $id) {
+            self::assertArrayHasKey($id, $fp, "anti-vacuity: Unicode row {$id} must be fingerprinted");
+        }
+
+        foreach ($unicodeIds as $i) {
+            foreach ($unicodeIds as $j) {
+                if ($i >= $j) {
+                    continue;
+                }
+                self::assertNotSame(
+                    $fp[$i],
+                    $fp[$j],
+                    "Unicode rows {$i} and {$j} must not share a fingerprint"
+                );
+            }
+        }
+
+        // An invisible character must not collapse to its visible neighbour.
+        self::assertNotSame(
+            $fp[28],
+            $this->fingerprints(self::SRC, ['a'])[22] ?? null,
+            'a zero-width space must not fingerprint as though it were absent'
+        );
+
+        // 4-byte characters: bytes must exceed characters, or the column is
+        // not really utf8mb4 and the emoji was silently replaced.
+        $row = $wpdb->get_row(
+            'SELECT CHAR_LENGTH(a) AS cl, OCTET_LENGTH(a) AS ol, HEX(a) AS hx FROM `'
+            . $this->t(self::SRC) . '` WHERE id = 27'
+        );
+        self::assertIsObject($row);
+        self::assertGreaterThan(
+            (int) $row->cl,
+            (int) $row->ol,
+            'the astral-plane character lost its extra bytes — utf8mb3 replacement'
+        );
+        self::assertStringContainsString(
+            'F09F',
+            strtoupper((string) $row->hx),
+            'the 4-byte UTF-8 lead byte F0 must still be there'
+        );
+
+        // And a combining sequence must not be normalised into one codepoint.
+        $combining = $wpdb->get_var(
+            'SELECT HEX(a) FROM `' . $this->t(self::SRC) . '` WHERE id = 29'
+        );
+        self::assertStringContainsString(
+            'CC81',
+            strtoupper((string) $combining),
+            'the U+0301 combining acute must survive as its own codepoint'
         );
     }
 
@@ -670,6 +772,117 @@ final class ScannerSchemaBackupExportIntegrationTest extends TestCase
         );
     }
 
+    /**
+     * ⚠⚠ COLUMN ORDER IS RESTORED, NOT APPENDED — the second finding of the
+     * 2026-10-09 staging rehearsal, and the one that actually failed there.
+     *
+     * `SHOW CREATE TABLE` lists columns in order but each line carries NO
+     * positional clause, so a verbatim replay appends. Staging has
+     * `cosmwasm_nft_discovery_enabled` at ordinal 19, `AFTER description` —
+     * an earlier release added it with a different anchor — so the first
+     * restore put it back at ordinal 21, behind the two RETAINED capability
+     * columns. Every value was correct; only the position moved.
+     *
+     * That is worth fixing rather than tolerating. A `SELECT *` consumer, or
+     * any `INSERT … VALUES` written without a column list, is
+     * position-dependent; and the verification digest concatenates columns in
+     * ordinal order, so loosening it to accommodate a lossy restore would
+     * have discarded a real check to hide a real defect.
+     */
+    public function testRestoredColumnsLandInTheirOriginalPositions(): void
+    {
+        $wpdb = $GLOBALS['wpdb'];
+        $t    = $this->t(self::DDL);
+
+        // A retained column, then a retired one, then two more retained —
+        // the staging shape that produced the failure.
+        $wpdb->query("DROP TABLE IF EXISTS `{$t}`");
+        $wpdb->query(
+            "CREATE TABLE `{$t}` (
+                id BIGINT UNSIGNED NOT NULL,
+                description TEXT DEFAULT NULL,
+                cosmwasm_nft_discovery_enabled TINYINT(1) NOT NULL DEFAULT 0,
+                bcc_supports_nft_collections TINYINT(1) NOT NULL DEFAULT 0,
+                manual_collection_discovery_enabled TINYINT(1) NOT NULL DEFAULT 0,
+                PRIMARY KEY (id)
+            )"
+        );
+
+        $before = $this->columnOrder(self::DDL);
+        self::assertSame(
+            ['id', 'description', 'cosmwasm_nft_discovery_enabled',
+             'bcc_supports_nft_collections', 'manual_collection_discovery_enabled'],
+            $before,
+            'anti-vacuity: the retired column must start in the MIDDLE, not at the end'
+        );
+
+        $defs = bcc_trust_backup_column_definitions($t, ['cosmwasm_nft_discovery_enabled']);
+        self::assertCount(1, $defs);
+        self::assertStringContainsString(
+            'AFTER `description`',
+            $defs['cosmwasm_nft_discovery_enabled'],
+            'the captured statement must carry its original anchor'
+        );
+
+        $wpdb->query("ALTER TABLE `{$t}` DROP COLUMN `cosmwasm_nft_discovery_enabled`");
+        self::assertNotContains('cosmwasm_nft_discovery_enabled', $this->columnOrder(self::DDL));
+
+        foreach ($defs as $sql) {
+            self::assertNotFalse($wpdb->query($sql), $wpdb->last_error);
+        }
+
+        self::assertSame(
+            $before,
+            $this->columnOrder(self::DDL),
+            'the restored column must land back in its ORIGINAL position, not at the end'
+        );
+    }
+
+    /**
+     * A contiguous run of retired columns restores front to back, each
+     * anchored on the one before it — so the statements must be emitted in
+     * ascending declaration order or an `AFTER` would name a column that does
+     * not exist yet.
+     */
+    public function testAContiguousRunOfRetiredColumnsRestoresInOrder(): void
+    {
+        $wpdb = $GLOBALS['wpdb'];
+        $t    = $this->t(self::DDL);
+
+        $wpdb->query("DROP TABLE IF EXISTS `{$t}`");
+        $wpdb->query(
+            "CREATE TABLE `{$t}` (
+                chain_id BIGINT UNSIGNED NOT NULL,
+                block_progression_history VARCHAR(500) DEFAULT NULL,
+                cw_discovery_state VARCHAR(20) NOT NULL DEFAULT 'idle',
+                cw_code_cursor VARCHAR(255) DEFAULT NULL,
+                cw_max_code_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                PRIMARY KEY (chain_id)
+            )"
+        );
+
+        $retired = ['cw_discovery_state', 'cw_code_cursor', 'cw_max_code_id'];
+        $before  = $this->columnOrder(self::DDL);
+
+        // Requested in a deliberately SCRAMBLED order — the helper must still
+        // emit them in declaration order.
+        $defs = bcc_trust_backup_column_definitions($t, ['cw_max_code_id', 'cw_discovery_state', 'cw_code_cursor']);
+        self::assertSame(
+            $retired,
+            array_keys($defs),
+            'the helper must return declaration order regardless of the order asked for'
+        );
+
+        foreach (array_reverse($retired) as $c) {
+            $wpdb->query("ALTER TABLE `{$t}` DROP COLUMN `{$c}`");
+        }
+        foreach ($defs as $sql) {
+            self::assertNotFalse($wpdb->query($sql), 'anchor missing at apply time: ' . $wpdb->last_error);
+        }
+
+        self::assertSame($before, $this->columnOrder(self::DDL));
+    }
+
     public function testCapturingAMissingTableIsNullRatherThanAnEmptyString(): void
     {
         self::assertNull(bcc_trust_backup_capture_ddl($this->t('bcc_s9b_definitely_absent')));
@@ -679,6 +892,27 @@ final class ScannerSchemaBackupExportIntegrationTest extends TestCase
     }
 
     // ── helpers ─────────────────────────────────────────────────────────
+
+    /**
+     * Column names in ORDINAL order — the thing a verbatim `ADD COLUMN`
+     * replay silently loses.
+     *
+     * @return list<string>
+     */
+    private function columnOrder(string $bare): array
+    {
+        $wpdb = $GLOBALS['wpdb'];
+
+        /** @var list<object>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            'SELECT COLUMN_NAME AS c FROM INFORMATION_SCHEMA.COLUMNS
+              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+              ORDER BY ORDINAL_POSITION',
+            $this->t($bare)
+        ));
+
+        return array_map(static fn (object $r): string => (string) $r->c, $rows ?: []);
+    }
 
     /** @return list<string> */
     private function indexNames(string $bare): array
