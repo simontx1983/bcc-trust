@@ -358,23 +358,40 @@ final class ChainsCapabilityColumnAnchorIntegrationTest extends TestCase
     // ══ 4. Fresh install ═══════════════════════════════════════════════
 
     /**
-     * The baseline, and the anti-vacuity for everything above: on a fresh
-     * install the three columns come from the base `CREATE TABLE`, so the
-     * installer has nothing to add and the anchor is never consulted.
+     * ⚠ WAS `testAFreshInstallHasAllThreeColumnsWithoutAnyAlter` UNTIL S9b.
+     *
+     * It asserted that a fresh install got all THREE columns from the base
+     * `CREATE TABLE` with no ALTER — the retired scanner flag included. S9b
+     * removed `cosmwasm_nft_discovery_enabled` from `CREATE TABLE`, so a
+     * fresh install now gets TWO, and the third must be ABSENT.
+     *
+     * Keeping the old form was not an option and neither was deleting it:
+     * the property is still exactly the one worth pinning. The capability
+     * columns must come from the base declaration on a fresh install, so the
+     * ALTER migration is a no-op there — that is what makes the anchor fix
+     * (#280) hold and what stops a fresh install depending on migration
+     * order at all. Only the count changed.
      */
-    public function testAFreshInstallHasAllThreeColumnsWithoutAnyAlter(): void
+    public function testAFreshInstallHasTheTwoCapabilityColumnsAndNotTheRetiredOne(): void
     {
         $wpdb = $GLOBALS['wpdb'];
         $wpdb->query('DROP TABLE IF EXISTS `' . $this->table() . '`');
 
         bcc_onchain_create_chains_table();
 
-        foreach (array_merge([self::RETIRED_ANCHOR], self::CAPABILITY_COLUMNS) as $column) {
+        foreach (self::CAPABILITY_COLUMNS as $column) {
             self::assertTrue(
                 $this->hasColumn($column),
                 $column . ' must come from the base CREATE TABLE on a fresh install'
             );
         }
+
+        self::assertFalse(
+            $this->hasColumn(self::RETIRED_ANCHOR),
+            self::RETIRED_ANCHOR . ' was dropped in S9b and must NOT come back from '
+            . 'the base CREATE TABLE — a fresh install that still had it would be '
+            . 'immediately out of step with every migrated one'
+        );
 
         // Running the capability installer on top is still a no-op.
         $before = $this->columns();

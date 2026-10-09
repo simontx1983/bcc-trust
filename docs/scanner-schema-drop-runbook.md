@@ -394,6 +394,29 @@ Run **all** of it. Each line is a separate claim.
    **exactly**. A matching row count alone is not evidence.
 3. The column count on both parents matches, and `idx_cw_discovery` is present
    with `cw_discovery_state, cw_last_discovery_at` **in that order**.
+
+   ⚠ **Compare columns SEMANTICALLY, not as DDL text.** Check
+   `COLUMN_TYPE`, `IS_NULLABLE`, `COLUMN_DEFAULT`, `CHARACTER_SET_NAME` and
+   `COLLATION_NAME` from `INFORMATION_SCHEMA`, not the `SHOW CREATE TABLE`
+   string. On **MySQL** a restored column's rendering changes in one benign
+   way, and discovering that mid-restore would look like a failure:
+
+   | | rendering |
+   |---|---|
+   | captured | `` `cw_discovery_state` varchar(20) COLLATE utf8mb4_unicode_ci … `` |
+   | after replay | `` `cw_discovery_state` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci … `` |
+
+   `SHOW CREATE TABLE` omits `CHARACTER SET` when a column matches the table
+   default and prints only `COLLATE`; replaying that line as `ADD COLUMN`
+   makes the collation an explicit column-level choice, so the redundant
+   `CHARACTER SET` is then rendered too. Same type, charset, collation and
+   default — the column is identical.
+
+   **MariaDB 11.8, the production engine, renders both forms identically**, so
+   a production restore really is byte-for-byte. The divergence is MySQL-only,
+   and both directions are pinned by
+   `ScannerSchemaBackupExportIntegrationTest::testCapturedDefinitionsAreVerbatimRatherThanReconstructed()`,
+   which runs on both engines.
 4. The running code is unaffected: read a chain through
    `ChainRepository::getById()` and a checkpoint through
    `ChainCheckpointRepository::get()`. Neither may surface a restored column and

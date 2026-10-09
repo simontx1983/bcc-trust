@@ -618,11 +618,12 @@ final class ScannerSchemaBackupExportIntegrationTest extends TestCase
         );
         self::assertStringContainsString('ADD COLUMN `cw_max_code_id`', $defs['cw_max_code_id']);
 
-        // The real proof: replay them and compare the engine's own rendering,
-        // which also covers the MySQL/MariaDB display-width divergence that
+        // The real proof: replay them and compare what the engine itself
+        // reports, which also covers the MySQL/MariaDB divergences that
         // misled the first rehearsal.
-        $original = bcc_trust_backup_capture_ddl($t);
-        self::assertIsString($original);
+        $originalLines    = $this->columnLines((string) bcc_trust_backup_capture_ddl($t));
+        $originalSemantic = $this->columnSemantics(self::DDL);
+        self::assertNotSame([], $originalSemantic, 'anti-vacuity: the probe must read columns');
 
         foreach (['cw_discovery_state', 'cw_last_discovery_at', 'cw_max_code_id'] as $column) {
             $wpdb->query("ALTER TABLE `{$t}` DROP COLUMN `{$column}`");
@@ -631,13 +632,41 @@ final class ScannerSchemaBackupExportIntegrationTest extends TestCase
             self::assertNotFalse($wpdb->query($sql), $wpdb->last_error);
         }
 
-        $restored = bcc_trust_backup_capture_ddl($t);
-        self::assertIsString($restored);
-
+        // ⚠⚠ SEMANTICS FIRST, AND THIS IS THE ASSERTION THAT MATTERS. Type,
+        // nullability, default, charset and collation, straight from
+        // INFORMATION_SCHEMA. A restore is correct when the engine agrees the
+        // columns are the same columns — not when two strings match.
         self::assertSame(
-            $this->columnLines($original),
-            $this->columnLines($restored),
-            'every column definition must come back byte-identical on this engine'
+            $originalSemantic,
+            $this->columnSemantics(self::DDL),
+            'every restored column must be semantically identical: same type, '
+            . 'nullability, default, charset and collation'
+        );
+
+        // ⚠ AND THE RENDERED TEXT, NORMALISED — because it is NOT
+        // byte-identical on every engine, and finding that out during a
+        // restore would be the worst possible moment.
+        //
+        // On MySQL 8, `SHOW CREATE TABLE` omits `CHARACTER SET` for a column
+        // whose charset matches the table default and prints only `COLLATE`.
+        // Replaying that captured line as `ADD COLUMN` makes the collation an
+        // explicit column-level choice, so MySQL then renders it WITH the
+        // redundant `CHARACTER SET utf8mb4` as well:
+        //
+        //   captured  `cw_discovery_state` varchar(20) COLLATE utf8mb4_unicode_ci …
+        //   restored  `cw_discovery_state` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci …
+        //
+        // Same type, same charset, same collation, same default — the column
+        // is identical and only its rendering changed. MariaDB 11.8, which is
+        // the PRODUCTION engine, renders both forms identically, so a
+        // production restore really is byte-for-byte. This normalisation
+        // exists so the suite states that divergence instead of either
+        // failing on MySQL or quietly dropping the text check.
+        self::assertSame(
+            array_map([$this, 'normaliseColumnLine'], $originalLines),
+            array_map([$this, 'normaliseColumnLine'], $this->columnLines((string) bcc_trust_backup_capture_ddl($t))),
+            'the rendered definitions must match once the redundant CHARACTER SET '
+            . 'that MySQL adds to a replayed COLLATE is normalised away'
         );
     }
 
@@ -681,6 +710,72 @@ final class ScannerSchemaBackupExportIntegrationTest extends TestCase
         ));
 
         return array_map(static fn (object $r): string => (string) $r->c, $rows ?: []);
+    }
+
+    /**
+     * What the ENGINE says each column is: type, nullability, default,
+     * charset and collation, from `INFORMATION_SCHEMA`.
+     *
+     * This is the comparison that decides whether a restore is correct. Two
+     * identical strings are nice; two columns the server agrees are the same
+     * column is the actual requirement, and it is stable across engines in a
+     * way the rendered DDL is not.
+     *
+     * @return array<string, string>
+     */
+    private function columnSemantics(string $bare): array
+    {
+        $wpdb = $GLOBALS['wpdb'];
+
+        /** @var list<object> $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            'SELECT COLUMN_NAME AS c, COLUMN_TYPE AS t, IS_NULLABLE AS n,
+                    COALESCE(COLUMN_DEFAULT, %s) AS d,
+                    COALESCE(CHARACTER_SET_NAME, %s) AS cs,
+                    COALESCE(COLLATION_NAME, %s) AS co
+               FROM INFORMATION_SCHEMA.COLUMNS
+              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+              ORDER BY COLUMN_NAME',
+            '<none>',
+            '<none>',
+            '<none>',
+            $this->t($bare)
+        ));
+
+        $out = [];
+        foreach ($rows ?: [] as $r) {
+            $out[(string) $r->c] = sprintf(
+                'type=%s null=%s default=%s charset=%s collation=%s',
+                $r->t,
+                $r->n,
+                $r->d,
+                $r->cs,
+                $r->co
+            );
+        }
+
+        return $out;
+    }
+
+    /**
+     * Normalise the one benign rendering divergence between MySQL and
+     * MariaDB: a redundant `CHARACTER SET x` in front of `COLLATE x_...`.
+     *
+     * See the long note in
+     * `testCapturedDefinitionsAreVerbatimRatherThanReconstructed()`. Only
+     * this exact redundancy is collapsed — where the charset is literally the
+     * collation's own prefix — so a genuine charset CHANGE still fails the
+     * comparison rather than being normalised into agreement.
+     */
+    private function normaliseColumnLine(string $line): string
+    {
+        return (string) preg_replace_callback(
+            '/CHARACTER SET (\w+) COLLATE (\w+)/',
+            static fn (array $m): string => str_starts_with($m[2], $m[1] . '_')
+                ? 'COLLATE ' . $m[2]
+                : $m[0],
+            $line
+        );
     }
 
     /**
