@@ -446,10 +446,14 @@ Run **all** of it. Each line is a separate claim.
 
 1. Re-run the row counts and digests; compare to the backup manifest (§5).
 2. Confirm the Action Scheduler queue for `bcc_discovery_run_execute` is still
-   all-`complete` and `wp_bcc_discovery_runs WHERE active_marker = 1` is 0 —
-   **on production too**, which as of 2026-10-09 is still unmeasured. Staging was
-   measured: 37 rows, all `complete`, against a denominator of 249 action rows of
-   which 7 were pending for other hooks, so the zero is real and not an artifact.
+   all-`complete` and `wp_bcc_discovery_runs WHERE active_marker = 1` is 0.
+   ⚠ This said production was "still unmeasured"; **it has since been
+   measured — see §14.1**, which found NO ROWS AT ALL for that hook against a
+   210-row denominator with 9 pending for other hooks. Staging: 37 rows, all
+   `complete`, against 249 action rows of which 7 were pending for other
+   hooks. Both zeros are real rather than artefacts of an empty table. The
+   check still has to be RE-RUN in the window, because a measurement is a
+   statement about the moment it was taken.
 3. Comment-stripped token sweep: no retained file names any dropped column.
 4. Confirm the computed post-change stamp is exactly `db054e2c71` (§3.1).
 5. ⚠⚠ **Manual column parity.** `schema-drift-guard.php` compares table names and
@@ -693,17 +697,30 @@ Consequences:
 - Holding production back therefore means **not dispatching at all**, not "dispatching carefully".
 - Rolling production back means a tarball restore or a revert commit on `main`; there is no "deploy the previous SHA" path.
 
-Production was last deployed 2026-10-07 (run `37567853867`) and is at `d84c2ac1a9` — **four releases behind** `main`. The gap is deliberate and must stay deliberate: the next production dispatch, whenever it happens and for whatever reason, is also an S9b release unless `main` is changed first.
+Production was last deployed 2026-10-07 (run `37567853867`) and is at `d84c2ac1a9` — **seven merged PRs behind** `main`: the four scanner releases S7–S9b (#287–#290) plus #293, #292 and #294, which are code and docs only. The gap is deliberate and must stay deliberate: the next production dispatch, whenever it happens and for whatever reason, is also an S9b release unless `main` is changed first. ⚠ The exact target moves every time `main` does — §14.2 names it, and that line is a snapshot, not a guarantee.
 
-Before any production dispatch after this merges: take and restore-verify a production backup, confirm the production executor queue is quiet (⚠ **still unmeasured on production** as of 2026-10-09 — only staging has been measured), and treat it as an S9b execution window.
+Before any production dispatch after this merges: take and restore-verify a production backup, re-confirm the production executor queue is quiet (measured 2026-10-09 and satisfied — **no rows at all** for the hook; see §14.1 — but a measurement expires, so re-run it), and treat it as an S9b execution window.
 
 ---
 
 ## 14. Production rollout — measured prerequisites and the exact order
 
-**Status: PLAN ONLY. No production deployment, no production cleanup, no
-execution-window backup taken.** Everything in §14.1 is a fresh read-only
-measurement of 2026-10-09; everything in §14.2 onward is procedure.
+**Status: PLAN ONLY. ⛔ NO PRODUCTION DEPLOYMENT, NO PRODUCTION CLEANUP, NO
+EXECUTION-WINDOW BACKUP TAKEN, AND NO AUTHORIZATION GIVEN.** Everything in
+§14.1 is a read-only measurement; everything in §14.2 onward is procedure.
+
+⚠⚠ **THE MEASUREMENTS ARE DATED, AND `main` HAS MOVED SINCE.** §14.1 was taken
+**2026-10-09** against production at `d84c2ac1a9`, when `main` was
+`04f18244`. `main` is now further ahead (§14.2). Production itself has not
+been deployed since 2026-10-07, so the §14.1 figures are expected to still
+hold — but **expected is not measured**. §14.4 step 3 requires re-reading the
+prerequisites immediately before dispatching, and that step is not optional:
+every row below is a statement about 2026-10-09, not about the moment you
+read it.
+
+The two gates that no amount of re-measurement replaces are unchanged: a
+**fresh execution-window backup with an isolated MariaDB 11.8.9 restore
+rehearsal** (§14.3), and **explicit authorization**.
 
 ### 14.1 Production state — measured, read-only
 
@@ -740,15 +757,26 @@ explicit authorization.
 The workflow compares `github.ref` to `refs/heads/main`; there is no SHA input
 and no way to target an older commit.
 
-So a production dispatch today deploys `main` = `04f182445b9d…`, which carries
-**four releases at once**:
+⚠ **THE RELEASE TARGET MOVES. Re-read it; do not trust this line.** At the
+time of writing a production dispatch deploys `main` =
+`23ef4a7da2e0ef3c9f2f878d60a2456d84873e6f`, which is **seven merged PRs**
+ahead of production's `d84c2ac1a9`:
 
 | | |
 |---|---|
-| **S7** | retires the `enumeration` operation and the `cosmwasm_enumeration` driver key, with a bounded idempotent override migration |
-| **S8** | deletes 26 classes / 12,911 production lines, including `ScannerFreeze` itself |
-| **S9a** | removes the 8 retired columns from the live `SELECT` lists and 12 callerless writers |
-| **S9b** | ⚠ **DESTROYS 138 rows**: drops 3 tables, 8 columns and `idx_cw_discovery` |
+| **S7** (#287) | retires the `enumeration` operation and the `cosmwasm_enumeration` driver key, with a bounded idempotent override migration |
+| **S8** (#288) | deletes 26 classes / 12,911 production lines, including `ScannerFreeze` itself |
+| **S9a** (#289) | removes the 8 retired columns from the live `SELECT` lists and 12 callerless writers |
+| **S9b** (#290) | ⚠ **DESTROYS 138 rows**: drops 3 tables, 8 columns and `idx_cw_discovery` |
+| #293 | docs only — retracts the false "EVM and Solana perform no provider validation" claim |
+| #292 | Verify Collections rendering: a fabricated `0` for a null holder count, a contradictory provisioned state, and the per-row attention cause |
+| #294 | NFT Discovery admin copy and dead code — three producerless status values and two vacuous tests |
+
+The last three are code and documentation only. ⚠ **They do not change the
+stamp expectation in §14.5**: no `schema-*.php` file has been touched since
+`04f18244`, so the post-deploy stamp is still `db054e2c71`. Confirm that with
+the §3.1 recompute rather than taking it on trust, because the statement
+becomes false the moment anyone edits one of those files.
 
 **This is not a code-only promotion.** The deploy fires `dbDelta` and the
 migration runner on the first request afterwards, because removing the three
