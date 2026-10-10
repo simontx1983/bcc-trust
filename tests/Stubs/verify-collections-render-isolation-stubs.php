@@ -189,7 +189,47 @@ namespace {
         }
     }
     if (!function_exists('get_permalink')) {
-        function get_permalink($post = 0): string { return 'https://example.test/?p=' . (int) $post; }
+        function get_permalink($post = 0): string { \BccPostCacheSpy::$permalinks[] = (int) $post; return 'https://example.test/?p=' . (int) $post; }
+    }
+    if (!class_exists('BccPostCacheSpy', false)) {
+        /**
+         * Records the post-cache priming and every permalink read.
+         *
+         * `get_permalink()` is still called once per rendered row — that is
+         * a cache READ, not a query, and moving it out of the loop would
+         * change nothing. What must hold is that the cache was PRIMED once
+         * beforehand, so those reads are hits. The prefetch test asserts
+         * `$primes === 1` and that the primed id set covers every permalink
+         * that was then read.
+         */
+        final class BccPostCacheSpy
+        {
+            /** @var int how many times the post cache was primed */
+            public static int $primes = 0;
+
+            /** @var list<int> the ids handed to each prime, flattened */
+            public static array $primed = [];
+
+            /** @var list<int> every post id a permalink was read for */
+            public static array $permalinks = [];
+
+            public static function reset(): void
+            {
+                self::$primes = 0;
+                self::$primed = [];
+                self::$permalinks = [];
+            }
+        }
+    }
+    if (!function_exists('_prime_post_caches')) {
+        /** @param list<int> $ids */
+        function _prime_post_caches(array $ids, bool $terms = true, bool $meta = true): void
+        {
+            \BccPostCacheSpy::$primes++;
+            foreach ($ids as $id) {
+                \BccPostCacheSpy::$primed[] = (int) $id;
+            }
+        }
     }
     if (!function_exists('wp_create_nonce')) {
         /**
@@ -360,9 +400,52 @@ namespace BCC\Core\DB {
 
 namespace BCC\Core\Repositories {
     if (!class_exists(PeepSoGroupRepository::class, false)) {
+        /**
+         * Same arrangement as the gated-group stub: the per-group counter is
+         * kept callable so a restored per-row count is caught by an
+         * assertion rather than a fatal.
+         *
+         * `findManyByIds()` mirrors the real bcc-core method, which already
+         * returns `member_count` per group from ONE aggregate query under
+         * the same `gm_user_status LIKE` filter `countGroupMembers()` uses.
+         */
         final class PeepSoGroupRepository
         {
-            public static function countGroupMembers(int $groupId): int { return 0; }
+            /** @var int per-group counts — MUST stay 0 during a render */
+            public static int $perRowCalls = 0;
+
+            /** @var int set-based reads — one per render when any group resolves */
+            public static int $batchCalls = 0;
+
+            /** @var array<int,int> group id => member count, seeded by the test */
+            public static array $memberCounts = [];
+
+            public static function countGroupMembers(int $groupId): int
+            {
+                self::$perRowCalls++;
+                return self::$memberCounts[$groupId] ?? 0;
+            }
+
+            /**
+             * @param list<int> $groupIds
+             * @return array<int, object>
+             */
+            public static function findManyByIds(array $groupIds): array
+            {
+                self::$batchCalls++;
+
+                $out = [];
+                foreach ($groupIds as $groupId) {
+                    $out[(int) $groupId] = (object) [
+                        'id'           => (string) $groupId,
+                        'post_name'    => 'group-' . $groupId,
+                        'post_title'   => 'Group ' . $groupId,
+                        'post_content' => '',
+                        'member_count' => (string) (self::$memberCounts[(int) $groupId] ?? 0),
+                    ];
+                }
+                return $out;
+            }
         }
     }
 }
@@ -457,9 +540,54 @@ namespace BCC\Trust\Onchain\Repositories {
     }
 
     if (!class_exists(GatedGroupRepository::class, false)) {
+        /**
+         * ⚠ BOTH FORMS ARE PRESENT ON PURPOSE.
+         *
+         * `findGroupForCollection()` is the PER-ROW form. Production no
+         * longer calls it from the render loop, and
+         * `VerifyCollectionsCommunityCellPrefetchTest` asserts its counter
+         * stays at 0 — so a mutant that restores the N+1 is caught here
+         * rather than by a fatal, which would read as a kill for the wrong
+         * reason. Keeping it callable is what makes that assertion mean
+         * something.
+         */
         final class GatedGroupRepository
         {
-            public static function findGroupForCollection(int $chainId, string $contract): ?int { return null; }
+            /** @var int per-row lookups — MUST stay 0 during a render */
+            public static int $perRowCalls = 0;
+
+            /** @var int set-based lookups — one per render, regardless of row count */
+            public static int $batchCalls = 0;
+
+            /** @var list<int> the pair-count handed to each set-based call */
+            public static array $batchSizes = [];
+
+            /** @var array<int,int> collection row id => group id, seeded by the test */
+            public static array $groupByRowId = [];
+
+            public static function findGroupForCollection(int $chainId, string $contract): ?int
+            {
+                self::$perRowCalls++;
+                return null;
+            }
+
+            /**
+             * @param array<array-key, array{chain_id:int, contract:string}> $pairs
+             * @return array<array-key, int>
+             */
+            public static function findGroupsForCollections(array $pairs): array
+            {
+                self::$batchCalls++;
+                self::$batchSizes[] = count($pairs);
+
+                $out = [];
+                foreach ($pairs as $rowId => $_pair) {
+                    if (isset(self::$groupByRowId[(int) $rowId])) {
+                        $out[$rowId] = self::$groupByRowId[(int) $rowId];
+                    }
+                }
+                return $out;
+            }
         }
     }
 
