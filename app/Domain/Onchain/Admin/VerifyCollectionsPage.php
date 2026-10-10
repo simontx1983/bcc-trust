@@ -237,6 +237,94 @@ final class VerifyCollectionsPage
      * Register the inline AJAX handlers. Called from the plugin
      * bootstrap alongside ChainsPage::register_ajax().
      */
+    /**
+     * Resolve every community cell on the page in a BOUNDED number of
+     * reads, independent of how many rows are rendered.
+     *
+     * ── WHAT THIS REPLACED ──────────────────────────────────────────────
+     * The render loop used to call, per row with a community:
+     *   1. `GatedGroupRepository::findGroupForCollection()`  — 1 query, and
+     *      internally a `ChainRepository::getById()` per row as well
+     *   2. `PeepSoGroupRepository::countGroupMembers()`      — 1 query
+     *   3. `get_permalink()`                                 — 1 post read
+     *
+     * At the 100-row page size that is up to ~300 reads for one screen. The
+     * comment above the loop claimed the N+1 was "gone" because PR 6
+     * projected community EXISTENCE; these three were not existence and
+     * were not projected.
+     *
+     * ── WHAT IT DOES INSTEAD — THREE READS, NOT THREE PER ROW ───────────
+     *   1. `findGroupsForCollections()` — ONE query for every
+     *      (chain, contract) pair, using the SAME canonicalisation and the
+     *      SAME `utf8mb4_bin` comparison as the single lookup, so identity
+     *      behaviour is unchanged. Chain families are resolved once per
+     *      DISTINCT chain inside it.
+     *   2. `PeepSoGroupRepository::findManyByIds()` — ONE query returning
+     *      `member_count` per group. ⚠ Reused rather than written: it
+     *      already aggregates `COUNT(gm.gm_id)` under the identical
+     *      `gm_user_status LIKE` filter that `countGroupMembers()` uses, so
+     *      the number displayed is the same number. Writing a second
+     *      counter would have been a §11 duplicate AND a chance for the two
+     *      to disagree.
+     *   3. `_prime_post_caches()` — ONE query, so the `get_permalink()`
+     *      calls still in the loop are cache hits rather than post reads.
+     *      Same precedent as `CardsSearchEndpoint` and
+     *      `EndorsementService`.
+     *
+     * ⚠ A read failure yields an empty map, and the loop then renders
+     * "community present, identity unresolved" — exactly what a single
+     * failed lookup already produced. It never renders "no community" for a
+     * row that has one.
+     *
+     * @param list<object> $rows the FINAL page of rows, after any re-rank
+     * @return array{0: array<int,int>, 1: array<int,int>}
+     *         [collection row id => group post id, group post id => member count]
+     */
+    private static function prefetch_community_cells(array $rows): array
+    {
+        $pairs = [];
+        foreach ($rows as $row) {
+            if ((int) ($row->has_community ?? 0) !== 1) {
+                continue;
+            }
+            $rowId = (int) ($row->id ?? 0);
+            if ($rowId <= 0) {
+                continue;
+            }
+            // Same value the per-row lookup passed: the canonical identifier
+            // when present, else the contract address.
+            $pairs[$rowId] = [
+                'chain_id' => (int) ($row->chain_id ?? 0),
+                'contract' => (string) ($row->canonical_identifier ?? $row->contract_address ?? ''),
+            ];
+        }
+
+        if ($pairs === []) {
+            return [[], []];
+        }
+
+        $groupIds = GatedGroupRepository::findGroupsForCollections($pairs);
+        if ($groupIds === []) {
+            return [[], []];
+        }
+
+        $distinctGroupIds = array_values(array_unique(array_map('intval', $groupIds)));
+
+        $counts = [];
+        foreach (PeepSoGroupRepository::findManyByIds($distinctGroupIds) as $groupId => $group) {
+            $counts[(int) $groupId] = (int) ($group->member_count ?? 0);
+        }
+
+        // Prime the post cache so the loop's get_permalink() calls do not
+        // each read a post. `false, false` — neither terms nor meta are
+        // needed for a permalink.
+        if (function_exists('_prime_post_caches')) {
+            _prime_post_caches($distinctGroupIds, false, false);
+        }
+
+        return [$groupIds, $counts];
+    }
+
     public static function register_ajax(): void
     {
         add_action('wp_ajax_' . self::AJAX_ACTION_TOGGLE, [__CLASS__, 'ajax_toggle_verified']);
@@ -1492,6 +1580,12 @@ final class VerifyCollectionsPage
         $stateCounts       = $stateCountsResult['counts'];
         $countsAvailable   = $stateCountsResult['available'];
 
+        // ⚠ AFTER the re-rank, because the re-rank REPLACES
+        // `$listing['items']`. Prefetching before it would resolve the
+        // wrong page of rows.
+        [$communityGroupIds, $communityMemberCounts] =
+            self::prefetch_community_cells($listing['items']);
+
         // Pill chains: intersection of PILL_CHAIN_SLUGS (filterable) and
         // the active chains registry, in the configured order. A
         // missing/disabled chain silently drops its pill.
@@ -1990,13 +2084,20 @@ final class VerifyCollectionsPage
                                       }
                                       ?>
                                     <?php
-                                    // PR 6: community existence is PROJECTED by
-                                    // listForAdminState(), so the old per-row
-                                    // findGroupForCollection() N+1 is gone — one
-                                    // page used to issue 50 of them.
+                                    // PR 6 projected community EXISTENCE into
+                                    // listForAdminState(), which removed one N+1.
+                                    // ⚠ Three per-row reads survived it — the
+                                    // group lookup, its member count and its
+                                    // permalink — and the comment that used to sit
+                                    // here claimed the N+1 was "gone", which made
+                                    // them easy to miss. All three are now resolved
+                                    // in bounded set-based reads BEFORE this loop
+                                    // ({@see prefetch_community_cells()}), and this
+                                    // block does array lookups only. Nothing here
+                                    // may issue a query.
                                     //
-                                    // Cell semantics now follow the state machine,
-                                    // not verification:
+                                    // Cell semantics follow the state machine, not
+                                    // verification:
                                     //   community exists → linked member count
                                     //   requested        → "awaiting creation"
                                     //   failed           → the bounded failure reason
@@ -2005,12 +2106,9 @@ final class VerifyCollectionsPage
                                     $rowState     = (string) ($row->provisioning_state ?? ProvisioningState::NONE);
 
                                     if ($hasCommunity) {
-                                        $groupId = GatedGroupRepository::findGroupForCollection(
-                                            (int) $row->chain_id,
-                                            (string) ($row->canonical_identifier ?? $row->contract_address)
-                                        );
+                                        $groupId = $communityGroupIds[(int) $row->id] ?? null;
                                         if ($groupId !== null) {
-                                            $count     = PeepSoGroupRepository::countGroupMembers($groupId);
+                                            $count     = $communityMemberCounts[$groupId] ?? 0;
                                             $permalink = get_permalink($groupId);
                                             $label     = number_format_i18n($count) . ' member' . ($count === 1 ? '' : 's');
                                             if (is_string($permalink) && $permalink !== '') {

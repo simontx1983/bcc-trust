@@ -446,10 +446,14 @@ Run **all** of it. Each line is a separate claim.
 
 1. Re-run the row counts and digests; compare to the backup manifest (§5).
 2. Confirm the Action Scheduler queue for `bcc_discovery_run_execute` is still
-   all-`complete` and `wp_bcc_discovery_runs WHERE active_marker = 1` is 0 —
-   **on production too**, which as of 2026-10-09 is still unmeasured. Staging was
-   measured: 37 rows, all `complete`, against a denominator of 249 action rows of
-   which 7 were pending for other hooks, so the zero is real and not an artifact.
+   all-`complete` and `wp_bcc_discovery_runs WHERE active_marker = 1` is 0.
+   ⚠ This said production was "still unmeasured"; **it has since been
+   measured — see §14.1**, which found NO ROWS AT ALL for that hook against a
+   210-row denominator with 9 pending for other hooks. Staging: 37 rows, all
+   `complete`, against 249 action rows of which 7 were pending for other
+   hooks. Both zeros are real rather than artefacts of an empty table. The
+   check still has to be RE-RUN in the window, because a measurement is a
+   statement about the moment it was taken.
 3. Comment-stripped token sweep: no retained file names any dropped column.
 4. Confirm the computed post-change stamp is exactly `db054e2c71` (§3.1).
 5. ⚠⚠ **Manual column parity.** `schema-drift-guard.php` compares table names and
@@ -693,14 +697,235 @@ Consequences:
 - Holding production back therefore means **not dispatching at all**, not "dispatching carefully".
 - Rolling production back means a tarball restore or a revert commit on `main`; there is no "deploy the previous SHA" path.
 
-Production was last deployed 2026-10-07 (run `37567853867`) and is at `d84c2ac1a9` — **four releases behind** `main`. The gap is deliberate and must stay deliberate: the next production dispatch, whenever it happens and for whatever reason, is also an S9b release unless `main` is changed first.
+Production was last deployed 2026-10-07 (run `37567853867`) and is at `d84c2ac1a9` — **seven merged PRs behind** `main`: the four scanner releases S7–S9b (#287–#290) plus #293, #292 and #294, which are code and docs only. The gap is deliberate and must stay deliberate: the next production dispatch, whenever it happens and for whatever reason, is also an S9b release unless `main` is changed first. ⚠ The exact target moves every time `main` does — §14.2 names it, and that line is a snapshot, not a guarantee.
 
-Before any production dispatch after this merges: take and restore-verify a production backup, confirm the production executor queue is quiet (⚠ **still unmeasured on production** as of 2026-10-09 — only staging has been measured), and treat it as an S9b execution window.
-
+Before any production dispatch after this merges: take and restore-verify a production backup, re-confirm the production executor queue is quiet (measured 2026-10-09 and satisfied — **no rows at all** for the hook; see §14.1 — but a measurement expires, so re-run it), and treat it as an S9b execution window.
 
 ---
 
-## 14. Related
+## 14. Production rollout — measured prerequisites and the exact order
+
+**Status: PLAN ONLY. ⛔ NO PRODUCTION DEPLOYMENT, NO PRODUCTION CLEANUP, NO
+EXECUTION-WINDOW BACKUP TAKEN, AND NO AUTHORIZATION GIVEN.** Everything in
+§14.1 is a read-only measurement; everything in §14.2 onward is procedure.
+
+⚠⚠ **THE MEASUREMENTS ARE DATED, AND `main` HAS MOVED SINCE.** §14.1 was taken
+**2026-10-09** against production at `d84c2ac1a9`, when `main` was
+`04f18244`. `main` is now further ahead (§14.2). Production itself has not
+been deployed since 2026-10-07, so the §14.1 figures are expected to still
+hold — but **expected is not measured**. §14.4 step 3 requires re-reading the
+prerequisites immediately before dispatching, and that step is not optional:
+every row below is a statement about 2026-10-09, not about the moment you
+read it.
+
+The two gates that no amount of re-measurement replaces are unchanged: a
+**fresh execution-window backup with an isolated MariaDB 11.8.9 restore
+rehearsal** (§14.3), and **explicit authorization**.
+
+### 14.1 Production state — measured, read-only
+
+Taken through `wp eval-file … --skip-plugins --skip-themes` against the
+production path, and a filesystem manifest. No credentials or endpoint values
+were read or printed.
+
+| Prerequisite | Measured | Satisfied |
+|---|---|---|
+| Deployed identity | manifest **1,932 entries, sha256 `9285a36a29bdaf62ef55c01d221e1b9441309ea8de03c30a9b0e6b61fb2a08ca`** — content-and-path **identical to `d84c2ac1a9`** | ✅ |
+| Release level | pre-S8: `ScannerFreeze.php` and `CosmwasmDiscoveryService.php` still on disk; `drop-scanner-schema.php` absent | ✅ as expected |
+| Schema stamp | `bcc_trust_schema_version` = **`1a0bf150b1`** | ✅ pre-S9b |
+| Migration marker | `bcc_trust_scanner_schema_dropped` = **ABSENT** | ✅ has not run |
+| Sibling markers | `…cw721_scan_options_cleaned` and `…discovery_run_chunks_used_added` both present | ✅ will not re-run |
+| Destructive targets | `code_families` **102 rows**, `contracts` **36 rows**, `discovery_runs` **0 rows**; 7 `cw_*` columns; chains flag present; `idx_cw_discovery` present | ✅ as documented |
+| Option sweep target | `bcc_cosmos_endpoint_authz_%` = **0 rows** — the sweep is a **no-op** on production | ✅ |
+| Must survive | chains **21 rows / 21 cols**, checkpoints **8 rows / 16 cols**, chains **4 indexes** | ✅ |
+| Retained digests | chains `e02cdd4ecd7231d2…`, checkpoints `5e53d1170c429a70…` | ✅ recorded |
+| ⚠ Executor queue | **`bcc_discovery_run_execute` has NO ROWS AT ALL** in `wp_actionscheduler_actions`, against a denominator of **210** action rows of which **9 pending + 1 failed** belong to other hooks — so the zero is real, not an artifact. `wp_bcc_discovery_runs`: **0 rows**, `active_marker = 1` → **0** | ✅ **this was the last unmeasured prerequisite** |
+| Cron | `bcc_discovery_run_maintenance` **0** scheduled, `bcc_discovery_run_execute` **0** scheduled, against 122 events / 82 hooks | ✅ |
+| Application log | 10,215 lines; ERROR 1,335 / WARNING 6,075 / INFO 2,801 / AUDIT 4. **Zero** fatal/parse/undefined. All ERROR classes provider-side (Cosmos LCD 500 ×1,110, 502 ×76, 429 ×16, 404 ×6; Polkadot 403 ×57; THORChain cURL 60 ×56) plus **2× the known `Missing tables: bcc_trust_flags`** | ✅ baseline recorded |
+
+**Production never ran a discovery run.** That is the strongest form of the
+executor prerequisite: not "the queue drained" but "the queue was never used".
+
+**Conclusion: production satisfies every prerequisite for deploying current
+`main` EXCEPT the two that are deliberately deferred** — a fresh
+execution-window backup with an isolated restore rehearsal (§14.3), and
+explicit authorization.
+
+### 14.2 ⚠⚠⚠ What a production dispatch actually does
+
+`workflow_dispatch` deploys **the current `main` branch, not a pinned SHA**.
+The workflow compares `github.ref` to `refs/heads/main`; there is no SHA input
+and no way to target an older commit.
+
+⚠ **THE RELEASE TARGET MOVES. Re-read it; do not trust this line.** At the
+time of writing a production dispatch deploys `main` =
+`23ef4a7da2e0ef3c9f2f878d60a2456d84873e6f`, which is **seven merged PRs**
+ahead of production's `d84c2ac1a9`:
+
+| | |
+|---|---|
+| **S7** (#287) | retires the `enumeration` operation and the `cosmwasm_enumeration` driver key, with a bounded idempotent override migration |
+| **S8** (#288) | deletes 26 classes / 12,911 production lines, including `ScannerFreeze` itself |
+| **S9a** (#289) | removes the 8 retired columns from the live `SELECT` lists and 12 callerless writers |
+| **S9b** (#290) | ⚠ **DESTROYS 138 rows**: drops 3 tables, 8 columns and `idx_cw_discovery` |
+| #293 | docs only — retracts the false "EVM and Solana perform no provider validation" claim |
+| #292 | Verify Collections rendering: a fabricated `0` for a null holder count, a contradictory provisioned state, and the per-row attention cause |
+| #294 | NFT Discovery admin copy and dead code — three producerless status values and two vacuous tests |
+
+The last three are code and documentation only. ⚠ **They do not change the
+stamp expectation in §14.5**: no `schema-*.php` file has been touched since
+`04f18244`, so the post-deploy stamp is still `db054e2c71`. Confirm that with
+the §3.1 recompute rather than taking it on trust, because the statement
+becomes false the moment anyone edits one of those files.
+
+**This is not a code-only promotion.** The deploy fires `dbDelta` and the
+migration runner on the first request afterwards, because removing the three
+`schema-*.php` files moves the stamp. There is no separate "run migrations"
+step and no opportunity to deploy the code and defer the cleanup.
+
+⚠ **Any production dispatch for an unrelated reason now carries S9b.** Until
+`main` changes, "deploy that small fix to production" and "execute the
+destructive cleanup on production" are the same action.
+
+### 14.3 Required immediately before execution — fresh backup and rehearsal
+
+**The staging artefacts do not substitute.** They contain staging's rows
+(742/3762/10), not production's (102/36/0), and a backup is only a backup of
+the rows it actually holds.
+
+1. **Capture**, into a directory outside the webroot, `0700`/`0600`:
+
+   ```
+   wp eval-file ~/bcc-s9b-backup/capture.php --skip-plugins --skip-themes \
+     --path=<production root>
+   ```
+
+   The capture refuses unless all five participating tables are **InnoDB**,
+   then opens `START TRANSACTION WITH CONSISTENT SNAPSHOT` and takes digests
+   **twice inside the snapshot**, requiring them equal. Record both sha256
+   values it prints.
+
+2. **Verify by restoring**, in an isolated MariaDB **11.8.9** (the production
+   engine — a MySQL rehearsal gives false confidence about DDL portability):
+
+   ```
+   <fixture>.sql            # production's parents at their pre-drop shape
+   <artifact sections 1+4>  # the three tables
+   php verify.php <manifest>.json     # expect 30/30
+   <the real drop>                    # index first, then columns, then tables
+   accept.sql                         # expect 10/10 PASS
+   <artifact>.sql                     # the full restore
+   php verify.php <manifest>.json     # expect 30/30 again
+   ```
+
+   ⚠ **Proceed only if every check passes.** A backup that has not been
+   restored is a file, not a backup.
+
+3. Confirm the transferred artefact's sha256 still matches the host-side value.
+
+### 14.4 Exact release order
+
+1. ✅ **Done** — umbrella `Status = RETIRED` (#168) and the staging/production
+   distinction (#171) are merged. `schema-drift-guard.php` is already green
+   against a `main` that no longer declares the tables, so **no umbrella change
+   is required before a production deploy.**
+2. Take and verify the production backup (§14.3).
+3. Re-read the §14.1 prerequisites immediately before dispatching — in
+   particular that `bcc_trust_scanner_schema_dropped` is still **ABSENT** and
+   the stamp is still `1a0bf150b1`.
+4. Baseline the production application log **before** dispatching. Without it,
+   new errors and pre-existing errors are indistinguishable afterwards, and
+   production carries ~1,335 pre-existing provider ERRORs that will drown a new
+   one.
+5. **Dispatch** `Deploy` → environment `production`.
+6. Verify (§14.5) on the first request after deploy.
+7. Leave the executor binding alone. Unbinding is a separate decision; see
+   §14.8.
+
+### 14.5 Expected stamp and acceptance checks
+
+**Stamp: `1a0bf150b1` → `db054e2c71`** (55 inputs → 52). The stamp is a content
+hash over the deployed files, so it is the *same* value staging reached — it is
+not environment-specific. Recompute it from the tree before dispatching; a
+different value means the tree is not what was reviewed.
+
+Then, in order:
+
+| # | Check | Expected |
+|---|---|---|
+| 1 | content-and-path manifest vs the deployed commit | identical |
+| 2 | `bcc_trust_schema_version` | `db054e2c71` |
+| 3 | `bcc_trust_schema_version_cache` | absent |
+| 4 | `bcc_trust_scanner_schema_dropped` | **present** |
+| 5 | the ten acceptance checks (`accept.sql`) | **10/10 PASS** |
+| 6 | retained-column digests vs the §14.1 baseline | **unchanged** — chains `e02cdd4e…`, checkpoints `5e53d117…` |
+| 7 | chains + checkpoint projections | 21 and 8 rows, dropped column not surfaced |
+| 8 | option sweep | `authz_%` 0 (already 0 — a no-op here); `cw721_scan_%` still **1** (the sibling marker) |
+| 9 | cron / queue | maintenance 0; executor still bound; no non-complete executor actions |
+| 10 | application log vs the §14.4 baseline | no new fatal/parse/undefined; new ERRORs only in the pre-existing provider classes; **the `Missing tables: bcc_trust_flags` line is expected and pre-existing** |
+| 11 | the migration's own log lines | an `INFO` inventory **before** any mutation and an `INFO … drop complete` — expect `inventory_before` to read 102 / 36 / 0 |
+
+⚠ Run the verifier with `BCC_S9B_FORCE_FAIL=1` once first. A verifier whose
+exit code has never been seen to go non-zero is not known to work.
+
+### 14.6 Partial-failure handling
+
+The migration is idempotent at every step and fail-closed in both directions:
+it returns `INCOMPLETE` without writing its `done_option`, and the runner
+retries on the next request.
+
+**The operator's action at almost every failure point is: nothing. Let it
+retry.** Full matrix in §12. The specific points worth restating for
+production:
+
+- An unreadable `INFORMATION_SCHEMA` probe is **UNVERIFIED, never "already
+  absent"** — nothing is dropped and it retries.
+- A failed `DROP COLUMN` leaves the index gone and tables intact, because
+  tables come last. It retries and drops only what remains.
+- A postcondition re-probe that cannot be read returns `INCOMPLETE` **even
+  though the drops succeeded** — `query()` succeeding is not proof the schema
+  moved.
+- If a **retained** column is missing afterwards, the migration refuses to
+  complete and logs the expected-vs-present lists. ⛔ **Stop and restore.**
+- ⚠ **Do not hand-repair a half-applied schema**, and do not hand-write the
+  `done_option`. Every step is gated on its own existence probe; a manual
+  `ALTER` makes the logged inventory stop matching reality.
+
+### 14.7 Recovery on production
+
+Identical to §13.3, and the two traps matter more here because production
+carries the only copy of its 138 rows:
+
+1. **Precondition gate first** (§13.3.1): the three tables, the eight columns
+   and `idx_cw_discovery` must all count **0**, and the parents must still have
+   21 and 8 rows. Non-zero means something already partially restored — resolve
+   that before running the artefact, or it aborts mid-file.
+2. **Check `bcc_trust_scanner_schema_dropped` is present** (§13.3.2). If it is
+   ABSENT the migration is still pending and the runner retries every request,
+   so a restore is re-dropped almost immediately.
+3. ⚠⚠ **Do NOT revert the code before restoring.** Tested: a revert re-adds the
+   chains column via the restored installer, the artefact then hits
+   `ERROR 1060 Duplicate column name`, and the file **aborts** — leaving
+   structures present and data absent, which looks restored and is not.
+   Restore *with* the post-S9b code in place; restored tables are inert to it.
+4. Order: tables → columns (with their `AFTER` anchors) → index → rows
+   (`INSERT`s then `UPDATE`s) → verify → `wp cache flush`.
+
+### 14.8 Deliberately out of scope for this rollout
+
+- **The executor unbind.** Its prerequisite is now measured and satisfied on
+  **both** environments — staging 37 rows all `complete`, production **no rows
+  at all** — so it is unblocked, but it remains a separate decision and is not
+  part of this deploy. ⚠ If it is ever done, `wp_clear_scheduled_hook` with no
+  arguments **misses** the wp-cron fallback events, which carry `[$runId]`.
+- The stale deployed `.git` on production (603 files, 6.4 MB, HTTP 403 — not a
+  disclosure, see the findings handoff).
+- The `bcc_trust_flags` inventory warning and the role-boost warning.
+- The deferred `CosmwasmClassifier` prune and `bulkUpsert` migration.
+
+---
+
+## 15. Related
 
 - `includes/database/drop-scanner-schema.php` — the migration
 - `scripts/scanner-schema-backup.php` — the backup and digest functions
