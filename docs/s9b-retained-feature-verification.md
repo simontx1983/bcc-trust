@@ -77,7 +77,7 @@ action invoked, no endpoint switched and no provider probed.
 | # | Feature | What verifying it would involve | Why it needs authorization |
 |---|---|---|---|
 | C1 | **Manual Add Collection — Cosmos** | Submit a chain + contract in wp-admin | Runs the bounded CW-721 `contract_info` probe: **up to two live LCD queries**, and may write a collection row |
-| C2 | **Manual Add Collection — EVM / Solana** | Submit a contract | Writes a collection row. No provider validation on these families — accepted as entered |
+| C2 | **Manual Add Collection — EVM / Solana** | Submit a contract | ⚠ **CORRECTED 2026-10-09: these ARE validated, and a provider IS called.** `ContractValidator::validate()` dispatches `EvmContractProbe` and `SolanaContractProbe` per family, and `ManualCollectionIntakeService` refuses anything whose verdict is not persistable. ⚠ EVM additionally refuses any chain outside `NftLaunchChains` (Ethereum and Base) **without asking anything**. An earlier revision of this row said "no provider validation — accepted as entered", which pre-dated PR E's validators |
 | C3 | **Targeted validation** | Validate a submitted contract | **Live provider call** |
 | C4 | **Metadata retrieval** | Open an NFT piece / run enrichment | **Live provider call** (EVM + Solana fetchers are retained and unfrozen) |
 | C5 | **Ownership / holdings** | Refresh a wallet's holdings | **Live provider calls**, and writes holdings rows |
