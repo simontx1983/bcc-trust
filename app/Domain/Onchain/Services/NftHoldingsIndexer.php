@@ -4,7 +4,9 @@ namespace BCC\Trust\Onchain\Services;
 
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
+use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -157,7 +159,20 @@ final class NftHoldingsIndexer
             return $spamCache[$contract];
         };
 
-        $plan = self::planBatch($chainId, $events, $walletIdMap, $isSpam);
+        // ⚠⚠ THE CHAIN FAMILY, RESOLVED ONCE, FOR THE IDENTITY RULE.
+        //
+        // `planBatch()` is a pure planner with no DB access, so it cannot
+        // look the family up itself — and it needs it, because the
+        // canonical form of a contract identity is FAMILY-SPECIFIC. One
+        // read here, not one per event.
+        //
+        // An unreadable chain row yields '', which
+        // `NftCollectionIdentifier` refuses rather than guessing, so the
+        // batch is skipped instead of being written under a folded key.
+        $chain  = ChainRepository::getById($chainId);
+        $family = $chain === null ? '' : (string) ($chain->chain_type ?? '');
+
+        $plan = self::planBatch($chainId, $events, $walletIdMap, $isSpam, $family);
         $result['skipped']       = $plan['skipped'];
         $result['spam_filtered'] = $plan['spam_filtered'];
 
@@ -211,10 +226,20 @@ final class NftHoldingsIndexer
      * @param list<array<string, mixed>>      $events
      * @param array<string, int>              $walletIdMap lowercased address → wallet_link_id
      * @param callable(string, ?string): bool $isSpam contract, collection-name → spam?
+     * @param string                          $chainFamily `wp_bcc_chains.chain_type`,
+     *        resolved ONCE by {@see ingest()}. Required: the canonical form
+     *        of a contract identity is family-specific, and this planner
+     *        cannot read the chain row itself. REQUIRED, so a caller that omits
+     *        it is a type error rather than a silent no-op batch.
      * @return BatchPlan
      */
-    public static function planBatch(int $chainId, array $events, array $walletIdMap, callable $isSpam): array
-    {
+    public static function planBatch(
+        int $chainId,
+        array $events,
+        array $walletIdMap,
+        callable $isSpam,
+        string $chainFamily
+    ): array {
         $net          = self::emptyNetMap();
         /** @var array<string, array{wallet_link_id:int, chain_id:int, contract_address:string, token_id:string, token_standard:?string, delta:int, metadata_status:int, last_seen_block:int, confirmed_at:string, collection_name:?string, order:array{int,int}}> $deltaMap */
         $deltaMap     = [];
@@ -228,7 +253,30 @@ final class NftHoldingsIndexer
                 continue;
             }
 
-            $contract = strtolower((string) ($e['contract_address'] ?? ''));
+            // ⚠⚠⚠ THE CONTRACT IDENTITY IS CANONICALISED, NOT FOLDED.
+            //
+            // This was `strtolower()`. On EVM and Cosmos that agrees with
+            // the canonical rule, so nobody noticed. On SOLANA it does not:
+            // `contract_address` carries the MINT, base58 is
+            // case-sensitive, and a folded mint is a DIFFERENT key that no
+            // longer names the asset. `NftCollectionIdentifier` already
+            // says so in as many words; the write path simply was not
+            // using it.
+            //
+            // `SolanaFetcher::normalizeWebhookPayload()` supplies the mint
+            // byte-exact in BOTH `contract_address` and `token_id`, and
+            // only the former was folded — which is why `token_id` is the
+            // authoritative recovery evidence for rows already written
+            // (see docs/solana-mint-case-recovery.md).
+            //
+            // ⚠ A value the family rule refuses is SKIPPED, not stored
+            // under a guessed key. Fail closed: a row written under the
+            // wrong identity is worse than a row not written.
+            $identity = NftCollectionIdentifier::canonicalize(
+                $chainFamily,
+                (string) ($e['contract_address'] ?? '')
+            );
+            $contract = $identity->isAccepted() ? $identity->canonical() : '';
             $tokenId  = (string) ($e['token_id'] ?? '');
             $confAt   = (string) ($e['confirmed_at'] ?? '');
             $blkNum   = (int) ($e['block_number'] ?? 0);
