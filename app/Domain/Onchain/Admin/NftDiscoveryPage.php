@@ -53,27 +53,37 @@ use BCC\Trust\Onchain\Services\ManualCollectionIntakeService;
  * `subtab=nft-discovery` to `family=cosmos`, and
  * {@see maybe_redirect_legacy_url()} keeps the old URL working.
  *
- * ── WHAT IT CANNOT DO, AND WHY THAT IS THE POINT ────────────────────────
- * This page is READ-ONLY about capability. It has no writer for
- * `bcc_supports_nft_collections`, none for
- * `manual_collection_discovery_enabled`, and none for a driver override
- * row. It explains those values; it cannot change them, and it cannot seed
- * one. The editor that changes them is a later, separately reviewed change.
+ * ── WHAT IT CAN AND CANNOT DO ───────────────────────────────────────────
+ * ⚠ This docblock used to say the page is READ-ONLY about capability and
+ * that "the editor that changes them is a later, separately reviewed
+ * change". That editor LANDED. This page now hosts it and owns the eight
+ * `ACTION_CAP_*` routes below — which, as their own docblock says, are the
+ * only sanctioned way any of the three capability values is written. The
+ * two statements sat 24 lines apart and contradicted each other.
+ *
+ * So, precisely: this page WRITES the two capability columns and driver
+ * override rows, through admin-post + capability + POST-only + a
+ * route-and-chain-scoped nonce. It does NOT write provider readiness,
+ * which is observed from configuration and never edited here.
+ *
+ * What it still cannot do is START WORK. Granting product support or the
+ * manual permission authorises a later operator action; neither one runs
+ * anything, and no control on this page spends a provider request.
  *
  * A consequence worth stating plainly, because an operator will meet it
- * first: both capability columns are `DEFAULT 0` with no backfill and no
- * writer anywhere in this build, so on a stock install every chain reads
- * `no_bcc_support` and the backfill control is not offered. That is the
- * intended fail-closed state, not a defect, and the page names the exact
- * missing permission rather than showing a dead button.
+ * first: both capability columns are `DEFAULT 0` with no backfill, so on a
+ * stock install every chain reads `no_bcc_support` until an administrator
+ * grants it here. That is the intended fail-closed default, not a defect,
+ * and the page names the exact missing permission rather than showing a
+ * dead button.
  *
  * ── AND WHAT IT MUST NEVER GROW ─────────────────────────────────────────
- * No cron hook, no `wp_schedule_event`, no `register()` on
- * {@see CosmwasmDiscoveryWorker}, no REST or AJAX route that reaches a
- * discovery entry point. Automatic collection discovery was retired
- * deliberately; the only sanctioned way in is admin-post + capability +
- * POST-only + a route-and-chain-scoped nonce, which is what this file
- * implements and what its tests pin.
+ * No cron hook, no `wp_schedule_event`, no worker registration, no REST or
+ * AJAX route that reaches a discovery entry point. Chain-wide discovery was
+ * retired deliberately and S8 deleted its implementation outright, so there
+ * is no longer a class here to name; the only sanctioned way in is
+ * admin-post + capability + POST-only + a route-and-chain-scoped nonce,
+ * which is what this file implements and what its tests pin.
  */
 class NftDiscoveryPage
 {
@@ -668,9 +678,9 @@ class NftDiscoveryPage
                 start a discovery. Granting the manual permission does not start a discovery — it
                 only allows an administrator to start one later. A driver override can narrow or
                 reorder what the code already declares; it can never add a capability the build does
-                not have. Provider readiness is observed here, never edited. The backfill is a
-                separate, explicit action and appears only when every gate passes. Nothing here
-                verifies a collection or creates a community.
+                not have. Provider readiness is observed here, never edited. No control on this
+                page spends a provider request. Nothing here verifies a collection or creates a
+                community.
             </p>
 
             <?php if ($notice !== null): ?>
@@ -862,11 +872,12 @@ class NftDiscoveryPage
 
             case NftCapabilityEditor::RESULT_MANUAL_NO_STARTABLE:
                 return ['type' => 'warning', 'message' =>
-                    'The manual permission was refused: no driver in this build can perform an '
-                    . 'administrator-started operation on that chain, so the permission could not '
-                    . 'authorise anything. This is a structural limit, not a configuration gap — no '
-                    . 'credential or setting adds chain-wide enumeration to EVM or Solana. Nothing was '
-                    . 'changed.'];
+                    'The manual permission was refused: manual intake cannot be performed on that '
+                    . 'chain, so the permission could not authorise anything. Either no driver in '
+                    . 'this build can validate a single contract on that chain family, or — on an '
+                    . 'EVM chain — the chain is outside the approved launch scope. The second case '
+                    . 'is a product decision rather than a missing credential, and no setting on '
+                    . 'this page widens it. Nothing was changed.'];
 
             case NftCapabilityEditor::RESULT_MANUAL_WRITE_FAILED:
                 return ['type' => 'error', 'message' =>
@@ -1192,8 +1203,6 @@ class NftDiscoveryPage
                 return 'No driver';
             case NftChainCapability::OP_DISABLED:
                 return 'Disabled';
-            case NftChainCapability::OP_MANUAL_DISABLED:
-                return 'Not permitted';
             case NftChainCapability::OP_PROVIDER_UNAVAILABLE:
                 return 'Not configured';
         }
@@ -1210,7 +1219,6 @@ class NftDiscoveryPage
             case NftChainCapability::OP_READY:
                 return '#00a32a';
             case NftChainCapability::OP_PROVIDER_UNAVAILABLE:
-            case NftChainCapability::OP_MANUAL_DISABLED:
             case NftChainCapability::OP_DISABLED:
                 return '#dba617';
             case NftChainCapability::OP_UNKNOWN:
@@ -1257,21 +1265,18 @@ class NftDiscoveryPage
             case NftChainCapability::REASON_PRODUCT_COLUMN_ABSENT:
                 return 'This install cannot store whether BCC supports NFT collections on this chain '
                     . '(the column is absent from the projection), so nothing can be said yet.';
-            case NftChainCapability::REASON_MANUAL_COLUMN_ABSENT:
-                return 'This install cannot store the manual-discovery permission (the column is '
-                    . 'absent from the projection), so nothing can be said yet.';
+
             case NftChainCapability::REASON_PRODUCT_SUPPORT_DISABLED:
                 return 'BCC does not currently support NFT collections on this chain. This is a '
-                    . 'product decision, not a technical limit, and it is not editable from this page.';
+                    . 'product decision, not a technical limit. It is granted in the capability '
+                    . 'editor below, and granting it starts nothing on its own.';
             case NftChainCapability::REASON_NO_REGISTERED_DRIVER:
                 return 'No driver in this build performs this operation on this chain family, on any '
                     . 'configuration. Credentials would not change it.';
             case NftChainCapability::REASON_ALL_DRIVERS_DISABLED:
                 return 'A driver exists for this operation and every one of them has been switched '
                     . 'off by a driver-override row.';
-            case NftChainCapability::REASON_MANUAL_PERMISSION_DISABLED:
-                return 'Operator-started discovery is not permitted on this chain. The permission is '
-                    . 'read-only in this build.';
+
             case NftChainCapability::REASON_NO_READY_DRIVER:
                 return 'A driver exists and is enabled, but nothing is configured to run it — a '
                     . 'missing endpoint or credential.';
@@ -1317,8 +1322,8 @@ class NftDiscoveryPage
 
         <p style="color:#646970;max-width:900px;">
             It runs on its own existing schedule and is not started from this page. Anything it
-            records arrives <strong>unverified</strong>, exactly like anything the CosmWasm engine
-            finds, and it verifies nothing and creates no community.
+            records arrives <strong>unverified</strong>, and it verifies nothing and creates no
+            community.
         </p>
         <?php
     }
@@ -1467,7 +1472,7 @@ class NftDiscoveryPage
         ?>
         <h2 style="margin-top:32px;">Add a collection</h2>
         <p style="color:#646970;max-width:60em;">
-            Manual intake for a collection that discovery cannot reach. The chain you
+            Manual intake is the only way a collection is added. The chain you
             pick is authoritative: the form is bound to it, and a submission whose
             chain does not belong to this family is refused.
             The new row lands <strong>unverified</strong>, with <strong>no community</strong>,

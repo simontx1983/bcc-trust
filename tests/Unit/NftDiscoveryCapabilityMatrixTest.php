@@ -259,21 +259,36 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
      * column is present but the projection could stop carrying it, that
      * would black out the entire page.
      */
-    public function testAnAbsentManualColumnDoesNotMakeNonStartedOperationsUnknown(): void
+    public function testAnAbsentManualColumnRefusesNoOperationAtAll(): void
     {
         $chain = self::cosmos();
         unset($chain->manual_collection_discovery_enabled);
 
         $matrix = NftChainCapability::operationMatrix($chain)['operations'];
 
+        // ⚠⚠ THIS CASE USED TO BE VACUOUS, AND THE REWRITE IS THE POINT.
+        //
+        // It asserted that the absent-column refusal did not reach the
+        // operations that never read the column — against
+        // `REASON_MANUAL_COLUMN_ABSENT`, which S7 left with NO PRODUCER when
+        // it deleted rung 3. So the assertion passed because the value could
+        // not be returned for ANY operation, not because the scoping worked,
+        // and it would have gone on passing if the scoping had been deleted.
+        // It also carried a `continue` exempting OP_VALIDATION, which by then
+        // was exempting it from nothing.
+        //
+        // The property worth pinning now is the stronger one that is actually
+        // true: an install whose projection cannot carry the permission
+        // refuses NOTHING on that basis — no operation, validation included.
         foreach (NftDriverRegistry::operations() as $operation) {
-            if ($operation === NftDriverRegistry::OP_VALIDATION) {
-                continue;
-            }
-
             self::assertNotSame(
-                NftChainCapability::REASON_MANUAL_COLUMN_ABSENT,
-                $matrix[$operation]['reason'],
+                NftChainCapability::OP_UNKNOWN,
+                $matrix[$operation]['status'],
+                "{$operation} must not be UNKNOWN because of a column it never reads"
+            );
+            self::assertStringNotContainsStringIgnoringCase(
+                'manual_permission_column_absent',
+                (string) $matrix[$operation]['reason'],
                 "{$operation} must not be refused by a column it never reads"
             );
         }
@@ -580,24 +595,38 @@ final class NftDiscoveryCapabilityMatrixTest extends TestCase
      * consequence of other work — would report those as blocked by a switch
      * that has nothing to do with them.
      */
-    public function testManualPermissionOffDoesNotRefuseNonStartedOperations(): void
+    public function testManualPermissionOffRefusesNoOperationInTheMatrix(): void
     {
         $chain = self::cosmos(true, false);
 
-        foreach ([
-            NftDriverRegistry::OP_METADATA,
-            NftDriverRegistry::OP_VALIDATION,
-            NftDriverRegistry::OP_OWNERSHIP,
-        ] as $operation) {
+        // ⚠⚠ ALSO REWRITTEN FROM A VACUOUS CASE. It asserted that three
+        // named operations were not blamed on the manual-start permission,
+        // against `OP_MANUAL_DISABLED` — which S7 left with no producer when
+        // it deleted rung 7. The assertion could not fail.
+        //
+        // What is true, and now pinned across EVERY operation rather than
+        // three of them: with the permission explicitly OFF, the matrix
+        // refuses nothing on that basis, because the permission is enforced
+        // by manual intake (`canTakeManualIntake()`) and not by this ladder.
+        // A reinstated rung would break this case, which is the intent.
+        foreach (NftDriverRegistry::operations() as $operation) {
             $row = self::op($chain, $operation);
 
             self::assertFalse($row['operator_started'], "{$operation} is not operator-started");
-            self::assertNotSame(
-                NftChainCapability::OP_MANUAL_DISABLED,
-                $row['status'],
+            self::assertStringNotContainsStringIgnoringCase(
+                'manual',
+                (string) $row['status'],
+                "{$operation} must not be blamed on the manual-start permission"
+            );
+            self::assertStringNotContainsStringIgnoringCase(
+                'manual_permission_disabled',
+                (string) $row['reason'],
                 "{$operation} must not be blamed on the manual-start permission"
             );
         }
+
+        // Anti-vacuity: the loop above has to have examined something.
+        self::assertNotSame([], NftDriverRegistry::operations());
     }
 
 
