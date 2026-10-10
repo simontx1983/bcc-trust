@@ -575,7 +575,13 @@ final class NftCapabilityEditorRenderTest extends TestCase
             'only allows an administrator to start one later',
             'can never add a capability',
             'observed here, never edited',
-            'separate, explicit action',
+            // ⚠ Was 'separate, explicit action', which described the CosmWasm
+            // BACKFILL — the page's one provider-spending control. S4
+            // withdrew that route, so the promise named something that can no
+            // longer appear. Re-pointed rather than dropped: the inventory
+            // keeps six entries, and the replacement is the stronger claim
+            // that is now true of the whole page.
+            'spends a provider request',
         ] as $promise) {
             $this->assertStringContainsString($promise, $html, 'the operator copy must state: ' . $promise);
         }

@@ -176,8 +176,11 @@ final class NftChainCapability
      */
     public const OP_DISABLED = 'op_disabled';
 
-    /** OPERATOR PERMISSION: `manual_collection_discovery_enabled = 0`. */
-    public const OP_MANUAL_DISABLED = 'op_manual_disabled';
+    // ⚠ OP_MANUAL_DISABLED was removed here. S7 deleted the only rung that
+    // produced it (rung 7), so it had no producer; the admin page still
+    // carried a label and a colour arm for a status nothing could return.
+    // The permission it described is still enforced — by manual intake
+    // itself, via canTakeManualIntake(), not by this ladder.
 
     /** A driver exists and is enabled, but nothing is configured to run it. */
     public const OP_PROVIDER_UNAVAILABLE = 'op_provider_unavailable';
@@ -186,12 +189,13 @@ final class NftChainCapability
 
     public const REASON_OVERRIDES_UNAVAILABLE     = 'overrides_unavailable';
     public const REASON_PRODUCT_COLUMN_ABSENT     = 'product_support_column_absent';
-    public const REASON_MANUAL_COLUMN_ABSENT      = 'manual_permission_column_absent';
     public const REASON_PRODUCT_SUPPORT_DISABLED  = 'product_support_disabled';
     public const REASON_NO_REGISTERED_DRIVER      = 'no_registered_driver';
     public const REASON_ALL_DRIVERS_DISABLED      = 'all_drivers_disabled';
-    public const REASON_MANUAL_PERMISSION_DISABLED = 'manual_permission_disabled';
     public const REASON_NO_READY_DRIVER           = 'no_ready_driver';
+    // ⚠ REASON_MANUAL_COLUMN_ABSENT and REASON_MANUAL_PERMISSION_DISABLED
+    // were removed alongside OP_MANUAL_DISABLED above: rungs 3 and 7 were
+    // their only producers and S7 deleted both.
     public const REASON_READY                     = 'ready';
 
     // ── The three override states, for the editor ───────────────────────
@@ -269,18 +273,25 @@ final class NftChainCapability
     // `canTakeManualIntake()` below is the manual-intake question, and it is
     // the only one either the writer or the renderer asks.
     //
-    // OPERATOR_STARTED_OPERATIONS itself stays: it still marks which per-
-    // operation rows are operator-started in `operationMatrix()`, which is the
-    // genuine enumeration concept and remains frozen and separate.
+    // ⚠ OPERATOR_STARTED_OPERATIONS is GONE TOO. This comment used to say it
+    // "stays", and that was true when written; S7 then removed OP_ENUMERATION,
+    // which left the list empty and the predicate over it provably always
+    // false, so the list went with the two rungs it scoped. What survives is
+    // the `operator_started` KEY in each matrix row, hard-coded false — a true
+    // statement about every row today, and a computed value again on the day
+    // an operation is genuinely started by an operator.
 
     /**
      * PURE. Can an administrator submit ONE contract on this chain through
      * manual intake?
      *
      * ── ⚠⚠⚠ WHY THIS IS NOT hasOperatorStartableOperation() ─────────────
-     * That predicate asks whether the chain can be ENUMERATED, because
-     * `OPERATOR_STARTED_OPERATIONS` is `[OP_ENUMERATION]` — and no EVM or
-     * Solana driver in this build claims enumeration, by design. So while
+     * That predicate asked whether the chain can be ENUMERATED, because
+     * `OPERATOR_STARTED_OPERATIONS` was `[OP_ENUMERATION]` — and no EVM or
+     * Solana driver in this build claims enumeration, by design. (Both the
+     * predicate and that list are gone as of S7; this paragraph is kept in
+     * the past tense because the mistake it records is easy to repeat.) So
+     * while
      * `manual_collection_discovery_enabled` was gated on it, manual intake
      * could **never be enabled on Ethereum, Base or Solana**: the editor
      * refused every grant on exactly the chains PR E exists to serve.
@@ -349,11 +360,11 @@ final class NftChainCapability
      *
      *   1. overrides unavailable         OP_UNKNOWN               GLOBAL
      *   2. product column absent         OP_UNKNOWN               GLOBAL
-     *   3. manual column absent          OP_UNKNOWN               started ops
+     *   3. ── REMOVED IN S7 ── was: manual column absent → OP_UNKNOWN
      *   4. product support off           OP_NO_BCC_SUPPORT        GLOBAL
      *   5. no registered driver          OP_NO_DRIVER
      *   6. every driver overridden off   OP_DISABLED
-     *   7. manual permission off         OP_MANUAL_DISABLED       started ops
+     *   7. ── REMOVED IN S7 ── was: manual permission off → OP_MANUAL_DISABLED
      *   8. no ready driver               OP_PROVIDER_UNAVAILABLE
      *   9.                               OP_READY
      *
