@@ -6,6 +6,8 @@ namespace BCC\Trust\Tests\Unit;
 
 use BCC\Trust\Core\OverviewRenderWorld;
 use PHPUnit\Framework\Attributes\Group;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -23,7 +25,26 @@ use PHPUnit\Framework\TestCase;
  * a real database in AdminDashboardReadFailureIntegrationTest. Here the
  * verdict is the INPUT and the markup is the subject.
  */
+/**
+ * ⚠⚠ EACH TEST RUNS IN ITS OWN PROCESS, AND THAT IS NOT OPTIONAL.
+ *
+ * The stubs declare `BCC\Trust\Core\Plugin`, because the tab reaches the
+ * repository through `Plugin::instance()->adminDashboardRepository()` and
+ * there is no other seam. A `class_exists(..., false)` guard cannot win that
+ * race in the shared suite: any of ~3,700 tests that touches a production
+ * class calling `Plugin::instance()` autoloads the REAL Plugin first, after
+ * which the stub is skipped, the real repository runs, and every case here
+ * dies on `undefined function wp_cache_get()` — which is exactly what CI
+ * reported, 13 errors, while the same file passed alone.
+ *
+ * In a fresh process only tests/bootstrap.php has run (it does not load
+ * Plugin), so the stub is defined before anything can ask the autoloader.
+ * Isolation also means this file's Plugin double can never leak into another
+ * suite, which the shared-process version risked in the other direction.
+ */
 #[Group('unit')]
+#[RunTestsInSeparateProcesses]
+#[PreserveGlobalState(false)]
 final class OverviewTabReadFailureRenderTest extends TestCase
 {
     public static function setUpBeforeClass(): void

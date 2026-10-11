@@ -101,26 +101,62 @@ final class AdminDashboardReadFailureIntegrationTest extends TestCase
 
     /**
      * The integration bootstrap creates `user_info` but not the other seven
-     * tables these aggregates read. Minimal fixtures, only the columns the
-     * queries actually name — enough for the healthy control to be a real
-     * measurement rather than a missing-table failure in disguise.
+     * tables these aggregates read.
+     *
+     * ⚠⚠ THE READ MODEL IS INSTALLED BY THE PLUGIN'S OWN INSTALLER, NOT BY
+     * HAND. The integration suites share one database, this class sorts
+     * before PageReadModelSyncIntegrationTest, and that suite creates the
+     * table only `if (SHOW TABLES LIKE ... !== $table)`. A hand-rolled
+     * two-column `bcc_page_read_model` therefore SATISFIED its existence
+     * check and shadowed the real schema for the rest of the run — measured:
+     * 6 errors and 10 failures in that suite, caused entirely by this
+     * fixture. Same pattern as that suite now: require the real schema file,
+     * call the real installer, assert the table exists.
+     *
+     * The remaining six have no dedicated installer in includes/database/,
+     * so they are minimal fixtures naming only the columns these queries
+     * use. They are created ONLY when absent, so they can add a table but
+     * never replace a richer one.
      */
     private function ensureTables(): void
     {
         $wpdb = $GLOBALS['wpdb'];
         $p    = $wpdb->prefix;
 
+        $root       = dirname(__DIR__, 2);
+        $installers = [
+            [
+                \BCC\Trust\Core\Database\TableRegistry::pageReadModel(),
+                $root . '/includes/database/schema-project.php',
+                'bcc_trust_create_page_tables',
+            ],
+            [
+                \BCC\Trust\Core\Database\TableRegistry::trustAttestations(),
+                $root . '/includes/database/schema-trust-attestations.php',
+                'bcc_trust_create_trust_attestations_table',
+            ],
+        ];
+        foreach ($installers as [$table, $file, $installer]) {
+            if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table)) !== $table) {
+                require_once $file;
+                $installer();
+            }
+            self::assertSame(
+                $table,
+                $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table)),
+                "{$table} must be installed by the plugin, not by this fixture"
+            );
+        }
+
         $ddl = [
             "{$p}bcc_trust_votes" =>
                 'id BIGINT AUTO_INCREMENT PRIMARY KEY, status TINYINT NOT NULL DEFAULT 1, created_at DATETIME NULL',
-            "{$p}bcc_trust_attestations" =>
-                'id BIGINT AUTO_INCREMENT PRIMARY KEY, kind VARCHAR(32) NOT NULL DEFAULT \'vouch\', revoked_at DATETIME NULL',
+
             "{$p}bcc_trust_device_fingerprints" =>
                 'id BIGINT AUTO_INCREMENT PRIMARY KEY, fingerprint VARCHAR(64) NOT NULL, automation_score INT NOT NULL DEFAULT 0',
             "{$p}bcc_trust_fraud_analysis" =>
                 'id BIGINT AUTO_INCREMENT PRIMARY KEY, analyzed_at DATETIME NULL',
-            "{$p}bcc_page_read_model" =>
-                'page_id BIGINT PRIMARY KEY, reputation_tier VARCHAR(16) NOT NULL DEFAULT \'neutral\'',
+
             "{$p}bcc_trust_suspensions" =>
                 'id BIGINT AUTO_INCREMENT PRIMARY KEY, suspended_at DATETIME NULL, unsuspended_at DATETIME NULL',
             "{$p}bcc_trust_activity" =>
