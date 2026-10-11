@@ -1955,15 +1955,31 @@ final class VerifyCollectionsPage
         $chainId  = (int) ($row->chain_id ?? 0);
         $contract = (string) ($row->contract_address ?? '');
 
-        // ⚠⚠ `getRule()` DOES NOT DISTINGUISH A READ FAILURE.
+        // ⚠⚠ THE FAIL-CLOSED ARM, DELIBERATELY.
         //
-        // It returns 'deny', 'allow', or null — and a FAILED query also
-        // yields null, indistinguishable from "no rule recorded". So this
-        // view can honestly report the two states it can tell apart and
-        // must not claim a third it cannot. Reported as a finding rather
-        // than fixed here: adding discrimination means touching the Hide
-        // read path, which is out of scope for a read-only view.
-        $rule   = NftSpamContractRepository::getRule($chainId, $contract);
+        // `getRule()` returns null for "no rule" AND for a failed query,
+        // so this view used to print "not hidden" for a database fault —
+        // stating, about a contract an operator may have deliberately
+        // suppressed, the exact opposite of what was known.
+        //
+        // `getRuleOrThrow()` is the same query with an honest answer.
+        // Nothing here acts on the result, so throwing costs only a
+        // section of the page, and the section it costs is the one that
+        // would otherwise lie.
+        try {
+            $rule = NftSpamContractRepository::getRuleOrThrow($chainId, $contract);
+        } catch (RepositoryReadFailure $e) {
+            echo '<div class="notice notice-error inline"><p><strong>';
+            echo esc_html__('Could not read the hide rules for this contract.', 'bcc-trust');
+            echo '</strong> ';
+            echo esc_html__('This is a database read failure, not a statement that the collection is visible. Do not act on it.', 'bcc-trust');
+            echo '</p></div>';
+            echo '<p style="color:#646970;font-size:12px;">'
+                . esc_html__('Hide and Unhide are operated from the list, where the control and its nonce live.', 'bcc-trust')
+                . '</p>';
+            return;
+        }
+
         $hidden = $rule === NftSpamContractRepository::RULE_DENY;
 
         if ($hidden) {

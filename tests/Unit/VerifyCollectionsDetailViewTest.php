@@ -288,6 +288,46 @@ final class VerifyCollectionsDetailViewTest extends TestCase
         self::assertStringNotContainsString('Approve', $text);
     }
 
+    public function testAnUnreadableHideRuleIsNeverDisplayedAsNotHidden(): void
+    {
+        // ⚠⚠ THE WHOLE POINT OF getRuleOrThrow(). Before it, a database
+        // fault printed "not hidden" for a contract an operator may have
+        // deliberately suppressed — the exact opposite of what was known.
+        $this->seedRow();
+        \BccRenderWorld::$hideThrows = true;
+        $text = self::text($this->render());
+
+        self::assertStringContainsString('Could not read the hide rules', $text);
+        self::assertStringContainsString('not a statement that the collection is visible', $text);
+        self::assertStringNotContainsString('not hidden', $text);
+        self::assertStringNotContainsString('No deny rule is recorded', $text);
+    }
+
+    public function testAnUnreadableHideRuleDegradesOnlyThatSection(): void
+    {
+        // The rest of the record is still worth showing — the failure is
+        // scoped to the one fact that could not be established.
+        $this->seedRow();
+        \BccRenderWorld::$hideThrows = true;
+        $text = self::text($this->render());
+
+        self::assertStringContainsString('Identity and chain', $text);
+        self::assertStringContainsString('Validation and metadata', $text);
+    }
+
+    public function testAGenuinelyAbsentRuleStillReadsAsNotHidden(): void
+    {
+        // The control. Without it, the assertion above could pass because
+        // the view never says "not hidden" under any circumstances.
+        $this->seedRow();
+        \BccRenderWorld::$hideThrows = false;
+        \BccRenderWorld::$hideRule   = null;
+        $text = self::text($this->render());
+
+        self::assertStringContainsString('No deny rule is recorded', $text);
+        self::assertStringNotContainsString('Could not read the hide rules', $text);
+    }
+
     public function testHideStatusIsReportedButOffersNoControl(): void
     {
         // ⚠ Hide semantics are a separate decision. This view REPORTS; the
