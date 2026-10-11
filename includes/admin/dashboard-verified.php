@@ -57,8 +57,12 @@ function bcc_trust_render_verified_tab() {
     $where_clause = implode(' AND ', $where);
 
     // Total count + paginated data via repository
-    $total_items    = $repo->getVerifiedUsersCount($where_clause, $params);
-    $verified_users = $repo->getVerifiedUsersFiltered($where_clause, $params, $orderby_col, $order, $per_page, $offset);
+    // One admin-specific call, one verdict for the page. The three
+    // repository methods behind it keep their public contracts.
+    $panel          = $repo->getVerifiedPanelData($where_clause, $params, $orderby_col, $order, $per_page, $offset);
+    $panel_ok       = ( $panel['ok'] ?? true ) === true;
+    $total_items    = $panel['total'];
+    $verified_users = $panel['users'];
 
     // Decode and process meta data for each row
     foreach ($verified_users as $user) {
@@ -86,8 +90,13 @@ function bcc_trust_render_verified_tab() {
     }
 
     // Summary statistics via repository
-    $summary              = $repo->getVerifiedSummaryStats();
+    $summary              = $panel['summary'];
     $total_verified       = $summary['total_verified'];
+    // ⚠ number_format() on an unread figure prints a confident 0 under a
+    // green "Total Verified" heading, which reads as a measurement.
+    $verified_num = static function ($v) use ($panel_ok) {
+        return $panel_ok ? number_format((float) $v) : '—';
+    };
     $avg_net_impact       = $summary['avg_net_impact'];
     $high_quality_count   = $summary['high_quality_count'];
     $recent_verifications = $summary['recent_verifications'];
@@ -100,7 +109,7 @@ function bcc_trust_render_verified_tab() {
         <div class="stats-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0;">
             <div class="stat-card" style="background: #fff; padding: 20px; border: 1px solid #ccd0d4; border-radius: 5px; border-left: 4px solid #46b450;">
                 <h3 style="margin:0 0 5px 0; font-size:14px; color:#555;">Total Verified</h3>
-                <div class="stat-value" style="font-size: 32px; font-weight: bold;"><?php echo number_format($total_verified); ?></div>
+                <div class="stat-value" style="font-size: 32px; font-weight: bold;"><?php echo esc_html($verified_num($total_verified)); ?></div>
                 <small><?php echo esc_html($recent_verifications); ?> in last 30 days</small>
             </div>
 
@@ -173,7 +182,17 @@ function bcc_trust_render_verified_tab() {
                 </tr>
             </thead>
             <tbody>
-                <?php if (empty($verified_users)): ?>
+                <?php if (! $panel_ok): ?>
+                    <?php // ⚠ NOT "No verified users found" — that asserts a
+                          // fact about a table nobody read. elseif, so the
+                          // genuine empty state is untouched. ?>
+                    <tr>
+                        <td colspan="7" style="padding:20px;">
+                            <strong><?php esc_html_e('The verified-user list could not be read.', 'bcc-trust'); ?></strong>
+                            <?php esc_html_e('This is a database read failure, not a statement that no user is verified. The counts above are shown as a dash for the same reason. The failure is recorded in the application log.', 'bcc-trust'); ?>
+                        </td>
+                    </tr>
+                <?php elseif (empty($verified_users)): ?>
                     <tr>
                         <td colspan="7" style="text-align:center; padding:20px;">
                             <strong>No verified users found.</strong>
