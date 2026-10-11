@@ -23,8 +23,17 @@ if (!defined('ABSPATH')) {
 function bcc_trust_render_push_tab(): void {
     $now           = time();
     $prevHour      = $now - HOUR_IN_SECONDS;
-    $currentSnap   = \BCC\Trust\Core\Support\PushMetrics::readSnapshot($now);
-    $prevSnap      = \BCC\Trust\Core\Support\PushMetrics::readSnapshot($prevHour);
+    // ⚠ The admin-specific reader, which also reports whether any counter
+    // was RECORDED. readBucket() returns 0 for an absent bucket and 0 for a
+    // bucket that genuinely counted nothing, so this tab used to render
+    // "0 sends" for an hour in which nothing was recorded at all.
+    $currentRead   = \BCC\Trust\Core\Support\PushMetrics::readSnapshotForAdmin($now);
+    $prevRead      = \BCC\Trust\Core\Support\PushMetrics::readSnapshotForAdmin($prevHour);
+    $currentSnap   = $currentRead['buckets'];
+    $prevSnap      = $prevRead['buckets'];
+    // `?? true` so a build predating the reader renders exactly as before.
+    $current_available = ( $currentRead['available'] ?? true ) === true;
+    $prev_available    = ( $prevRead['available'] ?? true ) === true;
 
     $vapidConfigured = defined('BCC_PUSH_VAPID_PUBLIC_KEY')
         && defined('BCC_PUSH_VAPID_PRIVATE_KEY')
@@ -53,10 +62,36 @@ function bcc_trust_render_push_tab(): void {
         <?php endif; ?>
 
         <h3 style="margin-top:20px;">Current UTC hour (<?php echo esc_html(gmdate('Y-m-d H:00', $now)); ?> UTC)</h3>
-        <?php bcc_trust_render_push_stats_table($currentSnap); ?>
+        <?php if (! $current_available): ?>
+            <?php // ⚠ Not a table of zeros: nothing was RECORDED for this
+                  // hour, which is different from "nothing was sent". Before
+                  // the hour's first push this is the normal state, so it is
+                  // deliberately NOT styled as an error. ?>
+            <p style="color:#646970;padding:10px 0;">
+                <strong><?php esc_html_e('No counters recorded for this hour yet.', 'bcc-trust'); ?></strong><br>
+                <span style="font-size:12px;">
+                    <?php esc_html_e('Counters appear once the first push of the hour is attempted. An empty hour here is not a statement that no push was sent.', 'bcc-trust'); ?>
+                </span>
+            </p>
+        <?php else: ?>
+            <?php bcc_trust_render_push_stats_table($currentSnap); ?>
+        <?php endif; ?>
 
         <h3 style="margin-top:30px;">Previous UTC hour (<?php echo esc_html(gmdate('Y-m-d H:00', $prevHour)); ?> UTC)</h3>
-        <?php bcc_trust_render_push_stats_table($prevSnap); ?>
+        <?php if (! $prev_available): ?>
+            <?php // The previous hour is the more informative of the two: by
+                  // now it either recorded something or the counters never
+                  // reached this reader. Still not an error — the buckets
+                  // expire after PushMetrics::TTL (2 hours). ?>
+            <p style="color:#646970;padding:10px 0;">
+                <strong><?php esc_html_e('No counters recorded for the previous hour.', 'bcc-trust'); ?></strong><br>
+                <span style="font-size:12px;">
+                    <?php esc_html_e('Either no push was attempted in that hour, or its counters have expired. Counters are kept for two hours.', 'bcc-trust'); ?>
+                </span>
+            </p>
+        <?php else: ?>
+            <?php bcc_trust_render_push_stats_table($prevSnap); ?>
+        <?php endif; ?>
     </div>
 
     <div class="bcc-panel" style="margin-top:20px;">
