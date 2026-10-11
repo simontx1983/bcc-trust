@@ -219,8 +219,17 @@ would pass against a cursor that never moves.
   and a marker.
 
 ⚠ **This change alters what the detector FINDS**, and therefore who gets
-scored. Everything above this point in the ring work has been explicitly
-scoring-neutral; this one is not, and it should not be presented as plumbing.
+scored. It should not be presented as plumbing.
+
+⚠⚠ **And it is the SECOND scoring change in this programme, not the first.**
+#309 turned out to carry one too, found in review and measured: on a host
+with no persistent object cache the old `FraudDetector` read always missed,
+so its fallback ran and `detectVoteRings()` returned **vote rings only** —
+while the stored snapshot carries both kinds. An endorsement-only ring member
+goes from **+0 to +40** there. A drop-in host always scored both, so #309
+unifies the two rather than adding anything; but the earlier claim that the
+ring work was uniformly scoring-neutral was wrong, and this document should
+not repeat it.
 Rings beyond row 500 becoming visible means members of those rings start
 receiving `+15` / `+40`. That is the intended correction, and it needs to be
 stated as a scoring change in its own right — with the volume of newly detected
