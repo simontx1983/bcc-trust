@@ -11,6 +11,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 function bcc_trust_render_users_tab() {
     $data  = \BCC\Trust\Core\Plugin::instance()->adminDashboardRepository()->getUsersData();
+    // `?? true` keeps a pre-verdict payload rendering exactly as before.
+    $users_ok = ( $data['ok'] ?? true ) === true;
     $users = $data['users'];
     ?>
     <div class="bcc-panel">
@@ -20,7 +22,18 @@ function bcc_trust_render_users_tab() {
             visit <a href="<?php echo esc_url( admin_url( 'admin.php?page=bcc-trust-moderation' ) ); ?>">Trust Moderation</a>.
         </p>
 
-        <?php if ( empty( $users ) ): ?>
+        <?php if ( ! $users_ok ) : ?>
+            <?php // ⚠ NOT the empty-state sentence below: that asserts a fact
+                  // about a table nobody managed to read. This branch is an
+                  // elseif chain on purpose — the empty state is still exactly
+                  // what a successful read with no rows shows. ?>
+            <div class="notice notice-error inline" style="margin:0;">
+                <p>
+                    <strong><?php esc_html_e( 'The user list could not be read.', 'bcc-trust' ); ?></strong>
+                    <?php esc_html_e( 'This is a database read failure, not a statement that there are no tracked users. The failure is recorded in the application log.', 'bcc-trust' ); ?>
+                </p>
+            </div>
+        <?php elseif ( empty( $users ) ): ?>
             <p>No users found.</p>
         <?php else: ?>
         <table class="wp-list-table widefat fixed striped">

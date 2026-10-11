@@ -440,6 +440,8 @@ class AdminDashboardRepository
 
         // Use the denormalized read model — vote_count is pre-computed,
         // eliminating the correlated COUNT subquery on bcc_trust_votes.
+        $this->readFailed = false;
+
         $pages = $wpdb->get_results($wpdb->prepare(
             "SELECT rm.page_id, rm.owner_id AS page_owner_id,
                     rm.trust_score AS total_score, rm.reputation_tier,
@@ -455,10 +457,14 @@ class AdminDashboardRepository
             $limit
         ));
 
+        $this->noteReadFailure('getPagesData.pages');
+
         $pageIds = array_map(function ($p) { return (int) $p->page_id; }, $pages);
         $cptMap  = $this->getCptMap($pageIds);
 
         return [
+            // false => the top-pages read did not run; an empty table is not "no tracked pages".
+            'ok'      => !$this->readFailed,
             'pages'   => $pages,
             'cpt_map' => $cptMap,
             'total'   => count($pages),
@@ -479,6 +485,8 @@ class AdminDashboardRepository
 
         $limit = BCC_TRUST_ADMIN_ALL_PAGES_LIMIT;
 
+        $this->readFailed = false;
+
         $pages = $wpdb->get_results($wpdb->prepare(
             "SELECT p.ID, p.post_author, p.post_title, p.post_name, p.post_status, p.post_type, p.post_date, s.total_score, s.reputation_tier, s.vote_count, s.confidence_score
              FROM {$wpdb->posts} p
@@ -489,10 +497,14 @@ class AdminDashboardRepository
             $limit
         ));
 
+        $this->noteReadFailure('getAllPagesData.pages');
+
         $pageIds = array_map(function ($p) { return (int) $p->ID; }, $pages);
         $cptMap  = $this->getCptMap($pageIds);
 
         return [
+            // false => the all-pages read did not run; an empty table is not "no pages".
+            'ok'      => !$this->readFailed,
             'pages'   => $pages,
             'cpt_map' => $cptMap,
             'total'   => count($pages),
@@ -516,6 +528,8 @@ class AdminDashboardRepository
         $idBase     = \BCC\Trust\Core\Services\MemberSelfPageService::ID_BASE;
 
         $limit = BCC_TRUST_ADMIN_USERS_LIMIT;
+
+        $this->readFailed = false;
 
         $users = $wpdb->get_results($wpdb->prepare(
             "SELECT ui.id, ui.user_id, ui.user_login, ui.user_email, ui.display_name, ui.registered, ui.usr_last_activity, ui.usr_views, ui.usr_likes, ui.usr_role, ui.fraud_score, ui.peak_fraud_score, ui.trust_rank, ui.risk_level, ui.is_suspended, ui.is_verified, ui.votes_cast, ui.endorsements_given, ui.automation_score, ui.behavior_score, ui.device_fraud_probability, ui.signals_updated_at, ui.pages_owned, ui.groups_owned, ui.posts_created, ui.comments_made, ui.last_login, ui.last_ip_address, ui.device_fingerprint, ui.fraud_triggers, ui.page_ids_owned, ui.created_at, ui.updated_at,
@@ -541,7 +555,12 @@ class AdminDashboardRepository
             $user->risk_color = FraudClassification::color($score);
         }
 
+        $this->noteReadFailure('getUsersData.users');
+
         return [
+            // false => the user-trust read did not run; an empty table is not
+            // a statement that no user is tracked.
+            'ok'    => !$this->readFailed,
             'users' => $users,
             'total' => count($users),
             'limit' => $limit,
@@ -561,6 +580,8 @@ class AdminDashboardRepository
 
         $limit = BCC_TRUST_ADMIN_ACTIVITY_LIMIT;
 
+        $this->readFailed = false;
+
         $activity = $wpdb->get_results($wpdb->prepare(
             "SELECT a.id, a.user_id, a.action, a.target_type, a.target_id, a.ip_address, a.created_at, u.display_name as user_name
              FROM {$auditTable} a
@@ -570,7 +591,12 @@ class AdminDashboardRepository
             $limit
         ));
 
+        $this->noteReadFailure('getActivityData.activity');
+
         return [
+            // false => the activity read did not run; an empty log is not a
+            // statement that nothing has happened.
+            'ok'       => !$this->readFailed,
             'activity' => $activity,
             'total'    => count($activity),
             'limit'    => $limit,
@@ -1451,12 +1477,26 @@ class AdminDashboardRepository
      * @param int $limit
      * @return list<object>
      */
+    /**
+     * ⚠ Returns a BARE list, so it cannot carry an `ok` verdict without
+     * changing its contract. Its one caller (tab-activity.php) renders it
+     * beside getActivityData(), whose verdict covers the same table — so the
+     * tab already degrades honestly. The read is still guarded, so a failure
+     * is LOGGED rather than silent; reshaping this signature is a separate,
+     * reviewable change and is deliberately not bundled here.
+     *
+     * ⚠ The @return is not decoration: adding a docblock WITHOUT one makes
+     * PHPStan level 8 demand the iterable value type, and it caught exactly
+     * that here. A docblock can break a build it was only meant to explain.
+     *
+     * @return list<object>
+     */
     public function getAdminOnlyActivity(int $limit): array
     {
         global $wpdb;
         $table = TableRegistry::activity();
 
-        return $wpdb->get_results($wpdb->prepare(
+        $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT a.id, a.user_id, a.action, a.target_id, a.target_type,
                     a.ip_address, a.created_at,
                     u.display_name AS user_name
@@ -1467,7 +1507,10 @@ class AdminDashboardRepository
              LIMIT %d",
             'admin_%',
             $limit
-        )) ?: [];
+        ));
+        $this->noteReadFailure('getAdminOnlyActivity.rows');
+
+        return $rows ?: [];
     }
 
     /**

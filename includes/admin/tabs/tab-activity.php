@@ -13,6 +13,8 @@ function bcc_trust_render_activity_tab() {
     $repo = \BCC\Trust\Core\Plugin::instance()->adminDashboardRepository();
 
     $data           = $repo->getActivityData();
+    // `?? true` keeps a pre-verdict payload rendering exactly as before.
+    $activity_ok    = ( $data['ok'] ?? true ) === true;
     $activity       = $data['activity'];
 
     // ── Filter ────────────────────────────────────────────────────
@@ -40,7 +42,18 @@ function bcc_trust_render_activity_tab() {
 
         <p style="color:#666;">Last <?php echo intval($data['limit']); ?> entries. <?php echo intval( count( $activity ) ); ?> shown.</p>
 
-        <?php if ( empty( $activity ) ): ?>
+        <?php if ( ! $activity_ok ) : ?>
+            <?php // ⚠ NOT the empty-state sentence below: that asserts a fact
+                  // about a table nobody managed to read. This branch is an
+                  // elseif chain on purpose — the empty state is still exactly
+                  // what a successful read with no rows shows. ?>
+            <div class="notice notice-error inline" style="margin:0;">
+                <p>
+                    <strong><?php esc_html_e( 'The activity log could not be read.', 'bcc-trust' ); ?></strong>
+                    <?php esc_html_e( 'This is a database read failure, not a statement that nothing has happened. The failure is recorded in the application log.', 'bcc-trust' ); ?>
+                </p>
+            </div>
+        <?php elseif ( empty( $activity ) ): ?>
             <p>No activity found.</p>
         <?php else: ?>
         <table class="wp-list-table widefat fixed striped">
