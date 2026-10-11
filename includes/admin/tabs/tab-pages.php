@@ -34,6 +34,8 @@ function bcc_trust_get_peepso_page_settings_url( int $page_id ): string {
 
 function bcc_trust_render_pages_tab() {
     $data    = \BCC\Trust\Core\Plugin::instance()->adminDashboardRepository()->getPagesData();
+    // `?? true` keeps a pre-verdict payload rendering exactly as before.
+    $pages_ok = ( $data['ok'] ?? true ) === true;
     $pages   = $data['pages'];
     $cpt_map = $data['cpt_map'] ?? [];
     ?>
@@ -41,7 +43,18 @@ function bcc_trust_render_pages_tab() {
         <h2>Top Pages by Trust Score</h2>
         <p style="color:#666;">Showing top <?php echo intval($data['limit']); ?> pages by total score.</p>
 
-        <?php if ( empty( $pages ) ) : ?>
+        <?php if ( ! $pages_ok ) : ?>
+            <?php // ⚠ NOT the empty-state sentence below: that asserts a fact
+                  // about a table nobody managed to read. This branch is an
+                  // elseif chain on purpose — the empty state is still exactly
+                  // what a successful read with no rows shows. ?>
+            <div class="notice notice-error inline" style="margin:0;">
+                <p>
+                    <strong><?php esc_html_e( 'The scored pages could not be read.', 'bcc-trust' ); ?></strong>
+                    <?php esc_html_e( 'This is a database read failure, not a statement that no page has been scored. The failure is recorded in the application log.', 'bcc-trust' ); ?>
+                </p>
+            </div>
+        <?php elseif ( empty( $pages ) ) : ?>
             <p>No pages scored yet.</p>
         <?php else : ?>
         <table class="wp-list-table widefat fixed striped">
@@ -114,6 +127,8 @@ function bcc_trust_render_pages_tab() {
 
 function bcc_trust_render_all_pages_tab() {
     $data    = \BCC\Trust\Core\Plugin::instance()->adminDashboardRepository()->getAllPagesData();
+    // `?? true` keeps a pre-verdict payload rendering exactly as before.
+    $pages_ok = ( $data['ok'] ?? true ) === true;
     $pages   = $data['pages'];
     $cpt_map = $data['cpt_map'] ?? [];
     ?>
@@ -121,7 +136,18 @@ function bcc_trust_render_all_pages_tab() {
         <h2>All Pages (<?php echo number_format( $data['total'] ); ?>)</h2>
         <p style="color:#666;">All peepso-page posts. Showing up to <?php echo intval($data['limit']); ?>.</p>
 
-        <?php if ( empty( $pages ) ) : ?>
+        <?php if ( ! $pages_ok ) : ?>
+            <?php // ⚠ NOT the empty-state sentence below: that asserts a fact
+                  // about a table nobody managed to read. This branch is an
+                  // elseif chain on purpose — the empty state is still exactly
+                  // what a successful read with no rows shows. ?>
+            <div class="notice notice-error inline" style="margin:0;">
+                <p>
+                    <strong><?php esc_html_e( 'The page list could not be read.', 'bcc-trust' ); ?></strong>
+                    <?php esc_html_e( 'This is a database read failure, not a statement that there are no pages. The failure is recorded in the application log.', 'bcc-trust' ); ?>
+                </p>
+            </div>
+        <?php elseif ( empty( $pages ) ) : ?>
             <p>No pages found.</p>
         <?php else : ?>
         <table class="wp-list-table widefat fixed striped">
