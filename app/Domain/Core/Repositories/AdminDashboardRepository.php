@@ -2193,14 +2193,46 @@ class AdminDashboardRepository
             return $cached;
         }
 
+        // ⚠ Reset once for the WHOLE rollup, not per sub-helper. Five reads
+        // across three helpers feed one panel, and the operator-facing
+        // question is "can I trust this page", not "which of five queries
+        // failed" — the specific aggregate is named in the log instead.
+        $this->readFailed = false;
+
+        $slowRings   = $this->ecosystemSlowRings($days);
+        $disputeFlow = $this->ecosystemDisputeFlow($days);
+
+        // ⚠⚠ THE SECTIONS ARE BUILT IN EXPLICIT ORDER, NOT IN AN ARRAY
+        // LITERAL, BECAUSE ONE OF THEM RESETS THE FLAG UNDER US.
+        //
+        // ecosystemTierMovement() delegates to getOverviewData(), which on a
+        // cache miss runs computeOverviewData() — and that resets
+        // $readFailed to false for its own verdict. Called from inside an
+        // array literal it therefore ERASED any failure recorded by the
+        // sections before it, and whether it did so depended on whether the
+        // overview snapshot happened to be warm. A rollup whose verdict
+        // flips with unrelated cache state is worse than no verdict.
+        //
+        // So: capture the flag, let the nested call do what it likes, then
+        // restore it and fold in the nested verdict separately. Overview
+        // carries its own `ok` (added in #300), which is the right thing to
+        // consult rather than a flag it is entitled to reset.
+        $failedBeforeNested = $this->readFailed;
+        $tierMovement       = $this->ecosystemTierMovement();
+        $nestedOk           = ($tierMovement['overview_ok'] ?? true) === true;
+        $this->readFailed   = $failedBeforeNested;
+
+        $watchGraph     = $this->ecosystemWatchGraph($days);
+        $feedDominance  = $this->ecosystemFeedDominance($days);
+
         $rollup = [
             'window_days'   => $days,
             'generated_at'  => gmdate('Y-m-d H:i:s'),
-            'slow_rings'    => $this->ecosystemSlowRings($days),
-            'dispute_flow'  => $this->ecosystemDisputeFlow($days),
-            'tier_movement' => $this->ecosystemTierMovement(),
-            'watch_graph'   => $this->ecosystemWatchGraph($days),
-            'feed_dominance' => $this->ecosystemFeedDominance($days),
+            'slow_rings'    => $slowRings,
+            'dispute_flow'  => $disputeFlow,
+            'tier_movement' => $tierMovement,
+            'watch_graph'   => $watchGraph,
+            'feed_dominance' => $feedDominance,
 
             // V1-deferred sections — designed in the audit, not wired this pass.
             // Each `null` is rendered as an honest "deferred" placeholder in the
@@ -2210,6 +2242,15 @@ class AdminDashboardRepository
             'attention_gravity' => null,  // Needs prior-period snapshot store for WoW deltas.
             'external_slot'     => null,  // Needs HighlightStrip fetch-rate instrumentation.
         ];
+
+        // ⚠⚠ A FAILED ROLLUP IS NOT CACHED, for the same reason the overview
+        // snapshot is not (#300): caching it freezes a half-empty panel in
+        // for the TTL and keeps serving it after the database recovers. The
+        // old code cached unconditionally.
+        $rollup['ok'] = !$this->readFailed && $nestedOk;
+        if ($rollup['ok'] !== true) {
+            return $rollup;
+        }
 
         wp_cache_set($cacheKey, $rollup, self::CACHE_GROUP, self::CACHE_TTL);
         return $rollup;
@@ -2223,7 +2264,34 @@ class AdminDashboardRepository
      * log file operators don't habitually read; this lifts the signal
      * onto a tab they will.
      *
+     * ⚠⚠ THIS SECTION READS THROUGH A DIFFERENT REPOSITORY, AND THAT IS WHY
+     * ITS GUARDS LOOK MISPLACED. PatternRepository::getCountsByTypesSince()
+     * returns `[]`-defaulted ZEROS and getLatestByType() returns NULL when
+     * their query does not run — neither detects a read failure, and neither
+     * can be changed here without altering a public contract with callers
+     * outside this panel. So the failure is detected on THIS side, right
+     * after each call, from the same global $wpdb those reads used.
+     *
+     * ⚠ Two guards, not one: wpdb::query() clears last_error at the START of
+     * every query, so a failed count followed by a successful latest-row read
+     * leaves no trace by the time the method returns. Checking once at the end
+     * would miss exactly the interleaving that matters.
+     *
      * @return array<string, mixed>
+     *
+     * @phpstan-impure — this helper mutates $readFailed through
+     * noteReadFailure(), so the tag states a fact about it.
+     *
+     * ⚠ MEASURED, NOT ASSUMED: unlike the other three reading helpers, this
+     * tag is NOT load-bearing today. Stripping it leaves PHPStan level 8 at
+     * "[OK] No errors", because the three tagged helpers already run before
+     * the verdict is computed and PHPStan therefore already knows the flag
+     * may have changed. It is kept because the method really is impure and
+     * because the day those three calls move or go away, an untagged impure
+     * helper is how the verdict silently becomes structurally always-ok —
+     * which is the failure the other three tags were added to fix.
+     *
+     * @phpstan-impure
      */
     private function ecosystemSlowRings(int $days): array
     {
@@ -2231,8 +2299,10 @@ class AdminDashboardRepository
 
         $types  = ['vote_ring', 'endorsement_ring', 'slow_endorsement_ring'];
         $counts = $patternRepo->getCountsByTypesSince($types, $days);
+        $this->noteReadFailure('getEcosystemRollup.slow_ring_counts');
 
         $latestSlow = $patternRepo->getLatestByType('slow_endorsement_ring');
+        $this->noteReadFailure('getEcosystemRollup.slow_ring_latest');
         $latest     = null;
         if ($latestSlow !== null) {
             $rawData = $latestSlow->pattern_data ?? null;
@@ -2267,6 +2337,16 @@ class AdminDashboardRepository
      * the panel-spread metrics died with the panel columns.
      *
      * @return array<string, mixed>
+     *
+     * ⚠ @phpstan-impure — this helper MUTATES $readFailed through
+     * noteReadFailure(). PHPStan otherwise treats it as pure, concludes that
+     * $readFailed cannot have changed since getEcosystemRollup() reset it,
+     * and reports the rollup's verdict as always-ok: "Negated boolean
+     * expression is always true". It was right — without this tag the verdict
+     * is structurally incapable of being false, which is worse than no
+     * verdict at all.
+     *
+     * @phpstan-impure
      */
     private function ecosystemDisputeFlow(int $days): array
     {
@@ -2285,6 +2365,7 @@ class AdminDashboardRepository
              LIMIT 10",
             $days
         ), ARRAY_A);
+        $this->noteReadFailure('getEcosystemRollup.dispute_flow');
 
         $statusCounts = [
             'reviewing'         => 0,
@@ -2333,9 +2414,17 @@ class AdminDashboardRepository
     private function ecosystemTierMovement(): array
     {
         $overview = $this->getOverviewData();
+
         return [
             'current_distribution' => $overview['tier_distribution'] ?? [],
             'wow_delta'            => null, // V1-deferred — see audit P4 design notes.
+            // ⚠ Surfaced so getEcosystemRollup() can fold it in. This helper
+            // reads nothing itself; it borrows the Overview tab's aggregates,
+            // and getOverviewData() is entitled to reset the shared flag for
+            // its own verdict — so its `ok` is what the rollup must consult,
+            // not the flag it just cleared. `?? true` keeps a snapshot written
+            // before #300 rendering as readable.
+            'overview_ok'          => ($overview['ok'] ?? true) === true,
         ];
     }
 
@@ -2355,6 +2444,16 @@ class AdminDashboardRepository
      * constraints: detect celebrity gravity early, never amplify it.
      *
      * @return array<string, mixed>
+     *
+     * ⚠ @phpstan-impure — this helper MUTATES $readFailed through
+     * noteReadFailure(). PHPStan otherwise treats it as pure, concludes that
+     * $readFailed cannot have changed since getEcosystemRollup() reset it,
+     * and reports the rollup's verdict as always-ok: "Negated boolean
+     * expression is always true". It was right — without this tag the verdict
+     * is structurally incapable of being false, which is worse than no
+     * verdict at all.
+     *
+     * @phpstan-impure
      */
     private function ecosystemWatchGraph(int $days): array
     {
@@ -2370,6 +2469,8 @@ class AdminDashboardRepository
             $days
         ));
 
+        $this->noteReadFailure('getEcosystemRollup.watch_pulls');
+
         // Top-5 recipients (operator-only; never user-surfaced).
         /** @var list<array{recipient_id: string|int, gained: string|int}>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
@@ -2384,6 +2485,8 @@ class AdminDashboardRepository
              LIMIT 5",
             $days
         ), ARRAY_A);
+
+        $this->noteReadFailure('getEcosystemRollup.watch_graph');
 
         $topGainers = [];
         foreach (($rows ?: []) as $row) {
@@ -2418,6 +2521,16 @@ class AdminDashboardRepository
      * template (color/copy choice), not in this method.
      *
      * @return array<string, mixed>
+     *
+     * ⚠ @phpstan-impure — this helper MUTATES $readFailed through
+     * noteReadFailure(). PHPStan otherwise treats it as pure, concludes that
+     * $readFailed cannot have changed since getEcosystemRollup() reset it,
+     * and reports the rollup's verdict as always-ok: "Negated boolean
+     * expression is always true". It was right — without this tag the verdict
+     * is structurally incapable of being false, which is worse than no
+     * verdict at all.
+     *
+     * @phpstan-impure
      */
     private function ecosystemFeedDominance(int $days): array
     {
@@ -2447,6 +2560,8 @@ class AdminDashboardRepository
             ...$params
         ), ARRAY_A);
 
+        $this->noteReadFailure('getEcosystemRollup.feed_authors');
+
         $totalPosts = 0;
         $allAuthorCounts = [];
         foreach (($authorRows ?: []) as $row) {
@@ -2474,6 +2589,8 @@ class AdminDashboardRepository
              LIMIT 10",
             ...$kindParams
         ), ARRAY_A);
+
+        $this->noteReadFailure('getEcosystemRollup.feed_kinds');
 
         $byKind = [
             'peepso-activity-status' => 0,
