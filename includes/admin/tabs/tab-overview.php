@@ -25,19 +25,76 @@ function bcc_trust_render_overview_tab() {
     $today_verifications  = $today['today_verifications'];
     $today_votes          = $today['today_votes'];
     $today_admin_actions  = $today['today_admin_actions'];
+
+    // ⚠⚠ "Nothing happened" and "we could not look" are different facts.
+    //
+    // Every figure on this tab is a COUNT, and a failed COUNT used to arrive
+    // here as the integer 0 — then "New High-Fraud: 0" and "Suspensions: 0"
+    // were painted GREEN, so an unreadable database was displayed as an
+    // all-clear. The repository now reports whether its reads actually ran;
+    // where they did not, this tab says so instead of colouring a number it
+    // never received.
+    //
+    // `?? true` is deliberate for both: a snapshot written by the previous
+    // build carries no 'ok' key, and treating that absence as a failure
+    // would show every operator a read error on the first load after deploy.
+    $overview_ok = ( $data['ok'] ?? true ) === true;
+    $today_ok    = ( $today['ok'] ?? true ) === true;
+    $is_stale    = ! empty( $data['stale'] );
+    $stale_age   = (int) ( $data['stale_age'] ?? 0 );
     ?>
 
-    <div class="bcc-panel" style="border-left:5px solid #2196f3;">
+    <?php if ( ! $overview_ok || ! $today_ok ): ?>
+        <div class="notice notice-error inline" style="margin:0 0 16px 0;">
+            <p>
+                <strong><?php esc_html_e( 'Some figures below could not be read from the database.', 'bcc-trust' ); ?></strong>
+                <?php esc_html_e( 'Where a number could not be read it is shown as a dash, not as zero. A dash is not a statement that nothing happened — do not read it as an all-clear.', 'bcc-trust' ); ?>
+            </p>
+            <p style="margin-top:0;">
+                <?php esc_html_e( 'The failure is recorded in the application log with the specific aggregate that failed.', 'bcc-trust' ); ?>
+            </p>
+        </div>
+    <?php endif; ?>
+
+    <?php if ( $is_stale ): ?>
+        <div class="notice notice-warning inline" style="margin:0 0 16px 0;">
+            <p>
+                <strong><?php esc_html_e( 'Showing the last good snapshot.', 'bcc-trust' ); ?></strong>
+                <?php
+                printf(
+                    /* translators: %s: human-readable age, e.g. "4 mins". */
+                    esc_html__( 'The live read failed, so these totals are from a snapshot taken %s ago rather than fabricated zeros.', 'bcc-trust' ),
+                    esc_html( human_time_diff( time() - $stale_age, time() ) )
+                );
+                ?>
+            </p>
+        </div>
+    <?php endif; ?>
+
+    <div class="bcc-panel" style="border-left:5px solid <?php echo $today_ok ? '#2196f3' : '#d63638'; ?>;">
         <h2 style="margin-top:0;">Today's Activity Summary</h2>
         <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:16px;text-align:center;">
             <?php
-            $summary_stats = [
-                [ 'label' => 'New High-Fraud', 'value' => $today_fraud,         'color' => $today_fraud > 0         ? '#f44336' : '#4caf50' ],
-                [ 'label' => 'Suspensions',    'value' => $today_suspensions,   'color' => $today_suspensions > 0   ? '#ff9800' : '#4caf50' ],
-                [ 'label' => 'Verifications',  'value' => $today_verifications, 'color' => $today_verifications > 0 ? '#4caf50' : '#999' ],
-                [ 'label' => 'Votes Cast',     'value' => $today_votes,         'color' => '#2196f3' ],
-                [ 'label' => 'Admin Actions',  'value' => $today_admin_actions, 'color' => '#9c27b0' ],
-            ];
+            // ⚠ The colour is a CLAIM. Green on "New High-Fraud" asserts that
+            // nobody crossed the threshold today, which only the number's
+            // provenance can justify — so when the read failed every tile
+            // goes neutral grey and the value becomes an em dash. There is no
+            // branch here that can paint an unread number green.
+            $summary_stats = $today_ok
+                ? [
+                    [ 'label' => 'New High-Fraud', 'value' => $today_fraud,         'color' => $today_fraud > 0         ? '#f44336' : '#4caf50' ],
+                    [ 'label' => 'Suspensions',    'value' => $today_suspensions,   'color' => $today_suspensions > 0   ? '#ff9800' : '#4caf50' ],
+                    [ 'label' => 'Verifications',  'value' => $today_verifications, 'color' => $today_verifications > 0 ? '#4caf50' : '#999' ],
+                    [ 'label' => 'Votes Cast',     'value' => $today_votes,         'color' => '#2196f3' ],
+                    [ 'label' => 'Admin Actions',  'value' => $today_admin_actions, 'color' => '#9c27b0' ],
+                ]
+                : [
+                    [ 'label' => 'New High-Fraud', 'value' => '—', 'color' => '#646970' ],
+                    [ 'label' => 'Suspensions',    'value' => '—', 'color' => '#646970' ],
+                    [ 'label' => 'Verifications',  'value' => '—', 'color' => '#646970' ],
+                    [ 'label' => 'Votes Cast',     'value' => '—', 'color' => '#646970' ],
+                    [ 'label' => 'Admin Actions',  'value' => '—', 'color' => '#646970' ],
+                ];
             foreach ( $summary_stats as $s ):
             ?>
                 <div>
@@ -46,6 +103,11 @@ function bcc_trust_render_overview_tab() {
                 </div>
             <?php endforeach; ?>
         </div>
+        <?php if ( ! $today_ok ): ?>
+            <p style="margin:12px 0 0 0;color:#646970;font-size:12px;">
+                <?php esc_html_e( "Today's figures are unavailable because at least one of the five reads behind them did not run.", 'bcc-trust' ); ?>
+            </p>
+        <?php endif; ?>
     </div>
 
     <!-- ── Headline stats ───────────────────────────────────────── -->
@@ -57,6 +119,14 @@ function bcc_trust_render_overview_tab() {
             [ 'label' => 'Tracked Pages',       'value' => number_format( $counts['total_pages'] ),        'icon' => '📄' ],
             [ 'label' => 'Tracked Users',       'value' => number_format( $counts['total_users'] ),        'icon' => '👤' ],
         ];
+        // ⚠ number_format() makes a fabricated zero look authoritative — this
+        // is the line that rendered "Tracked Users 0" while the table held 3.
+        // A dash cannot be mistaken for a measurement.
+        if ( ! $overview_ok ) {
+            foreach ( $headline as $i => $unused_h ) {
+                $headline[ $i ]['value'] = '—';
+            }
+        }
         foreach ( $headline as $h ):
         ?>
             <div class="bcc-panel" style="text-align:center;padding:16px;">
@@ -80,9 +150,24 @@ function bcc_trust_render_overview_tab() {
                 [ 'label' => 'Low Risk',      'value' => $risk['low_risk'],            'color' => '#ffc107' ],
                 [ 'label' => 'Minimal Risk',  'value' => $risk['minimal_risk'],        'color' => '#28a745' ],
             ];
+            // ⚠ An all-zero distribution draws five empty bars, which reads as
+            // "no user is at risk" — the same false all-clear as a green 0.
+            //
+            // ⚠⚠ ORDER MATTERS: the denominator is taken from the NUMBERS,
+            // before any value becomes a dash. In PHP 8 `'—' / 1` throws a
+            // TypeError, so dashing first and dividing later would replace a
+            // misleading panel with a white screen. The $pct line below is
+            // guarded with is_numeric() for the same reason.
             $total_users = max( 1, array_sum( array_column( $risk_rows, 'value' ) ) );
+            if ( ! $overview_ok ) {
+                foreach ( $risk_rows as $i => $unused_r ) {
+                    $risk_rows[ $i ]['value'] = '—';
+                }
+            }
             foreach ( $risk_rows as $r ):
-                $pct = round( $r['value'] / $total_users * 100 );
+                // is_numeric: the value is a dash when the read failed, and
+                // dividing by it would throw. A dashed row draws no bar.
+                $pct = is_numeric( $r['value'] ) ? round( $r['value'] / $total_users * 100 ) : 0;
             ?>
                 <div style="margin-bottom:10px;">
                     <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
@@ -107,9 +192,18 @@ function bcc_trust_render_overview_tab() {
                 [ 'label' => 'Caution', 'value' => $tiers['caution'], 'color' => '#ff9800' ],
                 [ 'label' => 'Risky',   'value' => $tiers['risky'],   'color' => '#f44336' ],
             ];
+            // Same ordering rule as the risk panel above: denominator from
+            // the numbers, dashes afterwards, never divide by a dash.
             $total_pages = max( 1, array_sum( array_column( $tier_rows, 'value' ) ) );
+            if ( ! $overview_ok ) {
+                foreach ( $tier_rows as $i => $unused_r ) {
+                    $tier_rows[ $i ]['value'] = '—';
+                }
+            }
             foreach ( $tier_rows as $r ):
-                $pct = round( $r['value'] / $total_pages * 100 );
+                // is_numeric: the value is a dash when the read failed, and
+                // dividing by it would throw. A dashed row draws no bar.
+                $pct = is_numeric( $r['value'] ) ? round( $r['value'] / $total_pages * 100 ) : 0;
             ?>
                 <div style="margin-bottom:8px;">
                     <div style="display:flex;justify-content:space-between;margin-bottom:3px;">
@@ -127,14 +221,33 @@ function bcc_trust_render_overview_tab() {
         <div class="bcc-panel">
             <h3>Device Automation Risk</h3>
             <?php
+            // ⚠ 'normal' is a SUBTRACTION in the repository:
+            //     total_devices - (high_automation + suspicious)
+            // so it goes NEGATIVE the moment those three reads disagree —
+            // which is exactly what a partial read failure produces. The old
+            // `max(0, …)` silenced that: a negative became a confident 0 and
+            // the three bars quietly stopped summing to the total.
+            //
+            // The clamp stays (a negative bar is meaningless) but it is no
+            // longer silent, and the denominator is now the three buckets
+            // rather than a separately-read total, so the bars always sum to
+            // 100% of what is actually displayed.
+            $device_normal_raw = (int) $device_risk['normal'];
             $device_rows = [
-                [ 'label' => 'High Automation (Bot likely)', 'value' => $device_risk['high_automation'], 'color' => '#f44336' ],
-                [ 'label' => 'Suspicious',                   'value' => $device_risk['suspicious'],      'color' => '#ff9800' ],
-                [ 'label' => 'Normal',                       'value' => max( 0, $device_risk['normal'] ), 'color' => '#4caf50' ],
+                [ 'label' => 'High Automation (Bot likely)', 'value' => (int) $device_risk['high_automation'], 'color' => '#f44336' ],
+                [ 'label' => 'Suspicious',                   'value' => (int) $device_risk['suspicious'],      'color' => '#ff9800' ],
+                [ 'label' => 'Normal',                       'value' => max( 0, $device_normal_raw ),          'color' => '#4caf50' ],
             ];
-            $total_devices = max( 1, $counts['total_devices'] );
+            $total_devices = max( 1, array_sum( array_column( $device_rows, 'value' ) ) );
+            if ( ! $overview_ok ) {
+                foreach ( $device_rows as $i => $unused_r ) {
+                    $device_rows[ $i ]['value'] = '—';
+                }
+            }
             foreach ( $device_rows as $r ):
-                $pct = round( $r['value'] / $total_devices * 100 );
+                // is_numeric: the value is a dash when the read failed, and
+                // dividing by it would throw. A dashed row draws no bar.
+                $pct = is_numeric( $r['value'] ) ? round( $r['value'] / $total_devices * 100 ) : 0;
             ?>
                 <div style="margin-bottom:12px;">
                     <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
@@ -147,9 +260,18 @@ function bcc_trust_render_overview_tab() {
                 </div>
             <?php endforeach; ?>
             <p style="font-size:12px;color:#666;margin:0;">
-                <?php echo number_format( $counts['total_devices'] ); ?> unique devices tracked.
-                <?php echo intval($counts['recent_fraud_analyses']); ?> fraud analyses in last 24h.
+                <?php if ( $overview_ok ): ?>
+                    <?php echo number_format( $counts['total_devices'] ); ?> unique devices tracked.
+                    <?php echo intval($counts['recent_fraud_analyses']); ?> fraud analyses in last 24h.
+                <?php else: ?>
+                    <?php esc_html_e( 'Device and fraud-analysis totals could not be read.', 'bcc-trust' ); ?>
+                <?php endif; ?>
             </p>
+            <?php if ( $device_normal_raw < 0 ): ?>
+                <p style="font-size:12px;color:#d63638;margin:6px 0 0 0;">
+                    <?php esc_html_e( 'These device buckets do not reconcile: the high-automation and suspicious counts together exceed the unique-device total, so at least one of the three reads is inconsistent. The Normal figure is clamped at zero and should not be relied on.', 'bcc-trust' ); ?>
+                </p>
+            <?php endif; ?>
         </div>
 
     </div>

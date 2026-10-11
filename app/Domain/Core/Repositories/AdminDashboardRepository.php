@@ -38,6 +38,66 @@ class AdminDashboardRepository
     private const OVERVIEW_REFRESH_LOCK    = 'overview_refresh_lock';
 
     /**
+     * ⚠⚠ Set when any aggregate read in the CURRENT computation failed.
+     *
+     * ── WHY THIS EXISTS ─────────────────────────────────────────────────
+     * Every aggregate here is `(int) $wpdb->get_var(...)`, and `get_var()`
+     * returns null both for "no rows" and for "the query did not run".
+     * `(int) null` is 0, so a failed read became the number 0 — and the
+     * Overview tab paints a 0 for New High-Fraud and Suspensions GREEN.
+     * A database the dashboard could not read was therefore displayed as
+     * an all-clear, which is the one thing an operator must never be told
+     * by mistake.
+     *
+     * It was then CACHED. `getOverviewData()` wrote the zeroed result into
+     * the object cache AND into the OVERVIEW_SNAPSHOT_OPTION row with a
+     * fresh `computed_at`, so the fabricated all-clear outlived the fault
+     * and was served for the whole TTL window AFTER the database recovered.
+     *
+     * ⚠ The flag has to be accumulated per read, not checked once at the
+     * end: `wpdb::query()` resets `last_error` at the start of every query,
+     * so a failure in the third read is erased by the fourth read's
+     * success. Checking after the batch would report a clean run.
+     *
+     * @var bool
+     */
+    private bool $readFailed = false;
+
+    /**
+     * Record whether the read that just ran failed. Call IMMEDIATELY after
+     * each `$wpdb` read in a computation whose result may be cached.
+     *
+     * Deliberately fail-SAFE rather than throwing: this repository backs
+     * ten admin tabs, and a throw here would turn a degraded panel into a
+     * white screen. The verdict travels in the returned array instead, and
+     * the caller decides whether to cache it and what to render.
+     *
+     * (The Onchain repositories express the same idea through the
+     * GuardsReadFailures trait, whose own docblock names exactly this
+     * failure class. It is not imported here: that trait lives in the
+     * Onchain namespace with no Core consumer today, it decides per read
+     * rather than accumulating across a batch, and Core already has its
+     * own established `$wpdb->last_error` idiom in six repositories.
+     * Promoting the trait to a home both domains can share is worth doing
+     * and is deliberately NOT bundled into a dashboard fix.)
+     */
+    private function noteReadFailure(string $method): void
+    {
+        global $wpdb;
+
+        if ($wpdb->last_error === '' || $wpdb->last_error === null) {
+            return;
+        }
+
+        $this->readFailed = true;
+
+        \BCC\Core\Log\Logger::error('[bcc-trust] admin dashboard read failed', [
+            'method' => $method,
+            'error'  => $wpdb->last_error,
+        ]);
+    }
+
+    /**
      * Escape a string for use in a LIKE clause.
      *
      * Centralises `$wpdb->esc_like()` so admin templates do not need
@@ -142,6 +202,35 @@ class AdminDashboardRepository
         }
 
         $data = $this->computeOverviewData();
+
+        // ⚠⚠ A FAILED COMPUTATION IS NEVER CACHED OR SNAPSHOTTED.
+        //
+        // This is the half that made the bug outlive the fault. The old code
+        // cached and snapshotted unconditionally, so a run in which every
+        // aggregate had collapsed to a fabricated 0 was written to
+        // wp_options with a fresh `computed_at` — and then served for the
+        // whole TTL window, including after the database had recovered.
+        // Measured: four tables renamed away, one page load, and the
+        // dashboard kept reporting 0 of 3 tracked users for five minutes
+        // after the tables came back.
+        if (($data['ok'] ?? true) !== true) {
+            // Prefer a stale-but-real snapshot over fabricated zeros, and say
+            // which it is. A number an operator can date is worth more than a
+            // number that is simply wrong.
+            if ($snapshotData !== null) {
+                $snapshotData['ok']        = true;
+                $snapshotData['stale']     = true;
+                $snapshotData['stale_age'] = $snapshotAge;
+
+                return $snapshotData;
+            }
+
+            // Nothing real to fall back on. Hand the failure to the caller
+            // rather than a clean-looking zero, and leave both caches alone
+            // so the next request re-attempts instead of inheriting this.
+            return $data;
+        }
+
         wp_cache_set('overview_stats', $data, self::CACHE_GROUP, self::CACHE_TTL);
         update_option(
             self::OVERVIEW_SNAPSHOT_OPTION,
@@ -175,10 +264,17 @@ class AdminDashboardRepository
         // source of truth for frontend/API/admin page reads.
         // total_endorsements is attestation-backed (active kind=vouch rows)
         // since the legacy endorsements-table retirement.
+        // ⚠ Reset per computation: the flag describes THIS batch of reads.
+        $this->readFailed = false;
+
         $totalVotes        = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$votesTable} WHERE status = %d", 1));
+        $this->noteReadFailure('computeOverviewData.total_votes');
         $totalEndorsements = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$attestationsTable} WHERE kind = 'vouch' AND revoked_at IS NULL");
+        $this->noteReadFailure('computeOverviewData.total_endorsements');
         $totalPages        = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$readModelTable}");
+        $this->noteReadFailure('computeOverviewData.total_pages');
         $totalUsers        = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$userInfoTable}");
+        $this->noteReadFailure('computeOverviewData.total_users');
 
         // Risk distribution from canonical user_info table — 5-tier scheme
         // aligned with FraudClassification (Critical/High/Medium/Low/Minimal).
@@ -203,6 +299,12 @@ class AdminDashboardRepository
             $fraudLow
         ));
 
+        $this->noteReadFailure('computeOverviewData.risk_distribution');
+
+        // ⚠ `?? 0` is the same collapse as `(int) null`: a failed get_row
+        // leaves $riskDist null and every bucket reads 0, which renders as
+        // "no users at risk". noteReadFailure() above is what tells the
+        // caller those zeros are not an answer.
         $criticalRiskUsers = (int) ($riskDist->critical_risk ?? 0);
         $highRiskUsers     = (int) ($riskDist->high_risk ?? 0);
         $mediumRiskUsers   = (int) ($riskDist->medium_risk ?? 0);
@@ -213,6 +315,7 @@ class AdminDashboardRepository
         $uniqueDevices = (int) $wpdb->get_var(
             "SELECT COUNT(DISTINCT fingerprint) FROM {$fingerprintTable}"
         );
+        $this->noteReadFailure('computeOverviewData.total_devices');
 
         $automationHigh   = BCC_TRUST_AUTOMATION_HIGH;
         $automationMedium = BCC_TRUST_AUTOMATION_MEDIUM;
@@ -222,6 +325,8 @@ class AdminDashboardRepository
             $automationHigh
         ));
 
+        $this->noteReadFailure('computeOverviewData.high_automation_devices');
+
         $suspiciousDevices = (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$fingerprintTable}
              WHERE automation_score >= %d AND automation_score < %d",
@@ -229,8 +334,11 @@ class AdminDashboardRepository
             $automationHigh
         ));
 
+        $this->noteReadFailure('computeOverviewData.suspicious_devices');
+
         // Get fraud analysis stats
         $totalFraudAnalyses  = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$fraudTable}");
+        $this->noteReadFailure('computeOverviewData.total_fraud_analyses');
         $recentFraudAnalyses = (int) $wpdb->get_var(
             $wpdb->prepare(
                 "SELECT COUNT(*) FROM {$fraudTable}
@@ -238,14 +346,19 @@ class AdminDashboardRepository
                 24
             )
         );
+        $this->noteReadFailure('computeOverviewData.recent_fraud_analyses');
 
         // READ MODEL ONLY — DO NOT BYPASS.
         // Tier distribution reads from the pre-computed reputation_tier column
         // in bcc_page_read_model. Classification logic lives in the sync pipeline
         // so the admin dashboard cannot drift from the canonical rule.
+        // ⚠ `?: []` is the exact idiom the GuardsReadFailures docblock was
+        // written about: get_results() returns null on a SQL error, and the
+        // empty array it becomes is indistinguishable from "no pages".
         $tierRows = $wpdb->get_results(
             "SELECT reputation_tier, COUNT(*) AS cnt FROM {$readModelTable} GROUP BY reputation_tier"
         ) ?: [];
+        $this->noteReadFailure('computeOverviewData.tier_distribution');
         $tierCounts = ['elite' => 0, 'trusted' => 0, 'neutral' => 0, 'caution' => 0, 'risky' => 0];
         foreach ($tierRows as $r) {
             if (isset($tierCounts[$r->reputation_tier])) {
@@ -259,6 +372,13 @@ class AdminDashboardRepository
         $riskyPages   = $tierCounts['risky'];
 
         $data = [
+            // ⚠⚠ THE VERDICT, AND THE WHOLE POINT OF THE FLAG.
+            //
+            // false means at least one aggregate below is a fabricated zero
+            // rather than a measurement. Two callers depend on it:
+            // getOverviewData() must not cache or snapshot a false result,
+            // and the Overview tab must not paint it green.
+            'ok' => !$this->readFailed,
             'counts' => [
                 'total_votes'           => $totalVotes,
                 'total_endorsements'    => $totalEndorsements,
@@ -1243,12 +1363,20 @@ class AdminDashboardRepository
     /**
      * Get today's activity summary counts for the overview tab.
      *
-     * @return array<string, int> Associative array with keys: today_fraud, today_suspensions,
-     *               today_verifications, today_votes, today_admin_actions.
+     * ⚠ `ok` is false when at least one of the five reads below did not run,
+     * which is why the return type is no longer uniformly int. The Overview
+     * tab must consult it before colouring any of these numbers: a 0 it
+     * paints green is a claim that nothing happened today.
+     *
+     * @return array{ok: bool, today_fraud: int, today_suspensions: int,
+     *               today_verifications: int, today_votes: int,
+     *               today_admin_actions: int}
      */
     public function getTodaySummary(): array
     {
         global $wpdb;
+
+        $this->readFailed = false;
 
         $todayStart        = date('Y-m-d 00:00:00');
         $userInfoTable     = TableRegistry::userInfo();
@@ -1262,12 +1390,14 @@ class AdminDashboardRepository
             BCC_TRUST_FRAUD_HIGH,
             $todayStart
         ));
+        $this->noteReadFailure('getTodaySummary.today_fraud');
 
         $todaySuspensions = (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$suspensionsTable}
              WHERE suspended_at >= %s AND unsuspended_at IS NULL",
             $todayStart
         ));
+        $this->noteReadFailure('getTodaySummary.today_suspensions');
 
         // Email verifications are sourced from the audit log: the PeepSo
         // bridge (PeepSoIntegration::onEmailVerified) emits `email_verified`
@@ -1278,12 +1408,14 @@ class AdminDashboardRepository
             'email_verified',
             $todayStart
         ));
+        $this->noteReadFailure('getTodaySummary.today_verifications');
 
         $todayVotes = (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$votesTable}
              WHERE created_at >= %s AND status = 1",
             $todayStart
         ));
+        $this->noteReadFailure('getTodaySummary.today_votes');
 
         $todayAdminActions = (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$activityTable}
@@ -1291,8 +1423,16 @@ class AdminDashboardRepository
             'admin_%',
             $todayStart
         ));
+        $this->noteReadFailure('getTodaySummary.today_admin_actions');
 
         return [
+            // ⚠ Same verdict as getOverviewData(). These five are the numbers
+            // the Overview tab colours, and "New High-Fraud: 0" is painted
+            // GREEN — so a failed read here is the one that reads as an
+            // all-clear. Nothing is cached in this method, so there is no
+            // snapshot to protect; the flag exists purely so the view can
+            // refuse to colour a number it did not get.
+            'ok'                  => !$this->readFailed,
             'today_fraud'         => $todayFraud,
             'today_suspensions'   => $todaySuspensions,
             'today_verifications' => $todayVerifications,
