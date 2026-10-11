@@ -19,14 +19,25 @@ use PHPUnit\Framework\TestCase;
  * what a boring healthy week looks like. Then the half-empty rollup was
  * CACHED for the TTL, so the quiet week outlived the fault.
  *
- * ── FIVE READS, ONE VERDICT ─────────────────────────────────────────────
- * dispute_flow, watch_pulls, watch_graph, feed_authors and feed_kinds sit
- * across three private helpers. The flag is reset ONCE for the whole rollup,
- * because the operator-facing question is "can I trust this page", not
- * "which of five queries failed" — the specific aggregate is named in the
- * log instead.
+ * ── SEVEN READS, ONE VERDICT ────────────────────────────────────────────
+ * slow_ring_counts, slow_ring_latest, dispute_flow, watch_pulls,
+ * watch_graph, feed_authors and feed_kinds sit across four private helpers,
+ * feeding the five sections the tab renders. The flag is reset ONCE for the
+ * whole rollup, because the operator-facing question is "can I trust this
+ * page", not "which of seven queries failed" — the specific aggregate is
+ * named in the log instead.
  *
- * ⚠ PHPStan had to be told the three helpers are @phpstan-impure. They
+ * ⚠⚠ THE TWO SLOW-RING READS DO NOT TOUCH $wpdb IN THE REPOSITORY AT ALL.
+ * They go through PatternRepository, which collapses a failed read to
+ * `[]`-defaulted zeros and NULL and cannot report its own failure. That
+ * section was the one aggregate left unguarded, and it was found by reading
+ * this PR's diff rather than by running this suite — which is why the four
+ * cases in section 1a exist.
+ *
+ * ⚠ PHPStan had to be told three of the four reading helpers are
+ * @phpstan-impure (slow_rings carries the tag too, but measurably does not
+ * need it — the other three run first, so PHPStan already knows the flag may
+ * have moved by the time the verdict is computed). They
  * mutate the flag through noteReadFailure(), and without the tag PHPStan
  * treats them as pure, concludes the flag cannot have changed since the
  * reset, and reports "Negated boolean expression is always true". It was
@@ -161,6 +172,21 @@ final class EcosystemRollupReadFailureIntegrationTest extends TestCase
                 "fixture precondition: {$table} must exist (last_error: {$wpdb->last_error})"
             );
         }
+
+        // ⚠ The patterns table is created by the integration bootstrap's own
+        // bcc_trust_create_core_tables() call, NOT by this fixture — so it is
+        // asserted rather than created, because a hand-rolled stand-in would
+        // shadow the real schema for every suite sharing this database. The
+        // assertion matters because slow_rings now participates in the
+        // verdict: if the bootstrap ever stopped installing it, the healthy
+        // control would fail with a table name instead of every
+        // discrimination case passing for the wrong reason.
+        $patterns = \BCC\Trust\Core\Database\TableRegistry::patterns();
+        self::assertSame(
+            $patterns,
+            $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $patterns)),
+            "fixture precondition: {$patterns} must be installed by the bootstrap"
+        );
     }
 
     private function failReadsMatching(string $needle): void
@@ -232,6 +258,102 @@ final class EcosystemRollupReadFailureIntegrationTest extends TestCase
         $this->failReadsMatching('posts');
 
         self::assertFalse($this->repo->getEcosystemRollup(7)['ok']);
+    }
+
+    // ── 1a. ⚠⚠ THE SECTION THAT READS THROUGH ANOTHER REPOSITORY
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // slow_rings does not touch $wpdb in this class at all. It calls
+    // PatternRepository::getCountsByTypesSince() and getLatestByType(),
+    // which return `[]`-defaulted ZEROS and NULL respectively when their
+    // query does not run — neither detects a read failure, and neither can
+    // be reshaped here without changing a public contract.
+    //
+    // Found in review of this PR's own diff, not by the suite: the other
+    // four aggregates were guarded and this one was not, so a broken
+    // patterns table rendered "0 rings" under an `ok` verdict AND got
+    // cached. The notice the tab prints says "at least one of the five
+    // aggregates", so leaving the fifth unguarded made the tab's own
+    // sentence untrue.
+
+    public function testAFailedSlowRingReadIsNotOk(): void
+    {
+        $this->failReadsMatching('bcc_trust_patterns');
+
+        $rollup = $this->repo->getEcosystemRollup(7);
+
+        self::assertFalse(
+            $rollup['ok'],
+            'slow_rings reads through PatternRepository, which cannot report its own failure'
+        );
+        self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures, 'the fault must have fired');
+    }
+
+    public function testAnEmptyPatternsTableIsStillOk(): void
+    {
+        // ⚠ The half that keeps a healthy zero healthy. No detected rings is
+        // the NORMAL state of this table — the tab's own copy says healthy
+        // looks boring — so a zero here must not start reading as a fault.
+        $p = $GLOBALS['wpdb']->prefix;
+        $GLOBALS['wpdb']->query("DELETE FROM `{$p}bcc_trust_patterns`");
+
+        $rollup = $this->repo->getEcosystemRollup(7);
+
+        self::assertTrue($rollup['ok'], 'no detected rings is an answer, not a failure');
+        self::assertSame(0, $rollup['slow_rings']['total']);
+        self::assertNull($rollup['slow_rings']['latest_slow_ring']);
+    }
+
+    public function testAnEmptyRingCountAndAFailedRingReadCarryDifferentVerdicts(): void
+    {
+        // ⚠ THE WHOLE POINT, stated as one comparison: both render the same
+        // zero, and only the verdict separates them.
+        $p = $GLOBALS['wpdb']->prefix;
+        $GLOBALS['wpdb']->query("DELETE FROM `{$p}bcc_trust_patterns`");
+        $empty = $this->repo->getEcosystemRollup(7);
+
+        wp_cache_delete(self::CACHE_KEY, self::CACHE_GROUP);
+        $this->failReadsMatching('bcc_trust_patterns');
+        $broken = $this->repo->getEcosystemRollup(7);
+
+        self::assertSame(0, $empty['slow_rings']['total']);
+        self::assertSame(0, $broken['slow_rings']['total'], 'the same zero');
+        self::assertTrue($empty['ok']);
+        self::assertFalse($broken['ok'], 'different verdicts: that is the fix');
+    }
+
+    public function testOnlyTheFirstOfTheTwoRingReadsFailingIsStillNotOk(): void
+    {
+        // ⚠⚠ THE CASE THAT JUSTIFIES TWO GUARDS INSTEAD OF ONE.
+        //
+        // wpdb::query() clears last_error at the START of every query. So a
+        // failed count followed by a SUCCESSFUL latest-row read leaves no
+        // trace at all by the time ecosystemSlowRings() returns, and a single
+        // check at the end of the method would report the page as healthy.
+        //
+        // The needle matches the counts query ONLY: "GROUP BY pattern_type"
+        // appears in getCountsByTypesSince() and nowhere in getLatestByType(),
+        // which orders by detected_at instead. So exactly one of the two reads
+        // fails here, and the later success is what would erase the evidence.
+        $this->failReadsMatching('GROUP BY pattern_type');
+
+        $rollup = $this->repo->getEcosystemRollup(7);
+
+        self::assertSame(1, $GLOBALS['wpdb']->injectedFailures, 'exactly one read must have failed');
+        self::assertFalse($rollup['ok'], 'a failure erased by a later success is still a failure');
+    }
+
+    public function testAFailedSlowRingReadIsNotCached(): void
+    {
+        // ⚠ The cache is the half that makes this worse than a bad render: a
+        // half-read journal cached for the TTL outlives the fault.
+        $this->failReadsMatching('bcc_trust_patterns');
+        self::assertFalse($this->repo->getEcosystemRollup(7)['ok']);
+
+        self::assertFalse(
+            wp_cache_get(self::CACHE_KEY, self::CACHE_GROUP),
+            'a rollup missing its ring counts must not be cached as a good one'
+        );
     }
 
     public function testTheSameRollupThatFailsWhenBrokenIsOkWhenReadable(): void

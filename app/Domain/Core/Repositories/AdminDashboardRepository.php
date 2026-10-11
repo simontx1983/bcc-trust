@@ -2170,7 +2170,34 @@ class AdminDashboardRepository
      * log file operators don't habitually read; this lifts the signal
      * onto a tab they will.
      *
+     * ⚠⚠ THIS SECTION READS THROUGH A DIFFERENT REPOSITORY, AND THAT IS WHY
+     * ITS GUARDS LOOK MISPLACED. PatternRepository::getCountsByTypesSince()
+     * returns `[]`-defaulted ZEROS and getLatestByType() returns NULL when
+     * their query does not run — neither detects a read failure, and neither
+     * can be changed here without altering a public contract with callers
+     * outside this panel. So the failure is detected on THIS side, right
+     * after each call, from the same global $wpdb those reads used.
+     *
+     * ⚠ Two guards, not one: wpdb::query() clears last_error at the START of
+     * every query, so a failed count followed by a successful latest-row read
+     * leaves no trace by the time the method returns. Checking once at the end
+     * would miss exactly the interleaving that matters.
+     *
      * @return array<string, mixed>
+     *
+     * @phpstan-impure — this helper mutates $readFailed through
+     * noteReadFailure(), so the tag states a fact about it.
+     *
+     * ⚠ MEASURED, NOT ASSUMED: unlike the other three reading helpers, this
+     * tag is NOT load-bearing today. Stripping it leaves PHPStan level 8 at
+     * "[OK] No errors", because the three tagged helpers already run before
+     * the verdict is computed and PHPStan therefore already knows the flag
+     * may have changed. It is kept because the method really is impure and
+     * because the day those three calls move or go away, an untagged impure
+     * helper is how the verdict silently becomes structurally always-ok —
+     * which is the failure the other three tags were added to fix.
+     *
+     * @phpstan-impure
      */
     private function ecosystemSlowRings(int $days): array
     {
@@ -2178,8 +2205,10 @@ class AdminDashboardRepository
 
         $types  = ['vote_ring', 'endorsement_ring', 'slow_endorsement_ring'];
         $counts = $patternRepo->getCountsByTypesSince($types, $days);
+        $this->noteReadFailure('getEcosystemRollup.slow_ring_counts');
 
         $latestSlow = $patternRepo->getLatestByType('slow_endorsement_ring');
+        $this->noteReadFailure('getEcosystemRollup.slow_ring_latest');
         $latest     = null;
         if ($latestSlow !== null) {
             $rawData = $latestSlow->pattern_data ?? null;
