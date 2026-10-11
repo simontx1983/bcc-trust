@@ -51,6 +51,26 @@ function bcc_onchain_create_chains_table(): void {
     $charset_collate = $wpdb->get_charset_collate();
     $table = bcc_onchain_chains_table();
 
+    // ⚠⚠ NO BLANK LINES, AND NO COMMENTS, INSIDE THE COLUMN LIST BELOW.
+    //
+    // dbDelta() splits the CREATE TABLE body on newlines and treats each line
+    // as a column or key definition. A blank line becomes an empty definition:
+    // its index regex fails to match, `$index_column_matches['column_name']`
+    // is unset, and WordPress emits
+    //
+    //     ALTER TABLE wp_bcc_chains ADD  `` (``)
+    //
+    // which fails with a syntax error on EVERY schema pass. Four PHP warnings
+    // from wp-admin/includes/upgrade.php (lines 3019, 3025, 3028, 3057) and one
+    // WordPress database error, forever. No index is created or lost — the
+    // index set is identical either way — so this was pure log noise and a
+    // wasted round-trip, which is exactly why it survived so long.
+    //
+    // Proved by running dbDelta twice over the same throwaway table, once with
+    // a blank line in the body and once without: with it, last_error was the
+    // syntax error above; without it, last_error was empty. Same indexes both
+    // times. A comment line would go through the identical code path, so the
+    // explanation lives out here.
     $sql = "CREATE TABLE {$table} (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         slug VARCHAR(50) NOT NULL,
@@ -69,7 +89,6 @@ function bcc_onchain_create_chains_table(): void {
         description TEXT DEFAULT NULL,
         is_testnet TINYINT(1) NOT NULL DEFAULT 0,
         is_active TINYINT(1) NOT NULL DEFAULT 1,
-
         bcc_supports_nft_collections TINYINT(1) NOT NULL DEFAULT 0,
         manual_collection_discovery_enabled TINYINT(1) NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
