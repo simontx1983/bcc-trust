@@ -33,14 +33,34 @@ function bcc_trust_render_ecosystem_tab() {
     $repo   = \BCC\Trust\Core\Plugin::instance()->adminDashboardRepository();
     $days   = isset( $_GET['days'] ) ? max( 1, min( (int) $_GET['days'], 90 ) ) : 7;
     $rollup = $repo->getEcosystemRollup( $days );
+    // `?? true` keeps a cached rollup written by the previous build rendering
+    // exactly as before rather than greeting the operator with a false error.
+    $rollup_ok = ( $rollup['ok'] ?? true ) === true;
     ?>
+
+    <?php if ( ! $rollup_ok ) : ?>
+        <?php // ⚠ This panel is a JOURNAL: an operator reads it for sustained
+              // patterns and treats a quiet week as good news. Five reads feed
+              // it, and a failed one used to arrive as an empty section
+              // indistinguishable from a genuinely quiet window — then the
+              // half-empty rollup was CACHED for the TTL, so the quiet week
+              // outlived the fault. Neither happens now. ?>
+        <div class="notice notice-error inline" style="margin:0 0 16px 0;">
+            <p>
+                <strong><?php esc_html_e( 'Part of this journal could not be read.', 'bcc-trust' ); ?></strong>
+                <?php esc_html_e( 'At least one of the five aggregates behind this page did not run, so the sections below are incomplete. A quiet section here is not evidence of a quiet week. The failure is recorded in the application log with the aggregate that failed, and this incomplete result has NOT been cached.', 'bcc-trust' ); ?>
+            </p>
+        </div>
+    <?php endif; ?>
 
     <div class="bcc-panel" style="border-left:5px solid #607d8b;">
         <h2 style="margin-top:0;">Ecosystem — operator journal</h2>
         <p style="margin:0;color:#666;">
             Window: <strong>last <?php echo (int) $rollup['window_days']; ?> days</strong>
             · generated <?php echo esc_html( $rollup['generated_at'] ); ?> UTC
-            · cached up to 5 minutes.
+            <?php // Only a complete rollup is cached, so the claim has to move
+                  // with the verdict rather than always promising a cache. ?>
+            · <?php echo $rollup_ok ? 'cached up to 5 minutes.' : 'not cached (incomplete).'; ?>
         </p>
         <p style="margin:8px 0 0;color:#666;font-size:13px;">
             Read this weekly. Notice <em>sustained</em> patterns; ignore single spikes.

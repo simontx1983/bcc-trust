@@ -57,8 +57,12 @@ function bcc_trust_render_verified_tab() {
     $where_clause = implode(' AND ', $where);
 
     // Total count + paginated data via repository
-    $total_items    = $repo->getVerifiedUsersCount($where_clause, $params);
-    $verified_users = $repo->getVerifiedUsersFiltered($where_clause, $params, $orderby_col, $order, $per_page, $offset);
+    // One admin-specific call, one verdict for the page. The three
+    // repository methods behind it keep their public contracts.
+    $panel          = $repo->getVerifiedPanelData($where_clause, $params, $orderby_col, $order, $per_page, $offset);
+    $panel_ok       = ( $panel['ok'] ?? true ) === true;
+    $total_items    = $panel['total'];
+    $verified_users = $panel['users'];
 
     // Decode and process meta data for each row
     foreach ($verified_users as $user) {
@@ -86,8 +90,28 @@ function bcc_trust_render_verified_tab() {
     }
 
     // Summary statistics via repository
-    $summary              = $repo->getVerifiedSummaryStats();
+    $summary              = $panel['summary'];
     $total_verified       = $summary['total_verified'];
+    // ⚠ number_format() on an unread figure prints a confident 0 under a
+    // green "Total Verified" heading, which reads as a measurement.
+    //
+    // ⚠⚠ EVERY READ-DERIVED FIGURE ON THIS PAGE GOES THROUGH ONE OF THESE,
+    // not just the headline. A first version dashed "Total Verified" alone
+    // and left "0 in last 30 days", "Avg Net Impact 0" and "High Quality 0"
+    // standing beside it — three confident zeros from the same unread table,
+    // which is exactly the collapse this change exists to remove. The
+    // "Trust Boost Tiers" card is deliberately NOT dashed: it comes from
+    // config.php and is not a read at all.
+    //
+    // ⚠ The dash is returned INSTEAD OF the arithmetic, never alongside it:
+    // round('—', 1) is a TypeError in PHP 8, so the guard has to sit outside
+    // the formatting rather than inside it.
+    $verified_num = static function ($v) use ($panel_ok) {
+        return $panel_ok ? number_format((float) $v) : '—';
+    };
+    $verified_dec = static function ($v) use ($panel_ok) {
+        return $panel_ok ? (string) round((float) ($v ?: 0), 1) : '—';
+    };
     $avg_net_impact       = $summary['avg_net_impact'];
     $high_quality_count   = $summary['high_quality_count'];
     $recent_verifications = $summary['recent_verifications'];
@@ -96,23 +120,38 @@ function bcc_trust_render_verified_tab() {
     <div class="wrap bcc-admin-wrap">
         <h2>✓ Verified Users</h2>
 
+        <?php if ( ! $panel_ok ) : ?>
+            <?php // ⚠ A PAGE-LEVEL NOTICE, not only the in-table row. The row
+                  // is below four stat cards and a filter bar, and the cards
+                  // are what an operator reads first — a failure visible only
+                  // after scrolling is a failure that gets missed. The two
+                  // Signals tabs and the Overview both lead with this notice;
+                  // this page was the one that did not. ?>
+            <div class="notice notice-error inline" style="margin:0 0 16px 0;">
+                <p>
+                    <strong><?php esc_html_e( 'This page could not be read.', 'bcc-trust' ); ?></strong>
+                    <?php esc_html_e( 'A database read behind the verified-user list or its summary did not run, so every figure derived from it is shown as a dash rather than a zero. Nothing here says that no user is verified. The failure is recorded in the application log with the query that failed.', 'bcc-trust' ); ?>
+                </p>
+            </div>
+        <?php endif; ?>
+
         <!-- Summary Stats with Config Context -->
         <div class="stats-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0;">
             <div class="stat-card" style="background: #fff; padding: 20px; border: 1px solid #ccd0d4; border-radius: 5px; border-left: 4px solid #46b450;">
                 <h3 style="margin:0 0 5px 0; font-size:14px; color:#555;">Total Verified</h3>
-                <div class="stat-value" style="font-size: 32px; font-weight: bold;"><?php echo number_format($total_verified); ?></div>
-                <small><?php echo esc_html($recent_verifications); ?> in last 30 days</small>
+                <div class="stat-value" style="font-size: 32px; font-weight: bold;"><?php echo esc_html($verified_num($total_verified)); ?></div>
+                <small><?php echo esc_html($verified_num($recent_verifications)); ?> in last 30 days</small>
             </div>
 
             <div class="stat-card" style="background: #fff; padding: 20px; border: 1px solid #ccd0d4; border-radius: 5px;">
                 <h3 style="margin:0 0 5px 0; font-size:14px; color:#555;">Avg Net Impact</h3>
-                <div class="stat-value" style="font-size: 32px; font-weight: bold;"><?php echo round($avg_net_impact ?: 0, 1); ?></div>
+                <div class="stat-value" style="font-size: 32px; font-weight: bold;"><?php echo esc_html($verified_dec($avg_net_impact)); ?></div>
                 <small>Trust Boost - Fraud Reduction</small>
             </div>
 
             <div class="stat-card" style="background: #fff; padding: 20px; border: 1px solid #ccd0d4; border-radius: 5px;">
                 <h3 style="margin:0 0 5px 0; font-size:14px; color:#555;">High Quality</h3>
-                <div class="stat-value" style="font-size: 32px; font-weight: bold;"><?php echo number_format($high_quality_count); ?></div>
+                <div class="stat-value" style="font-size: 32px; font-weight: bold;"><?php echo esc_html($verified_num($high_quality_count)); ?></div>
                 <small>100+ GitHub followers</small>
             </div>
 
@@ -173,7 +212,17 @@ function bcc_trust_render_verified_tab() {
                 </tr>
             </thead>
             <tbody>
-                <?php if (empty($verified_users)): ?>
+                <?php if (! $panel_ok): ?>
+                    <?php // ⚠ NOT "No verified users found" — that asserts a
+                          // fact about a table nobody read. elseif, so the
+                          // genuine empty state is untouched. ?>
+                    <tr>
+                        <td colspan="7" style="padding:20px;">
+                            <strong><?php esc_html_e('The verified-user list could not be read.', 'bcc-trust'); ?></strong>
+                            <?php esc_html_e('This is a database read failure, not a statement that no user is verified. Every figure above that comes from this table is shown as a dash for the same reason; the Trust Boost Tiers card is config, not a read, so it is unaffected. The failure is recorded in the application log.', 'bcc-trust'); ?>
+                        </td>
+                    </tr>
+                <?php elseif (empty($verified_users)): ?>
                     <tr>
                         <td colspan="7" style="text-align:center; padding:20px;">
                             <strong>No verified users found.</strong>
