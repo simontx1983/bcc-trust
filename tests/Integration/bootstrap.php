@@ -578,6 +578,18 @@ if (!function_exists('wp_cache_get')) {
      */
     function wp_cache_add($key, $value, string $group = '', int $expire = 0): bool
     {
+        // ⚠ Injectable write failure. A real external object cache can refuse
+        // a write (backend down, memory pressure, connection reset), and the
+        // production fallbacks that exist for exactly that are otherwise
+        // UNREACHABLE from a test: with the honest stub below, wp_cache_add
+        // only fails when the key already exists, in which case wp_cache_incr
+        // succeeds and the transient branch never runs.
+        //
+        // Default is off, so every existing suite takes the same path it took
+        // before this hook existed.
+        if (!empty($GLOBALS['__bcc_test_object_cache_write_fails'])) {
+            return false;
+        }
         if (isset($GLOBALS['__bcc_test_object_cache'][$group][$key])) {
             return false;
         }
@@ -596,6 +608,9 @@ if (!function_exists('wp_cache_get')) {
      */
     function wp_cache_incr($key, int $offset = 1, string $group = '')
     {
+        if (!empty($GLOBALS['__bcc_test_object_cache_write_fails'])) {
+            return false;   // see wp_cache_add() for why this hook exists
+        }
         if (!isset($GLOBALS['__bcc_test_object_cache'][$group][$key])) {
             return false;
         }
@@ -607,10 +622,23 @@ if (!function_exists('wp_cache_get')) {
      * per-request and needs none). The in-memory store above is NOT an
      * external object cache, so answering false is the honest answer and
      * keeps the branch that runs here the same one a plain WP install takes.
+     *
+     * ⚠ FALSE REMAINS THE DEFAULT, deliberately: staging has no
+     * object-cache.php, so false is what this deployment actually does, and
+     * every suite written before this hook keeps the branch it was written
+     * against.
+     *
+     * A test may set $GLOBALS['__bcc_test_ext_object_cache'] = true to
+     * exercise the OTHER branch. That matters because the
+     * object-cache-then-transient fallback in PushMetrics is the pattern the
+     * vote-ring storage proposal copies, and half of it — the half that runs
+     * on a host WITH a persistent cache — cannot be reached at all while this
+     * function is a hard-coded false. A fallback whose preferred path is
+     * never executed in any test is not a tested fallback.
      */
     function wp_using_ext_object_cache(): bool
     {
-        return false;
+        return !empty($GLOBALS['__bcc_test_ext_object_cache']);
     }
 }
 
