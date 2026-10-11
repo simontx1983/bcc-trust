@@ -13,6 +13,8 @@ function bcc_trust_render_rings_tab() {
     $data       = \BCC\Trust\Core\Plugin::instance()->adminDashboardRepository()->getRingsData();
     $rings      = $data['rings'];
     $thresholds = $data['thresholds'];
+    // `?? true` keeps a pre-verdict build rendering exactly as before.
+    $rings_available = ( $data['available'] ?? true ) === true;
     ?>
 
     <div class="bcc-panel" style="border-left:5px solid #f44336;">
@@ -23,11 +25,30 @@ function bcc_trust_render_rings_tab() {
             Min mutual votes: <strong><?php echo $thresholds['min_mutual']; ?></strong>.
         </p>
         <p>
-            <strong><?php echo count( $rings ); ?></strong> suspicious cluster(s) detected.
+            <?php if ( $rings_available ): ?>
+                <strong><?php echo count( $rings ); ?></strong> suspicious cluster(s) detected.
+            <?php else: ?>
+                <?php // A count of 0 here would be a measurement nobody took. ?>
+                <strong>—</strong> <?php esc_html_e( 'detection has not produced a snapshot yet.', 'bcc-trust' ); ?>
+            <?php endif; ?>
         </p>
     </div>
 
-    <?php if ( empty( $rings ) ): ?>
+    <?php if ( ! $rings_available ): ?>
+        <?php // ⚠ The tick is the problem. "✓ No vote rings detected" is the
+              // most confident wrong answer on this dashboard: nothing here
+              // reads the database, so an absent snapshot means detection has
+              // not run, which is not the same fact. Deliberately NOT styled
+              // as an error — on a fresh install this is the correct state. ?>
+        <div class="bcc-panel">
+            <p style="color:#646970;text-align:center;padding:20px;">
+                <strong><?php esc_html_e( 'No ring-detection snapshot yet.', 'bcc-trust' ); ?></strong><br>
+                <span style="font-size:12px;">
+                    <?php esc_html_e( 'Ring detection runs hourly and stores its result for this page to read. Until it has run there is nothing to show — which is not the same as finding no rings.', 'bcc-trust' ); ?>
+                </span>
+            </p>
+        </div>
+    <?php elseif ( empty( $rings ) ): ?>
         <div class="bcc-panel">
             <p style="color:#4caf50;text-align:center;padding:20px;">
                 <strong>✓ No vote rings detected.</strong>
