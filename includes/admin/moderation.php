@@ -75,7 +75,15 @@ add_action( 'admin_post_bcc_trust_ring_action', function () {
     if ( $ring === null ) {
         // No snapshot, no matching ring, or a page older than the snapshot.
         // Nothing is acted on, and the operator is told which it was.
-        \BCC\Trust\Core\Log\Logger::warning( '[bcc-trust] ring action refused: no matching ring', [
+        // ⚠ BCC\Core\Log\Logger, not BCC\Trust\Core\Log\Logger. The Logger
+        // lives in the bcc-core plugin, and the Trust-namespaced class does
+        // not exist — so the first version of this line would have fatalled
+        // on the refusal path, which is the SAFETY path.
+        //
+        // ⚠ Nothing caught it: phpstan.neon analyses `app/` only, so no file
+        // under includes/ is type-checked at all, and a class that does not
+        // exist is invisible here.
+        \BCC\Core\Log\Logger::warning( '[bcc-trust] ring action refused: no matching ring', [
             'action'      => $action,
             'fingerprint' => $fingerprint,
         ] );
