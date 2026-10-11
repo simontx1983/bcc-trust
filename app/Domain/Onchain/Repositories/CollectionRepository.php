@@ -999,6 +999,70 @@ final class CollectionRepository
             ['%d']
         );
     }
+    /**
+     * One collection, with everything the admin DETAIL view shows.
+     *
+     * ── WHY A SEPARATE READ ─────────────────────────────────────────────
+     * `getByIdWithChain()` is the handlers' read and deliberately carries
+     * identity, verification and provisioning only — widening it would
+     * change what a dozen mutation paths load. `listForAdminState()` has
+     * the right columns but is a LIST query bound to a tab predicate, and a
+     * detail view addressed by id must not inherit a tab: a row the current
+     * tab does not contain is still a row an operator can hold a link to.
+     *
+     * So this selects exactly the detail view's columns, by id, with no tab
+     * and no filter. READ-ONLY; it contacts no provider and writes nothing.
+     *
+     * ⚠ A THREE-WAY ANSWER, because the view says something different for
+     * each:
+     *   - object → found
+     *   - null   → provably absent (no such id)
+     *   - throws → the read did not run, so NOTHING is known
+     * A missing row and an unreadable table must never render the same, or
+     * a database fault reads as a deleted collection. The fail-closed arm
+     * reuses {@see GuardsReadFailures::guardReadOrThrow()} rather than
+     * re-deriving the `last_error` check.
+     *
+     * @throws RepositoryReadFailure when the read could not be performed
+     */
+    public static function findForAdminDetail(int $collectionId): ?object
+    {
+        if ($collectionId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT c.id, c.contract_address, c.canonical_identifier, c.chain_id,
+                    c.collection_name, c.collection_symbol, c.token_standard,
+                    c.total_supply, c.unique_holders, c.image_url, c.marketplace_url,
+                    c.is_verified, c.source, c.show_on_profile,
+                    c.provisioning_state, c.provisioning_requested_at,
+                    c.provisioning_requested_by, c.provisioning_failure_code,
+                    c.fetched_at, c.expires_at,
+                    c.metadata_state, c.metadata_checked_at,
+                    c.chain_description, c.chain_description_state,
+                    c.chain_description_source,
+                    ch.slug AS chain_slug, ch.name AS chain_name,
+                    ch.chain_type, ch.explorer_url
+               FROM {$table} c
+          LEFT JOIN {$chains} ch ON ch.id = c.chain_id
+              WHERE c.id = %d
+              LIMIT 1",
+            $collectionId
+        ));
+
+        // ⚠ `get_row()` returns null BOTH for no-such-row and for a failed
+        // query, so this has to run on the null path too — otherwise an
+        // unreadable table is indistinguishable from a deleted collection.
+        self::guardReadOrThrow('findForAdminDetail');
+
+        return $row;
+    }
+
 
     /**
      * Load a collection with chain metadata. Used by ClaimService.

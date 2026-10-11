@@ -30,6 +30,7 @@ use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
+use BCC\Trust\Onchain\Repositories\NftSpamContractRepository;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\CollectionDemandService;
 use BCC\Trust\Onchain\Services\CollectionStateClassifier;
@@ -1503,10 +1504,514 @@ final class VerifyCollectionsPage
         ]);
     }
 
+    /**
+     * The LIST CONTEXT an operator came from, for the Back link.
+     *
+     * ⚠ Only the four keys the list itself reads. An allowlist, not a
+     * passthrough of `$_GET`: a Back link built from whatever arrived would
+     * carry an attacker-chosen query string back into an admin URL.
+     *
+     * @return array<string, string|int>
+     */
+    private static function listContextArgs(): array
+    {
+        $args = ['page' => self::PAGE_SLUG];
+
+        foreach (['vstate', 's', 'chain', 'token_standard', 'paged'] as $key) {
+            if (!isset($_GET[$key])) {
+                continue;
+            }
+            $value = trim(sanitize_text_field((string) $_GET[$key]));
+            if ($value !== '') {
+                $args[$key] = $key === 'paged' ? max(1, (int) $value) : $value;
+            }
+        }
+
+        return $args;
+    }
+
+    /** The URL back to the list, with the operator's filters intact. */
+    private static function listUrl(): string
+    {
+        return add_query_arg(self::listContextArgs(), admin_url('admin.php'));
+    }
+
+    /**
+     * READ-ONLY collection detail.
+     *
+     * ── WHAT IT IS FOR ──────────────────────────────────────────────────
+     * The review table answers "which rows need me". It cannot answer "what
+     * do we actually know about THIS one" — the contract and canonical
+     * identifier are truncated, the description is a badge, and the chain is
+     * a slug. An operator deciding whether to verify a collection had to
+     * read the database.
+     *
+     * ── WHAT IT DELIBERATELY IS NOT ─────────────────────────────────────
+     * ⚠⚠ OPENING IT MUST NOT FETCH OR MUTATE ANYTHING. There is exactly one
+     * collection read, one community lookup, one member-count read and one
+     * hide-rule read. No provider is contacted, no option or transient is
+     * written, no cache is primed, and nothing here takes a nonce — because
+     * nothing here acts.
+     *
+     * The ONE set of controls it surfaces is the existing description
+     * review, through the existing {@see renderDescriptionReview()} with its
+     * own per-row nonce and its own handler. Permissions and behaviour are
+     * untouched; the buttons simply become reachable from here as well.
+     *
+     * ── PERMISSIONS ─────────────────────────────────────────────────────
+     * Reuses `render_page()`'s gate — this renders from inside it, after
+     * `current_user_can('manage_options')` has already run and `wp_die`d
+     * otherwise. The submenu is registered with the same capability. No new
+     * capability, no new route.
+     */
+    private static function render_detail(int $collectionId): void
+    {
+        $listUrl = self::listUrl();
+
+        // ── the read, and its three distinguishable outcomes ────────────
+        $row   = null;
+        $error = null;
+        try {
+            $row = CollectionRepository::findForAdminDetail($collectionId);
+        } catch (RepositoryReadFailure $e) {
+            // ⚠ NOT "not found". Nothing was established about this id, so
+            // nothing is asserted about it.
+            $error = $e;
+        }
+
+        echo '<div class="wrap">';
+
+        if ($error !== null) {
+            printf('<h1>%s</h1>', esc_html__('Collection could not be loaded', 'bcc-trust'));
+            echo '<div class="notice notice-error"><p><strong>';
+            echo esc_html__('This is a database read failure, not a statement about the collection.', 'bcc-trust');
+            echo '</strong> ';
+            echo esc_html__('Nothing is shown rather than a partial or misleading record. Try again, and check the bcc-trust error log if it persists.', 'bcc-trust');
+            echo '</p></div>';
+            printf('<p><a href="%s">%s</a></p>', esc_url($listUrl), esc_html__('Back to the list', 'bcc-trust'));
+            echo '</div>';
+            return;
+        }
+
+        if ($row === null) {
+            printf('<h1>%s</h1>', esc_html__('Collection not found', 'bcc-trust'));
+            echo '<div class="notice notice-warning"><p>';
+            printf(
+                /* translators: %d: collection row id */
+                esc_html__('No collection with id %d exists. It may have been removed since the link was made.', 'bcc-trust'),
+                $collectionId
+            );
+            echo '</p></div>';
+            printf('<p><a href="%s">%s</a></p>', esc_url($listUrl), esc_html__('Back to the list', 'bcc-trust'));
+            echo '</div>';
+            return;
+        }
+
+        $name      = (string) ($row->collection_name ?? '');
+        $heading   = $name !== '' ? $name : sprintf('Collection #%d', (int) ($row->id ?? 0));
+        $family    = (string) ($row->chain_type ?? '');
+        $contract  = (string) ($row->contract_address ?? '');
+        $canonical = $row->canonical_identifier ?? null;
+
+        printf(
+            '<h1 style="margin-bottom:4px;">%s</h1>',
+            esc_html($heading)
+        );
+        printf(
+            '<p style="margin-top:0;"><a href="%s">&larr; %s</a></p>',
+            esc_url($listUrl),
+            esc_html__('Back to the list', 'bcc-trust')
+        );
+
+        if ($name === '') {
+            echo '<div class="notice notice-info inline"><p>';
+            echo esc_html__('This collection has no name recorded. That is normal for a row discovered from a wallet before any metadata read succeeded.', 'bcc-trust');
+            echo '</p></div>';
+        }
+
+        // ── 1. identity and chain ───────────────────────────────────────
+        self::renderDetailSection(__('Identity and chain', 'bcc-trust'), [
+            __('Row id', 'bcc-trust')      => (string) (int) ($row->id ?? 0),
+            __('Chain', 'bcc-trust')       => self::detailChain($row),
+            __('Family', 'bcc-trust')      => $family !== '' ? $family : null,
+            __('Contract', 'bcc-trust')    => $contract !== '' ? self::detailMono($contract) : null,
+            __('Canonical identifier', 'bcc-trust') => is_string($canonical) && $canonical !== ''
+                ? self::detailMono($canonical)
+                    . ($canonical !== $contract
+                        ? '<div style="color:#646970;font-size:11px;">'
+                            . esc_html__('Differs from the contract address above — the canonical form is what identity comparisons use.', 'bcc-trust')
+                            . '</div>'
+                        : '')
+                : '<em>' . esc_html__('none recorded', 'bcc-trust') . '</em>',
+            __('Symbol', 'bcc-trust')         => self::detailOrNull($row->collection_symbol ?? null),
+            __('Token standard', 'bcc-trust') => self::detailOrNull($row->token_standard ?? null),
+            __('Total supply', 'bcc-trust')   => self::detailCount($row->total_supply ?? null),
+            __('Marketplace holders', 'bcc-trust') => self::detailCount(
+                $row->unique_holders ?? null,
+                __('BCC has no marketplace-wide holder figure for this collection. This is not a count of zero.', 'bcc-trust')
+            ),
+            __('Source', 'bcc-trust')  => self::detailOrNull($row->source ?? null),
+            __('Verified', 'bcc-trust') => (int) ($row->is_verified ?? 0) === 1
+                ? '<strong style="color:#00a32a;">' . esc_html__('Yes', 'bcc-trust') . '</strong>'
+                : esc_html__('No', 'bcc-trust'),
+        ]);
+
+        // ── 2. validation and metadata ──────────────────────────────────
+        self::renderDetailSection(__('Validation and metadata', 'bcc-trust'), [
+            __('Metadata state', 'bcc-trust') => self::detailMetadata($row, $family),
+            __('Metadata last attempted', 'bcc-trust') => self::detailStamp(
+                $row->metadata_checked_at ?? null,
+                __('When a metadata read was last ATTEMPTED — not when it last succeeded.', 'bcc-trust'),
+                __('never attempted', 'bcc-trust')
+            ),
+            __('Holdings last fetched', 'bcc-trust') => self::detailStamp(
+                $row->fetched_at ?? null,
+                __('Any holdings write bumps this, which is why it is not the metadata timestamp.', 'bcc-trust')
+            ),
+            __('Cache expires', 'bcc-trust') => self::detailStamp($row->expires_at ?? null),
+        ]);
+
+        // ── 3. description review ───────────────────────────────────────
+        echo '<h2>' . esc_html__('Imported description', 'bcc-trust') . '</h2>';
+        $descText = $row->chain_description ?? null;
+        if (!is_string($descText) || trim($descText) === '') {
+            echo '<p style="color:#646970;">'
+                . esc_html__('No description has been imported for this collection, so there is nothing to review.', 'bcc-trust')
+                . '</p>';
+        } else {
+            // ⚠ The EXISTING renderer, with its existing per-row nonce and
+            // its existing handler. Reachable from here; unchanged.
+            self::renderDescriptionReview($row);
+        }
+
+        // ── 4. community linkage ────────────────────────────────────────
+        self::renderDetailCommunity((int) ($row->id ?? 0));
+
+        // ── 5. hide status ──────────────────────────────────────────────
+        self::renderDetailHide($row);
+
+        printf(
+            '<p style="margin-top:24px;"><a href="%s">&larr; %s</a></p>',
+            esc_url($listUrl),
+            esc_html__('Back to the list', 'bcc-trust')
+        );
+
+        echo '</div>';
+    }
+
+    /**
+     * PURE RENDER. A labelled definition list.
+     *
+     * A `<dl>` rather than a table because this is label/value pairs, not
+     * tabular data — a screen reader announces each term with its
+     * definition, and the section heading gives it a landmark. Values are
+     * pre-escaped HTML fragments; a null value renders the em dash.
+     *
+     * @param array<string, string|null> $rows
+     */
+    private static function renderDetailSection(string $heading, array $rows): void
+    {
+        printf('<h2>%s</h2>', esc_html($heading));
+        echo '<dl style="display:grid;grid-template-columns:minmax(160px,220px) 1fr;gap:6px 16px;margin:0 0 20px 0;">';
+        foreach ($rows as $label => $value) {
+            printf('<dt style="font-weight:600;color:#1d2327;">%s</dt>', esc_html((string) $label));
+            printf(
+                '<dd style="margin:0;">%s</dd>',
+                $value === null || $value === ''
+                    ? '<span style="color:#999;">&mdash;</span>'
+                    : $value
+            );
+        }
+        echo '</dl>';
+    }
+
+    /** PURE. Monospaced, selectable, full value — never truncated here. */
+    private static function detailMono(string $value): string
+    {
+        return sprintf(
+            '<code style="font-size:12px;word-break:break-all;">%s</code>',
+            esc_html($value)
+        );
+    }
+
+    /** PURE. An escaped scalar, or null so the caller renders the dash. */
+    private static function detailOrNull(mixed $value): ?string
+    {
+        if (!is_string($value) && !is_int($value)) {
+            return null;
+        }
+        $text = trim((string) $value);
+
+        return $text === '' ? null : esc_html($text);
+    }
+
+    /**
+     * PURE. A count, distinguishing NULL from zero.
+     *
+     * ⚠ The same defect #292 fixed in the table: `(int) null` is 0, and
+     * rendering that as "0 holders" states a fact BCC does not have.
+     */
+    private static function detailCount(mixed $value, ?string $nullTitle = null): ?string
+    {
+        if ($value === null || $value === '') {
+            return $nullTitle === null
+                ? null
+                : sprintf(
+                    '<span style="color:#646970;" title="%s">%s</span>',
+                    esc_attr($nullTitle),
+                    esc_html__('not known', 'bcc-trust')
+                );
+        }
+
+        return esc_html(number_format_i18n((int) $value));
+    }
+
+    /** PURE. A datetime, or an explicit statement that there is none. */
+    private static function detailStamp(mixed $value, ?string $title = null, ?string $absent = null): ?string
+    {
+        $ok = is_string($value) && $value !== '' && $value !== '0000-00-00 00:00:00';
+        if (!$ok) {
+            return $absent === null
+                ? null
+                : sprintf('<em style="color:#646970;">%s</em>', esc_html($absent));
+        }
+
+        $formatted = (string) mysql2date('Y-m-d H:i', (string) $value);
+
+        return $title === null
+            ? esc_html($formatted)
+            : sprintf('<span title="%s">%s</span>', esc_attr($title), esc_html($formatted));
+    }
+
+    /** PURE. The chain, with its family, and an explorer link when there is one. */
+    private static function detailChain(object $row): string
+    {
+        $name = (string) ($row->chain_name ?? '');
+        $slug = (string) ($row->chain_slug ?? '');
+        if ($name === '' && $slug === '') {
+            // A LEFT JOIN that found no chain row. Say so: the collection
+            // references a chain this install does not have.
+            return sprintf(
+                '<span style="color:#d63638;">%s</span>',
+                esc_html__('unknown chain — the referenced chain row is missing', 'bcc-trust')
+            );
+        }
+
+        $label = $name !== '' ? $name : $slug;
+        $out   = esc_html($label);
+        if ($slug !== '' && $slug !== $label) {
+            $out .= ' <span style="color:#646970;">(' . esc_html($slug) . ')</span>';
+        }
+
+        // ⚠ The explorer root only. There is no per-chain path convention
+        // in this codebase, so a deep link to the contract would 404 on
+        // most families — linking the root is honest, guessing is not.
+        $explorer = $row->explorer_url ?? null;
+        if (is_string($explorer) && $explorer !== '') {
+            $out .= sprintf(
+                ' &middot; <a href="%s" target="_blank" rel="noopener noreferrer">%s</a>',
+                esc_url($explorer),
+                esc_html__('explorer', 'bcc-trust')
+            );
+        }
+
+        return $out;
+    }
+
+    /**
+     * PURE. Metadata state, with its family-specific meaning spelled out.
+     *
+     * ⚠ The state is COMPUTED PER FAMILY, so `complete` does not mean the
+     * same field count on EVM as on Cosmos — a field the family never
+     * fetches is `not_applicable`, not a shortfall. The detail view has
+     * room to say that in words rather than only in a tooltip.
+     */
+    private static function detailMetadata(object $row, string $family): string
+    {
+        $state   = (string) ($row->metadata_state ?? '');
+        $checked = is_string($row->metadata_checked_at ?? null)
+            && (string) $row->metadata_checked_at !== ''
+            && (string) $row->metadata_checked_at !== '0000-00-00 00:00:00';
+
+        $familyNote = $family !== ''
+            ? sprintf(
+                /* translators: %s: chain family, e.g. evm */
+                esc_html__('Scoped to the %s family: a field this family never fetches counts as not applicable, not as missing.', 'bcc-trust'),
+                $family
+            )
+            : esc_html__('Scoped to this collection\'s chain family.', 'bcc-trust');
+
+        if ($state === '') {
+            return '<span style="color:#999;">&mdash;</span><div style="color:#646970;font-size:12px;">'
+                . esc_html__('This build recorded no metadata state for this row.', 'bcc-trust')
+                . '</div>';
+        }
+
+        if ($state === 'unavailable' && !$checked) {
+            return '<strong style="color:#646970;">' . esc_html__('Not checked', 'bcc-trust') . '</strong>'
+                . '<div style="color:#646970;font-size:12px;">'
+                . esc_html__('No metadata read has been attempted, so this is not a statement about the collection.', 'bcc-trust')
+                . '</div>';
+        }
+
+        $known = [
+            'complete'    => ['Complete',    '#00a32a', __('Every field this family fetches was read.', 'bcc-trust')],
+            'partial'     => ['Partial',     '#dba617', __('Some fields this family fetches are missing.', 'bcc-trust')],
+            'unavailable' => ['Unavailable', '#d63638', __('A read was attempted and no metadata could be obtained.', 'bcc-trust')],
+        ];
+
+        if (!isset($known[$state])) {
+            return sprintf(
+                '<span style="color:#646970;">%s</span><div style="color:#646970;font-size:12px;">%s</div>',
+                esc_html($state),
+                esc_html__('Unrecognised state, shown verbatim rather than mapped to a known label.', 'bcc-trust')
+            );
+        }
+
+        [$label, $colour, $why] = $known[$state];
+
+        return sprintf(
+            '<strong style="color:%s;">%s</strong><div style="color:#646970;font-size:12px;">%s %s</div>',
+            esc_attr($colour),
+            esc_html($label),
+            esc_html($why),
+            $familyNote
+        );
+    }
+
+    /**
+     * Community linkage. READ-ONLY, and fail-closed.
+     *
+     * ⚠ Keyed on the ROW ID via the authoritative link, not on a
+     * canonicalised address — the same correction the Remove path carries,
+     * and for the same reason: an address that is not a valid identity on
+     * its chain resolves to null without a query, and a live community
+     * would read as absent.
+     *
+     * ⚠⚠ An unreadable check says so. "No community" and "we could not
+     * look" are different facts, and only one of them is safe to act on.
+     */
+    private static function renderDetailCommunity(int $collectionId): void
+    {
+        echo '<h2>' . esc_html__('Holder community', 'bcc-trust') . '</h2>';
+
+        try {
+            $groupId = GatedGroupRepository::findPublishedGroupIdForCollectionId($collectionId);
+        } catch (RepositoryReadFailure $e) {
+            echo '<div class="notice notice-error inline"><p><strong>';
+            echo esc_html__('Could not determine whether this collection has a holder community.', 'bcc-trust');
+            echo '</strong> ';
+            echo esc_html__('This is a database read failure, not a statement that no community exists. Do not act on it.', 'bcc-trust');
+            echo '</p></div>';
+            return;
+        }
+
+        if ($groupId === null) {
+            echo '<p style="color:#646970;">'
+                . esc_html__('No published holder community is linked to this collection.', 'bcc-trust')
+                . '</p>';
+            return;
+        }
+
+        $members   = null;
+        $groupRows = PeepSoGroupRepository::findManyByIds([$groupId]);
+        if (isset($groupRows[$groupId])) {
+            $members = (int) ($groupRows[$groupId]->member_count ?? 0);
+        }
+
+        $permalink = get_permalink($groupId);
+
+        self::renderDetailSection(__('Linked community', 'bcc-trust'), [
+            __('Group id', 'bcc-trust') => (string) $groupId,
+            __('Members', 'bcc-trust')  => $members === null
+                ? sprintf(
+                    '<span style="color:#646970;" title="%s">%s</span>',
+                    esc_attr__('The group exists but its member count could not be read.', 'bcc-trust'),
+                    esc_html__('not known', 'bcc-trust')
+                )
+                : esc_html(number_format_i18n($members)),
+            __('Link', 'bcc-trust') => is_string($permalink) && $permalink !== ''
+                ? sprintf(
+                    '<a href="%s" target="_blank" rel="noopener noreferrer">%s</a>',
+                    esc_url($permalink),
+                    esc_html__('open the community', 'bcc-trust')
+                )
+                : null,
+        ]);
+    }
+
+    /**
+     * Hide status. READ-ONLY — this view states it and offers no control.
+     *
+     * ⚠ NO TOGGLE HERE, DELIBERATELY. Hide semantics are a separate
+     * decision; this view only reports what the existing deny rule says,
+     * and the existing control stays on the list where its nonce and
+     * handler already live.
+     */
+    private static function renderDetailHide(object $row): void
+    {
+        echo '<h2>' . esc_html__('Hide status', 'bcc-trust') . '</h2>';
+
+        $chainId  = (int) ($row->chain_id ?? 0);
+        $contract = (string) ($row->contract_address ?? '');
+
+        // ⚠⚠ `getRule()` DOES NOT DISTINGUISH A READ FAILURE.
+        //
+        // It returns 'deny', 'allow', or null — and a FAILED query also
+        // yields null, indistinguishable from "no rule recorded". So this
+        // view can honestly report the two states it can tell apart and
+        // must not claim a third it cannot. Reported as a finding rather
+        // than fixed here: adding discrimination means touching the Hide
+        // read path, which is out of scope for a read-only view.
+        $rule   = NftSpamContractRepository::getRule($chainId, $contract);
+        $hidden = $rule === NftSpamContractRepository::RULE_DENY;
+
+        if ($hidden) {
+            echo '<p><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:#d63638;">'
+                . esc_html__('HIDDEN', 'bcc-trust')
+                . '</span> '
+                . esc_html__('A deny rule on this contract keeps it out of the lists, and survives rediscovery.', 'bcc-trust')
+                . '</p>';
+        } elseif ($rule !== null) {
+            printf(
+                '<p>%s <code>%s</code></p>',
+                esc_html__('Not hidden. An explicit rule is recorded:', 'bcc-trust'),
+                esc_html($rule)
+            );
+        } else {
+            echo '<p style="color:#646970;">'
+                . esc_html__('No deny rule is recorded for this contract, so it is not hidden.', 'bcc-trust')
+                . '</p>';
+        }
+
+        echo '<p style="color:#646970;font-size:12px;">'
+            . esc_html__('Hide and Unhide are operated from the list, where the control and its nonce live.', 'bcc-trust')
+            . '</p>';
+    }
+
     public static function render_page(): void
     {
         if (!current_user_can('manage_options')) {
             wp_die('Insufficient permissions.');
+        }
+
+        // ── READ-ONLY DETAIL VIEW ───────────────────────────────────────
+        //
+        // ⚠ AFTER the capability gate, so the detail view inherits it
+        // rather than declaring its own — one gate, one place.
+        //
+        // ⚠⚠ AND BEFORE handlePost(). A GET carrying `collection` is a
+        // read; routing it through the POST handler first would mean a
+        // detail link could reach a mutation path, and would also make the
+        // view's "nothing here acts" claim false. A malformed id falls
+        // through to the list rather than rendering an error page for a
+        // typo.
+        if (isset($_GET['collection'])) {
+            $detailId = (int) $_GET['collection'];
+            if ($detailId > 0) {
+                self::render_detail($detailId);
+                return;
+            }
         }
 
         // VC-B branches still post back to this page and return notices
@@ -2125,7 +2630,28 @@ final class VerifyCollectionsPage
                                     <?php endif; ?>
                                 </td>
                                 <td>
-                                    <strong><?php echo esc_html($row->collection_name ?? '(no name)'); ?></strong>
+                                    <?php
+                                    // ⚠ The NAME is the link, which is what a
+                                    // screen reader and a keyboard user expect:
+                                    // the accessible name of the control is the
+                                    // thing it opens. A bare "View" link in the
+                                    // Actions column would announce as "View"
+                                    // forty times with no subject.
+                                    //
+                                    // The list context rides along, so Back
+                                    // returns to the same tab, page, search and
+                                    // filters.
+                                    $detailUrl = add_query_arg(
+                                        self::listContextArgs() + ['collection' => $rowId],
+                                        admin_url('admin.php')
+                                    );
+                                    printf(
+                                        '<strong><a href="%s" title="%s">%s</a></strong>',
+                                        esc_url($detailUrl),
+                                        esc_attr__('Open the read-only detail view for this collection', 'bcc-trust'),
+                                        esc_html($row->collection_name ?? '(no name)')
+                                    );
+                                    ?>
                                     <?php if ($tokenStandard !== ''): ?>
                                         <br>
                                         <span style="color:#646970;font-size:11px;"><?php echo esc_html($tokenStandard); ?></span>
