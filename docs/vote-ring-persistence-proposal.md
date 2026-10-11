@@ -354,6 +354,16 @@ The payload-size question is **closed** by §3. Three remain, none blocking:
 
 ## Related
 
+- **`docs/ring-member-enrichment-proposal.md`** — loading the three member
+  facts the tab currently shows as "not loaded", with the query budget fixed
+  before any code (a per-member read is 171,402 queries at the worst-case
+  payload measured in §3).
+- **`docs/vote-ring-cursor-persistence-proposal.md`** — the stuck
+  `vote_ring_offset` named in §1, now measured: the cursor climbs
+  500 → 1000 → 1500 inside one process and resets on every new request, so a
+  cacheless host scans rows 0–499 of 1,800 every time. ⚠ Unlike the snapshot
+  store, fixing it CHANGES WHAT THE DETECTOR FINDS, and therefore who gets
+  scored.
 - **#309** — the implementation this document recommends. Open, unmerged.
 - #301 — the Vote Rings tab stops printing "✓ No vote rings detected" from an
   absent snapshot. The display half; already merged.
