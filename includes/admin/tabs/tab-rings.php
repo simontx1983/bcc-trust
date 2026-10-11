@@ -27,6 +27,19 @@ function bcc_trust_render_rings_tab() {
         <p>
             <?php if ( $rings_available ): ?>
                 <strong><?php echo count( $rings ); ?></strong> suspicious cluster(s) detected.
+                <?php // ⚠ A ring list without its age is not readable. The
+                      // producer runs once a day, so "0 clusters" an hour
+                      // after a run and "0 clusters" twenty-three hours
+                      // after one are different facts about the platform. ?>
+                <?php if ( isset( $data['age_seconds'] ) && $data['age_seconds'] !== null ): ?>
+                    <span style="color:#646970;">
+                        <?php printf(
+                            /* translators: %s is a human-readable duration, e.g. "3 hours". */
+                            esc_html__( 'Snapshot taken %s ago.', 'bcc-trust' ),
+                            esc_html( human_time_diff( time() - (int) $data['age_seconds'], time() ) )
+                        ); ?>
+                    </span>
+                <?php endif; ?>
             <?php else: ?>
                 <?php // A count of 0 here would be a measurement nobody took. ?>
                 <strong>—</strong> <?php esc_html_e( 'detection has not produced a snapshot yet.', 'bcc-trust' ); ?>
@@ -44,7 +57,7 @@ function bcc_trust_render_rings_tab() {
             <p style="color:#646970;text-align:center;padding:20px;">
                 <strong><?php esc_html_e( 'No ring-detection snapshot yet.', 'bcc-trust' ); ?></strong><br>
                 <span style="font-size:12px;">
-                    <?php esc_html_e( 'Ring detection runs hourly and stores its result for this page to read. Until it has run there is nothing to show — which is not the same as finding no rings.', 'bcc-trust' ); ?>
+                    <?php esc_html_e( 'Ring detection runs once a day and stores its result for this page to read. Until it has run there is nothing to show — which is not the same as finding no rings.', 'bcc-trust' ); ?>
                 </span>
             </p>
         </div>
@@ -56,9 +69,25 @@ function bcc_trust_render_rings_tab() {
         </div>
     <?php else: ?>
         <?php foreach ( $rings as $ring_index => $ring ):
+            // ⚠⚠ THE PRODUCER EMITS `users`, A FLAT LIST OF INTS. This read
+            // `$ring['members']` and then array_column(..., 'user_id') over
+            // it, which is a different key AND a different shape — a list of
+            // rows rather than a list of ids. Both detectors have always
+            // emitted `users`, so this never matched.
+            //
+            // It was invisible because nothing persisted a snapshot, so this
+            // branch never rendered. Measured against a stored payload, every
+            // ring printed "— 0 members" with an empty id list, which is bad
+            // enough on its own — but $member_ids also feeds the hidden
+            // `user_ids` field of the two DESTRUCTIVE forms below
+            // (invalidate-ring-votes and suspend-all). Persisting the
+            // snapshot without this fix would arm both buttons with no
+            // targets, under a confirm dialog reading "Suspend ALL 0
+            // members". That is why the shape fix ships WITH the storage
+            // change and not after it.
             $ring_id      = $ring['ring_id'] ?? $ring_index;
-            $members      = $ring['members'] ?? [];
-            $member_ids   = is_array( $members ) ? implode( ',', array_map( 'intval', array_column( $members, 'user_id' ) ) ) : '';
+            $members      = is_array( $ring['users'] ?? null ) ? $ring['users'] : [];
+            $member_ids   = implode( ',', array_map( 'intval', $members ) );
             $member_count = count( $members );
         ?>
         <div class="bcc-panel" style="border-left:5px solid #ff9800;margin-bottom:20px;">

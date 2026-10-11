@@ -765,9 +765,20 @@ class AdminDashboardRepository
     /**
      * Get vote ring data from cached cron results.
      *
-     * Ring detection is expensive (graph analysis). Results are computed
-     * hourly by bcc_trust_run_ring_detection_cron() and stored as a transient.
-     * Admin pages always read the cached snapshot.
+     * Ring detection is expensive — measured at up to 91.9 s for a graph at
+     * the detector's own 10,000-edge limit. Results are computed DAILY by
+     * `bcc_trust_daily_graph_update` (CronService::dailyGraphUpdate, wired in
+     * bcc-trust.php) and stored by RingSnapshot. Admin pages only ever read
+     * that snapshot; they never compute.
+     *
+     * ⚠ This docblock previously said the results were computed "hourly by
+     * bcc_trust_run_ring_detection_cron() and stored as a transient". All
+     * three parts were wrong: the cadence is daily, that function does not
+     * exist anywhere in the codebase, and until RingSnapshot landed nothing
+     * stored a transient at all — it was wp_cache_set and nothing else. The
+     * "stored as a transient" sentence is why the gap survived review, and
+     * the cadence matters because a TTL has to outlive the producer's
+     * interval to be worth anything.
      *
      * @return array<string, mixed> Rings data with thresholds.
      */
@@ -778,25 +789,33 @@ class AdminDashboardRepository
 
         // ⚠⚠ A DIFFERENT FAILURE CLASS FROM THE OTHER TABS.
         //
-        // Nothing here reads the database. Rings are computed hourly by
-        // bcc_trust_run_ring_detection_cron() and this only reads that
-        // snapshot — so an absent snapshot means "detection has not run",
-        // which is NOT the same fact as "no rings exist". The tab rendered
-        // both as "✓ No vote rings detected", complete with a tick, which
-        // is the most confident of the three wrong answers on this
-        // dashboard.
+        // Nothing here reads the database. Rings are computed daily by
+        // `bcc_trust_daily_graph_update` and this only reads that snapshot —
+        // so an absent snapshot means "detection has not run", which is NOT
+        // the same fact as "no rings exist". The tab rendered both as
+        // "✓ No vote rings detected", complete with a tick, which is the
+        // most confident of the three wrong answers on this dashboard.
         //
         // `available` is deliberately not called `ok`: this is not an error
-        // and must not be dressed as one. On a fresh install, or within the
-        // first hour, "no snapshot yet" is the correct and expected state.
-        $cached    = wp_cache_get('ring_results', self::CACHE_GROUP);
-        $available = is_array($cached);
-        $rings     = $available ? $cached : [];
+        // and must not be dressed as one. On a fresh install, or before the
+        // first daily run, "no snapshot yet" is the correct and expected
+        // state.
+        //
+        // ⚠ One reader helper, shared with FraudDetector, so the two cannot
+        // disagree about where the snapshot lives or what counts as having
+        // one. It used to be a bare wp_cache_get, which on a host without an
+        // object-cache.php drop-in can never see what the cron wrote.
+        $snapshot = \BCC\Trust\Core\Support\RingSnapshot::read();
 
         return [
-            'available'  => $available,
-            'rings'      => $rings,
-            'thresholds' => [
+            'available'   => $snapshot['available'],
+            'rings'       => $snapshot['rings'],
+            // Surfaced so the tab can say HOW OLD the snapshot is. A reader
+            // cannot judge a ring list without knowing when it was taken,
+            // and the producer runs daily.
+            'computed_at' => $snapshot['computed_at'],
+            'age_seconds' => $snapshot['age_seconds'],
+            'thresholds'  => [
                 'min_size'   => $ringMinSize,
                 'min_mutual' => $ringMinMutual,
             ],
