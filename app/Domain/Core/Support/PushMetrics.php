@@ -105,6 +105,83 @@ final class PushMetrics
     }
 
     /**
+     * The same snapshot, plus whether any counter was actually RECORDED.
+     *
+     * ── WHY readSnapshot() IS NOT CHANGED ───────────────────────────────
+     * It returns a plain outcome→type→int map and is public. Tracing callers
+     * first found exactly two, both in the admin Push tab — so reshaping it
+     * would be safe today, which is not a reason to change a public
+     * contract. This is additive and admin-specific; readSnapshot() still
+     * means precisely what it meant.
+     *
+     * ── THE DISTINCTION IT ADDS ─────────────────────────────────────────
+     * readBucket() returns 0 for a bucket that is ABSENT and 0 for a bucket
+     * that genuinely counted nothing. The tab therefore rendered "0 sends"
+     * for an hour in which nothing was recorded at all — before the first
+     * push of a new hour, on a fresh install, after the 2-hour TTL expired,
+     * or where the counters never reach the reader.
+     *
+     * ⚠ That last case is not hypothetical. increment() prefers
+     * wp_cache_incr when wp_using_ext_object_cache() and otherwise falls
+     * back to a transient, and readBucket() mirrors that order — so the
+     * counters DO survive without a persistent object cache. (The Vote Rings
+     * snapshot has no such fallback, which is why its tab can never show a
+     * ring on a host without one. Same family of problem, different
+     * outcome, and worth stating because the two look identical from the
+     * outside.)
+     *
+     * `available` is deliberately NOT called `ok`: an hour with no recorded
+     * pushes is not an error, and dressing it as one would train operators
+     * to ignore it.
+     *
+     * @return array{available: bool, buckets: array<string, array<string, int>>}
+     */
+    public static function readSnapshotForAdmin(int $timestamp): array
+    {
+        $hour      = gmdate('YmdH', $timestamp);
+        $buckets   = [];
+        $anyPresent = false;
+
+        foreach (self::ALL_OUTCOMES as $outcome) {
+            $buckets[$outcome] = [];
+            foreach (NotificationPrefs::PUSH_TYPES as $eventType) {
+                [$value, $present] = self::readBucketWithPresence(
+                    self::buildKey($outcome, $eventType, $hour)
+                );
+                $buckets[$outcome][$eventType] = $value;
+                $anyPresent = $anyPresent || $present;
+            }
+        }
+
+        return ['available' => $anyPresent, 'buckets' => $buckets];
+    }
+
+    /**
+     * A bucket's value AND whether it existed, in the same storage order
+     * readBucket() uses.
+     *
+     * ⚠ The order matters and is not cosmetic: with an external object cache
+     * a bucket lives there, and only the transient is consulted otherwise.
+     * Reading them in the other order would report a stale transient over a
+     * live counter.
+     *
+     * @return array{0: int, 1: bool}
+     */
+    private static function readBucketWithPresence(string $key): array
+    {
+        if (wp_using_ext_object_cache()) {
+            $cached = wp_cache_get($key, self::CACHE_GROUP);
+            if ($cached !== false) {
+                return [(int) $cached, true];
+            }
+        }
+
+        $value = get_transient($key);
+
+        return $value === false ? [0, false] : [(int) $value, true];
+    }
+
+    /**
      * Total sends in a hour as a single number — useful for "is anything
      * happening at all?" health checks.
      */
