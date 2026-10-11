@@ -13,6 +13,9 @@ function bcc_trust_render_devices_tab() {
     $data        = \BCC\Trust\Core\Plugin::instance()->adminDashboardRepository()->getDevicesData();
     $devices     = $data['devices'];
     $thresholds  = $data['thresholds'];
+    // `?? true` so a build or cache that predates the verdict is treated as
+    // readable rather than greeting the operator with a false error.
+    $devices_ok  = ( $data['ok'] ?? true ) === true;
     ?>
 
     <div class="bcc-panel">
@@ -24,7 +27,16 @@ function bcc_trust_render_devices_tab() {
             </span>
         </div>
 
-        <?php if ( empty( $devices ) ): ?>
+        <?php if ( ! $devices_ok ): ?>
+            <?php // ⚠ NOT "no device records found". That sentence asserts a
+                  // fact about a table nobody read. ?>
+            <div class="notice notice-error inline" style="margin:0;">
+                <p>
+                    <strong><?php esc_html_e( 'The device records could not be read.', 'bcc-trust' ); ?></strong>
+                    <?php esc_html_e( 'This is a database read failure, not a statement that no device has been seen. The failure is recorded in the application log.', 'bcc-trust' ); ?>
+                </p>
+            </div>
+        <?php elseif ( empty( $devices ) ): ?>
             <p>No device records found.</p>
         <?php else: ?>
         <table class="wp-list-table widefat fixed striped">

@@ -13,6 +13,7 @@ function bcc_trust_render_ml_tab() {
     $data           = \BCC\Trust\Core\Plugin::instance()->adminDashboardRepository()->getMlData();
     $patterns       = $data['patterns'];
     $pattern_counts = $data['pattern_counts'];
+    $ml_ok          = ( $data['ok'] ?? true ) === true;
     ?>
 
     <!-- ── Pattern type summary ─────────────────────────────────── -->
@@ -35,7 +36,14 @@ function bcc_trust_render_ml_tab() {
         <h2>Recent ML Pattern Detections</h2>
         <p style="color:#666;">Last <?php echo intval($data['limit']); ?> detections.</p>
 
-        <?php if ( empty( $patterns ) ): ?>
+        <?php if ( ! $ml_ok ): ?>
+            <div class="notice notice-error inline" style="margin:0;">
+                <p>
+                    <strong><?php esc_html_e( 'The detected patterns could not be read.', 'bcc-trust' ); ?></strong>
+                    <?php esc_html_e( 'This is a database read failure, not a statement that no pattern was detected. The failure is recorded in the application log.', 'bcc-trust' ); ?>
+                </p>
+            </div>
+        <?php elseif ( empty( $patterns ) ): ?>
             <p>No patterns detected yet.</p>
         <?php else: ?>
         <table class="wp-list-table widefat fixed striped">
