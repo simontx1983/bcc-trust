@@ -29,11 +29,64 @@ require_once __DIR__ . '/moderation-pages.php';
 // ADMIN-POST HOOKS (ring & bulk actions)
 // ──────────────────────────────────────────────
 
+/**
+ * Vote-ring actions: invalidate a ring's votes, or suspend every member.
+ *
+ * ── ⚠⚠ MEMBERSHIP IS RESOLVED SERVER-SIDE, NOT SUBMITTED ───────────────
+ * This used to read the ids straight out of $_POST['user_ids'], which the
+ * tab posted as a hidden field. Two things were wrong with that, and both
+ * became reachable the moment a ring snapshot was actually persisted:
+ *
+ *  1. ⚠⚠ THE RING WAS SILENTLY TRUNCATED TO ITS FIRST MEMBER. The form
+ *     posted a COMMA-SEPARATED STRING ("11,12,13") and this cast it with
+ *     `(array)`, producing `['11,12,13']`; absint() of that whole string is
+ *     11. So "Suspend ALL 3 members" suspended exactly ONE, and
+ *     invalidate-votes touched one member's votes. Silently — the redirect
+ *     reported `suspended_1` and nobody reads that as a failure.
+ *
+ *  2. The set of users to act on arrived from the browser. The capability
+ *     check means only an administrator can reach this, so it was never a
+ *     privilege escalation — an admin can already suspend anyone. But it
+ *     meant the reason recorded against the suspension (`vote_ring`) and the
+ *     audit row (`ring_users`) were claims nothing verified.
+ *
+ * The form now posts only a FINGERPRINT of the ring, and the members come
+ * from the stored snapshot. Membership is therefore never submitted and
+ * never has to be trusted; a fingerprint that no longer matches a detected
+ * ring refuses the action instead of falling back to anything.
+ *
+ * ⚠ POST ONLY. admin-post.php dispatches on $_REQUEST, so this fired for a
+ * GET as happily as a POST. A nonce in a URL is a normal WordPress pattern
+ * for a link, but these two actions suspend accounts and soft-delete votes;
+ * a destructive action should not be reachable by anything that can be
+ * prefetched, bookmarked, or logged in a referrer.
+ */
 add_action( 'admin_post_bcc_trust_ring_action', function () {
     if ( ! current_user_can( 'manage_options' ) ) { wp_die( 'Unauthorized', 403 ); }
+    if ( strtoupper( $_SERVER['REQUEST_METHOD'] ?? '' ) !== 'POST' ) {
+        wp_die( 'This action requires a POST request.', 405 );
+    }
     check_admin_referer( 'bcc_trust_ring_action' );
-    $userIds = array_filter( array_map( 'absint', (array) ( $_POST['user_ids'] ?? [] ) ) );
-    $action  = sanitize_text_field( $_POST['ring_action'] ?? '' );
+
+    $action      = sanitize_text_field( $_POST['ring_action'] ?? '' );
+    $fingerprint = sanitize_text_field( $_POST['ring_fingerprint'] ?? '' );
+    $ring        = \BCC\Trust\Core\Support\RingSnapshot::findRingByFingerprint( $fingerprint );
+
+    if ( $ring === null ) {
+        // No snapshot, no matching ring, or a page older than the snapshot.
+        // Nothing is acted on, and the operator is told which it was.
+        \BCC\Trust\Core\Log\Logger::warning( '[bcc-trust] ring action refused: no matching ring', [
+            'action'      => $action,
+            'fingerprint' => $fingerprint,
+        ] );
+        wp_safe_redirect( add_query_arg(
+            [ 'tab' => 'rings', 'ring_msg' => 'ring_not_found' ],
+            admin_url( 'admin.php?page=bcc-trust-dashboard' )
+        ) );
+        exit;
+    }
+
+    $userIds = array_values( array_filter( array_map( 'absint', $ring['users'] ) ) );
     \BCC\Trust\Core\Plugin::instance()->moderationService()->handleRingAction( $userIds, $action );
 } );
 

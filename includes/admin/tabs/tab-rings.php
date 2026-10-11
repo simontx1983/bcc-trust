@@ -17,6 +17,61 @@ function bcc_trust_render_rings_tab() {
     $rings_available = ( $data['available'] ?? true ) === true;
     ?>
 
+    <?php
+    // ⚠⚠ THE RESULT OF A DESTRUCTIVE ACTION WAS NEVER SHOWN TO ANYBODY.
+    // handleRingAction() redirects with ?ring_msg=…, and NOTHING in the
+    // codebase rendered that parameter — a grep for it found only the places
+    // that SET it. So an operator pressed "Suspend ALL 3 members", was
+    // redirected, and saw nothing at all.
+    //
+    // That is bad on its own, and it is what hid the truncation bug: the
+    // redirect said `suspended_1` for a three-member ring, every time, and
+    // there was no surface on which to read it.
+    //
+    // Codes come from ModerationService::handleRingAction() plus the
+    // refusal in the admin-post hook. Anything unrecognised is reported as
+    // unrecognised rather than ignored.
+    $ring_msg = isset( $_GET['ring_msg'] ) ? sanitize_text_field( wp_unslash( $_GET['ring_msg'] ) ) : '';
+    if ( $ring_msg !== '' ) :
+        $notice_class = 'notice-success';
+        if ( preg_match( '/^invalidated_(\d+)$/', $ring_msg, $m ) ) {
+            $notice_text = sprintf(
+                /* translators: %d is a count of pages. */
+                _n( 'Ring votes invalidated. %d page was rescored.', 'Ring votes invalidated. %d pages were rescored.', (int) $m[1], 'bcc-trust' ),
+                (int) $m[1]
+            );
+        } elseif ( preg_match( '/^suspended_(\d+)$/', $ring_msg, $m ) ) {
+            $notice_text  = sprintf(
+                /* translators: %d is a count of users. */
+                _n( '%d ring member was suspended.', '%d ring members were suspended.', (int) $m[1], 'bcc-trust' ),
+                (int) $m[1]
+            );
+            // ⚠ Zero suspended is not a success. Every member failing is a
+            // database problem, and it used to be indistinguishable from
+            // having worked.
+            if ( (int) $m[1] === 0 ) {
+                $notice_class = 'notice-error';
+                $notice_text  = __( 'No ring member was suspended. Every attempt failed — check the application log.', 'bcc-trust' );
+            }
+        } elseif ( $ring_msg === 'ring_not_found' ) {
+            $notice_class = 'notice-error';
+            $notice_text  = __( 'That ring could not be found in the current snapshot, so nothing was changed. The snapshot may have been refreshed since this page was loaded, or the ring may no longer be detected. Reload and try again.', 'bcc-trust' );
+        } elseif ( $ring_msg === 'no_users' ) {
+            $notice_class = 'notice-error';
+            $notice_text  = __( 'That ring had no members to act on, so nothing was changed.', 'bcc-trust' );
+        } elseif ( $ring_msg === 'unknown_action' ) {
+            $notice_class = 'notice-error';
+            $notice_text  = __( 'That ring action is not recognised, so nothing was changed.', 'bcc-trust' );
+        } else {
+            $notice_class = 'notice-warning';
+            $notice_text  = __( 'A ring action returned a result this page does not recognise. Nothing can be confirmed about what it did — check the application log.', 'bcc-trust' );
+        }
+        ?>
+        <div class="notice <?php echo esc_attr( $notice_class ); ?> inline" style="margin:0 0 16px 0;">
+            <p><?php echo esc_html( $notice_text ); ?></p>
+        </div>
+    <?php endif; ?>
+
     <div class="bcc-panel" style="border-left:5px solid #f44336;">
         <h2 style="margin-top:0;">Vote Ring Detection</h2>
         <p>
@@ -85,10 +140,25 @@ function bcc_trust_render_rings_tab() {
             // targets, under a confirm dialog reading "Suspend ALL 0
             // members". That is why the shape fix ships WITH the storage
             // change and not after it.
+            // ⚠⚠ THE FORMS NO LONGER POST MEMBERSHIP AT ALL. They post a
+            // FINGERPRINT of the ring, and the handler resolves the members
+            // from the stored snapshot. Two reasons:
+            //
+            //   - the old hidden field was a COMMA-SEPARATED STRING, and the
+            //     handler cast it with `(array)` — so absint() reduced
+            //     "11,12,13" to 11 and "Suspend ALL 3 members" suspended
+            //     exactly one, silently;
+            //   - a destructive action should not take the set of accounts
+            //     to suspend from the browser, even behind a capability
+            //     check.
+            //
+            // $member_ids is therefore gone. A fingerprint that no longer
+            // matches a detected ring refuses the action rather than falling
+            // back to anything.
             $ring_id      = $ring['ring_id'] ?? $ring_index;
             $members      = is_array( $ring['users'] ?? null ) ? $ring['users'] : [];
-            $member_ids   = implode( ',', array_map( 'intval', $members ) );
             $member_count = count( $members );
+            $ring_fp      = \BCC\Trust\Core\Support\RingSnapshot::fingerprint( $members );
         ?>
         <div class="bcc-panel" style="border-left:5px solid #ff9800;margin-bottom:20px;">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;">
@@ -115,7 +185,7 @@ function bcc_trust_render_rings_tab() {
                         <?php wp_nonce_field( 'bcc_trust_ring_action' ); ?>
                         <input type="hidden" name="action"      value="bcc_trust_ring_action">
                         <input type="hidden" name="ring_action" value="invalidate_votes">
-                        <input type="hidden" name="user_ids"    value="<?php echo esc_attr( $member_ids ); ?>">
+                        <input type="hidden" name="ring_fingerprint" value="<?php echo esc_attr( $ring_fp ); ?>">
                         <input type="hidden" name="ring_id"     value="<?php echo esc_attr( $ring_id ); ?>">
                         <button type="submit" class="button" style="background:#ff9800;color:#fff;border-color:#e68900;">
                             🚫 Invalidate Ring Votes
@@ -127,7 +197,7 @@ function bcc_trust_render_rings_tab() {
                         <?php wp_nonce_field( 'bcc_trust_ring_action' ); ?>
                         <input type="hidden" name="action"      value="bcc_trust_ring_action">
                         <input type="hidden" name="ring_action" value="suspend_all">
-                        <input type="hidden" name="user_ids"    value="<?php echo esc_attr( $member_ids ); ?>">
+                        <input type="hidden" name="ring_fingerprint" value="<?php echo esc_attr( $ring_fp ); ?>">
                         <input type="hidden" name="ring_id"     value="<?php echo esc_attr( $ring_id ); ?>">
                         <input type="text"   name="reason"      placeholder="Suspension reason…" style="width:160px;" required>
                         <button type="submit" class="button" style="background:#f44336;color:#fff;border-color:#c62828;">
@@ -164,10 +234,13 @@ function bcc_trust_render_rings_tab() {
                   // query budget rather than being slipped into a storage
                   // fix. ?>
             <?php if ( ! empty( $members ) ): ?>
-            <table class="wp-list-table widefat fixed striped" style="margin-top:12px;max-width:520px;">
+            <table class="wp-list-table widefat fixed striped" style="margin-top:12px;">
                 <thead>
                     <tr>
                         <th><?php esc_html_e( 'Ring member', 'bcc-trust' ); ?></th>
+                        <th><?php esc_html_e( 'Fraud score', 'bcc-trust' ); ?></th>
+                        <th><?php esc_html_e( 'Risk', 'bcc-trust' ); ?></th>
+                        <th><?php esc_html_e( 'Suspended', 'bcc-trust' ); ?></th>
                         <th><?php esc_html_e( 'Actions', 'bcc-trust' ); ?></th>
                     </tr>
                 </thead>
@@ -175,6 +248,27 @@ function bcc_trust_render_rings_tab() {
                     <?php foreach ( $members as $member_id ): ?>
                         <tr>
                             <td><strong>User #<?php echo intval( $member_id ); ?></strong></td>
+                            <?php // ⚠⚠ "Not loaded" IS THE POINT, in all three
+                                  // columns. The snapshot carries membership and
+                                  // nothing else, so these three facts are not
+                                  // available on this page.
+                                  //
+                                  // The columns are KEPT rather than removed, and
+                                  // they say which it is: an operator looking for a
+                                  // fraud score should learn that this page does not
+                                  // have it, not find the column quietly missing and
+                                  // have to work out why.
+                                  //
+                                  // What they must never do is what they did before:
+                                  // `?? 0` and `?? 'unknown'` printed "0" and
+                                  // "Unknown" in a coloured risk pill for every
+                                  // member of a detected ring — a fabricated
+                                  // measurement about a person, on the screen whose
+                                  // buttons suspend them. "Unknown" in a pill reads
+                                  // as a classification; "not loaded" cannot. ?>
+                            <td><em style="color:#646970;"><?php esc_html_e( 'not loaded', 'bcc-trust' ); ?></em></td>
+                            <td><em style="color:#646970;"><?php esc_html_e( 'not loaded', 'bcc-trust' ); ?></em></td>
+                            <td><em style="color:#646970;"><?php esc_html_e( 'not loaded', 'bcc-trust' ); ?></em></td>
                             <td>
                                 <a href="<?php echo esc_url( admin_url( 'admin.php?page=bcc-trust-moderation&user_id=' . intval( $member_id ) ) ); ?>" class="button button-small"><?php esc_html_e( 'Manage', 'bcc-trust' ); ?></a>
                             </td>
@@ -183,7 +277,7 @@ function bcc_trust_render_rings_tab() {
                 </tbody>
             </table>
             <p style="margin:6px 0 0;color:#646970;font-size:12px;">
-                <?php esc_html_e( 'The snapshot records ring membership only. Open a member to see their fraud score, risk level and suspension state.', 'bcc-trust' ); ?>
+                <?php esc_html_e( 'The ring snapshot records membership only, so fraud score, risk level and suspension state are not loaded on this page — "not loaded" is not a score of zero and not a risk assessment. Open a member to see their real values.', 'bcc-trust' ); ?>
             </p>
             <?php endif; ?>
         </div>

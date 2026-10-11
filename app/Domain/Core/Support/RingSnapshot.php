@@ -171,6 +171,70 @@ final class RingSnapshot
     }
 
     /**
+     * A stable identifier for a ring, derived from its MEMBERS.
+     *
+     * ── WHY THIS EXISTS ─────────────────────────────────────────────────
+     * The Vote Rings tab offers two DESTRUCTIVE actions per ring. It used to
+     * post the member ids themselves in a hidden field, which meant the set
+     * of users to suspend arrived from the browser. This replaces that: the
+     * form posts only a fingerprint, and the handler resolves the members
+     * from the stored snapshot. Membership is therefore never submitted and
+     * never has to be trusted.
+     *
+     * ⚠ Same shape as TrustGraph::ringTransientKey() — sorted ints, md5 of
+     * the comma-joined list — because that is already how this codebase
+     * identifies "the same ring" for its 30-day re-penalisation guard. Two
+     * different notions of ring identity would be worse than one.
+     *
+     * @param array<int, int|string> $users
+     */
+    public static function fingerprint(array $users): string
+    {
+        $ids = array_map('intval', $users);
+        sort($ids);
+        return md5(implode(',', $ids));
+    }
+
+    /**
+     * The ring in the CURRENT snapshot with this fingerprint, or null.
+     *
+     * ⚠ Returns null — meaning "refuse" — for every uncertain case: no
+     * snapshot, an unreadable store, a legacy payload, a fingerprint from a
+     * page rendered before the last run, or a ring that is no longer
+     * detected. A destructive action must have a positively identified
+     * target, so absence is never treated as "act on what you were given".
+     *
+     * ⚠ The snapshot TTL is a day, so a tab left open longer than that will
+     * stop resolving. That is the intended failure: the operator reloads and
+     * sees the current rings instead of acting on a ring that may no longer
+     * exist.
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function findRingByFingerprint(string $fingerprint): ?array
+    {
+        if ($fingerprint === '' || !preg_match('/^[a-f0-9]{32}$/', $fingerprint)) {
+            return null;
+        }
+
+        $snapshot = self::read();
+        if ($snapshot['available'] !== true) {
+            return null;
+        }
+
+        foreach ($snapshot['rings'] as $ring) {
+            if (!isset($ring['users']) || !\is_array($ring['users'])) {
+                continue;
+            }
+            if (hash_equals(self::fingerprint($ring['users']), $fingerprint)) {
+                return $ring;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * ⚠ A BARE LIST IS NOT ACCEPTED AS A PAYLOAD.
      *
      * The pre-existing wp_cache key held a bare list of rings. A build that

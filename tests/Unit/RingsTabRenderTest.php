@@ -64,37 +64,77 @@ final class RingsTabRenderTest extends TestCase
         return $html;
     }
 
-    /** @return list<string> every value the destructive forms would post */
-    private function destructiveTargets(string $html): array
+    /**
+     * Every ring fingerprint the destructive forms would post.
+     *
+     * ⚠ There is deliberately no destructiveTargets() any more. The forms
+     * used to post the member ids and this helper read them back; they now
+     * post only a fingerprint, and the handler resolves membership from the
+     * snapshot. A test that still looked for submitted ids would be
+     * asserting the shape this change removed.
+     *
+     * @return list<string>
+     */
+    private function destructiveFingerprints(string $html): array
     {
-        preg_match_all('/name="user_ids"\s+value="([^"]*)"/', $html, $m);
+        preg_match_all('/name="ring_fingerprint"\s+value="([^"]*)"/', $html, $m);
         return $m[1];
+    }
+
+    /** The fingerprint the server will compute for a given member list. */
+    private function fingerprintOf(array $users): string
+    {
+        $ids = array_map('intval', $users);
+        sort($ids);
+        return md5(implode(',', $ids));
     }
 
     // ── 0. ⚠⚠ THE DESTRUCTIVE FORMS CARRY REAL TARGETS
     // ═══════════════════════════════════════════════════════════════════
 
-    public function testEachRingArmsItsFormsWithItsOwnMembers(): void
+    public function testEachRingArmsItsFormsWithItsOwnFingerprint(): void
     {
         RingsRenderWorld::populated();
 
-        $targets = $this->destructiveTargets($this->render());
+        $fps = $this->destructiveFingerprints($this->render());
 
-        // Two forms per ring, two rings.
-        self::assertCount(4, $targets, 'two destructive forms per ring');
-        self::assertSame(['11,12,13', '11,12,13', '21,22,23,24', '21,22,23,24'], $targets);
+        // Two forms per ring, two rings, each carrying ITS OWN ring's print.
+        self::assertCount(4, $fps, 'two destructive forms per ring');
+        self::assertSame([
+            $this->fingerprintOf([11, 12, 13]),
+            $this->fingerprintOf([11, 12, 13]),
+            $this->fingerprintOf([21, 22, 23, 24]),
+            $this->fingerprintOf([21, 22, 23, 24]),
+        ], $fps);
     }
 
-    public function testNoDestructiveFormIsEverArmedWithAnEmptyTargetList(): void
+    public function testMembershipIsNeverSUBMITTEDByTheForms(): void
     {
-        // ⚠ THE CASE THE WHOLE SHAPE FIX EXISTS FOR, stated as an absence.
-        // An empty user_ids under a "Suspend ALL" confirm is worse than a
-        // broken page: it is a button that claims to act and cannot.
+        // ⚠⚠ THE SAFETY PROPERTY, stated as an absence and the reason the
+        // fingerprint exists. The old hidden field posted "11,12,13", the
+        // handler cast it with (array), and absint() reduced it to 11 — so
+        // "Suspend ALL 3 members" suspended one, silently. Nothing about the
+        // set of accounts to suspend may come from the browser.
         RingsRenderWorld::populated();
 
-        foreach ($this->destructiveTargets($this->render()) as $i => $ids) {
-            self::assertNotSame('', $ids, "form {$i} has no targets");
-            self::assertMatchesRegularExpression('/^\d+(,\d+)*$/', $ids, "form {$i} is not a list of ids");
+        $html = $this->render();
+
+        self::assertStringNotContainsString('name="user_ids"', $html);
+        self::assertStringNotContainsString('11,12,13', $html, 'no CSV member list anywhere');
+    }
+
+    public function testEveryFingerprintIsAWellFormedHash(): void
+    {
+        // ⚠ Anti-vacuity for the case above: "contains no ids" would also
+        // pass if the field were empty or missing, which would make both
+        // buttons unusable rather than safe.
+        RingsRenderWorld::populated();
+
+        $fps = $this->destructiveFingerprints($this->render());
+
+        self::assertNotEmpty($fps);
+        foreach ($fps as $i => $fp) {
+            self::assertMatchesRegularExpression('/^[a-f0-9]{32}$/', $fp, "form {$i} has no usable fingerprint");
         }
     }
 
@@ -124,19 +164,49 @@ final class RingsTabRenderTest extends TestCase
     // ── 1. NO FABRICATED FACTS ABOUT A PERSON
     // ═══════════════════════════════════════════════════════════════════
 
-    public function testNoFraudScoreOrRiskLevelIsInvented(): void
+    public function testUnloadedMemberDataSaysNotLoadedRatherThanZero(): void
     {
-        // ⚠ The snapshot holds membership only. Printing "Fraud Score 0" and
-        // "Risk Unknown" for every member — which the `?? 0` / `?? 'unknown'`
-        // defaults did — asserts a measurement nobody took, about a user, on
-        // the screen that can suspend them.
+        // ⚠⚠ THE COLUMNS STAY AND SAY WHICH IT IS. The `?? 0` / `?? 'unknown'`
+        // defaults printed "0" and a coloured "Unknown" risk pill for every
+        // member of a detected ring — a fabricated measurement about a
+        // person, on the screen whose buttons suspend them.
+        //
+        // Removing the columns would also have been wrong: an operator
+        // looking for a fraud score should learn that this page does not have
+        // it, not find the column missing and guess why. Three members' worth
+        // of three columns = 9 "not loaded" cells across two rings of 3 and 4
+        // => 21.
         RingsRenderWorld::populated();
 
         $html = $this->render();
 
-        self::assertStringNotContainsString('Fraud Score', $html);
-        self::assertStringNotContainsString('Risk', $html);
-        self::assertStringContainsString('records ring membership only', $html);
+        // ⚠ Count the CELLS, not the substring. A raw substring count also
+        // picks up the explanatory paragraph's own two mentions of the phrase
+        // (once per ring), which is how a first version of this assertion
+        // expected 21 and measured 25 — the code was right and the count was
+        // wrong. Matching the cell markup makes the number mean what it says.
+        self::assertSame(
+            21,
+            preg_match_all('/<td><em [^>]*>not loaded<\/em><\/td>/', $html),
+            'three unloaded columns for each of seven members across two rings'
+        );
+        self::assertStringContainsString('is not a score of zero and not a risk assessment', $html);
+    }
+
+    public function testNoMemberIsGivenAZeroScoreOrAnInventedRiskLevel(): void
+    {
+        // ⚠ The same claim stated as an absence, because "contains
+        // not loaded" and "contains no fabricated zero" are different
+        // assertions and only the pair rules out a table showing both.
+        RingsRenderWorld::populated();
+
+        $html = $this->render();
+
+        // the old fabrications, verbatim
+        self::assertStringNotContainsString('>Unknown<', $html, 'a risk pill reading Unknown is a classification');
+        self::assertStringNotContainsString('font-weight:bold;">0', $html, 'a bold 0 in a score cell is a measurement');
+        self::assertStringNotContainsString('scoreColor', $html);
+        self::assertStringNotContainsString('riskColor', $html);
     }
 
     public function testEveryMemberStillHasAWayToBeInspected(): void
@@ -178,7 +248,7 @@ final class RingsTabRenderTest extends TestCase
 
         self::assertStringContainsString('No ring-detection snapshot yet', $html);
         self::assertStringNotContainsString('No vote rings detected', $html);
-        self::assertSame([], $this->destructiveTargets($html), 'and nothing destructive is offered');
+        self::assertSame([], $this->destructiveFingerprints($html), 'and nothing destructive is offered');
     }
 
     public function testASnapshotThatFoundNothingKeepsTheTick(): void
@@ -210,5 +280,78 @@ final class RingsTabRenderTest extends TestCase
         RingsRenderWorld::absent();
 
         self::assertStringNotContainsString('Snapshot taken', $this->render());
+    }
+
+    // ── 3. ⚠⚠ THE RESULT OF A DESTRUCTIVE ACTION IS SHOWN
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // handleRingAction() has always redirected with ?ring_msg=…, and NOTHING
+    // rendered it — a grep found only the places that SET it. So an operator
+    // pressed "Suspend ALL 3 members", was redirected, and saw nothing.
+    //
+    // That is also what hid the truncation bug: the redirect said
+    // `suspended_1` for a three-member ring, every time, with no surface on
+    // which to read it.
+
+    public function testASuccessfulSuspensionReportsItsCount(): void
+    {
+        $_GET['ring_msg'] = 'suspended_3';
+        RingsRenderWorld::reset();
+
+        $html = $this->render();
+
+        self::assertStringContainsString('3 ring members were suspended', $html);
+        self::assertStringContainsString('notice-success', $html);
+    }
+
+    public function testSuspendingNobodyIsReportedAsAFAILURE(): void
+    {
+        // ⚠ `suspended_0` means every attempt threw. It used to be
+        // indistinguishable from success — and invisible either way.
+        $_GET['ring_msg'] = 'suspended_0';
+        RingsRenderWorld::reset();
+
+        $html = $this->render();
+
+        self::assertStringContainsString('notice-error', $html);
+        self::assertStringContainsString('No ring member was suspended', $html);
+    }
+
+    public function testARefusedActionSaysNothingWasChanged(): void
+    {
+        // The fingerprint no longer matches a detected ring: a stale tab, or
+        // a snapshot refreshed since the page loaded.
+        $_GET['ring_msg'] = 'ring_not_found';
+        RingsRenderWorld::reset();
+
+        $html = $this->render();
+
+        self::assertStringContainsString('notice-error', $html);
+        self::assertStringContainsString('nothing was changed', $html);
+    }
+
+    public function testAnUnrecognisedResultIsNotReportedAsSuccess(): void
+    {
+        // ⚠ Anti-vacuity, and the honest default: a code this page does not
+        // know could mean anything, so it must not wear a green notice.
+        $_GET['ring_msg'] = 'something_new_from_a_later_build';
+        RingsRenderWorld::reset();
+
+        $html = $this->render();
+
+        self::assertStringNotContainsString('notice-success', $html);
+        self::assertStringContainsString('does not recognise', $html);
+    }
+
+    public function testNoNoticeIsShownWithoutAResult(): void
+    {
+        // ⚠ The control. Without it every case above could pass against a
+        // page that always prints a notice.
+        RingsRenderWorld::reset();
+
+        $html = $this->render();
+
+        self::assertStringNotContainsString('notice-success', $html);
+        self::assertStringNotContainsString('notice-error', $html);
     }
 }

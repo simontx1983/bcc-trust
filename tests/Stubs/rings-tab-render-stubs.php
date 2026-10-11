@@ -57,6 +57,27 @@ namespace {
             return max(1, (int) round(abs(($to ?: time()) - $from) / 60)) . ' mins';
         }
     }
+    // ⚠ The four below are for the ring_msg notice block. Enumerated from
+    // the tab with a token walk after the block was added, not discovered
+    // one failing case at a time.
+    if (!function_exists('__')) {
+        function __($t, $d = null) { return $t; }
+    }
+    if (!function_exists('_n')) {
+        function _n($single, $plural, $number, $d = null)
+        {
+            return (int) $number === 1 ? $single : $plural;
+        }
+    }
+    if (!function_exists('sanitize_text_field')) {
+        function sanitize_text_field($s): string
+        {
+            return trim(strip_tags((string) $s));
+        }
+    }
+    if (!function_exists('wp_unslash')) {
+        function wp_unslash($v) { return is_string($v) ? stripslashes($v) : $v; }
+    }
 }
 
 namespace BCC\Trust\Core {
