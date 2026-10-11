@@ -135,7 +135,9 @@ if (!defined('ABSPATH')) {
  *     explorer_url: string|null,
  *     chain_description: string|null,
  *     chain_description_state: string|null,
- *     chain_description_source: string|null
+ *     chain_description_source: string|null,
+ *     metadata_state: string,
+ *     metadata_checked_at: string|null
  * }
  *
  * @phpstan-type CollectionCountByChain object{
@@ -2417,16 +2419,25 @@ final class CollectionRepository
      * @param int         $perPage       clamped to 1..100
      * @param string|null $chainSlug     optional chain filter
      * @param string|null $tokenStandard optional standard filter
+     * @param string|null $search        free-text term; see below
      * @return array{items: list<CollectionAdminStateRow>, total: int, pages: int, available: bool}
      *         `available` is false when the read failed — the caller must
      *         render "unavailable", never an empty or partial tab.
+     *
+     * ── THE SEARCH TERM NARROWS, NEVER WIDENS ───────────────────────────
+     * `$search` is matched against the collection NAME, the contract address
+     * and the canonical identifier, and is ANDed with the tab predicate — so
+     * no term can surface a row the tab would not have shown. An
+     * all-whitespace term is treated as ABSENT rather than as a term that
+     * matches everything.
      */
     public static function listForAdminState(
         string $tab,
         int $page = 1,
         int $perPage = 50,
         ?string $chainSlug = null,
-        ?string $tokenStandard = null
+        ?string $tokenStandard = null,
+        ?string $search = null
     ): array {
         global $wpdb;
 
@@ -2461,6 +2472,39 @@ final class CollectionRepository
         if ($tokenStandard !== null && $tokenStandard !== '') {
             $conditions[] = 'c.token_standard = %s';
             $params[]     = $tokenStandard;
+        }
+
+        // ── FREE-TEXT SEARCH ────────────────────────────────────────────
+        //
+        // ⚠ `esc_like()` FIRST, then the wildcards. The other way round
+        // escapes the `%` we just added and the term matches nothing — and
+        // an operator searching `50%` would otherwise have their own `%`
+        // read as a wildcard.
+        //
+        // ⚠ Matched against three columns because an operator arrives with
+        // whichever one they have: a name from a report, a contract address
+        // from a block explorer, or the canonical identifier from a gate.
+        // `canonical_identifier` is NULLable, so it needs its own IS NOT
+        // NULL — a NULL never satisfies LIKE and would silently drop rows
+        // from an OR chain that looked like it covered them.
+        //
+        // The comparison is deliberately the column's own collation
+        // (case-insensitive), so searching `apes` finds `Steel City Apes`.
+        // That is a DISPLAY search, not an identity lookup: nothing here
+        // decides what a row IS. The identity rule stays in
+        // NftCollectionIdentifier, where a Solana mint is compared
+        // byte-exact.
+        $term = $search === null ? '' : trim($search);
+        if ($term !== '') {
+            $like         = '%' . $wpdb->esc_like($term) . '%';
+            $conditions[] = '('
+                . 'c.collection_name LIKE %s'
+                . ' OR c.contract_address LIKE %s'
+                . ' OR (c.canonical_identifier IS NOT NULL AND c.canonical_identifier LIKE %s)'
+                . ')';
+            $params[] = $like;
+            $params[] = $like;
+            $params[] = $like;
         }
 
         $whereSql = 'WHERE ' . implode(' AND ', $conditions);
@@ -2511,7 +2555,20 @@ final class CollectionRepository
                     -- read HERE and only here. The admin review screen is its
                     -- only reader, so these three columns exist to be shown to
                     -- an administrator — never serialized to a public payload.
-                    c.chain_description, c.chain_description_state, c.chain_description_source
+                    c.chain_description, c.chain_description_state, c.chain_description_source,
+                    -- See docs/database-schema.md. Both are COMPUTED on
+                    -- intake and scoped per chain family; no caller supplies
+                    -- them. Surfaced in the admin review table since the
+                    -- search/review slice.
+                    -- WARNING: prose in an SQL comment must not contain the
+                    -- f-r-o-m keyword followed by a word. wpdb::query()
+                    -- resolves the table name by regex-matching the first
+                    -- such pair in the query TEXT, comments included, so a
+                    -- stray phrase here can get the whole query rejected.
+                    -- PreparedSqlCommentPlaceholderTest caught precisely
+                    -- that in this comment first draft. Placeholders are
+                    -- banned here for the same reason.
+                    c.metadata_state, c.metadata_checked_at
                FROM {$table} c
           LEFT JOIN {$chains} ch ON ch.id = c.chain_id
                {$whereSql}
