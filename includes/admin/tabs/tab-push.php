@@ -99,7 +99,7 @@ function bcc_trust_render_push_tab(): void {
         <ul style="margin-left:20px;">
             <li>A row turns <strong style="color:#dc2626;">red</strong> when its success rate falls below 80% — typically a bad payload, a provider outage, or a bug in the rendering layer.</li>
             <li><code>tombstone</code> counts subscriptions auto-deleted after a 410 Gone — that's the browser saying "this subscription is dead". Healthy in small numbers; concerning if it spikes.</li>
-            <li>Zeroes across the board can mean either "no events" or "events fired but push is muted by user prefs". Cross-reference with the bell write rate before debugging.</li>
+            <li>Zeroes across the board can mean either "no events" or "events fired but push is muted by user prefs". Cross-reference with the bell write rate before debugging. It can no longer mean "nothing was recorded at all" &mdash; an hour with no counters now says so in words instead of rendering a table of zeros, so if you are looking at a table, something <em>was</em> recorded.</li>
         </ul>
     </div>
     <?php
