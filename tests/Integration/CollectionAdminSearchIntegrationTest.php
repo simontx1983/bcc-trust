@@ -64,18 +64,50 @@ final class CollectionAdminSearchIntegrationTest extends TestCase
             ?string $canonical,
             bool $hidden = false
         ) use ($wpdb, $table): int {
-            $wpdb->query($wpdb->prepare(
-                "INSERT INTO `{$table}`
-                    (contract_address, canonical_identifier, chain_id, collection_name,
-                     token_standard, fetched_at, expires_at, is_verified)
-                 VALUES (%s, %s, %d, %s, %s, NOW(), NOW(), 0)",
-                $contract,
-                $canonical,
-                self::CHAIN_ID,
-                $name,
-                'ERC-721'
-            ));
+            // ⚠⚠ A REAL NULL, NOT prepare()'s EMPTY STRING.
+            //
+            // `$wpdb->prepare('%s', null)` renders `''`, and
+            // `uq_chain_canonical` is UNIQUE on (chain_id,
+            // canonical_identifier) — so every row seeded with a NULL
+            // canonical collided on `''` and silently did not exist. The
+            // first CI run of this file failed seven cases for that reason,
+            // and every one of them looked like a search defect.
+            //
+            // Two statements rather than one interpolated literal: the NULL
+            // has to sit outside a placeholder, and `esc_sql()` is not
+            // available under the integration bootstrap, so hand-escaping
+            // here would be both unnecessary and a thing to get wrong.
+            $cols = "(contract_address, canonical_identifier, chain_id, collection_name,
+                      token_standard, fetched_at, expires_at, is_verified)";
+
+            if ($canonical === null) {
+                $wpdb->query($wpdb->prepare(
+                    "INSERT INTO `{$table}` {$cols}
+                     VALUES (%s, NULL, %d, %s, %s, NOW(), NOW(), 0)",
+                    $contract,
+                    self::CHAIN_ID,
+                    $name,
+                    'ERC-721'
+                ));
+            } else {
+                $wpdb->query($wpdb->prepare(
+                    "INSERT INTO `{$table}` {$cols}
+                     VALUES (%s, %s, %d, %s, %s, NOW(), NOW(), 0)",
+                    $contract,
+                    $canonical,
+                    self::CHAIN_ID,
+                    $name,
+                    'ERC-721'
+                ));
+            }
             $id = (int) $wpdb->insert_id;
+            if ($id <= 0) {
+                // Fail loudly here rather than letting every assertion below
+                // report a search defect that is really a fixture defect.
+                throw new \RuntimeException(
+                    "fixture insert failed for '{$name}': " . $wpdb->last_error
+                );
+            }
 
             if ($hidden) {
                 $wpdb->query($wpdb->prepare(
