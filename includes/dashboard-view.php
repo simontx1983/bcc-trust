@@ -126,8 +126,14 @@ if ( isset( $legacy_alias[ $requested_tab ] ) ) {
         $current_sub = $clusters[ $current_cluster ]['default_sub'] ?? '';
     }
 } else {
-    $current_cluster = 'overview';
-    $current_sub     = '';
+    // ⚠ An unrecognised ?tab= used to be rewritten to Overview in silence.
+    // The operator then saw Overview's content under a URL that still said
+    // something else — so a mistyped or retired link looked like it worked,
+    // and a bookmark that had quietly stopped resolving was indistinguishable
+    // from one that had not. Recorded here and reported below the nav.
+    $current_cluster  = 'overview';
+    $current_sub      = '';
+    $unknown_tab_slug = $requested_tab;
 }
 
 // Helper: build a URL for a (cluster, sub) pair. Single-page clusters
@@ -143,8 +149,13 @@ $build_url = static function ( string $cluster, string $sub = '' ) use ( $cluste
 
 <nav class="nav-tab-wrapper">
     <?php foreach ( $clusters as $cluster_slug => $cluster ): ?>
+        <?php $is_current_cluster = $current_cluster === $cluster_slug; ?>
         <a href="<?php echo $build_url( $cluster_slug ); ?>"
-           class="nav-tab <?php echo $current_cluster === $cluster_slug ? 'nav-tab-active' : ''; ?>">
+           class="nav-tab <?php echo $is_current_cluster ? 'nav-tab-active' : ''; ?>"
+           <?php // Which tab is active was conveyed by CSS class alone, so a
+                 // screen reader announced seven identical links. aria-current
+                 // is the standard way to say "this is the one you are on". ?>
+           <?php echo $is_current_cluster ? ' aria-current="page"' : ''; ?>>
             <?php echo esc_html( $cluster['label'] ); ?>
         </a>
     <?php endforeach; ?>
@@ -163,10 +174,25 @@ if ( is_array( $current_cluster_subs ) && count( $current_cluster_subs ) > 1 ):
         ?>
             <a href="<?php echo $build_url( $current_cluster, $sub_slug ); ?>"
                class="button <?php echo $is_active ? 'button-primary' : ''; ?>"
+               <?php echo $is_active ? ' aria-current="page"' : ''; ?>
                style="margin-right:4px;<?php echo $highlight && ! $is_active ? 'background:' . esc_attr( $highlight ) . ';' : ''; ?>">
                 <?php echo esc_html( $sub['label'] ); ?>
             </a>
         <?php endforeach; ?>
+    </div>
+<?php endif; ?>
+
+<?php if ( isset( $unknown_tab_slug ) && $unknown_tab_slug !== '' ): ?>
+    <div class="notice notice-warning inline" style="margin:8px 0 0 0;">
+        <p>
+            <?php
+            printf(
+                /* translators: %s: the unrecognised tab slug from the URL. */
+                esc_html__( 'There is no tab called %s, so Overview is shown instead. If you followed a link or a bookmark, it is out of date.', 'bcc-trust' ),
+                '<code>' . esc_html( $unknown_tab_slug ) . '</code>'
+            );
+            ?>
+        </p>
     </div>
 <?php endif; ?>
 
@@ -183,10 +209,41 @@ if ( is_array( $current_cluster_subs ) && count( $current_cluster_subs ) > 1 ):
             ?? 'bcc_trust_render_overview_tab';
     }
 
+    // ⚠⚠ A MISSING RENDERER USED TO SHOW OVERVIEW'S CONTENT UNDER THE TAB
+    // THE OPERATOR HAD SELECTED.
+    //
+    // If a tab file fails to load, function_exists() is false and the old
+    // fallback called bcc_trust_render_overview_tab() — so the nav still
+    // highlighted, say, Signals while the panel below it showed Overview's
+    // totals. Nothing said so. Reading those numbers as the selected tab's is
+    // the obvious mistake, and it is the dashboard's fault for inviting it.
+    //
+    // Now it says what happened and renders nothing else. A tab that cannot
+    // load is a deployment problem; showing a different tab's data in its
+    // place cannot help an operator and can mislead one.
     if ( is_string( $render_fn ) && function_exists( $render_fn ) ) {
         $render_fn();
     } else {
-        bcc_trust_render_overview_tab();
+        $missing = $current_sub !== ''
+            ? $current_cluster . ' / ' . $current_sub
+            : $current_cluster;
+        ?>
+        <div class="notice notice-error inline" style="margin:0;">
+            <p>
+                <strong><?php esc_html_e( 'This tab could not be loaded.', 'bcc-trust' ); ?></strong>
+                <?php
+                printf(
+                    /* translators: %s: the selected tab, e.g. "signals / fraud". */
+                    esc_html__( 'Its renderer is not available, so there is nothing to show for %s. No other tab\'s data is displayed in its place.', 'bcc-trust' ),
+                    '<code>' . esc_html( $missing ) . '</code>'
+                );
+                ?>
+            </p>
+            <p style="margin-top:0;">
+                <a href="<?php echo $build_url( 'overview' ); ?>"><?php esc_html_e( 'Go to Overview', 'bcc-trust' ); ?></a>
+            </p>
+        </div>
+        <?php
     }
     ?>
 </div>
