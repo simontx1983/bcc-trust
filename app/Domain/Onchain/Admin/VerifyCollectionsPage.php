@@ -209,7 +209,14 @@ final class VerifyCollectionsPage
      * uses. Naming it once stops the two drifting apart the next time a
      * column is added.
      */
-    private const TABLE_COLSPAN = 12;
+    /**
+     * Data columns in the review table, for the "no rows" cell's colspan.
+     * ⚠ Bumped 12 → 13 by the Metadata column. The new column sits AFTER
+     * Community deliberately: inserting it earlier would shift the column
+     * index that VerifyCollectionsCommunityCellPrefetchTest pins, and an
+     * off-by-one there reads as "the community cell is empty".
+     */
+    private const TABLE_COLSPAN = 13;
 
     /*
      * FORCE_RETRY_LIMIT, ADMIN_BACKFILL_REQUESTS and ADMIN_BACKFILL_SECONDS
@@ -1073,6 +1080,83 @@ final class VerifyCollectionsPage
         <?php
     }
 
+    /**
+     * PURE RENDER. The metadata-status cell.
+     *
+     * ⚠ THE LABEL NAMES THE SCOPE, because `metadata_state` is computed PER
+     * FAMILY: a fully successful EVM read reaches `complete` while fetching
+     * fewer fields than Cosmos, and a field the family never fetches is
+     * `not_applicable` rather than a shortfall. A bare "Complete" badge
+     * would invite comparing an EVM row to a Cosmos row as if one scale
+     * applied to both.
+     *
+     * ⚠ AND IT DISTINGUISHES "NEVER CHECKED" FROM "CHECKED AND FOUND
+     * NOTHING". Both store `unavailable`; only `metadata_checked_at`
+     * separates them, and that distinction is the whole reason an operator
+     * would look at this cell — one is a gap in our work, the other is a
+     * fact about the collection.
+     *
+     * An unrecognised value renders as itself, escaped, rather than being
+     * coerced into a known badge: a value from a newer build must not be
+     * shown as something it is not.
+     */
+    private static function renderMetadataStatus(string $state, ?string $checkedAt): void
+    {
+        $known = [
+            'complete'    => ['Complete',    '#00a32a', 'Every field this chain family fetches was read.'],
+            'partial'     => ['Partial',     '#dba617', 'Some fields this chain family fetches are missing.'],
+            'unavailable' => ['Unavailable', '#d63638', 'No metadata could be read for this collection.'],
+        ];
+
+        $checked = is_string($checkedAt) && $checkedAt !== '' && $checkedAt !== '0000-00-00 00:00:00';
+
+        if ($state === '') {
+            echo '<span style="color:#999;" title="This build did not record a metadata state for this row.">&mdash;</span>';
+            return;
+        }
+
+        if (isset($known[$state])) {
+            [$label, $colour, $why] = $known[$state];
+            // ⚠ "Not checked" is NOT the same as "nothing found", and only
+            // metadata_checked_at tells them apart.
+            if ($state === 'unavailable' && !$checked) {
+                printf(
+                    '<span style="color:#646970;" title="%s">%s</span>',
+                    esc_attr('No metadata read has been attempted for this row yet, so this is not a statement about the collection.'),
+                    esc_html__('Not checked', 'bcc-trust')
+                );
+                return;
+            }
+            printf(
+                '<span style="color:%s;" title="%s">%s</span>',
+                esc_attr($colour),
+                esc_attr($why . ' Scoped to this chain family — not comparable across families.'),
+                esc_html($label)
+            );
+        } else {
+            printf(
+                '<span style="color:#646970;" title="%s">%s</span>',
+                esc_attr('Unrecognised metadata state; shown verbatim rather than mapped to a known label.'),
+                esc_html($state)
+            );
+        }
+
+        if ($checked) {
+            printf(
+                '<div style="color:#646970;font-size:11px;" title="%s">%s</div>',
+                esc_attr('When a metadata read was last ATTEMPTED — not when it last succeeded.'),
+                // ⚠ `mysql2date()` returns int|string|false, so the cast is
+                // load-bearing: a false would otherwise reach esc_html().
+                esc_html((string) mysql2date(
+                    is_string(get_option('date_format')) && get_option('date_format') !== ''
+                        ? (string) get_option('date_format')
+                        : 'Y-m-d',
+                    (string) $checkedAt
+                ))
+            );
+        }
+    }
+
     public static function renderHideButton(int $rowId, bool $isHidden): void
     {
         $rowId  = (int) $rowId;
@@ -1211,7 +1295,7 @@ final class VerifyCollectionsPage
     {
         $args = ['page' => self::PAGE_SLUG];
 
-        foreach (['paged', 'chain', 'token_standard', 'vstate'] as $key) {
+        foreach (['paged', 'chain', 'token_standard', 'vstate', 's'] as $key) {
             if (isset($_POST[$key]) && $_POST[$key] !== '') {
                 $args[$key] = sanitize_text_field((string) $_POST[$key]);
             }
@@ -1435,6 +1519,12 @@ final class VerifyCollectionsPage
         $selectedTokenStandard = isset($_GET['token_standard'])
             ? sanitize_text_field((string) $_GET['token_standard'])
             : '';
+        // ⚠ Bounded at the boundary. A 200-char cap keeps the LIKE term and
+        // the URL sane; nothing downstream depends on the length, and a
+        // longer term would narrow to nothing anyway.
+        $searchTerm = isset($_GET['s'])
+            ? trim(mb_substr(sanitize_text_field((string) $_GET['s']), 0, 200))
+            : '';
 
         $availableChains    = ChainRepository::getActive();
         $availableStandards = CollectionRepository::getDistinctTokenStandards();
@@ -1472,7 +1562,8 @@ final class VerifyCollectionsPage
             // accepted id count cannot drift apart.
             self::MAX_BULK_IDS,
             $chainArg,
-            $standardArg
+            $standardArg,
+            $searchTerm !== '' ? $searchTerm : null
         );
 
         // Demand signals, strongest first:
@@ -1519,7 +1610,12 @@ final class VerifyCollectionsPage
                     $p,
                     100,
                     $chainArg,
-                    $standardArg
+                    $standardArg,
+                    // ⚠ The SAME term. Without it the re-rank re-fetches a
+                    // WIDER scope than the page is showing and then slices
+                    // 50 rows out of it, so a searched page would silently
+                    // display rows that do not match the search.
+                    $searchTerm !== '' ? $searchTerm : null
                 );
                 if (!$chunk['available']) {
                     // A failed chunk read must not silently produce a
@@ -1764,7 +1860,7 @@ final class VerifyCollectionsPage
                     <label for="bcc-vc-chain-filter" style="margin-right:6px;">
                         <strong>Chain:</strong>
                     </label>
-                    <select name="chain" id="bcc-vc-chain-filter" onchange="this.form.submit()">
+                    <select name="chain" id="bcc-vc-chain-filter">
                         <option value="">All chains</option>
                         <?php foreach ($availableChains as $chainOption): ?>
                             <option value="<?php echo esc_attr((string) $chainOption->slug); ?>"
@@ -1780,7 +1876,7 @@ final class VerifyCollectionsPage
                         <label for="bcc-vc-token-filter" style="margin-right:6px;">
                             <strong>Token standard:</strong>
                         </label>
-                        <select name="token_standard" id="bcc-vc-token-filter" onchange="this.form.submit()">
+                        <select name="token_standard" id="bcc-vc-token-filter">
                             <option value="">All standards</option>
                             <?php foreach ($availableStandards as $standard): ?>
                                 <option value="<?php echo esc_attr($standard); ?>"
@@ -1791,9 +1887,45 @@ final class VerifyCollectionsPage
                         </select>
                     </span>
                 <?php endif; ?>
-                <noscript>
-                    <button type="submit" class="button">Filter</button>
-                </noscript>
+                <span>
+                    <label for="bcc-vc-search" style="margin-right:6px;">
+                        <strong>Search:</strong>
+                    </label>
+                    <input type="search"
+                           name="s"
+                           id="bcc-vc-search"
+                           value="<?php echo esc_attr($searchTerm); ?>"
+                           placeholder="Name, contract or identifier"
+                           style="min-width:260px;"
+                           spellcheck="false"
+                           autocomplete="off">
+                </span>
+
+                <?php
+                // ⚠⚠ AN ALWAYS-PRESENT SUBMIT, AND THE SELECTS NO LONGER
+                // AUTO-SUBMIT.
+                //
+                // Both selects carried `onchange="this.form.submit()"` with
+                // this button inside <noscript>. So with JavaScript ON —
+                // which is every real admin session — there was NO submit
+                // control at all, and a keyboard user moving through the
+                // options with the arrow keys fired a form submission on
+                // EVERY keystroke, navigating away mid-selection. The
+                // control was effectively mouse-only.
+                //
+                // One button, always rendered, serves mouse, keyboard and
+                // no-JS identically, and it is also what makes the search
+                // field submittable. The selects are now ordinary selects.
+                ?>
+                <button type="submit" class="button">Filter</button>
+
+                <?php if ($searchTerm !== '' || $selectedChain !== '' || $selectedTokenStandard !== ''): ?>
+                    <a class="button-link"
+                       href="<?php echo esc_url(add_query_arg(
+                           ['page' => self::PAGE_SLUG, 'vstate' => $vstate],
+                           admin_url('admin.php')
+                       )); ?>">Clear filters</a>
+                <?php endif; ?>
             </form>
 
             <?php
@@ -1877,6 +2009,9 @@ final class VerifyCollectionsPage
                             <th style="width:160px;" title="Members of the collection's holder community (only meaningful once verified).">
                                 Community
                             </th>
+                            <th style="width:110px;" title="What BCC knows about this collection's metadata. COMPUTED per chain family, so it is not comparable across families.">
+                                Metadata
+                            </th>
                             <th style="width:80px;">Actions</th>
                         </tr>
                     </thead>
@@ -1885,6 +2020,63 @@ final class VerifyCollectionsPage
                             <tr>
                                 <td colspan="<?php echo (int) self::TABLE_COLSPAN; ?>"><em>
                                     <?php
+                                    // ⚠⚠ THREE DIFFERENT REASONS FOR NO ROWS, AND THEY
+                                    // MUST NOT SHARE ONE MESSAGE.
+                                    //
+                                    // 1. PAST THE LAST PAGE. `paged` is clamped only at
+                                    //    the bottom, so `&paged=99` on a 1-page tab gave
+                                    //    an offset past the end: zero rows, and the tab
+                                    //    its own counter says holds 38. The page then
+                                    //    said "No unverified collections. Add one from
+                                    //    NFT Discovery" — contradicting the counter
+                                    //    beside it and advising the operator to create
+                                    //    data that already exists. Verified in a browser
+                                    //    before this fix.
+                                    // 2. A SEARCH OR FILTER THAT MATCHES NOTHING. The
+                                    //    rows exist; the operator narrowed past them.
+                                    //    Telling them to go and add a collection is the
+                                    //    wrong instruction.
+                                    // 3. GENUINELY EMPTY for this tab — the only case
+                                    //    the original per-tab copy was written for.
+                                    //
+                                    // This is the same class of defect the per-tab
+                                    // messages already guard against ("no collections"
+                                    // when three other tabs are full), one level down.
+                                    $hasAnyInTab  = ($listing['total'] ?? 0) > 0;
+                                    $isFiltered   = $searchTerm !== ''
+                                        || $selectedChain !== ''
+                                        || $selectedTokenStandard !== '';
+                                    $clearUrl     = add_query_arg(
+                                        ['page' => self::PAGE_SLUG, 'vstate' => $vstate],
+                                        admin_url('admin.php')
+                                    );
+
+                                    if ($hasAnyInTab && $page > 1) {
+                                        printf(
+                                            /* translators: 1: requested page, 2: last page with rows */
+                                            esc_html__('Page %1$d is past the end of this list — it has %2$d page(s). Nothing is missing.', 'bcc-trust'),
+                                            (int) $page,
+                                            max(1, (int) $listing['pages'])
+                                        );
+                                        printf(
+                                            ' <a href="%s">%s</a>',
+                                            esc_url(add_query_arg(
+                                                ['page' => self::PAGE_SLUG, 'vstate' => $vstate, 'paged' => 1]
+                                                + ($searchTerm !== '' ? ['s' => $searchTerm] : [])
+                                                + ($selectedChain !== '' ? ['chain' => $selectedChain] : [])
+                                                + ($selectedTokenStandard !== '' ? ['token_standard' => $selectedTokenStandard] : []),
+                                                admin_url('admin.php')
+                                            )),
+                                            esc_html__('Back to the first page', 'bcc-trust')
+                                        );
+                                    } elseif ($isFiltered) {
+                                        echo esc_html__('No collections in this tab match the current search or filters.', 'bcc-trust');
+                                        printf(
+                                            ' <a href="%s">%s</a>',
+                                            esc_url($clearUrl),
+                                            esc_html__('Clear filters', 'bcc-trust')
+                                        );
+                                    } else {
                                     // The empty state is per tab, and says nothing about
                                     // rows in the OTHER tabs — "no collections" when three
                                     // other tabs are full is how an operator concludes the
@@ -1901,6 +2093,7 @@ final class VerifyCollectionsPage
                                             break;
                                         default:
                                             echo 'No unverified collections. Add one from NFT Discovery, or connect a wallet to populate this list.';
+                                    }
                                     }
                                     ?>
                                 </em></td>
@@ -2165,6 +2358,35 @@ final class VerifyCollectionsPage
                                     } else {
                                         echo '<span style="color:#999;">&mdash;</span>';
                                     }
+                                    ?>
+                                </td>
+                                <td>
+                                    <?php
+                                    // ── METADATA STATUS ────────────────────
+                                    //
+                                    // ⚠ These two columns have been written on
+                                    // intake since PR E and surfaced in NO
+                                    // admin view, so an administrator could
+                                    // not see how much metadata BCC actually
+                                    // holds for a row it is being asked to
+                                    // verify.
+                                    //
+                                    // `metadata_state` is COMPUTED and scoped
+                                    // PER FAMILY, so `complete` does not mean
+                                    // the same field count on EVM as on
+                                    // Cosmos — a field the family never
+                                    // fetches is not a shortfall. The title
+                                    // says so rather than implying a single
+                                    // scale.
+                                    //
+                                    // `metadata_checked_at` is when metadata
+                                    // was ATTEMPTED, not when it succeeded,
+                                    // and is deliberately NOT `fetched_at`
+                                    // (any holdings write bumps that one).
+                                    self::renderMetadataStatus(
+                                        (string) ($row->metadata_state ?? ''),
+                                        $row->metadata_checked_at ?? null
+                                    );
                                     ?>
                                 </td>
                                 <td>

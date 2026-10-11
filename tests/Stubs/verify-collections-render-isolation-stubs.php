@@ -221,6 +221,19 @@ namespace {
             }
         }
     }
+    if (!function_exists('mysql2date')) {
+        /**
+         * Formats a MySQL datetime. Deliberately returns a STRING here, but
+         * production's WordPress returns `int|string|false` — which is why
+         * the caller casts. Keeping the stub honest about the happy path only
+         * is fine; the cast is what PHPStan checks.
+         */
+        function mysql2date(string $format, string $date, bool $translate = true)
+        {
+            $ts = strtotime($date);
+            return $ts === false ? false : date($format, $ts);
+        }
+    }
     if (!function_exists('_prime_post_caches')) {
         /** @param list<int> $ids */
         function _prime_post_caches(array $ids, bool $terms = true, bool $meta = true): void
@@ -489,9 +502,34 @@ namespace BCC\Trust\Onchain\Repositories {
         final class CollectionRepository
         {
             /** @return array{items: list<object>, total: int, pages: int, available: bool} */
-            public static function listForAdminState(string $tab, int $page = 1, int $perPage = 50, ?string $chainSlug = null, ?string $tokenStandard = null): array
+            /**
+             * ⚠ THE SEARCH TERM MUST BE HONOURED HERE, NOT IGNORED.
+             *
+             * PHP silently accepts a surplus argument to a user-defined
+             * method, so a stub that kept the old 5-parameter signature
+             * would take the term and drop it — and every render test of a
+             * searched page would exercise the UNSEARCHED list while
+             * appearing to pass. The filter is deliberately crude (it only
+             * has to narrow); the real SQL is pinned by
+             * CollectionAdminSearchIntegrationTest.
+             */
+            public static function listForAdminState(string $tab, int $page = 1, int $perPage = 50, ?string $chainSlug = null, ?string $tokenStandard = null, ?string $search = null): array
             {
-                $rows  = \BccRenderWorld::$rows;
+                $rows = \BccRenderWorld::$rows;
+
+                $term = $search === null ? '' : trim($search);
+                if ($term !== '') {
+                    $rows = array_values(array_filter($rows, static function (object $r) use ($term): bool {
+                        foreach (['collection_name', 'contract_address', 'canonical_identifier'] as $f) {
+                            $v = $r->$f ?? null;
+                            if (is_string($v) && stripos($v, $term) !== false) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }));
+                }
+
                 $slice = array_slice($rows, ($page - 1) * $perPage, $perPage);
                 return ['items' => $slice, 'total' => count($rows), 'pages' => (int) ceil(max(1, count($rows)) / $perPage), 'available' => true];
             }
