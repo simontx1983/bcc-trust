@@ -248,6 +248,22 @@ final class NftHoldingsRepository
 
         global $wpdb;
         $table       = self::table();
+        // ⚠⚠ THIS READ FOLD IS DELIBERATE — DO NOT "FIX" IT TO MATCH THE
+        // WRITE PATH.
+        //
+        // The write path stopped folding, so NEW rows carry the canonical
+        // identity. Rows written BEFORE that are still folded, and this
+        // read has to find both. `contract_address` has a case-INSENSITIVE
+        // collation, so a folded needle matches a canonical row and a
+        // canonical needle matches a folded row — the fold here is
+        // therefore harmless in both directions, and removing it would
+        // change nothing today.
+        //
+        // What it would change is the day the column's collation is made
+        // binary (part of the recovery in
+        // docs/solana-mint-case-recovery.md): at that point this fold
+        // becomes wrong and must go in the SAME change, or Solana reads
+        // stop matching. That ordering is the reason this comment exists.
         $contractLc  = strtolower($contract);
         $placeholders = implode(',', array_fill(0, count($clean), '%d'));
 
@@ -427,6 +443,8 @@ final class NftHoldingsRepository
               ORDER BY h.balance DESC, w.wallet_address ASC
               LIMIT %d",
             $chainId,
+            // ⚠ Deliberate read fold — see readVisibleByContract() for why
+            // reads still fold while writes no longer do.
             strtolower($contract),
             $tokenId,
             self::STATUS_PENDING,
@@ -570,7 +588,10 @@ final class NftHoldingsRepository
         foreach ($rows as $r) {
             $walletLinkId = (int) ($r['wallet_link_id'] ?? 0);
             $chainId      = (int) ($r['chain_id'] ?? 0);
-            $contract     = strtolower((string) ($r['contract_address'] ?? ''));
+            // ⚠ NOT folded. The planner has already canonicalised this per
+            // chain family; re-folding here would undo it and store a
+            // Solana mint under a key that does not name the asset.
+            $contract     = (string) ($r['contract_address'] ?? '');
             $tokenId      = (string) ($r['token_id'] ?? '');
             $confirmedAt  = (string) ($r['confirmed_at'] ?? '');
             $lastSeenBlk  = (int) ($r['last_seen_block'] ?? 0);
@@ -653,7 +674,11 @@ final class NftHoldingsRepository
             $table,
             [
                 'wallet_link_id'   => $walletLinkId,
-                'contract_address' => strtolower($contract),
+                // ⚠ NOT folded. `contract_address`'s collation is
+                // case-INSENSITIVE, so this still matches a legacy row that
+                // was stored folded — the delete works on both old and new
+                // rows without rewriting either.
+                'contract_address' => $contract,
                 'token_id'         => $tokenId,
             ],
             ['%d', '%s', '%s']
@@ -828,7 +853,9 @@ final class NftHoldingsRepository
         foreach ($deltas as $d) {
             $walletLinkId = (int) ($d['wallet_link_id'] ?? 0);
             $chainId      = (int) ($d['chain_id'] ?? 0);
-            $contract     = strtolower((string) ($d['contract_address'] ?? ''));
+            // ⚠ NOT folded — same reason as upsertMany(). The 1155 delta
+            // path writes the same column and must agree with it.
+            $contract     = (string) ($d['contract_address'] ?? '');
             $tokenId      = (string) ($d['token_id'] ?? '');
             $confirmedAt  = (string) ($d['confirmed_at'] ?? '');
             $block        = (int) ($d['last_seen_block'] ?? 0);

@@ -59,7 +59,14 @@ final class NftHoldingsIndexerPlanTest extends TestCase
             self::CHAIN,
             $events,
             $map,
-            $isSpam ?? static fn (string $c, ?string $n): bool => false
+            $isSpam ?? static fn (string $c, ?string $n): bool => false,
+            // ⚠ The family is now REQUIRED, because the contract identity is
+            // canonicalised per family rather than lowercased. Every fixture
+            // contract here is EVM hex, for which the canonical rule IS
+            // lowercase — so these cases assert the same values they always
+            // did. `NftHoldingsIndexerSolanaMintCaseTest` covers the family
+            // whose rule differs.
+            'evm'
         );
     }
 
