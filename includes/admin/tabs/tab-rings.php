@@ -139,50 +139,52 @@ function bcc_trust_render_rings_tab() {
             </div>
 
             <!-- ── Member table ── -->
+            <?php // ⚠⚠ THIS TABLE USED TO RENDER FIELDS THE SNAPSHOT HAS
+                  // NEVER CARRIED. It treated each member as an enriched ROW
+                  // with display_name / fraud_score / risk_level /
+                  // mutual_vote_count / is_suspended, while both detectors
+                  // emit a flat list of integer USER IDS. With a snapshot
+                  // actually stored, every one of those accesses raised
+                  // "Trying to access array offset on value of type int" —
+                  // 21 diagnostics across three rings — and the `?? 0` /
+                  // `?? 'unknown'` defaults would otherwise have printed
+                  // "Fraud Score 0, Risk Unknown" for every member in a
+                  // detected ring. That is a fabricated measurement about a
+                  // user, on the screen whose buttons suspend them.
+                  //
+                  // So the table now shows what the snapshot ACTUALLY holds:
+                  // who is in the ring, and a way to go look at them. The
+                  // five unpopulated columns are gone rather than defaulted.
+                  // Nothing is lost that ever worked — this branch could not
+                  // render at all before the snapshot was persisted.
+                  //
+                  // Enriching the ids into real fraud scores is worth doing
+                  // and is NOT done here: it is a per-member repository read
+                  // inside a loop, so it needs its own change with its own
+                  // query budget rather than being slipped into a storage
+                  // fix. ?>
             <?php if ( ! empty( $members ) ): ?>
-            <table class="wp-list-table widefat fixed striped" style="margin-top:12px;">
+            <table class="wp-list-table widefat fixed striped" style="margin-top:12px;max-width:520px;">
                 <thead>
                     <tr>
-                        <th>User</th>
-                        <th>Fraud Score</th>
-                        <th>Risk</th>
-                        <th>Mutual Votes</th>
-                        <th>Suspended</th>
-                        <th>Actions</th>
+                        <th><?php esc_html_e( 'Ring member', 'bcc-trust' ); ?></th>
+                        <th><?php esc_html_e( 'Actions', 'bcc-trust' ); ?></th>
                     </tr>
                 </thead>
                 <tbody>
-                    <?php foreach ( $members as $m ): ?>
+                    <?php foreach ( $members as $member_id ): ?>
                         <tr>
+                            <td><strong>User #<?php echo intval( $member_id ); ?></strong></td>
                             <td>
-                                <strong><?php echo esc_html( $m['display_name'] ?? 'User #' . $m['user_id'] ); ?></strong>
-                                <br><small>ID: <?php echo intval( $m['user_id'] ); ?></small>
-                            </td>
-                            <td>
-                                <span style="color:<?php echo esc_attr( \BCC\Trust\Core\Support\Formatting::scoreColor( $m['fraud_score'] ?? 0 ) ); ?>;font-weight:bold;">
-                                    <?php echo intval($m['fraud_score'] ?? 0); ?>
-                                </span>
-                            </td>
-                            <td>
-                                <span style="padding:2px 6px;border-radius:3px;background:<?php echo esc_attr( \BCC\Trust\Core\Support\Formatting::riskColor( $m['risk_level'] ?? 'unknown' ) ); ?>;color:#fff;font-size:11px;">
-                                    <?php echo esc_html( ucfirst( $m['risk_level'] ?? 'unknown' ) ); ?>
-                                </span>
-                            </td>
-                            <td><?php echo $m['mutual_vote_count'] ?? '—'; ?></td>
-                            <td>
-                                <?php if ( ! empty( $m['is_suspended'] ) ): ?>
-                                    <span style="color:#f44336;font-weight:bold;">✗ Yes</span>
-                                <?php else: ?>
-                                    <span style="color:#4caf50;">✓ No</span>
-                                <?php endif; ?>
-                            </td>
-                            <td>
-                                <a href="<?php echo esc_url( admin_url( 'admin.php?page=bcc-trust-moderation&user_id=' . intval( $m['user_id'] ) ) ); ?>" class="button button-small">Manage</a>
+                                <a href="<?php echo esc_url( admin_url( 'admin.php?page=bcc-trust-moderation&user_id=' . intval( $member_id ) ) ); ?>" class="button button-small"><?php esc_html_e( 'Manage', 'bcc-trust' ); ?></a>
                             </td>
                         </tr>
                     <?php endforeach; ?>
                 </tbody>
             </table>
+            <p style="margin:6px 0 0;color:#646970;font-size:12px;">
+                <?php esc_html_e( 'The snapshot records ring membership only. Open a member to see their fraud score, risk level and suspension state.', 'bcc-trust' ); ?>
+            </p>
             <?php endif; ?>
         </div>
         <?php endforeach; ?>
