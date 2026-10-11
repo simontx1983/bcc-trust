@@ -11,20 +11,27 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 function bcc_trust_render_fraud_tab() {
     $data  = \BCC\Trust\Core\Plugin::instance()->adminDashboardRepository()->getFraudData();
-    $users = $data['fraud_users'];
+    $users    = $data['fraud_users'];
+    $fraud_ok = ( $data['ok'] ?? true ) === true;
+    // ⚠ A dash, not intval(). `intval()` on an unread figure prints a
+    // confident 0 under a red "Critical Risk Users" heading, which reads as
+    // "we checked and there are none".
+    $fraud_num = static function ( $v ) use ( $fraud_ok ) {
+        return $fraud_ok ? (string) intval( $v ) : '—';
+    };
     ?>
 
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px;">
         <div class="bcc-panel" style="text-align:center;border-left:5px solid #f44336;">
-            <div style="font-size:32px;font-weight:bold;color:#f44336;"><?php echo intval($data['critical_count']); ?></div>
+            <div style="font-size:32px;font-weight:bold;color:#f44336;"><?php echo esc_html( $fraud_num( $data['critical_count'] ) ); ?></div>
             <div style="font-size:13px;color:#666;">Critical Risk Users</div>
         </div>
         <div class="bcc-panel" style="text-align:center;border-left:5px solid #ff9800;">
-            <div style="font-size:32px;font-weight:bold;color:#ff9800;"><?php echo intval($data['total']); ?></div>
+            <div style="font-size:32px;font-weight:bold;color:#ff9800;"><?php echo esc_html( $fraud_num( $data['total'] ) ); ?></div>
             <div style="font-size:13px;color:#666;">High-Risk Users (≥<?php echo intval($data['high_risk_threshold']); ?>)</div>
         </div>
         <div class="bcc-panel" style="text-align:center;border-left:5px solid #2196f3;">
-            <div style="font-size:32px;font-weight:bold;color:#2196f3;"><?php echo intval($data['total']); ?></div>
+            <div style="font-size:32px;font-weight:bold;color:#2196f3;"><?php echo esc_html( $fraud_num( $data['total'] ) ); ?></div>
             <div style="font-size:13px;color:#666;">Showing (limit <?php echo intval($data['limit']); ?>)</div>
         </div>
     </div>
@@ -32,7 +39,17 @@ function bcc_trust_render_fraud_tab() {
     <div class="bcc-panel">
         <h2>High-Risk Users</h2>
 
-        <?php if ( empty( $users ) ): ?>
+        <?php if ( ! $fraud_ok ): ?>
+            <?php // ⚠ "✓ All users are within acceptable fraud score
+                  // thresholds" is the single most dangerous sentence on this
+                  // dashboard to print from a failed query. ?>
+            <div class="notice notice-error inline" style="margin:0;">
+                <p>
+                    <strong><?php esc_html_e( 'The high-risk user list could not be read.', 'bcc-trust' ); ?></strong>
+                    <?php esc_html_e( 'This is a database read failure, not a statement that no user is high-risk. Do not treat this as an all-clear. The failure is recorded in the application log.', 'bcc-trust' ); ?>
+                </p>
+            </div>
+        <?php elseif ( empty( $users ) ): ?>
             <div style="padding:30px;text-align:center;color:#4caf50;">
                 <strong>✓ No high-risk users detected.</strong>
                 <p>All users are within acceptable fraud score thresholds.</p>

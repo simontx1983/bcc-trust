@@ -596,6 +596,21 @@ class AdminDashboardRepository
         $fraudCritical = BCC_TRUST_FRAUD_CRITICAL;
         $limit         = BCC_TRUST_ADMIN_FRAUD_LIMIT;
 
+        $this->readFailed = false;
+
+        // ⚠⚠ A FAILED get_results IS AN EMPTY ARRAY, NOT NULL.
+        //
+        // `wpdb::get_results()` returns `last_result`, and `flush()` resets
+        // that to `array()` at the start of every query — so a query that
+        // never ran is indistinguishable from one that matched nothing.
+        // `last_error` is the only thing that separates them, which is why
+        // the guard below is not optional. (Checked against this build's
+        // wp-includes/class-wpdb.php rather than assumed: it was worth
+        // confirming, because `count(null)` would have been a FATAL and
+        // that is a different, louder bug than the silent one this is.)
+        //
+        // The silent version is what the Fraud tab shipped: with the read
+        // failing it rendered an EMPTY high-risk table and no warning.
         $users = $wpdb->get_results($wpdb->prepare(
             "SELECT ui.user_id, ui.fraud_score, ui.risk_level,
                     ui.automation_score, ui.behavior_score,
@@ -622,10 +637,13 @@ class AdminDashboardRepository
             $limit
         ));
 
+        $this->noteReadFailure('getFraudData.fraud_users');
+
         $criticalCount = (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$userInfoTable} WHERE fraud_score >= %d",
             $fraudCritical
         ));
+        $this->noteReadFailure('getFraudData.critical_count');
 
         // Decode fraud signals from pre-stored JSON.
         foreach ($users as $u) {
@@ -634,6 +652,9 @@ class AdminDashboardRepository
         }
 
         return [
+            // false => at least one read above did not run, so an empty
+            // `fraud_users` is not a statement that nobody is high-risk.
+            'ok'                   => !$this->readFailed,
             'fraud_users'          => $users,
             'critical_count'       => $criticalCount,
             'high_risk_threshold'  => $fraudHigh,
@@ -660,6 +681,8 @@ class AdminDashboardRepository
         $automationHigh   = BCC_TRUST_AUTOMATION_HIGH;
         $automationMedium = BCC_TRUST_AUTOMATION_MEDIUM;
 
+        $this->readFailed = false;
+
         $devices = $wpdb->get_results($wpdb->prepare(
             "SELECT f.id, f.user_id, f.fingerprint, f.automation_score, f.automation_signals, f.screen_resolution, f.first_seen, f.last_seen, f.ip_address, f.user_agent, f.risk_level AS fingerprint_risk_level,
                     u.display_name,
@@ -680,6 +703,8 @@ class AdminDashboardRepository
         ));
 
         // Add automation labels
+        $this->noteReadFailure('getDevicesData.devices');
+
         foreach ($devices as &$device) {
             if ($device->automation_score >= $automationHigh) {
                 $device->automation_label = 'High';
@@ -697,6 +722,10 @@ class AdminDashboardRepository
         }
 
         return [
+            // false => the device read did not run, so an empty list is not
+            // a statement that no device has been seen. The tab used to say
+            // "No device records found" either way.
+            'ok'         => !$this->readFailed,
             'devices'    => $devices,
             'total'      => count($devices),
             'limit'      => $limit,
@@ -721,10 +750,25 @@ class AdminDashboardRepository
         $ringMinSize   = BCC_TRUST_RING_MIN_SIZE;
         $ringMinMutual = BCC_TRUST_RING_MIN_MUTUAL;
 
-        $cached = wp_cache_get('ring_results', self::CACHE_GROUP);
-        $rings  = is_array($cached) ? $cached : [];
+        // ⚠⚠ A DIFFERENT FAILURE CLASS FROM THE OTHER TABS.
+        //
+        // Nothing here reads the database. Rings are computed hourly by
+        // bcc_trust_run_ring_detection_cron() and this only reads that
+        // snapshot — so an absent snapshot means "detection has not run",
+        // which is NOT the same fact as "no rings exist". The tab rendered
+        // both as "✓ No vote rings detected", complete with a tick, which
+        // is the most confident of the three wrong answers on this
+        // dashboard.
+        //
+        // `available` is deliberately not called `ok`: this is not an error
+        // and must not be dressed as one. On a fresh install, or within the
+        // first hour, "no snapshot yet" is the correct and expected state.
+        $cached    = wp_cache_get('ring_results', self::CACHE_GROUP);
+        $available = is_array($cached);
+        $rings     = $available ? $cached : [];
 
         return [
+            'available'  => $available,
             'rings'      => $rings,
             'thresholds' => [
                 'min_size'   => $ringMinSize,
@@ -746,6 +790,8 @@ class AdminDashboardRepository
 
         $limit = BCC_TRUST_ADMIN_ML_LIMIT;
 
+        $this->readFailed = false;
+
         $patterns = $wpdb->get_results($wpdb->prepare(
             "SELECT p.id, p.user_id, p.pattern_type, p.pattern_data, p.confidence, p.detected_at, p.expires_at, u.display_name
              FROM {$patternsTable} p
@@ -754,6 +800,8 @@ class AdminDashboardRepository
              LIMIT %d",
             $limit
         ));
+
+        $this->noteReadFailure('getMlData.patterns');
 
         $patternCounts = $wpdb->get_results(
             $wpdb->prepare(
@@ -766,7 +814,12 @@ class AdminDashboardRepository
             )
         );
 
+        $this->noteReadFailure('getMlData.pattern_counts');
+
         return [
+            // false => "No patterns detected yet" would be a claim about a
+            // table nobody managed to read.
+            'ok'             => !$this->readFailed,
             'patterns'       => $patterns,
             'pattern_counts' => $patternCounts,
             'total'          => count($patterns),
