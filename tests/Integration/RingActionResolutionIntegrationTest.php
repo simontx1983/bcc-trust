@@ -306,6 +306,71 @@ final class RingActionResolutionIntegrationTest extends TestCase
         );
     }
 
+    // ── 2a. ⚠⚠ THE ONE SCORING CHANGE, PINNED DELIBERATELY
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // Reading the snapshot instead of recomputing changes WHICH rings a user
+    // matches, on a host with no persistent object cache. Both halves
+    // measured in an isolated container:
+    //
+    //   host WITH object-cache.php   before: both kinds (cron's write was
+    //                                        visible)        after: both
+    //   host WITHOUT (staging)       before: VOTE ONLY (the read always
+    //                                        missed, so the fallback ran and
+    //                                        detectVoteRings() returns vote
+    //                                        rings only)     after: both
+    //
+    //   probe user in an endorsement-only ring, cacheless host:
+    //       before +0    after +40    ** CHANGED **
+    //
+    // So this does not ADD endorsement scoring; it makes a cacheless host
+    // behave the way a drop-in host always did. No uniform rule preserves
+    // both, because the two configurations never agreed.
+    //
+    // It is pinned here so the widening is a decision with a test on it
+    // rather than a side effect nobody wrote down.
+
+    public function testTheSnapshotCarriesBOTHRingKindsToTheScoringPath(): void
+    {
+        RingSnapshot::store([
+            $this->voteRing([8001, 8002, 8003]),
+            $this->endorsementRing([8101, 8102, 8103]),
+        ]);
+
+        $rings = RingSnapshot::read()['rings'];
+
+        // FraudDetector's matching loop, in shape.
+        $matched = static function (int $userId) use ($rings): ?string {
+            foreach ($rings as $ring) {
+                if (in_array($userId, $ring['users'], true)) { return $ring['kind']; }
+            }
+            return null;
+        };
+
+        self::assertSame(RingSnapshot::KIND_VOTE, $matched(8001), 'a vote-ring member still matches');
+        self::assertSame(
+            RingSnapshot::KIND_ENDORSEMENT,
+            $matched(8101),
+            'and an endorsement-only member NOW matches, which is the scoring change'
+        );
+        self::assertNull($matched(9999), 'and someone in neither still matches nothing');
+    }
+
+    public function testAnEndorsementRingReachesTheScoringPathWithoutAStrengthKeyError(): void
+    {
+        // ⚠ The reason the shape normalisation had to ship with the storage
+        // change: once an endorsement ring reaches the scoring path, the
+        // unguarded $ring['strength'] read raised "Undefined array key". The
+        // key is now always present and null for this kind.
+        RingSnapshot::store([$this->endorsementRing([8101, 8102, 8103])]);
+
+        $ring = RingSnapshot::read()['rings'][0];
+
+        self::assertArrayHasKey('strength', $ring);
+        self::assertNull($ring['strength']);
+        self::assertArrayHasKey('size', $ring, 'and ring_size still resolves for the signal');
+    }
+
     // ── 3. ⚠⚠ THE GATES ON THE ADMIN-POST HOOK
     // ═══════════════════════════════════════════════════════════════════
     //

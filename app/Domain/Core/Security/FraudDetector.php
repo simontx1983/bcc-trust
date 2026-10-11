@@ -397,6 +397,17 @@ class FraudDetector {
             $rings = $trustGraph->detectVoteRings( BCC_TRUST_RING_MIN_SIZE );
         }
         foreach ($rings as $ring) {
+            // ⚠ The per-element shape is guarded here as it is in the other
+            // two snapshot consumers (tab-rings.php and
+            // RingSnapshot::findRingByFingerprint). looksLikePayload()
+            // validates only the TOP level, so a malformed `rings` element
+            // would be a TypeError — in the SCORING path. store() normalises,
+            // so no current writer can produce one; this is the same
+            // cross-deploy defence the class already applies to the payload
+            // itself, applied to its elements.
+            if (!\is_array($ring) || !isset($ring['users']) || !\is_array($ring['users'])) {
+                continue;
+            }
             if (in_array($userId, $ring['users'])) {
                 $results['triggers'][] = 'in_vote_ring';
                 $results['score'] += 40;
@@ -419,8 +430,43 @@ class FraudDetector {
                 // — which is exactly what this change alters, so the fix
                 // ships with it rather than after it.
                 //
-                // The score and the trigger name are UNCHANGED: +40 and
-                // `in_vote_ring`, for either kind, exactly as before.
+                // ⚠⚠ THE SCORE AND TRIGGER NAME ARE UNCHANGED PER RING —
+                // BUT NOT PER USER ON A HOST WITH NO OBJECT CACHE. An
+                // earlier version of this comment claimed "exactly as
+                // before" without qualification, and that was wrong. Both
+                // halves measured in an isolated container:
+                //
+                //   host WITH object-cache.php
+                //     before: wp_cache_get('ring_results') HIT, and cron
+                //             stored getSuspiciousClusters() — BOTH kinds.
+                //     after : the same two kinds. UNCHANGED.
+                //
+                //   host WITHOUT object-cache.php  (staging)
+                //     before: wp_cache_get always MISSED, because the
+                //             producer is a different request. So the
+                //             fallback ran, and detectVoteRings() returns
+                //             VOTE RINGS ONLY.
+                //     after : the stored snapshot carries both kinds.
+                //
+                //   probe user in an endorsement-only ring, cacheless host:
+                //     before +0   after +40   ** CHANGED **
+                //
+                // So this change does not ADD endorsement scoring: it makes
+                // a cacheless host behave the way a drop-in host always did.
+                // There is no uniform rule that preserves both, because the
+                // two configurations did not agree to begin with.
+                //
+                // Two consequences, both on cacheless hosts:
+                //   (a) an endorsement-only ring member now scores +40;
+                //   (b) a vote ring formed AFTER the last daily run is no
+                //       longer caught live, so its members do not score
+                //       until the next run.
+                //
+                // ⚠ `in_vote_ring` is therefore the wrong NAME for what it
+                // now matches on those hosts — it was already the wrong name
+                // on drop-in hosts. Renaming a trigger is a separate
+                // decision with its own consumers to check, and is not taken
+                // here.
                 $strength = $ring['strength'] ?? null;
                 $kind     = ($ring['kind'] ?? '') === \BCC\Trust\Core\Support\RingSnapshot::KIND_ENDORSEMENT
                     ? 'endorsement ring'

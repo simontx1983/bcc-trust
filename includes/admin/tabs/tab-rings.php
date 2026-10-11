@@ -155,7 +155,15 @@ function bcc_trust_render_rings_tab() {
             // $member_ids is therefore gone. A fingerprint that no longer
             // matches a detected ring refuses the action rather than falling
             // back to anything.
-            $ring_id      = $ring['ring_id'] ?? $ring_index;
+            // ⚠ `ring_id` and `mutual_votes` are GONE from this view.
+            // normalise() emits neither, no detector ever produced them, and
+            // the handler no longer reads a submitted ring_id — so the hidden
+            // field was always the loop index and the "Mutual votes" line was
+            // permanently dead. They are removed rather than left to look
+            // like data that might arrive one day.
+            $ring_kind    = ( $ring['kind'] ?? '' ) === 'endorsement_ring'
+                ? __( 'Endorsement ring', 'bcc-trust' )
+                : __( 'Vote ring', 'bcc-trust' );
             $members      = is_array( $ring['users'] ?? null ) ? $ring['users'] : [];
             $member_count = count( $members );
             $ring_fp      = \BCC\Trust\Core\Support\RingSnapshot::fingerprint( $members );
@@ -164,7 +172,17 @@ function bcc_trust_render_rings_tab() {
             <div style="display:flex;justify-content:space-between;align-items:flex-start;">
                 <div>
                     <h3 style="margin:0 0 5px;">
-                        Ring #<?php echo $ring_index + 1; ?>
+                        <?php // ⚠⚠ THE KIND IS NAMED. The snapshot merges two
+                              // detectors, so this panel can hold an
+                              // ENDORSEMENT ring — under a heading that says
+                              // "Vote Ring Detection", beside a button
+                              // labelled "Invalidate Ring Votes". Calling
+                              // every ring a vote ring is the same mislabelling
+                              // this change just fixed in FraudDetector's
+                              // signal text, and it became visible here for
+                              // the first time because the snapshot now
+                              // renders. ?>
+                        <?php echo esc_html( $ring_kind ); ?> #<?php echo $ring_index + 1; ?>
                         <span style="font-size:13px;font-weight:normal;color:#666;">
                             — <?php echo $member_count; ?> members
                         </span>
@@ -172,9 +190,7 @@ function bcc_trust_render_rings_tab() {
                     <?php if ( ! empty( $ring['detected_at'] ) ): ?>
                         <small style="color:#666;">Detected: <?php echo esc_html( $ring['detected_at'] ); ?></small>
                     <?php endif; ?>
-                    <?php if ( ! empty( $ring['mutual_votes'] ) ): ?>
-                        <br><small style="color:#666;">Mutual votes: <?php echo intval($ring['mutual_votes']); ?></small>
-                    <?php endif; ?>
+
                 </div>
 
                 <!-- ── Ring action buttons ── -->
@@ -186,7 +202,6 @@ function bcc_trust_render_rings_tab() {
                         <input type="hidden" name="action"      value="bcc_trust_ring_action">
                         <input type="hidden" name="ring_action" value="invalidate_votes">
                         <input type="hidden" name="ring_fingerprint" value="<?php echo esc_attr( $ring_fp ); ?>">
-                        <input type="hidden" name="ring_id"     value="<?php echo esc_attr( $ring_id ); ?>">
                         <button type="submit" class="button" style="background:#ff9800;color:#fff;border-color:#e68900;">
                             🚫 Invalidate Ring Votes
                         </button>
@@ -198,7 +213,6 @@ function bcc_trust_render_rings_tab() {
                         <input type="hidden" name="action"      value="bcc_trust_ring_action">
                         <input type="hidden" name="ring_action" value="suspend_all">
                         <input type="hidden" name="ring_fingerprint" value="<?php echo esc_attr( $ring_fp ); ?>">
-                        <input type="hidden" name="ring_id"     value="<?php echo esc_attr( $ring_id ); ?>">
                         <input type="text"   name="reason"      placeholder="Suspension reason…" style="width:160px;" required>
                         <button type="submit" class="button" style="background:#f44336;color:#fff;border-color:#c62828;">
                             🔴 Suspend All Members

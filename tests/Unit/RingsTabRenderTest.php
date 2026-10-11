@@ -282,6 +282,52 @@ final class RingsTabRenderTest extends TestCase
         self::assertStringNotContainsString('Snapshot taken', $this->render());
     }
 
+    // ── 2a. ⚠⚠ AN ENDORSEMENT RING IS NOT CALLED A VOTE RING
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // The snapshot merges two detectors, so this panel can hold an
+    // ENDORSEMENT ring — under a heading reading "Vote Ring Detection",
+    // beside a button labelled "Invalidate Ring Votes". Calling every ring a
+    // vote ring is the same mislabelling this change fixed in FraudDetector's
+    // signal text, and it became visible here only because the snapshot now
+    // renders.
+
+    public function testEachRingIsLabelledWithItsKind(): void
+    {
+        RingsRenderWorld::populated();
+
+        $html = $this->render();
+
+        self::assertStringContainsString('Vote ring #1', $html);
+        self::assertStringContainsString('Endorsement ring #2', $html);
+    }
+
+    public function testNoRingIsLabelledWithTheWrongKind(): void
+    {
+        // ⚠ Stated as an absence too: "contains Endorsement ring" would pass
+        // against a page that labelled BOTH panels that way.
+        RingsRenderWorld::populated();
+
+        $html = $this->render();
+
+        self::assertSame(1, substr_count($html, 'Vote ring #'), 'exactly one vote ring');
+        self::assertSame(1, substr_count($html, 'Endorsement ring #'), 'exactly one endorsement ring');
+    }
+
+    public function testTheDeadRingIdAndMutualVotesFieldsAreGone(): void
+    {
+        // Neither detector ever produced them and normalise() emits neither,
+        // so the hidden field was always the loop index and the "Mutual
+        // votes" line was permanently dead. Pinned so they do not drift back
+        // in looking like data.
+        RingsRenderWorld::populated();
+
+        $html = $this->render();
+
+        self::assertStringNotContainsString('name="ring_id"', $html);
+        self::assertStringNotContainsString('Mutual votes', $html);
+    }
+
     // ── 3. ⚠⚠ THE RESULT OF A DESTRUCTIVE ACTION IS SHOWN
     // ═══════════════════════════════════════════════════════════════════
     //
