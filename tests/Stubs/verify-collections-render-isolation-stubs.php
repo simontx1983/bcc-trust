@@ -82,6 +82,8 @@ namespace {
             public static bool $communityThrows = false;
             /** @var string|null the deny/allow rule for the hide section */
             public static ?string $hideRule = null;
+            /** @var bool make the hide-rule read throw */
+            public static bool $hideThrows = false;
             public static int $detailReads = 0;
             public static int $communityReads = 0;
             public static int $hideReads = 0;
@@ -125,6 +127,7 @@ namespace {
                 self::$detailThrows    = false;
                 self::$communityThrows = false;
                 self::$hideRule        = null;
+                self::$hideThrows      = false;
                 self::$detailReads     = 0;
                 self::$communityReads  = 0;
                 self::$hideReads       = 0;
@@ -742,6 +745,23 @@ namespace BCC\Trust\Onchain\Repositories {
             public static function getRule(int $chainId, string $contract): ?string
             {
                 \BccRenderWorld::$hideReads++;
+                return \BccRenderWorld::$hideRule;
+            }
+
+            /**
+             * The FAIL-CLOSED arm. Able to throw, because the whole point
+             * of the detail view's hide section is that "could not read"
+             * is rendered as itself rather than as "not hidden" — and a
+             * stub that could only return would make that untestable.
+             */
+            public static function getRuleOrThrow(int $chainId, string $contract): ?string
+            {
+                \BccRenderWorld::$hideReads++;
+                if (\BccRenderWorld::$hideThrows) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(
+                        self::class, 'getRuleOrThrow', 'injected read failure'
+                    );
+                }
                 return \BccRenderWorld::$hideRule;
             }
         }
