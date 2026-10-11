@@ -73,6 +73,19 @@ namespace {
             /** @var list<string> every option/transient/cache write, as "kind:key" */
             public static array $writes = [];
 
+            // ── the DETAIL view's world ─────────────────────────────────
+            /** @var object|null the single row findForAdminDetail() returns */
+            public static ?object $row = null;
+            /** @var bool make the detail read throw, i.e. the table is unreadable */
+            public static bool $detailThrows = false;
+            /** @var bool make the community lookup throw */
+            public static bool $communityThrows = false;
+            /** @var string|null the deny/allow rule for the hide section */
+            public static ?string $hideRule = null;
+            public static int $detailReads = 0;
+            public static int $communityReads = 0;
+            public static int $hideReads = 0;
+
             /** @var list<string> every advisory-lock or breaker probe touch */
             public static array $probes = [];
 
@@ -108,6 +121,13 @@ namespace {
                 self::$index         = [];
                 self::$indexReadFails = false;
                 self::$hubWallets    = [];
+                self::$row             = null;
+                self::$detailThrows    = false;
+                self::$communityThrows = false;
+                self::$hideRule        = null;
+                self::$detailReads     = 0;
+                self::$communityReads  = 0;
+                self::$hideReads       = 0;
             }
 
             /** @return \WP_Error */
@@ -501,6 +521,22 @@ namespace BCC\Trust\Onchain\Repositories {
     if (!class_exists(CollectionRepository::class, false)) {
         final class CollectionRepository
         {
+            /**
+             * The DETAIL read. Counted, and able to THROW — the three-way
+             * outcome is the thing under test, so a stub that could only
+             * return a row or null would make the read-failure case
+             * untestable.
+             */
+            public static function findForAdminDetail(int $collectionId): ?object
+            {
+                \BccRenderWorld::$detailReads++;
+                if (\BccRenderWorld::$detailThrows) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(
+                        self::class, 'findForAdminDetail', 'injected read failure'
+                    );
+                }
+                return \BccRenderWorld::$row;
+            }
             /** @return array{items: list<object>, total: int, pages: int, available: bool} */
             /**
              * ⚠ THE SEARCH TERM MUST BE HONOURED HERE, NOT IGNORED.
@@ -609,6 +645,18 @@ namespace BCC\Trust\Onchain\Repositories {
                 return null;
             }
 
+            /** The AUTHORITATIVE by-row-id lookup the detail view uses. */
+            public static function findPublishedGroupIdForCollectionId(int $collectionId): ?int
+            {
+                \BccRenderWorld::$communityReads++;
+                if (\BccRenderWorld::$communityThrows) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(
+                        self::class, 'findPublishedGroupIdForCollectionId', 'injected read failure'
+                    );
+                }
+                return null;
+            }
+
             /**
              * @param array<array-key, array{chain_id:int, contract:string}> $pairs
              * @return array<array-key, int>
@@ -691,7 +739,11 @@ namespace BCC\Trust\Onchain\Repositories {
         {
             public const RULE_DENY  = 'deny';
             public const RULE_ALLOW = 'allow';
-            public static function getRule(int $chainId, string $contract): ?string { return null; }
+            public static function getRule(int $chainId, string $contract): ?string
+            {
+                \BccRenderWorld::$hideReads++;
+                return \BccRenderWorld::$hideRule;
+            }
         }
     }
 }
