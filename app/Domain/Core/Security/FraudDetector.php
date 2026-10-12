@@ -194,14 +194,31 @@ class FraudDetector {
             ];
         }
 
+        // ── RELATIONSHIP OBSERVATION, NOT A FRAUD SIGNAL ──────────────
+        //
+        // This is the PAIRWISE reciprocity check: countMutualVotePages()
+        // > BCC_TRUST_RING_MIN_MUTUAL, i.e. two people who have each voted
+        // on four or more of each other's pages. No ring, no third member,
+        // no strength gate and no dependence on the ring cache — so unlike
+        // `in_vote_ring` below it has always applied on every host.
+        //
+        // It used to add 25 points. It no longer adds any, because two
+        // tradespeople who have repeatedly used each other's services are
+        // the ordinary case in this product's population, and the rule has
+        // no input that could separate them from a manufactured pair.
+        //
+        // The trigger and the `details` entry are RETAINED deliberately:
+        // they are the durable record of the observation, and `details` is
+        // what `confidence` is computed from, so dropping it would silently
+        // move confidence for every observed pair.
         if (self::detectVoteRing($userId)) {
             $results['triggers'][] = 'vote_ring';
-            $results['score'] += 25;
             $results['details']['vote_ring'] = true;
             $results['signals'][] = [
                 'type'        => 'vote_ring',
-                'points'      => 25,
-                'description' => 'Mutual vote-exchange pattern detected with another user',
+                'points'      => 0,
+                'punitive'    => false,
+                'description' => 'Mutual vote-exchange relationship with another member (observation only — adds no fraud points)',
             ];
         }
 
@@ -385,17 +402,34 @@ class FraudDetector {
             // Fallback: compute only when no cached results are available
             $rings = $trustGraph->detectVoteRings( BCC_TRUST_RING_MIN_SIZE );
         }
+        // ── RELATIONSHIP OBSERVATION, NOT A FRAUD SIGNAL ──────────────
+        //
+        // Ring membership used to add 40 points. It no longer adds any.
+        //
+        // The detection rule separates RECIPROCAL structure from
+        // non-reciprocal structure. It does not separate legitimate
+        // reciprocity from manufactured reciprocity, because it has no
+        // input that could: a six-person hall where everyone has used
+        // everyone scores 48.0 against a threshold of 5.0, on exactly the
+        // same terms as six sock puppets. The rule is in fact most lenient
+        // toward the newest accounts, whose vote weight is too low to clear
+        // the strength gate — the opposite of the risk profile it is meant
+        // to describe.
+        //
+        // Trigger and `details` are RETAINED: they are the durable record,
+        // and `ring_size` + `ring_strength` are two of the data points that
+        // `confidence` is computed from.
         foreach ($rings as $ring) {
             if (in_array($userId, $ring['users'])) {
                 $results['triggers'][] = 'in_vote_ring';
-                $results['score'] += 40;
                 $results['details']['ring_size'] = $ring['size'];
                 $results['details']['ring_strength'] = $ring['strength'];
                 $results['signals'][] = [
                     'type'        => 'in_vote_ring',
-                    'points'      => 40,
+                    'points'      => 0,
+                    'punitive'    => false,
                     'description' => sprintf(
-                        'User is part of a vote ring with %d members (strength: %.2f)',
+                        'Member of a mutually-connected group of %d (connection strength: %.2f) — observation only, adds no fraud points',
                         $ring['size'],
                         $ring['strength']
                     ),

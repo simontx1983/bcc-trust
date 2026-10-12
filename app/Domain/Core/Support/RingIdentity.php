@@ -53,9 +53,14 @@ final class RingIdentity
      *
      * ⚠ Same shape as TrustGraph::ringTransientKey() — intval, sort, md5 of
      * the comma-joined list — because that is already how this codebase
-     * decides two detections are "the same ring" for its 30-day
-     * re-penalisation guard. Two competing notions of ring identity would be
-     * worse than one.
+     * decides two detections are "the same ring" for its 30-day transient.
+     * Two competing notions of ring identity would be worse than one.
+     *
+     * ⚠ That transient was a re-penalisation guard until reciprocity stopped
+     * carrying a penalty. It now dedupes the soft-flag log line, and it is
+     * what makes a revert of that change safe: with the keys intact an
+     * already-flagged ring stays un-penalised until each lapses, whereas
+     * clearing them would re-penalise every member on the next pass.
      *
      * ⚠ md5 is an identity key here, not a security control. Nothing is
      * authenticated by it: the capability check and the nonce do that, and a

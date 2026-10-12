@@ -312,6 +312,7 @@ return array(
     'BCC\\Trust\\Core\\Support\\ReactionGrammarRegistry' => $baseDir . '/app/Domain/Core/Support/ReactionGrammarRegistry.php',
     'BCC\\Trust\\Core\\Support\\ReactionStateComposer' => $baseDir . '/app/Domain/Core/Support/ReactionStateComposer.php',
     'BCC\\Trust\\Core\\Support\\ReactionTypeRegistry' => $baseDir . '/app/Domain/Core/Support/ReactionTypeRegistry.php',
+    'BCC\\Trust\\Core\\Support\\ReciprocityObservation' => $baseDir . '/app/Domain/Core/Support/ReciprocityObservation.php',
     'BCC\\Trust\\Core\\Support\\ReputationTierMap' => $baseDir . '/app/Domain/Core/Support/ReputationTierMap.php',
     'BCC\\Trust\\Core\\Support\\RingIdentity' => $baseDir . '/app/Domain/Core/Support/RingIdentity.php',
     'BCC\\Trust\\Core\\Support\\UserSlugResolver' => $baseDir . '/app/Domain/Core/Support/UserSlugResolver.php',
