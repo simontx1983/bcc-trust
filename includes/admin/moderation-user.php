@@ -301,7 +301,23 @@ function bcc_trust_render_user_moderation( $user_id ) {
                             <td><strong><?php echo intval( $fa->fraud_score ); ?></strong></td>
                             <td><span style="padding:2px 6px;border-radius:3px;background:<?php echo esc_attr( \BCC\Trust\Core\Support\Formatting::riskColor( $fa->risk_level ) ); ?>;color:#fff;"><?php echo esc_html( ucfirst( $fa->risk_level ?: 'unknown' ) ); ?></span></td>
                             <td><?php echo intval( round( $fa->confidence * 100 ) ); ?>%</td>
-                            <td><?php echo esc_html( implode( ', ', array_slice( $triggers, 0, 3 ) ) ?: '—' ); ?><?php echo count( $triggers ) > 3 ? '…' : ''; ?></td>
+                            <td><?php
+                                // A trigger name in a column headed "Triggers", inside a
+                                // panel headed "Fraud Analysis History", reads as a finding.
+                                // Reciprocity triggers are observations that carry no points,
+                                // so they are marked as such rather than listed alongside
+                                // real fraud signals without distinction.
+                                $shown = array_slice( $triggers, 0, 3 );
+                                $parts = [];
+                                foreach ( $shown as $trigger ) {
+                                    $trigger = (string) $trigger;
+                                    $parts[] = \BCC\Trust\Core\Support\ReciprocityObservation::isNonPunitive( $trigger )
+                                        ? $trigger . ' (' . \BCC\Trust\Core\Support\ReciprocityObservation::QUALIFIER . ')'
+                                        : $trigger;
+                                }
+                                echo esc_html( implode( ', ', $parts ) ?: '—' );
+                                echo count( $triggers ) > 3 ? '…' : '';
+                            ?></td>
                             <td><?php echo esc_html( $fa->expires_at ?: 'Never' ); ?></td>
                         </tr>
                     <?php endforeach; ?>
