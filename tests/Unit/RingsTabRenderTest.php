@@ -263,6 +263,25 @@ final class RingsTabRenderTest extends TestCase
         self::assertStringNotContainsString('No ring-detection snapshot yet', $html);
     }
 
+    public function testAnAvailableSnapshotShowsItsAge(): void
+    {
+        // A ring list without its age is not readable: the producer runs once
+        // a day, so "0 clusters" an hour after a run and twenty-three hours
+        // after one are different facts.
+        RingsRenderWorld::reset();
+
+        self::assertStringContainsString('Snapshot taken', $this->render());
+    }
+
+    public function testAnAbsentSnapshotShowsNoAge(): void
+    {
+        // ⚠ The pair. An age printed next to "no snapshot" would be a
+        // timestamp for something that does not exist.
+        RingsRenderWorld::absent();
+
+        self::assertStringNotContainsString('Snapshot taken', $this->render());
+    }
+
     // ── 2a. ⚠⚠ AN ENDORSEMENT RING IS NOT CALLED A VOTE RING
     // ═══════════════════════════════════════════════════════════════════
     //

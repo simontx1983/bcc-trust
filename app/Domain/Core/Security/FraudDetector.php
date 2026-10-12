@@ -378,27 +378,111 @@ class FraudDetector {
             ];
         }
 
-        // Check if user is in a vote ring — use cached results from hourly cron.
-        // CronService stores results via wp_cache_set('ring_results', ..., 'bcc_trust_admin').
-        $rings = wp_cache_get('ring_results', 'bcc_trust_admin');
-        if ( ! is_array( $rings ) ) {
-            // Fallback: compute only when no cached results are available
+        // Check if the user is in a ring — from the DAILY snapshot, through
+        // the same reader the admin tab uses so the two cannot disagree
+        // about where it lives.
+        //
+        // ⚠ THE RECOMPUTE STAYS, deliberately. It is a correctness-preserving
+        // fallback: an analysis that silently skipped the ring signal would
+        // under-score a user who is in a ring, and that is worse than the
+        // cost. What changes is how OFTEN it fires — from "every analysis on
+        // a host with no object-cache.php drop-in" to "only when the producer
+        // has genuinely not run". Measured, the pass it avoids is up to
+        // 91.9 s on a graph at the detector's own 10,000-edge limit.
+        $snapshot = \BCC\Trust\Core\Support\RingSnapshot::read();
+        if ($snapshot['available']) {
+            $rings = $snapshot['rings'];
+        } else {
+            // Fallback: compute only when no stored snapshot is available.
             $rings = $trustGraph->detectVoteRings( BCC_TRUST_RING_MIN_SIZE );
         }
         foreach ($rings as $ring) {
+            // ⚠ The per-element shape is guarded here as it is in the other
+            // two snapshot consumers (tab-rings.php and
+            // RingSnapshot::findRingByFingerprint). looksLikePayload()
+            // validates only the TOP level, so a malformed `rings` element
+            // would be a TypeError — in the SCORING path. store() normalises,
+            // so no current writer can produce one; this is the same
+            // cross-deploy defence the class already applies to the payload
+            // itself, applied to its elements.
+            if (!\is_array($ring) || !isset($ring['users']) || !\is_array($ring['users'])) {
+                continue;
+            }
             if (in_array($userId, $ring['users'])) {
                 $results['triggers'][] = 'in_vote_ring';
                 $results['score'] += 40;
                 $results['details']['ring_size'] = $ring['size'];
-                $results['details']['ring_strength'] = $ring['strength'];
+                // ⚠⚠ `?? null`, AND A STRENGTH-AWARE SENTENCE, BECAUSE THE
+                // TWO DETECTORS DO NOT PRODUCE THE SAME KEYS.
+                //
+                // getSuspiciousClusters() merges detectVoteRings() with
+                // detectEndorsementRings(), and only the first emits
+                // 'strength'. This loop read $ring['strength'] unguarded, so
+                // a user in an ENDORSEMENT ring produced, measured in an
+                // isolated container:
+                //
+                //   Undefined array key "strength"
+                //   "part of a vote ring with 3 members (strength: 0.00)"
+                //
+                // A PHP 8 warning, a ring called the wrong kind, and a
+                // fabricated 0.00 strength on a detector that computes none.
+                // It was dormant only because nothing persisted the snapshot
+                // — which is exactly what this change alters, so the fix
+                // ships with it rather than after it.
+                //
+                // ⚠⚠ THE SCORE AND TRIGGER NAME ARE UNCHANGED PER RING —
+                // BUT NOT PER USER ON A HOST WITH NO OBJECT CACHE. An
+                // earlier version of this comment claimed "exactly as
+                // before" without qualification, and that was wrong. Both
+                // halves measured in an isolated container:
+                //
+                //   host WITH object-cache.php
+                //     before: wp_cache_get('ring_results') HIT, and cron
+                //             stored getSuspiciousClusters() — BOTH kinds.
+                //     after : the same two kinds. UNCHANGED.
+                //
+                //   host WITHOUT object-cache.php  (staging)
+                //     before: wp_cache_get always MISSED, because the
+                //             producer is a different request. So the
+                //             fallback ran, and detectVoteRings() returns
+                //             VOTE RINGS ONLY.
+                //     after : the stored snapshot carries both kinds.
+                //
+                //   probe user in an endorsement-only ring, cacheless host:
+                //     before +0   after +40   ** CHANGED **
+                //
+                // So this change does not ADD endorsement scoring: it makes
+                // a cacheless host behave the way a drop-in host always did.
+                // There is no uniform rule that preserves both, because the
+                // two configurations did not agree to begin with.
+                //
+                // Two consequences, both on cacheless hosts:
+                //   (a) an endorsement-only ring member now scores +40;
+                //   (b) a vote ring formed AFTER the last daily run is no
+                //       longer caught live, so its members do not score
+                //       until the next run.
+                //
+                // ⚠ `in_vote_ring` is therefore the wrong NAME for what it
+                // now matches on those hosts — it was already the wrong name
+                // on drop-in hosts. Renaming a trigger is a separate
+                // decision with its own consumers to check, and is not taken
+                // here.
+                $strength = $ring['strength'] ?? null;
+                $kind     = ($ring['kind'] ?? '') === \BCC\Trust\Core\Support\RingSnapshot::KIND_ENDORSEMENT
+                    ? 'endorsement ring'
+                    : 'vote ring';
+                $results['details']['ring_strength'] = $strength;
                 $results['signals'][] = [
                     'type'        => 'in_vote_ring',
                     'points'      => 40,
-                    'description' => sprintf(
-                        'User is part of a vote ring with %d members (strength: %.2f)',
-                        $ring['size'],
-                        $ring['strength']
-                    ),
+                    'description' => $strength === null
+                        ? sprintf('User is part of a %s with %d members', $kind, $ring['size'])
+                        : sprintf(
+                            'User is part of a %s with %d members (strength: %.2f)',
+                            $kind,
+                            $ring['size'],
+                            $strength
+                        ),
                 ];
                 break;
             }

@@ -15,25 +15,20 @@ namespace BCC\Trust\Core\Support;
  * from the browser. This class replaces that: the form posts a fingerprint,
  * and the handler resolves the members server-side.
  *
- * ── ⚠ IT READS THE STORE THAT EXISTS TODAY, DELIBERATELY ────────────────
- * `wp_cache_get('ring_results', 'bcc_trust_admin')` — the same key
- * `AdminDashboardRepository::getRingsData()` renders from, and the same key
- * `CronService::dailyGraphUpdate()` writes. Renderer and resolver therefore
- * read the same list by construction, which is the property that makes a
- * fingerprint meaningful.
+ * ── ⚠ IT READS THE SAME LIST THE PAGE RENDERED FROM ─────────────────────
+ * Through RingSnapshot::read(), which is also what
+ * `AdminDashboardRepository::getRingsData()` reads. Renderer and resolver
+ * therefore see the same list by construction, which is the property that
+ * makes a fingerprint meaningful.
  *
- * This is NOT a storage change. Nothing here writes, nothing changes where
- * rings live, and nothing changes which rings exist. A separate, unmerged
- * change proposes making that store durable; this class works with or
- * without it, because it only ever asks "is this ring in the list the page
- * just rendered from".
+ * ⚠ That read MOVED when the snapshot store landed. This class originally
+ * read `wp_cache_get('ring_results')` directly, because that was where the
+ * list lived; the store wraps that key in a payload and adds a durable
+ * transient, so a direct read would now return the wrapper and resolve
+ * nothing. The dependency runs one way only: resolution worked before the
+ * store existed, but the store could not land without updating this.
  *
- * ⚠ The consequence worth stating: on a host with no `object-cache.php`
- * drop-in, `wp_cache_*` is per-request, so this read MISSES and resolution
- * refuses. That is correct and changes nothing — on such a host
- * `getRingsData()` already returns `available: false`, the tab renders no
- * ring panels, and therefore no destructive form exists to submit. The
- * buttons are reachable today only where the read can succeed.
+ * Nothing here writes, and nothing here changes which rings exist.
  *
  * ── SHAPE ───────────────────────────────────────────────────────────────
  * It depends on exactly one key: `users`. BOTH detectors emit it —
@@ -88,10 +83,27 @@ final class RingIdentity
             return null;
         }
 
-        $rings = wp_cache_get(self::CACHE_KEY, self::CACHE_GROUP);
-        if (!\is_array($rings)) {
+        // ⚠⚠ THIS READ MOVED, AND IT HAD TO. The moderation-safety change
+        // read wp_cache_get('ring_results') directly, because that was where
+        // the ring list lived. This change WRAPS that key in a payload
+        // ({rings, computed_at}) and adds a durable transient — so a direct
+        // read would now hand back the wrapper and find no `users` key in it,
+        // and every destructive action would refuse.
+        //
+        // That is the one dependency between the two changes, and it runs in
+        // this direction only: resolution works without the snapshot store
+        // (it did), but the snapshot store cannot land without updating
+        // resolution.
+        //
+        // RingSnapshot::read() handles both stores in the right order and
+        // refuses a pre-change bare list, so a cache left warm across the
+        // deploy reads as "no rings" until the next daily run rather than
+        // being dereferenced for a computed_at that is not there.
+        $snapshot = RingSnapshot::read();
+        if ($snapshot['available'] !== true) {
             return null;
         }
+        $rings = $snapshot['rings'];
 
         foreach ($rings as $ring) {
             if (!\is_array($ring) || !isset($ring['users']) || !\is_array($ring['users'])) {

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Tests\Integration;
 
 use BCC\Trust\Core\Repositories\AdminDashboardRepository;
+use BCC\Trust\Core\Support\RingSnapshot;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
@@ -59,6 +60,10 @@ final class SignalsTabReadFailureIntegrationTest extends TestCase
         $wpdb = $GLOBALS['wpdb'];
         $wpdb->clearFaultInjection();
         wp_cache_delete('ring_results', self::CACHE_GROUP);
+        // ⚠ BOTH stores. The snapshot now has a durable copy, and a
+        // transient surviving between cases would make a later "absent"
+        // assertion pass or fail on leftover state.
+        delete_transient('bcc_trust_ring_snapshot');
 
         $p = $wpdb->prefix;
 
@@ -109,6 +114,10 @@ final class SignalsTabReadFailureIntegrationTest extends TestCase
     {
         $GLOBALS['wpdb']->clearFaultInjection();
         wp_cache_delete('ring_results', self::CACHE_GROUP);
+        // ⚠ BOTH stores. The snapshot now has a durable copy, and a
+        // transient surviving between cases would make a later "absent"
+        // assertion pass or fail on leftover state.
+        delete_transient('bcc_trust_ring_snapshot');
     }
 
     /**
@@ -296,6 +305,7 @@ final class SignalsTabReadFailureIntegrationTest extends TestCase
     public function testAnAbsentRingSnapshotIsReportedUnavailable(): void
     {
         wp_cache_delete('ring_results', self::CACHE_GROUP);
+        delete_transient('bcc_trust_ring_snapshot');
 
         $data = $this->repo->getRingsData();
 
@@ -308,7 +318,14 @@ final class SignalsTabReadFailureIntegrationTest extends TestCase
         // ⚠ ANTI-VACUITY, and the case that keeps the tick honest: when
         // detection HAS run and found nothing, the tab must still be able to
         // say so. Without this, `available` could just be hardcoded false.
-        wp_cache_set('ring_results', [], self::CACHE_GROUP, 3600);
+        //
+        // ⚠ Stored through RingSnapshot::store() rather than a bare
+        // wp_cache_set. These two cases used to seed the raw cache key with a
+        // bare list, which is what the old code read — and they FAILED when
+        // the store landed, correctly: a bare list carries no computed_at and
+        // is deliberately no longer accepted as a payload. The seeding had to
+        // move to the writer, which is the point of having one.
+        RingSnapshot::store([]);
 
         $data = $this->repo->getRingsData();
 
@@ -318,25 +335,77 @@ final class SignalsTabReadFailureIntegrationTest extends TestCase
 
     public function testAPopulatedRingSnapshotIsAvailableAndCarriesItsRings(): void
     {
-        wp_cache_set('ring_results', [['members' => [1, 2, 3]]], self::CACHE_GROUP, 3600);
+        // ⚠ `users`, not `members`. The producers have always emitted
+        // `users`; this fixture said `members` because the TAB read
+        // `members`, and nothing ever compared the two — the snapshot was
+        // never persisted, so the populated branch never rendered.
+        RingSnapshot::store([
+            ['users' => [1, 2, 3], 'size' => 3, 'strength' => 0.8, 'detected_at' => '2026-10-11 00:00:00'],
+        ]);
 
         $data = $this->repo->getRingsData();
 
         self::assertTrue($data['available']);
         self::assertCount(1, $data['rings']);
+        self::assertSame([1, 2, 3], $data['rings'][0]['users']);
     }
 
-    public function testRingsNeverConsultsTheDatabase(): void
+    public function testALegacyBareListIsNotServedAsASnapshot(): void
     {
-        // ⚠ The property the `available` wording depends on: if this method
-        // ever grew a query, "detection has not run" would stop being the
-        // right explanation for an empty result.
-        $this->failReadsMatching('bcc_');
-        wp_cache_set('ring_results', [], self::CACHE_GROUP, 3600);
+        // ⚠ The deploy-window case. A host WITH a persistent object cache
+        // can carry a pre-change bare list across the deploy. Reading it
+        // would mean dereferencing a computed_at that is not there, and
+        // handing FraudDetector the un-normalised shape whose missing
+        // `strength` key it reads unguarded. "Not available" until the next
+        // daily run is the honest and the safe answer.
+        $GLOBALS['__bcc_test_ext_object_cache'] = true;
+        wp_cache_set('ring_results', [['users' => [1, 2, 3]]], self::CACHE_GROUP, 3600);
+
+        try {
+            $data = $this->repo->getRingsData();
+            self::assertFalse($data['available'], 'a pre-wrapper value is not a payload');
+            self::assertSame([], $data['rings']);
+        } finally {
+            unset($GLOBALS['__bcc_test_ext_object_cache']);
+        }
+    }
+
+    public function testRingsRunsNoneOfTheDashboardAggregates(): void
+    {
+        // ⚠⚠ THIS CASE REPLACES testRingsNeverConsultsTheDatabase, WHICH IS
+        // NO LONGER TRUE, AND THAT IS A REAL BEHAVIOUR CHANGE — NOT A TEST
+        // THAT NEEDED RESEEDING.
+        //
+        // Before the snapshot store, getRingsData() called wp_cache_get and
+        // nothing else, so it genuinely issued no query. It now reads through
+        // RingSnapshot, which falls back to get_transient() — and in
+        // production a transient IS a wp_options read. The old assertion
+        // would only have stayed green here because this harness implements
+        // transients as an in-memory array, which is precisely the kind of
+        // false green worth refusing.
+        //
+        // What is still true, and is what the `available` wording actually
+        // depends on, is that rings runs NONE of the dashboard's aggregate
+        // queries: it does not read the trust tables at all, so an empty
+        // result still means "detection has not produced a snapshot" rather
+        // than "a query failed". That is what this asserts.
+        //
+        // ⚠ The practical limit of the change: if wp_options itself were
+        // unreadable, an absent snapshot and an unreadable store would both
+        // present as "not available". A site whose wp_options cannot be read
+        // has no admin page to render this on, so the conflation is not
+        // reachable in practice — but it is a conflation, and it belongs in
+        // the record rather than in a comment nobody wrote.
+        $this->failReadsMatching('bcc_trust_');
+        RingSnapshot::store([]);
 
         $data = $this->repo->getRingsData();
 
-        self::assertTrue($data['available'], 'a total database fault cannot affect rings');
-        self::assertSame(0, $GLOBALS['wpdb']->injectedFailures, 'because it issues no query at all');
+        self::assertTrue($data['available'], 'a fault in the trust tables cannot affect rings');
+        self::assertSame(
+            0,
+            $GLOBALS['wpdb']->injectedFailures,
+            'because rings issues none of the aggregate queries'
+        );
     }
 }

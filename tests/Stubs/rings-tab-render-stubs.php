@@ -92,6 +92,8 @@ namespace BCC\Trust\Core {
             self::$data = [
                 'available'   => true,
                 'rings'       => [],
+                'computed_at' => time() - 3600,
+                'age_seconds' => 3600,
                 'thresholds'  => ['min_size' => 3, 'min_mutual' => 3],
             ];
         }
@@ -100,6 +102,8 @@ namespace BCC\Trust\Core {
         {
             self::reset();
             self::$data['available']   = false;
+            self::$data['computed_at'] = null;
+            self::$data['age_seconds'] = null;
         }
 
         /**
@@ -109,24 +113,19 @@ namespace BCC\Trust\Core {
         public static function populated(): void
         {
             self::reset();
-            // ⚠ THE RAW MERGED SHAPE, deliberately. This change adds no
-            // normalisation: getSuspiciousClusters() array_merges
-            // detectVoteRings() (users, size, strength, detected_at - no
-            // `type`) with detectEndorsementRings() (users, size, type,
-            // detected_at - no `strength`), and that is exactly what the tab
-            // is handed today. Seeding a tidied-up shape would test a payload
-            // nothing produces.
             self::$data['rings'] = [
                 [
                     'users'       => [11, 12, 13],
                     'size'        => 3,
+                    'kind'        => 'vote_ring',
                     'strength'    => 0.93,
                     'detected_at' => '2026-10-11 09:00:00',
                 ],
                 [
                     'users'       => [21, 22, 23, 24],
                     'size'        => 4,
-                    'type'        => 'endorsement_ring',
+                    'kind'        => 'endorsement_ring',
+                    'strength'    => null,
                     'detected_at' => '2026-10-11 09:00:00',
                 ],
             ];
