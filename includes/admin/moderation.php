@@ -29,12 +29,97 @@ require_once __DIR__ . '/moderation-pages.php';
 // ADMIN-POST HOOKS (ring & bulk actions)
 // ──────────────────────────────────────────────
 
+/**
+ * Resolve a submitted ring action to the accounts it may act on.
+ *
+ * ── ⚠⚠ MEMBERSHIP IS RESOLVED SERVER-SIDE, NOT SUBMITTED ───────────────
+ * This used to read the ids straight out of $_POST['user_ids'], which the
+ * tab posted as a hidden field. Two things were wrong with that:
+ *
+ *  1. ⚠⚠ THE RING WAS SILENTLY TRUNCATED TO ITS FIRST MEMBER. The form
+ *     posted a COMMA-SEPARATED STRING ("11,12,13") and the handler cast it
+ *     with `(array)`, producing `['11,12,13']`; absint() of that whole
+ *     string is 11. So "Suspend ALL 3 members" suspended exactly ONE, and
+ *     invalidate-votes touched one member's votes. Silently — the redirect
+ *     reported `suspended_1` and nothing rendered that parameter.
+ *
+ *  2. The set of accounts to act on arrived from the browser. The capability
+ *     check means only an administrator can reach this, so it was never a
+ *     privilege escalation — an admin can already suspend anyone. But it
+ *     meant the reason recorded against the suspension (`vote_ring`) and the
+ *     audit row (`ring_users`) were claims nothing verified.
+ *
+ * ── WHY THIS IS A SEPARATE FUNCTION ─────────────────────────────────────
+ * The hook below redirects and exits, which no test can follow. Everything
+ * that DECIDES anything lives here and RETURNS its decision, so the refusal
+ * path — including its Logger call — is reachable from a test. The closure
+ * keeps the exit.
+ *
+ * ⚠ The @param is not decoration: with includes/admin/moderation.php newly
+ * inside PHPStan's paths, level 8 demanded the iterable value type and
+ * reported its absence here. The expansion earned its place on the very
+ * function it was added to protect.
+ *
+ * @param array<string, mixed> $post typically $_POST
+ * @return array{ring: array<string, mixed>|null, user_ids: list<int>, action: string, refusal: string}
+ */
+function bcc_trust_resolve_ring_action( array $post ): array {
+    $action      = sanitize_text_field( $post['ring_action'] ?? '' );
+    $fingerprint = sanitize_text_field( $post['ring_fingerprint'] ?? '' );
+    $ring        = \BCC\Trust\Core\Support\RingIdentity::findByFingerprint( $fingerprint );
+
+    if ( $ring === null ) {
+        // No ring list, no matching ring, or a page older than the list.
+        // Nothing is acted on, and the operator is told which it was.
+        \BCC\Core\Log\Logger::warning( '[bcc-trust] ring action refused: no matching ring', [
+            'action'      => $action,
+            'fingerprint' => $fingerprint,
+        ] );
+        return [ 'ring' => null, 'user_ids' => [], 'action' => $action, 'refusal' => 'ring_not_found' ];
+    }
+
+    $userIds = \BCC\Trust\Core\Support\RingIdentity::members( $ring );
+
+    if ( $userIds === [] ) {
+        // A ring with no usable members must never become actionable input.
+        \BCC\Core\Log\Logger::warning( '[bcc-trust] ring action refused: ring has no members', [
+            'action'      => $action,
+            'fingerprint' => $fingerprint,
+        ] );
+        return [ 'ring' => $ring, 'user_ids' => [], 'action' => $action, 'refusal' => 'no_users' ];
+    }
+
+    return [ 'ring' => $ring, 'user_ids' => $userIds, 'action' => $action, 'refusal' => '' ];
+}
+
+/**
+ * Vote-ring actions: invalidate a ring's votes, or suspend every member.
+ *
+ * ⚠ POST ONLY. admin-post.php dispatches on $_REQUEST, so this fired for a
+ * GET as happily as a POST. A nonce in a URL is a normal WordPress pattern
+ * for a link, but these two actions suspend accounts and soft-delete votes;
+ * a destructive action should not be reachable by anything that can be
+ * prefetched, bookmarked, or logged in a referrer.
+ */
 add_action( 'admin_post_bcc_trust_ring_action', function () {
     if ( ! current_user_can( 'manage_options' ) ) { wp_die( 'Unauthorized', 403 ); }
+    if ( strtoupper( $_SERVER['REQUEST_METHOD'] ?? '' ) !== 'POST' ) {
+        wp_die( 'This action requires a POST request.', 405 );
+    }
     check_admin_referer( 'bcc_trust_ring_action' );
-    $userIds = array_filter( array_map( 'absint', (array) ( $_POST['user_ids'] ?? [] ) ) );
-    $action  = sanitize_text_field( $_POST['ring_action'] ?? '' );
-    \BCC\Trust\Core\Plugin::instance()->moderationService()->handleRingAction( $userIds, $action );
+
+    $resolved = bcc_trust_resolve_ring_action( $_POST );
+
+    if ( $resolved['refusal'] !== '' ) {
+        wp_safe_redirect( add_query_arg(
+            [ 'tab' => 'rings', 'ring_msg' => $resolved['refusal'] ],
+            admin_url( 'admin.php?page=bcc-trust-dashboard' )
+        ) );
+        exit;
+    }
+
+    \BCC\Trust\Core\Plugin::instance()->moderationService()
+        ->handleRingAction( $resolved['user_ids'], $resolved['action'] );
 } );
 
 /**
@@ -88,7 +173,7 @@ add_action( 'admin_menu', function () {
 // MAIN ROUTER
 // ──────────────────────────────────────────────
 
-function bcc_trust_render_moderation() {
+function bcc_trust_render_moderation(): void {
     if ( ! current_user_can( 'manage_options' ) ) {
         wp_die( __( 'Sorry, you are not allowed to access this page.' ) );
     }
