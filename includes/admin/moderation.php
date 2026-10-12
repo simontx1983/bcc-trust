@@ -37,8 +37,32 @@ add_action( 'admin_post_bcc_trust_ring_action', function () {
     \BCC\Trust\Core\Plugin::instance()->moderationService()->handleRingAction( $userIds, $action );
 } );
 
+/**
+ * Bulk moderation actions (suspend, unsuspend, reset fraud score, …).
+ *
+ * ⚠ POST ONLY. wp-admin/admin-post.php dispatches on $_REQUEST, so this
+ * fired for a GET as happily as a POST — and this action can SUSPEND
+ * ACCOUNTS. A destructive action must not be reachable by anything that can
+ * be prefetched by a browser, bookmarked, shared, or recorded in a referrer
+ * header.
+ *
+ * ⚠ THE VALID PATH IS UNCHANGED, DELIBERATELY. The only submitter is the
+ * bulk-apply handler in includes/admin/moderation-list.php, which already
+ * builds a form with method="POST" and posts each id as `user_ids[]` — an
+ * ARRAY, which is what `(array) $_POST['user_ids']` needs to parse every id
+ * rather than just the first. That array shape is load-bearing and is left
+ * exactly as it is; the comment there records that an earlier version posted
+ * a comma-joined string and silently no-op'd.
+ *
+ * Traced before changing anything: one submitter, no other form, no other
+ * PHP caller, nothing in assets/. So requiring POST removes a reachable
+ * destructive path without removing any working one.
+ */
 add_action( 'admin_post_bcc_trust_bulk_action', function () {
     if ( ! current_user_can( 'manage_options' ) ) { wp_die( 'Unauthorized', 403 ); }
+    if ( strtoupper( $_SERVER['REQUEST_METHOD'] ?? '' ) !== 'POST' ) {
+        wp_die( 'This action requires a POST request.', 405 );
+    }
     check_admin_referer( 'bcc_trust_bulk_action' );
     $userIds = array_filter( array_map( 'absint', (array) ( $_POST['user_ids'] ?? [] ) ) );
     $action  = sanitize_text_field( $_POST['bulk_action'] ?? '' );
