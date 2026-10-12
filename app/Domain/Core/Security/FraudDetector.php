@@ -42,6 +42,7 @@ class FraudDetector {
     private static ?UserInfoRepository $userInfoRepo = null;
     private static ?FraudAnalysisRepository $fraudAnalysisRepo = null;
     private static ?VoteRepository $voteRepo = null;
+    private static ?\BCC\Trust\Core\Repositories\PatternRepository $patternRepo = null;
     private static ?AuditLogRepository $auditLogRepo = null;
 
     private static function userInfoRepo(): UserInfoRepository {
@@ -54,6 +55,10 @@ class FraudDetector {
 
     private static function voteRepo(): VoteRepository {
         return self::$voteRepo ??= \BCC\Trust\Core\Plugin::instance()->voteRepository();
+    }
+
+    private static function patternRepo(): \BCC\Trust\Core\Repositories\PatternRepository {
+        return self::$patternRepo ??= \BCC\Trust\Core\Plugin::instance()->patternRepository();
     }
 
     private static function auditLogRepo(): AuditLogRepository {
@@ -671,33 +676,94 @@ class FraudDetector {
 
             // Low diversity: these accounts vote on fewer than 3 other pages combined.
             if ($otherPageVotes < 3) {
-                // Store fraud signal for all participants.
-                $fraudRepo = self::fraudAnalysisRepo();
-                $pageOwnerId = \BCC\Trust\Core\Services\PeepSoPageResolver::getOwnerId($pageId);
+                // ── UNCORROBORATED OBSERVATION, NOT A FRAUD FINDING ────
+                //
+                // What this rule actually measures: five or more accounts
+                // registered within a 7-day window voted on one page, and
+                // between them have voted on fewer than three other pages.
+                //
+                // That conjunction is the signature of successful
+                // word-of-mouth onboarding. A sparky tells four colleagues
+                // about BCC; they sign up the same week, back the person who
+                // introduced them, and have not got round to anything else
+                // yet. It fires. Meanwhile a motivated ring defeats it
+                // trivially by voting on three unrelated pages — so the rule
+                // is lenient toward exactly the accounts that warrant
+                // scrutiny, and sharp against a cohort's first week.
+                //
+                // It used to do two punitive things. Both are removed:
+                //
+                //   1. +15 fraud_score PER VOTER, with peak_fraud_score
+                //      bumped atomically and the HIGH-crossing fan-out —
+                //      i.e. vote-weight discount, rate limits, and at 60 the
+                //      attestation and rank gates. On honest newcomers who
+                //      already carry brand_new_account / unverified_email /
+                //      very_low_trust, +15 could reach the gate from
+                //      ordinary newness plus one fan-in event.
+                //
+                //   2. ⚠ A fraud_analysis row at min(100, 40 + 5n) — 65 at
+                //      the rule's own 5-voter threshold, i.e. HIGH — written
+                //      against THE PAGE OWNER. The person who was voted on,
+                //      the supposed beneficiary of the coordination, got the
+                //      allegation on their moderation screen.
+                //
+                // What remains is a system-level observation with no member
+                // attributed, plus the audit row. Same posture as the ring
+                // detectors after #314.
+                $voterCount = count($recentVoters);
 
-                $fraudRepo->storeAnalysisWithAutoRisk(
-                    $pageOwnerId > 0 ? $pageOwnerId : $voterId,
-                    min(100, 40 + count($recentVoters) * 5),
-                    ['fan_in_coordination'],
-                    [
-                        'page_id'       => $pageId,
-                        'voter_count'   => count($recentVoters),
-                        'spread_days'   => round($spreadDays, 1),
-                        'other_pages'   => $otherPageVotes,
-                        'voter_ids'     => $voterIds,
-                    ]
-                );
+                // ⚠ user_id 0 — a SYSTEM-LEVEL pattern, deliberately not
+                // attributed to the page owner or to any voter. tab-ml.php
+                // gates both the member link and the "Investigate" button on
+                // `if ($p->user_id)`, so this renders with nobody named and
+                // no action offered. The member ids live in pattern_data for
+                // an operator who opens the row, not as a subject of it.
+                try {
+                    self::patternRepo()->storePattern(
+                        0,
+                        'fan_in_coordination',
+                        [
+                            'page_id'     => $pageId,
+                            'voter_count' => $voterCount,
+                            'spread_days' => round($spreadDays, 1),
+                            'other_pages' => $otherPageVotes,
+                            'voter_ids'   => $voterIds,
+                            // Recorded so a reader cannot mistake the row
+                            // for a finding, and so the absent corroboration
+                            // is explicit rather than implied.
+                            'punitive'      => false,
+                            'corroborated'  => false,
+                            'evidence_note' => 'registration proximity and low vote diversity only — '
+                                . 'account proximity alone is not corroborated manipulation',
+                        ],
+                        // No strength is computed by this rule, so no
+                        // confidence is asserted. See the ring-detector
+                        // precedent: 0.0 means "none computed", not
+                        // "measured as weak".
+                        0.0,
+                        date('Y-m-d H:i:s', strtotime('+30 days'))
+                    );
+                } catch (\Exception $e) {
+                    \BCC\Core\Log\Logger::error(
+                        '[bcc-trust] fan_in_coordination pattern insert failed: ',
+                        ['detail' => $e->getMessage()]
+                    );
+                }
 
                 AuditLogger::log('fan_in_coordination_detected', $pageId, [
-                    'voter_count' => count($recentVoters),
+                    'voter_count' => $voterCount,
                     'spread_days' => round($spreadDays, 1),
                     'voter_ids'   => $voterIds,
                 ], 'page', $voterId);
 
-                // Increment fraud score for each participating voter.
-                foreach ($voterIds as $uid) {
-                    self::userInfoRepo()->incrementFraudScore($uid, 15, 'fan_in_coordination');
-                }
+                \BCC\Core\Log\Logger::info(
+                    '[bcc-trust] fan_in_coordination detected (soft-flag)',
+                    [
+                        'page_id'     => $pageId,
+                        'voter_count' => $voterCount,
+                        'spread_days' => round($spreadDays, 1),
+                    ]
+                );
 
                 // Mark this page as already processed for the next hour.
                 set_transient($dedupKey, 1, HOUR_IN_SECONDS);

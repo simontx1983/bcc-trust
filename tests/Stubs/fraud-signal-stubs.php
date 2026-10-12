@@ -143,11 +143,22 @@ namespace BCC\Trust\Core {
         /** @var list<object> rows shaped like getVouchEdges() output */
         public static array $vouchEdges = [];
 
+        // ── inputs for detectFanInCoordination() ──────────────────────
+        /** @var list<object> rows shaped like getRecentVotersWithRegistration() */
+        public static array $recentVoters = [];
+        public static int $otherPageVotes = 0;
+
+        /** @var list<array{action: string, target_id: ?int, meta: array<string, mixed>}> */
+        public static array $auditLog = [];
+
         public static function reset(): void
         {
             self::$logs            = [];
             self::$mutualVotePairs = [];
             self::$vouchEdges      = [];
+            self::$recentVoters    = [];
+            self::$otherPageVotes  = 0;
+            self::$auditLog        = [];
             self::$transients          = [];
             self::$rapidVotes          = 0;
             self::$voteTypeStats       = null;
@@ -298,6 +309,18 @@ namespace BCC\Trust\Core\Repositories {
             {
                 return W::$mutualVotePairs;
             }
+
+            /** @return list<object> rows carrying voter_user_id + registered */
+            public function getRecentVotersWithRegistration(int $pageId, int $days = 1): array
+            {
+                return W::$recentVoters;
+            }
+
+            /** @param list<int> $voterIds */
+            public function countOtherPagesVotedByUsers(array $voterIds, int $excludePageId): int
+            {
+                return W::$otherPageVotes;
+            }
         }
     }
 
@@ -388,6 +411,29 @@ namespace BCC\Trust\Core\Security {
     //
     // analyzeFraud() never type-checks these collaborators — it only calls
     // methods on whatever Plugin hands back — so the rename costs nothing.
+    // ⚠ AuditLogger shares FraudDetector's namespace and is referenced
+    // unqualified, so a double must be registered under this exact FQN.
+    // detectFanInCoordination() is the only path here that reaches it.
+    if (!class_exists('BCC\Trust\Core\Security\AuditLogger', false)) {
+        class AuditLogger
+        {
+            /** @param array<string, mixed> $meta */
+            public static function log(
+                string $action,
+                ?int $targetId = null,
+                array $meta = [],
+                ?string $targetType = null,
+                ?int $userId = null
+            ): void {
+                W::$auditLog[] = [
+                    'action'    => $action,
+                    'target_id' => $targetId,
+                    'meta'      => $meta,
+                ];
+            }
+        }
+    }
+
     if (!class_exists('BCC\Trust\Core\Security\DeviceFingerprinterDouble', false)) {
         class DeviceFingerprinterDouble
         {
