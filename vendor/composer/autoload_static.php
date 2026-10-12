@@ -463,6 +463,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Support\\ReactionStateComposer' => __DIR__ . '/../..' . '/app/Domain/Core/Support/ReactionStateComposer.php',
         'BCC\\Trust\\Core\\Support\\ReactionTypeRegistry' => __DIR__ . '/../..' . '/app/Domain/Core/Support/ReactionTypeRegistry.php',
         'BCC\\Trust\\Core\\Support\\ReputationTierMap' => __DIR__ . '/../..' . '/app/Domain/Core/Support/ReputationTierMap.php',
+        'BCC\\Trust\\Core\\Support\\RingIdentity' => __DIR__ . '/../..' . '/app/Domain/Core/Support/RingIdentity.php',
         'BCC\\Trust\\Core\\Support\\UserSlugResolver' => __DIR__ . '/../..' . '/app/Domain/Core/Support/UserSlugResolver.php',
         'BCC\\Trust\\Core\\Support\\WalletAddressValidator' => __DIR__ . '/../..' . '/app/Domain/Core/Support/WalletAddressValidator.php',
         'BCC\\Trust\\Core\\ValueObjects\\BlogCategory' => __DIR__ . '/../..' . '/app/Domain/Core/ValueObjects/BlogCategory.php',
