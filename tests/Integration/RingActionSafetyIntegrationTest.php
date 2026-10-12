@@ -78,17 +78,36 @@ final class RingActionSafetyIntegrationTest extends TestCase
     protected function setUp(): void
     {
         wp_cache_delete(RingIdentity::CACHE_KEY, RingIdentity::CACHE_GROUP);
+        delete_transient('bcc_trust_ring_snapshot');
     }
 
     protected function tearDown(): void
     {
         wp_cache_delete(RingIdentity::CACHE_KEY, RingIdentity::CACHE_GROUP);
+        // ⚠ BOTH stores: the snapshot now has a durable copy, and a
+        // transient surviving between cases would make a later "refuses"
+        // assertion pass or fail on leftover state.
+        delete_transient('bcc_trust_ring_snapshot');
+        unset($GLOBALS['__bcc_test_ext_object_cache']);
     }
 
-    /** Seed the store the tab renders from, in its RAW un-normalised shape. */
+    /**
+     * Seed the store the tab renders from.
+     *
+     * ⚠ THIS MOVED WITH THE SNAPSHOT STORE. It used to write the raw list
+     * straight to wp_cache_set(CACHE_KEY, ...), because that was the store.
+     * The store now wraps that key in a payload and adds a durable
+     * transient, so seeding the raw shape would no longer resolve — which is
+     * precisely the dependency between the two changes, and is why these
+     * cases now go through the writer.
+     *
+     * ⚠ The INPUT is still the raw merged producer shape. normalise()
+     * runs inside store(), so handing it a tidied payload would test a shape
+     * nothing produces.
+     */
     private function seed(array $rings): void
     {
-        wp_cache_set(RingIdentity::CACHE_KEY, $rings, RingIdentity::CACHE_GROUP, 3600);
+        \BCC\Trust\Core\Support\RingSnapshot::store($rings);
     }
 
     /** detectVoteRings() shape: no `type`, a real `strength`. */
@@ -212,9 +231,41 @@ final class RingActionSafetyIntegrationTest extends TestCase
     public function testANonArrayCachedValueRefuses(): void
     {
         // wp_cache can hold anything. A scalar must not be iterated.
+        $GLOBALS['__bcc_test_ext_object_cache'] = true;
         wp_cache_set(RingIdentity::CACHE_KEY, 'not-an-array', RingIdentity::CACHE_GROUP, 3600);
 
-        self::assertNull(RingIdentity::findByFingerprint(RingIdentity::fingerprint([11, 12, 13])));
+        try {
+            self::assertNull(RingIdentity::findByFingerprint(RingIdentity::fingerprint([11, 12, 13])));
+        } finally {
+            unset($GLOBALS['__bcc_test_ext_object_cache']);
+        }
+    }
+
+    public function testAPreChangeBareListInTheCacheRefuses(): void
+    {
+        // ⚠⚠ THE DEPLOY-WINDOW CASE, and the reason the dependency between
+        // these two changes is one-directional. A host WITH a persistent
+        // object cache can carry a pre-change BARE LIST across the deploy.
+        // Reading it would mean dereferencing a computed_at that is not
+        // there; refusing until the next daily run is the honest and the safe
+        // answer, and it means the destructive buttons refuse rather than
+        // acting on a list this build cannot vouch for.
+        $GLOBALS['__bcc_test_ext_object_cache'] = true;
+        wp_cache_set(
+            RingIdentity::CACHE_KEY,
+            [['users' => [11, 12, 13], 'size' => 3, 'strength' => 0.9]],
+            RingIdentity::CACHE_GROUP,
+            3600
+        );
+
+        try {
+            self::assertNull(
+                RingIdentity::findByFingerprint(RingIdentity::fingerprint([11, 12, 13])),
+                'a pre-wrapper value is not a payload'
+            );
+        } finally {
+            unset($GLOBALS['__bcc_test_ext_object_cache']);
+        }
     }
 
     public function testAMalformedRingElementIsSkippedNotFatal(): void

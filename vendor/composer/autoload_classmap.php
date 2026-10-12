@@ -314,6 +314,7 @@ return array(
     'BCC\\Trust\\Core\\Support\\ReactionTypeRegistry' => $baseDir . '/app/Domain/Core/Support/ReactionTypeRegistry.php',
     'BCC\\Trust\\Core\\Support\\ReputationTierMap' => $baseDir . '/app/Domain/Core/Support/ReputationTierMap.php',
     'BCC\\Trust\\Core\\Support\\RingIdentity' => $baseDir . '/app/Domain/Core/Support/RingIdentity.php',
+    'BCC\\Trust\\Core\\Support\\RingSnapshot' => $baseDir . '/app/Domain/Core/Support/RingSnapshot.php',
     'BCC\\Trust\\Core\\Support\\UserSlugResolver' => $baseDir . '/app/Domain/Core/Support/UserSlugResolver.php',
     'BCC\\Trust\\Core\\Support\\WalletAddressValidator' => $baseDir . '/app/Domain/Core/Support/WalletAddressValidator.php',
     'BCC\\Trust\\Core\\ValueObjects\\BlogCategory' => $baseDir . '/app/Domain/Core/ValueObjects/BlogCategory.php',

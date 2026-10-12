@@ -314,8 +314,14 @@ class CronService
             // Ring / sybil detection (cache results for FraudDetector lookups)
             $ringMinSize = defined('BCC_TRUST_RING_MIN_SIZE') ? BCC_TRUST_RING_MIN_SIZE : 3;
             $rings       = $graph->getSuspiciousClusters($ringMinSize);
-            // Shared cache key with AdminDashboardRepository::getRingsData()
-            wp_cache_set('ring_results', $rings, 'bcc_trust_admin', DAY_IN_SECONDS);
+            // ⚠ One writer, one store. This used to be a bare
+            // wp_cache_set('ring_results', ...), which on a host with no
+            // object-cache.php drop-in is PER-REQUEST — so this job computed
+            // a graph pass measured at up to 91.9 s and then discarded it,
+            // every day. RingSnapshot writes the object cache when the host
+            // has one and ALWAYS writes a transient, so the readers in other
+            // requests can actually find it. TTL is unchanged.
+            \BCC\Trust\Core\Support\RingSnapshot::store($rings);
         } finally {
             $this->releaseLock('bcc_cron_graph_lock');
         }
