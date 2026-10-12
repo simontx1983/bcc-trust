@@ -14,16 +14,40 @@ config constant or was measured with the harness in §7.
 
 ---
 
-## 1. Three mechanisms, not one
+> ⚠⚠ **CORRECTION, 2026-10-12.** This section said "three mechanisms". There
+> are **FOUR**. The one it missed is **pairwise** and needs no ring at all:
+> `vote_ring` **+25**, `FraudDetector.php:197`, via
+> `countMutualVotePages() > BCC_TRUST_RING_MIN_MUTUAL` — i.e. **≥4 distinct
+> mutual pages between two people**. No third member, no component, no
+> strength gate, and **no cache dependency**, so it has been applying on every
+> host all along.
+>
+> It is listed as **A2** below, and §7.2's trajectory is **superseded** — it
+> modelled A1 alone and therefore understated the effect substantially. See
+> `docs/ring-detection-scoring-separation-design.md` §1 for the corrected
+> measurements: a genuine trio reaches **HIGH on pass 2**, not Medium on
+> pass 4.
+
+## 1. Four mechanisms, not one
 
 | # | Mechanism | Value | Applied | Blended? |
 |---|---|---|---|---|
-| **A** | `in_vote_ring` signal in the fraud analysis | **+40** | per analysis, when the member matches a ring | ⚠ **YES** |
+| **A1** | `in_vote_ring` signal in the fraud analysis | **+40** | per analysis, when the member matches a ring (≥3 members, strength > 5.0) | ⚠ **YES** |
+| **A2** | `vote_ring` signal in the fraud analysis | **+25** | ⚠ per analysis, on **PAIRWISE** reciprocity alone — ≥4 distinct mutual pages, **no ring required** | ⚠ **YES** |
 | **B** | direct increment inside `detectVoteRings()` | **+15** | once per ring per 30 days | no — straight add |
 | **C** | direct increment inside `detectEndorsementRings()` | **+20** | once per ring per 30 days | no — straight add |
 
-- **A** — `FraudDetector.php:390`, `$results['score'] += 40`, trigger
+⚠ **A1 and A2 both fire for a ring member**, because a ring member necessarily
+has pairwise reciprocity. The analysis contribution for a trio is therefore
+**+65**, not +40.
+
+- **A1** — `FraudDetector.php:390`, `$results['score'] += 40`, trigger
   `in_vote_ring`.
+- **A2** — `FraudDetector.php:197`, `$results['score'] += 25`, trigger
+  `vote_ring`, gated by `FraudDetector::detectVoteRing()` (`:77`) →
+  `VoteRepository::countMutualVotePages()`, compared
+  `> BCC_TRUST_RING_MIN_MUTUAL` (3). ⚠ A plain SQL count — no snapshot, no
+  cache, no graph.
 - **B** — `TrustGraph.php:747`,
   `incrementFraudScore((int)$uid, 15, 'vote_ring_member')`, inside
   `detectVoteRings()` (`:663`), behind a 30-day per-ring transient.
@@ -264,6 +288,17 @@ which inverts the risk profile it is meant to describe.
 
 ### 7.2 What the score actually does over time
 
+> ⚠⚠ **SUPERSEDED.** The two scenarios below model **A1 alone**. In reality A2
+> fires alongside it for any ring member, and B adds a direct +15, so the real
+> analysis contribution for a trio is **+65 with +15 direct** — not 40. The
+> corrected measurement is in
+> `docs/ring-detection-scoring-separation-design.md` §1: a genuine trio
+> reaches **HIGH (61) on pass 2**, with attestations and rank progression
+> blocked and a permanent decay floor of 32.
+>
+> The tables are kept because the *shape* of the blend they illustrate is
+> correct and still useful. The **magnitudes understate the effect**.
+
 Scenario A — a ring flag is the member's **only** signal (analysis score 40):
 
 | pass | stored | peak | band | rate limit | vote weight | attest? |
@@ -325,5 +360,7 @@ The script is `docs/fixtures/ring-shape-fixtures.php`; `docs/ring-policy-proposa
 
 - `docs/ring-policy-proposal.md` — the policy question this trace exists to
   inform.
-- #312 — snapshot storage, **unmerged** pending a scoring-policy decision.
+- `docs/ring-detection-scoring-separation-design.md` — the implementation
+  design, and the **corrected** measurements that supersede §7.2 here.
+- #312 — snapshot storage, **blocked** on this policy work.
 - #310, #311 — the moderation-safety fixes, which carry no scoring change.

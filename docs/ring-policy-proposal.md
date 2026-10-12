@@ -34,6 +34,12 @@ in one town who have each hired the others and said so is the **intended
 output** of the system, not an anomaly in it. A rule that penalises it is
 penalising success.
 
+⚠ **And it is not only trios.** The pairwise contribution (A2, `vote_ring`
++25) needs **no ring at all** — two tradespeople with four mutual jobs
+between them qualify. So Tier 1 has to cover *pairs*, not just groups, or the
+direction is not implemented. Measured: that pair reaches **Low band with a
+permanent decay floor of 12**.
+
 **Measured examples** (trace §7.1) — all currently detected:
 
 - 3 tradespeople, each used the others, 2 jobs each → strength **24.0**
@@ -211,7 +217,11 @@ So:
   existing behaviour.
 - **On an uncached host, only vote rings penalise via `in_vote_ring`** — but
   `+15`/`+20` still land from cron, so endorsement rings are penalised anyway,
-  just by a different mechanism. The asymmetry is in mechanism A only.
+  just by a different mechanism. The asymmetry is in mechanism **A1** only.
+- ⚠ **A2 is cache-independent.** It is a plain SQL count, so the pairwise
+  **+25 has been applying on every host all along**. Any statement that
+  uncached hosts escape reciprocity penalties is wrong, and this document said
+  something close to it before the fourth mechanism was found.
 - ⚠ **#312 would unify them upward** — making uncached hosts behave like
   cached ones. Under this proposal that is the wrong direction: the policy
   question should be settled first, and if Tier 1 carries no consequence then
@@ -317,7 +327,9 @@ historical-correction problem in §5.2 does.**
 
 - `docs/ring-scoring-trace.md` — the measurements and code references this
   proposal rests on.
-- #312 — snapshot storage, **unmerged**. Its scoring change is the immediate
+- `docs/ring-detection-scoring-separation-design.md` — the implementation
+  design for these tiers, including the fourth (pairwise) contribution.
+- #312 — snapshot storage, **blocked**. Its scoring change is the immediate
   occasion for this document.
 - #310, #311 — merged moderation-safety fixes; no scoring change.
 - `docs/vote-ring-persistence-proposal.md`,
