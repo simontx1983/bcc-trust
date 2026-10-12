@@ -653,11 +653,16 @@ final class AttestationService
                 // later wallet aging, reverse revokes, or cohort changes
                 // do NOT retroactively reweight this row.
                 $walletAgeMult   = $this->walletAgeWeighter->weightFor($attestorUserId);
-                $reciprocityMult = $this->reciprocityResolver->weightFor(
+                // ⚠ Detection and weight effect are now SEPARATE. The
+                // observation is recorded either way; the multiplier is
+                // baseline for ordinary reciprocity. One reverse-lookup:
+                // isReciprocal() reads, multiplierFor() is pure.
+                $isReciprocal    = $this->reciprocityResolver->isReciprocal(
                     $attestorUserId,
                     $targetKind,
                     $targetId
                 );
+                $reciprocityMult = ReciprocityPenaltyResolver::multiplierFor($isReciprocal);
                 $cohortOverlapMult = $this->cohortOverlapDampener->weightFor(
                     $attestorUserId,
                     $targetKind,
@@ -697,6 +702,11 @@ final class AttestationService
                         'weight_at_time'       => $weightAtTime,
                         'wallet_age_mult'      => $walletAgeMult,
                         'reciprocity_mult'     => $reciprocityMult,
+                        // ⚠ The OBSERVATION. `reciprocity_mult` used to
+                        // carry this implicitly by being 0.50; at baseline
+                        // it no longer distinguishes, so the fact is
+                        // recorded explicitly rather than lost.
+                        'reciprocity_detected' => $isReciprocal,
                         'cohort_overlap_mult'  => $cohortOverlapMult,
                     ],
                     'attestation',

@@ -143,11 +143,22 @@ namespace BCC\Trust\Core {
         /** @var list<object> rows shaped like getVouchEdges() output */
         public static array $vouchEdges = [];
 
+        /**
+         * Reverse-attestation lookup results, keyed
+         * "<attestorUserId>:<targetKind>:<targetId>", shaped like
+         * AttestationRepository::findActiveByAttestorAndTarget() output.
+         * A miss returns the empty shape, which is what production does.
+         *
+         * @var array<string, array{vouch: ?object, stand_behind: ?object}>
+         */
+        public static array $reverseAttestations = [];
+
         public static function reset(): void
         {
             self::$logs            = [];
             self::$mutualVotePairs = [];
             self::$vouchEdges      = [];
+            self::$reverseAttestations = [];
             self::$transients          = [];
             self::$rapidVotes          = 0;
             self::$voteTypeStats       = null;
@@ -364,6 +375,24 @@ namespace BCC\Trust\Core\Repositories {
             public function getVouchEdges(int $limit = 10000): array
             {
                 return W::$vouchEdges;
+            }
+
+            /**
+             * ⚠ Mirrors production exactly: a MISS returns the EMPTY SHAPE,
+             * never null, so a case cannot pass against a shape production
+             * does not produce.
+             *
+             * @return array{vouch: ?object, stand_behind: ?object}
+             */
+            public function findActiveByAttestorAndTarget(
+                int $attestorUserId,
+                string $targetKind,
+                int $targetId
+            ): array {
+                $key = $attestorUserId . ':' . $targetKind . ':' . $targetId;
+
+                return W::$reverseAttestations[$key]
+                    ?? ['vouch' => null, 'stand_behind' => null];
             }
         }
     }
