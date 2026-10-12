@@ -157,4 +157,117 @@ final class AttestationScoreSynthesisTest extends TestCase
         ];
         self::assertSame(1.0, $this->compute($rows));
     }
+
+    // ══ HOW RECIPROCAL SOURCES INTERACT WITH THE DIVERSITY BONUS ══════
+    //
+    // ⚠ CHARACTERISATION, NOT A CHANGE. The reciprocity baseline-weight fix
+    // restores x1.0 at cast time; it deliberately does NOT alter synthesis.
+    // These cases pin what synthesis does with reciprocal sources TODAY, so
+    // that:
+    //   (a) the baseline-weight fix is shown not to disturb it, and
+    //   (b) if the diversity half is ever taken up as its own decision,
+    //       there is a recorded before-state to argue against.
+    //
+    // The old specification (trust-attestation-risk-assessment.md, cartel
+    // mitigation #3) asked for reciprocal pairs to get "baseline weight only
+    // (no diversity bonus)" so they "don't compound". Synthesis has never
+    // implemented the second half, and these cases demonstrate that.
+
+    public function testTheDiversityGateCountsDISTINCTSOURCESONLY(): void
+    {
+        // The gate is count($sources) >= DIV_MIN. Nothing about the
+        // relationship between those sources is an input — so synthesis
+        // cannot tell a reciprocal source from an independent one, and the
+        // cast-time multipliers it already baked in are not re-read.
+        $independent = [
+            $this->row(1, 1.0, '2026-06-26 00:00:00'),
+            $this->row(2, 1.0, '2026-06-26 00:00:00'),
+            $this->row(3, 1.0, '2026-06-26 00:00:00'),
+        ];
+
+        self::assertSame(3.9, $this->compute($independent), '3 sources x 1.0, x1.3 diversity');
+    }
+
+    public function testReciprocalSourcesStillEARNTheDiversityBonus(): void
+    {
+        // ⚠ THIS IS THE DIVERGENCE FROM THE OLD SPEC, pinned.
+        //
+        // Three mutually-backing tradespeople. Post-fix each cast carries
+        // baseline weight 1.0 (pre-fix it would have been 0.50). Either way
+        // synthesis applies the full x1.3 diversity multiplier, because it
+        // only ever counted sources. The spec asked for exactly this NOT to
+        // happen; it does.
+        $reciprocal = [
+            $this->row(1, 1.0, '2026-06-26 00:00:00'),
+            $this->row(2, 1.0, '2026-06-26 00:00:00'),
+            $this->row(3, 1.0, '2026-06-26 00:00:00'),
+        ];
+
+        self::assertSame(
+            3.9,
+            $this->compute($reciprocal),
+            'reciprocal sources compound exactly as independent ones do'
+        );
+    }
+
+    public function testTheBaselineFixRAISESAReciprocalTargetsBonusAndThatIsTheIntent(): void
+    {
+        // The measurable effect of the cast-time fix, expressed at synthesis.
+        // Pre-fix: three reciprocal casts at 0.50 → 1.5, x1.3 → 1.95.
+        // Post-fix: the same three casts at 1.00 → 3.0, x1.3 → 3.9.
+        $preFix = [
+            $this->row(1, 0.50, '2026-06-26 00:00:00'),
+            $this->row(2, 0.50, '2026-06-26 00:00:00'),
+            $this->row(3, 0.50, '2026-06-26 00:00:00'),
+        ];
+        $postFix = [
+            $this->row(1, 1.00, '2026-06-26 00:00:00'),
+            $this->row(2, 1.00, '2026-06-26 00:00:00'),
+            $this->row(3, 1.00, '2026-06-26 00:00:00'),
+        ];
+
+        self::assertSame(1.95, $this->compute($preFix), 'what a mutual trio used to synthesise to');
+        self::assertSame(3.9, $this->compute($postFix), 'what it synthesises to now');
+    }
+
+    public function testHISTORICALROWSAREUNAFFECTEDBYTHEFIX(): void
+    {
+        // ⚠ The fix is FORWARD-ONLY by construction. weight_at_time is an
+        // immutable cast-time snapshot and synthesis reads it verbatim, so a
+        // row written at 0.50 keeps synthesising at 0.50 after the fix. No
+        // migration is implied, and none is proposed.
+        $mixed = [
+            $this->row(1, 0.50, '2026-06-26 00:00:00'), // cast before the fix
+            $this->row(2, 1.00, '2026-06-26 00:00:00'), // cast after
+            $this->row(3, 1.00, '2026-06-26 00:00:00'), // cast after
+        ];
+
+        // 0.5 + 1.0 + 1.0 = 2.5, three sources → x1.3 → 3.25
+        self::assertSame(3.25, $this->compute($mixed), 'old and new rows coexist, verbatim');
+    }
+
+    public function testBelowTheDiversityMinimumAReciprocalPairGetsNoBonusEitherWay(): void
+    {
+        // A mutual PAIR is 2 sources, under DIV_MIN of 3, so the diversity
+        // question never arises for the commonest reciprocal shape at all.
+        $pair = [
+            $this->row(1, 1.0, '2026-06-26 00:00:00'),
+            $this->row(2, 1.0, '2026-06-26 00:00:00'),
+        ];
+
+        self::assertSame(2.0, $this->compute($pair), 'no multiplier at 2 sources');
+    }
+
+    public function testSynthesisDoesNotReapplyAnyCastTimeMultiplier(): void
+    {
+        // Anti-double-penalty guarantee, pinned: the only thing synthesis
+        // knows about a cast's wallet-age, reciprocity or cohort-overlap
+        // multipliers is the single number they produced. Two rows with the
+        // same weight are indistinguishable regardless of how they got it.
+        $viaReciprocity = [$this->row(1, 0.50, '2026-06-26 00:00:00')];
+        $viaSomethingElse = [$this->row(9, 0.50, '2026-06-26 00:00:00')];
+
+        self::assertSame($this->compute($viaReciprocity), $this->compute($viaSomethingElse));
+        self::assertSame(0.5, $this->compute($viaReciprocity));
+    }
 }
