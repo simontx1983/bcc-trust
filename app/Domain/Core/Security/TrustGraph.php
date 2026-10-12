@@ -1123,7 +1123,15 @@ class TrustGraph {
      * A→B→C→A style endorsement rings are invisible to detectVoteRings()
      * because that method only examines mutual vote pairs, not endorsements.
      * This method builds a directed endorser→page_owner graph and uses DFS
-     * to find back edges (cycles), penalising all members found.
+     * to find back edges (cycles), RECORDING all members found.
+     *
+     * ⚠ It used to penalise them — 20 points each. It no longer does: it
+     * stores an observation and logs a soft-flag, like
+     * detectSlowEndorsementRings(). Note how weak the rule is as evidence of
+     * anything: ANY directed cycle of >= $minSize qualifies, with no
+     * strength gate, no volume gate and no time window, so one vouch per
+     * edge around three people is enough — which is also what three
+     * tradespeople who rate each other produce.
      *
      * @return array<int, array<string, mixed>>
      */
