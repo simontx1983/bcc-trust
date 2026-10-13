@@ -435,6 +435,77 @@ final class AnnouncementVisibilityIntegrationTest extends TestCase
     }
 
     /**
+     * ⚠⚠⚠ THE PREDICATE MUST NOT DEPEND ON ANY COLLATION.
+     *
+     * An earlier version compared `meta_value = CAST(post_author AS CHAR)`.
+     * On MySQL 8 that raised `Illegal mix of collations
+     * (utf8mb4_unicode_ci, IMPLICIT) and (utf8mb4_0900_ai_ci, IMPLICIT)` —
+     * the predicate did not mis-answer, it **errored**, and it would have
+     * done so in production wherever `wp_postmeta`'s collation differs
+     * from the server default.
+     *
+     * So the marker comparison is numeric end to end. This case asserts
+     * that structurally rather than hoping: no `COLLATE`, and no string
+     * equality against `meta_value`.
+     */
+    public function testTheMarkerComparisonIsCollationIndependent(): void
+    {
+        $sql = Vis::publicPredicateSql(self::META, 'p');
+
+        self::assertStringNotContainsStringIgnoringCase(
+            'COLLATE',
+            $sql,
+            'a hardcoded collation is a guess about the deployment'
+        );
+        self::assertStringNotContainsString(
+            'meta_value = CAST',
+            $sql,
+            'string equality against meta_value reintroduces the collation mix'
+        );
+        // The numeric round trip is what replaced it.
+        self::assertStringContainsString('CAST(bcc_au.meta_value AS UNSIGNED)', $sql);
+        self::assertStringContainsString('LENGTH(bcc_au.meta_value)', $sql);
+    }
+
+    /**
+     * ⚠ And it must survive a table whose collation differs from the
+     * server default — which is the condition that produced the error.
+     * Seeded by re-creating the meta fixture under a DIFFERENT collation
+     * and running the real predicate over it.
+     */
+    public function testThePredicateRunsAgainstAMetaTableWithADifferentCollation(): void
+    {
+        global $wpdb;
+
+        $this->seed('collation check');
+
+        // Rebuild the meta table under a deliberately different collation,
+        // preserving its rows.
+        $rows = $wpdb->get_results('SELECT post_id, meta_key, meta_value FROM `' . self::META . '`');
+        $wpdb->query('DROP TABLE `' . self::META . '`');
+        $created = $wpdb->query(
+            'CREATE TABLE `' . self::META . '` (
+                meta_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                post_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                meta_key VARCHAR(255) DEFAULT NULL,
+                meta_value LONGTEXT,
+                PRIMARY KEY (meta_id)
+            ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin'
+        );
+        self::assertNotFalse($created, 'collation fixture: ' . $wpdb->last_error);
+
+        foreach ((array) $rows as $r) {
+            $wpdb->insert(self::META, [
+                'post_id'    => (int) $r->post_id,
+                'meta_key'   => (string) $r->meta_key,
+                'meta_value' => (string) $r->meta_value,
+            ]);
+        }
+
+        self::assertSame(['collation check'], $this->visible());
+    }
+
+    /**
      * ⚠ The META TABLE is an identifier too, and it now arrives from the
      * caller rather than from `$wpdb`. So it gets the same validation as
      * the alias — a caller that threaded a request value through here

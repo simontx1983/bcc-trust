@@ -142,24 +142,45 @@ final class AnnouncementVisibility
                 . " SELECT 1 FROM {$meta} bcc_au"
                 . " WHERE bcc_au.post_id = {$a}.ID"
                 . " AND bcc_au.meta_key = '" . self::META_AUTHORIZED_USER_ID . "'"
-                // ⚠⚠⚠ EXACT STRING EQUALITY, NOT A CAST, AND NOT A REGEXP.
+                // ⚠⚠⚠ NUMERIC ONLY — NO STRING COMPARISON, NO REGEXP, NO
+                // COLLATION. Two CI failures produced this form, and both
+                // earlier versions looked correct.
                 //
-                // `CAST('7abc' AS UNSIGNED)` is 7 in MySQL, so a cast alone
-                // accepts '7abc', ' 7', '7.9', '+7' and '0x7' as user 7. The
-                // first version guarded that with `REGEXP '^[0-9]+$'` — and
-                // CI proved the guard leaks: in MySQL and MariaDB the regex
-                // `$` matches BEFORE A TRAILING NEWLINE, so "7\n" satisfied
-                // `^[0-9]+$`, cast to 7, and authorized. The integration case
-                // seeding "7\n" is what found it.
+                // v1 — `REGEXP '^[0-9]+$'` then `CAST(... AS UNSIGNED)`. The
+                //   regex was there because `CAST('7abc' AS UNSIGNED)` is 7.
+                //   It LEAKS: in MySQL and MariaDB the regex `$` matches
+                //   BEFORE A TRAILING NEWLINE, so "7\n" satisfied it, cast to
+                //   7, and authorized. Found by the case seeding "7\n".
                 //
-                // Comparing the stored string to the author rendered as a
-                // string has no such edge: "7\n", " 7", "7abc", "07" and
-                // "7.9" are all simply not equal to "7". It is also stricter
-                // than the contract requires ('07' is refused), which is the
-                // right direction for a check that gates publication.
-                . " AND bcc_au.meta_value = CAST({$a}.post_author AS CHAR)"
+                // v2 — `meta_value = CAST(post_author AS CHAR)`. Correct on
+                //   values, but it compares a LONGTEXT column against a CAST
+                //   result carrying the CONNECTION's collation. On MySQL 8
+                //   that is `Illegal mix of collations (utf8mb4_unicode_ci,
+                //   IMPLICIT) and (utf8mb4_0900_ai_ci, IMPLICIT)` — the
+                //   predicate does not merely mis-answer, it ERRORS. ⚠ That
+                //   would have been production-breaking wherever the postmeta
+                //   collation differs from the server default, and no amount
+                //   of value-level reasoning would have revealed it.
+                //
+                // v3, below — every comparison is a NUMBER, so no collation
+                // is involved anywhere and `COLLATE` appears nowhere:
+                //
+                //   1. the cast must equal the author, and
+                //   2. casting BACK must reproduce the stored byte length.
+                //
+                // The round trip is what closes the coercion hole without a
+                // regex: '7abc'→7→'7' (1 vs 4), ' 7' (1 vs 2), '7.9' (1 vs 3),
+                // '+7' (1 vs 2), "7\n" (1 vs 2) and '07' (1 vs 2) are each
+                // rejected, while '7' (1 vs 1) is accepted. Stricter than the
+                // contract requires — '07' is refused — which is the right
+                // direction for a check that gates publication.
+                . " AND CAST(bcc_au.meta_value AS UNSIGNED) = {$a}.post_author"
+                . ' AND LENGTH(bcc_au.meta_value)'
+                . ' = LENGTH(CAST(CAST(bcc_au.meta_value AS UNSIGNED) AS CHAR))'
                 // ⚠ And author 0 is never a valid operator, so a row with
-                // post_author = 0 and meta '0' must not satisfy this.
+                // post_author = 0 and meta '0' — which is internally
+                // CONSISTENT and passes both rungs above — must not satisfy
+                // this.
                 . " AND {$a}.post_author > 0"
             . ')'
             . ')';
