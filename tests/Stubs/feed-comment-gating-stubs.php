@@ -22,6 +22,41 @@
 
 declare(strict_types=1);
 
+namespace BCC\Core\Feed {
+
+    /**
+     * Grammar double — REQUIRED, not optional, since hydrateCommentCounts()
+     * began asking NoReactionsGate whether the kind takes reactions. bcc-core
+     * is not autoloadable in the unit suite, so without this the method dies
+     * on a class-not-found before a single assertion runs.
+     *
+     * ⚠ Faithful to the production map, including `announcement => none`. A
+     * double that answered `none` for everything would turn the comment-count
+     * cases below green while silently withholding the count from every kind.
+     */
+    class ReactionGrammarMap
+    {
+        public const GRAMMAR_SOCIAL = 'social';
+        public const GRAMMAR_TRUST  = 'trust';
+        public const GRAMMAR_NONE   = 'none';
+
+        private const POST_KIND_TO_GRAMMAR = [
+            'review'         => self::GRAMMAR_TRUST,
+            'dispute_signed' => self::GRAMMAR_TRUST,
+            'page_claim'     => self::GRAMMAR_TRUST,
+            'status'         => self::GRAMMAR_SOCIAL,
+            'watch_batch'    => self::GRAMMAR_SOCIAL,
+            'blog_excerpt'   => self::GRAMMAR_SOCIAL,
+            'announcement'   => self::GRAMMAR_NONE,
+        ];
+
+        public static function grammarFor(string $postKind): string
+        {
+            return self::POST_KIND_TO_GRAMMAR[$postKind] ?? self::GRAMMAR_SOCIAL;
+        }
+    }
+}
+
 namespace BCC\Core\Repositories {
     if (!class_exists(PeepSoGroupRepository::class, false)) {
         class PeepSoGroupRepository
