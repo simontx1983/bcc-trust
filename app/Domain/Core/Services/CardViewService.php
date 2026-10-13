@@ -41,6 +41,7 @@ use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\PageTypeMap;
+use BCC\Trust\Core\Support\Permission as PermissionShape;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorMsgActivationRepository;
@@ -1882,19 +1883,34 @@ final class CardViewService
     }
 
     /**
+     * Forwarder. The shape itself now lives in
+     * {@see \BCC\Trust\Core\Support\Permission}, because
+     * `docs/pattern-registry.md` names THIS method as the canonical
+     * producer while `private` kept every other consumer from reaching
+     * it -- so the triple got open-coded in fourteen files instead. The
+     * forwarder is kept so the registry entry still resolves and so the
+     * 28 call sites in this file need no edit.
+     *
      * @return Permission
      */
     private static function allow(): array
     {
-        return ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
+        return PermissionShape::allow();
     }
 
     /**
+     * Forwarder -- see {@see self::allow()}.
+     *
+     * WARNING: the argument order is INVERTED relative to
+     * `Permission::deny()`, which takes the reason code first because it
+     * is the required one. Kept as-is here so this file 28 call sites
+     * are untouched; a reader comparing the two should expect the swap.
+     *
      * @return Permission
      */
     private static function deny(?string $unlockHint, string $reasonCode): array
     {
-        return ['allowed' => false, 'unlock_hint' => $unlockHint, 'reason_code' => $reasonCode];
+        return PermissionShape::deny($reasonCode, $unlockHint);
     }
 
     // ──────────────────────────────────────────────────────────────────
