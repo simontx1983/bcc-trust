@@ -188,14 +188,44 @@ class FraudDetector {
             ];
         }
 
+        // ── CONSISTENCY OBSERVATION, NOT A FRAUD SIGNAL ───────────────
+        //
+        // The rule: >= BCC_TRUST_UNIFORM_VOTE_MIN (10) votes in 7 days, and
+        // more than 90% positive OR less than 10% positive.
+        //
+        // What that establishes is that a member's ratings are CONSISTENT.
+        // Consistency is exactly what an honest rater with consistent
+        // experience produces, so the rule cannot separate the two cases it
+        // most needs to:
+        //
+        //   a satisfied customer who rated 30 good trades  -> 100% positive
+        //   a sock puppet who upvoted 30 for one cartel    -> 100% positive
+        //
+        // Both were measured at +20 with isolated fixtures; they are
+        // INDISTINGUISHABLE to this rule, because it has no input that
+        // could tell them apart.
+        //
+        // ⚠ It also penalised the consumer-protection case. Someone who
+        // only flags poor work — 12 bad jobs out of 13 — lands at 7.7%
+        // positive and scored +20 for it. That is the member behaviour this
+        // product most wants.
+        //
+        // So the points are removed. The trigger and the `details` entry are
+        // RETAINED: they are the durable record, and `details` is what
+        // `confidence` is computed from, so dropping it would silently move
+        // confidence for every consistent rater.
+        //
+        // ⚠ NOT changed: the thresholds. Raising the sample floor or
+        // widening the band would be a new arbitrary number in place of an
+        // old one, and would still not distinguish the two cases above.
         if (self::detectUniformVoting($userId)) {
             $results['triggers'][] = 'uniform_voting';
-            $results['score'] += 20;
             $results['details']['uniform_voting'] = true;
             $results['signals'][] = [
                 'type'        => 'uniform_voting',
-                'points'      => 20,
-                'description' => 'Suspiciously consistent vote pattern (all up or all down)',
+                'points'      => 0,
+                'punitive'    => false,
+                'description' => 'Consistent rating pattern — nearly all positive or nearly all negative (observation only, adds no fraud points)',
             ];
         }
 

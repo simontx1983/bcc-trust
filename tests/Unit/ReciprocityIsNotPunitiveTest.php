@@ -264,8 +264,12 @@ final class ReciprocityIsNotPunitiveTest extends TestCase
 
     public function testIndependentSignalsAreNotOnTheObservationList(): void
     {
+        // ⚠ `uniform_voting` was on this list and has been REMOVED, because
+        // it is now an observation too — see
+        // FanInIsObservationalTest's sibling, UniformVotingIsObservationalTest.
+        // The other eight are unchanged and still carry points.
         foreach ([
-            'uniform_voting', 'multi_account', 'shared_device_4_users',
+            'multi_account', 'shared_device_4_users',
             'rapid_voting', 'vote_changing', 'critical_behavior',
             'very_low_trust', 'brand_new_account', 'unverified_email',
         ] as $trigger) {

@@ -83,15 +83,26 @@ final class IndependentFraudSignalsTest extends TestCase
         self::assertSame(0, $this->analyse()['score']);
     }
 
-    public function testUniformVotingScoresTwenty(): void
+    /**
+     * ⚠ MOVED OUT OF THE PUNITIVE SET. `uniform_voting` scored +20 until it
+     * was shown to be indistinguishable between a satisfied customer and a
+     * sock puppet — both 100% positive — and to penalise the
+     * consumer-protection case. It is now an observation.
+     *
+     * The case is kept here rather than deleted, because "this signal adds
+     * nothing" is exactly the property this file exists to pin, and a
+     * deleted case would let the points come back unnoticed.
+     */
+    public function testUniformVotingIsNowAnObservationAndScoresNothing(): void
     {
         // >= BCC_TRUST_UNIFORM_VOTE_MIN (10) votes, all positive.
         W::$voteTypeStats = (object) ['total' => 10, 'positive' => 10];
 
         $r = $this->analyse();
 
-        self::assertSame(20, $r['score']);
-        self::assertContains('uniform_voting', $r['triggers']);
+        self::assertSame(0, $r['score'], 'was 20');
+        self::assertContains('uniform_voting', $r['triggers'], 'the observation is retained');
+        self::assertTrue($r['details']['uniform_voting']);
     }
 
     public function testUniformVotingBelowTheMinimumSampleDoesNotFire(): void
@@ -498,27 +509,53 @@ final class IndependentFraudSignalsTest extends TestCase
         self::assertNotSame([], $r['signals'], 'the signals list must be populated by production code');
     }
 
-    public function testSeventeenIndependentSignalNamesAreCovered(): void
+    public function testSixteenPunitiveSignalNamesAreCovered(): void
     {
         // A roll-call, so dropping a case cannot quietly shrink the guard.
-        $covered = [
-            'rapid_voting', 'uniform_voting', 'vote_changing', 'multi_account',
+        //
+        // ⚠ WAS SEVENTEEN. `uniform_voting` moved to the observation set
+        // and is rolled-called separately below, so the punitive count is
+        // now sixteen. The two lists together still cover every trigger
+        // this file asserts, and the split is the point: a reader can see
+        // at a glance which signals carry points.
+        $punitive = [
+            'rapid_voting', 'vote_changing', 'multi_account',
             'high_device_fraud', 'medium_device_fraud', 'shared_device_4_users',
             'critical_behavior', 'high_risk_behavior', 'suspicious_behavior',
             'behavior_odd_hours', 'very_low_trust', 'low_trust',
             'brand_new_account', 'new_account', 'unverified_email',
             'user_info_missing',
         ];
+        $observations = [
+            'uniform_voting',
+        ];
 
-        self::assertCount(17, $covered);
+        self::assertCount(16, $punitive);
+        self::assertCount(1, $observations);
 
         $source = file_get_contents(__FILE__);
         self::assertIsString($source);
-        foreach ($covered as $name) {
+        foreach (array_merge($punitive, $observations) as $name) {
             self::assertStringContainsString(
                 "'" . $name . "'",
                 $source,
                 $name . ' is named in the roll-call but no case in this file asserts it'
+            );
+        }
+
+        // ⚠ Anti-drift: the observation names here must be exactly what the
+        // canonical list declares, or the admin surface and this file would
+        // disagree about which triggers carry no penalty.
+        foreach ($observations as $name) {
+            self::assertTrue(
+                \BCC\Trust\Core\Support\ReciprocityObservation::isNonPunitive($name),
+                $name . ' is rolled-called as an observation but the canonical list disagrees'
+            );
+        }
+        foreach ($punitive as $name) {
+            self::assertFalse(
+                \BCC\Trust\Core\Support\ReciprocityObservation::isNonPunitive($name),
+                $name . ' carries points but is on the non-punitive list'
             );
         }
     }
