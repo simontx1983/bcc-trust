@@ -54,6 +54,12 @@ namespace BCC\Core\Feed {
         {
             return self::POST_KIND_TO_GRAMMAR[$postKind] ?? self::GRAMMAR_SOCIAL;
         }
+
+        /** @param array<string, int> $counts @return array<string, int>|\stdClass */
+        public static function countsForWire(array $counts)
+        {
+            return $counts === [] ? new \stdClass() : $counts;
+        }
     }
 }
 

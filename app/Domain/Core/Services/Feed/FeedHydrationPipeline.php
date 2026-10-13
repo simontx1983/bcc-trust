@@ -1180,7 +1180,11 @@ final class FeedHydrationPipeline
 
             $reactions = [
                 'kind_grammar'       => $grammar,
-                'counts'             => $counts,
+                // ⚠ Through the boundary: an EMPTY dict must serialize as
+                // `{}`, not `[]`. PHP encodes an empty array as a JSON
+                // ARRAY, which would make the no-reactions kind ship a
+                // different TYPE for `counts` than every other grammar.
+                'counts'             => ReactionGrammarMap::countsForWire($counts),
                 'viewer_reaction'    => $viewerKind,
             ];
 

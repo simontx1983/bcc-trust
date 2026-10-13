@@ -68,6 +68,20 @@ namespace BCC\Core\Feed {
             return self::POST_KIND_TO_GRAMMAR[$postKind] ?? self::GRAMMAR_SOCIAL;
         }
 
+        /**
+         * ⚠ FAITHFUL TO PRODUCTION: returns an OBJECT for an empty dict, so a
+         * test that encodes the result sees `{}` and not `[]`. A double that
+         * returned the array unchanged would make the wire-shape assertions
+         * pass against a shape production does not emit.
+         *
+         * @param  array<string, int> $counts
+         * @return array<string, int>|\stdClass
+         */
+        public static function countsForWire(array $counts)
+        {
+            return $counts === [] ? new \stdClass() : $counts;
+        }
+
         public static function grammarForModule(string $moduleId): string
         {
             $postKind = FeedItemNormalizer::MODULE_TO_KIND[$moduleId] ?? 'status';
