@@ -161,6 +161,32 @@ namespace BCC\Trust\Core {
          */
         public static array $reverseAttestations = [];
 
+        /**
+         * The ACTIVE user_profile attestation graph, as
+         * attestorUserId => [targetUserId, ...].
+         *
+         * ⚠ The two cohort-overlap repository doubles derive their counts
+         * from THIS, using the same set semantics as the production SQL,
+         * so a fixture is a graph rather than a pre-computed answer. That
+         * matters: the thing under test is the ratio and the threshold, and
+         * hand-feeding the ratio would test nothing.
+         *
+         * @var array<int, list<int>>
+         */
+        public static array $attestationGraph = [];
+
+        /** Everyone who has an active cast ON $target. */
+        public static function attestorsOf(int $target): array
+        {
+            $out = [];
+            foreach (self::$attestationGraph as $attestor => $targets) {
+                if (in_array($target, $targets, true)) {
+                    $out[] = (int) $attestor;
+                }
+            }
+            return $out;
+        }
+
         public static function reset(): void
         {
             self::$logs            = [];
@@ -170,6 +196,7 @@ namespace BCC\Trust\Core {
             self::$otherPageVotes  = 0;
             self::$auditLog        = [];
             self::$reverseAttestations = [];
+            self::$attestationGraph = [];
             self::$transients          = [];
             self::$rapidVotes          = 0;
             self::$voteTypeStats       = null;
@@ -416,6 +443,36 @@ namespace BCC\Trust\Core\Repositories {
 
                 return W::$reverseAttestations[$key]
                     ?? ['vouch' => null, 'stand_behind' => null];
+            }
+
+            /**
+             * COUNT(DISTINCT target_id) WHERE attestor = ? AND kind = ?
+             * AND revoked_at IS NULL — derived from the fixture graph.
+             */
+            public function countDistinctTargetsByAttestor(int $attestorUserId, string $targetKind): int
+            {
+                if ($attestorUserId <= 0 || $targetKind !== 'user_profile') {
+                    return 0;
+                }
+
+                return count(array_unique(W::$attestationGraph[$attestorUserId] ?? []));
+            }
+
+            /**
+             * |{ u : attestor -> u } ∩ { u : u -> target }| — the production
+             * SQL's INNER JOIN on b.attestor_user_id = a.target_id, counted
+             * DISTINCT over a.target_id.
+             */
+            public function countOverlapBetweenAttestorAndTarget(int $attestorUserId, int $targetUserId): int
+            {
+                if ($attestorUserId <= 0 || $targetUserId <= 0 || $attestorUserId === $targetUserId) {
+                    return 0;
+                }
+
+                $myCohort       = array_unique(W::$attestationGraph[$attestorUserId] ?? []);
+                $targetBackers  = W::attestorsOf($targetUserId);
+
+                return count(array_intersect($myCohort, $targetBackers));
             }
         }
     }
