@@ -24,7 +24,13 @@ if (!defined('ABSPATH')) {
 final class ReactionStateComposer
 {
     /**
-     * @return array{kind_grammar: string, counts: array<string, int>, viewer_reaction: ?string}
+     * `counts` widens to `|\stdClass` because this is a serialization
+     * boundary: {@see ReactionGrammarMap::countsForWire} returns an object
+     * for an EMPTY dict so it encodes as `{}` rather than `[]`. The
+     * declaration follows the value rather than being narrowed back — a
+     * cast here would hide the one case the boundary exists for.
+     *
+     * @return array{kind_grammar: string, counts: array<string, int>|\stdClass, viewer_reaction: ?string}
      */
     public static function compose(int $actId, int $viewerId, string $grammar): array
     {
@@ -64,7 +70,11 @@ final class ReactionStateComposer
 
         return [
             'kind_grammar'    => $grammar,
-            'counts'          => $counts,
+            // Same boundary as the feed hydrator: an empty dict must
+            // encode as `{}`. Unreachable for an announcement today,
+            // because NoReactionsGate refuses before this runs — applied
+            // anyway so the two serializers cannot disagree about shape.
+            'counts'          => ReactionGrammarMap::countsForWire($counts),
             'viewer_reaction' => $viewerReaction,
         ];
     }

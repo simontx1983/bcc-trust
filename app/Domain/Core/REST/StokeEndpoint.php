@@ -34,6 +34,7 @@ use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\GroupInteractionGate;
+use BCC\Trust\Core\Support\NoReactionsGate;
 use BCC\Trust\Core\Support\ReactionStateComposer;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -105,6 +106,14 @@ final class StokeEndpoint
             return $gateError;
         }
 
+        // An announcement takes no engagement at all (contract §4.32.15).
+        // Sibling of the group gate on purpose: same ?WP_REST_Response
+        // contract, same position, so the two cannot drift apart.
+        $noReactions = NoReactionsGate::check($actId);
+        if ($noReactions !== null) {
+            return $noReactions;
+        }
+
         if (!Plugin::instance()->stokeRepository()->addStoke($actId, $userId)) {
             return ApiResponse::error('bcc_internal_error', 'Failed to stoke.', 500);
         }
@@ -137,6 +146,14 @@ final class StokeEndpoint
         $gateError = GroupInteractionGate::check($userId, $actId);
         if ($gateError !== null) {
             return $gateError;
+        }
+
+        // An announcement takes no engagement at all (contract §4.32.15).
+        // Sibling of the group gate on purpose: same ?WP_REST_Response
+        // contract, same position, so the two cannot drift apart.
+        $noReactions = NoReactionsGate::check($actId);
+        if ($noReactions !== null) {
+            return $noReactions;
         }
 
         if (!Plugin::instance()->stokeRepository()->removeStoke($actId, $userId)) {
