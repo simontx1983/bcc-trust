@@ -463,6 +463,7 @@ return array(
     'BCC\\Trust\\Onchain\\Services\\ValidatorGroupRevokeService' => $baseDir . '/app/Domain/Onchain/Services/ValidatorGroupRevokeService.php',
     'BCC\\Trust\\Onchain\\Services\\ValidatorLogoService' => $baseDir . '/app/Domain/Onchain/Services/ValidatorLogoService.php',
     'BCC\\Trust\\Onchain\\Services\\ValidatorPageMinter' => $baseDir . '/app/Domain/Onchain/Services/ValidatorPageMinter.php',
+    'BCC\\Trust\\Onchain\\Services\\ValidatorPageOperatorAuthority' => $baseDir . '/app/Domain/Onchain/Services/ValidatorPageOperatorAuthority.php',
     'BCC\\Trust\\Onchain\\Services\\WalletLinkReadService' => $baseDir . '/app/Domain/Onchain/Services/WalletLinkReadService.php',
     'BCC\\Trust\\Onchain\\Services\\WalletLinkWriteService' => $baseDir . '/app/Domain/Onchain/Services/WalletLinkWriteService.php',
     'BCC\\Trust\\Onchain\\Services\\WalletSeedService' => $baseDir . '/app/Domain/Onchain/Services/WalletSeedService.php',
