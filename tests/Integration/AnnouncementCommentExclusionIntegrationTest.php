@@ -29,7 +29,7 @@ use PHPUnit\Framework\TestCase;
  * ── ⚠⚠⚠ THE THINGS THAT MUST NOT HAPPEN ─────────────────────────────────
  *  1. AN ANNOUNCEMENT COMMENT SURVIVES A GENERIC READ. The whole point.
  *  2. A MALFORMED STORED RECORD SURVIVES. Nothing of ours writes
- *     `BCC_Announce_Comment ` with different case and trailing
+ *     `BCC_Ann_Comment ` with different case and trailing
  *     whitespace — a plugin, an import, a migration or hand-written SQL
  *     can. Privacy must not depend on the writer being well-behaved, so
  *     the predicate normalizes before comparing and these rows are seeded
@@ -142,7 +142,7 @@ final class AnnouncementCommentExclusionIntegrationTest extends TestCase
 
     public function testAnAnnouncementCommentIsExcludedWhileOrdinaryCommentsSurvive(): void
     {
-        $this->seed('bcc_announce_comment', 'SECRET announcement reply');
+        $this->seed('bcc_ann_comment', 'SECRET announcement reply');
         $this->seed('comment', 'ordinary blog comment');
         $this->seed('', 'legacy empty-type comment');
 
@@ -167,10 +167,10 @@ final class AnnouncementCommentExclusionIntegrationTest extends TestCase
     public function testMalformedAnnouncementTypesAreAlsoExcluded(): void
     {
         $malformed = [
-            'BCC_Announce_Comment'   => 'mixed case leak',
-            'bcc_announce_comment '  => 'trailing space leak',
-            ' bcc_announce_comment'  => 'leading space leak',
-            'BCC_ANNOUNCE_COMMENT'   => 'upper case leak',
+            'BCC_Ann_Comment'   => 'mixed case leak',
+            'bcc_ann_comment '  => 'trailing space leak',
+            ' bcc_ann_comment'  => 'leading space leak',
+            'BCC_ANN_COMMENT'   => 'upper case leak',
         ];
         foreach ($malformed as $type => $content) {
             $this->seed($type, $content);
@@ -197,7 +197,7 @@ final class AnnouncementCommentExclusionIntegrationTest extends TestCase
     {
         foreach ([
             'bcc_announcement'          => 'different type entirely',
-            'bcc_announce_commen' => 'plural lookalike',
+            'bcc_ann_commen' => 'plural lookalike',
             'announcement_comment'      => 'unprefixed lookalike',
         ] as $type => $content) {
             $this->seed($type, $content);
@@ -220,7 +220,7 @@ final class AnnouncementCommentExclusionIntegrationTest extends TestCase
     public function testCoreNotesAreLeftVisible(): void
     {
         $this->seed('note', 'an editorial note');
-        $this->seed('bcc_announce_comment', 'ours, hidden');
+        $this->seed('bcc_ann_comment', 'ours, hidden');
 
         $visible = $this->visibleContent();
 
@@ -238,8 +238,8 @@ final class AnnouncementCommentExclusionIntegrationTest extends TestCase
      */
     public function testAnOrphanedAnnouncementCommentIsStillExcluded(): void
     {
-        $this->seed('bcc_announce_comment', 'orphaned but still ours', 0);
-        $this->seed('bcc_announce_comment', 'parent missing too', 999999);
+        $this->seed('bcc_ann_comment', 'orphaned but still ours', 0);
+        $this->seed('bcc_ann_comment', 'parent missing too', 999999);
         $this->seed('comment', 'orphaned ordinary comment', 0);
 
         $visible = $this->visibleContent();
@@ -264,7 +264,7 @@ final class AnnouncementCommentExclusionIntegrationTest extends TestCase
         $this->seed('comment', 'approved ordinary');
         $id = $this->seed('comment', 'UNAPPROVED ordinary');
         $wpdb->query('UPDATE `' . self::TABLE . "` SET comment_approved = '0' WHERE comment_ID = " . $id);
-        $this->seed('bcc_announce_comment', 'ours');
+        $this->seed('bcc_ann_comment', 'ours');
 
         $visible = $this->visibleContent();
 

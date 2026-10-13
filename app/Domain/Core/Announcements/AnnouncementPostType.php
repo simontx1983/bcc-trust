@@ -127,29 +127,42 @@ final class AnnouncementPostType
      * deliberately NOT `note` (which core special-cases out of the
      * post-permission check entirely).
      *
-     * ⚠⚠ 20 CHARACTERS — AN EXACT FIT, AND THAT IS THE CONSTRAINT.
+     * ⚠⚠ 15 CHARACTERS, AND THE BREVITY IS DELIBERATE.
      * `wp_comments.comment_type` is `varchar(20)` in WordPress core
      * (`wp-admin/includes/schema.php:114`). The planning value
      * `bcc_announcement_comment` was **24 characters and could not be
-     * stored at all**: MySQL rejected the insert with "Data too long for
-     * column 'comment_type'", or would have silently truncated it to
-     * `bcc_announcement_com` under a non-strict mode — which is worse,
-     * because a truncated type does not match the exclusion predicate and
-     * the comment becomes publicly readable.
+     * stored at all** — MySQL rejected every insert with "Data too long
+     * for column 'comment_type'".
+     *
+     * ⚠⚠⚠ AND THE FAILURE MODE IS A PRIVACY ONE. Strict mode rejects, but
+     * a NON-strict mode TRUNCATES — and a truncated value does not equal
+     * ours, so the exclusion predicate in {@see commentExclusionSql} would
+     * not match it and the comment would become publicly readable through
+     * exactly the generic read these guards exist to close. A silently
+     * truncated row is an exposed row.
      *
      * The same trap was already recorded for `wp_posts.post_type`, where a
      * 22-character slug blew the identical limit; the lesson had been
      * applied to {@see POST_TYPE} (16 chars) and not here.
      *
-     * Found only because the integration suite executes the real SQL
-     * against a real column — the whole unit suite passed, because no unit
-     * test touches a width-constrained column.
+     * ⚠ WHY NOT AN EXACT 20-CHARACTER FIT. A 20-character value is legal
+     * but makes the most realistic corruption UNTESTABLE: a
+     * whitespace-padded variant (` bcc_announce_comment`, 21 chars) cannot
+     * be stored, so the integration suite cannot prove the guards withhold
+     * it. The guards normalize whitespace precisely because such rows can
+     * exist — and they can only exist if the canonical value leaves room.
+     * 15 characters keeps every padded and case-shifted variant storable,
+     * so the privacy guarantee is provable against all of them.
      *
-     * There is NO headroom. A future variant must be SHORTER, not longer,
-     * and {@see \BCC\Trust\Core\Tests\Unit\AnnouncementCommentGuardsTest}
-     * pins the length so this cannot regress unnoticed.
+     * Found only because the integration suite executes real SQL against a
+     * real column — all 24 unit cases and the other 3,900-odd in the suite
+     * passed with an unstorable value, because no unit test touches a
+     * width-constrained column.
+     *
+     * {@see \BCC\Trust\Core\Tests\Unit\AnnouncementCommentGuardsTest} pins
+     * both the length and the padded-variant headroom.
      */
-    public const COMMENT_TYPE = 'bcc_announce_comment';
+    public const COMMENT_TYPE = 'bcc_ann_comment';
 
     /** Custom capability base, so generic `edit_posts` cannot satisfy it. */
     public const CAPABILITY_SINGULAR = 'bcc_announcement';
