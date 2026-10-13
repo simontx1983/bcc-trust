@@ -48,8 +48,21 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(Vis::class)]
 final class AnnouncementVisibilityIntegrationTest extends TestCase
 {
-    private const POSTS = 'wp_posts';
-    private const META  = 'wp_postmeta';
+    // ⚠⚠ OWN FIXTURE TABLES, NOT wp_posts / wp_postmeta.
+    //
+    // The first version of this suite DROPPED and recreated the shared
+    // tables with a reduced column set. It worked in isolation and
+    // POISONED 57 UNRELATED INTEGRATION CASES in the same process —
+    // including a chain-checkpoint suite that then reported
+    // "Table 'wp_bcc_chain_checkpoints' already exists". A destructive
+    // shared fixture is the same failure class as a mutation control that
+    // is never restored: it passes for itself and breaks its neighbours.
+    //
+    // Naming them separately is only possible because the predicate takes
+    // its meta table as a PARAMETER — the same change that removed its
+    // `$wpdb` access for arch-guardrails. Two problems, one fix.
+    private const POSTS = 'wp_bcc_vis_posts';
+    private const META  = 'wp_bcc_vis_meta';
 
     protected function setUp(): void
     {
@@ -65,7 +78,13 @@ final class AnnouncementVisibilityIntegrationTest extends TestCase
             'CREATE TABLE `' . self::POSTS . '` (
                 ID BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                 post_author BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                post_date_gmt DATETIME NOT NULL DEFAULT \'0000-00-00 00:00:00\',
+                -- WordPress ships a zero date here, which MySQL strict mode
+                -- REJECTS ("Invalid default value"). The fixture then never
+                -- created and EVERY case in this file failed on the MySQL job
+                -- while passing on MariaDB -- an engine-specific false negative.
+                -- Every seed supplies the value explicitly, so no default is
+                -- needed.
+                post_date_gmt DATETIME NOT NULL,
                 post_title TEXT NOT NULL,
                 post_status VARCHAR(20) NOT NULL DEFAULT \'publish\',
                 post_password VARCHAR(255) NOT NULL DEFAULT \'\',
@@ -91,9 +110,9 @@ final class AnnouncementVisibilityIntegrationTest extends TestCase
         );
         self::assertNotFalse($meta, 'wp_postmeta fixture: ' . $wpdb->last_error);
 
-        // The predicate reads $wpdb->postmeta for the table name; make it
-        // match the fixture rather than whatever the harness defaulted to.
-        $wpdb->postmeta = self::META;
+        // The predicate takes its table name as an argument, so this suite
+        // neither depends on nor disturbs the harness's idea of which
+        // postmeta table is live.
     }
 
     protected function tearDown(): void
@@ -156,7 +175,7 @@ final class AnnouncementVisibilityIntegrationTest extends TestCase
     {
         global $wpdb;
 
-        $pred = Vis::publicPredicateSql('p');
+        $pred = Vis::publicPredicateSql(self::META, 'p');
 
         // Sanity: the fragment under test really is what executes.
         self::assertStringContainsString('UTC_TIMESTAMP()', $pred);
@@ -348,8 +367,8 @@ final class AnnouncementVisibilityIntegrationTest extends TestCase
         $this->seed('active one');
         $this->seed('active two');
 
-        $active   = $this->visible(Vis::notArchivedSql('p'));
-        $archived = $this->visible(Vis::archivedSql('p'));
+        $active   = $this->visible(Vis::notArchivedSql(self::META, 'p'));
+        $archived = $this->visible(Vis::archivedSql(self::META, 'p'));
 
         self::assertSame(['active one', 'active two'], $active);
         self::assertSame(['archived one', 'archived two'], $archived);
@@ -372,10 +391,10 @@ final class AnnouncementVisibilityIntegrationTest extends TestCase
 
         self::assertSame(
             ['cleared archive flag', 'active'],
-            $this->visible(Vis::notArchivedSql('p')),
+            $this->visible(Vis::notArchivedSql(self::META, 'p')),
             'an empty meta value is not an archival'
         );
-        self::assertSame([], $this->visible(Vis::archivedSql('p')));
+        self::assertSame([], $this->visible(Vis::archivedSql(self::META, 'p')));
     }
 
     // ── 5. The predicate composes, and refuses a bad alias ──────────────
@@ -397,7 +416,7 @@ final class AnnouncementVisibilityIntegrationTest extends TestCase
     {
         foreach (['p; DROP TABLE wp_posts', 'p OR 1=1', '', '1p', 'p p', 'p`'] as $bad) {
             try {
-                Vis::publicPredicateSql($bad);
+                Vis::publicPredicateSql(self::META, $bad);
                 self::fail('alias [' . $bad . '] should have been refused');
             } catch (\InvalidArgumentException) {
                 self::assertTrue(true);
@@ -407,8 +426,34 @@ final class AnnouncementVisibilityIntegrationTest extends TestCase
         // And the archival filters guard it too — three producers, one rule.
         foreach (['notArchivedSql', 'archivedSql'] as $method) {
             try {
-                Vis::$method('p;--');
+                Vis::$method(self::META, 'p;--');
                 self::fail($method . ' should have refused the alias');
+            } catch (\InvalidArgumentException) {
+                self::assertTrue(true);
+            }
+        }
+    }
+
+    /**
+     * ⚠ The META TABLE is an identifier too, and it now arrives from the
+     * caller rather than from `$wpdb`. So it gets the same validation as
+     * the alias — a caller that threaded a request value through here
+     * would otherwise have an injection point in a predicate whose whole
+     * job is to be trustworthy.
+     */
+    public function testANonIdentifierMetaTableIsRefused(): void
+    {
+        foreach ([
+            'wp_postmeta; DROP TABLE wp_posts',
+            'wp_postmeta WHERE 1=1',
+            '',
+            '1meta',
+            'wp postmeta',
+            'wp_postmeta`',
+        ] as $bad) {
+            try {
+                Vis::publicPredicateSql($bad, 'p');
+                self::fail('meta table [' . $bad . '] should have been refused');
             } catch (\InvalidArgumentException) {
                 self::assertTrue(true);
             }
@@ -426,7 +471,7 @@ final class AnnouncementVisibilityIntegrationTest extends TestCase
 
         $rows = $wpdb->get_col(
             'SELECT posts.post_title FROM `' . self::POSTS . '` posts WHERE '
-            . Vis::publicPredicateSql('posts')
+            . Vis::publicPredicateSql(self::META, 'posts')
         );
         self::assertSame('', (string) $wpdb->last_error);
         self::assertSame(['aliased'], is_array($rows) ? array_map('strval', $rows) : []);

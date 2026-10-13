@@ -58,9 +58,10 @@
  * without it the predicate would happily describe an ordinary post that
  * happened to carry our meta.
  *
- * Pure string construction — no DB access, no WordPress bootstrap beyond
- * the table prefix — so the emitted SQL is unit-testable and the same
- * bytes can be executed against real rows in integration.
+ * Pure string construction — no DB access, no WordPress at all, and no
+ * `$wpdb`: the postmeta table name is a PARAMETER (see
+ * {@see self::assertIdentifier()}). So the emitted SQL is testable and
+ * the same bytes execute against real rows in integration.
  */
 
 declare(strict_types=1);
@@ -109,18 +110,13 @@ final class AnnouncementVisibility
      *
      * @throws \InvalidArgumentException on a non-identifier alias
      */
-    public static function publicPredicateSql(string $alias = 'p'): string
+    public static function publicPredicateSql(string $metaTable, string $alias = 'p'): string
     {
-        if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $alias) !== 1) {
-            throw new \InvalidArgumentException('Alias must be a bare SQL identifier.');
-        }
+        self::assertIdentifier($alias, 'Alias');
+        self::assertIdentifier($metaTable, 'Meta table');
 
-        global $wpdb;
-        $meta = isset($wpdb) && is_object($wpdb) && isset($wpdb->postmeta)
-            ? (string) $wpdb->postmeta
-            : 'wp_postmeta';
-
-        $a = $alias;
+        $meta = $metaTable;
+        $a    = $alias;
 
         // ⚠ EXISTS rather than JOINs. Two LEFT JOINs onto postmeta would
         // multiply rows when a key is duplicated — and a duplicated
@@ -146,12 +142,22 @@ final class AnnouncementVisibility
                 . " SELECT 1 FROM {$meta} bcc_au"
                 . " WHERE bcc_au.post_id = {$a}.ID"
                 . " AND bcc_au.meta_key = '" . self::META_AUTHORIZED_USER_ID . "'"
-                // ⚠⚠ REGEXP BEFORE THE CAST. `CAST('7abc' AS UNSIGNED)`
-                // is 7 in MySQL, so a cast alone would accept '7abc',
-                // ' 7' and '7.9' as user 7. The digits-only guard is what
-                // makes the comparison mean what it reads as.
-                . " AND bcc_au.meta_value REGEXP '^[0-9]+$'"
-                . " AND CAST(bcc_au.meta_value AS UNSIGNED) = {$a}.post_author"
+                // ⚠⚠⚠ EXACT STRING EQUALITY, NOT A CAST, AND NOT A REGEXP.
+                //
+                // `CAST('7abc' AS UNSIGNED)` is 7 in MySQL, so a cast alone
+                // accepts '7abc', ' 7', '7.9', '+7' and '0x7' as user 7. The
+                // first version guarded that with `REGEXP '^[0-9]+$'` — and
+                // CI proved the guard leaks: in MySQL and MariaDB the regex
+                // `$` matches BEFORE A TRAILING NEWLINE, so "7\n" satisfied
+                // `^[0-9]+$`, cast to 7, and authorized. The integration case
+                // seeding "7\n" is what found it.
+                //
+                // Comparing the stored string to the author rendered as a
+                // string has no such edge: "7\n", " 7", "7abc", "07" and
+                // "7.9" are all simply not equal to "7". It is also stricter
+                // than the contract requires ('07' is refused), which is the
+                // right direction for a check that gates publication.
+                . " AND bcc_au.meta_value = CAST({$a}.post_author AS CHAR)"
                 // ⚠ And author 0 is never a valid operator, so a row with
                 // post_author = 0 and meta '0' must not satisfy this.
                 . " AND {$a}.post_author > 0"
@@ -168,9 +174,9 @@ final class AnnouncementVisibility
      *
      * @throws \InvalidArgumentException on a non-identifier alias
      */
-    public static function notArchivedSql(string $alias = 'p'): string
+    public static function notArchivedSql(string $metaTable, string $alias = 'p'): string
     {
-        return self::archivalSql($alias, false);
+        return self::archivalSql($metaTable, $alias, false);
     }
 
     /**
@@ -178,9 +184,9 @@ final class AnnouncementVisibility
      *
      * @throws \InvalidArgumentException on a non-identifier alias
      */
-    public static function archivedSql(string $alias = 'p'): string
+    public static function archivedSql(string $metaTable, string $alias = 'p'): string
     {
-        return self::archivalSql($alias, true);
+        return self::archivalSql($metaTable, $alias, true);
     }
 
     /**
@@ -192,16 +198,12 @@ final class AnnouncementVisibility
      *
      * @throws \InvalidArgumentException on a non-identifier alias
      */
-    private static function archivalSql(string $alias, bool $archived): string
+    private static function archivalSql(string $metaTable, string $alias, bool $archived): string
     {
-        if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $alias) !== 1) {
-            throw new \InvalidArgumentException('Alias must be a bare SQL identifier.');
-        }
+        self::assertIdentifier($alias, 'Alias');
+        self::assertIdentifier($metaTable, 'Meta table');
 
-        global $wpdb;
-        $meta = isset($wpdb) && is_object($wpdb) && isset($wpdb->postmeta)
-            ? (string) $wpdb->postmeta
-            : 'wp_postmeta';
+        $meta = $metaTable;
 
         $inner = " SELECT 1 FROM {$meta} bcc_ar"
                . " WHERE bcc_ar.post_id = {$alias}.ID"
@@ -212,5 +214,32 @@ final class AnnouncementVisibility
                . " AND bcc_ar.meta_value <> ''";
 
         return '(' . ($archived ? 'EXISTS (' : 'NOT EXISTS (') . $inner . '))';
+    }
+
+    /**
+     * ⚠ Both the alias and the table name reach SQL as IDENTIFIERS,
+     * which cannot be bound as parameters. So they are validated, not
+     * escaped: anything other than a bare identifier is a programming
+     * error and is refused loudly rather than quoted into something
+     * that looks like it worked.
+     *
+     * ⚠⚠ The table name is a PARAMETER rather than read from `$wpdb`,
+     * and that is not stylistic. §1 forbids direct `$wpdb` outside a
+     * Repository, and an earlier version of this class used
+     * `global $wpdb` to read `$wpdb->postmeta` — six arch-guardrails
+     * violations. Taking the name from the caller puts the table
+     * choice where the DB seam already is, and has a second benefit:
+     * the integration suite can point the predicate at its OWN
+     * fixture tables instead of dropping and recreating the shared
+     * `wp_postmeta`, which is what poisoned 57 unrelated cases on the
+     * first CI run.
+     *
+     * @throws \InvalidArgumentException
+     */
+    private static function assertIdentifier(string $value, string $label): void
+    {
+        if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $value) !== 1) {
+            throw new \InvalidArgumentException($label . ' must be a bare SQL identifier.');
+        }
     }
 }
