@@ -663,11 +663,16 @@ final class AttestationService
                     $targetId
                 );
                 $reciprocityMult = ReciprocityPenaltyResolver::multiplierFor($isReciprocal);
-                $cohortOverlapMult = $this->cohortOverlapDampener->weightFor(
+                // ⚠ Detection and weight effect are SEPARATE here too. The
+                // ratio is measured and recorded either way; the multiplier
+                // is baseline. Same two reads as before: overlapRatio()
+                // reads, the two helpers are pure.
+                $cohortOverlapRatio = $this->cohortOverlapDampener->overlapRatio(
                     $attestorUserId,
                     $targetKind,
                     $targetId
                 );
+                $cohortOverlapMult = CohortOverlapDampener::multiplierFor($cohortOverlapRatio);
                 $weightAtTime = self::DEFAULT_WEIGHT
                     * $walletAgeMult
                     * $reciprocityMult
@@ -708,6 +713,15 @@ final class AttestationService
                         // recorded explicitly rather than lost.
                         'reciprocity_detected' => $isReciprocal,
                         'cohort_overlap_mult'  => $cohortOverlapMult,
+                        // ⚠ The OBSERVATION. `cohort_overlap_mult` used to
+                        // carry this implicitly by being 0.80; at baseline
+                        // it no longer distinguishes, so the measured ratio
+                        // and the threshold verdict are recorded explicitly
+                        // rather than lost. NULL ratio means the question
+                        // did not apply (card target, self, empty cohort) —
+                        // distinct from a measured 0.0.
+                        'cohort_overlap_ratio'    => $cohortOverlapRatio,
+                        'cohort_overlap_detected' => CohortOverlapDampener::isHighOverlap($cohortOverlapRatio),
                     ],
                     'attestation',
                     $attestorUserId
