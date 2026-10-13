@@ -126,8 +126,30 @@ final class AnnouncementPostType
      * exclusion in guard 2 catch every ordinary comment on the site) and
      * deliberately NOT `note` (which core special-cases out of the
      * post-permission check entirely).
+     *
+     * ⚠⚠ 20 CHARACTERS — AN EXACT FIT, AND THAT IS THE CONSTRAINT.
+     * `wp_comments.comment_type` is `varchar(20)` in WordPress core
+     * (`wp-admin/includes/schema.php:114`). The planning value
+     * `bcc_announcement_comment` was **24 characters and could not be
+     * stored at all**: MySQL rejected the insert with "Data too long for
+     * column 'comment_type'", or would have silently truncated it to
+     * `bcc_announcement_com` under a non-strict mode — which is worse,
+     * because a truncated type does not match the exclusion predicate and
+     * the comment becomes publicly readable.
+     *
+     * The same trap was already recorded for `wp_posts.post_type`, where a
+     * 22-character slug blew the identical limit; the lesson had been
+     * applied to {@see POST_TYPE} (16 chars) and not here.
+     *
+     * Found only because the integration suite executes the real SQL
+     * against a real column — the whole unit suite passed, because no unit
+     * test touches a width-constrained column.
+     *
+     * There is NO headroom. A future variant must be SHORTER, not longer,
+     * and {@see \BCC\Trust\Core\Tests\Unit\AnnouncementCommentGuardsTest}
+     * pins the length so this cannot regress unnoticed.
      */
-    public const COMMENT_TYPE = 'bcc_announcement_comment';
+    public const COMMENT_TYPE = 'bcc_announce_comment';
 
     /** Custom capability base, so generic `edit_posts` cannot satisfy it. */
     public const CAPABILITY_SINGULAR = 'bcc_announcement';
@@ -272,7 +294,11 @@ final class AnnouncementPostType
         }
 
         $comment = function_exists('get_comment') ? get_comment((int) $args[0]) : null;
-        if (!is_object($comment) || !isset($comment->comment_type)) {
+        // property_exists, NOT isset: WP_Comment declares comment_type as a
+        // non-nullable string, so isset() is always true there and PHPStan
+        // rejects it. The real defence is against an object that does not
+        // carry the property at all.
+        if (!is_object($comment) || !property_exists($comment, 'comment_type')) {
             // Unknown comment: do NOT widen. Leave the decision to core.
             return $caps;
         }

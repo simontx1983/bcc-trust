@@ -33,7 +33,7 @@ use PHPUnit\Framework\TestCase;
  *  4. A MALFORMED STORED RECORD ESCAPES THE GUARDS. "We only ever write
  *     the canonical value" is a claim about the writer, not a property of
  *     the table — a plugin, an import, a migration or hand-written SQL can
- *     store `BCC_Announcement_Comment ` with different case and padding.
+ *     store `BCC_Announce_Comment ` with different case and padding.
  *     Privacy must not depend on the writer being well-behaved.
  *  5. ORDINARY COMMENTS BREAK. A guard that withheld every comment would
  *     satisfy everything above while destroying the site's own discussion.
@@ -132,6 +132,55 @@ final class AnnouncementCommentGuardsTest extends TestCase
         self::assertLessThanOrEqual(20, strlen((self::PT)::POST_TYPE));
     }
 
+    /**
+     * ⚠⚠ THE CONSTRAINT THAT ACTUALLY BIT. `wp_comments.comment_type` is
+     * `varchar(20)` (`wp-admin/includes/schema.php:114`). The planning
+     * value `bcc_announcement_comment` was 24 characters and could not be
+     * stored at all — MySQL rejected the insert with "Data too long for
+     * column 'comment_type'".
+     *
+     * The whole unit suite passed with the unstorable value, because no
+     * unit test touches a width-constrained column. Only the integration
+     * suite, executing real SQL against a real column, caught it. This
+     * assertion is the cheap guard that stops it recurring.
+     *
+     * ⚠ It is an EXACT fit, so a future variant must be SHORTER. The
+     * assertion is `<=` rather than `===` because shortening is fine and
+     * lengthening is not.
+     */
+    public function testTheCommentTypeFitsTheCommentTypeColumn(): void
+    {
+        self::assertLessThanOrEqual(
+            20,
+            strlen((self::PT)::COMMENT_TYPE),
+            'wp_comments.comment_type is varchar(20) — a longer value cannot be stored'
+        );
+    }
+
+    /**
+     * ⚠⚠⚠ WHY THE LENGTH IS A PRIVACY MATTER, NOT A TIDINESS ONE.
+     *
+     * Under a non-strict SQL mode an over-long type is TRUNCATED rather
+     * than rejected. A truncated value does not equal ours, so the
+     * exclusion predicate would not match it — and the comment would
+     * become publicly readable through exactly the generic read this
+     * feature exists to close. A silent truncation is therefore a privacy
+     * failure, not a cosmetic one.
+     *
+     * Pinned here so the reasoning survives: a one-character truncation of
+     * our own type must NOT be recognised as ours.
+     */
+    public function testAOneCharacterTruncationIsNotRecognisedAsOurs(): void
+    {
+        $truncated = substr((self::PT)::COMMENT_TYPE, 0, -1);
+
+        self::assertNotSame((self::PT)::COMMENT_TYPE, $truncated);
+        self::assertFalse(
+            (self::PT)::isAnnouncementCommentType($truncated),
+            'a truncated type is a DIFFERENT type — which is why the value must fit the column'
+        );
+    }
+
     // ── 2. Guards are registered, and NOT behind the switch ───────────────
 
     /**
@@ -219,7 +268,7 @@ final class AnnouncementCommentGuardsTest extends TestCase
     {
         $sql = (self::PT)::commentExclusionSql();
 
-        self::assertStringContainsString('bcc_announcement_comment', $sql);
+        self::assertStringContainsString('bcc_announce_comment', $sql);
         self::assertStringNotContainsString("'note'", $sql);
         self::assertStringNotContainsString("'comment'", $sql);
         self::assertStringNotContainsString('comment_type IS NOT NULL', $sql);
@@ -230,7 +279,7 @@ final class AnnouncementCommentGuardsTest extends TestCase
     public function testEditCommentIsHardDeniedForAnAnnouncementComment(): void
     {
         $GLOBALS['__bcc_ag_comments'][11] = (object) [
-            'comment_ID' => 11, 'comment_type' => 'bcc_announcement_comment',
+            'comment_ID' => 11, 'comment_type' => 'bcc_announce_comment',
         ];
 
         self::assertSame(
@@ -267,7 +316,7 @@ final class AnnouncementCommentGuardsTest extends TestCase
     public function testOtherCapabilitiesAndUnknownCommentsArePassedThrough(): void
     {
         $GLOBALS['__bcc_ag_comments'][14] = (object) [
-            'comment_ID' => 14, 'comment_type' => 'bcc_announcement_comment',
+            'comment_ID' => 14, 'comment_type' => 'bcc_announce_comment',
         ];
 
         // A different capability is not ours to touch.
@@ -296,11 +345,11 @@ final class AnnouncementCommentGuardsTest extends TestCase
     public function testAMalformedStoredCommentTypeIsStillRecognisedAsOurs(): void
     {
         foreach ([
-            'bcc_announcement_comment',
-            'BCC_Announcement_Comment',
-            ' bcc_announcement_comment ',
-            "bcc_announcement_comment\t",
-            'BCC_ANNOUNCEMENT_COMMENT',
+            'bcc_announce_comment',
+            'BCC_Announce_Comment',
+            ' bcc_announce_comment ',
+            "bcc_announce_comment\t",
+            'BCC_ANNOUNCE_COMMENT',
         ] as $stored) {
             self::assertTrue(
                 (self::PT)::isAnnouncementCommentType($stored),
@@ -312,7 +361,7 @@ final class AnnouncementCommentGuardsTest extends TestCase
     public function testAMalformedTypeIsAlsoHardDeniedAtTheCapabilityGate(): void
     {
         $GLOBALS['__bcc_ag_comments'][15] = (object) [
-            'comment_ID' => 15, 'comment_type' => ' BCC_Announcement_Comment ',
+            'comment_ID' => 15, 'comment_type' => ' BCC_Announce_Comment ',
         ];
 
         self::assertSame(
@@ -325,7 +374,7 @@ final class AnnouncementCommentGuardsTest extends TestCase
     public function testALookalikeTypeIsNotTreatedAsOurs(): void
     {
         foreach ([
-            'bcc_announcement_comments',
+            'bcc_announce_commen',
             'bcc_announcement',
             'announcement_comment',
             'comment',
@@ -388,7 +437,7 @@ final class AnnouncementCommentGuardsTest extends TestCase
      */
     public function testOurCommentTypeIsNeitherNoteNorAnythingCoreSpecialCases(): void
     {
-        self::assertSame('bcc_announcement_comment', (self::PT)::COMMENT_TYPE);
+        self::assertSame('bcc_announce_comment', (self::PT)::COMMENT_TYPE);
         self::assertNotSame('note', (self::PT)::COMMENT_TYPE);
         self::assertNotSame('comment', (self::PT)::COMMENT_TYPE);
         self::assertNotSame('', (self::PT)::COMMENT_TYPE);
