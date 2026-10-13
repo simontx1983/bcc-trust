@@ -186,7 +186,7 @@ final class ContentReportRepository
      *
      * @var list<string>
      */
-    private const ALLOWED_POST_KINDS = ['status', 'blog', 'review', 'photo', 'gif'];
+    private const ALLOWED_POST_KINDS = ['status', 'blog', 'review', 'photo', 'gif', 'announcement'];
 
     /**
      * Queue kind → numeric `peepso_activities.act_module_id`.
@@ -208,6 +208,12 @@ final class ContentReportRepository
         'photo'  => 4,
         'review' => 202,
         'blog'   => 204,
+        // §4.32.16 — announcement reports are filterable in the admin
+        // queue. Display already worked (post_kind passes through the
+        // canonical module->kind map); the FILTER did not, because both
+        // this map and ALLOWED_POST_KINDS are closed sets. A report that
+        // is visible but unfilterable gets lost in a busy queue.
+        'announcement' => 205,
     ];
 
     /**

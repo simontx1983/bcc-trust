@@ -11,6 +11,7 @@ return array(
     'BCC\\Trust\\Core\\Admin\\SessionsPage' => $baseDir . '/app/Domain/Core/Admin/SessionsPage.php',
     'BCC\\Trust\\Core\\Admin\\WalletAuditPage' => $baseDir . '/app/Domain/Core/Admin/WalletAuditPage.php',
     'BCC\\Trust\\Core\\Announcements\\AnnouncementCapabilityResolver' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementCapabilityResolver.php',
+    'BCC\\Trust\\Core\\Announcements\\AnnouncementModerationPolicy' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementModerationPolicy.php',
     'BCC\\Trust\\Core\\Application\\Disputes\\DisputeAdjudicator' => $baseDir . '/app/Domain/Core/Application/Disputes/DisputeAdjudicator.php',
     'BCC\\Trust\\Core\\Application\\RecalcQueueReadService' => $baseDir . '/app/Domain/Core/Application/RecalcQueueReadService.php',
     'BCC\\Trust\\Core\\Application\\ScoreContributorService' => $baseDir . '/app/Domain/Core/Application/ScoreContributorService.php',

@@ -77,15 +77,29 @@
  * inventing a standing check here would be a second implementation of
  * member standing.
  *
- * ⚠ **Reportability is NOT represented.** There is no reporting
- * capability, and its absence is a recorded decision rather than an
- * oversight: §4.32.15 carries reporting as an **open proposal**, and
- * §4.32.9's reason-code inventory has no entry for it. Adding a capability
- * the contract has not accepted would make the client render a control
- * whose server side does not exist. When the moderation integration is
- * designed, the decision point is `ModerationQueueService`'s queue-kind
- * map plus a new row capability here.
- * {@see self::REPORTABILITY_UNDECIDED}.
+ * ⚠ **Reportability is now DECIDED, and this class changed accordingly.**
+ * An earlier revision deliberately emitted no reporting capability,
+ * because §4.32.15 carried reporting as an open proposal. §4.32.16 settled
+ * it: announcements **are** reportable, through the moderation workflow
+ * that already exists. So `can_report` is a row capability like the
+ * others, and {@see self::REPORTABILITY_UNDECIDED} is now `false` rather
+ * than deleted — a reader comparing revisions should be able to see the
+ * flip was deliberate instead of finding the guard simply gone.
+ *
+ * Three things reporting is NOT, each stated because the natural
+ * implementation gets one of them wrong:
+ *
+ *   - **Not a reaction.** Reactions and reporting were decided separately
+ *     and in opposite directions. A reaction is approval; a report is an
+ *     escalation. Neither answer follows from the other.
+ *   - **Not an ownership question.** The operator is neither privileged
+ *     nor forbidden, and the generic ownership reason must never be a
+ *     report-gate denial.
+ *   - **Not scoring, and not a hide.** No reputation, trust or fraud
+ *     signal, and no automatic hiding. This class cannot cause either —
+ *     it only describes a control — but the auto-hide exclusion that
+ *     §4.32.16 requires lives in
+ *     {@see \BCC\Trust\Core\Announcements\AnnouncementModerationPolicy}.
  */
 
 declare(strict_types=1);
@@ -128,6 +142,19 @@ final class AnnouncementCapabilityResolver
     public const REASON_FEATURE_DISABLED  = 'feature_disabled';
 
     /**
+     * ⚠ The one capability reason that is neither a standing fact nor an
+     * availability fact. The report endpoint is idempotent per
+     * (reporter, target), so a second report is ACCEPTED and changes
+     * nothing — a client rendering the control as still-available would
+     * invite an action with no effect.
+     *
+     * ⚠⚠ It is therefore VIEWER-DEPENDENT, which is a further reason
+     * `can_report` cannot appear on a cacheable public response
+     * (§4.32.11).
+     */
+    public const REASON_ALREADY_REPORTED  = 'already_reported';
+
+    /**
      * The one wire reason for every ownership refusal, whatever the
      * underlying cause (§4.32.2). Re-exported from the authority rather
      * than re-declared so the two cannot drift: a second literal is how a
@@ -155,11 +182,40 @@ final class AnnouncementCapabilityResolver
     ];
 
     /**
-     * Marker for the one product decision this class is waiting on. Read
-     * by a test that asserts no reportability capability has been added
-     * silently — see the class docblock.
+     * The closed inventory of report-gate denial reasons (§4.32.16).
+     *
+     * ⚠ `announcement_archived` is deliberately ABSENT. An archived
+     * announcement keeps its permalink and its public record (§4.32.6), so
+     * it stays reportable. Archival closes authoring and commenting; it
+     * does not retroactively make a notice unchallengeable.
+     *
+     * ⚠ The generic ownership reason is absent too. Reporting is not an
+     * ownership question — and the operator is neither privileged nor
+     * forbidden here.
+     *
+     * @var list<string>
      */
-    public const REPORTABILITY_UNDECIDED = true;
+    public const CAN_REPORT_REASONS = [
+        self::REASON_AUTH_REQUIRED,
+        self::REASON_UNAVAILABLE,
+        self::REASON_SUSPENDED,
+        self::REASON_FRAUD_LOCKED,
+        self::REASON_FEATURE_DISABLED,
+        self::REASON_ALREADY_REPORTED,
+    ];
+
+    /**
+     * ⚠ WAS the marker for an open product decision, and is now `false`
+     * because §4.32.16 DECIDED it: announcements are reportable through the
+     * existing moderation workflow.
+     *
+     * Kept rather than deleted, and kept as a constant rather than a
+     * comment, because the test that used to assert "no reportability
+     * capability has appeared" now asserts the opposite — and a reader
+     * comparing the two revisions should be able to see that the flip was
+     * deliberate rather than find the guard simply gone.
+     */
+    public const REPORTABILITY_UNDECIDED = false;
 
     // ── (b) Owner-level, per page ────────────────────────────────────────
 
@@ -236,7 +292,7 @@ final class AnnouncementCapabilityResolver
      *
      * @return array{
      *     can_edit: Entry, can_pin: Entry, can_archive: Entry,
-     *     can_manage_comments: Entry, can_comment: Entry
+     *     can_manage_comments: Entry, can_comment: Entry, can_report: Entry
      * }
      */
     public static function forRow(
@@ -259,6 +315,11 @@ final class AnnouncementCapabilityResolver
             // is worse than a closed discussion.
             'can_manage_comments' => self::manageComments($isOperator, $featureEnabled),
             'can_comment'         => self::comment($row, $viewer, $archived, $published, $featureEnabled),
+            // ⚠ NOT gated on $archived. §4.32.6 keeps an archived
+            // announcement publicly readable at its permalink, so it stays
+            // challengeable. The report gate is the only row capability
+            // that survives archival alongside moderation.
+            'can_report'          => self::report($row, $viewer, $published, $featureEnabled),
         ];
     }
 
@@ -485,6 +546,74 @@ final class AnnouncementCapabilityResolver
             // copy. Standing and suspension present identically to a
             // member: "you may not post right now".
             return Permission::deny(self::REASON_SUSPENDED);
+        }
+        return Permission::allow();
+    }
+
+    /**
+     * The report gate (§4.32.16).
+     *
+     * Fixed order, same discipline as the comment gate:
+     *   1. feature off       — nothing about this surface exists
+     *   2. not available     — not published/due, so there is nothing public
+     *                          to escalate; a draft is only visible to its
+     *                          own author
+     *   3. auth required     — a signed-in viewer could report
+     *   4. suspended         — this viewer specifically may not
+     *   5. fraud locked      — likewise
+     *   6. already reported  — accepted, but would change nothing
+     *
+     * ⚠⚠ ARCHIVED IS NOT A RUNG, and that is the difference from
+     * {@see self::comment()}. An archived announcement keeps its permalink
+     * and its public record, so it remains reportable — archival closes
+     * authoring and commenting, it does not make a published notice
+     * unchallengeable.
+     *
+     * ⚠ OWNERSHIP IS NOT A RUNG EITHER, in both directions. The operator is
+     * not privileged, and the generic ownership reason must never appear
+     * here — but the operator is not FORBIDDEN from reporting their own
+     * announcement either. That is a strange act, not an unsafe one, and a
+     * server that special-cased it would be making a product judgement the
+     * contract did not ask for.
+     *
+     * ⚠ `good_standing` is NOT a rung. Commenting asks for standing because
+     * it writes public prose; reporting writes nothing public and is how a
+     * member in poor standing escalates something genuinely wrong. Gating it
+     * on standing would silence exactly the reporters least able to be heard
+     * another way. Suspension and fraud lock still close it, because those
+     * are abuse states rather than reputation ones.
+     *
+     * @param array<string, mixed> $row
+     * @param array<string, mixed> $viewer
+     *
+     * @return Entry
+     */
+    private static function report(
+        array $row,
+        array $viewer,
+        bool $published,
+        bool $featureEnabled
+    ): array {
+        if (!$featureEnabled) {
+            return Permission::deny(self::REASON_FEATURE_DISABLED);
+        }
+        if (!$published) {
+            return Permission::deny(self::REASON_UNAVAILABLE);
+        }
+        if (!self::flag($viewer, 'authenticated', false)) {
+            return Permission::deny(
+                self::REASON_AUTH_REQUIRED,
+                'Sign in to report this announcement.'
+            );
+        }
+        if (self::flag($viewer, 'suspended', true)) {
+            return Permission::deny(self::REASON_SUSPENDED);
+        }
+        if (self::flag($viewer, 'fraud_locked', true)) {
+            return Permission::deny(self::REASON_FRAUD_LOCKED);
+        }
+        if (self::flag($viewer, 'already_reported', false)) {
+            return Permission::deny(self::REASON_ALREADY_REPORTED);
         }
         return Permission::allow();
     }
