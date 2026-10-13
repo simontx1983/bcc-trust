@@ -77,6 +77,88 @@ final class VerifiedOperatorResolverStatesIntegrationTest extends TestCase
         foreach (['bcc_onchain_claims', 'bcc_onchain_validators', 'bcc_onchain_collections', 'bcc_wallet_links'] as $t) {
             $wpdb->query('TRUNCATE TABLE `' . $wpdb->prefix . $t . '`');
         }
+        self::normaliseClaimsSchema();
+    }
+
+    /**
+     * Put the claims table in the shape this suite asserts against: the
+     * shipped `schema-claims.php` shape, WITHOUT the optional
+     * `verified_operator_slot` + `uq_verified_operator` pair.
+     *
+     * ⚠⚠ THIS IS NOT DEFENSIVE TIDYING — WITHOUT IT THIS SUITE FAILS IN CI,
+     * AND IT FAILED EXACTLY THAT WAY ON THE FIRST RUN. The constraint is
+     * added by the hand-run `scripts/claims-verified-operator-constraint.php`,
+     * and `VerifiedOperatorConstraintAuditIntegrationTest` executes that
+     * script for real. That file clears the constraint in its own `setUp()`
+     * rather than a `tearDown()` — deliberately, so that IT is hermetic
+     * whatever the order — which means it LEAVES THE CONSTRAINT APPLIED on
+     * the shared throwaway database when its last case finishes. This class
+     * sorts immediately after it, so it inherited the constraint and the
+     * second verified-operator insert was rejected.
+     *
+     * ⚠ That is also why the first run FAILED ON MySQL AND PASSED ON MariaDB,
+     * which reads at a glance like an engine difference and is not: the
+     * constraint suite carries `#[Group('integration')]` only, so it never
+     * runs in the `--group mariadb` job, and that job's schema was simply
+     * never modified.
+     *
+     * Dropping the pair here is safe ONLY because the integration database is
+     * disposable and rebuilt per run. Nothing here touches a real environment,
+     * and the production default is "not applied" on any environment where
+     * nobody has run that script.
+     *
+     * Making the precondition explicit is better than inheriting it: this
+     * suite exercises the `AMBIGUOUS` branch, and `AMBIGUOUS` is the state the
+     * constraint exists to prevent. A fixture for it has to say which schema
+     * it is speaking about.
+     */
+    private static function normaliseClaimsSchema(): void
+    {
+        global $wpdb;
+        $claims = $wpdb->prefix . 'bcc_onchain_claims';
+
+        if (self::claimsColumnExists('verified_operator_slot')) {
+            $wpdb->query(
+                'ALTER TABLE `' . $claims . '`'
+                . ' DROP INDEX uq_verified_operator, DROP COLUMN verified_operator_slot'
+            );
+        }
+
+        // The constraint suite drops uq_user_entity in one case to prove its
+        // audit does not lean on it. Restore it, because two cases here rely
+        // on it holding (one user cannot hold two rows on one entity).
+        $hasUserEntity = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+                AND INDEX_NAME = 'uq_user_entity'",
+            $claims
+        ));
+        if ($hasUserEntity === 0) {
+            $wpdb->query(
+                'ALTER TABLE `' . $claims . '`'
+                . ' ADD UNIQUE KEY uq_user_entity (user_id, entity_type, entity_id)'
+            );
+        }
+
+        // Postcondition, asserted rather than assumed: a silently failed
+        // ALTER would otherwise make every AMBIGUOUS case below fail with an
+        // opaque "insert must succeed", which is precisely the diagnosis that
+        // cost a CI round here.
+        self::assertFalse(
+            self::claimsColumnExists('verified_operator_slot'),
+            'the optional verified-operator constraint must be absent for this suite'
+        );
+    }
+
+    private static function claimsColumnExists(string $column): bool
+    {
+        global $wpdb;
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s",
+            $wpdb->prefix . 'bcc_onchain_claims',
+            $column
+        )) > 0;
     }
 
     // ── Fixtures ──────────────────────────────────────────────────────────
@@ -390,6 +472,95 @@ final class VerifiedOperatorResolverStatesIntegrationTest extends TestCase
         // assertion above is about the cap and not about a broken fixture.
         $withinCap = ClaimRepository::resolveVerifiedOperatorForPages([self::PAGE_ID]);
         self::assertSame(ClaimRepository::OPERATOR_RESOLVED, $withinCap[self::PAGE_ID]['state']);
+    }
+
+    // ── The optional constraint, and the gap it does not close ────────────
+
+    /**
+     * ⚠⚠⚠ THE FINDING, PINNED. The optional `uq_verified_operator` constraint
+     * is scoped to an ENTITY, so it closes the one-validator contested state
+     * and leaves the PER-PAGE one wide open.
+     *
+     * With the constraint applied:
+     *   - two verified operators on ONE validator  → the insert is REJECTED
+     *   - two verified operators on TWO validators
+     *     bound to the SAME page                   → both inserts SUCCEED,
+     *                                                and the page is AMBIGUOUS
+     *
+     * `createExclusiveClaim()` has the same blind spot for the same reason:
+     * it locks on `bcc_claim:{type}:{entity_id}:{role}` and checks
+     * `getPrimaryClaim` for that entity. So on a multi-chain validator page
+     * the contested state is reachable through the ORDINARY write path, with
+     * no manual SQL and with the constraint in place.
+     *
+     * Pinned, NOT fixed — whether a multi-validator page should be claimable
+     * per chain is a product decision. This case exists so the gap cannot be
+     * closed by accident and reopened by accident.
+     */
+    public function testTheOptionalConstraintStopsTheOneValidatorCaseAndNotThePerPageCase(): void
+    {
+        global $wpdb;
+        $claims = $wpdb->prefix . 'bcc_onchain_claims';
+
+        $applied = $wpdb->query(
+            'ALTER TABLE `' . $claims . '`'
+            . " ADD COLUMN verified_operator_slot VARCHAR(64)"
+            . "   GENERATED ALWAYS AS (CASE WHEN claim_role = 'operator' AND status = 'verified'"
+            . "     THEN CONCAT(entity_type, ':', entity_id) END) VIRTUAL,"
+            . ' ADD UNIQUE KEY uq_verified_operator (verified_operator_slot)'
+        );
+        self::assertNotFalse($applied, 'the fixture constraint must apply for this case to mean anything');
+        self::assertTrue(self::claimsColumnExists('verified_operator_slot'));
+
+        try {
+            // ── One validator, two operators: the constraint bites.
+            $vid = $this->validator($this->walletLink(self::USER_A, self::PAGE_ID));
+            self::assertNotFalse($this->rawClaim(self::USER_A, 'validator', $vid), 'first claim');
+            self::assertFalse(
+                $this->rawClaim(self::USER_B, 'validator', $vid),
+                'the constraint must reject a SECOND verified operator on one validator'
+            );
+
+            // ── Two validators on the same page: it does not.
+            $vid2 = $this->validator($this->walletLink(self::USER_B, self::PAGE_ID));
+            self::assertNotFalse(
+                $this->rawClaim(self::USER_B, 'validator', $vid2),
+                'a different entity is a different slot, so this is permitted'
+            );
+
+            $r = ClaimRepository::resolveVerifiedOperatorForPage(self::PAGE_ID);
+            self::assertSame(
+                ClaimRepository::OPERATOR_AMBIGUOUS,
+                $r['state'],
+                'the page is contested even though every per-entity constraint is satisfied'
+            );
+            self::assertNull($r['user_id']);
+        } finally {
+            // Restore the shipped shape for whatever runs next, and do it in a
+            // finally — the whole reason this suite failed its first CI round
+            // was a sibling leaving this constraint behind.
+            $wpdb->query(
+                'ALTER TABLE `' . $claims . '`'
+                . ' DROP INDEX uq_verified_operator, DROP COLUMN verified_operator_slot'
+            );
+        }
+    }
+
+    /** Insert without asserting success — the caller decides what to expect. */
+    private function rawClaim(int $userId, string $entityType, int $entityId): bool
+    {
+        global $wpdb;
+        return (bool) $wpdb->insert($wpdb->prefix . 'bcc_onchain_claims', [
+            'user_id'        => $userId,
+            'entity_type'    => $entityType,
+            'entity_id'      => $entityId,
+            'wallet_address' => 'cosmos1resolver' . $userId,
+            'chain_id'       => self::CHAIN_ID,
+            'claim_role'     => 'operator',
+            'status'         => 'verified',
+            'verified_at'    => gmdate('Y-m-d H:i:s'),
+            'created_at'     => gmdate('Y-m-d H:i:s'),
+        ]);
     }
 
     public function testDuplicatePageIdsAreDedupedRatherThanMultiplyingRows(): void
