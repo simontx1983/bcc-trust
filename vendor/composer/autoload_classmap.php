@@ -298,6 +298,7 @@ return array(
     'BCC\\Trust\\Core\\Support\\JwtToken' => $baseDir . '/app/Domain/Core/Support/JwtToken.php',
     'BCC\\Trust\\Core\\Support\\MemberCardPrefetcher' => $baseDir . '/app/Domain/Core/Support/MemberCardPrefetcher.php',
     'BCC\\Trust\\Core\\Support\\MemberSummaryPrefetcher' => $baseDir . '/app/Domain/Core/Support/MemberSummaryPrefetcher.php',
+    'BCC\\Trust\\Core\\Support\\NoReactionsGate' => $baseDir . '/app/Domain/Core/Support/NoReactionsGate.php',
     'BCC\\Trust\\Core\\Support\\NotificationPrefs' => $baseDir . '/app/Domain/Core/Support/NotificationPrefs.php',
     'BCC\\Trust\\Core\\Support\\NotificationType' => $baseDir . '/app/Domain/Core/Support/NotificationType.php',
     'BCC\\Trust\\Core\\Support\\PageCardPrefetcher' => $baseDir . '/app/Domain/Core/Support/PageCardPrefetcher.php',

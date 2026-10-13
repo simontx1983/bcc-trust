@@ -448,6 +448,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Support\\JwtToken' => __DIR__ . '/../..' . '/app/Domain/Core/Support/JwtToken.php',
         'BCC\\Trust\\Core\\Support\\MemberCardPrefetcher' => __DIR__ . '/../..' . '/app/Domain/Core/Support/MemberCardPrefetcher.php',
         'BCC\\Trust\\Core\\Support\\MemberSummaryPrefetcher' => __DIR__ . '/../..' . '/app/Domain/Core/Support/MemberSummaryPrefetcher.php',
+        'BCC\\Trust\\Core\\Support\\NoReactionsGate' => __DIR__ . '/../..' . '/app/Domain/Core/Support/NoReactionsGate.php',
         'BCC\\Trust\\Core\\Support\\NotificationPrefs' => __DIR__ . '/../..' . '/app/Domain/Core/Support/NotificationPrefs.php',
         'BCC\\Trust\\Core\\Support\\NotificationType' => __DIR__ . '/../..' . '/app/Domain/Core/Support/NotificationType.php',
         'BCC\\Trust\\Core\\Support\\PageCardPrefetcher' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PageCardPrefetcher.php',
