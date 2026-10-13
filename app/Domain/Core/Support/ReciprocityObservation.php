@@ -56,6 +56,30 @@ final class ReciprocityObservation
     ];
 
     /**
+     * Non-reciprocity triggers that are ALSO observations carrying no
+     * penalty.
+     *
+     *  - `uniform_voting` — >= BCC_TRUST_UNIFORM_VOTE_MIN votes in 7 days
+     *    at more than 90% or less than 10% positive. It establishes that a
+     *    member's ratings are CONSISTENT, which is what an honest rater
+     *    with consistent experience produces. A satisfied customer and a
+     *    sock puppet are indistinguishable to it, and it penalised the
+     *    consumer-protection case (someone who only flags poor work).
+     *
+     * ⚠ NAMING DEBT, recorded rather than hidden: this class is called
+     * ReciprocityObservation and now carries a trigger that is not about
+     * reciprocity. The alternative was a second, parallel class with the
+     * same shape, which §11 forbids and which would let two surfaces
+     * describe the same trigger differently. A rename belongs in its own
+     * change, not in a scoring fix.
+     *
+     * @var list<string>
+     */
+    public const CONSISTENCY_TRIGGERS = [
+        'uniform_voting',
+    ];
+
+    /**
      * Short operator-facing qualifier. Rendering is the template's job;
      * this is the wording, held in one place so two surfaces cannot
      * describe the same trigger differently.
@@ -64,7 +88,18 @@ final class ReciprocityObservation
 
     public static function isNonPunitive(string $trigger): bool
     {
-        return in_array($trigger, self::TRIGGERS, true);
+        return in_array($trigger, self::TRIGGERS, true)
+            || in_array($trigger, self::CONSISTENCY_TRIGGERS, true);
+    }
+
+    /**
+     * Every trigger that carries no penalty, reciprocity or otherwise.
+     *
+     * @return list<string>
+     */
+    public static function all(): array
+    {
+        return array_merge(self::TRIGGERS, self::CONSISTENCY_TRIGGERS);
     }
 
     /**
