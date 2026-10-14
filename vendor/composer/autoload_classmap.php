@@ -299,6 +299,7 @@ return array(
     'BCC\\Trust\\Core\\Support\\GroupInteractionGate' => $baseDir . '/app/Domain/Core/Support/GroupInteractionGate.php',
     'BCC\\Trust\\Core\\Support\\InternalPath' => $baseDir . '/app/Domain/Core/Support/InternalPath.php',
     'BCC\\Trust\\Core\\Support\\JwtToken' => $baseDir . '/app/Domain/Core/Support/JwtToken.php',
+    'BCC\\Trust\\Core\\Support\\KeysetCursor' => $baseDir . '/app/Domain/Core/Support/KeysetCursor.php',
     'BCC\\Trust\\Core\\Support\\MemberCardPrefetcher' => $baseDir . '/app/Domain/Core/Support/MemberCardPrefetcher.php',
     'BCC\\Trust\\Core\\Support\\MemberSummaryPrefetcher' => $baseDir . '/app/Domain/Core/Support/MemberSummaryPrefetcher.php',
     'BCC\\Trust\\Core\\Support\\NoReactionsGate' => $baseDir . '/app/Domain/Core/Support/NoReactionsGate.php',
