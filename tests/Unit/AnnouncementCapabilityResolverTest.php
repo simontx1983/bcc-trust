@@ -274,10 +274,10 @@ final class AnnouncementCapabilityResolverTest extends TestCase
 
     // ── 3. Row scope (c) ─────────────────────────────────────────────────
 
-    public function testTheRowScopeIsExactlyTheFiveContractEntries(): void
+    public function testTheRowScopeIsExactlyTheSixContractEntries(): void
     {
         self::assertSame(
-            ['can_edit', 'can_pin', 'can_archive', 'can_manage_comments', 'can_comment'],
+            ['can_edit', 'can_pin', 'can_archive', 'can_manage_comments', 'can_comment', 'can_report'],
             array_keys(Caps::forRow(self::operator(), self::publishedRow(), self::goodMember(), true))
         );
     }
@@ -304,6 +304,15 @@ final class AnnouncementCapabilityResolverTest extends TestCase
         self::assertTrue(
             Permission::isAllowed($caps, 'can_manage_comments'),
             'an archived discussion nobody can moderate is worse than a closed one'
+        );
+
+        // ⚠⚠ AND the report gate. §4.32.16: an archived announcement keeps
+        // its permalink and its public record, so it stays challengeable.
+        // `announcement_archived` is deliberately NOT in CAN_REPORT_REASONS,
+        // and this is the assertion that proves the two gates diverge.
+        self::assertTrue(
+            Permission::isAllowed($caps, 'can_report'),
+            'archival closes authoring, not challenge'
         );
     }
 
@@ -420,7 +429,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
     public function testFeatureOffDeniesEveryRowCapabilityWithTheFeatureReason(): void
     {
         $caps = Caps::forRow(self::operator(), self::publishedRow(), self::goodMember(), false);
-        self::assertCount(5, $caps);
+        self::assertCount(6, $caps);
         foreach (array_keys($caps) as $key) {
             self::assertFalse(Permission::isAllowed($caps, $key), $key);
             self::assertSame(Caps::REASON_FEATURE_DISABLED, $caps[$key]['reason_code'], $key);
@@ -696,20 +705,168 @@ final class AnnouncementCapabilityResolverTest extends TestCase
         );
     }
 
-    /** MUST-NOT-HAPPEN #8 — reportability is an open proposal (§4.32.15). */
-    public function testNoReportabilityCapabilityHasBeenAddedSilently(): void
+    /**
+     * ⚠ WAS "MUST-NOT-HAPPEN #8 — no reportability capability may appear".
+     * §4.32.16 DECIDED the question, so this case is INVERTED rather than
+     * deleted: the guard still exists, it now points the other way, and a
+     * reader comparing revisions can see the flip was deliberate.
+     *
+     * What it still protects is the SHAPE of the answer — reporting lives in
+     * the row scope and nowhere else.
+     */
+    public function testReportabilityIsDecidedAndLivesOnlyInTheRowScope(): void
     {
-        self::assertTrue(Caps::REPORTABILITY_UNDECIDED);
+        self::assertFalse(Caps::REPORTABILITY_UNDECIDED, 'settled by §4.32.16');
 
-        $surfaces = array_merge(
-            array_keys(Caps::forRow(self::operator(), self::publishedRow(), self::goodMember(), true)),
-            array_keys(Caps::forAdministrator(true, true)),
-            ['can_create', 'can_manage']
+        $row = array_keys(Caps::forRow(self::operator(), self::publishedRow(), self::goodMember(), true));
+        self::assertContains('can_report', $row);
+
+        // 🔒 NOT on the owner scope. A page-level "may report" would be as
+        // wrong as a page-level "may comment": reportability depends on the
+        // row being published and on whether THIS viewer already reported it.
+        $block = Caps::forOwnerScope(self::operator(), true);
+        self::assertNotNull($block);
+        self::assertArrayNotHasKey('can_report', $block['capabilities']);
+
+        // 🔒 NOT on the administrator scope either — admins resolve reports,
+        // they do not file them through this surface.
+        self::assertArrayNotHasKey('can_report', Caps::forAdministrator(true, true));
+
+        // 🔒 And still no public producer, so no public response can carry it.
+        $methods = array_map(
+            static fn (\ReflectionMethod $m): string => $m->getName(),
+            (new \ReflectionClass(Caps::class))->getMethods(\ReflectionMethod::IS_PUBLIC)
         );
-        foreach ($surfaces as $key) {
-            self::assertStringNotContainsStringIgnoringCase('report', $key, $key);
+        sort($methods);
+        self::assertSame(['forAdministrator', 'forCommentsResponse', 'forOwnerScope', 'forRow'], $methods);
+    }
+
+    /**
+     * The report ladder, in its contract order. Each case sets up the
+     * expected reason AND a later rung, so a reordering fails here rather
+     * than only a missing branch.
+     *
+     * @param array<string, mixed> $row
+     * @param array<string, mixed> $viewer
+     */
+    #[DataProvider('reportGateOrdering')]
+    public function testTheReportGateReportsReasonsInTheContractOrder(
+        array $row,
+        array $viewer,
+        bool $featureEnabled,
+        string $expected
+    ): void {
+        $caps = Caps::forRow(self::operator(), $row, $viewer, $featureEnabled);
+        self::assertSame($expected, $caps['can_report']['reason_code']);
+    }
+
+    /** @return iterable<string, array{array<string, mixed>, array<string, mixed>, bool, string}> */
+    public static function reportGateOrdering(): iterable
+    {
+        $worst = [
+            'authenticated' => false, 'suspended' => true,
+            'fraud_locked'  => true,  'already_reported' => true,
+        ];
+        $pub = ['status' => Caps::STATUS_PUBLISHED, 'is_archived' => false, 'comments_enabled' => true];
+
+        yield 'feature off beats everything' => [$pub, $worst, false, Caps::REASON_FEATURE_DISABLED];
+        yield 'unavailable beats auth' => [
+            ['status' => Caps::STATUS_DRAFT, 'is_archived' => false, 'comments_enabled' => true],
+            $worst, true, Caps::REASON_UNAVAILABLE,
+        ];
+        yield 'auth beats suspension' => [$pub, $worst, true, Caps::REASON_AUTH_REQUIRED];
+        yield 'suspension beats fraud' => [
+            $pub,
+            ['authenticated' => true, 'suspended' => true, 'fraud_locked' => true, 'already_reported' => true],
+            true, Caps::REASON_SUSPENDED,
+        ];
+        yield 'fraud beats already-reported' => [
+            $pub,
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => true, 'already_reported' => true],
+            true, Caps::REASON_FRAUD_LOCKED,
+        ];
+        yield 'already reported' => [
+            $pub,
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'already_reported' => true],
+            true, Caps::REASON_ALREADY_REPORTED,
+        ];
+    }
+
+    /**
+     * ⚠⚠ The two differences from the COMMENT gate, asserted together
+     * because each is a place the natural implementation would copy the
+     * comment ladder and be wrong.
+     */
+    public function testTheReportGateDivergesFromTheCommentGateInExactlyTwoWays(): void
+    {
+        // 1. Archived: comments close, reporting does not.
+        $archived = Caps::forRow(
+            self::denied(),
+            ['status' => Caps::STATUS_PUBLISHED, 'is_archived' => true, 'comments_enabled' => true],
+            self::goodMember(),
+            true
+        );
+        self::assertFalse(Permission::isAllowed($archived, 'can_comment'));
+        self::assertTrue(Permission::isAllowed($archived, 'can_report'));
+
+        // 2. Standing: commenting needs it, reporting does not. Gating
+        //    reporting on standing would silence exactly the reporters least
+        //    able to be heard another way.
+        $poorStanding = Caps::forRow(
+            self::denied(),
+            self::publishedRow(),
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false],
+            true
+        );
+        self::assertFalse(Permission::isAllowed($poorStanding, 'can_comment'));
+        self::assertTrue(Permission::isAllowed($poorStanding, 'can_report'));
+
+        // And NOT a third way: comments_enabled is a comment switch only.
+        $commentsOff = Caps::forRow(
+            self::denied(),
+            ['status' => Caps::STATUS_PUBLISHED, 'is_archived' => false, 'comments_enabled' => false],
+            self::goodMember(),
+            true
+        );
+        self::assertFalse(Permission::isAllowed($commentsOff, 'can_comment'));
+        self::assertTrue(Permission::isAllowed($commentsOff, 'can_report'));
+    }
+
+    /** The report inventory is closed, and every listed reason is reachable. */
+    public function testEveryReportReasonEmittedIsInTheClosedInventory(): void
+    {
+        $seen = [];
+        foreach (self::reportGateOrdering() as [$row, $viewer, $feature, $_e]) {
+            foreach ([self::operator(), self::denied()] as $decision) {
+                $code = Caps::forRow($decision, $row, $viewer, $feature)['can_report']['reason_code'];
+                if (is_string($code)) { $seen[$code] = true; }
+            }
         }
-        self::assertNotContains('can_report', Caps::CAN_COMMENT_REASONS);
+        foreach (array_keys($seen) as $code) {
+            self::assertContains($code, Caps::CAN_REPORT_REASONS, $code);
+        }
+        self::assertSame(
+            [],
+            array_values(array_diff(Caps::CAN_REPORT_REASONS, array_keys($seen))),
+            'the inventory lists a reason nothing can emit'
+        );
+
+        // ⚠ The ownership reason must never be among them, for an operator or
+        // a non-operator. Reporting is not an ownership question.
+        self::assertNotContains(Caps::REASON_NOT_CLAIMER, Caps::CAN_REPORT_REASONS);
+        // ⚠ Nor archived — that absence IS the §4.32.6 guarantee.
+        self::assertNotContains(Caps::REASON_ARCHIVED, Caps::CAN_REPORT_REASONS);
+    }
+
+    /**
+     * An operator may report their own announcement. Strange, not unsafe —
+     * and a server that special-cased it would be making a product judgement
+     * the contract did not ask for.
+     */
+    public function testAnOperatorMayReportTheirOwnAnnouncement(): void
+    {
+        $caps = Caps::forRow(self::operator(), self::publishedRow(), self::goodMember(), true);
+        self::assertTrue(Permission::isAllowed($caps, 'can_report'));
     }
 
     // ── 7. Source-level invariants ───────────────────────────────────────
