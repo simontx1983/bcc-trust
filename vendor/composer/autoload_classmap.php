@@ -285,6 +285,7 @@ return array(
     'BCC\\Trust\\Core\\Services\\x\\XVerificationService' => $baseDir . '/app/Domain/Core/Services/x/XVerificationService.php',
     'BCC\\Trust\\Core\\Support\\ApiResponse' => $baseDir . '/app/Domain/Core/Support/ApiResponse.php',
     'BCC\\Trust\\Core\\Support\\BearerAuth' => $baseDir . '/app/Domain/Core/Support/BearerAuth.php',
+    'BCC\\Trust\\Core\\Support\\BoundedIntParam' => $baseDir . '/app/Domain/Core/Support/BoundedIntParam.php',
     'BCC\\Trust\\Core\\Support\\CacheManager' => $baseDir . '/app/Domain/Core/Support/CacheManager.php',
     'BCC\\Trust\\Core\\Support\\CardUrlMap' => $baseDir . '/app/Domain/Core/Support/CardUrlMap.php',
     'BCC\\Trust\\Core\\Support\\CelebrationStash' => $baseDir . '/app/Domain/Core/Support/CelebrationStash.php',
