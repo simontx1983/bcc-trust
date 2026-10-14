@@ -282,14 +282,35 @@ final class AnnouncementsEndpointTest extends TestCase
      * reconciler marker so it would return ordinary drafts, and
      * `published` is served by the public list.
      */
-    public function testTheOwnerStatusEnumRefusesBlockedAndPublished(): void
+    /**
+     * ⚠⚠ `blocked` IS NOW ACCEPTED — this case previously asserted it was not,
+     * and the old reason is recorded because it was correct at the time.
+     *
+     * It read: *"no reconciler marker exists (§4.32.13)"*. That was true: with
+     * nothing to distinguish a blocked row from an ordinary draft, accepting
+     * the parameter would have returned ordinary drafts — a wrong page that
+     * looks right. Reconciler arm C now stamps
+     * `_bcc_announcement_blocked_at`, so the filter is real and the parameter
+     * means what it says.
+     *
+     * `published` is still refused, for its own unchanged reason: a published
+     * announcement is served by the public list.
+     */
+    public function testTheOwnerStatusEnumAcceptsBlockedButNotPublished(): void
     {
         $args = $this->route(self::OWNER_LIST)['args']['args'] ?? [];
         $enum = $args['status']['enum'] ?? null;
 
-        self::assertSame(['draft', 'scheduled'], $enum);
-        self::assertNotContains('blocked', (array) $enum, 'no reconciler marker exists (§4.32.13)');
+        self::assertSame(['draft', 'scheduled', 'blocked'], $enum);
         self::assertNotContains('published', (array) $enum, 'the public list serves published rows');
+
+        // ⚠ And the enum must BIND: beside a sanitizer it would be decorative,
+        // which is the /members defect. An explicit validator is required.
+        self::assertSame(
+            'rest_validate_request_arg',
+            $args['status']['validate_callback'] ?? null,
+            'an enum without an explicit validator does not bind'
+        );
     }
 
     public function testThePublicStateEnumIsExactlyActiveAndArchived(): void
@@ -438,7 +459,10 @@ final class AnnouncementsEndpointTest extends TestCase
         yield 'state casing'        => [self::PUBLIC_LIST, ['pageId' => 1, 'state' => 'ACTIVE'], 'state'];
         // limit bounds live in their own case (testAnOutOfRangeLimitIsRefusedRatherThanClamped)
         yield 'owner limit over'    => [self::OWNER_LIST, ['pageId' => 1, 'limit' => 51], 'limit'];
-        yield 'status blocked'      => [self::OWNER_LIST, ['pageId' => 1, 'status' => 'blocked'], 'status'];
+        // ⚠ `status blocked` was here and is REMOVED: reconciler arm C now
+        // produces the state and stamps a marker to filter on, so the owner
+        // route accepts it. See testTheOwnerStatusEnumAcceptsBlockedButNotPublished.
+        // `published` stays refused — the public list serves published rows.
         yield 'status published'    => [self::OWNER_LIST, ['pageId' => 1, 'status' => 'published'], 'status'];
         yield 'status nonsense'     => [self::OWNER_LIST, ['pageId' => 1, 'status' => 'whatever'], 'status'];
         yield 'status empty'        => [self::OWNER_LIST, ['pageId' => 1, 'status' => ''], 'status'];

@@ -1678,6 +1678,17 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
 // nothing can create an announcement. The type exists and the guards are
 // live; that is the whole of A1.
 \BCC\Trust\Core\Announcements\AnnouncementPostType::register();
+// §4.32.17 reconciler arm C — the publication-time authority re-check.
+// ⚠⚠ REGISTERED AT BOOT, NOT IN registerRoutes(). Its first placement was
+// inside the REST route registration, which meant it only ever hooked during
+// a REST request — and wp-cron is NOT a REST request, so on the real
+// scheduled path the guard would never have fired at all. The cron probe
+// caught it with has_action() returning false.
+// ⚠ Registered UNCONDITIONALLY, outside the feature switch: it must close a
+// scheduled row whose claim lapsed even if the feature is turned off between
+// scheduling and the due instant. Turning the feature off must never OPEN a
+// publication path.
+\BCC\Trust\Core\Announcements\AnnouncementPublicationGuard::register();
 
 // §K2 / §G1: hook PeepSo's user-search filter so users with
 // `bcc_privacy_discovery_optout = 1` are excluded from search results.
