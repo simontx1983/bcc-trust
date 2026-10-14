@@ -438,6 +438,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Services\\x\\XVerificationService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/x/XVerificationService.php',
         'BCC\\Trust\\Core\\Support\\ApiResponse' => __DIR__ . '/../..' . '/app/Domain/Core/Support/ApiResponse.php',
         'BCC\\Trust\\Core\\Support\\BearerAuth' => __DIR__ . '/../..' . '/app/Domain/Core/Support/BearerAuth.php',
+        'BCC\\Trust\\Core\\Support\\BoundedIntParam' => __DIR__ . '/../..' . '/app/Domain/Core/Support/BoundedIntParam.php',
         'BCC\\Trust\\Core\\Support\\CacheManager' => __DIR__ . '/../..' . '/app/Domain/Core/Support/CacheManager.php',
         'BCC\\Trust\\Core\\Support\\CardUrlMap' => __DIR__ . '/../..' . '/app/Domain/Core/Support/CardUrlMap.php',
         'BCC\\Trust\\Core\\Support\\CelebrationStash' => __DIR__ . '/../..' . '/app/Domain/Core/Support/CelebrationStash.php',
