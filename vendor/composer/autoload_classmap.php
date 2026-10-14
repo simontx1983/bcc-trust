@@ -12,6 +12,7 @@ return array(
     'BCC\\Trust\\Core\\Admin\\WalletAuditPage' => $baseDir . '/app/Domain/Core/Admin/WalletAuditPage.php',
     'BCC\\Trust\\Core\\Announcements\\AnnouncementCapabilityResolver' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementCapabilityResolver.php',
     'BCC\\Trust\\Core\\Announcements\\AnnouncementFeature' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementFeature.php',
+    'BCC\\Trust\\Core\\Announcements\\AnnouncementModerationPolicy' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementModerationPolicy.php',
     'BCC\\Trust\\Core\\Announcements\\AnnouncementPostType' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementPostType.php',
     'BCC\\Trust\\Core\\Announcements\\AnnouncementVisibility' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementVisibility.php',
     'BCC\\Trust\\Core\\Application\\Disputes\\DisputeAdjudicator' => $baseDir . '/app/Domain/Core/Application/Disputes/DisputeAdjudicator.php',

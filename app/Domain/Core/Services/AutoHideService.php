@@ -35,6 +35,7 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Log\Logger;
+use BCC\Trust\Core\Announcements\AnnouncementModerationPolicy;
 use BCC\Trust\Core\Repositories\ContentReportRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 
@@ -88,6 +89,38 @@ final class AutoHideService
 
         $count = $this->reportRepo->countPendingForTarget($targetKind, $targetId);
         if ($count < $threshold) {
+            return;
+        }
+
+        // §4.32.16 — ANNOUNCEMENTS ARE NEVER AUTOMATICALLY HIDDEN.
+        //
+        // Checked HERE rather than at the top of the method on purpose:
+        // this is the last gate before the only write, so the extra
+        // act-id -> module lookup runs only when a hide is actually about
+        // to happen (rare) instead of on every report (common). The
+        // guarantee is identical either way -- nothing is hidden.
+        $autoHide = AnnouncementModerationPolicy::autoHideDecision($targetId);
+        if ($autoHide !== AnnouncementModerationPolicy::AUTO_HIDE_ALLOWED) {
+            if ($autoHide === AnnouncementModerationPolicy::AUTO_HIDE_BLOCKED_ANNOUNCEMENT) {
+                // Ordinary policy, not a fault. The report stays filed and
+                // the admin queue still shows it; only the automatic
+                // action is withheld.
+                Logger::info('[AutoHideService] auto-hide withheld: announcement', [
+                    'act_id'        => $targetId,
+                    'pending_count' => $count,
+                    'threshold'     => $threshold,
+                ]);
+            } else {
+                // ⚠ The module could not be read, so this activity cannot
+                // be identified -- and an unidentifiable activity is not
+                // one to hide. WARNING, because a persistent occurrence is
+                // a fault rather than a decision.
+                Logger::warning('[AutoHideService] auto-hide withheld: module unresolved', [
+                    'act_id'        => $targetId,
+                    'pending_count' => $count,
+                    'threshold'     => $threshold,
+                ]);
+            }
             return;
         }
 
