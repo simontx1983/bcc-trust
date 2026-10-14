@@ -1776,6 +1776,12 @@ final class Plugin
         // direction while the switch is off — which is the whole life of
         // the feature until it ships.
         \BCC\Trust\Core\REST\AnnouncementsEndpoint::register();
+        // §4.32.13 announcement WRITE routes (A3). Registered unconditionally
+        // for the same reason as the reads above: an unregistered route is
+        // invisible to contract-parity-guard in both directions. Every handler
+        // refuses with 404 while the switch is off, and then again for a
+        // non-operator, so registration grants nothing.
+        \BCC\Trust\Core\REST\AnnouncementWriteEndpoint::register();
 
         // V2: Paginated group members (§4.7.7). Same privacy model as
         // §4.7.5 + §4.7.6 — secret-non-member 404s; closed-non-member
