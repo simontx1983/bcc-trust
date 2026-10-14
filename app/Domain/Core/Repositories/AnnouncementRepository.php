@@ -1,0 +1,660 @@
+<?php
+/**
+ * Announcement reads — api-contract-v1.md §4.32.1, §4.32.4, §4.32.12.
+ *
+ * The first code in the project that returns announcement DATA. Everything
+ * built before it returned a DECISION — who may act
+ * ({@see \BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority}), what
+ * the client may be told
+ * ({@see \BCC\Trust\Core\Announcements\AnnouncementCapabilityResolver}),
+ * which rows are public
+ * ({@see \BCC\Trust\Core\Announcements\AnnouncementVisibility}). This is
+ * where the §4.32.11 public/owner split either holds or leaks.
+ *
+ * ── FOUR READS, FOUR ORDERS, FOUR CURSOR TAGS ───────────────────────────
+ * §4.32.12 gives every collection a DIFFERENT order, so each read pairs its
+ * own `KeysetCursor::SURFACE_*` tag with its own `ORDER BY` in one place:
+ *
+ *   listActive()    ann_active     pinned first (<=1), then newest published_at
+ *   listArchived()  ann_archived   newest archived_at  <- a DIFFERENT column
+ *   rotator()       (no cursor)    pinned first then newest, capped at 5
+ *   listForOwner()  ann_owner      newest effective date
+ *
+ * The active and archived lists are the pair most likely to be conflated —
+ * both order by a datetime and an id — and they order by different columns.
+ * Applying one list's cursor to the other would skip or repeat rows with
+ * nothing in the response to show it happened, which is why the cursor
+ * carries a surface tag and why the tag lives next to the ORDER BY.
+ *
+ * ── ⚠⚠ FAIL-CLOSED READS: AN ERROR IS NOT "NO ANNOUNCEMENTS" ────────────
+ * Every read clears `$wpdb->last_error`, runs, and throws
+ * {@see RepositoryException} if it is non-empty — the
+ * `PageReadModelRepository::readScoreRowOrThrow()` idiom.
+ *
+ * This matters more here than almost anywhere else in the codebase. A
+ * failed query that returned `[]` would be indistinguishable from "this
+ * validator has not posted any announcements" — and an empty announcement
+ * bar looks COMPLETELY NORMAL. The failure would be invisible: no error, no
+ * log line a reader would notice, just a validator's official notices
+ * silently missing from their own page.
+ *
+ * ── ⚠⚠ WHY BOTH TABLE NAMES ARE INJECTED ────────────────────────────────
+ * Not stylistic — forced. The integration harness's shared `wp_posts` is a
+ * REDUCED table (`ID, post_title, post_name, post_type, post_status`) with
+ * **no `post_author` and no `post_date_gmt`**
+ * (`tests/Integration/bootstrap.php:707`). Two of the three §4.32.1
+ * predicates read exactly those missing columns, so this SQL could not be
+ * integration-tested against the shared table at all.
+ *
+ * Resolving both tables in the constructor — defaulting from `$wpdb`, the
+ * way `PageReadModelRepository` resolves its table once — keeps `$wpdb`
+ * inside the repository (§1) while letting the suite own its own fixture
+ * tables. It is the same move that made `AnnouncementVisibility` testable,
+ * and the reason #324's suite stopped poisoning its neighbours.
+ *
+ * ── UNCACHED, DELIBERATELY ──────────────────────────────────────────────
+ * No cache, and §5 does not require one — it requires generation-counter
+ * invalidation for caches that EXIST. There is no measured need: the
+ * feature is disabled, so there is no traffic. A cache would need five
+ * invalidation points (publish, pin, archive, edit, comment count), three
+ * of which are the operations §4.32 is most emphatic about, and a stale
+ * announcement bar shows a validator's official notice saying the wrong
+ * thing. §4.32.11 makes the public list viewer-independent, so a cache key
+ * will need no viewer component whenever one is wanted — that property is
+ * what makes deferring safe rather than a debt.
+ */
+
+declare(strict_types=1);
+
+namespace BCC\Trust\Core\Repositories;
+
+use BCC\Trust\Core\Announcements\AnnouncementCapabilityResolver;
+use BCC\Trust\Core\Announcements\AnnouncementPostType;
+use BCC\Trust\Core\Announcements\AnnouncementVisibility;
+use BCC\Trust\Core\Exceptions\RepositoryException;
+use BCC\Trust\Core\Support\KeysetCursor;
+use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+/**
+ * @phpstan-type Row object{
+ *     ID: int|numeric-string,
+ *     post_title: string,
+ *     post_excerpt: string,
+ *     post_content: string,
+ *     post_status: string,
+ *     post_author: int|numeric-string,
+ *     post_date_gmt: string,
+ *     post_modified_gmt: string,
+ *     is_pinned: int|numeric-string,
+ *     archived_at: ?string,
+ *     comments_enabled: ?string,
+ *     publish_at: ?string
+ * }
+ * @phpstan-type Page array{rows: list<Row>, has_more: bool}
+ */
+final class AnnouncementRepository
+{
+    /**
+     * §4.32.4 limits. `DEFAULT` when the caller sends none, `MAX` as the
+     * clamp — never an unbounded read (§2, and arch-guardrails checks
+     * `get_results`/`get_col` for a bound).
+     */
+    public const LIMIT_DEFAULT = 20;
+    public const LIMIT_MAX     = 50;
+
+    /** §4.32.4: the rotator is capped and mints no cursor. */
+    public const ROTATOR_CAP = 5;
+
+    /**
+     * Pin meta. ⚠ Pinning is NOT a post column — it is meta, so it joins
+     * like archival does and sorts on a derived expression.
+     */
+    public const META_PINNED_AT = '_bcc_announcement_pinned_at';
+
+    /** Scheduled rows carry their due date here (§4.32.13 `schedule`). */
+    public const META_PUBLISH_AT = '_bcc_announcement_publish_at';
+
+    /**
+     * ⚠⚠ THE COMMENT-COUNT PREDICATE LIVES HERE, IN ONE PLACE, ON PURPOSE.
+     *
+     * §4.32.7 requires that a removed comment stays as a public tombstone
+     * and **counts toward `comment_count` so the rendered count matches**.
+     * Whether a tombstone is `comment_approved = '0'` or a meta flag is
+     * **A5's** design decision and is not made here.
+     *
+     * Today the count is a MEASURED ZERO — nothing writes announcement
+     * comments yet — so the choice is not load-bearing. It will be the
+     * moment A5 lands, which is why it is one named constant to change
+     * rather than a predicate spread across call sites.
+     *
+     * ⚠ Do NOT confuse this with the FEED projection, which deliberately
+     * emits no count at all for an announcement rather than a zero
+     * (`FeedHydrationPipeline`, merged in #320). Different surfaces, both
+     * correct; "fixing" either to match the other is a regression.
+     */
+    public const COMMENT_COUNT_APPROVED_STATES = ['1', '0'];
+
+    private string $postsTable;
+    private string $metaTable;
+    private string $commentsTable;
+
+    /**
+     * Table names default from `$wpdb` and are overridable so the
+     * integration suite can own its fixtures — see the class docblock.
+     *
+     * @throws \InvalidArgumentException on a non-identifier table name
+     */
+    public function __construct(
+        ?string $postsTable = null,
+        ?string $metaTable = null,
+        ?string $commentsTable = null
+    ) {
+        global $wpdb;
+
+        $this->postsTable    = self::identifier($postsTable ?? (string) $wpdb->posts, 'Posts table');
+        $this->metaTable     = self::identifier($metaTable ?? (string) $wpdb->postmeta, 'Meta table');
+        $this->commentsTable = self::identifier(
+            $commentsTable ?? (string) $wpdb->prefix . 'comments',
+            'Comments table'
+        );
+    }
+
+    // ── Public reads (§4.32.11: published public data only) ──────────────
+
+    /**
+     * `?state=active` — pinned first (at most one), then newest first.
+     *
+     * ⚠ `is_pinned` is a field the OPERATOR CAN CHANGE, so a page boundary
+     * can shift under a reader mid-scroll (§4.32.12). That is exactly why
+     * the cursor key is the composite `pinned|published_at` and why the row
+     * id is a required tiebreak: ordering by the datetime alone is not a
+     * total order, and two announcements published in the same second would
+     * page unstably.
+     *
+     * @return Page
+     * @throws RepositoryException when the read fails
+     */
+    public function listActive(int $pageId, int $limit, ?string $cursor): array
+    {
+        return $this->publicPage(
+            $pageId,
+            $limit,
+            $cursor,
+            KeysetCursor::SURFACE_ANNOUNCEMENTS_ACTIVE,
+            AnnouncementVisibility::notArchivedSql($this->metaTable, 'p'),
+            'active'
+        );
+    }
+
+    /**
+     * `?state=archived` — newest `archived_at` first. The archive is the
+     * event being listed (§4.32.12), so it orders by a DIFFERENT column
+     * from the active list.
+     *
+     * ⚠ Archived announcements are still PUBLIC (§4.32.6) — they keep their
+     * permalink and their original `published_at`. So this read applies the
+     * same §4.32.1 visibility predicate and differs only in the archival
+     * filter.
+     *
+     * @return Page
+     * @throws RepositoryException when the read fails
+     */
+    public function listArchived(int $pageId, int $limit, ?string $cursor): array
+    {
+        return $this->publicPage(
+            $pageId,
+            $limit,
+            $cursor,
+            KeysetCursor::SURFACE_ANNOUNCEMENTS_ARCHIVED,
+            AnnouncementVisibility::archivedSql($this->metaTable, 'p'),
+            'archived'
+        );
+    }
+
+    /**
+     * The rotator — pinned first then newest, hard-capped at 5.
+     *
+     * Takes no cursor and mints none: §4.32.4 caps it and §4.32.12 makes
+     * its `pagination` inert. Expressed by having no cursor PARAMETER, so a
+     * caller cannot page it.
+     *
+     * @return list<Row>
+     * @throws RepositoryException when the read fails
+     */
+    public function rotator(int $pageId): array
+    {
+        $page = $this->publicPage(
+            $pageId,
+            self::ROTATOR_CAP,
+            null,
+            KeysetCursor::SURFACE_ANNOUNCEMENTS_ACTIVE,
+            AnnouncementVisibility::notArchivedSql($this->metaTable, 'p'),
+            'active'
+        );
+
+        return $page['rows'];
+    }
+
+    // ── Owner read — the ONLY one that may return unpublished rows ───────
+
+    /**
+     * `GET /me/validators/:pageId/announcements?status=…`
+     *
+     * ⚠⚠ The only read that returns draft, scheduled or `blocked` rows, and
+     * the only one that does NOT apply the §4.32.1 public predicate. It is
+     * therefore the only read that can leak, so:
+     *
+     *   - it takes the authority's DECISION ARRAY, never a page id and a
+     *     viewer id, and never a bool. §4.32.2 forbids `post_author`,
+     *     mirror claim rows, page metadata, PeepSo membership and read
+     *     models as authorization inputs — and a bool accepts all five
+     *     without a trace. Same discipline as
+     *     `AnnouncementCapabilityResolver`;
+     *   - a decision that is not `DECISION_OPERATOR` returns an EMPTY page
+     *     rather than throwing, because the route turns that into the
+     *     generic `not_claimer` denial (§4.32.11) and a distinguishable
+     *     exception here would be a second channel for the same fact;
+     *   - it additionally binds `post_author` to the resolved operator, so
+     *     even a correct decision cannot read another operator's drafts.
+     *     ⚠ That is a CONSISTENCY CHECK on the row, not an authorization
+     *     input: it can only ever narrow the result.
+     *
+     * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision
+     * @param list<string> $statuses subset of draft|scheduled|blocked
+     *
+     * @return Page
+     * @throws RepositoryException when the read fails
+     */
+    public function listForOwner(
+        int $pageId,
+        array $decision,
+        array $statuses,
+        int $limit,
+        ?string $cursor
+    ): array {
+        if (($decision['decision'] ?? null) !== ValidatorPageOperatorAuthority::DECISION_OPERATOR) {
+            return ['rows' => [], 'has_more' => false];
+        }
+
+        $operatorId = $decision['operator_user_id'] ?? null;
+        if (!is_int($operatorId) || $operatorId <= 0) {
+            // RESOLVED without a usable id is a contradiction. Empty rather
+            // than trusting half a decision.
+            return ['rows' => [], 'has_more' => false];
+        }
+
+        $wanted = self::ownerStatuses($statuses);
+        if ($wanted === []) {
+            return ['rows' => [], 'has_more' => false];
+        }
+
+        global $wpdb;
+
+        $limit  = self::clampLimit($limit);
+        $fetch  = $limit + 1;
+        $params = [AnnouncementPostType::POST_TYPE, $pageId, $operatorId];
+
+        $where = [
+            'p.post_type = %s',
+            'p.post_parent = %d',
+            'p.post_author = %d',
+            // ⚠ NOT the public predicate — this read exists to return rows
+            // the public predicate refuses. The ownership binding above is
+            // what replaces it.
+            AnnouncementVisibility::notArchivedSql($this->metaTable, 'p'),
+        ];
+
+        $statusIn = [];
+        foreach ($wanted as $status) {
+            $statusIn[] = '%s';
+            $params[]   = self::wpStatusFor($status);
+        }
+        $where[] = 'p.post_status IN (' . implode(', ', $statusIn) . ')';
+
+        // Effective date: publish_at for a scheduled row, else last
+        // modification (§4.32.12).
+        $effective = 'COALESCE(NULLIF(mp.meta_value, \'\'), p.post_modified_gmt)';
+
+        $decoded = KeysetCursor::decode(KeysetCursor::SURFACE_ANNOUNCEMENTS_OWNER, $cursor);
+        if ($decoded !== null) {
+            $where[]  = "({$effective} < %s OR ({$effective} = %s AND p.ID < %d))";
+            $params[] = $decoded['key'];
+            $params[] = $decoded['key'];
+            $params[] = $decoded['id'];
+        }
+
+        $sql = 'SELECT ' . $this->columns($effective) . '
+                  FROM ' . $this->postsTable . ' p
+                  ' . $this->metaJoins() . '
+                 WHERE ' . implode(' AND ', $where) . '
+                 ORDER BY effective_at DESC, p.ID DESC
+                 LIMIT %d';
+        $params[] = $fetch;
+
+        return $this->runPage($sql, $params, $limit);
+    }
+
+    // ── Batched comment counts (batch-then-shape, never per row) ─────────
+
+    /**
+     * Comment counts for a whole page of announcements, in ONE grouped
+     * query.
+     *
+     * ⚠ Never a per-row count. The convention is `CommentService`'s
+     * batch-then-shape split: the list method batches every side lookup
+     * first and the row shaper performs zero queries. A per-row count here
+     * would be an N+1 on a public read path.
+     *
+     * Returns a map keyed by announcement id. ⚠ An id with no comments is
+     * ABSENT from the map, not zero — the caller supplies the zero, so a
+     * missing key and a measured zero cannot be confused.
+     *
+     * @param list<int> $announcementIds
+     * @return array<int, int>
+     * @throws RepositoryException when the read fails
+     */
+    public function commentCountsFor(array $announcementIds): array
+    {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', $announcementIds),
+            static fn (int $id): bool => $id > 0
+        )));
+
+        if ($ids === []) {
+            return [];
+        }
+
+        global $wpdb;
+
+        $idIn     = implode(', ', array_fill(0, count($ids), '%d'));
+        $stateIn  = implode(', ', array_fill(0, count(self::COMMENT_COUNT_APPROVED_STATES), '%s'));
+        $params   = array_merge(
+            $ids,
+            [AnnouncementPostType::COMMENT_TYPE],
+            self::COMMENT_COUNT_APPROVED_STATES
+        );
+
+        $sql = 'SELECT comment_post_ID AS announcement_id, COUNT(*) AS c
+                  FROM ' . $this->commentsTable . '
+                 WHERE comment_post_ID IN (' . $idIn . ')
+                   AND comment_type = %s
+                   AND comment_approved IN (' . $stateIn . ')
+                 GROUP BY comment_post_ID';
+
+        $wpdb->last_error = '';
+        $rows = $wpdb->get_results($wpdb->prepare($sql, ...$params));
+
+        $lastError = (string) $wpdb->last_error;
+        if (strlen($lastError) > 0) {
+            throw new RepositoryException('announcement_comment_count_failed');
+        }
+
+        $out = [];
+        foreach (is_array($rows) ? $rows : [] as $row) {
+            if (!is_object($row) || !isset($row->announcement_id)) {
+                continue;
+            }
+            $out[(int) $row->announcement_id] = isset($row->c) ? (int) $row->c : 0;
+        }
+
+        return $out;
+    }
+
+    // ── internals ────────────────────────────────────────────────────────
+
+    /**
+     * The shared public read. Both public lists differ ONLY in their
+     * archival filter and their sort column, so they share one builder —
+     * two hand-written copies of a visibility-bearing query is how one of
+     * them ends up missing a predicate.
+     *
+     * @param 'active'|'archived' $order
+     * @return Page
+     * @throws RepositoryException when the read fails
+     */
+    private function publicPage(
+        int $pageId,
+        int $limit,
+        ?string $cursor,
+        string $surface,
+        string $archivalSql,
+        string $order
+    ): array {
+        $limit  = self::clampLimit($limit);
+        $fetch  = $limit + 1;
+        $params = [AnnouncementPostType::POST_TYPE, $pageId];
+
+        $where = [
+            'p.post_type = %s',
+            'p.post_parent = %d',
+            // ⚠⚠ THE §4.32.1 THREE-PREDICATE RULE. Composed, never
+            // re-derived: status, due date, AND a valid
+            // publication-authorization marker. Predicate 3 is the one that
+            // stops a row moved to `publish` early from becoming public
+            // without ever passing the ownership recheck.
+            AnnouncementVisibility::publicPredicateSql($this->metaTable, 'p'),
+            $archivalSql,
+        ];
+
+        // Pinned-first is a COMPOSITE key, so the cursor carries
+        // "<pinned><sep><date>" and the WHERE repeats the expression
+        // verbatim — MySQL forbids a SELECT alias in WHERE.
+        $pinnedExpr = self::PINNED_EXPR;
+        $dateExpr   = $order === 'archived' ? self::ARCHIVED_EXPR : 'p.post_date_gmt';
+        $sortExpr   = $order === 'archived'
+            ? $dateExpr
+            : "CONCAT({$pinnedExpr}, '|', {$dateExpr})";
+
+        $orderBy = $order === 'archived'
+            ? 'archived_at DESC, p.ID DESC'
+            : 'is_pinned DESC, p.post_date_gmt DESC, p.ID DESC';
+
+        $decoded = KeysetCursor::decode($surface, $cursor);
+        if ($decoded !== null) {
+            $where[]  = "({$sortExpr} < %s OR ({$sortExpr} = %s AND p.ID < %d))";
+            $params[] = $decoded['key'];
+            $params[] = $decoded['key'];
+            $params[] = $decoded['id'];
+        }
+
+        $sql = 'SELECT ' . $this->columns('NULL') . '
+                  FROM ' . $this->postsTable . ' p
+                  ' . $this->metaJoins() . '
+                 WHERE ' . implode(' AND ', $where) . '
+                 ORDER BY ' . $orderBy . '
+                 LIMIT %d';
+        $params[] = $fetch;
+
+        return $this->runPage($sql, $params, $limit);
+    }
+
+    /**
+     * ⚠ `limit + 1` over-fetch, then slice.
+     *
+     * Precedent is `BlogService::getUserBlog`, NOT `CommentService`, which
+     * infers the cursor from `count($rows) === $limit` — and so MINTS A
+     * FALSE-POSITIVE CURSOR on an exact-boundary page, handing the reader a
+     * "next page" that is empty.
+     *
+     * @param list<mixed> $params
+     * @return Page
+     * @throws RepositoryException when the read fails
+     */
+    private function runPage(string $sql, array $params, int $limit): array
+    {
+        global $wpdb;
+
+        // ⚠⚠ FAIL-CLOSED. An errored read must not present as "this
+        // validator has no announcements" — an empty bar looks normal, so
+        // the failure would be invisible.
+        $wpdb->last_error = '';
+        $rows = $wpdb->get_results($wpdb->prepare($sql, ...$params));
+
+        // Local copy + strlen: PHPStan's wpdb stub narrows last_error to the
+        // literal '' (same note as PageReadModelRepository).
+        $lastError = (string) $wpdb->last_error;
+        if (strlen($lastError) > 0) {
+            throw new RepositoryException('announcement_read_failed');
+        }
+
+        $rows    = is_array($rows) ? array_values($rows) : [];
+        $hasMore = count($rows) > $limit;
+
+        return [
+            'rows'     => $hasMore ? array_slice($rows, 0, $limit) : $rows,
+            'has_more' => $hasMore,
+        ];
+    }
+
+    /**
+     * Pinned-ness as a sortable 0/1. Meta, not a column — so it is derived
+     * and must be repeated verbatim in any WHERE that uses it.
+     */
+    private const PINNED_EXPR = "CASE WHEN mpin.meta_value IS NOT NULL AND mpin.meta_value <> '' THEN 1 ELSE 0 END";
+
+    /** Archival timestamp, empty-string-safe (an empty meta is NOT archived). */
+    private const ARCHIVED_EXPR = "NULLIF(mar.meta_value, '')";
+
+    /**
+     * Explicit column list — never `SELECT *` (§2, and arch-guardrails
+     * Rule 2 enforces it).
+     *
+     * `$effectiveExpr` is the owner list's effective-date expression, or
+     * `NULL` for the public reads which do not order by it. Passing it in
+     * keeps ONE column list rather than two that can drift.
+     */
+    private function columns(string $effectiveExpr): string
+    {
+        return 'p.ID,
+                p.post_title,
+                p.post_excerpt,
+                p.post_content,
+                p.post_status,
+                p.post_author,
+                p.post_date_gmt,
+                p.post_modified_gmt,
+                ' . self::PINNED_EXPR . ' AS is_pinned,
+                ' . self::ARCHIVED_EXPR . ' AS archived_at,
+                mce.meta_value AS comments_enabled,
+                mp.meta_value AS publish_at,
+                ' . $effectiveExpr . ' AS effective_at';
+    }
+
+    /**
+     * ⚠ LEFT JOINs for the OPTIONAL meta only (pin, archive,
+     * comments-enabled, publish-at). The §4.32.1 authorization marker is
+     * NOT joined — `AnnouncementVisibility` asks for it with `EXISTS`,
+     * because a duplicated meta key multiplies JOINed rows and a duplicated
+     * `_authorized_user_id` (one correct, one wrong) is exactly what a bad
+     * migration leaves behind.
+     *
+     * These four are single-valued by construction and only read, never
+     * compared for authorization, so a duplicate would at worst pick one —
+     * it cannot grant anything.
+     */
+    private function metaJoins(): string
+    {
+        $m = $this->metaTable;
+
+        return "LEFT JOIN {$m} mpin ON mpin.post_id = p.ID AND mpin.meta_key = '"
+                . self::META_PINNED_AT . "'
+                LEFT JOIN {$m} mar ON mar.post_id = p.ID AND mar.meta_key = '"
+                . AnnouncementVisibility::META_ARCHIVED_AT . "'
+                LEFT JOIN {$m} mce ON mce.post_id = p.ID AND mce.meta_key = '"
+                . AnnouncementVisibility::META_COMMENTS_ENABLED . "'
+                LEFT JOIN {$m} mp ON mp.post_id = p.ID AND mp.meta_key = '"
+                . self::META_PUBLISH_AT . "'";
+    }
+
+    /**
+     * §4.32.4: default 20, max 50. A non-positive limit takes the default
+     * rather than erroring — a bad `?limit` is a navigation accident, like
+     * a bad cursor.
+     */
+    private static function clampLimit(int $limit): int
+    {
+        if ($limit <= 0) {
+            return self::LIMIT_DEFAULT;
+        }
+
+        return min($limit, self::LIMIT_MAX);
+    }
+
+    /**
+     * §4.32.13: the owner list accepts `draft` | `scheduled` | `blocked`
+     * and **not** `published`, because a published announcement is served
+     * by the public list. An unrecognised value is DROPPED, and an
+     * all-unrecognised request yields an empty page rather than silently
+     * widening to every status.
+     *
+     * ⚠⚠ `blocked` IS REFUSED TODAY, and that is a recorded gap rather
+     * than an oversight. §4.32.13 defines it as a row forced to `publish`
+     * without a valid authorization marker and moved to a non-public state
+     * **by reconciler arm C** — which does not exist yet. It has no
+     * WordPress `post_status`, so the only thing that could distinguish it
+     * from an ordinary `draft` is a marker the reconciler writes.
+     *
+     * Accepting it would be worse than refusing it: it would map to
+     * `draft`, and `?status=blocked` would silently return ORDINARY DRAFTS
+     * — a wrong answer that looks like a right one. Refusing yields an
+     * empty page, which is true: there are no blocked rows.
+     *
+     * ⚠ When arm C lands it must define its marker, this method must accept
+     * `blocked`, and `AnnouncementViewService::status()` must read it.
+     *
+     * @param list<string> $statuses
+     * @return list<string>
+     */
+    private static function ownerStatuses(array $statuses): array
+    {
+        $allowed = [
+            AnnouncementCapabilityResolver::STATUS_DRAFT,
+            AnnouncementCapabilityResolver::STATUS_SCHEDULED,
+            // AnnouncementCapabilityResolver::STATUS_BLOCKED — see above.
+        ];
+
+        $out = [];
+        foreach ($statuses as $status) {
+            if (is_string($status) && in_array($status, $allowed, true) && !in_array($status, $out, true)) {
+                $out[] = $status;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Contract read-state → WordPress `post_status`.
+     *
+     * Only `draft` and `scheduled` reach here (see
+     * {@see self::ownerStatuses()}), so the mapping is total:
+     * `scheduled` → `future`, `draft` → `draft`. ⚠ Nothing maps to
+     * `publish` — a mapping that did would make a non-public row public.
+     */
+    private static function wpStatusFor(string $contractStatus): string
+    {
+        return $contractStatus === AnnouncementCapabilityResolver::STATUS_SCHEDULED
+            ? 'future'
+            : 'draft';
+    }
+
+    /**
+     * Table names reach SQL as identifiers and cannot be bound, so they are
+     * validated rather than escaped — the same rule
+     * `AnnouncementVisibility::assertIdentifier()` applies.
+     *
+     * @throws \InvalidArgumentException
+     */
+    private static function identifier(string $value, string $label): string
+    {
+        if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $value) !== 1) {
+            throw new \InvalidArgumentException($label . ' must be a bare SQL identifier.');
+        }
+
+        return $value;
+    }
+}
