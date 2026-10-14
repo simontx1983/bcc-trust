@@ -32,6 +32,7 @@ use BCC\Trust\Core\Repositories\GitHubRepository;
 use BCC\Trust\Core\Repositories\XRepository;
 use BCC\Trust\Core\Services\Mentions\MentionSearchService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\BoundedIntParam;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
 use BCC\Trust\Core\Support\UserSlugResolver;
 use BCC\Trust\Infrastructure\EdgeCache;
@@ -298,12 +299,27 @@ final class UsersEndpoint
                 'callback'            => [new self(), 'members'],
                 'permission_callback' => '__return_true',
                 'args'                => [
+                    // ⚠⚠ `sanitize_callback` is DELIBERATELY NOT `absint`
+                    // on these two. `absint` rewrites invalid input into
+                    // valid input — `absint('-5') === 5` — so a parser
+                    // running after it has already lost what it needs to
+                    // refuse. `keepScalar` preserves the caller's text for
+                    // {@see BoundedIntParam::parse()} in the handler.
+                    //
+                    // ⚠ The argument must still declare SOME
+                    // `sanitize_callback`: WordPress substitutes
+                    // `rest_parse_request_arg` only for an argument that
+                    // declares none, and that path answers
+                    // `rest_invalid_param`, discarding the contract's own
+                    // error code. `minimum`/`maximum` below are therefore
+                    // documentation of the bound; the handler is where it
+                    // binds. See BoundedIntParam's class docblock.
                     'page' => [
                         'required'          => false,
                         'type'              => 'integer',
                         'default'           => 1,
                         'minimum'           => 1,
-                        'sanitize_callback' => 'absint',
+                        'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
                     ],
                     'per_page' => [
                         'required'          => false,
@@ -311,7 +327,7 @@ final class UsersEndpoint
                         'default'           => self::LIST_DEFAULT_PER_PAGE,
                         'minimum'           => 1,
                         'maximum'           => self::LIST_MAX_PER_PAGE,
-                        'sanitize_callback' => 'absint',
+                        'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
                     ],
                     'q' => [
                         'required'          => false,
@@ -520,13 +536,32 @@ final class UsersEndpoint
 
     public function members(WP_REST_Request $request): WP_REST_Response
     {
-        $page    = (int) $request->get_param('page');
-        $perPage = (int) $request->get_param('per_page');
-        if ($page < 1) {
-            $page = 1;
-        }
-        if ($perPage < 1) {
-            $perPage = self::LIST_DEFAULT_PER_PAGE;
+        // ⚠⚠ THIS IS THE FIRST STATEMENT FOR A REASON. §4's `/members`
+        // entry promises an error for an invalid `page` / `per_page`, and
+        // a refusal is only worth anything if it lands before the work.
+        //
+        // Below this block the route performs a global type-count query and
+        // then `MemberSummaryPrefetcher::primeFor` — eleven batched maps
+        // whose cost scales with `$perPage`. A request that asked for
+        // 100,000 rows must not pay for any of it, and before this change
+        // it did: measured on WordPress 6.7.2, `?per_page=100000` answered
+        // 200 and issued a real `LIMIT 100000`.
+        //
+        // The old code clamped the LOWER bound only — `$perPage < 1` became
+        // the default — so there was no upper bound anywhere in the
+        // request path, and the declared `'maximum' => 50` bound nothing.
+        $page    = BoundedIntParam::parse($request->get_param('page'), 1, null);
+        $perPage = BoundedIntParam::parse($request->get_param('per_page'), 1, self::LIST_MAX_PER_PAGE);
+
+        if ($page === null || $perPage === null) {
+            // One message for both, and it states the bounds rather than
+            // echoing what was sent — the caller knows what they sent.
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'page must be a whole number >= 1; per_page must be a whole number between 1 and '
+                    . self::LIST_MAX_PER_PAGE . '.',
+                400
+            );
         }
 
         $qParam = $request->get_param('q');
