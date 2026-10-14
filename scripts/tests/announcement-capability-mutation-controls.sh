@@ -53,9 +53,11 @@ PHPUNIT="vendor/bin/phpunit"
 CAPS="app/Domain/Core/Announcements/AnnouncementCapabilityResolver.php"
 PERM="app/Domain/Core/Support/Permission.php"
 CARD="app/Domain/Core/Services/CardViewService.php"
+HIDE="app/Domain/Core/Services/AutoHideService.php"
+POLICY="app/Domain/Core/Announcements/AnnouncementModerationPolicy.php"
 
 SNAPDIR="$(mktemp -d)"
-for f in "$CAPS" "$PERM" "$CARD"; do
+for f in "$CAPS" "$PERM" "$CARD" "$HIDE" "$POLICY"; do
     cp "$f" "$SNAPDIR/$(basename "$f").orig" || { echo "FATAL: snapshot failed for $f"; exit 2; }
 done
 
@@ -161,11 +163,24 @@ file_put_contents($f, str_replace($old, $new, $s));
 # ownership reason — which is OUTSIDE §4.32.11's closed inventory — on the
 # comment composer of every ordinary member, who would see a control disabled
 # with no copy, because the frontend closes on an unrecognised reason.
+# ⚠ ANCHORED ON THE ARCHIVED RUNG, not on the not-published one. The
+# original needle matched `if (!$published) { ... REASON_UNAVAILABLE; }`,
+# which was unique until §4.32.16 added can_report with the same opening
+# rung -- at which point the needle matched TWICE, the mutation refused to
+# apply, and the control reported `broken`. A control that tests nothing is
+# worse than no control, because the run still looks like it passed.
+# `if ($archived)` is the comment gate's next rung and report() has none.
 mutate "$CAPS" '
 $f = $argv[1]; $s = file_get_contents($f);
 $E = substr_count($s, "\r\n") > 0 ? "\r\n" : "\n";
-$old = "        if (!\$published) {" . $E . "            return Permission::deny(self::REASON_UNAVAILABLE);";
-$new = "        if (!\$published) {" . $E . "            return Permission::deny(self::REASON_NOT_CLAIMER);";
+$old = "            return Permission::deny(self::REASON_UNAVAILABLE);" . $E
+     . "        }" . $E
+     . "        if (\$archived) {" . $E
+     . "            return Permission::deny(self::REASON_ARCHIVED);";
+$new = "            return Permission::deny(self::REASON_NOT_CLAIMER);" . $E
+     . "        }" . $E
+     . "        if (\$archived) {" . $E
+     . "            return Permission::deny(self::REASON_ARCHIVED);";
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
 ' 'testTheCommentGateNeverReportsAnOwnershipReason|testEveryCommentReasonEmittedIsInTheClosedInventory' 'M4 the comment gate reports an ownership reason'
@@ -319,6 +334,70 @@ if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
 ' 'testTheResolverNamesNoForbiddenAuthorizationInput' 'M12 a WordPress capability read appears in the pure resolver'
 
+# ── M13. ⚠⚠ REPORTING CLOSES ON AN ARCHIVED ROW — reads as consistency ─────
+#
+# The single most likely wrong edit in the whole reportability change: copy
+# the comment gate, which DOES close on archival. §4.32.6 keeps an archived
+# announcement publicly readable at its permalink, so it stays challengeable
+# -- and `announcement_archived` is absent from CAN_REPORT_REASONS precisely
+# so this cannot be added without the inventory test also failing.
+mutate "$CAPS" '
+$f = $argv[1]; $s = file_get_contents($f);
+$E = substr_count($s, "\r\n") > 0 ? "\r\n" : "\n";
+$old = "            " . chr(39) . "can_report" . chr(39) . "          => self::report(\$row, \$viewer, \$published, \$featureEnabled),";
+$new = "            " . chr(39) . "can_report" . chr(39) . "          => self::comment(\$row, \$viewer, \$archived, \$published, \$featureEnabled),";
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, $new, $s));
+' 'testTheReportGateDivergesFromTheCommentGateInExactlyTwoWays|testEveryReportReasonEmittedIsInTheClosedInventory' 'M13 reporting closes on an archived row'
+
+# ── M14. ⚠⚠ THE AUTO-HIDE EXCLUSION IS COMPUTED AND IGNORED ───────────────
+#
+# The decision is still made and still logged -- only the `return` goes. So
+# every value test of the policy still passes, the log still says the hide
+# was withheld, and the announcement is hidden anyway. This is why the
+# policy suite reads the CALLER'S SOURCE instead of trusting that calling
+# the policy means honouring it.
+mutate "$HIDE" '
+$f = $argv[1]; $s = file_get_contents($f);
+$E = substr_count($s, "\r\n") > 0 ? "\r\n" : "\n";
+$old = "            }" . $E . "            return;" . $E . "        }";
+$new = "            }" . $E . "        }";
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, $new, $s));
+' 'testAutoHideServiceConsultsThePolicyBeforeItsOnlyWrite' 'M14 the auto-hide exclusion is computed but not honoured'
+
+# ── M15. AN UNREADABLE MODULE BECOMES HIDEABLE ────────────────────────────
+#
+# Reads as not punishing ordinary content for a transient read failure, and
+# it is the trade-off §4.32.16 decided the other way: an activity nobody can
+# identify is not one to hide, and auto-hiding an announcement is the one
+# outcome the decision forbids.
+mutate "$POLICY" '
+$f = $argv[1]; $s = file_get_contents($f);
+$E = substr_count($s, "\r\n") > 0 ? "\r\n" : "\n";
+$old = "        if (\$module === " . chr(39) . chr(39) . ") {" . $E
+     . "            return self::AUTO_HIDE_BLOCKED_UNRESOLVED;" . $E
+     . "        }";
+$new = "        if (\$module === " . chr(39) . chr(39) . ") {" . $E
+     . "            return self::AUTO_HIDE_ALLOWED;" . $E
+     . "        }";
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, $new, $s));
+' 'testAnUnreadableModuleBlocksTheAutomaticHide' 'M15 an unreadable module becomes hideable'
+
+# ── M16. THE MODULE CONSTANT BECOMES AN INT ───────────────────────────────
+#
+# ⚠ Fails in the SAFE-LOOKING direction. `act_module_id` comes back from
+# MySQL as a string, so an int constant makes the strict comparison never
+# match: the exclusion never fires, every ordinary-content test still
+# passes, and nothing anywhere looks wrong.
+mutate "$POLICY" '
+$f = $argv[1]; $s = file_get_contents($f);
+$old = "    public const ANNOUNCEMENT_MODULE_ID = " . chr(39) . "205" . chr(39) . ";";
+$new = "    public const ANNOUNCEMENT_MODULE_ID = 205;";
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, $new, $s));
+' 'testTheModuleConstantIsAStringNotAnInt|testAnAnnouncementActivityIsNeverAutoHidden' 'M16 the module constant becomes an int'
 echo "──────────────────────────────────────────────────────────────────────────"
 echo "killed=$killed survived=$survived broken=$broken"
 rm -rf "$SNAPDIR"
