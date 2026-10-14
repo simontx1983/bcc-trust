@@ -1664,6 +1664,21 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
 \BCC\Trust\Core\Support\CorsHandler::register();
 \BCC\Trust\Infrastructure\EdgeCache::init();
 
+// Validator announcements, unit A1 (api-contract-v1.md §4.32): the private
+// `bcc_announcement` post type plus the four guards that stop WordPress's
+// own comment surfaces serving announcement comments.
+//
+// ⚠ Registered at file load and UNCONDITIONALLY — deliberately NOT behind
+// `bcc_announcements_enabled`. §4.32.10: turning the feature off must never
+// *open* the bypass surface, so the switch gates routes and surfaces and
+// never gates a guard. A filter added later than its consumer runs is a
+// filter that did not apply.
+//
+// Inert by construction: there are no routes, no service and no writer, so
+// nothing can create an announcement. The type exists and the guards are
+// live; that is the whole of A1.
+\BCC\Trust\Core\Announcements\AnnouncementPostType::register();
+
 // §K2 / §G1: hook PeepSo's user-search filter so users with
 // `bcc_privacy_discovery_optout = 1` are excluded from search results.
 // Registered at file load (top-level) so the filter is in place by the
