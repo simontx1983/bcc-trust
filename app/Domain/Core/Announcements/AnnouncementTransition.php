@@ -79,28 +79,44 @@ final class AnnouncementTransition
      * marker must be written.
      *
      * ⚠⚠ TRUE FOR `schedule` AS WELL AS `publish`, and that is the §6.1
-     * decision this slice owns. The marker records **who authorized publication
-     * and when they did so** — not when the row becomes visible. Writing it at
-     * schedule time is safe because a scheduled row is stored `future`, so
-     * predicate 1 (`post_status='publish'`) and predicate 2
-     * (`post_date_gmt <= now`) BOTH fail while it is pending: the marker cannot
-     * leak it early, because predicate 1 is what is keeping it private.
+     * decision this slice owns.
      *
-     * The alternative — writing the marker at promotion — would require the
-     * promoting actor to mint an authorization it does not have. WordPress's
-     * scheduler runs with no operator session, so that actor would have to be
-     * invented. Rejected for that reason, not for convenience.
+     * ⚠⚠ THIS IS NOW `publish` ONLY, AND THAT REVERSES THE FIRST VERSION OF
+     * THIS SLICE ON MEASURED EVIDENCE. The old reasoning is replaced rather
+     * than left standing beside the new behaviour.
      *
-     * ⚠ The residual risk is NAMED and NOT SOLVED here: a claim revoked between
-     * scheduling and promotion still lets the row publish under the
-     * authorization captured at schedule time. Closing that needs a reconciler
-     * (arm C territory) and is not A3's to invent. `AnnouncementWriteServiceTest`
-     * pins the current behaviour so a future reconciler has something to change
-     * rather than something to discover.
+     * The first version wrote the marker at schedule time as well, arguing that
+     * a scheduled row is stored `future` so predicate 1 keeps it private. §6.1
+     * of the CRUD design doc had already warned what that choice costs:
+     * *"choosing between them decides whether predicate 3 or predicate 2 is the
+     * one keeping it private."* It does — and predicate 2 is not up to the job:
+     *
+     *   - an OVERDUE scheduled row (status `future`, due instant passed, cron
+     *     not yet run) has a PAST date, so predicate 2 stops refusing, and a
+     *     non-cron publish then satisfies all three predicates;
+     *   - a published row demoted to `draft` keeps its marker, so the same
+     *     holds for it.
+     *
+     * Both were MEASURED publicly readable inside the interval between core's
+     * status write and arm C's backstop — `findPublic()` true, present in the
+     * public list and rotator, detail 200. See
+     * `scripts/tests/announcement-publication-interval.php` cases B, E and F.
+     *
+     * So the marker is written at **scheduled promotion** instead — the SECOND
+     * of the three moments §6.1 named, not a new invention and not a third
+     * marker. `AnnouncementPublicationGuard` writes it at the
+     * `publish_future_post` veto hook, after a fresh authority check and before
+     * core publishes. A row that is not yet public therefore never carries the
+     * marker, so predicate 3 refuses throughout the interval on every path.
+     *
+     * ⚠ The earlier objection to this moment — "the promoting actor would have
+     * to mint an authorization it does not have" — was wrong in one word. The
+     * guard mints nothing: it re-resolves the SAME operator authority for the
+     * user the row records, and writes the marker only if it still holds.
      */
     public static function authorizesPublication(string $verb): bool
     {
-        return self::statusFor($verb) !== self::STATUS_DRAFT;
+        return self::statusFor($verb) === self::STATUS_PUBLIC;
     }
 
     /**

@@ -266,6 +266,49 @@ final class AnnouncementPublicationGuardTest extends TestCase
         );
     }
 
+    /**
+     * ⚠⚠ THE MARKER IS WRITTEN AT PROMOTION. This is the safeguard for the
+     * measured interval exposure: a not-yet-public row must carry no
+     * publication marker, so predicate 3 refuses for the whole window between
+     * core's status write and the backstop.
+     */
+    public function testTheGuardWritesTheMarkerAtPromotionWhenAuthorityHolds(): void
+    {
+        $code = self::code(self::GUARD);
+
+        self::assertStringContainsString('function affirm(', $code);
+        self::assertStringContainsString('META_AUTHORIZED_AT', $code);
+
+        // affirm() must be reached from the veto path, on the authorized branch.
+        $start = strpos($code, 'function vetoScheduledPublication(');
+        self::assertIsInt($start);
+        $body = substr($code, $start, 1200);
+        self::assertStringContainsString('stillAuthorized(', $body);
+        self::assertStringContainsString('self::affirm(', $body);
+    }
+
+    /**
+     * ⚠⚠ LEAVING `publish` RETIRES THE MARKER. A demoted row that kept its
+     * marker was measured as a real exposure (interval probe cases B and F).
+     *
+     * ⚠ This is NOT a post-publication revocation policy: it fires only when
+     * something has already taken the row out of `publish`, and never
+     * un-publishes anything.
+     */
+    public function testLeavingPublishRetiresTheMarker(): void
+    {
+        $code  = self::code(self::GUARD);
+        $start = strpos($code, 'function onTransition(');
+        self::assertIsInt($start);
+        $body = substr($code, $start, 1600);
+
+        self::assertMatchesRegularExpression(
+            "/\\\$old\s*===\s*'publish'\s*&&\s*\\\$new\s*!==\s*'publish'/",
+            $body,
+            'the leaving-publish branch must exist'
+        );
+        self::assertStringContainsString('delete_post_meta', $body);
+    }
     /** The pending cron event is cleared, or core retries and re-blocks forever. */
     public function testBlockingClearsThePendingCronEvent(): void
     {

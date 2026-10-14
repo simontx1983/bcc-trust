@@ -313,12 +313,33 @@ final class AnnouncementRepository
             AnnouncementVisibility::notArchivedSql($this->metaTable, 'p'),
         ];
 
-        $statusIn = [];
+        // ⚠⚠ PER-STATUS PREDICATES, NOT AN `IN` LIST, and that is forced rather
+        // than stylistic. `blocked` and `draft` share the SAME WordPress
+        // `post_status` — a blocked row is a `draft` carrying arm C's marker —
+        // so `post_status IN (...)` cannot tell them apart. An `IN` list asked
+        // for `blocked` would return every ordinary draft: a wrong page that
+        // looks right, which is exactly why the route refused the parameter
+        // until the marker existed.
+        $clauses = [];
         foreach ($wanted as $status) {
-            $statusIn[] = '%s';
-            $params[]   = self::wpStatusFor($status);
+            if ($status === AnnouncementCapabilityResolver::STATUS_BLOCKED) {
+                $clauses[] = '(p.post_status = %s AND ' . self::BLOCKED_EXPR . ' IS NOT NULL)';
+                $params[]  = 'draft';
+                continue;
+            }
+            if ($status === AnnouncementCapabilityResolver::STATUS_DRAFT) {
+                // ⚠ An ordinary draft EXCLUDES blocked rows. Without this the
+                // two filters would overlap and `?status=draft` would contain
+                // rows whose own reported `status` is `blocked` — the filter
+                // and the view-model disagreeing about the same row.
+                $clauses[] = '(p.post_status = %s AND ' . self::BLOCKED_EXPR . ' IS NULL)';
+                $params[]  = 'draft';
+                continue;
+            }
+            $clauses[] = '(p.post_status = %s)';
+            $params[]  = self::wpStatusFor($status);
         }
-        $where[] = 'p.post_status IN (' . implode(', ', $statusIn) . ')';
+        $where[] = '(' . implode(' OR ', $clauses) . ')';
 
         // Effective date: publish_at for a scheduled row, else last
         // modification (§4.32.12).
@@ -925,7 +946,13 @@ final class AnnouncementRepository
         $allowed = [
             AnnouncementCapabilityResolver::STATUS_DRAFT,
             AnnouncementCapabilityResolver::STATUS_SCHEDULED,
-            // AnnouncementCapabilityResolver::STATUS_BLOCKED — see above.
+            // ⚠⚠ BLOCKED IS NOW ACCEPTED. It was refused while reconciler arm C
+            // did not exist, because nothing distinguished a blocked row from
+            // an ordinary draft, so the filter would have returned ordinary
+            // drafts — a wrong page that looks right. Arm C now stamps
+            // `_bcc_announcement_blocked_at`, so the two are separable in SQL
+            // and the parameter means what it says.
+            AnnouncementCapabilityResolver::STATUS_BLOCKED,
         ];
 
         $out = [];

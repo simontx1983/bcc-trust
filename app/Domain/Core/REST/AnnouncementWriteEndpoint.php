@@ -274,10 +274,19 @@ final class AnnouncementWriteEndpoint
     private static function render(array $result, array $decision, int $okStatus = 200): WP_REST_Response
     {
         if (($result['ok'] ?? false) !== true) {
+            // ⚠ §4.32.2: an ownership denial carries `reason_code`, and that
+            // code is the GENERIC one. The service supplies it and this layer
+            // only forwards it, so there is no second place from which a finer
+            // internal reason could leak.
+            $data = isset($result['reason']) && is_string($result['reason'])
+                ? ['reason_code' => $result['reason']]
+                : null;
+
             return ApiResponse::error(
                 (string) ($result['code'] ?? AnnouncementWriteService::ERR_UNAVAILABLE),
                 (string) ($result['message'] ?? 'Unavailable.'),
-                (int) ($result['status'] ?? 503)
+                (int) ($result['status'] ?? 503),
+                $data
             );
         }
 

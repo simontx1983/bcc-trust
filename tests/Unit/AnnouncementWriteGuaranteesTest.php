@@ -244,21 +244,48 @@ final class AnnouncementWriteGuaranteesTest extends TestCase
      * never appear in the write layer's own source — they are the authority's
      * internal vocabulary.
      */
-    public function testANonOperatorRefusalIsIndistinguishableFromAMissingRow(): void
+    /**
+     * ⚠⚠ RECONCILED TO §4.32.2 — THIS CASE PREVIOUSLY ASSERTED THE OPPOSITE.
+     *
+     * It required 404 and forbade 403, on my reasoning that a 403 would tell a
+     * prober which pages have an announcements surface. §4.32.2 is the
+     * canonical rule and settles it the other way, with the reason stated:
+     * *"Every ownership denial — no claim, a claim held by somebody else, or
+     * competing claims — presents on the wire as `bcc_forbidden` with
+     * `reason_code: not_claimer` and nothing else."*
+     *
+     * The disclosure concern is answered by the reason being GENERIC, not by
+     * the status code — and the surface is already public anyway: the read list
+     * is unauthenticated and the routes appear in `/wp-json/`. The owner read
+     * route has always answered 403 this way, so the write routes were the
+     * outlier, not the standard.
+     */
+    public function testANonOperatorRefusalIsAGenericForbidden(): void
     {
         $service = self::code(self::SERVICE);
 
-        self::assertStringContainsString("'bcc_not_found'", $service);
-        self::assertStringNotContainsString('403', $service, 'a write refusal must never be a 403');
-        self::assertStringNotContainsString('bcc_forbidden', $service);
+        self::assertStringContainsString("'bcc_forbidden'", $service);
+        self::assertStringContainsString(
+            'Authority::PUBLIC_REASON',
+            $service,
+            'the serialised reason must be the authority s own generic constant, not a literal'
+        );
 
-        foreach (['claim_absent', 'claim_ambiguous', 'not_claimer', 'auth_required'] as $private) {
+        // ⚠ The half of the old case that was RIGHT, kept verbatim: the finer
+        // internal reasons must still never be serialised. A distinguishable
+        // claim_ambiguous would reveal which validators are contested, and a
+        // distinguishable claim_absent which are unclaimed.
+        foreach (['claim_absent', 'claim_ambiguous', 'auth_required'] as $private) {
             self::assertStringNotContainsString(
-                $private,
+                "'" . $private . "'",
                 $service,
                 'the private denial reason ' . $private . ' must not be emitted by the write layer'
             );
         }
+
+        // Feature-off and a genuinely missing row both stay 404, so the three
+        // outcomes remain distinguishable to a legitimate operator.
+        self::assertStringContainsString("'bcc_not_found'", $service);
     }
 
     /**

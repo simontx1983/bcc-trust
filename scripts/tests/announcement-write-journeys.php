@@ -178,7 +178,8 @@ $r  = dsp('POST', $base, ['status' => 'schedule', 'title' => 'Scheduled', 'body'
 ck('create schedule -> 201', 201, $r['status']);
 $schedId = (int) $r['id'];
 ck('stored status is future, not publish', 'future', (string) get_post_status($schedId));
-ck('marker IS written at schedule time (the §6.1 decision)', true, trim((string) get_post_meta($schedId, VIS::META_AUTHORIZED_AT, true)) !== '');
+// ⚠⚠ REVERSED: schedule now writes NO marker. See the interval probe.
+ck('⚠⚠ NO marker at schedule time (written at promotion instead)', '', trim((string) get_post_meta($schedId, VIS::META_AUTHORIZED_AT, true)));
 // ⚠ The whole safety argument for writing the marker early: predicate 1 is
 // what keeps this private, not predicate 3.
 ck('scheduled row is NOT publicly visible', false, isPublic($pageId, $schedId));
@@ -230,22 +231,22 @@ foreach ([
     ['POST', $base . '/' . $draftId . '/pin', ['pinned' => true]],
 ] as [$m, $r3, $p]) {
     $res = dsp($m, $r3, $p, $st);
-    ck('stranger ' . $m . ' -> 404', 404, $res['status']);
-    ck('stranger   never 403', true, $res['status'] !== 403);
-    foreach (['claim_absent', 'claim_ambiguous', 'not_claimer', 'auth_required'] as $leak) {
+    ck('stranger ' . $m . ' -> 403 (generic, §4.32.2)', 403, $res['status']);
+    ck('stranger   carries the GENERIC reason only', true, strpos($res['json'], 'not_claimer') !== false);
+    foreach (['claim_absent', 'claim_ambiguous', 'auth_required'] as $leak) {
         ck('stranger   body omits ' . $leak, false, strpos($res['json'], $leak) !== false);
     }
 }
-ck('an ANONYMOUS caller is refused too', 404, dsp('POST', $base, ['status' => 'publish', 'title' => 'T', 'body' => 'B'], 0)['status']);
+ck('an ANONYMOUS caller is refused too', 403, dsp('POST', $base, ['status' => 'publish', 'title' => 'T', 'body' => 'B'], 0)['status']);
 ck('the stranger changed nothing', 'Renamed', get_post_field('post_title', $draftId));
 
 echo "\n=== J8. A REVOKED claim refuses, and so does an AMBIGUOUS one ===\n";
 $wpdb->update($wpdb->prefix . 'bcc_onchain_claims', ['status' => 'revoked'], ['id' => $claimId]);
 wp_cache_flush();
 ck('authority no longer says operator', 'denied', AUTH::decide($pageId, $op)['decision']);
-ck('⚠ REVOKED claim: create -> 404', 404, dsp('POST', $base, ['status' => 'publish', 'title' => 'T', 'body' => 'B'], $op)['status']);
-ck('REVOKED claim: publish -> 404', 404, dsp('POST', $base . '/' . $schedId . '/publish', [], $op)['status']);
-ck('REVOKED claim: archive -> 404', 404, dsp('POST', $base . '/' . $schedId . '/archive', [], $op)['status']);
+ck('⚠ REVOKED claim: create -> 403', 403, dsp('POST', $base, ['status' => 'publish', 'title' => 'T', 'body' => 'B'], $op)['status']);
+ck('REVOKED claim: publish -> 403', 403, dsp('POST', $base . '/' . $schedId . '/publish', [], $op)['status']);
+ck('REVOKED claim: archive -> 403', 403, dsp('POST', $base . '/' . $schedId . '/archive', [], $op)['status']);
 
 // Restore, then make it AMBIGUOUS with a second verified operator claim.
 $wpdb->update($wpdb->prefix . 'bcc_onchain_claims', ['status' => 'verified'], ['id' => $claimId]);
@@ -262,7 +263,7 @@ wp_cache_flush();
 $amb = AUTH::decide($pageId, $op);
 ck('authority reports ambiguity', 'denied', $amb['decision']);
 ck('ambiguity reason', 'claim_ambiguous', $amb['reason']);
-ck('⚠ AMBIGUOUS claim: create -> 404', 404, dsp('POST', $base, ['status' => 'publish', 'title' => 'T', 'body' => 'B'], $op)['status']);
+ck('⚠ AMBIGUOUS claim: create -> 403', 403, dsp('POST', $base, ['status' => 'publish', 'title' => 'T', 'body' => 'B'], $op)['status']);
 ck('AMBIGUOUS claim: body omits the private reason', false, strpos(dsp('POST', $base, ['status' => 'publish', 'title' => 'T', 'body' => 'B'], $op)['json'], 'claim_ambiguous') !== false);
 $wpdb->delete($wpdb->prefix . 'bcc_onchain_claims', ['id' => $dupId]);
 wp_cache_flush();

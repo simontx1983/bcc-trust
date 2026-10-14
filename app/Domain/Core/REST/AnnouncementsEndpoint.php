@@ -208,9 +208,19 @@ final class AnnouncementsEndpoint
                     'status' => [
                         'required' => false,
                         'type'     => 'string',
-                        // ⚠ `blocked` is ABSENT from this enum, and
-                        // `published` is too. See ownerList().
-                        'enum'     => ['draft', 'scheduled'],
+                        // ⚠⚠ `blocked` IS NOW ACCEPTED; `published` is still
+                        // absent, because a published announcement is served by
+                        // the public list. `blocked` was refused while
+                        // reconciler arm C did not exist — nothing then
+                        // distinguished a blocked row from an ordinary draft,
+                        // so accepting the parameter would have returned
+                        // ordinary drafts. Arm C stamps
+                        // `_bcc_announcement_blocked_at`, so the filter is now
+                        // real; see AnnouncementRepository::ownerStatuses().
+                        'enum'              => ['draft', 'scheduled', 'blocked'],
+                        // ⚠ Explicit validator: without one, `enum` beside a
+                        // sanitizer is decorative — the /members defect.
+                        'validate_callback' => 'rest_validate_request_arg',
                     ],
                     'limit' => $limitArg,
                     'cursor' => [

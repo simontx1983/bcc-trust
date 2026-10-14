@@ -204,7 +204,7 @@ ck('⚠ blocked row absent from the ROTATOR', false, in_array('ann_' . $revoked,
 // probe asserts `owner list, stranger -> 403`. Recorded as an asymmetry worth
 // raising (A3 write refusals are 404; this owner READ is 403) rather than
 // changed here: the read contract is not this slice to alter.
-ck('owner list refuses a stranger (403, shipped A2.4 behaviour)', 403, dsp('GET', $mbase, [], $st)['status']);
+ck('owner list refuses a stranger (403 — now CONSISTENT with writes)', 403, dsp('GET', $mbase, [], $st)['status']);
 
 echo "\n=== 4. FEED EXCLUSION ===\n";
 $act = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}peepso_activities'");
@@ -311,7 +311,7 @@ clean_post_cache($blocked2); wp_cache_flush();
 ck('row is blocked', true, GUARD::isBlocked($blocked2));
 $wpdb->update($wpdb->prefix . 'bcc_onchain_claims', ['status' => 'verified'], ['id' => $claimId]);
 wp_cache_flush();
-ck('stranger publish -> 404', 404, dsp('POST', $base . '/' . $blocked2 . '/publish', [], $st)['status']);
+ck('stranger publish -> 403 (generic)', 403, dsp('POST', $base . '/' . $blocked2 . '/publish', [], $st)['status']);
 ck('⚠ still blocked after the stranger tried', true, GUARD::isBlocked($blocked2));
 ck('still not publicly readable', false, isPublic($pageId, $blocked2));
 

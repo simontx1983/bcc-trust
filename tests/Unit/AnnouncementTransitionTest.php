@@ -80,12 +80,28 @@ final class AnnouncementTransitionTest extends TestCase
      * visibility predicate 1 — the marker cannot leak it early, because
      * predicate 1 is what is keeping it private, not predicate 3.
      */
-    public function testPublishAndScheduleAuthorizePublicationButDraftDoesNot(): void
+    /**
+     * ⚠⚠ REVERSED ON MEASURED EVIDENCE, and the old expectation is recorded
+     * here rather than quietly swapped.
+     *
+     * This case used to assert that `schedule` authorizes publication, because
+     * the marker was written at schedule time. The interval probe measured what
+     * that cost: an OVERDUE scheduled row (status `future`, due instant passed,
+     * cron not yet run) has a PAST date, so predicate 2 stops refusing and a
+     * non-cron publish satisfies all three predicates — the row was measurably
+     * readable through the public list, rotator and detail in the interval
+     * between core's status write and arm C's backstop.
+     *
+     * `schedule` now writes no marker at all; `AnnouncementPublicationGuard`
+     * writes it at promotion after re-checking authority. A not-yet-public row
+     * therefore never carries the marker, and predicate 3 refuses throughout.
+     */
+    public function testOnlyPublishAuthorizesPublication(): void
     {
         self::assertTrue(Verb::authorizesPublication('publish'));
-        self::assertTrue(
+        self::assertFalse(
             Verb::authorizesPublication('schedule'),
-            'the marker is written at schedule time — see §6.1 in the write service docblock'
+            'the marker is written at PROMOTION, not at schedule time — interval probe cases E and G'
         );
         self::assertFalse(Verb::authorizesPublication('draft'));
     }

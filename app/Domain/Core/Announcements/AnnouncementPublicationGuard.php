@@ -112,12 +112,44 @@ final class AnnouncementPublicationGuard
         }
 
         if (self::stillAuthorized($row)) {
+            // ⚠⚠ THE MARKER IS WRITTEN HERE, AT PROMOTION — not at schedule
+            // time. This is the second of the three moments the CRUD design
+            // doc's §6.1 named, chosen on measured evidence: writing it at
+            // schedule time left an OVERDUE scheduled row (past date, marker
+            // present) publicly readable in the interval between core's status
+            // write and the backstop, because predicate 2 had stopped
+            // refusing. A row that is not yet public now carries no marker at
+            // all, so predicate 3 refuses throughout that interval.
+            //
+            // ⚠ Written BEFORE core publishes (this hook is priority 1, core's
+            // is 10), and only after stillAuthorized() has just re-resolved
+            // the SAME operator authority for the user the row records. The
+            // guard mints no authority of its own.
+            self::affirm($row);
+
             return;
         }
 
         // ⚠ Blocking here means core's callback sees a non-`future` status and
         // returns without publishing. The notice is never public.
         self::block($row, self::reasonFor($row));
+    }
+
+    /**
+     * Write the publication-authorization marker for a row whose authority has
+     * just been re-confirmed.
+     *
+     * ⚠ The user id must be `post_author`, because visibility predicate 3
+     * compares the marker's user id against `post_author` numerically. Writing
+     * the marker's own recorded user instead would be correct only while the
+     * two agree, and silently unpublishable when they do not.
+     */
+    private static function affirm(\WP_Post $post): void
+    {
+        $postId = (int) $post->ID;
+
+        update_post_meta($postId, AnnouncementVisibility::META_AUTHORIZED_AT, gmdate('Y-m-d H:i:s'));
+        update_post_meta($postId, AnnouncementVisibility::META_AUTHORIZED_USER_ID, (string) (int) $post->post_author);
     }
 
     /**
@@ -129,10 +161,32 @@ final class AnnouncementPublicationGuard
      */
     public static function onTransition($new, $old, $post): void
     {
-        if ($new !== 'publish' || !$post instanceof \WP_Post) {
+        if (!$post instanceof \WP_Post || $post->post_type !== AnnouncementPostType::POST_TYPE) {
             return;
         }
-        if ($post->post_type !== AnnouncementPostType::POST_TYPE) {
+
+        // ⚠⚠ LEAVING `publish` RETIRES THE MARKER. A published row demoted to
+        // draft used to keep it, and that stale marker was MEASURED as a real
+        // exposure: re-publishing such a row by any non-cron path satisfied all
+        // three visibility predicates for the whole interval between core's
+        // status write and this backstop (interval probe, cases B and F).
+        //
+        // The marker means "authorized to publish at time T". Once the row is
+        // not public that authorization is spent, so retiring it is the honest
+        // semantic as well as the safe one.
+        //
+        // ⚠ THIS IS NOT A POST-PUBLICATION REVOCATION POLICY. It fires only
+        // when something has ALREADY taken the row out of `publish`; it never
+        // un-publishes anything. A row that stays published keeps its marker
+        // untouched.
+        if ($old === 'publish' && $new !== 'publish') {
+            delete_post_meta((int) $post->ID, AnnouncementVisibility::META_AUTHORIZED_AT);
+            delete_post_meta((int) $post->ID, AnnouncementVisibility::META_AUTHORIZED_USER_ID);
+
+            return;
+        }
+
+        if ($new !== 'publish') {
             return;
         }
         // Nothing to do when it was already public.

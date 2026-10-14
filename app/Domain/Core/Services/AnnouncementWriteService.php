@@ -64,6 +64,7 @@ final class AnnouncementWriteService
 
     /** Refusal codes. The house validation code is bcc_invalid_request. */
     public const ERR_INVALID     = 'bcc_invalid_request';
+    public const ERR_FORBIDDEN   = 'bcc_forbidden';
     public const ERR_NOT_FOUND   = 'bcc_not_found';
     public const ERR_CONFLICT    = 'bcc_conflict';
     public const ERR_UNAVAILABLE = 'bcc_unavailable';
@@ -451,9 +452,18 @@ final class AnnouncementWriteService
         string $now
     ): array {
         if (!Verb::authorizesPublication($verb)) {
-            // draft: no marker, per the §2 mapping table. Nothing further to
-            // confirm beyond the row id wp_insert_post already returned.
-            return ['ok' => true, 'id' => $postId, 'state' => Verb::VERB_DRAFT];
+            // ⚠⚠ `draft` AND `schedule` both land here now. Neither writes the
+            // publication marker: `draft` never did, and `schedule` stopped,
+            // because a marker on a not-yet-public row was measured as a real
+            // exposure once its due instant passed (interval probe case E).
+            // `AnnouncementPublicationGuard` writes the marker at promotion,
+            // after re-checking authority.
+            //
+            // ⚠ Still read back. The row must be confirmed stored in the state
+            // asked for — the Cosmos endpoint-switch lesson — and for
+            // `schedule` that confirmation is the only evidence the row really
+            // is `future` rather than silently normalised by WordPress.
+            return $this->readBackOrFail($pageId, $postId, $decision);
         }
 
         $okAt   = update_post_meta($postId, Vis::META_AUTHORIZED_AT, $now) !== false;
@@ -599,10 +609,36 @@ final class AnnouncementWriteService
     /** @return array<string,mixed> */
     private static function deny(): array
     {
-        // ⚠ 404, never 403, and never the private reason. §4.32.11: a
-        // non-operator must not learn that a page has announcements at all, so
-        // the refusal is indistinguishable from a missing row.
-        return self::fail(self::ERR_NOT_FOUND, 'Not found.', 404);
+        // ⚠⚠ 403 WITH THE GENERIC REASON — reconciled to §4.32.2, which is the
+        // canonical rule and which this slice originally contradicted.
+        //
+        // The first version returned 404 on the argument that a 403 would tell
+        // a prober which pages have an announcements surface. §4.32.2 settles
+        // it the other way and explains why: "Every ownership denial — no
+        // claim, a claim held by somebody else, or competing claims — presents
+        // on the wire as `bcc_forbidden` with `reason_code: not_claimer` and
+        // nothing else." The disclosure concern is answered by the reason being
+        // GENERIC, not by the status code; the surface itself is already public
+        // (the read list is unauthenticated and the routes appear in
+        // `/wp-json/`). The owner read route has always answered 403 this way,
+        // so the writes were the outlier.
+        //
+        // ⚠ The finer internal reason (`claim_absent`, `claim_ambiguous`,
+        // `not_claimer`, `auth_required`) is still NEVER serialised — a
+        // distinguishable `claim_ambiguous` would reveal which validators are
+        // contested, and a distinguishable `claim_absent` which are unclaimed.
+        //
+        // ⚠ This is ONLY for ownership failure. Feature-off stays 404 (§4.32.10)
+        // and a genuinely missing row stays 404, so the three cases remain
+        // distinguishable to a legitimate operator without leaking to anyone
+        // else.
+        return [
+            'ok'      => false,
+            'code'    => self::ERR_FORBIDDEN,
+            'message' => 'Not permitted.',
+            'status'  => 403,
+            'reason'  => Authority::PUBLIC_REASON,
+        ];
     }
 
     /** @return array<string,mixed> */
