@@ -1,7 +1,16 @@
 # Removing Alchemy credentials from `bcc_chains.rpc_url`
 
-**Status:** procedure only — NOT run. Requires separate review and explicit
-operator authorization per environment.
+**Status: RUN in both environments, 2026-10-01.** Staging cleaned 2026-09-30,
+production cleaned 2026-10-01 after both credentials were rotated with Alchemy's
+rotation action. Both environments resolve from `BCC_ALCHEMY_API_KEY` alone and hold
+zero keyed endpoints in rows, options, transients or caches.
+
+Still requires separate review and explicit operator authorization **per environment,
+per run** — being documented here is not standing permission.
+
+⚠ §5a records a **procedure change** made during the production run. Read it before
+reusing this document: the single identity condition became two branches, and the one
+used in production makes provider calls that the original did not.
 
 **Why it is separate from the code change:** the code change makes credentials in
 the database *unnecessary*. This procedure makes them *absent*. Doing both at once
@@ -28,7 +37,7 @@ It does **not** touch:
 - Avalanche or BSC — public RPCs, no credential to remove
 - any chain not named in the authorization for that run
 
-## 2. ⚠⚠⚠ Why the credential must be rotated afterwards, regardless
+## 2. ⚠⚠⚠ Why rotation is required, and why it comes FIRST
 
 **Removing a secret from a live table does not un-leak it.** By the time this runs,
 the value has been in:
@@ -45,13 +54,36 @@ that is still valid removes the copy you can see and leaves every copy you canno
 
 Recommended order per environment:
 
-1. mint a **new** Alchemy key
-2. set `BCC_ALCHEMY_API_KEY` to the new key in `wp-config.php`
-3. verify (§4) that resolution now works from the constant alone
-4. run the cleanup (§5) to remove the **old** key from the rows
-5. revoke the old key at Alchemy
+1. rotate the credential at Alchemy. ⚠ Alchemy's **rotation action invalidates the
+   superseded key as part of the rotation** — when that action is used there is no
+   separate revocation step afterwards, and step 5 is a confirmation rather than a
+   change. If the key was instead replaced by minting a second one, the old one is
+   still live and must be revoked explicitly.
+2. set `BCC_ALCHEMY_API_KEY` to the replacement in that environment's `wp-config.php`
+   — ⚠ for staging that is `<webroot>/stage/wp-config.php`, **not** the parent
+3. verify (§4) that resolution works from the constant alone
+4. run the cleanup (§5) to remove the superseded key from the rows
+5. confirm the superseded key no longer authenticates (§6)
 
-Step 5 is what actually ends the exposure. Steps 1–4 make it safe to take.
+What ends the exposure is the superseded key ceasing to authenticate — step 1 with
+the rotation action, or step 5 with an explicit revoke. Steps 2–4 make the
+environment keep working across it.
+
+### ⚠⚠ Clean immediately after rotating — there is an outage window
+
+`AlchemyCredential::rpcUrlFor()` **prefers a keyed chain row over the constant** (the
+transitional branch in §1). So between step 1 and step 4 the rows still hold the
+superseded credential and the live path uses it. Once the rotation has invalidated
+that key, every Alchemy call on those chains fails until the cleanup runs.
+
+This is what happened in production on 2026-10-01: after rotation the row endpoints
+answered **HTTP 401** on both Ethereum and Base while the constant answered **200**,
+and the cleanup was the remedy, not a tidy-up. Do not leave steps 1–4 spread across
+sessions, and if the gap cannot be avoided, expect and monitor the failures.
+
+⚠ When diagnosing in that window, probe the **row endpoint and the constant endpoint
+separately**. A single blended check reads as "rotation broke the site" when the stale
+row is the only cause.
 
 ## 3. Preconditions — all of them, or stop
 
@@ -128,14 +160,14 @@ Per chain, in this order:
 
 1. **Re-read** the row inside the same transaction you will write in. A value read
    minutes earlier may have been changed by an operator in the admin UI.
-2. **Refuse** unless *all* of:
+2. **Refuse** unless *all* of these STRUCTURAL guards hold:
    - `chain_type === 'evm'`
    - `chain_id_hex` is in `AlchemyCredential`'s network map
    - the row's host is exactly `<network>.g.alchemy.com` for that chain's mapped
      network — not a suffix match, not a subdomain of it
    - the row's path is exactly `/v2/<segment>` with a non-empty segment
-   - the `<segment>` is `hash_equals()`-equal to the **designated** credential for
-     this run
+
+   …**and** the row satisfies **one** of the two IDENTITY branches in §5a.
 3. **Write** the keyless template for that network:
    `https://<network>.g.alchemy.com/v2/`
 4. **Re-read and assert** the row now equals that template and
@@ -151,11 +183,126 @@ recognise, and a human should look at it.
 nothing, and the next indexer tick reports UNAVAILABLE across the board with no
 obvious cause.
 
+## 5a. The two identity branches
+
+⚠ **PROCEDURE CHANGE, 2026-10-01.** This section replaces a single condition — "the
+`<segment>` is `hash_equals()`-equal to the designated credential for this run" —
+with two alternative branches. The original condition is retained unchanged as
+branch **A**.
+
+The change was forced by the production run. §2 prescribes **rotate → clean**, and
+after a real rotation the row holds the **superseded** credential while the constant
+holds the replacement, so they are *unequal by definition*. Under branch A alone both
+Ethereum and Base were correctly skipped and nothing was cleaned — the guard blocking
+the removal it exists to enable. Branch **B** covers that case.
+
+A row is eligible if the structural guards in §5 step 2 hold **and** either:
+
+### Branch A — the row IS the designated credential
+
+`hash_equals($designated, $row_rpc_url)` is true, where `$designated` is what
+`AlchemyCredential::rpcUrlFor()` returns for that chain with `rpc_url` blanked **in
+memory**.
+
+Use when cleaning without a rotation, or when the rotation installed the same value
+in both places. Decides from local state only, makes no provider call, and is the
+branch to prefer when it applies.
+
+### Branch B — the row's credential is rejected and the designated one works
+
+Both conditions, each proven by **one bounded `eth_chainId` call**:
+
+| | call | required result |
+|---|---|---|
+| the row's own endpoint | `eth_chainId` | HTTP **401 only** |
+| the designated endpoint | `eth_chainId` | HTTP **200** *and* `result` equals the chain's `chain_id_hex` |
+
+Use after a rotation, when branch A cannot match because the values differ by design.
+
+⚠⚠⚠ **403 IS INELIGIBLE AND REQUIRES HUMAN REVIEW.** A 403 **can** indicate a
+credential that is valid but restricted — a network not enabled on the plan, a policy
+or IP restriction, a suspended account. It is therefore not evidence that the
+credential was superseded.
+
+Observed in this project: a staging key returned `403 network-not-enabled-on-plan` for
+Base while returning **200 for Ethereum in the same moment**, with that key valid and
+in active use.
+
+A row whose endpoint answers 403 is **skipped**, and the skip is recorded for a human
+to look at. Do not widen this back to 401/403: the second condition keeps the chain
+working either way, so widening buys nothing and costs the correctness of the reason
+recorded against the row.
+
+⚠ What 401 establishes is narrow: an **observed authentication rejection**. It does not
+establish the cause, and it is not by itself proof that a rotation occurred.
+
+**What branch B rules out.** A hand-configured endpoint that still works answers 200
+and is skipped. A broken or mis-installed replacement fails the second condition, so
+the row is skipped rather than cleaned into an unusable state. Both conditions must
+hold for the same chain in the same run.
+
+**What branch B costs, and how it differs from A.** It is not a strict improvement on
+branch A, and should not be described as one — it trades differently:
+
+- It **makes network calls** (2 per candidate row). Branch A makes none. A provider
+  outage, a rate limit, or a transient 5xx makes branch B *refuse* — correct, but it
+  means the procedure can be blocked by conditions unrelated to the rows.
+- It reasons from **observed provider behaviour**, not from a local value match. That is
+  why only **401** qualifies: a valid-but-restricted credential **can** answer 403, so
+  403 is excluded above. Status codes are not a reliable map to causes in either
+  direction — do not treat 401 as proving "superseded", and do not assume every
+  restricted credential presents as 403.
+- It cannot distinguish "superseded" from "revoked" from "never valid". Within 401 it
+  establishes only "this row's credential did not authenticate on this call, and the
+  configured replacement did."
+
+⚠ Do not weaken either branch to "any keyed endpoint on the mapped host". That drops
+every identity check and would overwrite a working hand-configured endpoint.
+
+⚠ Record which branch fired, per row, in the run output. The two have different
+evidentiary weight and a reviewer needs to know which one was relied on.
+
+### ⚠ What was executed, versus what this procedure now requires
+
+The 401-only rule above **tightens eligibility for future runs**. It is not a
+description of what the executed scripts did, and the completed cleanups are unaffected
+by it.
+
+**Production cleanup, 2026-10-01, after rotation.** The script used there accepted
+**401 or 403** for the row endpoint. In that run **only 401 was observed** — Ethereum
+and Base each answered 401 — so no row was cleaned on the strength of a 403. That run
+is where the 401/403 behaviour was actually exercised and verified.
+
+**Staging cleanup, 2026-09-30, before rotation.** This did **not** use branch B. At that
+point the row and the constant held the same value, so it matched under **branch A**
+(equality), and the script used there had no eligibility probe at all — neither 401 nor
+403 was involved, and none was observed.
+
+**Staging re-verification, 2026-10-01, after rotation — separate from the cleanup.** The
+replacement was confirmed to differ from the superseded credential by comparing against
+a digest recorded *before* the staging cleanup, and both chains were confirmed working
+from the constant. ⚠ Staging's rows were already keyless by then, so **no superseded
+endpoint remained to probe and no rejection was observed there**. Do not read staging's
+evidence as a 401 observation.
+
 ### Rollback
 
-Restore the row from the backup, or re-set the credentialed URL through the admin
-UI. Rollback restores the **old** key, so if it has already been revoked (§2 step
-5) rollback does not restore service — which is why revocation is last.
+Restore the row from the backup, or re-set the credentialed URL through the admin UI.
+
+⚠ Rollback restores the **superseded** key, so once that key no longer authenticates
+— which, with Alchemy's rotation action, is already true before the cleanup runs —
+**rollback does not restore service.** After a rotation the recovery path is not the
+row but the constant: confirm `BCC_ALCHEMY_API_KEY` holds the replacement and that
+`AlchemyCredential::rpcUrlFor()` resolves with the row blanked in memory (§4).
+
+⚠ Rolling back a row to a dead credential is actively harmful, because the resolver
+prefers a keyed row — it would reintroduce the outage described in §2.
+
+No stored secret is needed to undo a cleanup performed under **branch A**: the
+constant regenerates the exact prior row value. Under **branch B** the prior value is
+the superseded credential and is deliberately not recoverable from the constant;
+restore it from the backup only if there is a reason to, which after a rotation there
+normally is not.
 
 ## 6. Verification after the run
 
@@ -172,7 +319,47 @@ UI. Rollback restores the **old** key, so if it has already been revoked (§2 st
       reported as a count only.
 - [ ] One bounded live call per launch chain succeeds (an existing read path — do
       **not** create a collection or call `addManual()`).
-- [ ] The old key is **revoked** at Alchemy.
+- [ ] The superseded key no longer authenticates. If the rotation was performed with
+      Alchemy's **rotation action**, that action invalidates the superseded key, so
+      there is **no separate revocation step**. What establishes invalidation is the
+      **rotation action itself**. The **401 responses observed** from the superseded row
+      endpoints during the 2026-10-01 production cleanup are a **rejection signal**
+      consistent with that invalidation — corroboration, not the mechanism, and not
+      proof on their own. Confirm rather than assume, and note that a 401 shows an
+      observed authentication rejection without establishing its cause.
+
+### ⚠⚠ Cache verification when an external object cache is present
+
+Check first:
+
+```php
+wp_using_ext_object_cache()   // true in production as of 2026-10-01
+```
+
+When this is **true**, transients live in the object cache, **not** in `wp_options`.
+That changes how invalidation must be verified, and the obvious check is wrong:
+
+- ⛔ **Do not** judge invalidation by reading the `_transient_<key>` **option row**.
+  After `delete_transient()` the option row can still be present, and a run will
+  report "invalidated = false" while the live cache is in fact empty. The two are
+  different stores.
+- ✅ Judge by `get_transient('bcc_active_chains')` — the API that reads the store
+  actually in use — and by **re-scanning the contents after a forced rebuild**
+  (`delete_transient()` then `ChainRepository::getActive()`).
+- ✅ Scan **both** layers for a keyed endpoint and require zero in each: the value
+  from `get_transient()`, and the `_transient_bcc_active_chains` option row if one
+  exists.
+
+⚠ `_transient_bcc_active_chains` may exist in `wp_options` as a **stale artifact
+predating the object cache**. In production on 2026-10-01 its timeout had expired
+roughly 27 days earlier, yet the row still carried all 21 chain columns including
+`rpc_url`. It was credential-free after the cleanup and was left in place. Treat such
+a row as a surface to scan, not as the live cache, and do not infer freshness from its
+presence.
+
+⚠ The cache mirrors whatever `rpc_url` holds, so it is credential-bearing for exactly
+as long as the rows are. It is cleaned by cleaning the rows and rebuilding — never by
+editing the cache.
 
 ## 7. Known limitations
 
@@ -190,6 +377,19 @@ UI. Rollback restores the **old** key, so if it has already been revoked (§2 st
   `EvmFetcher::jsonRpcUrl()` as a guaranteed 401, so a cleaned chain whose
   constant is later unset loses `eth_call` as well as the Alchemy paths. That is
   correct — it cannot authenticate either way — but it means the constant becomes
-  load-bearing for more than NFT discovery once the rows are clean.
+  load-bearing for more than NFT discovery once the rows are clean. **Both
+  environments are now in that state.**
+- **Branch B depends on the provider being reachable.** If Alchemy is down or rate
+  limiting, a post-rotation cleanup cannot proceed, because neither of branch B's two
+  conditions can be established. There is no offline fallback for that case: branch A
+  cannot match after a rotation, and relaxing the guards is not an option. Wait and
+  retry.
+- ⚠ **This file IS deployed to both hosts.** The plugin rsync is not scoped to code:
+  `docs/alchemy-credential-cleanup.md` is present under the deployed plugin directory
+  on staging and production (verified 2026-10-01). It contains no secrets and that is
+  harmless, but it means operational notes written here are world-readable if the
+  directory is ever served, and a host copy can be **stale relative to the repo**.
+  Treat the repository as the source of truth, and never put a credential, a hostname
+  worth hiding, or host-specific detail in it that you would not deploy.
 
 Refs #267
