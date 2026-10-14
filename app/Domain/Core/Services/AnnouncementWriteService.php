@@ -6,6 +6,7 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Announcements\AnnouncementPostType;
+use BCC\Trust\Core\Announcements\AnnouncementPublicationGuard as PublicationGuard;
 use BCC\Trust\Core\Announcements\AnnouncementTransition as Verb;
 use BCC\Trust\Core\Announcements\AnnouncementVisibility as Vis;
 use BCC\Trust\Core\Exceptions\RepositoryException;
@@ -125,13 +126,25 @@ final class AnnouncementWriteService
             );
         }
 
+        // ⚠ §4.32.13: `publish_at` is sent ONLY with `schedule`. Sending it
+        // otherwise is 400, not silently ignored — ignoring it would accept a
+        // request whose intent the server did not honour, and the caller would
+        // have no way to tell that their chosen instant was discarded.
+        if (!Verb::requiresInstant($verb) && trim((string) ($input['publish_at'] ?? '')) !== '') {
+            return self::fail(
+                self::ERR_INVALID,
+                'publish_at is only accepted with status=schedule.',
+                400
+            );
+        }
+
         $date = $now;
         if (Verb::requiresInstant($verb)) {
-            $at = Verb::normalizeInstant((string) ($input['at'] ?? ''), $now);
+            $at = Verb::normalizeInstant((string) ($input['publish_at'] ?? ''), $now);
             if ($at === null) {
                 return self::fail(
                     self::ERR_INVALID,
-                    'at must be a strictly future UTC instant formatted Y-m-d H:i:s.',
+                    'publish_at must be a strictly future UTC instant formatted Y-m-d H:i:s.',
                     400
                 );
             }
@@ -216,16 +229,16 @@ final class AnnouncementWriteService
             }
             $update['post_content'] = $body;
         }
-        if (array_key_exists('at', $input)) {
+        if (array_key_exists('publish_at', $input)) {
             // Re-scheduling only means anything while the row is still pending.
             if ((string) ($row->post_status ?? '') !== Verb::STATUS_FUTURE) {
                 return self::fail(self::ERR_CONFLICT, 'Only a scheduled announcement can be re-scheduled.', 409);
             }
-            $at = Verb::normalizeInstant((string) $input['at'], $now);
+            $at = Verb::normalizeInstant((string) $input['publish_at'], $now);
             if ($at === null) {
                 return self::fail(
                     self::ERR_INVALID,
-                    'at must be a strictly future UTC instant formatted Y-m-d H:i:s.',
+                    'publish_at must be a strictly future UTC instant formatted Y-m-d H:i:s.',
                     400
                 );
             }
@@ -234,7 +247,7 @@ final class AnnouncementWriteService
         }
 
         if (count($update) === 1) {
-            return self::fail(self::ERR_INVALID, 'Nothing to change: supply title, body or at.', 400);
+            return self::fail(self::ERR_INVALID, 'Nothing to change: supply title, body or publish_at.', 400);
         }
 
         $res = wp_update_post($update, true);
@@ -283,6 +296,14 @@ final class AnnouncementWriteService
         if (is_wp_error($res)) {
             return self::fail(self::ERR_UNAVAILABLE, 'The announcement could not be published.', 503);
         }
+
+        // ⚠⚠ THE PERMITTED RECOVERY PATH. If reconciler arm C blocked this row
+        // because authority had lapsed, a fresh publish by a CURRENTLY
+        // authorized operator clears the block. The clear happens only after
+        // isOperator($decision) passed at the top of this method, so recovery
+        // cannot be a bypass: no path clears the blocked marker without a fresh
+        // operator check first.
+        PublicationGuard::clearBlock($announcementId);
 
         return $this->finishPublicationWrite(
             $pageId,
@@ -364,29 +385,47 @@ final class AnnouncementWriteService
             return ['ok' => true, 'id' => $announcementId, 'state' => 'unpinned'];
         }
 
-        // ⚠ At most one pin per page: clear the others first, so the invariant
-        // holds even if an earlier request half-applied.
-        // ⚠⚠ A read failure here REFUSES the pin rather than proceeding. An
-        // errored read would come back as "nothing is pinned", and pinning on
-        // that basis would produce the two-pin state this block exists to
-        // prevent. Failing closed costs the operator a retry; failing open
-        // costs the page its ordering guarantee.
+        // ⚠⚠ THE CRITICAL SECTION IS LOCKED, AND IT HAD TO BE. Read-then-write
+        // without a lock is a race: six parallel processes pinning six rows on
+        // one page left TWO pins surviving (a real run: ids 164 and 167). The
+        // sequential "pin twice, find one" test cannot observe that, because it
+        // never interleaves — which is exactly why it was not sufficient proof.
+        //
+        // ⚠ Refuse rather than queue. A waiting pin would return 200 to a
+        // caller whose pin is then cleared by the request behind it; a conflict
+        // is the honest answer.
+        if (!$this->repo->acquirePinLock($pageId)) {
+            return self::fail(self::ERR_CONFLICT, 'Another pin change is in progress for this page.', 409);
+        }
+
         try {
-            $existing = $this->pinnedIdsFor($pageId);
-        } catch (RepositoryException $e) {
-            return self::fail(self::ERR_UNAVAILABLE, 'The current pin could not be read, so the pin was not applied.', 503);
-        }
-
-        foreach ($existing as $other) {
-            if ($other !== $announcementId) {
-                delete_post_meta($other, AnnouncementRepository::META_PINNED_AT);
+            // ⚠ A read failure here REFUSES the pin rather than proceeding. An
+            // errored read would come back as "nothing is pinned", and pinning
+            // on that basis would produce the two-pin state this section exists
+            // to prevent.
+            try {
+                $existing = $this->pinnedIdsFor($pageId);
+            } catch (RepositoryException $e) {
+                return self::fail(self::ERR_UNAVAILABLE, 'The current pin could not be read, so the pin was not applied.', 503);
             }
-        }
-        if (update_post_meta($announcementId, AnnouncementRepository::META_PINNED_AT, $now) === false) {
-            return self::fail(self::ERR_UNAVAILABLE, 'The announcement could not be pinned.', 503);
-        }
 
-        return ['ok' => true, 'id' => $announcementId, 'state' => 'pinned'];
+            foreach ($existing as $other) {
+                if ($other !== $announcementId) {
+                    delete_post_meta($other, AnnouncementRepository::META_PINNED_AT);
+                }
+            }
+            if (update_post_meta($announcementId, AnnouncementRepository::META_PINNED_AT, $now) === false) {
+                return self::fail(self::ERR_UNAVAILABLE, 'The announcement could not be pinned.', 503);
+            }
+
+            return ['ok' => true, 'id' => $announcementId, 'state' => 'pinned'];
+        } finally {
+            // ⚠ EXACTLY ONE RELEASE FOR THE ONE ACQUIRE ABOVE. GET_LOCK is
+            // reentrant per session, so an unmatched pair leaks the lock for
+            // the rest of the request. The `finally` covers every return path
+            // including the two refusals inside the try.
+            $this->repo->releasePinLock($pageId);
+        }
     }
 
     // ── internals ───────────────────────────────────────────────────────────

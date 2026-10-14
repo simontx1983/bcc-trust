@@ -83,7 +83,7 @@ final class AnnouncementWriteEndpoint
                     ],
                     'title'  => self::textArg(true),
                     'body'   => self::textArg(false),
-                    'at'     => self::instantArg(),
+                    'publish_at' => self::instantArg(),
                 ],
             ]
         );
@@ -101,7 +101,7 @@ final class AnnouncementWriteEndpoint
                     'id'     => $idArg,
                     'title'  => self::textArg(false),
                     'body'   => self::textArg(false),
-                    'at'     => self::instantArg(),
+                    'publish_at' => self::instantArg(),
                 ],
             ]
         );
@@ -168,7 +168,7 @@ final class AnnouncementWriteEndpoint
             [
                 'title' => (string) ($request['title'] ?? ''),
                 'body'  => (string) ($request['body'] ?? ''),
-                'at'    => (string) ($request['at'] ?? ''),
+                'publish_at' => (string) ($request['publish_at'] ?? ''),
             ]
         );
 
@@ -187,7 +187,7 @@ final class AnnouncementWriteEndpoint
         // ⚠ Only keys the caller actually sent are forwarded, so an omitted
         // field is "leave alone" rather than "set to empty".
         $input = [];
-        foreach (['title', 'body', 'at'] as $k) {
+        foreach (['title', 'body', 'publish_at'] as $k) {
             $v = $request->get_param($k);
             if ($v !== null) {
                 $input[$k] = (string) $v;

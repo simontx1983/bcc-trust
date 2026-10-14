@@ -174,7 +174,7 @@ ck('publishing twice is a conflict', 409, dsp('POST', $base . '/' . $draftId . '
 
 echo "\n=== J3. ⚠⚠ SCHEDULE — stored `future`, marker PRESENT, and still NOT public ===\n";
 $at = gmdate('Y-m-d H:i:s', time() + 7200);
-$r  = dsp('POST', $base, ['status' => 'schedule', 'title' => 'Scheduled', 'body' => 'Later', 'at' => $at], $op);
+$r  = dsp('POST', $base, ['status' => 'schedule', 'title' => 'Scheduled', 'body' => 'Later', 'publish_at' => $at], $op);
 ck('create schedule -> 201', 201, $r['status']);
 $schedId = (int) $r['id'];
 ck('stored status is future, not publish', 'future', (string) get_post_status($schedId));
@@ -182,14 +182,19 @@ ck('marker IS written at schedule time (the §6.1 decision)', true, trim((string
 // ⚠ The whole safety argument for writing the marker early: predicate 1 is
 // what keeps this private, not predicate 3.
 ck('scheduled row is NOT publicly visible', false, isPublic($pageId, $schedId));
-ck('a past instant is refused, not clamped', 400, dsp('POST', $base, ['status' => 'schedule', 'title' => 'X', 'body' => 'Y', 'at' => gmdate('Y-m-d H:i:s', time() - 60)], $op)['status']);
+ck('a past instant is refused, not clamped', 400, dsp('POST', $base, ['status' => 'schedule', 'title' => 'X', 'body' => 'Y', 'publish_at' => gmdate('Y-m-d H:i:s', time() - 60)], $op)['status']);
 ck('schedule with no instant is refused', 400, dsp('POST', $base, ['status' => 'schedule', 'title' => 'X', 'body' => 'Y'], $op)['status']);
+// ⚠ §4.32.13: publish_at is sent ONLY with schedule. Sending it with another
+// verb is 400, not silently ignored — ignoring it would accept a request whose
+// intent the server did not honour.
+ck('publish_at with status=draft is refused', 400, dsp('POST', $base, ['status' => 'draft', 'title' => 'X', 'body' => 'Y', 'publish_at' => gmdate('Y-m-d H:i:s', time() + 7200)], $op)['status']);
+ck('publish_at with status=publish is refused', 400, dsp('POST', $base, ['status' => 'publish', 'title' => 'X', 'body' => 'Y', 'publish_at' => gmdate('Y-m-d H:i:s', time() + 7200)], $op)['status']);
 
 echo "\n=== J4. EDIT title/body, and re-schedule only while pending ===\n";
 ck('edit title -> 200', 200, dsp('PATCH', $base . '/' . $draftId, ['title' => 'Renamed'], $op)['status']);
 ck('title actually changed', 'Renamed', get_post_field('post_title', $draftId));
-ck('re-schedule a PENDING row -> 200', 200, dsp('PATCH', $base . '/' . $schedId, ['at' => gmdate('Y-m-d H:i:s', time() + 14400)], $op)['status']);
-ck('re-schedule a PUBLISHED row is a conflict', 409, dsp('PATCH', $base . '/' . $draftId, ['at' => $at], $op)['status']);
+ck('re-schedule a PENDING row -> 200', 200, dsp('PATCH', $base . '/' . $schedId, ['publish_at' => gmdate('Y-m-d H:i:s', time() + 14400)], $op)['status']);
+ck('re-schedule a PUBLISHED row is a conflict', 409, dsp('PATCH', $base . '/' . $draftId, ['publish_at' => $at], $op)['status']);
 ck('an empty edit is refused', 400, dsp('PATCH', $base . '/' . $draftId, [], $op)['status']);
 
 echo "\n=== J5. PIN — at most one per page ===\n";

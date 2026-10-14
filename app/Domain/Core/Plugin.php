@@ -1782,6 +1782,10 @@ final class Plugin
         // refuses with 404 while the switch is off, and then again for a
         // non-operator, so registration grants nothing.
         \BCC\Trust\Core\REST\AnnouncementWriteEndpoint::register();
+        // ⚠ Reconciler arm C (AnnouncementPublicationGuard) is NOT registered
+        // here. It hooks wp-cron and post-status transitions, which are not
+        // REST requests, so it registers at BOOT in bcc-trust.php beside the
+        // CPT. Registering it here is what the cron probe caught.
 
         // V2: Paginated group members (§4.7.7). Same privacy model as
         // §4.7.5 + §4.7.6 — secret-non-member 404s; closed-non-member

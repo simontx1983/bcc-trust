@@ -474,6 +474,22 @@ final class AnnouncementViewService
      */
     private static function status(object $row): string
     {
+        // ⚠⚠ BLOCKED IS CHECKED FIRST, and arm C now exists so this branch is
+        // reachable. The docblock above previously recorded this as an open
+        // item — "when reconciler arm C lands it must define its marker and
+        // this method must read it". It has landed
+        // (`AnnouncementPublicationGuard::META_BLOCKED_AT`), so the mapping is
+        // no longer approximate.
+        //
+        // ⚠ FIRST, not last: a blocked row is stored as `draft`, so a
+        // status-only check would label it `draft` and lose the distinction.
+        // And if a concurrent write ever left it `publish` while the blocked
+        // marker stood, reporting `published` would be the worst answer
+        // available — the marker wins.
+        if (self::str($row, 'blocked_at') !== '') {
+            return AnnouncementCapabilityResolver::STATUS_BLOCKED;
+        }
+
         $wp = self::str($row, 'post_status');
 
         if ($wp === 'future') {

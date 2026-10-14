@@ -68,8 +68,10 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Repositories;
 
+use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Announcements\AnnouncementCapabilityResolver;
 use BCC\Trust\Core\Announcements\AnnouncementPostType;
+use BCC\Trust\Core\Announcements\AnnouncementPublicationGuard;
 use BCC\Trust\Core\Announcements\AnnouncementVisibility;
 use BCC\Trust\Core\Exceptions\RepositoryException;
 use BCC\Trust\Core\Support\KeysetCursor;
@@ -589,6 +591,118 @@ final class AnnouncementRepository
         return array_values(array_map('intval', is_array($ids) ? $ids : []));
     }
 
+    /**
+     * Page-scoped advisory lock for the at-most-one-pin critical section.
+     *
+     * ⚠⚠ MEASURED NECESSARY, NOT ADDED DEFENSIVELY. Without it, six parallel
+     * processes pinning six different rows on one page left **two** pins
+     * surviving (a real run: ids 164 and 167). The sequential test — pin twice,
+     * find one — cannot observe that, because it never interleaves the
+     * read-then-write. `pin()` reads the current pins, deletes the others and
+     * sets its own; two readers that both see "nothing pinned" both set.
+     *
+     * ⚠ Scoped to the PAGE, not globally: pinning on one validator page must
+     * not serialise behind another page's pin.
+     *
+     * ⚠ Timeout 0 — refuse rather than wait. A queued pin would return 200 to
+     * a caller whose pin was then cleared by the request behind it, which is a
+     * worse answer than a conflict.
+     *
+     * ⚠ Routed through `AdvisoryLock` where available so a NULL return (driver
+     * or permission error) stays distinguishable from 0 (held elsewhere); the
+     * raw `(int)` cast collapses both to false and silently degrades the lock
+     * into no lock. Same reasoning as `DisputeRepository`.
+     */
+    public function acquirePinLock(int $pageId): bool
+    {
+        $name = self::pinLockName($pageId);
+
+        if (class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
+            return \BCC\Core\DB\AdvisoryLock::acquire($name, 0);
+        }
+
+        global $wpdb;
+
+        return (int) $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 0)', $name)) === 1;
+    }
+
+    /**
+     * ⚠ EXACTLY ONE RELEASE PER ACQUIRE. MySQL's `GET_LOCK` is reentrant per
+     * session: a second acquire in the same connection succeeds and needs its
+     * own release, so an unmatched pair leaks the lock for the rest of the
+     * request. `pin()` acquires once and releases in a `finally`.
+     */
+    public function releasePinLock(int $pageId): void
+    {
+        global $wpdb;
+
+        $res = $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', self::pinLockName($pageId)));
+        if ($res === false) {
+            Logger::error('[bcc-trust] failed to release the announcement pin lock', [
+                'page_id'  => $pageId,
+                'db_error' => (string) $wpdb->last_error,
+            ]);
+        }
+    }
+
+    private static function pinLockName(int $pageId): string
+    {
+        // ⚠ Well under MySQL's 64-character lock-name limit.
+        return 'bcc_ann_pin_' . $pageId;
+    }
+
+    /**
+     * Force a row's `post_status` with a direct write.
+     *
+     * ⚠⚠ THIS DELIBERATELY BYPASSES `wp_update_post()`, and that is the whole
+     * point of its existence. The publication guard calls it from inside
+     * `transition_post_status`; `wp_update_post()` would re-enter the
+     * transition machinery and recurse into the guard that is calling it.
+     * Core's own `wp_publish_post()` writes the status the same way, for the
+     * same reason.
+     *
+     * ⚠ It lives HERE because §1 permits raw `$wpdb` only in a repository.
+     * Its first home was the guard itself, which is a forbidden layer — the
+     * same mistake `arch-guardrails` had already caught once in this slice.
+     *
+     * ⚠ The status is validated against a CLOSED set rather than interpolated.
+     * A caller-supplied status reaching a direct UPDATE is how a row ends up in
+     * a state no predicate accounts for.
+     *
+     * @throws RepositoryException when the write fails
+     */
+    public function forceStatus(int $announcementId, string $status): bool
+    {
+        if ($announcementId <= 0) {
+            return false;
+        }
+        if (!in_array($status, ['draft', 'future', 'publish'], true)) {
+            throw new \InvalidArgumentException('not a permitted announcement post_status: ' . $status);
+        }
+
+        global $wpdb;
+
+        $wpdb->last_error = '';
+        $res = $wpdb->update(
+            $this->postsTable,
+            ['post_status' => $status],
+            ['ID' => $announcementId, 'post_type' => AnnouncementPostType::POST_TYPE]
+        );
+
+        $lastError = (string) $wpdb->last_error;
+        if (strlen($lastError) > 0) {
+            throw new RepositoryException('announcement_force_status_failed');
+        }
+
+        // ⚠ `0` means "matched but unchanged" OR "matched nothing"; `false`
+        // means error, which is already handled above. The caller treats a
+        // non-false return as "the write did not error", and confirms the state
+        // with its own read — the Cosmos endpoint-switch lesson.
+        clean_post_cache($announcementId);
+
+        return $res !== false;
+    }
+
     // ── internals ────────────────────────────────────────────────────────
 
     /**
@@ -705,6 +819,15 @@ final class AnnouncementRepository
     private const ARCHIVED_EXPR = "NULLIF(mar.meta_value, '')";
 
     /**
+     * Reconciler arm C's blocked timestamp, empty-string-safe.
+     *
+     * ⚠ A separate const for the same reason as ARCHIVED_EXPR: it is derived
+     * from meta, so it must be repeated verbatim anywhere a WHERE uses it, and
+     * an empty meta is NOT blocked.
+     */
+    private const BLOCKED_EXPR = "NULLIF(mbl.meta_value, '')";
+
+    /**
      * Explicit column list — never `SELECT *` (§2, and arch-guardrails
      * Rule 2 enforces it).
      *
@@ -726,6 +849,7 @@ final class AnnouncementRepository
                 ' . self::ARCHIVED_EXPR . ' AS archived_at,
                 mce.meta_value AS comments_enabled,
                 mp.meta_value AS publish_at,
+                ' . self::BLOCKED_EXPR . ' AS blocked_at,
                 ' . $effectiveExpr . ' AS effective_at';
     }
 
@@ -752,7 +876,9 @@ final class AnnouncementRepository
                 LEFT JOIN {$m} mce ON mce.post_id = p.ID AND mce.meta_key = '"
                 . AnnouncementVisibility::META_COMMENTS_ENABLED . "'
                 LEFT JOIN {$m} mp ON mp.post_id = p.ID AND mp.meta_key = '"
-                . self::META_PUBLISH_AT . "'";
+                  . self::META_PUBLISH_AT . "'
+                  LEFT JOIN {$m} mbl ON mbl.post_id = p.ID AND mbl.meta_key = '"
+                  . AnnouncementPublicationGuard::META_BLOCKED_AT . "'";
     }
 
     /**

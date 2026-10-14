@@ -164,6 +164,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Announcements\\AnnouncementFeature' => __DIR__ . '/../..' . '/app/Domain/Core/Announcements/AnnouncementFeature.php',
         'BCC\\Trust\\Core\\Announcements\\AnnouncementModerationPolicy' => __DIR__ . '/../..' . '/app/Domain/Core/Announcements/AnnouncementModerationPolicy.php',
         'BCC\\Trust\\Core\\Announcements\\AnnouncementPostType' => __DIR__ . '/../..' . '/app/Domain/Core/Announcements/AnnouncementPostType.php',
+        'BCC\\Trust\\Core\\Announcements\\AnnouncementPublicationGuard' => __DIR__ . '/../..' . '/app/Domain/Core/Announcements/AnnouncementPublicationGuard.php',
         'BCC\\Trust\\Core\\Announcements\\AnnouncementTransition' => __DIR__ . '/../..' . '/app/Domain/Core/Announcements/AnnouncementTransition.php',
         'BCC\\Trust\\Core\\Announcements\\AnnouncementVisibility' => __DIR__ . '/../..' . '/app/Domain/Core/Announcements/AnnouncementVisibility.php',
         'BCC\\Trust\\Core\\Application\\Disputes\\DisputeAdjudicator' => __DIR__ . '/../..' . '/app/Domain/Core/Application/Disputes/DisputeAdjudicator.php',
