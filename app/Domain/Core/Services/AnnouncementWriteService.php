@@ -366,7 +366,18 @@ final class AnnouncementWriteService
 
         // ⚠ At most one pin per page: clear the others first, so the invariant
         // holds even if an earlier request half-applied.
-        foreach ($this->pinnedIdsFor($pageId) as $other) {
+        // ⚠⚠ A read failure here REFUSES the pin rather than proceeding. An
+        // errored read would come back as "nothing is pinned", and pinning on
+        // that basis would produce the two-pin state this block exists to
+        // prevent. Failing closed costs the operator a retry; failing open
+        // costs the page its ordering guarantee.
+        try {
+            $existing = $this->pinnedIdsFor($pageId);
+        } catch (RepositoryException $e) {
+            return self::fail(self::ERR_UNAVAILABLE, 'The current pin could not be read, so the pin was not applied.', 503);
+        }
+
+        foreach ($existing as $other) {
             if ($other !== $announcementId) {
                 delete_post_meta($other, AnnouncementRepository::META_PINNED_AT);
             }
@@ -480,26 +491,23 @@ final class AnnouncementWriteService
         }
     }
 
-    /** @return list<int> */
+    /**
+     * ⚠⚠ ASKS THE REPOSITORY. Its first version ran the query here, and
+     * `arch-guardrails` rejected it with five `WPDB_OUTSIDE_REPO` violations —
+     * correctly: §1 puts raw `$wpdb` in a repository and nowhere else. The
+     * query now lives in `AnnouncementRepository::pinnedIdsFor()`.
+     *
+     * ⚠ A read failure must NOT be swallowed into an empty list here. An empty
+     * list means "nothing is pinned", and the caller would then pin a second
+     * row — breaking the very at-most-one invariant this supports. So the
+     * RepositoryException propagates to the caller, which refuses the pin.
+     *
+     * @return list<int>
+     * @throws RepositoryException when the read fails
+     */
     private function pinnedIdsFor(int $pageId): array
     {
-        global $wpdb;
-
-        $sql = $wpdb->prepare(
-            'SELECT p.ID FROM ' . $wpdb->posts . ' p'
-            . ' INNER JOIN ' . $wpdb->postmeta . ' m ON m.post_id = p.ID'
-            . ' WHERE p.post_type = %s AND p.post_parent = %d'
-            . ' AND m.meta_key = %s LIMIT 50',
-            AnnouncementPostType::POST_TYPE,
-            $pageId,
-            AnnouncementRepository::META_PINNED_AT
-        );
-        $ids = $wpdb->get_col($sql);
-
-        // ⚠ array_values(): get_col() preserves keys, so array_map alone returns
-        // array<int> rather than the list<int> this signature promises.
-        // Re-indexing is the fix; widening the return type would have been the lie.
-        return is_array($ids) ? array_values(array_map('intval', $ids)) : [];
+        return $this->repo->pinnedIdsFor($pageId);
     }
 
     /**

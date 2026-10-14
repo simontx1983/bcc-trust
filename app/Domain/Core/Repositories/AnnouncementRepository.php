@@ -537,6 +537,58 @@ final class AnnouncementRepository
         return $out;
     }
 
+    /**
+     * Every currently pinned announcement id on a page.
+     *
+     * ⚠ THIS LIVES HERE BECAUSE §1 PUTS IT HERE. The A3 write layer needs it to
+     * hold §4.32.12's at-most-one-pin invariant, and its first version ran the
+     * query inside `AnnouncementWriteService` — which `arch-guardrails`
+     * correctly rejected with five `WPDB_OUTSIDE_REPO` violations. Raw `$wpdb`
+     * belongs in a repository and nowhere else; the service now asks for ids.
+     *
+     * ⚠ Bounded by LIMIT. The invariant means the real answer is 0 or 1, so a
+     * larger result set is already a broken install; the bound stops a broken
+     * install turning into an unbounded read.
+     *
+     * @return list<int>
+     * @throws RepositoryException when the read fails
+     */
+    public function pinnedIdsFor(int $pageId): array
+    {
+        if ($pageId <= 0) {
+            return [];
+        }
+
+        global $wpdb;
+
+        $sql = 'SELECT p.ID
+                  FROM ' . $this->postsTable . ' p
+                  INNER JOIN ' . $this->metaTable . ' m ON m.post_id = p.ID
+                 WHERE p.post_type = %s
+                   AND p.post_parent = %d
+                   AND m.meta_key = %s
+                 LIMIT 50';
+
+        $wpdb->last_error = '';
+        $ids = $wpdb->get_col($wpdb->prepare(
+            $sql,
+            AnnouncementPostType::POST_TYPE,
+            $pageId,
+            self::META_PINNED_AT
+        ));
+
+        $lastError = (string) $wpdb->last_error;
+        if (strlen($lastError) > 0) {
+            // ⚠ Fail closed, like every other read here. An errored query
+            // returning [] would tell the writer "nothing is pinned", and it
+            // would then pin a second row — breaking the very invariant this
+            // method exists to hold.
+            throw new RepositoryException('announcement_pinned_ids_failed');
+        }
+
+        return array_values(array_map('intval', is_array($ids) ? $ids : []));
+    }
+
     // ── internals ────────────────────────────────────────────────────────
 
     /**
