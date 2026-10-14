@@ -258,7 +258,7 @@ final class AnnouncementWriteEndpoint
      * cache here, because a cache is the obvious "optimisation" a later reader
      * would add.
      *
-     * @return array{0: array<string,mixed>, 1: int}
+     * @return array{0: array{decision: string, reason: string|null, operator_user_id: int|null}, 1: int}
      */
     private static function authorize(int $pageId): array
     {
@@ -269,7 +269,7 @@ final class AnnouncementWriteEndpoint
 
     /**
      * @param array<string,mixed> $result
-     * @param array<string,mixed> $decision
+     * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision
      */
     private static function render(array $result, array $decision, int $okStatus = 200): WP_REST_Response
     {

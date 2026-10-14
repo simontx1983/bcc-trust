@@ -77,7 +77,7 @@ final class AnnouncementWriteService
     /**
      * Create an announcement under one of the three verbs.
      *
-     * @param array<string,mixed> $decision the authority decision array, passed
+     * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision the authority decision array, passed
      *        in rather than resolved here — the discipline the capability
      *        resolver and the repository already follow. ⚠ §4.32.2 forbids
      *        current_user_can, page authorship, mirror claim rows, PeepSo
@@ -167,7 +167,7 @@ final class AnnouncementWriteService
     /**
      * Edit title and body, and optionally re-schedule.
      *
-     * @param array<string,mixed> $decision
+     * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision
      * @param array<string,mixed> $input
      * @return array<string,mixed>
      */
@@ -248,7 +248,7 @@ final class AnnouncementWriteService
     /**
      * Promote an existing draft to published.
      *
-     * @param array<string,mixed> $decision
+     * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision
      * @return array<string,mixed>
      */
     public function publish(
@@ -297,7 +297,7 @@ final class AnnouncementWriteService
     /**
      * Archive — one-way, keeps the permalink (§4.32.6). Not a deletion.
      *
-     * @param array<string,mixed> $decision
+     * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision
      * @return array<string,mixed>
      */
     public function archive(int $pageId, int $announcementId, array $decision, ?string $nowUtc = null): array
@@ -330,7 +330,7 @@ final class AnnouncementWriteService
      * Pin or unpin. §4.32.12 allows at most one pinned row per page, so pinning
      * clears any other pin first.
      *
-     * @param array<string,mixed> $decision
+     * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision
      * @return array<string,mixed>
      */
     public function pin(
@@ -389,7 +389,7 @@ final class AnnouncementWriteService
      * courtesy; the guarantee comes from predicate 3, which an absent marker
      * fails regardless of whether the revert succeeded.
      *
-     * @param array<string,mixed> $decision
+     * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision
      * @return array<string,mixed>
      */
     private function finishPublicationWrite(
@@ -448,7 +448,7 @@ final class AnnouncementWriteService
     }
 
     /**
-     * @param array<string,mixed> $decision
+     * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision
      * @return array<string,mixed>
      */
     private function readBackOrFail(int $pageId, int $postId, array $decision): array
@@ -469,7 +469,7 @@ final class AnnouncementWriteService
     }
 
     /**
-     * @param array<string,mixed> $decision
+     * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision
      */
     private function ownRowOrNull(int $pageId, array $decision, int $announcementId): ?\stdClass
     {
@@ -496,9 +496,25 @@ final class AnnouncementWriteService
         );
         $ids = $wpdb->get_col($sql);
 
-        return is_array($ids) ? array_map('intval', $ids) : [];
+        // ⚠ array_values(): get_col() preserves keys, so array_map alone returns
+        // array<int> rather than the list<int> this signature promises.
+        // Re-indexing is the fix; widening the return type would have been the lie.
+        return is_array($ids) ? array_values(array_map('intval', $ids)) : [];
     }
 
+    /**
+     * ⚠⚠ @phpstan-impure, and this is a correctness annotation rather than
+     * a silenced finding. This reads post meta that a write immediately
+     * before it may have just CHANGED — archive() stamps the key and then
+     * re-reads it as its post-write confirmation. Without the marker,
+     * PHPStan remembers the pre-write return value, concludes the
+     * confirmation is always true, and declares the real 503 path dead
+     * code. That is exactly the shape of the A2.4 defect where an early
+     * return made a 503 unreachable while a test counting source shapes
+     * stayed green.
+     *
+     * @phpstan-impure
+     */
     private static function isArchived(int $announcementId): bool
     {
         $v = get_post_meta($announcementId, Vis::META_ARCHIVED_AT, true);
@@ -507,7 +523,7 @@ final class AnnouncementWriteService
     }
 
     /**
-     * @param array<string,mixed> $decision
+     * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision
      */
     private function isOperator(array $decision): bool
     {
