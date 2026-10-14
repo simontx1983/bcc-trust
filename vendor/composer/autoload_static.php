@@ -162,6 +162,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Admin\\WalletAuditPage' => __DIR__ . '/../..' . '/app/Domain/Core/Admin/WalletAuditPage.php',
         'BCC\\Trust\\Core\\Announcements\\AnnouncementCapabilityResolver' => __DIR__ . '/../..' . '/app/Domain/Core/Announcements/AnnouncementCapabilityResolver.php',
         'BCC\\Trust\\Core\\Announcements\\AnnouncementPostType' => __DIR__ . '/../..' . '/app/Domain/Core/Announcements/AnnouncementPostType.php',
+        'BCC\\Trust\\Core\\Announcements\\AnnouncementVisibility' => __DIR__ . '/../..' . '/app/Domain/Core/Announcements/AnnouncementVisibility.php',
         'BCC\\Trust\\Core\\Application\\Disputes\\DisputeAdjudicator' => __DIR__ . '/../..' . '/app/Domain/Core/Application/Disputes/DisputeAdjudicator.php',
         'BCC\\Trust\\Core\\Application\\RecalcQueueReadService' => __DIR__ . '/../..' . '/app/Domain/Core/Application/RecalcQueueReadService.php',
         'BCC\\Trust\\Core\\Application\\ScoreContributorService' => __DIR__ . '/../..' . '/app/Domain/Core/Application/ScoreContributorService.php',
