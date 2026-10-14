@@ -12,6 +12,7 @@ use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Trust\Core\Support\KeysetCursor as Cursor;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority as Authority;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
@@ -68,6 +69,10 @@ final class AnnouncementRepositoryIntegrationTest extends TestCase
 
     private const PAGE_ID  = 4471;
     private const OPERATOR = 7;
+
+    /** A second page and a second operator, for the cross-boundary cases. */
+    private const OTHER_PAGE_ID  = 5522;
+    private const OTHER_OPERATOR = 8;
 
     private AnnouncementRepository $repo;
 
@@ -645,6 +650,193 @@ final class AnnouncementRepositoryIntegrationTest extends TestCase
         }
 
         self::assertTrue($threw);
+    }
+
+    // ── 6b. The SINGLE-ROW finders — a separate SQL composition ──────────
+
+    /**
+     * ⚠⚠ `findPublic()` and `findForOwner()` share NO SQL with the list
+     * methods — they are their own `WHERE` built in `findOne()`. So none of
+     * the predicate coverage above transfers to them, and the route that
+     * depends on them most is the one with the strongest rule: §4.32.4's
+     * "404 to non-owners, never 403" is carried entirely by `findPublic()`
+     * returning null for a row that exists but is not public.
+     *
+     * A list method that leaked would show an extra row in a collection
+     * someone might notice. A finder that leaked would serve a draft at a
+     * guessable URL.
+     */
+    public function testFindPublicReturnsAFullyAuthorizedDueRow(): void
+    {
+        $id  = $this->seed('public row');
+        $row = $this->repo->findPublic(self::PAGE_ID, $id);
+
+        self::assertNotNull($row);
+        self::assertSame('public row', (string) $row->post_title);
+        self::assertSame($id, (int) $row->ID);
+    }
+
+    /**
+     * Each §4.32.1 predicate removed independently. The marker cases are
+     * the ones with teeth: predicate 3 is what stops a row moved to
+     * `publish` by any other path from going public without the ownership
+     * recheck.
+     *
+     * @param array<string, string|null> $overrides
+     */
+    #[DataProvider('nonPublicRowShapes')]
+    public function testFindPublicRefusesEveryNonPublicShape(string $label, array $overrides): void
+    {
+        $id = $this->seed(
+            $label,
+            $overrides['dateGmt'] ?? '2026-01-01 00:00:00',
+            $overrides['status'] ?? 'publish',
+            self::OPERATOR,
+            self::PAGE_ID,
+            AnnouncementPostType::POST_TYPE,
+            array_key_exists('authorizedAt', $overrides) ? $overrides['authorizedAt'] : '2026-01-01 00:00:00',
+            array_key_exists('authorizedUserId', $overrides) ? $overrides['authorizedUserId'] : '7'
+        );
+
+        self::assertNull(
+            $this->repo->findPublic(self::PAGE_ID, $id),
+            $label . ' must not be publicly findable'
+        );
+    }
+
+    /** @return iterable<string, array{string, array<string, string|null>}> */
+    public static function nonPublicRowShapes(): iterable
+    {
+        yield 'draft'                   => ['draft row', ['status' => 'draft']];
+        yield 'scheduled (future)'      => ['future row', ['status' => 'future', 'dateGmt' => '2099-01-01 00:00:00']];
+        yield 'published but not due'   => ['not due', ['dateGmt' => '2099-01-01 00:00:00']];
+        yield 'no marker at all'        => ['no marker', ['authorizedAt' => null, 'authorizedUserId' => null]];
+        yield 'marker date only'        => ['half marker', ['authorizedUserId' => null]];
+        yield 'marker user only'        => ['other half', ['authorizedAt' => null]];
+        yield 'marker dated future'     => ['future marker', ['authorizedAt' => '2099-01-01 00:00:00']];
+        yield 'marker names another'    => ['wrong user', ['authorizedUserId' => '8']];
+        yield 'marker empty string'     => ['empty marker', ['authorizedAt' => '']];
+        yield 'marker user empty'       => ['empty user', ['authorizedUserId' => '']];
+        yield 'marker user zero'        => ['zero user', ['authorizedUserId' => '0']];
+        yield 'marker user non-numeric' => ['text user', ['authorizedUserId' => 'seven']];
+    }
+
+    /** §4.32.6: archival keeps the permalink, so the finder must still resolve it. */
+    public function testFindPublicStillResolvesAnArchivedRow(): void
+    {
+        $id = $this->seed('archived', '2026-01-01 00:00:00', 'publish', self::OPERATOR, self::PAGE_ID,
+            AnnouncementPostType::POST_TYPE, '2026-01-01 00:00:00', '7', '2026-02-01 00:00:00');
+
+        $row = $this->repo->findPublic(self::PAGE_ID, $id);
+        self::assertNotNull($row, 'an archived announcement keeps its permalink');
+    }
+
+    /** ⚠ No cross-page leak: the id alone must not be enough. */
+    public function testNeitherFinderCrossesPageBoundaries(): void
+    {
+        $id = $this->seed('on another page', '2026-01-01 00:00:00', 'publish', self::OPERATOR, self::OTHER_PAGE_ID);
+
+        self::assertNull($this->repo->findPublic(self::PAGE_ID, $id));
+        self::assertNull($this->repo->findForOwner(self::PAGE_ID, self::operator(), $id));
+        self::assertNotNull($this->repo->findPublic(self::OTHER_PAGE_ID, $id), 'and it IS findable on its own page');
+    }
+
+    public function testFindForOwnerReturnsTheOperatorsOwnUnpublishedRow(): void
+    {
+        $draft = $this->seed('my draft', '2026-01-01 00:00:00', 'draft');
+
+        $row = $this->repo->findForOwner(self::PAGE_ID, self::operator(), $draft);
+        self::assertNotNull($row);
+        self::assertSame('my draft', (string) $row->post_title);
+    }
+
+    /** @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision */
+    #[DataProvider('nonOperatorDecisions')]
+    public function testFindForOwnerRefusesEveryNonOperatorDecision(string $label, array $decision): void
+    {
+        $draft = $this->seed('someone draft', '2026-01-01 00:00:00', 'draft');
+
+        self::assertNull(
+            $this->repo->findForOwner(self::PAGE_ID, $decision, $draft),
+            $label . ' must not reach an unpublished row'
+        );
+    }
+
+    /** @return iterable<string, array{string, array<string, mixed>}> */
+    public static function nonOperatorDecisions(): iterable
+    {
+        yield 'denied' => ['a denial', ['decision' => 'denied', 'reason' => 'not_claimer', 'operator_user_id' => null]];
+        yield 'operator decision with no id' => ['half a decision', ['decision' => Authority::DECISION_OPERATOR, 'reason' => null, 'operator_user_id' => null]];
+        yield 'operator decision with id 0'  => ['a zero id', ['decision' => Authority::DECISION_OPERATOR, 'reason' => null, 'operator_user_id' => 0]];
+        yield 'empty decision'               => ['an empty array', []];
+    }
+
+    /** Another operator's draft on the same page is not the viewer's to read. */
+    public function testFindForOwnerRefusesAnotherOperatorsDraft(): void
+    {
+        $theirs = $this->seed('their draft', '2026-01-01 00:00:00', 'draft', self::OTHER_OPERATOR);
+
+        self::assertNull($this->repo->findForOwner(self::PAGE_ID, self::operator(), $theirs));
+        self::assertNotNull(
+            $this->repo->findForOwner(self::PAGE_ID, self::operator(self::OTHER_OPERATOR), $theirs),
+            'and it IS theirs to read'
+        );
+    }
+
+    /** @param int $id a value that cannot name a row */
+    #[DataProvider('impossibleFinderArguments')]
+    public function testBothFindersRefuseImpossibleArgumentsWithoutQuerying(int $pageId, int $annId): void
+    {
+        self::assertNull($this->repo->findPublic($pageId, $annId));
+        self::assertNull($this->repo->findForOwner($pageId, self::operator(), $annId));
+    }
+
+    /** @return iterable<string, array{int, int}> */
+    public static function impossibleFinderArguments(): iterable
+    {
+        yield 'zero page'        => [0, 1];
+        yield 'zero id'          => [self::PAGE_ID, 0];
+        yield 'negative page'    => [-1, 1];
+        yield 'negative id'      => [self::PAGE_ID, -1];
+        yield 'both impossible'  => [0, 0];
+    }
+
+    /**
+     * ⚠⚠ MUST-NOT-HAPPEN #2 for the single-row path. `null` is the finder's
+     * ORDINARY answer — it is what "not public" looks like — so a failed
+     * query that returned null would be indistinguishable from a correct
+     * refusal, and the detail route would answer 404 for a database fault.
+     * Hence the throw.
+     */
+    public function testAFailedFinderThrowsRatherThanLookingLikeNotFound(): void
+    {
+        $id   = $this->seed('present');
+        $repo = new AnnouncementRepository(self::POSTS, self::META . '_missing', self::COMMENTS);
+
+        $this->expectException(RepositoryException::class);
+        $repo->findPublic(self::PAGE_ID, $id);
+    }
+
+    public function testAFailedOwnerFinderAlsoThrows(): void
+    {
+        $id   = $this->seed('present too', '2026-01-01 00:00:00', 'draft');
+        $repo = new AnnouncementRepository(self::POSTS, self::META . '_missing', self::COMMENTS);
+
+        $this->expectException(RepositoryException::class);
+        $repo->findForOwner(self::PAGE_ID, self::operator(), $id);
+    }
+
+    /**
+     * ⚠ A non-announcement post with the same id space must not resolve.
+     * The finders bind `post_type`, and without it any post id under the
+     * page would be readable through the announcement route.
+     */
+    public function testNeitherFinderReturnsANonAnnouncementPost(): void
+    {
+        $alien = $this->seed('an ordinary post', '2026-01-01 00:00:00', 'publish', self::OPERATOR, self::PAGE_ID, 'post');
+
+        self::assertNull($this->repo->findPublic(self::PAGE_ID, $alien));
+        self::assertNull($this->repo->findForOwner(self::PAGE_ID, self::operator(), $alien));
     }
 
     // ── 7. Identifier validation ─────────────────────────────────────────

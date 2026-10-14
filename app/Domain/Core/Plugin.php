@@ -1768,6 +1768,14 @@ final class Plugin
         // model with feed_visible=false (detail) or 403 + unlock_hint
         // (feed sub-route).
         \BCC\Trust\Core\REST\GroupsDetailEndpoint::register();
+        // §4.32.4 announcement READ routes. Registered unconditionally;
+        // the handlers refuse with 404 while bcc_announcements_enabled is
+        // off (§4.32.10). ⚠ Not gated HERE on purpose: a route that is not
+        // registered is invisible to contract-parity-guard, so the guard
+        // could not police the four documented endpoints in either
+        // direction while the switch is off — which is the whole life of
+        // the feature until it ships.
+        \BCC\Trust\Core\REST\AnnouncementsEndpoint::register();
 
         // V2: Paginated group members (§4.7.7). Same privacy model as
         // §4.7.5 + §4.7.6 — secret-non-member 404s; closed-non-member

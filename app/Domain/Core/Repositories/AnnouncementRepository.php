@@ -292,8 +292,11 @@ final class AnnouncementRepository
             return ['rows' => [], 'has_more' => false];
         }
 
-        global $wpdb;
-
+        // ⚠ No `global $wpdb` here: this method BUILDS the query and
+        // {@see self::runPage()} executes it. An earlier revision declared
+        // it anyway, which reads as though this method queries — and the
+        // whole point of routing through runPage() is that the fail-closed
+        // error check lives in exactly one place.
         $limit  = self::clampLimit($limit);
         $fetch  = $limit + 1;
         $params = [AnnouncementPostType::POST_TYPE, $pageId, $operatorId];
@@ -336,6 +339,136 @@ final class AnnouncementRepository
         $params[] = $fetch;
 
         return $this->runPage($sql, $params, $limit);
+    }
+
+    // ── Single-row reads, for the detail route (§4.32.4) ─────────────────
+
+    /**
+     * One publicly visible announcement, or null.
+     *
+     * ⚠⚠ Composes the SAME §4.32.1 predicate as the public lists — it is
+     * not a relaxed "by id" lookup. A detail route that fetched by id and
+     * then checked visibility in PHP would be a second implementation of
+     * the three-predicate rule, and §4.32.1 requires all four read paths
+     * to enforce all three. Here the predicate IS the lookup.
+     *
+     * ⚠ Archival is deliberately NOT filtered: an archived announcement
+     * keeps its canonical permalink (§4.32.6), so its detail view must
+     * still resolve.
+     *
+     * Returning `null` for "not visible" rather than throwing is what lets
+     * the route answer 404 for a missing row, a draft and another
+     * operator's row identically.
+     *
+     * @return \stdClass|null the row as the driver returns it
+     * @throws RepositoryException when the read fails
+     */
+    public function findPublic(int $pageId, int $announcementId): ?\stdClass
+    {
+        if ($pageId <= 0 || $announcementId <= 0) {
+            return null;
+        }
+
+        $where = [
+            'p.post_type = %s',
+            'p.post_parent = %d',
+            'p.ID = %d',
+            AnnouncementVisibility::publicPredicateSql($this->metaTable, 'p'),
+        ];
+
+        return $this->findOne(
+            $where,
+            [AnnouncementPostType::POST_TYPE, $pageId, $announcementId]
+        );
+    }
+
+    /**
+     * One announcement belonging to the resolved operator, published or
+     * not — the detail route's second attempt, used only after
+     * {@see self::findPublic()} returns null.
+     *
+     * Same discipline as {@see self::listForOwner()}:
+     *   - takes the authority's DECISION ARRAY, never a page id + viewer
+     *     id and never a bool (§4.32.2 forbids five inputs a bool would
+     *     silently accept);
+     *   - a non-operator or half-resolved decision returns null, so the
+     *     route's 404 is indistinguishable from a missing row;
+     *   - binds `post_author` to the resolved operator, so even a correct
+     *     decision cannot read another operator's draft. ⚠ A consistency
+     *     check on the row, not an authorization input — it can only
+     *     narrow.
+     *
+     * ⚠ No `post_status` filter. The owner may read their own row in any
+     * state, including a `blocked` one they cannot yet be shown as blocked
+     * (see {@see self::ownerStatuses()}). Withholding it would hide an
+     * operator's own content from them.
+     *
+     * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision
+     *
+     * @return \stdClass|null the row as the driver returns it
+     * @throws RepositoryException when the read fails
+     */
+    public function findForOwner(int $pageId, array $decision, int $announcementId): ?\stdClass
+    {
+        if ($pageId <= 0 || $announcementId <= 0) {
+            return null;
+        }
+
+        if (($decision['decision'] ?? null) !== ValidatorPageOperatorAuthority::DECISION_OPERATOR) {
+            return null;
+        }
+
+        $operatorId = $decision['operator_user_id'] ?? null;
+        if (!is_int($operatorId) || $operatorId <= 0) {
+            return null;
+        }
+
+        $where = [
+            'p.post_type = %s',
+            'p.post_parent = %d',
+            'p.ID = %d',
+            'p.post_author = %d',
+        ];
+
+        return $this->findOne(
+            $where,
+            [AnnouncementPostType::POST_TYPE, $pageId, $announcementId, $operatorId]
+        );
+    }
+
+    /**
+     * The shared single-row read. One builder so the two lookups cannot
+     * drift in their column list or their failure handling.
+     *
+     * @param list<string> $where
+     * @param list<mixed> $params
+     *
+     * @return \stdClass|null the row as the driver returns it
+     * @throws RepositoryException when the read fails
+     */
+    private function findOne(array $where, array $params): ?\stdClass
+    {
+        global $wpdb;
+
+        $sql = 'SELECT ' . $this->columns('NULL') . '
+                  FROM ' . $this->postsTable . ' p
+                  ' . $this->metaJoins() . '
+                 WHERE ' . implode(' AND ', $where) . '
+                 LIMIT 1';
+
+        // ⚠⚠ FAIL-CLOSED, same as the list reads. A failed lookup must not
+        // present as "no such announcement" — the route turns null into a
+        // 404, and a 404 caused by a DB fault is indistinguishable from a
+        // genuine one.
+        $wpdb->last_error = '';
+        $row = $wpdb->get_row($wpdb->prepare($sql, ...$params));
+
+        $lastError = (string) $wpdb->last_error;
+        if (strlen($lastError) > 0) {
+            throw new RepositoryException('announcement_read_failed');
+        }
+
+        return $row instanceof \stdClass ? $row : null;
     }
 
     // ── Batched comment counts (batch-then-shape, never per row) ─────────
