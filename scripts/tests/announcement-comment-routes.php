@@ -545,6 +545,63 @@ foreach ([
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+echo "\n=== J. ⚠⚠ FEATURE OFF, ANONYMOUS — the case section I could not see ===\n";
+// ⚠⚠ Section I probes the two /admin/ routes AS AN ADMINISTRATOR
+// (`str_contains($route, '/admin/') ? $admin : $member`), so it only ever
+// exercised the path that REACHES the handler. An anonymous caller is stopped
+// by the `permission_callback` FIRST, and with `BearerAuth::requireAdmin`
+// wired there directly that answered `401 rest_forbidden` — telling an
+// unauthenticated caller that a switched-off surface exists.
+//
+// §4.32.10 is unqualified: "While OFF: every route returns 404." So every one
+// of the five is probed here with NO user at all.
+delete_option('bcc_announcements_enabled');
+
+foreach ([
+    ['GET',    $base,                                                     []],
+    ['POST',   $base,                                                     ['body' => 'x']],
+    ['DELETE', $base . '/' . $c1,                                         []],
+    ['GET',    '/bcc/v1/admin/announcement-comments/' . $c1,              []],
+    ['POST',   '/bcc/v1/admin/announcement-comments/' . $c1 . '/restore', []],
+] as [$m, $route, $params]) {
+    $label = str_contains($route, '/admin/') ? 'admin route' : 'member route';
+    $res   = dsp($m, $route, $params, 0);
+    ck('J ' . $m . ' ' . $label . ', ANONYMOUS -> 404', 404, $res['status']);
+    ck('J   and it is the handler own refusal, not a callback denial',
+        'bcc_not_found', $res['code']);
+}
+
+// ⚠ The control that keeps the fix honest: with the feature ON, an anonymous
+// caller must STILL be refused by the admin gate. If this started answering
+// 200 or 404, the fix would have turned a permission check into a no-op.
+update_option('bcc_announcements_enabled', '1');
+foreach ([
+    ['GET',  '/bcc/v1/admin/announcement-comments/' . $c1,              []],
+    ['POST', '/bcc/v1/admin/announcement-comments/' . $c1 . '/restore', []],
+] as [$m, $route, $params]) {
+    $res = dsp($m, $route, $params, 0);
+    ck('J ON + anonymous ' . $m . ' admin route is still refused', true,
+        in_array((int) $res['status'], [401, 403], true));
+    ck('J   ...and it is NOT a 404 (the surface exists once enabled)', false,
+        (int) $res['status'] === 404);
+}
+// ...and a non-administrator member is refused too, not just an anonymous one.
+foreach ([
+    ['GET',  '/bcc/v1/admin/announcement-comments/' . $c1,              []],
+    ['POST', '/bcc/v1/admin/announcement-comments/' . $c1 . '/restore', []],
+] as [$m, $route, $params]) {
+    $res = dsp($m, $route, $params, $member);
+    ck('J ON + non-admin member ' . $m . ' is refused', true,
+        in_array((int) $res['status'], [401, 403], true));
+}
+// An administrator still gets through while ON — so the gate refuses the right
+// people rather than everybody.
+$res = dsp('GET', '/bcc/v1/admin/announcement-comments/' . $c1, [], $admin);
+ck('J ON + administrator reads the private original', 200, $res['status']);
+
+delete_option('bcc_announcements_enabled');
+
+// ─────────────────────────────────────────────────────────────────────────
 echo "\n=== TEARDOWN ===\n";
 delete_option('bcc_announcements_enabled');
 ck('switch deleted, not set to 0', null, get_option('bcc_announcements_enabled', null));

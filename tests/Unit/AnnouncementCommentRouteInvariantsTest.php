@@ -646,7 +646,21 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
         // the surface and bypass §4.32.2's generic-reason rule. That argument
         // does not apply to an explicitly administrative path.
         self::assertSame(3, substr_count($code, '__return_true'), 'three member routes');
-        self::assertSame(2, substr_count($code, 'requireAdmin'), 'two administrator routes');
+        // ⚠ Counted on the REGISTRATION, not on the seam's name. The admin
+        // routes now wire `adminPermission`, which delegates to
+        // `BearerAuth::requireAdmin` exactly ONCE — so an earlier version of
+        // this line, which expected the name twice, failed against the
+        // corrected wiring rather than against a defect.
+        self::assertSame(
+            2,
+            substr_count($code, "[self::class, 'adminPermission']"),
+            'two administrator routes'
+        );
+        self::assertSame(
+            1,
+            substr_count($code, 'requireAdmin'),
+            'one delegation to the admin seam, inside the feature-aware callback'
+        );
         self::assertSame(5, substr_count($code, "'permission_callback'"), 'every route declares one');
     }
 
@@ -790,6 +804,73 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
         // Removal entitlement, captions and audit actions are the policy's.
         self::assertSame(0, substr_count($code, 'LABEL_'));
         self::assertSame(0, substr_count($code, 'AUDIT_'));
+    }
+
+    public function testNoRouteWiresTheAdminCheckAheadOfTheFeatureGate(): void
+    {
+        // ⚠⚠ THE DEFECT THIS PINS, found on staging after the merge.
+        // `BearerAuth::requireAdmin` wired straight into `permission_callback`
+        // runs BEFORE the handler, so an ANONYMOUS request to either
+        // `/admin/` route answered `401 rest_forbidden` while the feature was
+        // off — disclosing a switched-off surface. §4.32.10 is unqualified:
+        // "While OFF: every route returns 404."
+        //
+        // The probe could not see it: it authenticated as an administrator for
+        // those two routes, so only the path that reaches the handler was ever
+        // exercised. Section J of the probe now covers the anonymous path, and
+        // this case pins the shape so the wiring cannot regress.
+        $code = self::code(self::ENDPOINT);
+
+        self::assertSame(
+            0,
+            substr_count($code, "[BearerAuth::class, 'requireAdmin']"),
+            'requireAdmin must not be the permission_callback directly — the switch is checked first'
+        );
+        self::assertSame(
+            2,
+            substr_count($code, "[self::class, 'adminPermission']"),
+            'both administrator routes must gate through the feature-aware callback'
+        );
+    }
+
+    public function testTheAdminPermissionCallbackChecksTheSwitchBeforeTheRole(): void
+    {
+        $body = self::body(self::ENDPOINT, 'adminPermission');
+
+        $gate = strpos($body, 'Feature::isEnabled()');
+        $role = strpos($body, 'requireAdmin');
+
+        self::assertNotFalse($gate, 'the callback does not consult the feature switch');
+        self::assertNotFalse($role, 'the callback no longer delegates to requireAdmin');
+        self::assertLessThan(
+            $role,
+            $gate,
+            'the feature switch must be read BEFORE the role check, or a disabled surface leaks a 401'
+        );
+
+        // ⚠ And it must return TRUE when off — handing the request to the
+        // handler, whose first statement is the 404. Returning a WP_Error here
+        // would answer 403 and reintroduce the disclosure in a new shape.
+        self::assertStringContainsString('return true;', $body);
+    }
+
+    public function testTheAdminRoutesStillRefuseANonAdministratorWhenEnabled(): void
+    {
+        // The fix must not turn a permission check into a no-op: with the
+        // feature ON the callback still delegates to the same seam every other
+        // `/admin/` route in this plugin uses. The behavioural half of this is
+        // probe section J's ON-state control (anonymous and non-admin both
+        // refused, administrator 200).
+        $body = self::body(self::ENDPOINT, 'adminPermission');
+
+        // ⚠ No argument: `requireAdmin(): bool` declares none, and PHP
+        // would have silently ignored one.
+        self::assertStringContainsString('BearerAuth::requireAdmin()', $body);
+        self::assertSame(
+            0,
+            substr_count($body, 'current_user_can('),
+            'the admin decision has one owner; do not re-derive it here'
+        );
     }
 
     // ── 7. the capability call PHPStan caught ──────────────────────────
