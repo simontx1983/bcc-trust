@@ -22,6 +22,31 @@
  * `wp_update_post()` BEFORE writing the publication marker, so a projection
  * listening only on `transition_post_status` is refused by its own authority
  * gate on every direct publish. Case A is the regression test for that.
+ *
+ * ── ⚠⚠ WHAT SECTION L IS FOR, AND THE MISTAKE THAT MADE IT NECESSARY ───────
+ * Cases D, E and G look like they test the handler's authority gate. They do
+ * NOT, and a mutation control proved it: disabling the `findPublic()` refusal
+ * — the whole §4.32.8 "due AND authorized" check — left all of A–K passing.
+ *
+ * The reason is that NO EVENT IS FIRED on those paths: `draft` and `schedule`
+ * both return from `finishPublicationWrite()` before the `do_action`, and a
+ * blocked promotion takes arm C's `block()` branch rather than the branch
+ * carrying the event. So A–K prove the event WIRING is conservative, which is
+ * worth proving, but they say nothing about what the handler refuses.
+ *
+ * ⚠ And case H, the only one that fires the event directly at a refusable row,
+ * is guarded TWICE — by `isBlocked()` and by `findPublic()` — so neither guard
+ * is individually killed; only removing both together fails it. Mutually
+ * redundant guards are invisible to a single-mutation control.
+ *
+ * Section L therefore fires the event DIRECTLY at a row in each refusable
+ * state, one predicate at a time, each with a positive control on the same
+ * row. That is the only construction that can observe the handler's own gate.
+ *
+ * ⚠ An EDIT is deliberately absent from that list: `edit()` emits no event at
+ * all, so "edits do not bump the feed" is true because nothing fires, NOT
+ * because the idempotency check catches it. Case B measures the observable
+ * guarantee; case B2 pins the date half of it.
  */
 
 // ⚠ No declare(strict_types=1): `wp eval-file` EVALS this file, and a
@@ -220,10 +245,24 @@ ck('A: the card cannot host a discussion', '1', (string) get_post_meta($a, 'peep
 
 // ─────────────────────────────────────────────────────────────────────────
 echo "\n=== B. AN EDIT DOES NOT BUMP THE FEED ===\n";
+$dateBefore = (string) get_post_field('post_date_gmt', $a);
 $r = dsp('PATCH', $base . '/' . $a, ['title' => 'A4 direct, edited'], $op);
 ck('B: edit succeeded', 200, $r['status']);
 ck('B: STILL exactly one activity', 1, acts($a));
 ck('B: the SAME act_id (identity retained)', $actA, actId($a));
+
+// §4.32.8 — "retains the original `published_at`, feed position and activity
+// identity". act_id covers identity; this covers the DATE, which is what the
+// feed actually orders on. The suite asserted identity only.
+clean_post_cache($a);
+ck('B2: published_at UNCHANGED by the edit', $dateBefore, (string) get_post_field('post_date_gmt', $a));
+
+// ⚠ And the status gate that makes it true: a PUBLISHED row refuses a
+// re-schedule, so its date cannot be moved by any edit.
+$r = dsp('PATCH', $base . '/' . $a, ['publish_at' => gmdate('Y-m-d H:i:s', time() + 7200)], $op);
+ck('B2: re-scheduling a PUBLISHED row is refused', 409, $r['status']);
+clean_post_cache($a);
+ck('B2: and its date still did not move', $dateBefore, (string) get_post_field('post_date_gmt', $a));
 
 // ─────────────────────────────────────────────────────────────────────────
 echo "\n=== C. ARCHIVAL WITHDRAWS THE ACTIVITY ===\n";
@@ -353,6 +392,141 @@ ck('K: module 205 takes no reactions',
 ck('K: control — an ordinary status DOES take reactions',
     false,
     \BCC\Trust\Core\Support\NoReactionsGate::kindTakesNoReactions('status'));
+
+// ─────────────────────────────────────────────────────────────────────────
+echo "\n=== L. ⚠⚠ THE HANDLER'S OWN GATE, one refusable state at a time ===\n";
+// Each case below builds a row that is valid in every respect EXCEPT one,
+// fires the event DIRECTLY at it, and requires zero activities. Then it
+// repairs that one respect and requires exactly one. Without the paired
+// control a zero would be unfalsifiable: a handler that refused everything
+// would score full marks.
+update_option('bcc_announcements_enabled', '1');
+
+/**
+ * Build an announcement row that satisfies all three §4.32.1 predicates, then
+ * apply one named defect to it. Returns the new post id.
+ */
+$mk = static function (string $defect) use ($pageId, $op, $wpdb) {
+    $past = gmdate('Y-m-d H:i:s', time() - 120);
+
+    $status = $defect === 'draft' ? 'draft' : 'publish';
+
+    $id = wp_insert_post([
+        'post_type'     => CPT::POST_TYPE,
+        'post_status'   => $status,
+        'post_parent'   => $pageId,
+        'post_author'   => $op,
+        'post_title'    => 'A4 L ' . $defect,
+        'post_date_gmt' => $past,
+        'post_date'     => $past,
+    ]);
+
+    if ($defect === 'future_date') {
+        // ⚠⚠ The date is pushed into the future by a DIRECT UPDATE, after the
+        // insert, deliberately. `wp_insert_post()` COERCES a `publish` row
+        // carrying a future date into status `future` — so inserting it that
+        // way would have produced TWO defects (wrong status AND wrong date),
+        // and repairing one would leave the other. The paired control caught
+        // exactly that: L2 refused even after repair. This shape leaves
+        // `post_status = publish` and isolates predicate 2 alone.
+        $future = gmdate('Y-m-d H:i:s', time() + 3600);
+        $wpdb->update($wpdb->posts, ['post_date_gmt' => $future, 'post_date' => $future], ['ID' => $id]);
+    }
+
+    if ($defect !== 'no_marker') {
+        update_post_meta($id, VIS::META_AUTHORIZED_AT, $past);
+        update_post_meta($id, VIS::META_AUTHORIZED_USER_ID, (string) $op);
+    }
+    if ($defect === 'wrong_marker_user') {
+        update_post_meta($id, VIS::META_AUTHORIZED_USER_ID, (string) ($op + 9999));
+    }
+    if ($defect === 'archived') {
+        update_post_meta($id, VIS::META_ARCHIVED_AT, $past);
+    }
+    if ($defect === 'blocked') {
+        update_post_meta($id, ARMC::META_BLOCKED_AT, $past);
+        update_post_meta($id, ARMC::META_BLOCKED_REASON, ARMC::REASON_AUTHORITY_LOST);
+    }
+
+    clean_post_cache($id);
+
+    return (int) $id;
+};
+
+/** Repair the one defect, so the paired control can project. */
+$repair = static function (int $id, string $defect) use ($op, $wpdb) {
+    $past = gmdate('Y-m-d H:i:s', time() - 120);
+
+    if ($defect === 'draft') {
+        $wpdb->update($wpdb->posts, ['post_status' => 'publish'], ['ID' => $id]);
+    } elseif ($defect === 'future_date') {
+        $wpdb->update($wpdb->posts, ['post_date_gmt' => $past, 'post_date' => $past], ['ID' => $id]);
+    } elseif ($defect === 'no_marker') {
+        update_post_meta($id, VIS::META_AUTHORIZED_AT, $past);
+        update_post_meta($id, VIS::META_AUTHORIZED_USER_ID, (string) $op);
+    } elseif ($defect === 'wrong_marker_user') {
+        update_post_meta($id, VIS::META_AUTHORIZED_USER_ID, (string) $op);
+    } elseif ($defect === 'archived') {
+        delete_post_meta($id, VIS::META_ARCHIVED_AT);
+    } elseif ($defect === 'blocked') {
+        delete_post_meta($id, ARMC::META_BLOCKED_AT);
+        delete_post_meta($id, ARMC::META_BLOCKED_REASON);
+    }
+
+    clean_post_cache($id);
+};
+
+$cases = [
+    'draft'             => 'L1 predicate 1 — status is not publish',
+    'future_date'       => 'L2 predicate 2 — due instant is in the future',
+    'no_marker'         => 'L3 predicate 3 — NO publication marker',
+    'wrong_marker_user' => 'L4 predicate 3 — marker names a DIFFERENT user',
+    'archived'          => 'L5 archived — readable, but projects no NEW card',
+    'blocked'           => 'L6 arm C blocked — withheld by the reconciler',
+];
+
+foreach ($cases as $defect => $label) {
+    $id = $mk($defect);
+
+    // The defect must make the row unprojectable...
+    do_action('bcc_announcement_published', $op, $id);
+    ck($label, 0, acts($id));
+
+    // ...and repairing ONLY that defect must make it projectable, which is
+    // what proves the zero above came from the gate and not from the fixture.
+    $repair($id, $defect);
+    do_action('bcc_announcement_published', $op, $id);
+    ck('   control — the same row projects once repaired', 1, acts($id));
+}
+
+// ⚠ L3 and L4 are the two that matter most: they are the ONLY cases in this
+// probe that single out predicate 3, the publication-authorization marker.
+// Every other refusal in sections A–K is also caught by predicate 1 or 2, so
+// before section L existed a projection that dropped the marker check entirely
+// would have scored 56/56.
+
+echo "
+=== L7. RE-DELIVERY: firing the event twice yields ONE activity ===
+";
+// ⚠ This is the case that actually exercises the idempotency check, and it
+// was missing: a mutation control disabling that check SURVIVED the whole
+// suite. Nothing else fires the event twice on a projectable row — an edit
+// cannot, because `edit()` emits no event at all.
+//
+// The real-world shape is a cron tick delivering `publish_future_post` twice,
+// or any other caller re-firing after a successful projection.
+$rd = $mk('none');
+do_action('bcc_announcement_published', $op, $rd);
+ck('L7 first delivery projects one', 1, acts($rd));
+$rdAct = actId($rd);
+ck('L7 and it has a real act_id', true, $rdAct > 0);
+
+do_action('bcc_announcement_published', $op, $rd);
+ck('L7 ⚠⚠ SECOND delivery projects NO second activity', 1, acts($rd));
+ck('L7 and the act_id is unchanged (position retained)', $rdAct, actId($rd));
+
+do_action('bcc_announcement_published', $op, $rd);
+ck('L7 a third delivery still leaves exactly one', 1, acts($rd));
 
 // ─────────────────────────────────────────────────────────────────────────
 echo "\n=== TEARDOWN ===\n";

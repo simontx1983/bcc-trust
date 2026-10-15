@@ -281,9 +281,16 @@ final class AnnouncementFeedProjectionTest extends TestCase
     // ── 4. exactly one activity, and edits do not bump ───────────────────
 
     /**
-     * ⚠ "Exactly one activity per announcement" and "edits do not bump the
-     * feed" are the SAME mechanism: the idempotency check. It must run BEFORE
-     * the insert, which is asserted by position rather than by reading prose.
+     * ⚠ "Exactly one activity per announcement" is the idempotency check, and
+     * it must run BEFORE the insert — asserted by position, not by prose.
+     *
+     * ⚠⚠ CORRECTED: an earlier version of this docblock said this was ALSO
+     * what makes "edits do not bump the feed" true. It is not.
+     * {@see testAnEditFiresNoEventAtAll()} carries the real reason, and a
+     * mutation control proved the difference: disabling this check broke no
+     * case until a RE-DELIVERY case was added, because nothing in the suite
+     * fired the event twice on a projectable row — and an edit cannot, since
+     * it emits no event. The live probe's L7 now covers it.
      */
     public function testTheIdempotencyCheckPrecedesTheInsert(): void
     {
@@ -312,6 +319,55 @@ final class AnnouncementFeedProjectionTest extends TestCase
 
         $between = substr($body, $check, $insert - $check);
         self::assertStringContainsString('return;', $between, 'an existing activity must short-circuit');
+    }
+
+    /**
+     * ⚠⚠ THE REAL REASON "EDITS DO NOT BUMP THE FEED" HOLDS: `edit()` emits no
+     * event at all.
+     *
+     * It returns through `readBackOrFail()` and never reaches
+     * `finishPublicationWrite()`, which is the only place the direct-publish
+     * event is fired. So the edit path never arrives at the projection, let
+     * alone at its idempotency check.
+     *
+     * This case exists because the opposite was documented, and a reader who
+     * believed it could move the event into `edit()` thinking idempotency
+     * protected feed position.
+     */
+    public function testAnEditFiresNoEventAtAll(): void
+    {
+        $body = self::body(self::SERVICE, 'edit');
+
+        self::assertStringNotContainsString(
+            'do_action(',
+            $body,
+            'edit() must emit no event — that is what keeps an edit off the feed'
+        );
+        self::assertStringNotContainsString(
+            'finishPublicationWrite(',
+            $body,
+            'edit() must not route through the publication write, which fires the event'
+        );
+    }
+
+    /**
+     * ⚠ And the DATE half of §4.32.8's "retains the original `published_at`":
+     * a re-schedule is refused unless the row is still `future`, so a
+     * published announcement's date cannot be moved by any edit.
+     */
+    public function testAPublishedRowCannotBeRescheduled(): void
+    {
+        $body = self::body(self::SERVICE, 'edit');
+
+        self::assertStringContainsString('STATUS_FUTURE', $body, 'the re-schedule gate must test for future');
+        self::assertStringContainsString('ERR_CONFLICT', $body, 'and refuse with a conflict otherwise');
+
+        // The date write must sit AFTER that gate, or the gate is decorative.
+        $gate = strpos($body, 'STATUS_FUTURE');
+        $date = strpos($body, 'post_date_gmt');
+        self::assertIsInt($gate);
+        self::assertIsInt($date);
+        self::assertLessThan($date, $gate, 'the status gate must precede the date write');
     }
 
     // ── 5. the switch, in both directions ────────────────────────────────

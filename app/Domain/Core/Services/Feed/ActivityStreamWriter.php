@@ -467,10 +467,21 @@ final class ActivityStreamWriter
      *     hand-written copy would be most likely to drop.
      *   - "exactly one" is the idempotency check against
      *     `(module=announcement, external_id=$announcementId)`, the same
-     *     check-then-insert the blog handler uses. This is also what makes
-     *     "EDITS DO NOT BUMP THE FEED" true: an edit re-firing this event
-     *     finds the existing row and returns without touching feed position
-     *     or activity identity.
+     *     check-then-insert the blog handler uses. It guards RE-DELIVERY of
+     *     the event — a cron tick that fires twice, or any other caller
+     *     firing it again — and leaves feed position and activity identity
+     *     untouched when it does.
+     *
+     * ⚠ IT IS **NOT** WHAT MAKES "EDITS DO NOT BUMP THE FEED" TRUE, and an
+     * earlier version of this docblock said it was. `AnnouncementWriteService::edit()`
+     * emits NO event at all: it returns through `readBackOrFail()` and never
+     * reaches `finishPublicationWrite()`, so the edit path never arrives here.
+     * The guarantee holds for a different reason — nothing fires — and the
+     * date half of it is held by `edit()` answering `409` to a `publish_at` on
+     * any row that is not still `future`. Recorded because a reader who
+     * believed the old claim could move the event into `edit()` thinking this
+     * check protected feed position, or delete this check thinking the edit
+     * path still covered it.
      *
      * ⚠ Blocked rows are refused explicitly even though a blocked row is
      * stored `draft` with its marker stripped, so `findPublic()` would already
