@@ -1782,6 +1782,11 @@ final class Plugin
         // refuses with 404 while the switch is off, and then again for a
         // non-operator, so registration grants nothing.
         \BCC\Trust\Core\REST\AnnouncementWriteEndpoint::register();
+        // A5b — the five §4.32.4 comment routes. Registered unconditionally so
+        // `contract-parity-guard` can police them in both directions; every
+        // handler's first statement is the feature switch, so all five answer
+        // 404 while `bcc_announcements_enabled` is absent.
+        \BCC\Trust\Core\REST\AnnouncementCommentsEndpoint::register();
         // ⚠ Reconciler arm C (AnnouncementPublicationGuard) is NOT registered
         // here. It hooks wp-cron and post-status transitions, which are not
         // REST requests, so it registers at BOOT in bcc-trust.php beside the
