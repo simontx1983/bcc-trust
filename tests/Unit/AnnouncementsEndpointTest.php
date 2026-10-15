@@ -293,16 +293,26 @@ final class AnnouncementsEndpointTest extends TestCase
      * `_bcc_announcement_blocked_at`, so the filter is real and the parameter
      * means what it says.
      *
-     * `published` is still refused, for its own unchanged reason: a published
-     * announcement is served by the public list.
+     * `published` is accepted too, and for a reason that had to be corrected
+     * rather than merely extended: it was refused because "the public list
+     * serves it", which is true of the ROWS and false of the CAPABILITIES.
+     * §4.32.11 forbids the public list from carrying `capabilities` for any
+     * viewer, so an operator had no way to obtain management capabilities for
+     * a SET of published rows — only one at a time through detail.
      */
-    public function testTheOwnerStatusEnumAcceptsBlockedButNotPublished(): void
+    public function testTheOwnerStatusEnumAcceptsEveryWriteState(): void
     {
         $args = $this->route(self::OWNER_LIST)['args']['args'] ?? [];
         $enum = $args['status']['enum'] ?? null;
 
-        self::assertSame(['draft', 'scheduled', 'blocked'], $enum);
-        self::assertNotContains('published', (array) $enum, 'the public list serves published rows');
+        self::assertSame(['draft', 'scheduled', 'blocked', 'published'], $enum);
+
+        // ⚠ The PUBLIC list must not have gained a status parameter in the
+        // process. §4.32.11's guarantee is that it carries no status, no body
+        // and no capabilities for anybody; a status filter there would be the
+        // first step toward serving unpublished rows from a cacheable surface.
+        $publicArgs = $this->route(self::PUBLIC_LIST)['args']['args'] ?? [];
+        self::assertArrayNotHasKey('status', $publicArgs);
 
         // ⚠ And the enum must BIND: beside a sanitizer it would be decorative,
         // which is the /members defect. An explicit validator is required.
@@ -459,12 +469,19 @@ final class AnnouncementsEndpointTest extends TestCase
         yield 'state casing'        => [self::PUBLIC_LIST, ['pageId' => 1, 'state' => 'ACTIVE'], 'state'];
         // limit bounds live in their own case (testAnOutOfRangeLimitIsRefusedRatherThanClamped)
         yield 'owner limit over'    => [self::OWNER_LIST, ['pageId' => 1, 'limit' => 51], 'limit'];
-        // ⚠ `status blocked` was here and is REMOVED: reconciler arm C now
-        // produces the state and stamps a marker to filter on, so the owner
-        // route accepts it. See testTheOwnerStatusEnumAcceptsBlockedButNotPublished.
-        // `published` stays refused — the public list serves published rows.
-        yield 'status published'    => [self::OWNER_LIST, ['pageId' => 1, 'status' => 'published'], 'status'];
+        // ⚠⚠ `status blocked` AND `status published` were both here as expected
+        // REFUSALS and both are gone, each once its filter could mean what it
+        // says: arm C stamps a marker that separates a blocked row from an
+        // ordinary draft, and the owner list is the only surface that may
+        // carry capabilities for a SET of published rows (§4.32.11 forbids the
+        // public list from carrying them for anybody). See
+        // testTheOwnerStatusEnumAcceptsEveryWriteState.
+        //
+        // ⚠ The rows below are what keeps the enum BINDING. Deleting a refusal
+        // row without leaving a real invalid value behind would retire the
+        // only check that the enum rejects anything at all.
         yield 'status nonsense'     => [self::OWNER_LIST, ['pageId' => 1, 'status' => 'whatever'], 'status'];
+        yield 'status near-miss'    => [self::OWNER_LIST, ['pageId' => 1, 'status' => 'publish'], 'status'];
         yield 'status empty'        => [self::OWNER_LIST, ['pageId' => 1, 'status' => ''], 'status'];
     }
 
