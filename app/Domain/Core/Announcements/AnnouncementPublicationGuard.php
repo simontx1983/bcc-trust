@@ -195,6 +195,24 @@ final class AnnouncementPublicationGuard
         }
 
         if (self::stillAuthorized($post)) {
+            // §4.32.8 FEED PROJECTION — the SCHEDULED half.
+            //
+            // ⚠⚠ Only the `future` -> `publish` promotion fires here, and the
+            // ordering is what makes it correct: `affirm()` wrote the marker at
+            // `publish_future_post` priority 1, and core has now written the
+            // status, so BOTH §4.32.1 predicates the projection needs are in
+            // place at this instant.
+            //
+            // ⚠ A direct publish is deliberately NOT fired from here. It
+            // arrives with `$old` of `draft`, and on that path the marker is
+            // written AFTER this transition by
+            // `AnnouncementWriteService::finishPublicationWrite()`, which fires
+            // the event itself once both halves are stored. Firing here too
+            // would be refused by the projection and would log a misleading
+            // refusal for a publish that succeeded.
+            if ($old === 'future') {
+                do_action('bcc_announcement_published', (int) $post->post_author, (int) $post->ID);
+            }
             return;
         }
 

@@ -456,6 +456,11 @@ final class AnnouncementWriteService
             return self::fail(self::ERR_UNAVAILABLE, 'Archival could not be confirmed.', 503);
         }
 
+        // §4.32.8 / §4.32.13 — "archival withdraws the feed activity".
+        // Fired only after archival is CONFIRMED stored, so a failed archive
+        // cannot withdraw a card that is still live.
+        do_action('bcc_announcement_archived', $announcementId);
+
         return ['ok' => true, 'id' => $announcementId, 'state' => 'archived'];
     }
 
@@ -584,7 +589,27 @@ final class AnnouncementWriteService
             return $this->failClosed($pageId, $postId, 'The publication authorization could not be recorded.');
         }
 
-        return $this->readBackOrFail($pageId, $postId, $decision);
+        $result = $this->readBackOrFail($pageId, $postId, $decision);
+
+        // §4.32.8 FEED PROJECTION — the DIRECT-publish half.
+        //
+        // ⚠⚠ WHY THE EVENT FIRES HERE AND NOT ON `transition_post_status`.
+        // `publish()` calls `wp_update_post()` FIRST, so the status transition
+        // has already fired by the time this method runs — and at that instant
+        // the publication marker did not yet exist. A projection listening on
+        // the transition alone would therefore be refused by its own authority
+        // gate on every direct publish, and would log a misleading
+        // "not due or not authorized" for a publish that in fact succeeded.
+        // This is the first point at which BOTH the status and the marker are
+        // stored, which is exactly the condition the projection requires.
+        //
+        // ⚠ Gated on the read-back, not on the meta writes: a row that could
+        // not be confirmed stored must not be announced to the floor.
+        if (($result['ok'] ?? false) === true) {
+            do_action('bcc_announcement_published', $actorId, $postId);
+        }
+
+        return $result;
     }
 
     /**

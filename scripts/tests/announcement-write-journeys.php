@@ -292,9 +292,50 @@ foreach (['published', 'future', 'trash', 'private', 'Publish'] as $bad) {
 echo "\n=== J10. NO ENGAGEMENT: no activity row, no stokes, no helpful marks ===\n";
 $actTable = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}peepso_activities'");
 if ($actTable) {
-    ck('zero module-205 activity rows', 0, (int) $wpdb->get_var(
-        "SELECT COUNT(*) FROM {$wpdb->prefix}peepso_activities WHERE act_module_id = '205'"
+    // ⚠⚠ SCOPED, NOT DELETED. This used to require ZERO module-205 rows
+    // outright, which was right while nothing projected announcements. A4 makes
+    // a PUBLISHED row project exactly one activity by design (§4.32.8), so the
+    // bare zero is now false — and the section it sits in is about ENGAGEMENT,
+    // not about whether a card exists at all.
+    //
+    // ⚠ It also only failed in an environment where `peepso_activities` EXISTS.
+    // The disposable stack has no PeepSo tables, so this branch was SKIPped and
+    // the staleness stayed invisible until the table was created deliberately.
+    //
+    // ⚠ And it is scoped to THIS PAGE: a global count is contaminated by the
+    // sibling probes sharing this database — measured at 25 rows belonging to
+    // other probes — so a global zero asserts something this probe neither
+    // controls nor cleans.
+    //
+    // What J10 actually guarantees is that an announcement accrues no
+    // ENGAGEMENT. The activity row is a projection, not engagement, so the
+    // invariant is that there is never MORE than one per published row, and the
+    // engagement tables stay empty (asserted immediately below, unchanged).
+    $ann205 = (int) $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(*) FROM {$wpdb->prefix}peepso_activities a
+           JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
+          WHERE a.act_module_id = 205 AND p.post_type = %s AND p.post_parent = %d",
+        CPT::POST_TYPE,
+        $pageId
     ));
+    $annPublished = (int) $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(*) FROM {$wpdb->posts}
+          WHERE post_type = %s AND post_parent = %d AND post_status = 'publish'",
+        CPT::POST_TYPE,
+        $pageId
+    ));
+    ck('⚠ never more activities than published rows on this page', true, $ann205 <= $annPublished);
+    ck('⚠ and no DUPLICATE card for any one announcement', 0, (int) $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(*) FROM (
+             SELECT a.act_external_id
+               FROM {$wpdb->prefix}peepso_activities a
+               JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
+              WHERE a.act_module_id = 205 AND p.post_type = %s AND p.post_parent = %d
+              GROUP BY a.act_external_id HAVING COUNT(*) > 1
+         ) d",
+        CPT::POST_TYPE,
+        $pageId
+    )));
 } else {
     echo "SKIP no peepso_activities table in this environment — the unit inventory covers the absence\n";
 }
@@ -334,6 +375,26 @@ ck('switch deleted, not set to 0', null, get_option('bcc_announcements_enabled',
 $ids = $wpdb->get_col($wpdb->prepare(
     "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_parent = %d", CPT::POST_TYPE, $pageId
 ));
+// ⚠⚠ ACTIVITY ROWS MUST BE DELETED TOO, and this is NEW with A4. Before the
+// feed projection existed, publishing an announcement created no
+// `peepso_activities` row, so a teardown that deleted only posts left nothing
+// behind. A4 projects one card per published announcement, so this teardown now
+// leaks a row per run — and because `act_external_id` then points at a post
+// that no longer exists, the leak is invisible to any join and ACCUMULATES.
+//
+// Measured: 34 orphan module-205 rows had built up in the disposable stack from
+// repeated runs, which is what broke a sibling probe's teardown assertion.
+// Deleted BEFORE the posts, because afterwards there is no way left to tell
+// which rows were ours.
+$actTeardown = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}peepso_activities'");
+if ($actTeardown) {
+    foreach ($ids as $id) {
+        $wpdb->delete($wpdb->prefix . 'peepso_activities', [
+            'act_module_id'   => 205,
+            'act_external_id' => (int) $id,
+        ], ['%d', '%d']);
+    }
+}
 foreach ($ids as $id) {
     wp_delete_post((int) $id, true);
 }
