@@ -421,6 +421,26 @@ ck('I: ⚠ NOT flagged blocked (this is not a revocation)', false, GUARD::isBloc
 echo "\n=== TEARDOWN ===\n";
 delete_option('bcc_announcements_enabled');
 $ids = $wpdb->get_col($wpdb->prepare("SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_parent = %d", CPT::POST_TYPE, $pageId));
+// ⚠⚠ ACTIVITY ROWS MUST BE DELETED TOO, and this is NEW once A4's feed
+// projection exists. Before it, publishing an announcement created no
+// `peepso_activities` row, so deleting the posts was a complete teardown. With
+// the projection, every PUBLISHED row leaves one card — and once the post is
+// gone the card points at nothing, so the leak is invisible to any join and
+// ACCUMULATES across runs.
+//
+// Measured in the disposable stack: this probe leaked 5 rows per run and the
+// interval probe 1, which only showed up when a sibling's teardown assertion
+// was scoped tightly enough to notice. Deleted BEFORE the posts, because
+// afterwards there is no way left to identify which rows were ours.
+$actTeardown = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}peepso_activities'");
+if ($actTeardown) {
+    foreach ($ids as $id) {
+        $wpdb->delete($wpdb->prefix . 'peepso_activities', [
+            'act_module_id'   => 205,
+            'act_external_id' => (int) $id,
+        ], ['%d', '%d']);
+    }
+}
 foreach ($ids as $id) {
     wp_clear_scheduled_hook('publish_future_post', [(int) $id]);
     wp_delete_post((int) $id, true);
