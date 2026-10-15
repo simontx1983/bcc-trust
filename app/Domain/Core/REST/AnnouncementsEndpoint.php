@@ -55,6 +55,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Announcements\AnnouncementFeature;
+use BCC\Trust\Core\Announcements\AnnouncementViewerStanding;
 use BCC\Trust\Core\Exceptions\RepositoryException;
 use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Trust\Core\Services\AnnouncementViewService;
@@ -624,9 +625,31 @@ final class AnnouncementsEndpoint
      *
      * @return array<string, mixed>
      */
+    /**
+     * ⚠⚠ THE GAP THIS CLOSES, AND WHAT IT COST.
+     *
+     * This method used to return `['authenticated' => $viewerId > 0]` and
+     * nothing else, while `AnnouncementCapabilityResolver::forRow()` reads FOUR
+     * keys and — correctly — fails closed on an absent one. So `good_standing`
+     * read as FALSE for every viewer, and `can_comment` could never be
+     * `allowed` through any live route no matter who asked: the gate fell
+     * through to `suspended` for an authenticated member in perfectly good
+     * standing.
+     *
+     * Neither side was wrong on its own. The resolver documented that the
+     * caller computes standing "from the existing services"; this caller
+     * supplied one key and nothing compared the two. It was measured, not
+     * reasoned about — a probe asked for `can_comment` as an eligible member
+     * and got `suspended`.
+     *
+     * Standing now comes from {@see AnnouncementViewerStanding}, which routes
+     * every flag through the service that already owns it elsewhere.
+     *
+     * @return array{authenticated: bool, suspended: bool, fraud_locked: bool, good_standing: bool}
+     */
     private static function viewerStanding(int $viewerId): array
     {
-        return ['authenticated' => $viewerId > 0];
+        return AnnouncementViewerStanding::forViewer($viewerId);
     }
 
     /**
