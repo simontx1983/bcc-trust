@@ -18,6 +18,14 @@
  * that a revoked claim at due time produces NO card — all three need the real
  * event graph, a real cron dispatch and a real table.
  *
+ * ⚠⚠ EVERY ROUTE-CREATE BELOW CARRIES A `summary`, AND IT IS REQUIRED.
+ * §4.32.3 makes the summary a first-class authored field and the create route
+ * refuses a request without one. This probe was written BEFORE that landed, and
+ * on a tree carrying both it failed 23 of 76 assertions — every one of them a
+ * cascade from four creates that returned 400 instead of 201. The failure was
+ * invisible to either change ALONE and only appeared on a combined tree, which
+ * is the reason the three open PRs are reviewed together rather than in series.
+ *
  * ⚠ The ORDERING FINDING this probe exists to defend: `publish()` calls
  * `wp_update_post()` BEFORE writing the publication marker, so a projection
  * listening only on `transition_post_status` is refused by its own authority
@@ -231,7 +239,7 @@ echo "\n=== A. DIRECT PUBLISH projects EXACTLY ONE module-205 activity ===\n";
 // only to transition_post_status this case would see ZERO activities.
 update_option('bcc_announcements_enabled', '1');
 
-$r = dsp('POST', $base, ['status' => 'publish', 'title' => 'A4 direct', 'body' => 'Body'], $op);
+$r = dsp('POST', $base, ['status' => 'publish', 'summary' => 'A4 probe summary', 'title' => 'A4 direct', 'body' => 'Body'], $op);
 ck('A: create+publish returned 201/200', true, in_array($r['status'], [200, 201], true));
 $a = rawId($r['id']);
 ck('A: got an announcement id', true, $a > 0);
@@ -274,7 +282,7 @@ ck('C: the announcement itself is STILL public (§4.32.6)', true, (new REPO())->
 
 // ─────────────────────────────────────────────────────────────────────────
 echo "\n=== D. A DRAFT PROJECTS NOTHING ===\n";
-$r = dsp('POST', $base, ['status' => 'draft', 'title' => 'A4 draft', 'body' => 'B'], $op);
+$r = dsp('POST', $base, ['status' => 'draft', 'summary' => 'A4 probe summary', 'title' => 'A4 draft', 'body' => 'B'], $op);
 $d = rawId($r['id']);
 ck('D: draft created', true, $d > 0);
 ck('D: NOT publicly visible', false, (new REPO())->findPublic($pageId, $d) !== null);
@@ -283,7 +291,7 @@ ck('D: ZERO activities', 0, acts($d));
 // ─────────────────────────────────────────────────────────────────────────
 echo "\n=== E. A FUTURE SCHEDULE PROJECTS NOTHING — early projection refused ===\n";
 $future = gmdate('Y-m-d H:i:s', time() + 3600);
-$r = dsp('POST', $base, ['status' => 'schedule', 'title' => 'A4 sched', 'body' => 'B', 'publish_at' => $future], $op);
+$r = dsp('POST', $base, ['status' => 'schedule', 'summary' => 'A4 probe summary', 'title' => 'A4 sched', 'body' => 'B', 'publish_at' => $future], $op);
 $s = rawId($r['id']);
 ck('E: scheduled created', true, $s > 0);
 ck('E: stored as future', 'future', get_post_status($s));
@@ -310,7 +318,7 @@ ck('F: discussion disabled on the card', '1', (string) get_post_meta($s, 'peepso
 // ─────────────────────────────────────────────────────────────────────────
 echo "\n=== G. SCHEDULED + DUE + AUTHORITY REVOKED -> blocked, NO card ===\n";
 $future2 = gmdate('Y-m-d H:i:s', time() + 3600);
-$r = dsp('POST', $base, ['status' => 'schedule', 'title' => 'A4 revoked', 'body' => 'B', 'publish_at' => $future2], $op);
+$r = dsp('POST', $base, ['status' => 'schedule', 'summary' => 'A4 probe summary', 'title' => 'A4 revoked', 'body' => 'B', 'publish_at' => $future2], $op);
 $g = rawId($r['id']);
 ck('G: scheduled created', true, $g > 0);
 
@@ -550,9 +558,29 @@ wp_delete_user($st);
 ck('no announcement rows remain', 0, (int) $wpdb->get_var($wpdb->prepare(
     "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = %s", CPT::POST_TYPE
 )));
-ck('no module-205 activity rows remain', 0, (int) $wpdb->get_var(
-    "SELECT COUNT(*) FROM `{$ACT}` WHERE act_module_id = 205"
-));
+// ⚠⚠ ASSERTED ONLY ABOUT THE IDS THIS PROBE CREATED. Getting this right took
+// three attempts and the sequence is worth recording:
+//
+//   1. A global `COUNT(*) WHERE act_module_id = 205` was the original. It broke
+//      the moment A4 existed, because a published row legitimately projects one.
+//   2. Re-scoping to "no ORPHAN rows anywhere" broke too — measured at 34
+//      orphans left by SIBLING probes that publish announcements and whose
+//      teardowns predate the projection, so they deleted posts and left the
+//      cards pointing at nothing. Those teardowns are fixed in this change too.
+//   3. Only an assertion over THIS probe's own ids is both meaningful and
+//      immune to whatever else shares the database.
+//
+// `$ids` is exactly that set — every announcement under this probe's page,
+// collected BEFORE deletion, which is the last moment they can be identified.
+$leftOver = 0;
+foreach ($ids as $mid) {
+    $leftOver += (int) $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(*) FROM `{$GLOBALS['ACT']}` WHERE act_module_id = 205 AND act_external_id = %d",
+        (int) $mid
+    ));
+}
+ck('no module-205 rows remain for the ids THIS probe created', 0, $leftOver);
+ck('anti-vacuity — this probe did create ids to check', true, count($ids) > 0);
 
 // Drop the shared table ONLY if this probe created it.
 if ($madeTable) {
