@@ -209,16 +209,91 @@ ck('owner list refuses a stranger (403 — now CONSISTENT with writes)', 403, ds
 echo "\n=== 4. FEED EXCLUSION ===\n";
 $act = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}peepso_activities'");
 if ($act) {
-    ck('zero module-205 activity rows for any announcement', 0, (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}peepso_activities WHERE act_module_id = '205'"));
+    // ⚠⚠ THIS ASSERTION WAS ALSO INVERTED, and it is the one that nearly
+    // shipped stale. It required ZERO module-205 rows "for any announcement",
+    // which was correct while nothing projected — A4 makes it false, because a
+    // legitimately published row now DOES project.
+    //
+    // ⚠ It only failed once this probe ran in an environment where
+    // `peepso_activities` EXISTS. The disposable stack has no PeepSo tables, so
+    // the whole branch was SKIPped and the staleness was invisible; the table
+    // had to be created deliberately to expose it. An assertion behind a
+    // condition that never holds is not a passing assertion.
+    //
+    // Replaced by the guarantee that survives and is strictly stronger: NO
+    // activity may point at any row that is currently WITHHELD — stored `draft`
+    // AND carrying arm C's blocked marker.
+    $withheldWithCards = (int) $wpdb->get_var(
+        "SELECT COUNT(*)
+           FROM {$wpdb->prefix}peepso_activities a
+           JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
+           JOIN {$wpdb->postmeta} m ON m.post_id = p.ID
+          WHERE a.act_module_id = 205
+            AND p.post_type = 'bcc_announcement'
+            AND p.post_status = 'draft'
+            AND m.meta_key = '_bcc_announcement_blocked_at'
+            AND NULLIF(m.meta_value, '') IS NOT NULL"
+    );
+    ck('⚠⚠ NO withheld row anywhere carries a feed card', 0, $withheldWithCards);
+
+    // ⚠ Anti-vacuity: the join must be able to find rows at all, or the zero
+    // above would be meaningless.
+    $withheld = (int) $wpdb->get_var(
+        "SELECT COUNT(*)
+           FROM {$wpdb->posts} p
+           JOIN {$wpdb->postmeta} m ON m.post_id = p.ID
+          WHERE p.post_type = 'bcc_announcement'
+            AND p.post_status = 'draft'
+            AND m.meta_key = '_bcc_announcement_blocked_at'
+            AND NULLIF(m.meta_value, '') IS NOT NULL"
+    );
+    ck('anti-vacuity — withheld rows DO exist for that query to miss', true, $withheld > 0);
 } else {
-    echo "SKIP no peepso_activities table here — the structural absence is asserted below instead\n";
+    echo "SKIP no peepso_activities table here — the structural checks below still run\n";
 }
-// ⚠ The real guarantee is STRUCTURAL: nothing projects an announcement into
-// the feed at all, so a blocked row cannot be projected either. Asserted as
-// the absence of a verb rather than as a filtered query.
+// ⚠⚠ THIS ASSERTION WAS INVERTED, AND THE REASON MATTERS.
+//
+// It used to read "FeedColdStartService has NO announcement verb" and "and no
+// announcement module key", on the stated grounds that "nothing projects an
+// announcement into the feed at all, so a blocked row cannot be projected
+// either". That was true and was the right thing to pin at the time: §4.32.8
+// described a projection that did not exist, and the absence was the guarantee.
+//
+// A4 builds the projection. So the old assertion now fails BY DESIGN — it was
+// pinning a stopgap, not the contract — and deleting it would silently drop the
+// only check in this probe that a blocked row stays off the floor.
+//
+// Inverted to the guarantee that actually survives: the projection EXISTS, and
+// a blocked row still produces NO activity. That is strictly stronger than the
+// absence it replaces, because it is now possible for the answer to be wrong.
 $cold = file_get_contents(WP_PLUGIN_DIR . '/bcc-trust/app/Domain/Core/Services/FeedColdStartService.php');
-ck('FeedColdStartService has NO announcement verb', false, strpos((string) $cold, "'205'") !== false);
-ck('and no announcement module key', false, strpos((string) $cold, 'announcement') !== false);
+ck('FeedColdStartService now HAS an announcement verb (§4.32.8)', true, strpos((string) $cold, "'205'") !== false);
+ck('and it is past-tense, not a nudge (§2.7)', true, strpos((string) $cold, 'POSTED an announcement') !== false);
+
+// ⚠ The guarantee the old absence stood in for, asserted directly against the
+// blocked row this probe already built. It needs the activity table, so it is
+// conditional — and when the table is absent the structural check below still
+// runs, which is why both are kept.
+if ($act) {
+    ck('⚠⚠ the BLOCKED row has no activity even though projection now exists', 0, (int) $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(*) FROM {$wpdb->prefix}peepso_activities WHERE act_module_id = 205 AND act_external_id = %d",
+        $revoked
+    )));
+    // And the control: the GOOD row is the one that proves a zero above is a
+    // refusal rather than a projection that never runs in this environment.
+    // ⚠ It is only expected to carry an activity if it was published while the
+    // feature was on, which it was — section 2 published it through the route.
+    ck('control — the un-blocked row DID project', 1, (int) $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(*) FROM {$wpdb->prefix}peepso_activities WHERE act_module_id = 205 AND act_external_id = %d",
+        $good
+    )));
+}
+
+// ⚠ Structural, and still worth keeping: the projection must refuse a blocked
+// row by consulting arm C, not by accident. Asserted on the handler's source
+// because this probe has no way to observe the refusal path directly.
+$asw = file_get_contents(WP_PLUGIN_DIR . '/bcc-trust/app/Domain/Core/Services/Feed/ActivityStreamWriter.php');
+ck('the projection consults arm C before inserting', true, strpos((string) $asw, 'AnnouncementPublicationGuard::isBlocked(') !== false);
 
 echo "\n=== 5. AMBIGUOUS claim at due time — same refusal ===\n";
 $wpdb->update($wpdb->prefix . 'bcc_onchain_claims', ['status' => 'verified'], ['id' => $claimId]);
@@ -351,6 +426,26 @@ echo "\n=== TEARDOWN ===\n";
 delete_option('bcc_announcements_enabled');
 ck('switch deleted', null, get_option('bcc_announcements_enabled', null));
 $ids = $wpdb->get_col($wpdb->prepare("SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_parent = %d", CPT::POST_TYPE, $pageId));
+// ⚠⚠ ACTIVITY ROWS MUST BE DELETED TOO, and this is NEW with A4. Before the
+// feed projection existed, publishing an announcement created no
+// `peepso_activities` row, so a teardown that deleted only posts left nothing
+// behind. A4 projects one card per published announcement, so this teardown now
+// leaks a row per run — and because `act_external_id` then points at a post
+// that no longer exists, the leak is invisible to any join and ACCUMULATES.
+//
+// Measured: 34 orphan module-205 rows had built up in the disposable stack from
+// repeated runs, which is what broke a sibling probe's teardown assertion.
+// Deleted BEFORE the posts, because afterwards there is no way left to tell
+// which rows were ours.
+$actTeardown = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}peepso_activities'");
+if ($actTeardown) {
+    foreach ($ids as $id) {
+        $wpdb->delete($wpdb->prefix . 'peepso_activities', [
+            'act_module_id'   => 205,
+            'act_external_id' => (int) $id,
+        ], ['%d', '%d']);
+    }
+}
 foreach ($ids as $id) {
     wp_clear_scheduled_hook('publish_future_post', [(int) $id]);
     wp_delete_post((int) $id, true);

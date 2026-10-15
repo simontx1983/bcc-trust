@@ -2087,6 +2087,39 @@ final class Plugin
             }
         }, 10, 2);
 
+        // §4.32.8 — announcement feed projection.
+        //
+        // ⚠ Both subscriptions are registered UNCONDITIONALLY, outside the
+        // feature switch, and the handlers decide for themselves:
+        // `handleAnnouncementPublished` refuses while the switch is off
+        // (§4.32.10 stops projection), while `handleAnnouncementArchived`
+        // withdraws REGARDLESS of the switch, because turning a feature off
+        // must never strand a card that was already projected. Registering
+        // conditionally would make the withdrawal depend on the switch state
+        // at boot, which is the opposite of what is wanted.
+        add_action('bcc_announcement_published', function (int $operatorId, int $announcementId): void {
+            try {
+                $this->activityStreamWriter()->handleAnnouncementPublished($operatorId, $announcementId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] activity_stream announcement failed', [
+                    'user_id'         => $operatorId,
+                    'announcement_id' => $announcementId,
+                    'error'           => $e->getMessage(),
+                ]);
+            }
+        }, 10, 2);
+
+        add_action('bcc_announcement_archived', function (int $announcementId): void {
+            try {
+                $this->activityStreamWriter()->handleAnnouncementArchived($announcementId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] activity_stream announcement withdraw failed', [
+                    'announcement_id' => $announcementId,
+                    'error'           => $e->getMessage(),
+                ]);
+            }
+        }, 10, 1);
+
         // §D6 PR-A — WP transition_post_status bridge for blog posts.
         //
         // Fires on every WP post status transition; the handler scopes

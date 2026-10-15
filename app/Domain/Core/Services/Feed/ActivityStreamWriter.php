@@ -50,6 +50,11 @@
 namespace BCC\Trust\Core\Services\Feed;
 
 use BCC\Core\Log\Logger;
+use BCC\Trust\Core\Announcements\AnnouncementFeature;
+use BCC\Trust\Core\Announcements\AnnouncementPostType;
+use BCC\Trust\Core\Announcements\AnnouncementPublicationGuard;
+use BCC\Trust\Core\Announcements\AnnouncementVisibility;
+use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Trust\Core\Repositories\PeepSoActivityWriter;
 use BCC\Trust\Core\Repositories\WatchBatchRepository;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
@@ -65,10 +70,26 @@ final class ActivityStreamWriter
     /** post_meta key — id of the BCC sidecar row this activity points at. */
     private const META_SIDECAR = '_bcc_activity_sidecar_id';
 
+    /**
+     * ⚠ The announcement repository is OPTIONAL and last, so every existing
+     * two-argument construction (Plugin::activityStreamWriter and the unit
+     * suites) keeps working unchanged. It is only touched by the two
+     * announcement handlers below.
+     */
     public function __construct(
         private readonly WatchBatchRepository $watchBatchRepo,
-        private readonly PeepSoActivityWriter $activityWriter
+        private readonly PeepSoActivityWriter $activityWriter,
+        private ?AnnouncementRepository $announcementRepo = null
     ) {
+    }
+
+    /**
+     * §1 — the repository is the only thing allowed to touch $wpdb, so the
+     * projection asks it rather than re-deriving a visibility predicate here.
+     */
+    private function announcementRepo(): AnnouncementRepository
+    {
+        return $this->announcementRepo ??= new AnnouncementRepository();
     }
 
     /**
@@ -426,6 +447,196 @@ final class ActivityStreamWriter
             'user_id' => $authorId,
             'post_id' => $postId,
             'act_id'  => $actId,
+        ]);
+    }
+
+    /**
+     * Subscriber for `bcc_announcement_published` — §4.32.8 feed projection.
+     *
+     * ⚠⚠ "EXACTLY ONE ACTIVITY PER ANNOUNCEMENT, created only once the
+     * announcement is due AND authorized. Early projection is refused."
+     * That sentence is the whole contract of this method, and each half is
+     * enforced by a different mechanism:
+     *
+     *   - "due AND authorized" is delegated to
+     *     {@see AnnouncementRepository::findPublic()}, which composes the
+     *     canonical §4.32.1 three-predicate SQL. It is deliberately NOT
+     *     re-implemented in PHP here: a second copy of that predicate is
+     *     exactly the drift §11 forbids, and the one that matters most
+     *     (predicate 3, the publication-authorization marker) is the one a
+     *     hand-written copy would be most likely to drop.
+     *   - "exactly one" is the idempotency check against
+     *     `(module=announcement, external_id=$announcementId)`, the same
+     *     check-then-insert the blog handler uses. It guards RE-DELIVERY of
+     *     the event — a cron tick that fires twice, or any other caller
+     *     firing it again — and leaves feed position and activity identity
+     *     untouched when it does.
+     *
+     * ⚠ IT IS **NOT** WHAT MAKES "EDITS DO NOT BUMP THE FEED" TRUE, and an
+     * earlier version of this docblock said it was. `AnnouncementWriteService::edit()`
+     * emits NO event at all: it returns through `readBackOrFail()` and never
+     * reaches `finishPublicationWrite()`, so the edit path never arrives here.
+     * The guarantee holds for a different reason — nothing fires — and the
+     * date half of it is held by `edit()` answering `409` to a `publish_at` on
+     * any row that is not still `future`. Recorded because a reader who
+     * believed the old claim could move the event into `edit()` thinking this
+     * check protected feed position, or delete this check thinking the edit
+     * path still covered it.
+     *
+     * ⚠ Blocked rows are refused explicitly even though a blocked row is
+     * stored `draft` with its marker stripped, so `findPublic()` would already
+     * refuse it. The redundant check is kept because the two facts have
+     * different owners — arm C owns the block, the repository owns the
+     * predicate — and a future change to either must not silently let a
+     * withheld notice onto the floor.
+     *
+     * ⚠ Archival is NOT a reason for `findPublic()` to refuse: §4.32.6 keeps
+     * an archived announcement publicly readable, so it still returns the row.
+     * But an archived notice must not project a NEW activity, because
+     * {@see handleAnnouncementArchived()} withdraws activities. Checked below.
+     */
+    public function handleAnnouncementPublished(int $operatorId, int $announcementId): void
+    {
+        if ($operatorId <= 0 || $announcementId <= 0) {
+            return;
+        }
+
+        // §4.32.10 — while the switch is OFF, "creation, projection and
+        // reconciliation stop". Projection is named explicitly.
+        if (!AnnouncementFeature::isEnabled()) {
+            return;
+        }
+
+        $post = get_post($announcementId);
+        if (!$post instanceof \WP_Post || $post->post_type !== AnnouncementPostType::POST_TYPE) {
+            return;
+        }
+
+        // A3 stores the validator page id in post_parent. A row with no parent
+        // cannot be resolved and therefore cannot be projected.
+        $pageId = (int) $post->post_parent;
+        if ($pageId <= 0) {
+            Logger::warning('[ActivityStreamWriter] announcement projection skipped - no page', [
+                'announcement_id' => $announcementId,
+            ]);
+            return;
+        }
+
+        if (AnnouncementPublicationGuard::isBlocked($announcementId)) {
+            Logger::warning('[ActivityStreamWriter] announcement projection refused - blocked', [
+                'announcement_id' => $announcementId,
+                'page_id'         => $pageId,
+            ]);
+            return;
+        }
+
+        // Archived notices stay readable but gain no new feed presence.
+        $archivedAt = (string) get_post_meta($announcementId, AnnouncementVisibility::META_ARCHIVED_AT, true);
+        if (trim($archivedAt) !== '') {
+            return;
+        }
+
+        // ⚠⚠ THE AUTHORITY AND DUE-TIME GATE. All three §4.32.1 predicates,
+        // from the single canonical SQL source.
+        try {
+            $row = $this->announcementRepo()->findPublic($pageId, $announcementId);
+        } catch (\Throwable $e) {
+            // Fail CLOSED. An unreadable predicate is not permission to publish.
+            Logger::error('[ActivityStreamWriter] announcement projection refused - predicate unreadable', [
+                'announcement_id' => $announcementId,
+                'page_id'         => $pageId,
+                'error'           => $e->getMessage(),
+            ]);
+            return;
+        }
+
+        if ($row === null) {
+            Logger::info('[ActivityStreamWriter] announcement projection refused - not due or not authorized', [
+                'announcement_id' => $announcementId,
+                'page_id'         => $pageId,
+            ]);
+            return;
+        }
+
+        // §4.32.8 — the card "never hosts a discussion
+        // (`peepso_disable_comments` is set on the backing post)". The
+        // announcement comment thread (A5) lives on the canonical page.
+        update_post_meta($announcementId, 'peepso_disable_comments', '1');
+
+        // The announcement wp_post IS the body source of truth, exactly as for
+        // blog. No separate sidecar row, so the module meta points at itself.
+        update_post_meta($announcementId, self::META_MODULE,  'announcement');
+        update_post_meta($announcementId, self::META_SIDECAR, $announcementId);
+
+        $existingActId = $this->activityWriter->findActIdForExternal('announcement', $announcementId);
+        if ($existingActId > 0) {
+            // Not a fault: this is the edit path and the re-delivery path.
+            Logger::info('[ActivityStreamWriter] announcement activity exists - not bumping', [
+                'announcement_id' => $announcementId,
+                'existing_act_id' => $existingActId,
+            ]);
+            return;
+        }
+
+        $actId = $this->activityWriter->insert(
+            $operatorId,
+            $operatorId,
+            'announcement',
+            $announcementId
+        );
+
+        if ($actId === 0) {
+            Logger::error('[ActivityStreamWriter] failed to insert announcement activity', [
+                'announcement_id' => $announcementId,
+                'page_id'         => $pageId,
+                'operator_id'     => $operatorId,
+            ]);
+            return;
+        }
+
+        Logger::info('[ActivityStreamWriter] announcement activity written', [
+            'announcement_id' => $announcementId,
+            'page_id'         => $pageId,
+            'act_id'          => $actId,
+        ]);
+    }
+
+    /**
+     * Subscriber for `bcc_announcement_archived` — §4.32.8 "Archival withdraws
+     * the activity", and §4.32.13 "one-way; unpins; withdraws the feed
+     * activity".
+     *
+     * ⚠ The feature switch is deliberately NOT consulted here. Withdrawal is
+     * the SAFE direction: if the switch were turned off between a publish and
+     * an archive, refusing to withdraw would leave a live card on the floor
+     * for a notice its operator has retired. Turning a feature off must never
+     * strand content that was already projected.
+     *
+     * ⚠ A missing activity is not an error. A notice archived before it was
+     * ever due never projected one, and that is the common case.
+     */
+    public function handleAnnouncementArchived(int $announcementId): void
+    {
+        if ($announcementId <= 0) {
+            return;
+        }
+
+        $actId = $this->activityWriter->findActIdForExternal('announcement', $announcementId);
+        if ($actId <= 0) {
+            return;
+        }
+
+        if (!$this->activityWriter->deleteByActId($actId)) {
+            Logger::error('[ActivityStreamWriter] failed to withdraw announcement activity', [
+                'announcement_id' => $announcementId,
+                'act_id'          => $actId,
+            ]);
+            return;
+        }
+
+        Logger::info('[ActivityStreamWriter] announcement activity withdrawn', [
+            'announcement_id' => $announcementId,
+            'act_id'          => $actId,
         ]);
     }
 
