@@ -345,6 +345,9 @@ $req = new WP_REST_Request('POST', $base);
 $req->set_param('pageId', $pageId);
 $req->set_param('status', 'schedule');
 $req->set_param('title', 'A3 scheduled');
+// §4.32.3 — required on create, so the A3-path cases must supply it or they
+// fail on the missing field rather than on the marker behaviour they measure.
+$req->set_param('summary', 'A3 scheduled summary');
 $req->set_param('body', 'b');
 $req->set_param('publish_at', gmdate('Y-m-d H:i:s', time() + 7200));
 $res = rest_get_server()->dispatch($req);
@@ -384,6 +387,8 @@ $req = new WP_REST_Request('POST', $base);
 $req->set_param('pageId', $pageId);
 $req->set_param('status', 'schedule');
 $req->set_param('title', 'A3 cron promote');
+// §4.32.3 — required on create (see case G).
+$req->set_param('summary', 'A3 cron promote summary');
 $req->set_param('body', 'b');
 $req->set_param('publish_at', gmdate('Y-m-d H:i:s', time() + 7200));
 $h = (int) ((rest_get_server()->dispatch($req)->get_data()['data']['id'] ?? 0));

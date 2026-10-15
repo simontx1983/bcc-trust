@@ -81,9 +81,15 @@ final class AnnouncementWriteEndpoint
                         'enum'              => Verb::verbs(),
                         'validate_callback' => 'rest_validate_request_arg',
                     ],
-                    'title'  => self::textArg(true),
-                    'body'   => self::textArg(false),
+                    'title'   => self::textArg(true),
+                    // §4.32.3 — required and first-class. Declared `required` so
+                    // WordPress refuses an ABSENT field before the handler runs;
+                    // the service re-checks for a BLANK one, which is what
+                    // produces `reason_code: summary_required`.
+                    'summary' => self::textArg(true),
+                    'body'    => self::textArg(false),
                     'publish_at' => self::instantArg(),
+                    'comments_enabled' => self::boolArg(),
                 ],
             ]
         );
@@ -99,9 +105,15 @@ final class AnnouncementWriteEndpoint
                 'args'                => [
                     'pageId' => $pageArg,
                     'id'     => $idArg,
-                    'title'  => self::textArg(false),
-                    'body'   => self::textArg(false),
+                    'title'   => self::textArg(false),
+                    // ⚠ §4.32.8 says an edit updates `title`/`summary`/`body` in
+                    // place, so the summary is editable. §4.32.4's PATCH field
+                    // table omits it — reported as a contract item, not resolved
+                    // here.
+                    'summary' => self::textArg(false),
+                    'body'    => self::textArg(false),
                     'publish_at' => self::instantArg(),
+                    'comments_enabled' => self::boolArg(),
                 ],
             ]
         );
@@ -165,14 +177,48 @@ final class AnnouncementWriteEndpoint
             $decision,
             $actorId,
             (string) $request['status'],
-            [
-                'title' => (string) ($request['title'] ?? ''),
-                'body'  => (string) ($request['body'] ?? ''),
-                'publish_at' => (string) ($request['publish_at'] ?? ''),
-            ]
+            self::createInput($request)
         );
 
         return self::render($result, $decision, 201);
+    }
+
+    /**
+     * ⚠⚠ THIS ALLOWLIST IS LOAD-BEARING, and forgetting to extend it is a
+     * SILENT failure, not a loud one.
+     *
+     * The service reads `$input['summary']`; if the key is simply absent the
+     * service cannot tell that from a caller who omitted it, so a perfectly
+     * valid request is refused as `summary_required`. That is exactly what
+     * happened while this was being written: the route arg was declared, the
+     * service check was written, and the field was never forwarded — so every
+     * create answered 400 INCLUDING the ones carrying a good summary, and the
+     * error message said "required" about a field that had been supplied.
+     *
+     * ⚠ `comments_enabled` is NOT string-cast. It is a boolean, and
+     * `(string) false` is `''` — which would reach the service as a value that
+     * happens to be falsy, so it would appear to work while actually sending
+     * the wrong type. It is forwarded only when the caller sent it, so
+     * `array_key_exists()` in the service can still distinguish "not sent"
+     * from "sent as false".
+     *
+     * @return array<string,mixed>
+     */
+    private static function createInput(WP_REST_Request $request): array
+    {
+        $input = [
+            'title'      => (string) ($request['title'] ?? ''),
+            'summary'    => (string) ($request['summary'] ?? ''),
+            'body'       => (string) ($request['body'] ?? ''),
+            'publish_at' => (string) ($request['publish_at'] ?? ''),
+        ];
+
+        $commentsEnabled = $request->get_param('comments_enabled');
+        if ($commentsEnabled !== null) {
+            $input['comments_enabled'] = (bool) $commentsEnabled;
+        }
+
+        return $input;
     }
 
     public static function edit(WP_REST_Request $request): WP_REST_Response
@@ -187,11 +233,20 @@ final class AnnouncementWriteEndpoint
         // ⚠ Only keys the caller actually sent are forwarded, so an omitted
         // field is "leave alone" rather than "set to empty".
         $input = [];
-        foreach (['title', 'body', 'publish_at'] as $k) {
+        foreach (['title', 'summary', 'body', 'publish_at'] as $k) {
             $v = $request->get_param($k);
             if ($v !== null) {
                 $input[$k] = (string) $v;
             }
+        }
+
+        // ⚠ Kept OUT of the loop above: that loop string-casts, and
+        // `(string) false` is `''`. Casting a boolean through it would send the
+        // service a falsy string rather than a bool — working by accident
+        // today and breaking the moment the service type-checks.
+        $commentsEnabled = $request->get_param('comments_enabled');
+        if ($commentsEnabled !== null) {
+            $input['comments_enabled'] = (bool) $commentsEnabled;
         }
 
         $result = self::service()->edit($pageId, (int) $request['id'], $decision, $input);
@@ -331,6 +386,23 @@ final class AnnouncementWriteEndpoint
             // ⚠ No sanitize_callback. The service does the cleaning, because it
             // must be able to REFUSE an unacceptable value rather than hand the
             // handler a silently corrected one.
+            'validate_callback' => 'rest_validate_request_arg',
+        ];
+    }
+
+    /**
+     * An optional boolean. ⚠ `required => false` with NO default, so
+     * `array_key_exists()` in the service can distinguish "not sent" (leave
+     * alone) from "sent as false" (close the discussion). A default here would
+     * erase that distinction and make every edit write the flag.
+     *
+     * @return array<string,mixed>
+     */
+    private static function boolArg(): array
+    {
+        return [
+            'required'          => false,
+            'type'              => 'boolean',
             'validate_callback' => 'rest_validate_request_arg',
         ];
     }
