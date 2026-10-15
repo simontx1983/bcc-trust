@@ -36,6 +36,9 @@
 
 namespace BCC\Trust\Core\Services;
 
+use BCC\Trust\Core\Announcements\AnnouncementCapabilityResolver;
+use BCC\Trust\Core\Announcements\AnnouncementFeature;
+use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use BCC\Trust\Core\Repositories\PageReadModelRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
@@ -303,7 +306,7 @@ final class CardViewService
             ? ($prefetched['validator_logos'][$pageId] ?? null)
             : null;
 
-        return [
+        $card = [
             'id'                  => $pageId,
             'name'                => $name,
             'handle'              => $handle,
@@ -425,6 +428,37 @@ final class CardViewService
             'links'               => self::buildLinks($kind, $handle),
             'actions'             => self::buildPageActions($kind, $pageId, $prefetched),
         ];
+
+        // ⚠⚠ §4.32 ANNOUNCEMENTS — THE KEY WHOSE PRESENCE IS THE FEATURE GATE.
+        //
+        // The frontend mounts BOTH announcement surfaces on `announcements
+        // != null` and nothing else: no client flag, no env var. Without this
+        // block the bar and the tab render nothing and issue no requests, which
+        // is the correct fail-closed state but also makes the feature
+        // unreachable however many routes are live.
+        //
+        // ⚠ THE KEY IS OMITTED ENTIRELY WHEN THE BLOCK IS NULL, never emitted
+        // as null. `forOwnerScope()` returns null only when the switch is off,
+        // and its own docblock states the contract: "an emitted-but-denied
+        // block would make the client mount the surface and issue requests that
+        // are all going to 404. The caller omits the key entirely on null."
+        // A non-operator still gets the block, with both entries denied
+        // `not_claimer` — the public bar must render for everyone.
+        //
+        // Validator-only: announcements are a validator-page feature, and
+        // `decide()` answers `not_a_validator_page` for anything else, so
+        // calling it for a builder or nft card would do work to reach null.
+        if ($kind === 'validator') {
+            $announcements = AnnouncementCapabilityResolver::forOwnerScope(
+                ValidatorPageOperatorAuthority::decide($pageId, $viewerId),
+                AnnouncementFeature::isEnabled()
+            );
+            if ($announcements !== null) {
+                $card['announcements'] = $announcements;
+            }
+        }
+
+        return $card;
     }
 
     /**
