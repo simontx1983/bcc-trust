@@ -18,6 +18,14 @@
  * `WP_REST_Server::dispatch()` applies route-regex matching, `args` validation
  * and the sanitize/validate substitution rule the way production does.
  *
+ * ⚠⚠ EVERY create payload below carries a `summary`, and that is REQUIRED,
+ * not decorative. §4.32.3 makes the summary a first-class authored field and
+ * the create route now refuses a request without one. Omitting it would make
+ * each of these assertions pass or fail for the WRONG REASON — several of
+ * them expect a 400 for a DIFFERENT rule (a past `publish_at`, a missing
+ * instant, `publish_at` with the wrong verb), and a missing summary would
+ * satisfy that 400 without the rule under test ever being reached.
+ *
  * ⚠ The switch is DELETED at the end, not reset to '0', because the closed
  * truthy allowlist treats '0' and 'off' as disabled but an absent option is
  * the shipped default and the only state staging is allowed to be in.
@@ -134,7 +142,7 @@ $before = (int) $wpdb->get_var($wpdb->prepare(
 ));
 
 foreach ([
-    ['POST', $base, ['status' => 'publish', 'title' => 'T', 'body' => 'B']],
+    ['POST', $base, ['status' => 'publish', 'summary' => 'Probe summary', 'title' => 'T', 'body' => 'B']],
     ['PATCH', $base . '/1', ['title' => 'T']],
     ['POST', $base . '/1/publish', []],
     ['POST', $base . '/1/archive', []],
@@ -155,7 +163,7 @@ update_option('bcc_announcements_enabled', '1');
 ck('switch reads enabled', true, \BCC\Trust\Core\Announcements\AnnouncementFeature::isEnabled());
 
 echo "\n=== J1. CREATE draft — stored, and NOT public ===\n";
-$r = dsp('POST', $base, ['status' => 'draft', 'title' => 'Draft one', 'body' => 'Body one'], $op);
+$r = dsp('POST', $base, ['status' => 'draft', 'summary' => 'Probe summary', 'title' => 'Draft one', 'body' => 'Body one'], $op);
 ck('create draft -> 201', 201, $r['status']);
 ck('create draft state', 'draft', $r['state']);
 $draftId = (int) $r['id'];
@@ -174,7 +182,7 @@ ck('publishing twice is a conflict', 409, dsp('POST', $base . '/' . $draftId . '
 
 echo "\n=== J3. ⚠⚠ SCHEDULE — stored `future`, marker PRESENT, and still NOT public ===\n";
 $at = gmdate('Y-m-d H:i:s', time() + 7200);
-$r  = dsp('POST', $base, ['status' => 'schedule', 'title' => 'Scheduled', 'body' => 'Later', 'publish_at' => $at], $op);
+$r  = dsp('POST', $base, ['status' => 'schedule', 'summary' => 'Probe summary', 'title' => 'Scheduled', 'body' => 'Later', 'publish_at' => $at], $op);
 ck('create schedule -> 201', 201, $r['status']);
 $schedId = (int) $r['id'];
 ck('stored status is future, not publish', 'future', (string) get_post_status($schedId));
@@ -183,13 +191,13 @@ ck('⚠⚠ NO marker at schedule time (written at promotion instead)', '', trim(
 // ⚠ The whole safety argument for writing the marker early: predicate 1 is
 // what keeps this private, not predicate 3.
 ck('scheduled row is NOT publicly visible', false, isPublic($pageId, $schedId));
-ck('a past instant is refused, not clamped', 400, dsp('POST', $base, ['status' => 'schedule', 'title' => 'X', 'body' => 'Y', 'publish_at' => gmdate('Y-m-d H:i:s', time() - 60)], $op)['status']);
-ck('schedule with no instant is refused', 400, dsp('POST', $base, ['status' => 'schedule', 'title' => 'X', 'body' => 'Y'], $op)['status']);
+ck('a past instant is refused, not clamped', 400, dsp('POST', $base, ['status' => 'schedule', 'summary' => 'Probe summary', 'title' => 'X', 'body' => 'Y', 'publish_at' => gmdate('Y-m-d H:i:s', time() - 60)], $op)['status']);
+ck('schedule with no instant is refused', 400, dsp('POST', $base, ['status' => 'schedule', 'summary' => 'Probe summary', 'title' => 'X', 'body' => 'Y'], $op)['status']);
 // ⚠ §4.32.13: publish_at is sent ONLY with schedule. Sending it with another
 // verb is 400, not silently ignored — ignoring it would accept a request whose
 // intent the server did not honour.
-ck('publish_at with status=draft is refused', 400, dsp('POST', $base, ['status' => 'draft', 'title' => 'X', 'body' => 'Y', 'publish_at' => gmdate('Y-m-d H:i:s', time() + 7200)], $op)['status']);
-ck('publish_at with status=publish is refused', 400, dsp('POST', $base, ['status' => 'publish', 'title' => 'X', 'body' => 'Y', 'publish_at' => gmdate('Y-m-d H:i:s', time() + 7200)], $op)['status']);
+ck('publish_at with status=draft is refused', 400, dsp('POST', $base, ['status' => 'draft', 'summary' => 'Probe summary', 'title' => 'X', 'body' => 'Y', 'publish_at' => gmdate('Y-m-d H:i:s', time() + 7200)], $op)['status']);
+ck('publish_at with status=publish is refused', 400, dsp('POST', $base, ['status' => 'publish', 'summary' => 'Probe summary', 'title' => 'X', 'body' => 'Y', 'publish_at' => gmdate('Y-m-d H:i:s', time() + 7200)], $op)['status']);
 
 echo "\n=== J4. EDIT title/body, and re-schedule only while pending ===\n";
 ck('edit title -> 200', 200, dsp('PATCH', $base . '/' . $draftId, ['title' => 'Renamed'], $op)['status']);
@@ -199,7 +207,7 @@ ck('re-schedule a PUBLISHED row is a conflict', 409, dsp('PATCH', $base . '/' . 
 ck('an empty edit is refused', 400, dsp('PATCH', $base . '/' . $draftId, [], $op)['status']);
 
 echo "\n=== J5. PIN — at most one per page ===\n";
-$r2 = dsp('POST', $base, ['status' => 'publish', 'title' => 'Second public', 'body' => 'B2'], $op);
+$r2 = dsp('POST', $base, ['status' => 'publish', 'summary' => 'Probe summary', 'title' => 'Second public', 'body' => 'B2'], $op);
 $pub2 = (int) $r2['id'];
 ck('second published row created', true, $pub2 > 0);
 ck('pin the first -> 200', 200, dsp('POST', $base . '/' . $draftId . '/pin', ['pinned' => true], $op)['status']);
@@ -224,7 +232,7 @@ ck('pinning an archived row is a conflict', 409, dsp('POST', $base . '/' . $pub2
 
 echo "\n=== J7. A STRANGER gets 404 on every write route, never 403, no private reason ===\n";
 foreach ([
-    ['POST', $base, ['status' => 'publish', 'title' => 'T', 'body' => 'B']],
+    ['POST', $base, ['status' => 'publish', 'summary' => 'Probe summary', 'title' => 'T', 'body' => 'B']],
     ['PATCH', $base . '/' . $draftId, ['title' => 'T']],
     ['POST', $base . '/' . $draftId . '/publish', []],
     ['POST', $base . '/' . $draftId . '/archive', []],
@@ -237,14 +245,14 @@ foreach ([
         ck('stranger   body omits ' . $leak, false, strpos($res['json'], $leak) !== false);
     }
 }
-ck('an ANONYMOUS caller is refused too', 403, dsp('POST', $base, ['status' => 'publish', 'title' => 'T', 'body' => 'B'], 0)['status']);
+ck('an ANONYMOUS caller is refused too', 403, dsp('POST', $base, ['status' => 'publish', 'summary' => 'Probe summary', 'title' => 'T', 'body' => 'B'], 0)['status']);
 ck('the stranger changed nothing', 'Renamed', get_post_field('post_title', $draftId));
 
 echo "\n=== J8. A REVOKED claim refuses, and so does an AMBIGUOUS one ===\n";
 $wpdb->update($wpdb->prefix . 'bcc_onchain_claims', ['status' => 'revoked'], ['id' => $claimId]);
 wp_cache_flush();
 ck('authority no longer says operator', 'denied', AUTH::decide($pageId, $op)['decision']);
-ck('⚠ REVOKED claim: create -> 403', 403, dsp('POST', $base, ['status' => 'publish', 'title' => 'T', 'body' => 'B'], $op)['status']);
+ck('⚠ REVOKED claim: create -> 403', 403, dsp('POST', $base, ['status' => 'publish', 'summary' => 'Probe summary', 'title' => 'T', 'body' => 'B'], $op)['status']);
 ck('REVOKED claim: publish -> 403', 403, dsp('POST', $base . '/' . $schedId . '/publish', [], $op)['status']);
 ck('REVOKED claim: archive -> 403', 403, dsp('POST', $base . '/' . $schedId . '/archive', [], $op)['status']);
 
@@ -263,14 +271,17 @@ wp_cache_flush();
 $amb = AUTH::decide($pageId, $op);
 ck('authority reports ambiguity', 'denied', $amb['decision']);
 ck('ambiguity reason', 'claim_ambiguous', $amb['reason']);
-ck('⚠ AMBIGUOUS claim: create -> 403', 403, dsp('POST', $base, ['status' => 'publish', 'title' => 'T', 'body' => 'B'], $op)['status']);
-ck('AMBIGUOUS claim: body omits the private reason', false, strpos(dsp('POST', $base, ['status' => 'publish', 'title' => 'T', 'body' => 'B'], $op)['json'], 'claim_ambiguous') !== false);
+ck('⚠ AMBIGUOUS claim: create -> 403', 403, dsp('POST', $base, ['status' => 'publish', 'summary' => 'Probe summary', 'title' => 'T', 'body' => 'B'], $op)['status']);
+ck('AMBIGUOUS claim: body omits the private reason', false, strpos(dsp('POST', $base, ['status' => 'publish', 'summary' => 'Probe summary', 'title' => 'T', 'body' => 'B'], $op)['json'], 'claim_ambiguous') !== false);
 $wpdb->delete($wpdb->prefix . 'bcc_onchain_claims', ['id' => $dupId]);
 wp_cache_flush();
 ck('authority restored after removing the duplicate', 'operator', AUTH::decide($pageId, $op)['decision']);
 
 echo "\n=== J9. `blocked` is REJECTED BY THE SCHEMA, not mapped onto draft ===\n";
-$r = dsp('POST', $base, ['status' => 'blocked', 'title' => 'T', 'body' => 'B'], $op);
+// ⚠ A summary is supplied even though this request is MEANT to fail: without
+// it the refusal would come from the missing-field check and the assertion
+// below would never reach the enum rule it names.
+$r = dsp('POST', $base, ['status' => 'blocked', 'summary' => 'Probe summary', 'title' => 'T', 'body' => 'B'], $op);
 ck('status=blocked -> 400', 400, $r['status']);
 ck('and it is the schema that refuses', 'rest_invalid_param', $r['code']);
 ck('no row was created for it', false, strpos($r['json'], '"id"') !== false);
@@ -354,7 +365,7 @@ echo "\n=== J12. FEATURE OFF AGAIN — with real rows present, reads and writes 
 delete_option('bcc_announcements_enabled');
 ck('OFF: owner list 404s with rows present', 404, dsp('GET', $mbase, [], $op)['status']);
 ck('OFF: public list 404s with rows present', 404, dsp('GET', $base, [], 0)['status']);
-ck('OFF: create 404s', 404, dsp('POST', $base, ['status' => 'draft', 'title' => 'T', 'body' => 'B'], $op)['status']);
+ck('OFF: create 404s', 404, dsp('POST', $base, ['status' => 'draft', 'summary' => 'Probe summary', 'title' => 'T', 'body' => 'B'], $op)['status']);
 
 // ─────────────────────────────────────────────────────────────────────────
 echo "\n=== TEARDOWN ===\n";

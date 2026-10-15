@@ -59,8 +59,15 @@ use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority as Authority;
 final class AnnouncementWriteService
 {
     /** Bounded so a single request's writes stay predictable (§4.32.4 shape). */
-    public const MAX_TITLE_LEN = 200;
-    public const MAX_BODY_LEN  = 20000;
+    public const MAX_TITLE_LEN   = 200;
+    public const MAX_BODY_LEN    = 20000;
+
+    /**
+     * §4.32.3 — "`summary` is **required and first-class**, stored in
+     * `post_excerpt`, plain text, 1–300 chars. It is **never inferred from the
+     * body**."
+     */
+    public const MAX_SUMMARY_LEN = 300;
 
     /** Refusal codes. The house validation code is bcc_invalid_request. */
     public const ERR_INVALID     = 'bcc_invalid_request';
@@ -68,6 +75,17 @@ final class AnnouncementWriteService
     public const ERR_NOT_FOUND   = 'bcc_not_found';
     public const ERR_CONFLICT    = 'bcc_conflict';
     public const ERR_UNAVAILABLE = 'bcc_unavailable';
+
+    /**
+     * §4.32.9 defines `summary_required` as a 400 client error, while the
+     * route's own documented error line for this case is `bcc_invalid_request`.
+     * Both are satisfied rather than one being chosen: the envelope code stays
+     * the house `bcc_invalid_request` that every other 400 on these routes
+     * uses, and this value rides along as `reason_code`, which
+     * `AnnouncementWriteEndpoint::render()` already forwards for ANY error that
+     * carries a reason — not only for a 403.
+     */
+    public const REASON_SUMMARY_REQUIRED = 'summary_required';
 
     private AnnouncementRepository $repo;
 
@@ -127,6 +145,33 @@ final class AnnouncementWriteService
             );
         }
 
+        // ⚠⚠ SUMMARY IS REQUIRED ON CREATE, and the two failure modes are
+        // reported DIFFERENTLY because they are different mistakes:
+        //   - absent/blank -> `reason_code: summary_required` (§4.32.9), since
+        //     §4.32.3 makes the summary an authored field that is "never
+        //     inferred from the body"; a blank one would render an empty
+        //     one-liner on every list, rotator and feed card.
+        //   - present but oversized -> the ordinary length 400, like title.
+        // `self::text()` collapses both to null, so the blank case is tested
+        // FIRST on the raw input.
+        $summaryRaw = trim((string) ($input['summary'] ?? ''));
+        if ($summaryRaw === '') {
+            return self::fail(
+                self::ERR_INVALID,
+                'summary is required and must be at most ' . self::MAX_SUMMARY_LEN . ' characters.',
+                400,
+                self::REASON_SUMMARY_REQUIRED
+            );
+        }
+        $summary = self::text($summaryRaw, self::MAX_SUMMARY_LEN);
+        if ($summary === null) {
+            return self::fail(
+                self::ERR_INVALID,
+                'summary must be at most ' . self::MAX_SUMMARY_LEN . ' characters.',
+                400
+            );
+        }
+
         // ⚠ §4.32.13: `publish_at` is sent ONLY with `schedule`. Sending it
         // otherwise is 400, not silently ignored — ignoring it would accept a
         // request whose intent the server did not honour, and the caller would
@@ -163,6 +208,11 @@ final class AnnouncementWriteService
             'post_type'     => AnnouncementPostType::POST_TYPE,
             'post_status'   => Verb::statusFor($verb),
             'post_title'    => $title,
+            // §4.32.3 — the summary's storage is `post_excerpt`, which is where
+            // `AnnouncementViewService` already reads it from. Nothing new is
+            // invented here; the read side has projected this field since A2.3b
+            // and has had nothing to project.
+            'post_excerpt'  => $summary,
             'post_content'  => $body,
             'post_author'   => $actorId,
             'post_date_gmt' => $date,
@@ -173,6 +223,17 @@ final class AnnouncementWriteService
 
         if (is_wp_error($postId) || !is_int($postId) || $postId <= 0) {
             return self::fail(self::ERR_UNAVAILABLE, 'The announcement could not be stored.', 503);
+        }
+
+        // ⚠ `comments_enabled` is written ONLY when the operator supplied it.
+        // Absence must stay absence: `AnnouncementViewService::commentsEnabled()`
+        // and `AnnouncementCommentRepository::commentsEnabled()` both read an
+        // ABSENT key as ENABLED, because §4.32.7 makes discussion the default.
+        // Writing a default '1' here would work, but it would also mean every
+        // row carried a stored preference nobody expressed — and a later change
+        // to the default would then not reach any existing announcement.
+        if (array_key_exists('comments_enabled', $input)) {
+            $this->storeCommentsEnabled($postId, (bool) $input['comments_enabled']);
         }
 
         return $this->finishPublicationWrite($pageId, $postId, $decision, $actorId, $verb, $now);
@@ -230,6 +291,36 @@ final class AnnouncementWriteService
             }
             $update['post_content'] = $body;
         }
+        // ⚠ §4.32.8 says an edit "updates hydrated `title`/`summary`/`body` in
+        // place", so the summary IS editable. ⚠⚠ But §4.32.4's PATCH field table
+        // lists only `title`, `body` and `publish_at` — it does not mention
+        // `summary`. The normative sentence and the enumeration disagree; this
+        // implements the normative sentence (an operator who must author a
+        // summary at create and could never correct a typo in it would be stuck)
+        // and the omission is reported as a contract item rather than resolved
+        // here by guesswork.
+        if (array_key_exists('summary', $input)) {
+            $summaryRaw = trim((string) $input['summary']);
+            if ($summaryRaw === '') {
+                // Omitting the field means "leave alone"; SENDING it blank is an
+                // attempt to clear a required field, which is a different thing.
+                return self::fail(
+                    self::ERR_INVALID,
+                    'summary cannot be cleared; omit the field to leave it unchanged.',
+                    400,
+                    self::REASON_SUMMARY_REQUIRED
+                );
+            }
+            $summary = self::text($summaryRaw, self::MAX_SUMMARY_LEN);
+            if ($summary === null) {
+                return self::fail(
+                    self::ERR_INVALID,
+                    'summary must be at most ' . self::MAX_SUMMARY_LEN . ' characters.',
+                    400
+                );
+            }
+            $update['post_excerpt'] = $summary;
+        }
         if (array_key_exists('publish_at', $input)) {
             // Re-scheduling only means anything while the row is still pending.
             if ((string) ($row->post_status ?? '') !== Verb::STATUS_FUTURE) {
@@ -248,7 +339,27 @@ final class AnnouncementWriteService
         }
 
         if (count($update) === 1) {
-            return self::fail(self::ERR_INVALID, 'Nothing to change: supply title, body or publish_at.', 400);
+            // ⚠ `comments_enabled` counts as a change even though it is not a
+            // post column: an operator closing a discussion and changing nothing
+            // else is a real edit, and refusing it as "nothing to change" would
+            // be a false 400.
+            if (!array_key_exists('comments_enabled', $input)) {
+                return self::fail(
+                    self::ERR_INVALID,
+                    'Nothing to change: supply title, summary, body, publish_at or comments_enabled.',
+                    400
+                );
+            }
+        }
+
+        // ⚠ Written OUTSIDE $update because it is post META, not a post column,
+        // and BEFORE the wp_update_post() read-back so the response reflects it.
+        // ⚠ This is deliberately allowed on ANY editable row, including a
+        // draft or a scheduled one: closing comments ahead of publication is a
+        // legitimate operator choice, and the capability gate already refuses
+        // commenting on anything not yet public.
+        if (array_key_exists('comments_enabled', $input)) {
+            $this->storeCommentsEnabled($announcementId, (bool) $input['comments_enabled']);
         }
 
         $res = wp_update_post($update, true);
@@ -631,6 +742,20 @@ final class AnnouncementWriteService
         return $clean;
     }
 
+    /**
+     * Store the per-announcement discussion switch.
+     *
+     * ⚠ An explicit `true` is stored as '1' rather than deleting the key. The
+     * two are equivalent to every reader (absent and '1' both mean enabled),
+     * but an operator who deliberately re-opened a discussion has expressed a
+     * preference, and erasing it would make that indistinguishable from never
+     * having chosen.
+     */
+    private function storeCommentsEnabled(int $postId, bool $enabled): void
+    {
+        update_post_meta($postId, Vis::META_COMMENTS_ENABLED, $enabled ? '1' : '0');
+    }
+
     /** @return array<string,mixed> */
     private static function deny(): array
     {
@@ -667,8 +792,28 @@ final class AnnouncementWriteService
     }
 
     /** @return array<string,mixed> */
-    private static function fail(string $code, string $message, int $status): array
-    {
-        return ['ok' => false, 'code' => $code, 'message' => $message, 'status' => $status];
+    private static function fail(
+        string $code,
+        string $message,
+        int $status,
+        ?string $reason = null
+    ): array {
+        $out = ['ok' => false, 'code' => $code, 'message' => $message, 'status' => $status];
+
+        // ⚠⚠ Only set when supplied. `render()` keys off the PRESENCE of
+        // `reason` to decide whether to emit a `reason_code` block at all, so a
+        // null written here would turn every 400 into one carrying
+        // `reason_code: null` — a wire change to errors that have no reason.
+        //
+        // ⚠ This parameter is also why the signature had to change at all:
+        // PHP SILENTLY IGNORES a surplus argument to a user-defined method, so
+        // the four-argument `fail(..., REASON_SUMMARY_REQUIRED)` calls added
+        // above would have passed `php -l`, passed PHPStan, and dropped the
+        // reason on the floor. That exact trap is recorded in this project.
+        if ($reason !== null) {
+            $out['reason'] = $reason;
+        }
+
+        return $out;
     }
 }
