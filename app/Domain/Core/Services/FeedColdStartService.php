@@ -90,6 +90,17 @@ final class FeedColdStartService
         'project'    => 'DROPPED a release',
         'nft'        => 'RELEASED a piece',
         'blog'       => 'POSTED a blog excerpt',
+        // §4.32.8 — module 205. Without an entry here an announcement fell
+        // through to FALLBACK_RECENT_ACTION ('Recently on the floor.'), which
+        // is not wrong but says nothing. Both spellings are listed because
+        // this map is keyed by numeric id for PeepSo-native modules and by
+        // name for BCC modules, and the announcement path can present either.
+        //
+        // ⚠ §2.7 / §J.5 cadence-pressure policy: this is a PAST-TENSE
+        // statement of what happened, never a nudge. It must not acquire a
+        // second clause about what the reader should do next.
+        '205'          => 'POSTED an announcement',
+        'announcement' => 'POSTED an announcement',
     ];
 
     private const FALLBACK_RECENT_ACTION = 'Recently on the floor.';

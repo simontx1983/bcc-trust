@@ -61,6 +61,14 @@ final class PeepSoActivityWriter
         'review'     => 202,
         'dispute'    => 203,
         'blog'       => 204,
+        // §4.32.8 — announcements project ONE activity each, written only
+        // once the notice is due AND authorized. The numeric id is fixed at
+        // 205 by bcc-core's canonical MODULE_TO_KIND map ('205' =>
+        // 'announcement'), which also pins the kind to GRAMMAR_NONE so the
+        // card takes no reactions. Adding the name here is what lets
+        // ActivityStreamWriter::handleAnnouncementPublished() insert at all:
+        // insert() refuses any module name absent from this map.
+        'announcement' => 205,
     ];
 
     /**
