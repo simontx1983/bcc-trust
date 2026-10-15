@@ -253,19 +253,26 @@ $r = dsp('PATCH', $base . '/' . $cOn, ['comments_enabled' => true], $op);
 ck('C4 edit back to true -> 200', 200, $r['status']);
 ck('C4 the gate stops refusing', true, $reasonFor($cOn) !== 'comments_disabled');
 
-// C5 — ⚠ RECORDED, NOT ASSERTED AS DESIRABLE: `can_comment` can never be
-// `allowed` through the live routes today, because
-// `AnnouncementsEndpoint::viewerStanding()` returns only
-// `['authenticated' => bool]`. The gate's order is
-// feature -> published -> archived -> comments_enabled -> authenticated ->
-// suspended -> fraud_locked -> good_standing, and `good_standing` defaults to
-// FALSE when absent, so an authenticated member falls through to `suspended`.
+// C5 — ⚠⚠ INVERTED BY A5b, DELIBERATELY. The previous version of this
+// case RECORDED A DEFECT as the expected value: it asserted the gate stopped
+// at `suspended`, because `AnnouncementsEndpoint::viewerStanding()` returned
+// only `['authenticated' => bool]` and the resolver fails closed on an absent
+// key, so `good_standing` read FALSE for every viewer and `can_comment` could
+// never be `allowed` through a live route. Its own comment said the standing
+// context "is A5b's to supply and is reported as a prerequisite".
 //
-// That is why every case above asserts "NOT comments_disabled" rather than
-// "allowed": the comments field is observable, the final allow is not. The
-// standing context is A5b's to supply and is reported as a prerequisite.
+// A5b supplied it (`AnnouncementViewerStanding`), so the pin fired exactly as
+// designed — the assertion began failing the moment the prerequisite landed.
+// It is now the REGRESSION GUARD for the fix rather than a record of the bug:
+// an eligible member must reach `allowed`, with NO reason at all.
+//
+// ⚠ This probe is not CI-wired, so main stayed green while this assertion
+// was stale. The failure surfaced only on a manual run during closeout.
 $r = $reasonFor($cNone);
-ck('C5 ⚠ recorded: the gate stops at standing, not at comments', 'suspended', $r);
+ck('C5 ⚠⚠ an eligible member now reaches ALLOWED, not `suspended`', null, $r);
+ck('C5 ...and the standing producer supplies all four keys for that viewer', 4, count(
+    \BCC\Trust\Core\Announcements\AnnouncementViewerStanding::forViewer($st)
+));
 
 // C6 — ⚠⚠ THE CONTROL THAT MAKES SECTION C MEAN SOMETHING, and it is stronger
 // than the one first written here. An earlier version asserted that an
