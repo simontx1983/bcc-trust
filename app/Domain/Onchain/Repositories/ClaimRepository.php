@@ -587,6 +587,76 @@ class ClaimRepository {
             $byPage[(int) $row->page_id][(int) $row->user_id] = true;
         }
 
+        // ── ⚠⚠ SECOND LEG: the post_meta page<->validator binding ──────────
+        // The query above maps validator -> page through
+        // `wallet_links.post_id`, which is NOT the only binding this codebase
+        // recognises. `ValidatorPageMinter` writes the page's validator id to
+        // `_bcc_onchain_validator_id` post_meta, and FIVE other read paths
+        // already treat that as a first-class binding:
+        // `ValidatorRepository::findFirstByPageId` / `findAllByPageId` /
+        // `findCardRowsByPageIds` / `findCommunityStatsByIds`, plus
+        // `PageDiscoveryRepository` and `CardsListEndpoint`.
+        //
+        // Resolving only the wallet-link leg here made this method disagree
+        // with `findFirstByPageId`, and the two are consulted BY THE SAME
+        // CALLER one after the other: `ValidatorPageOperatorAuthority::decide()`
+        // proves the page is a validator page with `findFirstByPageId` (two
+        // legs) and then asks who the operator is with this method (one leg).
+        // A page bound only through post_meta therefore passed the first gate
+        // and always answered OPERATOR_UNCLAIMED, so `decide()` denied the
+        // page's REAL operator with `claim_absent` — on their own page.
+        //
+        // ⚠ That is reachable without any data repair, because nothing writes
+        // a non-zero `wallet_links.post_id`: `WalletRepository::insertOrFind`
+        // is the only write path into that table, its `ON DUPLICATE KEY
+        // UPDATE` clause deliberately touches only `id`, and its one caller
+        // (`WalletAuthController`, wallet signup) passes `0`. So for any page
+        // minted after that became true, post_meta is the only binding there
+        // is.
+        //
+        // Fallback ONLY for pages the first leg missed, which is the semantics
+        // every other two-leg reader in this codebase uses (wallet-link page
+        // wins; see `WalletRepository::resolveEntitiesForPages` for the same
+        // $missing shape). Deliberately NOT a union: a page that resolves to
+        // one operator today through the wallet link must keep resolving to
+        // that operator, and merging a second validator's claimants into its
+        // set would turn a working page AMBIGUOUS.
+        $missing = [];
+        foreach ($ids as $id) {
+            if (!isset($byPage[$id])) {
+                $missing[] = $id;
+            }
+        }
+
+        if ($missing !== []) {
+            $phMissing = implode(',', array_fill(0, count($missing), '%d'));
+
+            // ⚠ NO `LIMIT`, matching the first leg in this same method, and
+            // that is load-bearing rather than an omission. The unit of
+            // correctness here is the COMPLETE claimant set per page: the
+            // count decides RESOLVED vs AMBIGUOUS. A truncating LIMIT could
+            // drop a contested page's second claimant and silently convert
+            // AMBIGUOUS into RESOLVED, handing one of two rival claimants
+            // sole authority. Bounded by the 100-id IN-list above instead.
+            // CAST per the collation note on findMissingPlaceholderPage.
+            /** @var list<object{page_id: string, user_id: string}>|null $metaRows */
+            $metaRows = $wpdb->get_results($wpdb->prepare(
+                "SELECT pm.post_id AS page_id, cl.user_id
+                 FROM {$wpdb->postmeta} pm
+                 JOIN {$validators} v ON v.id = CAST(pm.meta_value AS UNSIGNED)
+                 JOIN {$table} cl ON cl.entity_id = v.id AND cl.entity_type = 'validator'
+                 WHERE pm.meta_key = '_bcc_onchain_validator_id'
+                   AND pm.post_id IN ({$phMissing})
+                   AND cl.status = 'verified' AND cl.claim_role = 'operator'
+                 ORDER BY pm.post_id, cl.user_id",
+                ...$missing
+            ));
+
+            foreach ($metaRows ?: [] as $row) {
+                $byPage[(int) $row->page_id][(int) $row->user_id] = true;
+            }
+        }
+
         $out = [];
         foreach ($byPage as $pageId => $userSet) {
             if (count($userSet) === 1) {

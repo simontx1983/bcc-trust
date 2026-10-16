@@ -69,6 +69,8 @@ final class VerifiedOperatorResolverStatesIntegrationTest extends TestCase
     private const USER_B   = 402;
     private const PAGE_ID  = 5501;
     private const OTHER_PAGE = 5502;
+    private const META_PAGE     = 5503;
+    private const META_PAGE_TWO = 5504;
     private const CHAIN_ID = 8;
 
     protected function setUp(): void
@@ -77,6 +79,25 @@ final class VerifiedOperatorResolverStatesIntegrationTest extends TestCase
         foreach (['bcc_onchain_claims', 'bcc_onchain_validators', 'bcc_onchain_collections', 'bcc_wallet_links'] as $t) {
             $wpdb->query('TRUNCATE TABLE `' . $wpdb->prefix . $t . '`');
         }
+
+        // ⚠⚠ The post_meta bindings MUST be cleared between cases, and the
+        // reason is the TRUNCATE above: truncating resets AUTO_INCREMENT, so
+        // validator id 1 recurs in every case. A leaked
+        // `_bcc_onchain_validator_id` row would therefore bind one case's page
+        // to a LATER case's unrelated validator — and it would do it quietly,
+        // by making a page resolve that the later case asserts is unclaimed.
+        // postmeta is shared with every other suite in the run, so this is
+        // scoped to this suite's own page ids rather than a blanket DELETE.
+        $wpdb->query($wpdb->prepare(
+            'DELETE FROM `' . $wpdb->postmeta . '`'
+            . " WHERE meta_key = '_bcc_onchain_validator_id'"
+            . ' AND post_id IN (%d, %d, %d, %d)',
+            self::PAGE_ID,
+            self::OTHER_PAGE,
+            self::META_PAGE,
+            self::META_PAGE_TWO
+        ));
+
         self::normaliseClaimsSchema();
     }
 
@@ -231,6 +252,28 @@ final class VerifiedOperatorResolverStatesIntegrationTest extends TestCase
         // ⚠ $wpdb->insert returns false SILENTLY on a column mismatch, which
         // would make every assertion below vacuous against an empty table.
         self::assertNotFalse($ok, 'fixture claim insert must succeed');
+    }
+
+    /**
+     * The `_bcc_onchain_validator_id` binding `ValidatorPageMinter` writes.
+     *
+     * Through `update_post_meta()` rather than a raw INSERT, because that is
+     * the function the minter itself calls — a raw insert could satisfy the
+     * join while disagreeing with how the row is really shaped.
+     */
+    private function bindByPostMeta(int $pageId, int $validatorId): void
+    {
+        $ok = update_post_meta($pageId, '_bcc_onchain_validator_id', (string) $validatorId);
+        self::assertTrue($ok, 'fixture post_meta binding must be written');
+    }
+
+    private function countWalletLinksFor(int $pageId): int
+    {
+        global $wpdb;
+        return (int) $wpdb->get_var($wpdb->prepare(
+            'SELECT COUNT(*) FROM `' . $wpdb->prefix . 'bcc_wallet_links` WHERE post_id = %d',
+            $pageId
+        ));
     }
 
     /** A validator on $pageId claimed by $userId as a verified operator. */
@@ -573,5 +616,208 @@ final class VerifiedOperatorResolverStatesIntegrationTest extends TestCase
 
         self::assertCount(1, $map);
         self::assertSame(ClaimRepository::OPERATOR_RESOLVED, $map[self::PAGE_ID]['state']);
+    }
+    // ── The post_meta binding leg ─────────────────────────────────────────
+
+    /**
+     * ⚠⚠ THE DEFECT THIS SECTION EXISTS FOR.
+     *
+     * `ValidatorPageOperatorAuthority::decide()` proves a page is a validator
+     * page with `ValidatorRepository::findFirstByPageId()`, which resolves
+     * EITHER through `wallet_links.post_id` OR through the
+     * `_bcc_onchain_validator_id` post_meta binding `ValidatorPageMinter`
+     * writes. It then asks THIS resolver who the operator is — and this
+     * resolver used to read only the wallet-link leg. So a page bound only
+     * through post_meta passed the first gate and answered UNCLAIMED, and
+     * `decide()` denied the page's real operator with `claim_absent`.
+     *
+     * The fixture below is the PRODUCTION shape, not a contrived one: the
+     * wallet link carries `post_id = 0`, because
+     * `WalletRepository::insertOrFind` is the only write path into that table,
+     * its `ON DUPLICATE KEY UPDATE` clause touches only `id`, and its one
+     * caller passes `0`.
+     */
+    public function testAPageBoundOnlyByPostMetaResolvesItsOperator(): void
+    {
+        $vid = $this->validator($this->walletLink(self::USER_A, 0));
+        $this->claim(self::USER_A, 'validator', $vid);
+        $this->bindByPostMeta(self::META_PAGE, $vid);
+
+        // Anti-vacuity: the wallet-link leg must genuinely MISS this page,
+        // or the case would pass without the second leg existing.
+        self::assertSame(
+            0,
+            $this->countWalletLinksFor(self::META_PAGE),
+            'the fixture must not bind this page through wallet_links'
+        );
+
+        $r = ClaimRepository::resolveVerifiedOperatorForPage(self::META_PAGE);
+
+        self::assertSame(ClaimRepository::OPERATOR_RESOLVED, $r['state']);
+        self::assertSame(self::USER_A, $r['user_id']);
+    }
+
+    /**
+     * The second leg is a FALLBACK, not a union, and this is the case that
+     * pins the difference. A page that resolves today through its wallet link
+     * must keep resolving to that same operator — merging a second validator's
+     * claimants into its set would turn a working page AMBIGUOUS and lock out
+     * an operator who is working fine right now.
+     */
+    public function testTheWalletLinkLegStillWinsOverThePostMetaBinding(): void
+    {
+        $this->claimedValidatorOn(self::PAGE_ID, self::USER_A);
+
+        $other = $this->validator($this->walletLink(self::USER_B, 0));
+        $this->claim(self::USER_B, 'validator', $other);
+        $this->bindByPostMeta(self::PAGE_ID, $other);
+
+        $r = ClaimRepository::resolveVerifiedOperatorForPage(self::PAGE_ID);
+
+        self::assertSame(
+            ClaimRepository::OPERATOR_RESOLVED,
+            $r['state'],
+            'a page that resolves through its wallet link must not become contested'
+        );
+        self::assertSame(self::USER_A, $r['user_id']);
+    }
+
+    /**
+     * Ambiguity is not weakened by the new leg: two rival operators reached
+     * ONLY through post_meta are still AMBIGUOUS with no user_id, exactly as
+     * they are through the wallet link. This is the reason the fallback query
+     * carries no LIMIT — truncating a contested page's second claimant would
+     * hand one of two rivals sole authority.
+     */
+    public function testTwoOperatorsReachedOnlyThroughPostMetaAreAmbiguous(): void
+    {
+        $vid = $this->validator($this->walletLink(self::USER_A, 0));
+        $this->claim(self::USER_A, 'validator', $vid);
+        $this->claim(self::USER_B, 'validator', $vid);
+        $this->bindByPostMeta(self::META_PAGE, $vid);
+
+        $r = ClaimRepository::resolveVerifiedOperatorForPage(self::META_PAGE);
+
+        self::assertSame(ClaimRepository::OPERATOR_AMBIGUOUS, $r['state']);
+        self::assertNull($r['user_id']);
+    }
+
+    /**
+     * The new leg carries the SAME role and status predicates as the first.
+     * A fallback that relaxed either would be a privilege widening dressed up
+     * as a bug fix — a creator or a pending row must stay invisible whichever
+     * leg reaches it.
+     */
+    public function testThePostMetaLegAppliesTheSameRoleAndStatusFilters(): void
+    {
+        $creatorVid = $this->validator($this->walletLink(self::USER_A, 0));
+        $this->claim(self::USER_A, 'validator', $creatorVid, 'creator');
+        $this->bindByPostMeta(self::META_PAGE, $creatorVid);
+
+        $pendingVid = $this->validator($this->walletLink(self::USER_B, 0));
+        $this->claim(self::USER_B, 'validator', $pendingVid, 'operator', 'pending');
+        $this->bindByPostMeta(self::META_PAGE_TWO, $pendingVid);
+
+        self::assertSame(
+            ClaimRepository::OPERATOR_UNCLAIMED,
+            ClaimRepository::resolveVerifiedOperatorForPage(self::META_PAGE)['state'],
+            'a creator claim must not resolve as the operator through the meta leg'
+        );
+        self::assertSame(
+            ClaimRepository::OPERATOR_UNCLAIMED,
+            ClaimRepository::resolveVerifiedOperatorForPage(self::META_PAGE_TWO)['state'],
+            'an unverified claim must not resolve through the meta leg'
+        );
+    }
+
+    /**
+     * ⚠ The constraint this change was made under: do not change collection
+     * creators' permissions. The fallback joins the validators table and keys
+     * on `cl.entity_type = 'validator'`, so a collection claim cannot be
+     * reached by it even when a `_bcc_onchain_validator_id` row names the
+     * collection's own id.
+     *
+     * ⚠ The fixture makes the collection id and a validator id COLLIDE, which
+     * is what gives the case teeth. `setUp()` truncates both tables, so each
+     * one's AUTO_INCREMENT restarts and the first row of each is id 1. The
+     * meta row then names an id that exists in BOTH tables, so the only thing
+     * keeping the collection's operator claim out of the answer is
+     * `cl.entity_type = 'validator'`. With an empty validators table — the
+     * first version of this case — nothing could match either way and the
+     * assertion passed for a reason unrelated to the predicate.
+     */
+    public function testACollectionClaimIsNotReachedByTheValidatorMetaLeg(): void
+    {
+        $vid = $this->validator($this->walletLink(self::USER_B, 0));   // no claim
+        $cid = $this->collection($this->walletLink(self::USER_A, 0));
+        $this->claim(self::USER_A, 'collection', $cid);
+
+        self::assertSame($vid, $cid, 'the ids must collide for this case to mean anything');
+
+        $this->bindByPostMeta(self::META_PAGE, $cid);
+
+        self::assertSame(
+            ClaimRepository::OPERATOR_UNCLAIMED,
+            ClaimRepository::resolveVerifiedOperatorForPage(self::META_PAGE)['state']
+        );
+    }
+
+    /** Both legs answer within ONE batch call, each page from its own leg. */
+    public function testBothLegsAnswerInOneBatch(): void
+    {
+        $this->claimedValidatorOn(self::PAGE_ID, self::USER_A);
+
+        $vid = $this->validator($this->walletLink(self::USER_B, 0));
+        $this->claim(self::USER_B, 'validator', $vid);
+        $this->bindByPostMeta(self::META_PAGE, $vid);
+
+        $map = ClaimRepository::resolveVerifiedOperatorForPages(
+            [self::PAGE_ID, self::META_PAGE]
+        );
+
+        self::assertCount(2, $map);
+        self::assertSame(self::USER_A, $map[self::PAGE_ID]['user_id']);
+        self::assertSame(self::USER_B, $map[self::META_PAGE]['user_id']);
+    }
+
+    /**
+     * The fallback is ONE extra statement for the whole batch, and it does not
+     * run at all when every page already resolved. Pinned because the obvious
+     * wrong implementation — resolve each missed page on its own — would pass
+     * every assertion above while turning a cards list into an N+1.
+     */
+    public function testTheFallbackIsOneExtraQueryAndIsSkippedWhenNothingWasMissed(): void
+    {
+        global $wpdb;
+
+        $this->claimedValidatorOn(self::PAGE_ID, self::USER_A);
+        $this->claimedValidatorOn(self::OTHER_PAGE, self::USER_B);
+
+        $wpdb->resetQueryCount();
+        ClaimRepository::resolveVerifiedOperatorForPages([self::PAGE_ID, self::OTHER_PAGE]);
+        self::assertSame(
+            1,
+            $wpdb->queryCount,
+            'every page resolved on the first leg, so the second must not run'
+        );
+
+        $vidA = $this->validator($this->walletLink(self::USER_A, 0));
+        $this->claim(self::USER_A, 'validator', $vidA);
+        $this->bindByPostMeta(self::META_PAGE, $vidA);
+
+        $vidB = $this->validator($this->walletLink(self::USER_B, 0));
+        $this->claim(self::USER_B, 'validator', $vidB);
+        $this->bindByPostMeta(self::META_PAGE_TWO, $vidB);
+
+        $wpdb->resetQueryCount();
+        $map = ClaimRepository::resolveVerifiedOperatorForPages(
+            [self::PAGE_ID, self::OTHER_PAGE, self::META_PAGE, self::META_PAGE_TWO]
+        );
+        self::assertSame(
+            2,
+            $wpdb->queryCount,
+            'two missed pages must cost ONE fallback statement, not one each'
+        );
+        self::assertCount(4, $map);
     }
 }
