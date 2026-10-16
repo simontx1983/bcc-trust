@@ -308,7 +308,23 @@ final class AnnouncementCapabilityResolver
         return [
             'can_edit'            => self::ownerAction($isOperator, $archived, $featureEnabled),
             'can_pin'             => self::pin($isOperator, $archived, $published, $featureEnabled),
-            'can_archive'         => self::ownerAction($isOperator, $archived, $featureEnabled),
+            // ⚠⚠ NARROWED WITH THE ROUTE, and it has to be. The archive route
+            // refuses any non-published row (§4.32.6), so leaving this as a
+            // plain owner action would hand a client a permitted capability for
+            // a request that answers 409 — a control that draws, clicks and
+            // fails. Every dead control found in this feature hid a second
+            // defect behind it, so the capability and the route move together.
+            //
+            // The ladder is `pin()`'s, reused rather than copied: both answer
+            // the same question — may this operator act on a PUBLISHED, live
+            // row — and both return `announcement_not_published` for the same
+            // condition, so a client renders them identically.
+            'can_archive'         => self::publishedOwnerAction(
+                $isOperator,
+                $archived,
+                $published,
+                $featureEnabled
+            ),
             // ⚠ STAYS TRUE ON AN ARCHIVED ROW. §4.32.7 keeps an archived
             // discussion visible and read-only while operator moderation
             // remains available — a closed discussion nobody can clean up
@@ -403,8 +419,15 @@ final class AnnouncementCapabilityResolver
     }
 
     /**
-     * Edit and archive share a ladder exactly, so they share a producer.
-     * Two copies of a fail-closed sequence is how divergent answers start.
+     * The ladder for an owner action that needs no publication rung — which,
+     * since the archive route began refusing unpublished rows, is `can_edit`
+     * alone.
+     *
+     * ⚠ This docblock read "Edit and archive share a ladder exactly, so they
+     * share a producer" and that stopped being true: archive moved to
+     * {@see self::publishedOwnerAction()} alongside pin. Corrected here rather
+     * than left as a comment describing a sharing that no longer happens —
+     * the original point still stands, it just now applies to the OTHER pair.
      *
      * @return Entry
      */
@@ -443,12 +466,49 @@ final class AnnouncementCapabilityResolver
         bool $published,
         bool $featureEnabled
     ): array {
+        // Delegates: `can_pin` and `can_archive` are provably the same ladder
+        // now that archive refuses unpublished rows, and §11 forbids a parallel
+        // implementation of logic that already exists. Kept as a named method
+        // because the capability it answers is named, and because its callers
+        // and tests address it by name.
+        return self::publishedOwnerAction($isOperator, $archived, $published, $featureEnabled);
+    }
+
+    /**
+     * The ladder for an owner action that requires a PUBLISHED, unarchived row.
+     *
+     * Order is load-bearing and is the same order the routes apply: the feature
+     * switch first (an off feature is not an ownership question), then
+     * ownership, then archival, then publication. Reversing the last two would
+     * report `announcement_not_published` for an archived draft, naming the
+     * condition the operator cannot fix instead of the one that is permanent.
+     *
+     * @return Entry
+     */
+    private static function publishedOwnerAction(
+        bool $isOperator,
+        bool $archived,
+        bool $published,
+        bool $featureEnabled
+    ): array {
         if (!$featureEnabled) {
             return Permission::deny(self::REASON_FEATURE_DISABLED);
         }
         if (!$isOperator) {
             return Permission::deny(self::REASON_NOT_CLAIMER);
         }
+        // ⚠ The next two rungs are ORDER-SENSITIVE and their order is pinned by
+        // M3 of scripts/tests/announcement-capability-mutation-controls.sh,
+        // which swaps them and requires a named test to die. The comment sits
+        // ABOVE the block rather than inside it for that reason: M3 anchors on
+        // the exact statement sequence, and a comment between `if ($archived)`
+        // and its `return` silently breaks the control — reported `broken`,
+        // which is a control that tests nothing. It did exactly that once.
+        //
+        // Archival outranks publication because archival cannot be undone
+        // (§4.32.6) while publication can; naming the fixable condition on a
+        // row that is permanently closed would promise a path that is gone.
+        // No unlock hint on the archived rung, for the same reason.
         if ($archived) {
             return Permission::deny(self::REASON_ARCHIVED);
         }
