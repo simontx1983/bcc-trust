@@ -519,19 +519,75 @@ final class AnnouncementRepositoryIntegrationTest extends TestCase
     }
 
     /**
-     * ⚠⚠ `blocked` is REFUSED today — reconciler arm C does not exist, so
-     * nothing can distinguish it from an ordinary draft. Accepting it would
-     * return ordinary drafts: a wrong answer that looks right.
+     * An unrecognised status, or none at all, returns nothing rather than
+     * everything — a filter that falls open is worse than one that refuses.
+     *
+     * ⚠ `blocked` and `published` USED TO BE IN THIS LIST, and the docblock
+     * above it still claimed `blocked` was refused long after
+     * `ownerStatuses()` began accepting it. The assertion kept passing for a
+     * reason the comment did not describe: no seeded row carried arm C's
+     * marker, so the blocked filter matched nothing. Both statuses are now
+     * supported and have their own cases.
      */
-    public function testTheOwnerListRefusesBlockedAndPublishedStatuses(): void
+    public function testTheOwnerListReturnsNothingForAnUnsupportedStatusSet(): void
     {
         $this->seed('a draft', status: 'draft', authorizedAt: null, authorizedUserId: null);
         $this->seed('published');
 
-        foreach ([[Caps::STATUS_BLOCKED], [Caps::STATUS_PUBLISHED], ['nonsense'], []] as $statuses) {
+        foreach ([['nonsense'], []] as $statuses) {
             $page = $this->repo->listForOwner(self::PAGE_ID, self::operator(), $statuses, 20, null);
             self::assertSame([], $this->titles($page), 'unsupported status set must return nothing');
         }
+    }
+
+    /**
+     * ⚠⚠ THE CASE THE WHOLE CHANGE EXISTS FOR, AND THE ONE THAT CATCHES THE
+     * TRAP IN IT.
+     *
+     * `?status=published` must return the PUBLISHED row. Before this change
+     * `wpStatusFor()` fell through to `'draft'` for every status it did not
+     * recognise, so widening the accepted list alone would have composed
+     * `p.post_status = 'draft'` and answered with the DRAFT — a wrong page
+     * that looks right, and one a test asserting merely "non-empty" would
+     * have waved straight through. Hence exact titles, with a draft present
+     * to be wrongly returned.
+     */
+    public function testTheOwnerListReturnsPublishedRowsAndNotDrafts(): void
+    {
+        $this->seed('a draft', status: 'draft', authorizedAt: null, authorizedUserId: null);
+        $this->seed('live on the billboard');
+
+        $page = $this->repo->listForOwner(
+            self::PAGE_ID,
+            self::operator(),
+            [Caps::STATUS_PUBLISHED],
+            20,
+            null
+        );
+
+        self::assertSame(['live on the billboard'], $this->titles($page));
+    }
+
+    /**
+     * The default is UNCHANGED. §4.32.4 documents `['draft', 'scheduled']`,
+     * and that is what every caller which does not send the parameter
+     * receives — so adding a value to the vocabulary must not change the
+     * meaning of a request nobody edited.
+     */
+    public function testThePublishedStatusIsOptInAndNotPartOfTheDefault(): void
+    {
+        $this->seed('a draft', status: 'draft', authorizedAt: null, authorizedUserId: null);
+        $this->seed('live on the billboard');
+
+        $page = $this->repo->listForOwner(
+            self::PAGE_ID,
+            self::operator(),
+            [Caps::STATUS_DRAFT, Caps::STATUS_SCHEDULED],
+            20,
+            null
+        );
+
+        self::assertSame(['a draft'], $this->titles($page));
     }
 
     public function testTheOwnerListOrdersByEffectiveDateNewestFirst(): void

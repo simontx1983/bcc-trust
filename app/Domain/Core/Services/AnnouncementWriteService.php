@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Log\Logger;
+use BCC\Trust\Core\Announcements\AnnouncementCapabilityResolver as Caps;
 use BCC\Trust\Core\Announcements\AnnouncementPostType;
 use BCC\Trust\Core\Announcements\AnnouncementPublicationGuard as PublicationGuard;
 use BCC\Trust\Core\Announcements\AnnouncementTransition as Verb;
@@ -440,13 +441,63 @@ final class AnnouncementWriteService
         if (!$this->isOperator($decision)) {
             return self::deny();
         }
-        if ($this->ownRowOrNull($pageId, $decision, $announcementId) === null) {
+        // ⚠ The row is now BOUND, not merely null-checked: the state gate below
+        // reads `post_status` off it. Same call, same 404 on absence — this is
+        // the identical ownership resolution every other write on this service
+        // performs, so the gate cannot be reached by a non-owner.
+        $row = $this->ownRowOrNull($pageId, $decision, $announcementId);
+        if ($row === null) {
             return self::fail(self::ERR_NOT_FOUND, 'Not found.', 404);
         }
         if (self::isArchived($announcementId)) {
             // ⚠ Refuse rather than re-stamp: archival is one-way, and moving the
             // timestamp would change a value a reader may already hold.
+            //
+            // ⚠⚠ DELIBERATELY STILL FIRST, ahead of the state gate below. This
+            // is the one existing refusal on this route and its wording is
+            // unchanged, so a row that is already archived answers exactly what
+            // it answered before — including the legacy case of a draft archived
+            // before the state gate existed, which keeps reporting
+            // `Already archived.` rather than switching to the new message.
             return self::fail(self::ERR_CONFLICT, 'Already archived.', 409);
+        }
+
+        // ── ⚠⚠ ARCHIVE IS A TRANSITION ON A *PUBLISHED* NOTICE ───────────────
+        //
+        // §4.32.6 defines archival as one-way, not a deletion, and says the row
+        // "keeps its permalink and stays publicly readable, so it remains
+        // challengeable". Every one of those properties presupposes a published
+        // row. Applied to a draft, scheduled or blocked notice it delivers the
+        // opposite of what it promises: the row was never publicly readable, so
+        // nothing is retained — and because `listForOwner()` always applies
+        // `notArchivedSql()`, the row also leaves the owner list. Measured on a
+        // real backend before this guard existed: an archived draft appeared on
+        // NO list surface — not `?status=draft`, not any other owner status, not
+        // the public archived list (the visibility predicate excludes it) —
+        // while `GET …/announcements/:id` still answered 200. The row survived,
+        // readable only by an id its own operator had no remaining way to
+        // obtain, with no route back because archival is one-way.
+        //
+        // That is content stranding reached through a second door: the same
+        // outcome as saving a draft that no surface lists. So this refuses
+        // instead, and refuses BEFORE any write — the row's state, its archived
+        // marker and its visibility are all left exactly as they were.
+        //
+        // ⚠ `announcement_not_published` is REUSED rather than minted. §4.32.9's
+        // reason inventory is closed and a client meeting an unrecognised reason
+        // takes its own refusal path, so a new code would land as a disabled
+        // control with no copy. This is the same code `can_pin` already returns
+        // for the same condition, so a client that renders one renders the other.
+        //
+        // ⚠ Not a new restriction on the published workflow: a published,
+        // unarchived row reaches the write below unchanged.
+        if ((string) ($row->post_status ?? '') !== Verb::STATUS_PUBLIC) {
+            return self::fail(
+                self::ERR_CONFLICT,
+                'Only a published announcement can be archived.',
+                409,
+                Caps::REASON_NOT_PUBLISHED
+            );
         }
 
         if (update_post_meta($announcementId, Vis::META_ARCHIVED_AT, $now) === false) {
