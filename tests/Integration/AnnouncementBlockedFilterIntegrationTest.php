@@ -225,13 +225,26 @@ final class AnnouncementBlockedFilterIntegrationTest extends TestCase
     }
 
     /**
-     * ⚠ A PUBLISHED row is never returned by the owner list, whatever is asked
-     * for — it is served by the public list. A blocked marker on a published
-     * row (which arm C would never leave) must not smuggle it in either.
+     * ⚠⚠ A PUBLISHED row is returned ONLY when `published` is what was asked
+     * for, and a `publish` row carrying arm C's blocked marker is not in that
+     * page at all.
+     *
+     * The marker exclusion is not symmetry for its own sake: the view-model
+     * checks the blocked marker BEFORE `post_status`, so such a row reports
+     * its own status as `blocked`. Including it would make
+     * `?status=published` return something that says `blocked` — the filter
+     * and the view-model disagreeing about one row, which is exactly what the
+     * `draft` branch's own exclusion exists to prevent.
+     *
+     * ⚠ THIS CASE USED TO ASSERT THE OPPOSITE — "never returned, whatever is
+     * asked for" — and all three of its original assertions are still true,
+     * because none of them asks for `published`. It would therefore have
+     * stayed green with a title and a docblock that had become false. Finding
+     * the file is not the same as auditing the file.
      */
-    public function testAPublishedRowIsNeverReturnedByTheOwnerList(): void
+    public function testAPublishedRowIsReturnedOnlyWhenAskedForAndNeverWhenBlockMarked(): void
     {
-        $this->seed('publish', [
+        $live = $this->seed('publish', [
             AnnouncementVisibility::META_AUTHORIZED_AT      => '2026-10-01 00:00:00',
             AnnouncementVisibility::META_AUTHORIZED_USER_ID => (string) self::OWNER,
         ]);
@@ -240,16 +253,30 @@ final class AnnouncementBlockedFilterIntegrationTest extends TestCase
         self::assertSame([], $this->ownerIds(['draft']));
         self::assertSame([], $this->ownerIds(['blocked']));
         self::assertSame([], $this->ownerIds(['draft', 'scheduled', 'blocked']));
+
+        self::assertSame([$live], $this->ownerIds(['published']));
     }
 
-    /** An unknown status is dropped rather than widening the result. */
+    /**
+     * An unknown status is dropped rather than widening the result.
+     *
+     * ⚠ This case used to use `published` as its unknown status, with the
+     * comment "`published` is not an owner status; the request collapses to
+     * `draft`". That is no longer true, and the case would have kept passing
+     * anyway because it seeds no `publish` row — a guard against a widening
+     * filter, resting on a status that had quietly become valid. It now uses a
+     * string that is not in the enum and never will be.
+     */
     public function testAnUnknownStatusIsDroppedNotHonoured(): void
     {
         $draft = $this->seed('draft');
         $this->seed('draft', [AnnouncementPublicationGuard::META_BLOCKED_AT => '2026-10-02 00:00:00']);
+        $this->seed('publish', [
+            AnnouncementVisibility::META_AUTHORIZED_AT      => '2026-10-01 00:00:00',
+            AnnouncementVisibility::META_AUTHORIZED_USER_ID => (string) self::OWNER,
+        ]);
 
-        // `published` is not an owner status; the request collapses to `draft`.
-        self::assertSame([$draft], $this->ownerIds(['draft', 'published']));
+        self::assertSame([$draft], $this->ownerIds(['draft', 'no_such_status']));
     }
 
     private function statusOf(int $id): string
