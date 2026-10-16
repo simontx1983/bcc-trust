@@ -329,21 +329,85 @@ final class AnnouncementCapabilityResolverTest extends TestCase
     }
 
     /**
-     * Pin is the one row capability with a publication rung: pinning
-     * promotes a row on the public page, and a draft has nothing to
-     * promote. Edit and archive stay open — a draft is exactly what an
-     * operator edits.
+     * Pin and archive BOTH carry a publication rung; edit does not.
+     *
+     * ⚠⚠ THIS CASE ASSERTED THE OPPOSITE FOR `can_archive` AND HAD TO CHANGE.
+     * It read "Edit and archive stay open — a draft is exactly what an operator
+     * edits", which is right about edit and was wrong about archive. The archive
+     * route now refuses any non-published row, because §4.32.6 defines archival
+     * as one-way, not a deletion, and promises the row "keeps its permalink and
+     * stays publicly readable, so it remains challengeable" — every one of which
+     * presupposes a published row. Applied to a draft it delivered the opposite:
+     * measured on a real backend, an archived draft appeared on NO list surface
+     * while detail-by-id still answered 200, so the row survived readable only
+     * by an id its operator had no way to obtain, with no route back.
+     *
+     * Leaving this capability open while the route refuses would hand a client a
+     * control that draws, clicks and 409s — and every dead control found in this
+     * feature hid a second defect behind it.
      */
     #[DataProvider('unpublishedStates')]
-    public function testAnUnpublishedRowCannotBePinnedButCanStillBeEdited(string $status): void
+    public function testAnUnpublishedRowCanBeEditedButNeitherPinnedNorArchived(string $status): void
     {
         $row  = ['status' => $status, 'is_archived' => false, 'comments_enabled' => true];
         $caps = Caps::forRow(self::operator(), $row, self::goodMember(), true);
 
         self::assertFalse(Permission::isAllowed($caps, 'can_pin'), $status);
         self::assertSame(Caps::REASON_NOT_PUBLISHED, $caps['can_pin']['reason_code'], $status);
+
+        self::assertFalse(Permission::isAllowed($caps, 'can_archive'), $status);
+        self::assertSame(
+            Caps::REASON_NOT_PUBLISHED,
+            $caps['can_archive']['reason_code'],
+            $status . ' — and the SAME code as can_pin, reused rather than minted, '
+                . 'because §4.32.9 is a closed inventory and a client meeting an '
+                . 'unrecognised reason takes its own refusal path'
+        );
+
+        // ⚠ Edit stays open, and that is the distinction worth keeping: a draft
+        // is exactly what an operator edits. Narrowing archive must not narrow
+        // editing with it.
         self::assertTrue(Permission::isAllowed($caps, 'can_edit'), $status);
-        self::assertTrue(Permission::isAllowed($caps, 'can_archive'), $status);
+    }
+
+    /**
+     * The published workflow is untouched: a live row may still be archived.
+     * Pinned here because the whole risk of this change is over-reach — a guard
+     * that refused the case it was meant to preserve would pass every assertion
+     * above.
+     */
+    public function testAPublishedRowCanStillBeArchived(): void
+    {
+        $caps = Caps::forRow(self::operator(), self::publishedRow(), self::goodMember(), true);
+
+        self::assertTrue(Permission::isAllowed($caps, 'can_archive'));
+        self::assertNull($caps['can_archive']['reason_code']);
+        self::assertNull($caps['can_archive']['unlock_hint']);
+    }
+
+    /**
+     * An ARCHIVED row reports `announcement_archived`, not
+     * `announcement_not_published` — the order of the two rungs is
+     * load-bearing. An archived row is stored `publish`, so the publication
+     * rung would pass it; reversing the order on an archived DRAFT would name
+     * the condition the operator could fix instead of the permanent one.
+     */
+    public function testAnArchivedRowNamesArchivalRatherThanPublication(): void
+    {
+        $row  = ['status' => Caps::STATUS_PUBLISHED, 'is_archived' => true, 'comments_enabled' => true];
+        $caps = Caps::forRow(self::operator(), $row, self::goodMember(), true);
+
+        self::assertFalse(Permission::isAllowed($caps, 'can_archive'));
+        self::assertSame(Caps::REASON_ARCHIVED, $caps['can_archive']['reason_code']);
+
+        $draft = ['status' => Caps::STATUS_DRAFT, 'is_archived' => true, 'comments_enabled' => true];
+        $dCaps = Caps::forRow(self::operator(), $draft, self::goodMember(), true);
+
+        self::assertSame(
+            Caps::REASON_ARCHIVED,
+            $dCaps['can_archive']['reason_code'],
+            'archival outranks publication: it is the condition that cannot be undone'
+        );
     }
 
     /** @return iterable<string, array{string}> */
