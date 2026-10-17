@@ -106,6 +106,12 @@ final class MyReportsEndpoint
         return match ($code) {
             'bcc_unauthorized'    => 401,
             'bcc_forbidden'       => 403,
+            // ⚠ 404 exists so an unreportable announcement answers exactly as
+            // its detail route does. Without this arm the match's `default`
+            // would turn "not found" into a 400, which tells a prober that the
+            // id was well-formed but refused — the disclosure §4.32.1 avoids
+            // by making a draft and a missing row indistinguishable.
+            'bcc_not_found'       => 404,
             'bcc_invalid_request' => 400,
             'bcc_rate_limited'    => 429,
             'bcc_unavailable'     => 503,

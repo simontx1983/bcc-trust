@@ -536,6 +536,82 @@ final class AnnouncementViewServiceTest extends TestCase
         self::assertSame($expected, $item['capabilities']);
     }
 
+    /**
+     * ⚠⚠ THE WIRING ASSERTION: the author reaches the REPORT GATE and
+     * nothing else.
+     *
+     * `can_report` must agree with the route, and the route refuses a
+     * self-report — so the resolver needs the row's author. This service is
+     * the only thing that has it. Two halves, and both have to hold:
+     *
+     *   1. IT IS PASSED IN. Without it the gate is permanently open and the
+     *      capability advertises a report the route answers `400 You can't
+     *      report your own post.` on every row of the owner surface, whose
+     *      reads bind `post_author` to the resolved operator.
+     *   2. IT NEVER REACHES THE WIRE. §4.32.2 forbids `post_author` on an
+     *      announcement payload, and the ownership-reason discipline exists
+     *      so a response never discloses who the operator is. So the id goes
+     *      into the capability INPUT and not into the view-model — a
+     *      distinction that is one line to get wrong and invisible once wrong.
+     *
+     * ⚠ The author id is deliberately unmistakable: a value like `7` would
+     * also appear inside a date or an id, so a "not on the wire" assertion
+     * over the encoded model would pass or fail for the wrong reason.
+     */
+    public function testTheDetailViewPassesTheAuthorToTheReportGateAndNeverToTheWire(): void
+    {
+        $authorId = 8675309;
+        $row      = self::row(['post_author' => $authorId]);
+
+        $asAuthor = View::detail(
+            $row,
+            [4471 => 0],
+            self::operator(),
+            self::goodMember() + ['user_id' => $authorId],
+            true,
+            self::SLUG
+        );
+
+        self::assertFalse(
+            $asAuthor['capabilities']['can_report']['allowed'],
+            'the author must not be offered a control the route refuses'
+        );
+        self::assertSame(
+            Caps::REASON_OWN_CONTENT,
+            $asAuthor['capabilities']['can_report']['reason_code']
+        );
+
+        // ⚠ THE COUNTERPART. Without it this case would also pass against a
+        // service that denied reporting to everyone.
+        $asStranger = View::detail(
+            $row,
+            [4471 => 0],
+            self::operator(),
+            self::goodMember() + ['user_id' => 99],
+            true,
+            self::SLUG
+        );
+        self::assertTrue(
+            $asStranger['capabilities']['can_report']['allowed'],
+            'a different member must still be able to report it'
+        );
+
+        foreach (['author' => $asAuthor, 'stranger' => $asStranger] as $who => $model) {
+            self::assertArrayNotHasKey('author_user_id', $model, $who);
+            self::assertArrayNotHasKey('post_author', $model, $who);
+
+            $encoded = json_encode($model);
+            self::assertIsString($encoded);
+            self::assertStringNotContainsString(
+                (string) $authorId,
+                $encoded,
+                "{$who}: the author id must not appear anywhere in the payload"
+            );
+            // ⚠ ANTI-VACUITY — the payload is real, not empty.
+            self::assertStringContainsString('"id":"ann_4471"', $encoded, $who);
+        }
+    }
+
     public function testOnlyTheDetailViewModelCarriesTheMarkdownBody(): void
     {
         $detail = View::detail(

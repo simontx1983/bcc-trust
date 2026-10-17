@@ -31,6 +31,9 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Log\Logger;
+use BCC\Trust\Core\Announcements\AnnouncementPostType;
+use BCC\Trust\Core\Exceptions\RepositoryException;
+use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Repositories\ContentReportRepository;
@@ -58,7 +61,28 @@ final class ContentReportService
     private const REASONS_REQUIRING_COMMENT = ['other'];
 
     /** V1 target kinds — currently only feed items. */
-    public const TARGET_KINDS = ['feed_item'];
+    public const KIND_FEED_ITEM    = 'feed_item';
+    public const KIND_ANNOUNCEMENT = 'announcement';
+
+    /**
+     * ⚠⚠ `announcement` IS A SECOND TARGET KIND, NOT A SECOND ROUTE.
+     *
+     * §4.32.11 advertises `can_report` on a notice, and until now no route
+     * accepted that kind and no notice field carried an id a client could send
+     * — so the capability promised something it could not deliver. Measured on
+     * staging: `can_report: allowed` on a published notice, `target_kind`
+     * enum of `feed_item` only, and zero activity/feed/module fields on the
+     * view-model.
+     *
+     * ⚠ The client sends the NOTICE's own id — the only id it legitimately
+     * holds — and the server resolves the page, the public-readability
+     * predicate and the author itself. Nothing about the author or the feed
+     * activity is taken from the browser. The alternative considered and
+     * rejected was exposing the feed activity id on the notice row: that would
+     * widen what a public notice discloses, and it would make the
+     * author/activity relationship a browser-supplied claim.
+     */
+    public const TARGET_KINDS = [self::KIND_FEED_ITEM, self::KIND_ANNOUNCEMENT];
 
     public function __construct(
         private readonly ContentReportRepository $repo
@@ -120,13 +144,25 @@ final class ContentReportService
             ];
         }
 
-        // §K1 self-report rejection. V1 only knows how to resolve the
-        // author of a feed_item; when more target kinds land (comment,
-        // profile, page) extend this dispatch with their resolvers.
-        // PHPStan narrows $targetKind to 'feed_item' here because that's
-        // the only entry in TARGET_KINDS — the in_array guard above is
-        // exhaustive against the literal-string union.
-        $authorId = self::resolveFeedItemAuthor($targetId);
+        // §K1 self-report rejection, dispatched per kind — the extension this
+        // method's own comment asked for ("when more target kinds land …
+        // extend this dispatch with their resolvers").
+        //
+        // ⚠⚠ THE ANNOUNCEMENT ARM ALSO DECIDES REPORTABILITY, and it must:
+        // a notice is reportable exactly when it is PUBLICLY READABLE, so the
+        // same resolution that finds the author is what proves the target may
+        // be reported at all. Splitting those into two passes would invite a
+        // later edit that authorises one and forgets the other.
+        if ($targetKind === self::KIND_ANNOUNCEMENT) {
+            $resolved = $this->resolveAnnouncementTarget($targetId);
+            if (isset($resolved['error'])) {
+                return $resolved;
+            }
+            $authorId = (int) $resolved['author_id'];
+        } else {
+            $authorId = self::resolveFeedItemAuthor($targetId);
+        }
+
         if ($authorId > 0 && $authorId === $reporterUserId) {
             return [
                 'error'   => 'bcc_invalid_request',
@@ -216,4 +252,58 @@ final class ContentReportService
         $authorRaw = $row->act_user_id ?? 0;
         return (int) $authorRaw;
     }
-}
+
+    /**
+     * Resolve an announcement report target: is it reportable, and whose is it.
+     *
+     * ⚠⚠ REPORTABILITY IS PUBLIC READABILITY, and it is decided by
+     * {@see AnnouncementRepository::findPublic()} — the same predicate the
+     * detail route uses — NOT by `post_status`. A `publish` row missing its
+     * publication-authorization marker reads as `published` on the owner list
+     * yet is not publicly readable, and it must not be reportable either.
+     *
+     * ⚠ ARCHIVED NOTICES REMAIN REPORTABLE. §4.32.6 keeps an archived notice
+     * at its canonical permalink precisely so it stays challengeable, and
+     * `findPublic()` deliberately does not filter archival. A reporting path
+     * that dropped archived rows would remove the challenge exactly when the
+     * operator had closed the discussion — the opposite of the intent.
+     *
+     * ⚠ The PAGE is resolved from `post_parent`, server-side. The client never
+     * sends a page id, an author id or an activity id, so no
+     * author/activity relationship is taken on the browser's word.
+     *
+     * ⚠ "Not reportable" answers `bcc_not_found` for a missing row, a draft, a
+     * scheduled row, a blocked row and an unauthorised `publish` row
+     * IDENTICALLY — the same non-disclosure the detail route gives. A distinct
+     * error for "exists but you may not report it" would confirm a draft's
+     * existence to anyone who guessed its id.
+     *
+     * ⚠ A read failure is `bcc_unavailable`, never "not found": failing closed
+     * on an unreadable database must not look like a row that does not exist.
+     *
+     * @return array{author_id: int}|array{error: string, message: string}
+     */
+    private function resolveAnnouncementTarget(int $announcementId): array
+    {
+        $post = get_post($announcementId);
+        if (!$post instanceof \WP_Post
+            || $post->post_type !== AnnouncementPostType::POST_TYPE
+        ) {
+            return ['error' => 'bcc_not_found', 'message' => 'Not found.'];
+        }
+
+        try {
+            $row = (new AnnouncementRepository())->findPublic(
+                (int) $post->post_parent,
+                $announcementId
+            );
+        } catch (RepositoryException) {
+            return ['error' => 'bcc_unavailable', 'message' => 'Could not file the report. Try again.'];
+        }
+
+        if ($row === null) {
+            return ['error' => 'bcc_not_found', 'message' => 'Not found.'];
+        }
+
+        return ['author_id' => (int) $post->post_author];
+    }}
