@@ -1000,6 +1000,65 @@ final class AnnouncementCapabilityResolverTest extends TestCase
     }
 
     /**
+     * ⚠⚠ `unlock_hint` IS THE RENDER INSTRUCTION, SO EXACTLY ONE DENIAL MAY
+     * CARRY ONE.
+     *
+     * §5.1/§N7 discriminates on the HINT, not the reason code: a gate the
+     * viewer could eventually resolve renders visible-disabled with its hint,
+     * and a structurally impossible one carries `unlock_hint: null` and is
+     * HIDDEN. A client can therefore implement the whole table as "render the
+     * hint when there is one, hide when there is not" and never branch on a
+     * reason — which is what makes a stray hint expensive: adding one to any
+     * other denial would make that control appear, disabled, where hiding is
+     * intended.
+     *
+     * `auth_required` is the only resolvable one — signing in is an action the
+     * viewer can actually take. Reporting your own notice is not resolvable at
+     * all, so a hint there would promise a path that does not exist.
+     *
+     * ⚠ This was guessed at by two implementations in opposite directions
+     * before anyone cited §N7: the server authored a sentence for the anonymous
+     * case while the first client rendered nothing on every denial.
+     */
+    public function testAuthRequiredIsTheOnlyReportDenialThatCarriesAnUnlockHint(): void
+    {
+        $hinted = [];
+
+        foreach (self::reportGateOrdering() as [$row, $viewer, $feature, $_expected]) {
+            foreach ([self::operator(), self::denied()] as $decision) {
+                $entry = Caps::forRow($decision, $row, $viewer, $feature)['can_report'];
+                $code  = $entry['reason_code'] ?? null;
+                if (!is_string($code)) {
+                    continue;
+                }
+                if (($entry['unlock_hint'] ?? null) !== null) {
+                    $hinted[$code] = $entry['unlock_hint'];
+                }
+            }
+        }
+
+        self::assertSame(
+            [Caps::REASON_AUTH_REQUIRED => 'Sign in to report this announcement.'],
+            $hinted,
+            'exactly one report denial may carry an unlock_hint, and it is the resolvable one'
+        );
+
+        // ⚠ ANTI-VACUITY — the sweep reached denials at all, and reached more
+        // than the one it found a hint on. Without this, an empty $hinted and a
+        // broken sweep are the same result.
+        $seen = [];
+        foreach (self::reportGateOrdering() as [$row, $viewer, $feature, $expected]) {
+            $seen[$expected] = true;
+        }
+        self::assertGreaterThan(
+            4,
+            count($seen),
+            'the ordering provider stopped covering the denial ladder'
+        );
+        self::assertArrayHasKey(Caps::REASON_OWN_CONTENT, $seen);
+    }
+
+    /**
      * ⚠⚠ THE DEAD CONTROL THIS RUNG REMOVED, AND IT WAS DEAD ON EVERY
      * OWNER-SURFACE ROW.
      *
