@@ -49,8 +49,35 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
     private const ENDPOINT = 'app/Domain/Core/REST/AnnouncementCommentsEndpoint.php';
     private const READS    = 'app/Domain/Core/REST/AnnouncementsEndpoint.php';
 
-    /** The four keys a complete standing array carries, sorted. */
+    /** The four STANDING FLAGS, sorted. Each one denies when absent. */
     private const KEYS = ['authenticated', 'fraud_locked', 'good_standing', 'suspended'];
+
+    /**
+     * ⚠⚠ A THIRD CATEGORY OF KEY, AND THE REASON IT NEEDED NAMING.
+     *
+     * This suite started with two: a key whose ABSENCE DENIES (every flag in
+     * `KEYS`, which the producer must therefore supply) and a key whose
+     * ABSENCE ALLOWS (`already_reported`, which the producer deliberately does
+     * NOT supply — see
+     * {@see testAKeyWhoseAbsenceAllowsIsDeliberatelyNotSupplied}).
+     *
+     * `user_id` is neither. The report gate reads it through `self::id()`
+     * rather than `self::flag()`, compares it against the row's author, and
+     * treats 0 as matching nobody — so its absence does not deny, and by the
+     * two-category rule the producer would be told not to supply it. That
+     * reading is wrong, and wrong in the dangerous direction: an absent
+     * `user_id` silently DISABLES the self-report rung, and the capability
+     * goes back to advertising a report the route answers
+     * `400 You can't report your own post.` on — the exact dead control the
+     * rung was added to remove.
+     *
+     * So: absence ALLOWS, and the producer must supply it anyway. The set is
+     * DERIVED from the resolver's own `self::id($viewer, '…')` reads
+     * ({@see viewerIdentityReads}) rather than restated, for the same reason
+     * the flag set is — a second identity read added tomorrow fails this
+     * suite until a producer supplies it.
+     */
+    private const IDENTITY = ['user_id'];
 
     private static function src(string $rel): string
     {
@@ -103,12 +130,15 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
 
     // ── 1. the anonymous branch, EXECUTED ────────────────────────────────
 
-    public function testAnAnonymousViewerGetsAllFourKeys(): void
+    public function testAnAnonymousViewerGetsEveryKeyTheResolverReads(): void
     {
         $keys = array_keys(Standing::forViewer(0));
         sort($keys);
 
-        self::assertSame(self::KEYS, $keys, 'a partial array is the defect this class replaces');
+        $expected = array_merge(self::KEYS, self::IDENTITY);
+        sort($expected);
+
+        self::assertSame($expected, $keys, 'a partial array is the defect this class replaces');
     }
 
     public function testAnAnonymousViewerIsNotAuthenticatedAndOtherwiseNeutral(): void
@@ -122,6 +152,11 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
                 'suspended'     => false,
                 'fraud_locked'  => false,
                 'good_standing' => false,
+                // ⚠ 0, not null and not absent. The report gate requires BOTH
+                // ids to be positive before it calls a row the viewer's own, so
+                // 0 matches no author — including a row whose `post_author`
+                // was itself unreadable and also read as 0.
+                'user_id'       => 0,
             ],
             Standing::forViewer(0)
         );
@@ -139,13 +174,29 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
         return ['zero' => [0], 'minus one' => [-1], 'far negative' => [-999999]];
     }
 
-    public function testEveryValueIsARealBooleanNotATruthyScalar(): void
+    public function testEveryFlagIsARealBooleanAndTheIdentityIsARealInt(): void
     {
         // A `'0'` or `''` would satisfy the resolver's `flag()` by accident
         // today and stop satisfying it the moment that helper tightens.
-        foreach (Standing::forViewer(0) as $key => $value) {
-            self::assertIsBool($value, $key . ' is not a bool');
+        $standing = Standing::forViewer(0);
+
+        foreach (self::KEYS as $key) {
+            self::assertArrayHasKey($key, $standing, $key);
+            self::assertIsBool($standing[$key], $key . ' is not a bool');
         }
+
+        // ⚠ And the identity is an INT, not a numeric string. The resolver's
+        // `id()` reader accepts either — it has to, because `post_author`
+        // arrives from MySQL as a string — but the PRODUCER has a real int and
+        // should hand over a real int, so a tightened reader cannot break it.
+        foreach (self::IDENTITY as $key) {
+            self::assertArrayHasKey($key, $standing, $key);
+            self::assertIsInt($standing[$key], $key . ' is not an int');
+        }
+
+        // Together the two lists are the whole array — no key escapes a
+        // type assertion by belonging to neither.
+        self::assertCount(count(self::KEYS) + count(self::IDENTITY), $standing);
     }
 
     // ── 2. the cross-file comparison that would have caught the gap ──────
@@ -154,7 +205,19 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
     {
         $needed = self::denyOnAbsenceKeys();
 
-        self::assertNotEmpty($needed, 'parsed no $viewer reads — the regex has drifted');
+        self::assertNotEmpty($needed, 'parsed no $viewer flag reads — the regex has drifted');
+
+        // ⚠ BOTH CHANNELS. The identity reads are added because their absence
+        // does not deny but silently disables a rung (see self::IDENTITY), and
+        // they are DERIVED so a new one cannot be introduced unaudited.
+        $identity = self::viewerIdentityReads();
+        self::assertSame(
+            self::IDENTITY,
+            $identity,
+            'the resolver reads an identity key this suite has not classified'
+        );
+
+        $needed = array_merge($needed, $identity);
 
         $supplied = array_keys(Standing::forViewer(0));
         sort($supplied);
@@ -163,7 +226,8 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
         self::assertSame(
             $needed,
             $supplied,
-            'the resolver denies when these keys are absent, so the producer must supply exactly them'
+            'the producer must supply exactly the keys the resolver reads: every flag whose '
+            . 'absence denies, and every identity key whose absence disables a rung'
         );
     }
 
@@ -215,6 +279,33 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
     private static function denyOnAbsenceKeys(): array
     {
         return array_values(array_keys(array_filter(self::viewerReads())));
+    }
+
+    /**
+     * Every `$viewer` key the resolver reads as an IDENTITY rather than a flag.
+     *
+     * ⚠ A SECOND CHANNEL, and the first version of this suite did not know
+     * about it. `viewerReads()` parses `self::flag($viewer, …)` only, so when
+     * `user_id` arrived through `self::id($viewer, …)` the producer supplied a
+     * key the audit could not see and
+     * {@see testEveryDenyOnAbsenceKeyIsSupplied} failed with no way to tell
+     * whether the producer or the resolver was wrong. Both channels are parsed
+     * now, so the comparison is over everything the resolver actually reads.
+     *
+     * @return list<string>
+     */
+    private static function viewerIdentityReads(): array
+    {
+        preg_match_all(
+            '~self::id\(\$viewer, \'([a-z_]+)\'\)~',
+            self::code(self::RESOLVER),
+            $m
+        );
+
+        $keys = array_values(array_unique($m[1]));
+        sort($keys);
+
+        return $keys;
     }
 
     public function testTheResolverStillFailsClosedOnAllFourKeys(): void
