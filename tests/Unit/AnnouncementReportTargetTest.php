@@ -221,6 +221,104 @@ final class AnnouncementReportTargetTest extends TestCase
         self::assertLessThan($cmp, $arm, 'target resolution precedes the self-report comparison');
     }
 
+    // ── 2b. The wire form of `target_id` ───────────────────────────
+
+    /**
+     * ⚠⚠ `target_id` IS THE BARE INTEGER, AND THE SCHEMA IS WHAT ENFORCES
+     * THAT — so the schema must stay BINDING.
+     *
+     * A notice's `id` on the wire is the PREFIXED string (`"ann_3732"`), and
+     * the frontend's own type says `number`. Those are two different values
+     * for one field, which is how a report gets filed against the wrong row
+     * or refused for a reason nobody can read. Measured through real
+     * `rest_do_request`:
+     *
+     *   `171` · `"171"` · `171.0` · `"171.0"`   → 200, all row 171
+     *   `"ann_171"` · `"ANN_171"`               → 400 `rest_invalid_param`
+     *   `171.5` · `"171.5"` · `""`             → 400 `rest_invalid_param`
+     *   `-171` · `0`                           → 400 (`minimum: 1`)
+     *
+     * ⚠⚠ THE LOAD-BEARING PART IS AN ABSENCE: `target_id` declares NO
+     * `sanitize_callback`. WordPress substitutes the schema-enforcing
+     * `rest_parse_request_arg` only for an argument that declares none — so
+     * adding one would make `type` and `minimum` DECORATIVE, and
+     * `absint('ann_171')` is `0`, which `minimum: 1` would then never see.
+     * That is not hypothetical: it is the exact defect #328 fixed on
+     * `/members`, where a declared `absint` served 100,000 rows against a
+     * documented cap of 50.
+     *
+     * A reviewer adding a sanitizer here "for consistency" would reopen it,
+     * which is why the absence is asserted rather than the presence.
+     */
+    public function testTheTargetIdSchemaStaysBindingSoAPrefixedIdCannotReachARow(): void
+    {
+        $args = self::routeArgs();
+
+        self::assertArrayHasKey('target_id', $args);
+        self::assertSame('integer', $args['target_id']['type'] ?? null, 'the bare integer, never a prefixed string');
+        self::assertSame(1, $args['target_id']['minimum'] ?? null);
+        self::assertTrue($args['target_id']['required'] ?? false);
+
+        self::assertArrayNotHasKey(
+            'sanitize_callback',
+            $args['target_id'],
+            'a sanitize_callback would opt this argument OUT of schema enforcement '
+            . '(the #328 defect), and absint("ann_171") is 0'
+        );
+
+        // ⚠ ANTI-VACUITY — the sibling argument DOES declare one, so the
+        // absence above is a property of this field and not of the parser.
+        self::assertSame(
+            'sanitize_key',
+            $args['target_kind']['sanitize_callback'] ?? null,
+            'target_kind is an enum of known literals, so sanitising it is safe; '
+            . 'an id compared against a numeric bound is not'
+        );
+    }
+
+    /**
+     * The registered `args` for `POST /me/reports`, read from the route
+     * registration rather than restated here — a restated copy would pass
+     * while the real declaration drifted.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    private static function routeArgs(): array
+    {
+        $src = self::methodBody('register', MyReportsEndpoint::class);
+
+        // The block is small and literal; parse the three fields this suite
+        // cares about rather than eval'ing a route registration.
+        $out = [];
+        foreach (['target_kind', 'target_id', 'reason_code', 'comment'] as $name) {
+            $at = strpos($src, "'" . $name . "' => [");
+            if ($at === false) {
+                continue;
+            }
+            $end   = strpos($src, '],', $at);
+            $chunk = substr($src, $at, ($end === false ? strlen($src) : $end) - $at);
+
+            $arg = [];
+            if (preg_match("~'type'\s*=>\s*'([a-z]+)'~", $chunk, $m)) {
+                $arg['type'] = $m[1];
+            }
+            if (preg_match("~'minimum'\s*=>\s*(\d+)~", $chunk, $m)) {
+                $arg['minimum'] = (int) $m[1];
+            }
+            if (preg_match("~'required'\s*=>\s*(true|false)~", $chunk, $m)) {
+                $arg['required'] = $m[1] === 'true';
+            }
+            if (preg_match("~'sanitize_callback'\s*=>\s*'([a-z_]+)'~", $chunk, $m)) {
+                $arg['sanitize_callback'] = $m[1];
+            }
+            $out[$name] = $arg;
+        }
+
+        self::assertNotSame([], $out, 'parsed no route args — the registration has moved');
+
+        return $out;
+    }
+
     // ── 3. The status mapping ────────────────────────────────────────────
 
     /**

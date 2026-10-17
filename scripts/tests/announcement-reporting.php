@@ -352,6 +352,79 @@ $check(
     $results['archived/reporter']['result']['status'] ?? null
 );
 
+// ══ 2c. THE WIRE FORM OF `target_id` ═══════════════════════════
+//
+// ⚠⚠ A notice's `id` ON THE WIRE is the PREFIXED string (`"ann_171"`), while
+// `target_id` is declared `integer`. The contract pins the BARE INTEGER, and
+// this is where that is demonstrated rather than asserted — because the
+// failure a client fears is not a refusal, it is a report filed against the
+// WRONG ROW. These go through `rest_do_request`, so the schema layer is in
+// the path; the rest of this probe calls the service directly.
+printf("\n==== 2c. target_id wire form ====\n");
+
+$idForms = [
+    'bare int'          => [$byState['published']['id'], 200],
+    'numeric string'    => [(string) $byState['published']['id'], 200],
+    'prefixed ann_'     => ['ann_' . $byState['published']['id'], 400],
+    'prefixed ANN_'     => ['ANN_' . $byState['published']['id'], 400],
+    'fractional'        => [$byState['published']['id'] + 0.5, 400],
+    'zero'              => [0, 400],
+    'negative'          => [-$byState['published']['id'], 400],
+    'empty string'      => ['', 400],
+];
+
+$accepted = [];
+foreach ($idForms as $label => [$value, $expected]) {
+    // Each attempt is independent of the UNIQUE index and of the throttle.
+    $wpdb->query($wpdb->prepare("DELETE FROM {$reportsTable} WHERE target_kind = %s", 'announcement'));
+    $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '\_transient\_bcc\_rl\_%'");
+
+    $req = new WP_REST_Request('POST', '/bcc/v1/me/reports');
+    $req->set_header('content-type', 'application/json');
+    $req->set_body(wp_json_encode([
+        'target_kind' => $SVC::KIND_ANNOUNCEMENT,
+        'target_id'   => $value,
+        'reason_code' => 'spam',
+    ]));
+
+    $previous = get_current_user_id();
+    wp_set_current_user($reporterId);
+    $res = rest_do_request($req);
+    wp_set_current_user($previous);
+
+    $check(sprintf('target_id as %-16s', $label), $expected, $res->get_status());
+
+    if ($res->get_status() === 200) {
+        $accepted[] = $label;
+    } else {
+        // ⚠ A REFUSAL MUST BE THE SCHEMA'S, NOT THE HANDLER'S. If a prefixed
+        // id reached the handler it would be `absint`-able to 0 elsewhere in
+        // this codebase; here it must never get that far.
+        $data = $res->get_data();
+        $check(
+            "  …refused by the schema, not the handler ({$label})",
+            true,
+            in_array($data['code'] ?? null, ['rest_invalid_param', 'rest_missing_callback_param'], true)
+        );
+    }
+}
+
+$check(
+    'ANTI-VACUITY: exactly the two numeric forms tried were accepted',
+    ['bare int', 'numeric string'],
+    array_values(array_intersect($accepted, ['bare int', 'numeric string']))
+);
+$check('…and no prefixed form was', 0, count(array_intersect($accepted, ['prefixed ann_', 'prefixed ANN_'])));
+
+// Leave the ledger as section 2 left it: re-file the two accepted reports the
+// later sections count, since the loop above cleared them.
+$wpdb->query($wpdb->prepare("DELETE FROM {$reportsTable} WHERE target_kind = %s", 'announcement'));
+$wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '\_transient\_bcc\_rl\_%'");
+foreach (['published', 'archived'] as $state) {
+    $service->fileReport($reporterId, $SVC::KIND_ANNOUNCEMENT, $byState[$state]['id'], 'spam', '');
+}
+printf("  report ledger restored to the two accepted rows\n");
+
 // ══ 3. NON-DISCLOSURE — one answer for every unreportable shape ═══════════
 printf("\n==== 3. non-disclosure ====\n");
 
