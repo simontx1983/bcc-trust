@@ -1000,6 +1000,122 @@ final class AnnouncementCapabilityResolverTest extends TestCase
     }
 
     /**
+     * ⚠⚠ THE TWO INVARIANTS THE §N7 RENDER RULE RESTS ON, SWEPT ACROSS EVERY
+     * PRODUCER AND EVERY INPUT THIS SUITE CAN REACH.
+     *
+     * The accepted client rule is now: `allowed` → enabled · denied WITH a
+     * non-empty hint → visible-disabled carrying that hint · denied with a NULL
+     * hint → hidden. No reason-code branching. That makes two server
+     * properties load-bearing, and neither was enforced anywhere:
+     *
+     *   1. ⚠⚠ A HINT IS NEVER THE EMPTY STRING. `Permission::deny()` takes
+     *      `?string`, so `deny($reason, '')` type-checks today. A client
+     *      testing `hint !== null` would then draw a visible-disabled control
+     *      carrying NO COPY — a dead control wearing an explanation it does
+     *      not have. (A client testing truthiness would hide it instead, so
+     *      the same payload renders two different ways depending on which
+     *      obvious implementation you picked. That ambiguity is the defect.)
+     *
+     *   2. ⚠⚠ AN ALLOWED ENTRY NEVER CARRIES A HINT. Under the rule above, a
+     *      hint on an `allowed: true` entry would DISABLE a control the server
+     *      just permitted — the inverse of the dead-control bug and harder to
+     *      notice, because the capability looks correct in the payload.
+     *
+     * Whitespace counts as empty: `' '` would satisfy `!== ''` while rendering
+     * as nothing.
+     *
+     * This sweeps all four producers rather than `can_report` alone, because
+     * the client rule is not announcement-specific — it is how every
+     * §2.1 entry on this surface is now read.
+     */
+    public function testEveryCapabilityEntryObeysTheRenderRuleAcrossEveryProducer(): void
+    {
+        $rows = [];
+        foreach ([Caps::STATUS_PUBLISHED, Caps::STATUS_DRAFT, Caps::STATUS_SCHEDULED, Caps::STATUS_BLOCKED] as $status) {
+            foreach ([true, false] as $archived) {
+                foreach ([true, false] as $comments) {
+                    $rows[] = [
+                        'status'           => $status,
+                        'is_archived'      => $archived,
+                        'comments_enabled' => $comments,
+                        'author_user_id'   => 42,
+                    ];
+                }
+            }
+        }
+
+        $viewers = [
+            self::goodMember() + ['user_id' => 99],
+            self::goodMember() + ['user_id' => 42],                       // the author
+            ['authenticated' => false, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false, 'user_id' => 0],
+            ['authenticated' => true, 'suspended' => true, 'fraud_locked' => false, 'good_standing' => true, 'user_id' => 99],
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => true, 'good_standing' => true, 'user_id' => 99],
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false, 'user_id' => 99],
+            self::goodMember() + ['user_id' => 99, 'already_reported' => true],
+            [],                                                            // the fail-closed empty array
+        ];
+
+        $maps     = [];
+        foreach ([true, false] as $feature) {
+            foreach ([self::operator(42), self::operator(7), self::denied()] as $decision) {
+                $owner = Caps::forOwnerScope($decision, $feature);
+                if ($owner !== null) {
+                    $maps[] = $owner['capabilities'];
+                }
+                foreach ([true, false] as $isAdmin) {
+                    $maps[] = Caps::forAdministrator($isAdmin, $feature);
+                }
+                foreach ($rows as $row) {
+                    foreach ($viewers as $viewer) {
+                        $maps[] = Caps::forRow($decision, $row, $viewer, $feature);
+                        $maps[] = Caps::forCommentsResponse($decision, $row, $viewer, $feature);
+                    }
+                }
+            }
+        }
+
+        $entries = 0;
+        $withHint = 0;
+        $withoutHint = 0;
+
+        foreach ($maps as $map) {
+            foreach ($map as $key => $entry) {
+                $entries++;
+
+                self::assertIsArray($entry, $key);
+                self::assertArrayHasKey('allowed', $entry, $key);
+                self::assertIsBool($entry['allowed'], $key);
+                self::assertArrayHasKey('unlock_hint', $entry, $key);
+                self::assertArrayHasKey('reason_code', $entry, $key);
+
+                $hint = $entry['unlock_hint'];
+
+                if ($hint === null) {
+                    $withoutHint++;
+                } else {
+                    // INVARIANT 1 — a hint is a real sentence or absent.
+                    self::assertIsString($hint, $key);
+                    self::assertNotSame('', trim($hint), "{$key}: an empty hint renders a disabled control with no copy");
+                    $withHint++;
+                }
+
+                if ($entry['allowed'] === true) {
+                    // INVARIANT 2 — an allowed entry carries neither.
+                    self::assertNull($hint, "{$key}: a hint on an ALLOWED entry would disable a permitted control");
+                    self::assertNull($entry['reason_code'], $key);
+                }
+            }
+        }
+
+        // ⚠ ANTI-VACUITY, three ways. Without these the sweep could pass on an
+        // empty matrix, or on one that never reached a hinted branch — and
+        // "no hints exist" would look identical to "every hint is well-formed".
+        self::assertGreaterThan(2000, $entries, 'the matrix collapsed');
+        self::assertGreaterThan(0, $withHint, 'no hinted entry was reached, so invariant 1 was never tested');
+        self::assertGreaterThan(0, $withoutHint, 'no hintless entry was reached');
+    }
+
+    /**
      * ⚠⚠ `unlock_hint` IS THE RENDER INSTRUCTION, SO EXACTLY ONE DENIAL MAY
      * CARRY ONE.
      *
