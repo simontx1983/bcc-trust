@@ -169,6 +169,26 @@ final class AnnouncementCapabilityResolver
     public const REASON_ALREADY_REPORTED  = 'already_reported';
 
     /**
+     * The viewer wrote the thing they are asking to report.
+     *
+     * ⚠⚠ THIS CLOSES A DEAD CONTROL THAT WAS ALWAYS DEAD ON THE OWNER
+     * SURFACE. `AnnouncementRepository`'s owner reads bind
+     * `p.post_author = <resolved operator>`, so EVERY row an operator sees
+     * on the owner list or as owner-detail was authored by that operator —
+     * and `ContentReportService::fileReport()` refuses a self-report with
+     * `400 "You can't report your own post."` So before this rung,
+     * `can_report` was `allowed` on every row of the one surface where it
+     * could never succeed.
+     *
+     * ⚠ It is the ROUTE's rung, in the route's position: `fileReport()`
+     * checks suspension first, then validates, then resolves the target's
+     * author and compares. So this sits after `suspended` / `fraud_locked`
+     * and before `already_reported`, which is the throttle/duplicate rung
+     * the route reaches afterwards.
+     */
+    public const REASON_OWN_CONTENT       = 'own_content';
+
+    /**
      * The one wire reason for every ownership refusal, whatever the
      * underlying cause (§4.32.2). Re-exported from the authority rather
      * than re-declared so the two cannot drift: a second literal is how a
@@ -216,6 +236,11 @@ final class AnnouncementCapabilityResolver
         self::REASON_FRAUD_LOCKED,
         self::REASON_FEATURE_DISABLED,
         self::REASON_ALREADY_REPORTED,
+        // ⚠ Added with the reporting route (§4.32.4). A client that has no
+        // copy for it renders a DENIED capability, which hides the control —
+        // the correct outcome here, so an un-updated client degrades to the
+        // behaviour this rung exists to produce rather than to a wrong one.
+        self::REASON_OWN_CONTENT,
     ];
 
     /**
@@ -287,6 +312,7 @@ final class AnnouncementCapabilityResolver
      *   - `status`            one of the four §4.32.13 READ states
      *   - `is_archived`       bool
      *   - `comments_enabled`  bool
+     *   - `author_user_id`    int   (for the report gate's self-report rung)
      *
      * `$viewer` is the viewer's standing, computed by the caller from the
      * existing services — this class performs no standing check:
@@ -294,6 +320,13 @@ final class AnnouncementCapabilityResolver
      *   - `suspended`      bool
      *   - `fraud_locked`   bool
      *   - `good_standing`  bool  (member standing for commenting)
+     *   - `user_id`        int   (for the report gate's self-report rung)
+     *
+     * ⚠ `author_user_id` and `user_id` are capability INPUTS and must never
+     * reach the wire: §4.32.2 forbids `post_author` on an announcement
+     * payload, and the whole point of the ownership-reason discipline is
+     * that a response never discloses who the operator is. The view service
+     * passes the author into this array and NOT into the view-model.
      *
      * Missing keys fail closed: an absent `authenticated` reads as not
      * authenticated, an absent `is_archived` reads as archived. A partial
@@ -751,6 +784,25 @@ final class AnnouncementCapabilityResolver
         if (self::flag($viewer, 'fraud_locked', true)) {
             return Permission::deny(self::REASON_FRAUD_LOCKED);
         }
+
+        // ⚠⚠ THE SELF-REPORT RUNG — the one that made this capability honest.
+        // `ContentReportService::fileReport()` refuses a self-report, and the
+        // owner reads bind `post_author` to the resolved operator, so without
+        // this every owner-surface row advertised a report the server would
+        // reject.
+        //
+        // ⚠ BOTH ids must be POSITIVE for the match to count. A zero author
+        // (an unreadable `post_author`) must not collide with a zero viewer
+        // (anonymous) and deny a stranger the report control — and an
+        // anonymous viewer is already denied by the `authenticated` rung
+        // above, so the only effect of a loose comparison would be a wrong
+        // reason on a row nobody can report anyway.
+        $authorId = self::id($row, 'author_user_id');
+        $viewerId = self::id($viewer, 'user_id');
+        if ($authorId > 0 && $authorId === $viewerId) {
+            return Permission::deny(self::REASON_OWN_CONTENT);
+        }
+
         if (self::flag($viewer, 'already_reported', false)) {
             return Permission::deny(self::REASON_ALREADY_REPORTED);
         }
@@ -805,4 +857,32 @@ final class AnnouncementCapabilityResolver
             self::STATUS_BLOCKED,
         ], true) ? $status : self::STATUS_DRAFT;
     }
-}
+
+    /**
+     * A non-negative id from a capability input array.
+     *
+     * ⚠ ABSENT, NULL, NON-NUMERIC AND NEGATIVE ALL READ AS 0, and 0 never
+     * matches — see the rung. This is the one place in the class where the
+     * fail-closed default is permissive, and it is deliberate: the
+     * restrictive reading of an unreadable author id would be to deny every
+     * viewer the report control on that row, which would suppress the
+     * challenge §4.32.6 exists to preserve. Denying a report is not the safe
+     * direction; refusing to disclose is, and that is the route's job.
+     *
+     * ⚠ Accepts a numeric STRING because `post_author` comes back from MySQL
+     * as one.
+     *
+     * @param array<string, mixed> $source
+     */
+    private static function id(array $source, string $key): int
+    {
+        $value = $source[$key] ?? null;
+
+        if (!is_int($value) && !(is_string($value) && $value !== '' && ctype_digit($value))) {
+            return 0;
+        }
+
+        $id = (int) $value;
+
+        return $id > 0 ? $id : 0;
+    }}

@@ -953,6 +953,10 @@ final class AnnouncementCapabilityResolverTest extends TestCase
         ];
         $pub = ['status' => Caps::STATUS_PUBLISHED, 'is_archived' => false, 'comments_enabled' => true];
 
+        // The same published row, authored by user 42 — for the self-report
+        // rung, which is a VIEWER-ROW relationship and so needs both halves.
+        $pubBy42 = $pub + ['author_user_id' => 42];
+
         yield 'feature off beats everything' => [$pub, $worst, false, Caps::REASON_FEATURE_DISABLED];
         yield 'unavailable beats auth' => [
             ['status' => Caps::STATUS_DRAFT, 'is_archived' => false, 'comments_enabled' => true],
@@ -969,11 +973,379 @@ final class AnnouncementCapabilityResolverTest extends TestCase
             ['authenticated' => true, 'suspended' => false, 'fraud_locked' => true, 'already_reported' => true],
             true, Caps::REASON_FRAUD_LOCKED,
         ];
+        // ⚠ The route checks suspension and validation BEFORE resolving the
+        // target's author, so the self-report rung sits here — below standing,
+        // above the duplicate rung the route reaches afterwards.
+        yield 'fraud beats own content' => [
+            $pubBy42,
+            [
+                'authenticated' => true, 'suspended' => false, 'fraud_locked' => true,
+                'user_id'       => 42, 'already_reported' => true,
+            ],
+            true, Caps::REASON_FRAUD_LOCKED,
+        ];
+        yield 'own content beats already-reported' => [
+            $pubBy42,
+            [
+                'authenticated' => true, 'suspended' => false, 'fraud_locked' => false,
+                'user_id'       => 42, 'already_reported' => true,
+            ],
+            true, Caps::REASON_OWN_CONTENT,
+        ];
         yield 'already reported' => [
             $pub,
             ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'already_reported' => true],
             true, Caps::REASON_ALREADY_REPORTED,
         ];
+    }
+
+    /**
+     * ⚠⚠ THE TWO INVARIANTS THE §N7 RENDER RULE RESTS ON, SWEPT ACROSS EVERY
+     * PRODUCER AND EVERY INPUT THIS SUITE CAN REACH.
+     *
+     * The accepted client rule is now: `allowed` → enabled · denied WITH a
+     * non-empty hint → visible-disabled carrying that hint · denied with a NULL
+     * hint → hidden. No reason-code branching. That makes two server
+     * properties load-bearing, and neither was enforced anywhere:
+     *
+     *   1. ⚠⚠ A HINT IS NEVER THE EMPTY STRING. `Permission::deny()` takes
+     *      `?string`, so `deny($reason, '')` type-checks today. A client
+     *      testing `hint !== null` would then draw a visible-disabled control
+     *      carrying NO COPY — a dead control wearing an explanation it does
+     *      not have. (A client testing truthiness would hide it instead, so
+     *      the same payload renders two different ways depending on which
+     *      obvious implementation you picked. That ambiguity is the defect.)
+     *
+     *   2. ⚠⚠ AN ALLOWED ENTRY NEVER CARRIES A HINT. Under the rule above, a
+     *      hint on an `allowed: true` entry would DISABLE a control the server
+     *      just permitted — the inverse of the dead-control bug and harder to
+     *      notice, because the capability looks correct in the payload.
+     *
+     * Whitespace counts as empty: `' '` would satisfy `!== ''` while rendering
+     * as nothing.
+     *
+     * This sweeps all four producers rather than `can_report` alone, because
+     * the client rule is not announcement-specific — it is how every
+     * §2.1 entry on this surface is now read.
+     */
+    public function testEveryCapabilityEntryObeysTheRenderRuleAcrossEveryProducer(): void
+    {
+        $rows = [];
+        foreach ([Caps::STATUS_PUBLISHED, Caps::STATUS_DRAFT, Caps::STATUS_SCHEDULED, Caps::STATUS_BLOCKED] as $status) {
+            foreach ([true, false] as $archived) {
+                foreach ([true, false] as $comments) {
+                    $rows[] = [
+                        'status'           => $status,
+                        'is_archived'      => $archived,
+                        'comments_enabled' => $comments,
+                        'author_user_id'   => 42,
+                    ];
+                }
+            }
+        }
+
+        $viewers = [
+            self::goodMember() + ['user_id' => 99],
+            self::goodMember() + ['user_id' => 42],                       // the author
+            ['authenticated' => false, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false, 'user_id' => 0],
+            ['authenticated' => true, 'suspended' => true, 'fraud_locked' => false, 'good_standing' => true, 'user_id' => 99],
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => true, 'good_standing' => true, 'user_id' => 99],
+            ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false, 'user_id' => 99],
+            self::goodMember() + ['user_id' => 99, 'already_reported' => true],
+            [],                                                            // the fail-closed empty array
+        ];
+
+        $maps     = [];
+        foreach ([true, false] as $feature) {
+            foreach ([self::operator(42), self::operator(7), self::denied()] as $decision) {
+                $owner = Caps::forOwnerScope($decision, $feature);
+                if ($owner !== null) {
+                    $maps[] = $owner['capabilities'];
+                }
+                foreach ([true, false] as $isAdmin) {
+                    $maps[] = Caps::forAdministrator($isAdmin, $feature);
+                }
+                foreach ($rows as $row) {
+                    foreach ($viewers as $viewer) {
+                        $maps[] = Caps::forRow($decision, $row, $viewer, $feature);
+                        $maps[] = Caps::forCommentsResponse($decision, $row, $viewer, $feature);
+                    }
+                }
+            }
+        }
+
+        $entries = 0;
+        $withHint = 0;
+        $withoutHint = 0;
+
+        foreach ($maps as $map) {
+            foreach ($map as $key => $entry) {
+                $entries++;
+
+                self::assertIsArray($entry, $key);
+                self::assertArrayHasKey('allowed', $entry, $key);
+                self::assertIsBool($entry['allowed'], $key);
+                self::assertArrayHasKey('unlock_hint', $entry, $key);
+                self::assertArrayHasKey('reason_code', $entry, $key);
+
+                $hint = $entry['unlock_hint'];
+
+                if ($hint === null) {
+                    $withoutHint++;
+                } else {
+                    // INVARIANT 1 — a hint is a real sentence or absent.
+                    self::assertIsString($hint, $key);
+                    self::assertNotSame('', trim($hint), "{$key}: an empty hint renders a disabled control with no copy");
+                    $withHint++;
+                }
+
+                if ($entry['allowed'] === true) {
+                    // INVARIANT 2 — an allowed entry carries neither.
+                    self::assertNull($hint, "{$key}: a hint on an ALLOWED entry would disable a permitted control");
+                    self::assertNull($entry['reason_code'], $key);
+                }
+            }
+        }
+
+        // ⚠ ANTI-VACUITY, three ways. Without these the sweep could pass on an
+        // empty matrix, or on one that never reached a hinted branch — and
+        // "no hints exist" would look identical to "every hint is well-formed".
+        self::assertGreaterThan(2000, $entries, 'the matrix collapsed');
+        self::assertGreaterThan(0, $withHint, 'no hinted entry was reached, so invariant 1 was never tested');
+        self::assertGreaterThan(0, $withoutHint, 'no hintless entry was reached');
+    }
+
+    /**
+     * ⚠⚠ `unlock_hint` IS THE RENDER INSTRUCTION, SO EXACTLY ONE DENIAL MAY
+     * CARRY ONE.
+     *
+     * §5.1/§N7 discriminates on the HINT, not the reason code: a gate the
+     * viewer could eventually resolve renders visible-disabled with its hint,
+     * and a structurally impossible one carries `unlock_hint: null` and is
+     * HIDDEN. A client can therefore implement the whole table as "render the
+     * hint when there is one, hide when there is not" and never branch on a
+     * reason — which is what makes a stray hint expensive: adding one to any
+     * other denial would make that control appear, disabled, where hiding is
+     * intended.
+     *
+     * `auth_required` is the only resolvable one — signing in is an action the
+     * viewer can actually take. Reporting your own notice is not resolvable at
+     * all, so a hint there would promise a path that does not exist.
+     *
+     * ⚠ This was guessed at by two implementations in opposite directions
+     * before anyone cited §N7: the server authored a sentence for the anonymous
+     * case while the first client rendered nothing on every denial.
+     */
+    public function testAuthRequiredIsTheOnlyReportDenialThatCarriesAnUnlockHint(): void
+    {
+        $hinted = [];
+
+        foreach (self::reportGateOrdering() as [$row, $viewer, $feature, $_expected]) {
+            foreach ([self::operator(), self::denied()] as $decision) {
+                $entry = Caps::forRow($decision, $row, $viewer, $feature)['can_report'];
+                $code  = $entry['reason_code'] ?? null;
+                if (!is_string($code)) {
+                    continue;
+                }
+                if (($entry['unlock_hint'] ?? null) !== null) {
+                    $hinted[$code] = $entry['unlock_hint'];
+                }
+            }
+        }
+
+        self::assertSame(
+            [Caps::REASON_AUTH_REQUIRED => 'Sign in to report this announcement.'],
+            $hinted,
+            'exactly one report denial may carry an unlock_hint, and it is the resolvable one'
+        );
+
+        // ⚠ ANTI-VACUITY — the sweep reached denials at all, and reached more
+        // than the one it found a hint on. Without this, an empty $hinted and a
+        // broken sweep are the same result.
+        $seen = [];
+        foreach (self::reportGateOrdering() as [$row, $viewer, $feature, $expected]) {
+            $seen[$expected] = true;
+        }
+        self::assertGreaterThan(
+            4,
+            count($seen),
+            'the ordering provider stopped covering the denial ladder'
+        );
+        self::assertArrayHasKey(Caps::REASON_OWN_CONTENT, $seen);
+    }
+
+    /**
+     * ⚠⚠ THE DEAD CONTROL THIS RUNG REMOVED, AND IT WAS DEAD ON EVERY
+     * OWNER-SURFACE ROW.
+     *
+     * `AnnouncementRepository`'s owner reads bind
+     * `p.post_author = <resolved operator>` — so every row an operator sees
+     * on the owner list or as owner-detail was authored by that operator.
+     * And `ContentReportService::fileReport()` refuses a self-report with
+     * `400 "You can't report your own post."` Before this rung, `can_report`
+     * therefore answered `allowed` on 100% of the one surface where the
+     * request could never succeed: a control that draws, clicks and fails.
+     *
+     * ⚠ The counterpart matters as much: a STRANGER must still be allowed,
+     * or the fix would have removed reporting rather than corrected it.
+     */
+    public function testTheAuthorCannotReportTheirOwnNoticeAndAStrangerStillCan(): void
+    {
+        $row = self::publishedRow() + ['author_user_id' => 42];
+
+        $author = Caps::forRow(
+            self::operator(42),
+            $row,
+            self::goodMember() + ['user_id' => 42],
+            true
+        );
+        self::assertFalse(Permission::isAllowed($author, 'can_report'));
+        self::assertSame(Caps::REASON_OWN_CONTENT, $author['can_report']['reason_code']);
+
+        // ⚠ POSITIVE COUNTERPART — a different member, same row.
+        $stranger = Caps::forRow(
+            self::denied(),
+            $row,
+            self::goodMember() + ['user_id' => 99],
+            true
+        );
+        self::assertTrue(
+            Permission::isAllowed($stranger, 'can_report'),
+            'the rung must refuse the author, not disable reporting'
+        );
+        self::assertNull($stranger['can_report']['reason_code']);
+    }
+
+    /**
+     * ⚠ ARCHIVAL DOES NOT RESCUE THE AUTHOR'S OWN CONTROL. §4.32.6 keeps an
+     * archived notice reportable — by OTHERS. The author is still the
+     * author, and the route still refuses them, so the capability must too.
+     */
+    public function testTheAuthorStillCannotReportTheirOwnArchivedNotice(): void
+    {
+        $row = [
+            'status'           => Caps::STATUS_PUBLISHED,
+            'is_archived'      => true,
+            'comments_enabled' => true,
+            'author_user_id'   => 42,
+        ];
+
+        $author = Caps::forRow(
+            self::operator(42),
+            $row,
+            self::goodMember() + ['user_id' => 42],
+            true
+        );
+        self::assertSame(Caps::REASON_OWN_CONTENT, $author['can_report']['reason_code']);
+
+        $stranger = Caps::forRow(
+            self::denied(),
+            $row,
+            self::goodMember() + ['user_id' => 99],
+            true
+        );
+        self::assertTrue(
+            Permission::isAllowed($stranger, 'can_report'),
+            'archival closes authoring, not challenge — §4.32.6'
+        );
+    }
+
+    /**
+     * ⚠⚠ THE ONE PERMISSIVE FAIL-OPEN IN THIS CLASS, AND IT IS DELIBERATE.
+     *
+     * An absent, null, non-numeric, zero or negative `author_user_id` reads
+     * as 0 and matches nobody, so the row stays reportable. The restrictive
+     * reading would deny EVERY viewer the report control on a row whose
+     * author could not be read — suppressing the challenge §4.32.6 exists to
+     * preserve, on the strength of a lookup that did not answer. Refusing to
+     * DISCLOSE is the safe direction here; refusing to accept a report is
+     * not, and the route is the thing that actually decides.
+     *
+     * ⚠ And an anonymous viewer (`user_id` 0) must not collide with an
+     * unreadable author (0) — which is why the rung requires BOTH to be
+     * positive. An anonymous viewer is already denied `auth_required` one
+     * rung above, so the only effect of a loose comparison would have been
+     * the wrong reason on a row nobody can report anyway.
+     *
+     * @param mixed $authorId
+     */
+    #[DataProvider('unreadableAuthorIds')]
+    public function testAnUnreadableAuthorLeavesTheNoticeReportable(mixed $authorId, string $why): void
+    {
+        $row = self::publishedRow();
+        if ($authorId !== '__absent__') {
+            $row['author_user_id'] = $authorId;
+        }
+
+        $caps = Caps::forRow(self::denied(), $row, self::goodMember() + ['user_id' => 42], true);
+
+        self::assertTrue(Permission::isAllowed($caps, 'can_report'), $why);
+        self::assertNull($caps['can_report']['reason_code'], $why);
+    }
+
+    /** @return iterable<string, array{mixed, string}> */
+    public static function unreadableAuthorIds(): iterable
+    {
+        yield 'absent'        => ['__absent__', 'the caller supplied no author'];
+        yield 'null'          => [null, 'an explicit null'];
+        yield 'zero'          => [0, 'a zero author must not match a zero viewer'];
+        yield 'negative'      => [-42, 'nonsense from storage'];
+        yield 'empty string'  => ['', 'an unset meta row reads as the empty string'];
+        yield 'non-numeric'   => ['forty-two', 'never a number'];
+        yield 'float-ish'     => ['42.0', 'ctype_digit refuses it, so it matches nobody'];
+        yield 'padded'        => [' 42', 'an untrimmed value must not match user 42'];
+        yield 'bool true'     => [true, 'PHP would cast this to 1 — it must not match user 1'];
+        yield 'array'         => [[42], 'a structure is not an id'];
+    }
+
+    /**
+     * ⚠ `post_author` comes back from MySQL as a STRING, and the view
+     * service passes it straight through. A rung comparing an int to a
+     * numeric string with `===` would never match — the gate would be
+     * permanently open and nothing would look wrong.
+     */
+    public function testANumericStringAuthorIdStillMatchesTheViewer(): void
+    {
+        $caps = Caps::forRow(
+            self::operator(42),
+            self::publishedRow() + ['author_user_id' => '42'],
+            self::goodMember() + ['user_id' => 42],
+            true
+        );
+
+        self::assertSame(
+            Caps::REASON_OWN_CONTENT,
+            $caps['can_report']['reason_code'],
+            'the string form from the database must compare equal'
+        );
+    }
+
+    /**
+     * ⚠⚠ NEITHER ID MAY REACH THE WIRE. §4.32.2 forbids `post_author` on
+     * an announcement payload, and the ownership-reason discipline exists so
+     * a response never discloses who the operator is. The resolver takes
+     * both ids as INPUTS and returns a reason code — so a `42` appearing
+     * anywhere in the capability map would be a privacy regression, not a
+     * cosmetic one.
+     */
+    public function testTheCapabilityMapDisclosesNeitherTheAuthorNorTheViewer(): void
+    {
+        $caps = Caps::forRow(
+            self::operator(42),
+            self::publishedRow() + ['author_user_id' => 42],
+            self::goodMember() + ['user_id' => 42],
+            true
+        );
+
+        $encoded = json_encode($caps);
+        self::assertIsString($encoded);
+
+        self::assertStringNotContainsString('author', $encoded);
+        self::assertStringNotContainsString('user_id', $encoded);
+        self::assertStringNotContainsString('42', $encoded);
+
+        // ⚠ ANTI-VACUITY — the map is not empty, and the rung DID fire.
+        self::assertStringContainsString('own_content', $encoded);
     }
 
     /**
