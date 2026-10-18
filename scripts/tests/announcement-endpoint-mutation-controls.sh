@@ -90,7 +90,22 @@ mutate () {
     rc=$?
     restore "$file"
 
-    if [ $rc -ne 0 ]; then
+    # ⚠⚠ "No tests executed" IS A BROKEN CONTROL, NOT A SURVIVOR.
+    #
+    # PHPUnit exits 0 when --filter matches nothing, so a control whose named
+    # case has been RENAMED reported `survived` — the loudest possible verdict
+    # for what is actually a stale string. That happened: endpoint M3 named a
+    # test renamed when `ownerStatuses()` began accepting `published`, and the
+    # script announced a surviving mutation on a guarantee that was never
+    # tested. The two failures need opposite responses (fix the needle vs fix
+    # the code), so conflating them is worse than either alone.
+    #
+    # ⚠ Checked BEFORE the exit code, because a filter that matches nothing
+    # always exits 0 and would otherwise be indistinguishable from a pass.
+    if printf '%s' "$out" | grep -q 'No tests executed'; then
+        echo "  broken       $label (filter matched NO tests — the control tested nothing)  [$filter]"
+        broken=$((broken + 1))
+    elif [ $rc -ne 0 ]; then
         echo "  killed       $label  [$filter]"
         killed=$((killed + 1))
     else
@@ -147,20 +162,39 @@ if (substr_count($s, $gate) !== 1) { exit(1); }
 file_put_contents($f, str_replace($gate, $moved, $s));
 ' 'testTheFeatureCheckPrecedesAuthorityAndAnyRepository' 'M2 the feature check moves below the authority call'
 
-# ── M3. THE OWNER ENUM ACCEPTS `blocked` ───────────────────────────────────
+# ── M3. ⚠⚠ THE PUBLIC LIST GAINS A `status` PARAMETER ──────────────────
 #
-# §4.32.13 names `blocked`, so accepting it reads like completeness. It has
-# no marker and no post_status, so the request would return ORDINARY DRAFTS
-# labelled as if the filter had been honoured.
+# REPLACES the original M3, whose premise was retired. That control existed to
+# catch `blocked` being accepted by the owner enum, which was right while
+# reconciler arm C did not exist and a blocked row was indistinguishable from
+# an ordinary draft. Arm C now stamps `_bcc_announcement_blocked_at`, the two
+# are separable in SQL, and `blocked` is accepted DELIBERATELY — so the old
+# mutation had become a no-op.
+#
+# It was also mis-targeted: it mutated the DEFAULT status array while its named
+# test asserts the ENUM. Two different things, so that test could never have
+# caught it even while the premise held. Both faults are recorded rather than
+# quietly dropped, because a survivor and a mis-aimed control need opposite
+# responses.
+#
+# The replacement attacks a guarantee of the same surface that IS live, and
+# that the same test already asserts: §4.32.11 forbids the public list from
+# carrying `status`. A status filter there is the first step toward serving
+# unpublished rows from a CACHEABLE, viewer-independent surface — and it reads
+# like a feature request rather than a privacy regression, which is exactly
+# what makes it worth a control.
 mutate "$ENDPOINT" '
 $f = $argv[1]; $s = file_get_contents($f);
 $q = chr(39);
-$old = "[" . $q . "draft" . $q . ", " . $q . "scheduled" . $q . "]";
-$new = "[" . $q . "draft" . $q . ", " . $q . "scheduled" . $q . ", " . $q . "blocked" . $q . "]";
-if (substr_count($s, $old) < 1) { exit(1); }
-file_put_contents($f, preg_replace("/" . preg_quote($old, "/") . "/", $new, $s, 1));
-' 'testTheOwnerStatusEnumRefusesBlockedAndPublished' 'M3 the owner enum accepts blocked'
-
+$E = substr_count($s, "\r\n") > 0 ? "\r\n" : "\n";
+$old = "                    " . $q . "pageId" . $q . " => \$pageArg," . $E
+     . "                    " . $q . "state" . $q . "  => [" . $E;
+if (substr_count($s, $old) !== 1) { exit(1); }
+$new = "                    " . $q . "pageId" . $q . " => \$pageArg," . $E
+     . "                    " . $q . "status" . $q . " => [" . $q . "required" . $q . " => false, " . $q . "type" . $q . " => " . $q . "string" . $q . "]," . $E
+     . "                    " . $q . "state" . $q . "  => [" . $E;
+file_put_contents($f, str_replace($old, $new, $s));
+' 'testTheOwnerStatusEnumAcceptsEveryWriteState' 'M3 the PUBLIC list gains a status parameter'
 # ── M4. THE MAXIMUM IS RAISED ──────────────────────────────────────────────
 mutate "$ENDPOINT" '
 $f = $argv[1]; $s = file_get_contents($f);
@@ -181,9 +215,15 @@ mutate "$ENDPOINT" '
 $f = $argv[1]; $s = file_get_contents($f);
 $E = substr_count($s, "\r\n") > 0 ? "\r\n" : "\n";
 $q = chr(39);
+# ⚠ There are now TWO `validate_callback` declarations in this file (a
+# later slice added one for the comments route), so an exact-count guard of 1
+# made this control `broken`. Remove only the FIRST occurrence — the `limit`
+# argument — which is the bound this control covers, and assert there is
+# at least one rather than exactly one.
 $old = "            " . $q . "validate_callback" . $q . " => " . $q . "rest_validate_request_arg" . $q . "," . $E;
-if (substr_count($s, $old) !== 1) { exit(1); }
-file_put_contents($f, str_replace($old, "", $s));
+if (substr_count($s, $old) < 1) { exit(1); }
+$at = strpos($s, $old);
+file_put_contents($f, substr($s, 0, $at) . substr($s, $at + strlen($old)));
 ' 'testTheListRoutesDeclareTheContractLimits' 'M5 the limit validator is deleted (bounds stop binding)'
 
 # ── M6. A READ FAILURE BECOMES AN EMPTY PAGE ───────────────────────────────
