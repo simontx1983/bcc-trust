@@ -177,12 +177,22 @@ file_put_contents($f, str_replace($gate, $moved, $s));
 # quietly dropped, because a survivor and a mis-aimed control need opposite
 # responses.
 #
-# The replacement attacks a guarantee of the same surface that IS live, and
-# that the same test already asserts: §4.32.11 forbids the public list from
-# carrying `status`. A status filter there is the first step toward serving
-# unpublished rows from a CACHEABLE, viewer-independent surface — and it reads
-# like a feature request rather than a privacy regression, which is exactly
-# what makes it worth a control.
+# The replacement attacks a guarantee of the same surface that IS live:
+# §4.32.11 forbids the public list from carrying `status`. A status filter
+# there is the first step toward serving unpublished rows from a CACHEABLE,
+# viewer-independent surface — and it reads like a feature request rather than
+# a privacy regression, which is exactly what makes it worth a control.
+#
+# ⚠⚠ THE FILTER NAMES THE GUARANTEE IT ATTACKS.
+#
+# An earlier version of this control pointed at
+# testTheOwnerStatusEnumAcceptsEveryWriteState, which DID assert the public
+# list as an aside — so it killed this mutation for the right reason under a
+# name describing a different one. That is the same name/attack mismatch
+# recorded above as the ORIGINAL M3 fault, reintroduced by its replacement,
+# and it is how the original went a release unnoticed. The assertion now has
+# its own home in testThePublicListCarriesNoStatusParameter, which this filter
+# names, so a later edit to the owner test cannot silently remove M3 cover.
 mutate "$ENDPOINT" '
 $f = $argv[1]; $s = file_get_contents($f);
 $q = chr(39);
@@ -194,7 +204,7 @@ $new = "                    " . $q . "pageId" . $q . " => \$pageArg," . $E
      . "                    " . $q . "status" . $q . " => [" . $q . "required" . $q . " => false, " . $q . "type" . $q . " => " . $q . "string" . $q . "]," . $E
      . "                    " . $q . "state" . $q . "  => [" . $E;
 file_put_contents($f, str_replace($old, $new, $s));
-' 'testTheOwnerStatusEnumAcceptsEveryWriteState' 'M3 the PUBLIC list gains a status parameter'
+' 'testThePublicListCarriesNoStatusParameter' 'M3 the PUBLIC list gains a status parameter'
 # ── M4. THE MAXIMUM IS RAISED ──────────────────────────────────────────────
 mutate "$ENDPOINT" '
 $f = $argv[1]; $s = file_get_contents($f);
@@ -215,15 +225,30 @@ mutate "$ENDPOINT" '
 $f = $argv[1]; $s = file_get_contents($f);
 $E = substr_count($s, "\r\n") > 0 ? "\r\n" : "\n";
 $q = chr(39);
-# ⚠ There are now TWO `validate_callback` declarations in this file (a
-# later slice added one for the comments route), so an exact-count guard of 1
-# made this control `broken`. Remove only the FIRST occurrence — the `limit`
-# argument — which is the bound this control covers, and assert there is
-# at least one rather than exactly one.
-$old = "            " . $q . "validate_callback" . $q . " => " . $q . "rest_validate_request_arg" . $q . "," . $E;
-if (substr_count($s, $old) < 1) { exit(1); }
-$at = strpos($s, $old);
-file_put_contents($f, substr($s, 0, $at) . substr($s, $at + strlen($old)));
+# ⚠⚠ ANCHORED ON THE limit ARGUMENT BY IDENTITY, NOT BY POSITION.
+#
+# An earlier version of this control took the FIRST validate_callback line and
+# asserted only >= 1. That was a position assumption dressed as an identity
+# one: reorder the file, or add a validator above limit, and the control
+# mutates a DIFFERENT argument while still reporting killed by some other
+# assertion. A control that stops testing its own bound and still looks like a
+# pass is the exact failure class this script exists to catch, rotated — the
+# old anchor stopped being unique, the new one could stop being first, and the
+# broken counter cannot see it because bytes do change either way.
+#
+# ⚠ Why the bare line is not unique, which is subtler than "there are two of
+# them": the owner route status enum carries its own validator at 24 spaces of
+# indentation. A 12-space needle matches INSIDE that run — its last 12 spaces,
+# then the quote — so substr_count reports 2 for what is one textual
+# occurrence of each. Measured: 2.
+#
+# Pairing the line with maximum => self::MAX_LIMIT names WHICH bound is being
+# unbound, is unique (measured: 1), and makes a future validator anywhere else
+# in the file harmless instead of silently redirecting this control.
+$keep = "            " . $q . "maximum" . $q . "           => self::MAX_LIMIT," . $E;
+$old  = $keep . "            " . $q . "validate_callback" . $q . " => " . $q . "rest_validate_request_arg" . $q . "," . $E;
+if (substr_count($s, $old) !== 1) { exit(1); }
+file_put_contents($f, str_replace($old, $keep, $s));
 ' 'testTheListRoutesDeclareTheContractLimits' 'M5 the limit validator is deleted (bounds stop binding)'
 
 # ── M6. A READ FAILURE BECOMES AN EMPTY PAGE ───────────────────────────────
