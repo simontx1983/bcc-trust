@@ -307,12 +307,10 @@ final class AnnouncementsEndpointTest extends TestCase
 
         self::assertSame(['draft', 'scheduled', 'blocked', 'published'], $enum);
 
-        // ⚠ The PUBLIC list must not have gained a status parameter in the
-        // process. §4.32.11's guarantee is that it carries no status, no body
-        // and no capabilities for anybody; a status filter there would be the
-        // first step toward serving unpublished rows from a cacheable surface.
-        $publicArgs = $this->route(self::PUBLIC_LIST)['args']['args'] ?? [];
-        self::assertArrayNotHasKey('status', $publicArgs);
+        // ⚠ The public list must not gain a status parameter in the process.
+        // Asserted by testThePublicListCarriesNoStatusParameter, which is also
+        // the filter endpoint mutation control M3 names — kept out of this test
+        // so the control's name describes the guarantee it attacks.
 
         // ⚠ And the enum must BIND: beside a sanitizer it would be decorative,
         // which is the /members defect. An explicit validator is required.
@@ -321,6 +319,36 @@ final class AnnouncementsEndpointTest extends TestCase
             $args['status']['validate_callback'] ?? null,
             'an enum without an explicit validator does not bind'
         );
+    }
+
+    /**
+     * ⚠⚠ §4.32.11 — THE PUBLIC LIST CARRIES NO `status` PARAMETER.
+     *
+     * Extracted from testTheOwnerStatusEnumAcceptsEveryWriteState, where it
+     * was a correct but tangential aside. The assertion was always executing;
+     * what was wrong is that endpoint mutation control M3 attacks THIS
+     * guarantee while naming a filter about the OWNER enum, so nothing in the
+     * control's name recorded why it covered the public list.
+     *
+     * That is how the PREVIOUS M3 drifted for a release: it mutated the default
+     * status array while its named test asserted the enum, and nobody noticed
+     * because the arrangement still reported `killed`. A control whose filter
+     * does not describe what it attacks cannot be reviewed, only re-derived.
+     *
+     * A status filter here is the first step toward serving unpublished rows
+     * from a CACHEABLE, viewer-independent surface, and it reads like a feature
+     * request rather than a privacy regression.
+     */
+    public function testThePublicListCarriesNoStatusParameter(): void
+    {
+        $publicArgs = $this->route(self::PUBLIC_LIST)['args']['args'] ?? [];
+
+        // ⚠ ANTI-VACUITY, and it is load-bearing: `?? []` makes an unresolved
+        // route indistinguishable from a clean one, and assertArrayNotHasKey
+        // passes on an empty array. Without this line the guarantee would be
+        // asserted against nothing the moment the route constant went stale.
+        self::assertNotSame([], $publicArgs, 'the public list must declare args at all');
+        self::assertArrayNotHasKey('status', $publicArgs);
     }
 
     public function testThePublicStateEnumIsExactlyActiveAndArchived(): void

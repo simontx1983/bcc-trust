@@ -88,7 +88,22 @@ mutate () {
     rc=$?
     restore "$file"
 
-    if [ $rc -ne 0 ]; then
+    # ⚠⚠ "No tests executed" IS A BROKEN CONTROL, NOT A SURVIVOR.
+    #
+    # PHPUnit exits 0 when --filter matches nothing, so a control whose named
+    # case has been RENAMED reported `survived` — the loudest possible verdict
+    # for what is actually a stale string. That happened: endpoint M3 named a
+    # test renamed when `ownerStatuses()` began accepting `published`, and the
+    # script announced a surviving mutation on a guarantee that was never
+    # tested. The two failures need opposite responses (fix the needle vs fix
+    # the code), so conflating them is worse than either alone.
+    #
+    # ⚠ Checked BEFORE the exit code, because a filter that matches nothing
+    # always exits 0 and would otherwise be indistinguishable from a pass.
+    if printf '%s' "$out" | grep -q 'No tests executed'; then
+        echo "  broken       $label (filter matched NO tests — the control tested nothing)  [$filter]"
+        broken=$((broken + 1))
+    elif [ $rc -ne 0 ]; then
         echo "  killed       $label  [$filter]"
         killed=$((killed + 1))
     else
