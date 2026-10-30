@@ -83,6 +83,7 @@ namespace BCC\Trust\Tests\Unit {
     use BCC\Trust\Core\REST\CardsEndpoint;
     use BCC\Trust\Core\Services\CardViewService;
     use BCC\Trust\Core\Support\BoundedIntParam;
+    use PHPUnit\Framework\Attributes\DataProvider;
     use PHPUnit\Framework\TestCase;
 
     final class CardIdAddressabilityTest extends TestCase
@@ -179,7 +180,7 @@ namespace BCC\Trust\Tests\Unit {
             ];
         }
 
-        /** @dataProvider storedSpellingProvider */
+        #[DataProvider('storedSpellingProvider')]
         public function testTheStoredSpellingResolvesToItsOwnPostName(string $id, string $expected): void
         {
             self::assertSame($expected, self::slugFor($id), $id);
@@ -237,7 +238,7 @@ namespace BCC\Trust\Tests\Unit {
             ];
         }
 
-        /** @dataProvider frontendSpellingProvider */
+        #[DataProvider('frontendSpellingProvider')]
         public function testTheFrontendSpellingResolvesToTheStoredPostName(string $id, string $expected): void
         {
             self::assertSame($expected, self::slugFor($id), $id);
@@ -273,8 +274,8 @@ namespace BCC\Trust\Tests\Unit {
          * real: that id has no recorded fixture value, so the stub would throw
          * if the resolver consulted it.
          *
-         * @dataProvider percentFreeProvider
          */
+        #[DataProvider('percentFreeProvider')]
         public function testAPercentFreeIdIsReturnedUntouchedAndNeverNormalised(string $id): void
         {
             self::assertSame($id, self::slugFor($id), $id);
@@ -320,8 +321,8 @@ namespace BCC\Trust\Tests\Unit {
          * refused, so normalization can change an identifier's URL spelling
          * but never which identifier it names.
          *
-         * @dataProvider refusedProvider
          */
+        #[DataProvider('refusedProvider')]
         public function testAnIdSanitizeTitleWouldAlterIsRefused(string $id, string $why): void
         {
             self::assertNull(self::slugFor($id), $id . ' — ' . $why);
@@ -368,7 +369,7 @@ namespace BCC\Trust\Tests\Unit {
             ];
         }
 
-        /** @dataProvider inertProvider */
+        #[DataProvider('inertProvider')]
         public function testTheInertPercentFamilyResolvesToAnUnmatchableSlug(string $id, string $expected): void
         {
             self::assertSame($expected, self::slugFor($id), $id);
@@ -394,7 +395,7 @@ namespace BCC\Trust\Tests\Unit {
             ];
         }
 
-        /** @dataProvider aliasProvider */
+        #[DataProvider('aliasProvider')]
         public function testASingleDecodeAliasResolvesThePageItSpells(string $id, string $expected): void
         {
             self::assertSame($expected, self::slugFor($id), $id);
@@ -458,8 +459,8 @@ namespace BCC\Trust\Tests\Unit {
          * answers with the MANTRA card. So the route pattern bounds only the
          * URL spelling, and these must be refused wherever they arrive from.
          *
-         * @dataProvider outsideCharsetProvider
          */
+        #[DataProvider('outsideCharsetProvider')]
         public function testCharactersOutsideTheRouteCharsetAreRefused(string $id): void
         {
             self::assertNull(self::slugFor($id), $id);
