@@ -1001,7 +1001,11 @@ final class CardViewService
         if (ctype_digit($id)) {
             $post = get_post((int) $id);
         } else {
-            $post = get_page_by_path($id, OBJECT, 'peepso-page');
+            $slug = self::canonicalSlugFor($id);
+            if ($slug === null) {
+                return null;
+            }
+            $post = get_page_by_path($slug, OBJECT, 'peepso-page');
         }
 
         if (!$post instanceof \WP_Post) {
@@ -1011,6 +1015,123 @@ final class CardViewService
             return null;
         }
         return $post;
+    }
+
+    /**
+     * The `post_name` this `:id` names, or null when it names nothing we are
+     * willing to look up.
+     *
+     * Applies to the SLUG branch only. The numeric-post_id branch above and
+     * the bcc_handle branch ({@see self::resolveHandle}) are untouched.
+     *
+     * WHY THIS EXISTS. `sanitize_title()` percent-encodes every non-ASCII
+     * character, so a page whose title carries an emoji is stored with a
+     * literal `%f0%9f…` in `post_name` — 123 of the 2,830 validator pages.
+     * Those pages had no reachable URL at all: the route rejected `%`, and the
+     * `id` argument's old `sanitize_text_field` callback STRIPPED the octets
+     * (measured on WP 7.0.2: `bonynode%f0%9f%92%9a-…` became
+     * `bonynode-…`), so even a widened pattern would have resolved a
+     * DIFFERENT page rather than 404ing. Verified end to end against an
+     * isolated backend: widening the pattern alone served the wrong entity.
+     *
+     * Three rules:
+     *
+     * 1. BOUNDED. `wp_posts.post_name` is varchar(200), so a longer id can
+     *    never match a row (§2 bounded reads).
+     *
+     * 2. CHARSET FLOOR. `id` is ALSO reachable through the query string, and
+     *    'GET' outranks 'URL' in WP_REST_Request::get_parameter_order() —
+     *    verified against production, where
+     *    `/cards/validator/ztake-org-cosmos-54at8c?id=mantra-cosmos-uv234h`
+     *    answers with the MANTRA card. So CardsEndpoint::ID_PATTERN bounds
+     *    only the URL spelling and cannot be the whole check; this repeats its
+     *    charset where every id actually arrives.
+     *    CardIdAddressabilityTest pins the two against each other.
+     *
+     * 3. CANONICAL SPELLING, for a percent-bearing id only. The id must be the
+     *    stored slug after ZERO or ONE url-decode, and the result must already
+     *    be `sanitize_title()`-canonical. Two spellings are legitimate because
+     *    two kinds of caller exist:
+     *      - zero decodes — the id IS `post_name`, octets intact, which is
+     *        what a direct API caller echoes back;
+     *      - one decode — `post_name` percent-escaped once, which is what this
+     *        project's frontend sends. Next.js hands `params.slug` the
+     *        NORMALIZED but still-encoded path segment (measured: `%2D` and
+     *        `%7A` come back decoded as RFC 3986 unreserved characters, `%20`
+     *        and `%F0` do not) and `cardEntityPath()` then applies
+     *        `encodeURIComponent`, so `/v/bonynode%f0%9f%92%9a-…` arrives here
+     *        as `bonynode%25F0%259F%2592%259A-…`.
+     *
+     *    Capping it at one decode is the whole safety property. Anything that
+     *    needs a second decode, or that `sanitize_title()` would have to ALTER
+     *    rather than merely re-spell, is refused — so normalization can change
+     *    an identifier's URL spelling but never which identifier it names:
+     *      - `…%2525f0…` (triple-encoded) needs two decodes → refused;
+     *      - `%2f` would become a path SEPARATOR, turning one segment into two
+     *        and sending get_page_by_path() walking post ancestry → refused;
+     *      - `%zz` is not an octet, and a bare trailing `%` is a truncated one
+     *        → both refused.
+     *    Measured: 0 of the 2,830 live validator slugs are refused, and all
+     *    123 percent-bearing ones become addressable.
+     *
+     *    Scoped to ids containing `%` on purpose. An id without `%` is exactly
+     *    what the pre-change pattern already admitted and is returned
+     *    untouched, so this fix cannot regress a URL that works today.
+     *
+     * ⚠ Accepted consequence: a single-decode alias such as `%7A` for `z`
+     * resolves the page it spells, so one page can have more than one URL.
+     * That is ordinary percent-encoding transparency — core's own
+     * get_page_by_path() has behaved this way for every page on the site
+     * since long before this route existed — and it names no page the caller
+     * did not name.
+     *
+     * ⚠ Deliberate non-goal: nothing here rewrites or re-slugs stored data, and
+     * no redirect is issued. A raw, unencoded UTF-8 id is refused because it is
+     * not a stored spelling; it 404s before this change too.
+     */
+    private static function canonicalSlugFor(string $id): ?string
+    {
+        // wp_posts.post_name is varchar(200), so a longer id cannot match a row.
+        if ($id === '' || strlen($id) > 200) {
+            return null;
+        }
+
+        // The charset floor. Repeats CardsEndpoint::ID_PATTERN because `id` is
+        // ALSO reachable through the query string, which outranks the URL
+        // segment, so the route pattern cannot be the only check.
+        if (preg_match('/\A[A-Za-z0-9%][A-Za-z0-9_%-]*\z/D', $id) !== 1) {
+            return null;
+        }
+
+        // An id with no `%` is exactly what the pre-change pattern already
+        // admitted. Returning it untouched keeps today's behaviour by
+        // construction, so this fix cannot regress a URL that works now.
+        if (!str_contains($id, '%')) {
+            return $id;
+        }
+
+        $lower = strtolower($id);
+
+        // Spelling 1 — the id IS the stored slug, octets intact. This is what a
+        // direct API caller sends when it echoes `post_name` back.
+        if (sanitize_title(rawurldecode($lower)) === $lower) {
+            return $lower;
+        }
+
+        // Spelling 2 — the id is the stored slug percent-escaped ONCE, which is
+        // what this project's own frontend produces and therefore the spelling
+        // that has to work. Next.js hands `params.slug` the NORMALIZED but
+        // still-encoded path segment (measured: `%2D` and `%7A` are decoded as
+        // RFC 3986 unreserved characters, `%20` and `%F0` are not), and
+        // `cardEntityPath()` then applies `encodeURIComponent` to it — so
+        // `/v/bonynode%f0%9f%92%9a-…` arrives here as
+        // `bonynode%25F0%259F%2592%259A-…`.
+        $decoded = strtolower(rawurldecode($id));
+        if ($decoded !== '' && sanitize_title($decoded) === $decoded) {
+            return $decoded;
+        }
+
+        return null;
     }
 
     private static function resolveHandle(string $handle): int

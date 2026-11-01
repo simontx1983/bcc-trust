@@ -28,6 +28,7 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\BoundedIntParam;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -40,10 +41,29 @@ final class CardsEndpoint
 {
     private const ROUTE_NAMESPACE = 'bcc/v1';
     private const TYPE_PATTERN    = 'validator|project|creator|member';
-    // Allows numeric post_id, alphanumeric post_name slugs, and bcc_handle.
-    // Capped at 100 chars defensively; the type-specific service does the
-    // real validation (handle pattern per §B6 enforced inside resolution).
-    private const ID_PATTERN      = '[A-Za-z0-9][A-Za-z0-9_-]{0,99}';
+    // Allows numeric post_id, post_name slugs, and bcc_handle.
+    //
+    // `%` is admitted because `sanitize_title()` PERCENT-ENCODES every
+    // non-ASCII character, so a page whose title carries an emoji is
+    // stored with a literal `%f0%9f...` in `post_name` — 123 of the 2,830
+    // validator pages. Measured against production: the REST route regex
+    // is matched against the UNDECODED request path (requesting
+    // `/cards/validator/%7Atake-org-cosmos-54at8c` answers
+    // `rest_no_route`, not the `ztake-…` card), so without `%` here those
+    // pages have no reachable URL at all — their own stored slug is
+    // rejected before any handler runs.
+    //
+    // Widening the charset is NOT the whole fix and must not be read as
+    // one: `id` is also reachable through the query string, which outranks
+    // the URL segment in WP_REST_Request::get_parameter_order(), so this
+    // pattern bounds only the URL spelling. The binding check lives in
+    // CardViewService::canonicalSlugFor(), which refuses any id that is not
+    // the stored slug after zero or one url-decode.
+    //
+    // Capped at 200 chars because `wp_posts.post_name` is varchar(200), so
+    // a longer id cannot match a row; the previous 100 left the one
+    // 124-char stored slug unreachable.
+    private const ID_PATTERN      = '[A-Za-z0-9%][A-Za-z0-9_%-]{0,199}';
 
     public static function register(): void
     {
@@ -64,7 +84,22 @@ final class CardsEndpoint
                     'id' => [
                         'required'          => true,
                         'type'              => 'string',
-                        'sanitize_callback' => 'sanitize_text_field',
+                        // ⚠ NOT `sanitize_text_field`. That sanitizer strips
+                        // percent-encoded octets outright — measured on WP
+                        // 7.0.2, `sanitize_text_field('bonynode%f0%9f%92%9a-…')`
+                        // returns `bonynode-…`, which is a DIFFERENT and
+                        // possibly real slug. Leaving it in place would make a
+                        // widened ID_PATTERN resolve the wrong entity instead
+                        // of 404ing, which is worse than the bug being fixed.
+                        //
+                        // `keepScalar` is the house sanitizer-that-does-not-
+                        // sanitize (#328): it keeps an explicit
+                        // `sanitize_callback` — which is what stops WordPress
+                        // substituting `rest_parse_request_arg` and answering
+                        // `rest_invalid_param` instead of this route's
+                        // documented `bcc_not_found` — while handing the
+                        // resolver the caller's untouched text to judge.
+                        'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
                     ],
                 ],
             ]
