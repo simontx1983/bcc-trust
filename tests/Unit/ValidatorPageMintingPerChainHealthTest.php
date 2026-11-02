@@ -46,6 +46,16 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
 {
     private const SERVICE = 'BCC\\Trust\\Onchain\\Services\\ChainRefreshService';
 
+    /** Read any plugin-relative source file, asserting it is really there. */
+    private static function read(string $relative): string
+    {
+        $src = file_get_contents(dirname(__DIR__, 2) . '/' . $relative);
+        self::assertNotFalse($src, "could not read {$relative}");
+        self::assertNotSame('', $src, "{$relative} is empty");
+
+        return (string) $src;
+    }
+
     private static function source(): string
     {
         $path = dirname(__DIR__, 2) . '/app/Domain/Onchain/Services/ChainRefreshService.php';
@@ -112,21 +122,21 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     }
 
     /**
-     * @param list<int> $chainIds
-     * @param list<array{0:int,1:int}> $calls
+     * @param array<int, list<int>> $chainFetches
+     * @param list<array{0:int,1:int,2:list<int>}> $calls
      * @return array{chains:int,scanned:int,minted:int,skipped:int,errors:int}
      */
-    private static function dispatch(array $chainIds, int $budget, callable $perChain, array &$calls): array
+    private static function dispatch(array $chainFetches, int $budget, callable $perChain, array &$calls): array
     {
         $calls = [];
-        $fake  = static function (int $chainId, int $max) use (&$calls, $perChain): array {
-            $calls[] = [$chainId, $max];
+        $fake  = static function (int $chainId, int $max, array $allowlist) use (&$calls, $perChain): array {
+            $calls[] = [$chainId, $max, $allowlist];
 
-            return $perChain($chainId, $max);
+            return $perChain($chainId, $max, $allowlist);
         };
 
         /** @var array{chains:int,scanned:int,minted:int,skipped:int,errors:int} $out */
-        $out = self::helper()->invoke(null, $chainIds, $budget, $fake);
+        $out = self::helper()->invoke(null, $chainFetches, $budget, $fake);
 
         return $out;
     }
@@ -168,12 +178,12 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
         $code = self::code(self::source());
 
         self::assertStringContainsString(
-            'if ($healthyChainIds !== [])',
+            'if ($healthyChainFetches !== [])',
             $code,
             'minting must be gated on the per-chain list'
         );
 
-        [$start, $end] = self::blockSpan($code, 'if ($healthyChainIds !== [])');
+        [$start, $end] = self::blockSpan($code, 'if ($healthyChainFetches !== [])');
         $branch = substr($code, $start, $end - $start);
 
         self::assertStringNotContainsString(
@@ -196,10 +206,9 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     {
         // The unhealthy chains are simply absent from the list; the healthy
         // ones must each still be dispatched, with their own id.
-        $healthy = [10, 13, 21];
-        $calls   = [];
+        $calls = [];
         $out     = self::dispatch(
-            $healthy,
+            [10 => [101], 13 => [131], 21 => [211]],
             500,
             static fn (): array => ['scanned' => 5, 'minted' => 2, 'skipped' => 3, 'errors' => 0],
             $calls
@@ -218,7 +227,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
 
         self::assertSame(
             1,
-            substr_count($code, '$healthyChainIds[] ='),
+            substr_count($code, '$healthyChainFetches[$chainId] ='),
             'exactly one site may declare a chain healthy'
         );
 
@@ -226,7 +235,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
         $branch = substr($code, $start, $end - $start);
 
         self::assertStringContainsString(
-            '$healthyChainIds[] = $chainId;',
+            '$healthyChainFetches[$chainId] = ValidatorRepository::idsForOperatorAddresses(',
             $branch,
             'the append must sit INSIDE the not-partial branch, structurally'
         );
@@ -235,9 +244,9 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     public function testAChainIsNeverMintedUnlessItIsInTheList(): void
     {
         $calls = [];
-        self::dispatch([13], 500, static fn (): array => ['scanned' => 1, 'minted' => 1, 'skipped' => 0, 'errors' => 0], $calls);
+        self::dispatch([13 => [131]], 500, static fn (): array => ['scanned' => 1, 'minted' => 1, 'skipped' => 0, 'errors' => 0], $calls);
 
-        self::assertSame([[13, 500]], $calls, 'only the listed chain may be dispatched');
+        self::assertSame([[13, 500, [131]]], $calls, 'only the listed chain may be dispatched');
     }
 
     public function testAnEmptyHealthyListMintsNothingAtAll(): void
@@ -278,7 +287,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     {
         $calls = [];
         self::dispatch(
-            [1, 2, 3],
+            [1 => [11], 2 => [22], 3 => [33]],
             500,
             static fn (): array => ['scanned' => 100, 'minted' => 100, 'skipped' => 0, 'errors' => 0],
             $calls
@@ -292,7 +301,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     {
         $calls = [];
         $out   = self::dispatch(
-            [1, 2, 3, 4],
+            [1 => [11], 2 => [22], 3 => [33], 4 => [44]],
             500,
             static fn (): array => ['scanned' => 250, 'minted' => 250, 'skipped' => 0, 'errors' => 0],
             $calls
@@ -312,7 +321,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     {
         $calls = [];
         $out   = self::dispatch(
-            [1, 2],
+            [1 => [11], 2 => [22]],
             500,
             static fn (): array => ['scanned' => 500, 'minted' => 0, 'skipped' => 500, 'errors' => 0],
             $calls
@@ -331,7 +340,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
             'the shared budget must be an explicit named constant'
         );
         self::assertStringContainsString(
-            'self::mintForHealthyChains($healthyChainIds, self::MINT_SCAN_BUDGET)',
+            'self::mintForHealthyChains($healthyChainFetches, self::MINT_SCAN_BUDGET)',
             self::code(self::source()),
             'production must pass the shared budget, not a per-chain default'
         );
@@ -362,7 +371,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     public function testTheMintPathCannotMarkAnythingInactive(): void
     {
         $code = self::code(self::source());
-        [$start, $end] = self::blockSpan($code, 'if ($healthyChainIds !== [])');
+        [$start, $end] = self::blockSpan($code, 'if ($healthyChainFetches !== [])');
         $branch = substr($code, $start, $end - $start);
 
         self::assertStringNotContainsString('markDeadValidators', $branch);
@@ -375,7 +384,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     {
         $calls = [];
         $out   = self::dispatch(
-            [7],
+            [7 => [77]],
             10,
             static fn (): array => ['scanned' => 1, 'minted' => 1, 'skipped' => 0, 'errors' => 0],
             $calls
@@ -384,7 +393,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
         // If the helper had reached a repository or $wpdb, loading the class
         // with nothing but ABSPATH defined would have failed before this point.
         self::assertSame(1, $out['minted']);
-        self::assertSame([[7, 10]], $calls);
+        self::assertSame([[7, 10, [77]]], $calls);
     }
 
     public function testTheDeadMarkingSqlIsUnchangedAndStillGlobal(): void
@@ -430,7 +439,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     public function testSavedPerChainHealthIsNotConsulted(): void
     {
         $code = self::code(self::source());
-        [$start, $end] = self::blockSpan($code, 'if ($healthyChainIds !== [])');
+        [$start, $end] = self::blockSpan($code, 'if ($healthyChainFetches !== [])');
         $branch = substr($code, $start, $end - $start);
 
         self::assertStringNotContainsString(
@@ -446,8 +455,183 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     {
         $code = self::code(self::source());
 
-        self::assertStringContainsString('$healthyChainIds = [];', $code);
-        self::assertStringNotContainsString('static $healthyChainIds', $code);
-        self::assertStringNotContainsString('self::$healthyChainIds', $code);
+        self::assertStringContainsString('$healthyChainFetches = [];', $code);
+        self::assertStringNotContainsString('static $healthyChainFetches', $code);
+        self::assertStringNotContainsString('self::$healthyChainFetches', $code);
+    }
+    // ── (6) the exact allowlist: only validators in THIS run's fetch ──
+
+    /**
+     * A healthy chain proves the FETCH was good. It does not prove any stored
+     * row is still in the set — eligibility reads `wallet_link_id IS NULL`
+     * plus no page meta and never consults currency. Measured 2026-11-02: 149
+     * of 693 staging candidates were absent from their chain's latest complete
+     * fetch, all 149 still labelled 'active', 56 unseen for over 90 days.
+     */
+    public function testTheAllowlistIsBuiltFromThisRunsFetchedAddresses(): void
+    {
+        $code = self::code(self::source());
+        [$start, $end] = self::blockSpan($code, 'if (!$isPartialFetch)');
+        $branch = substr($code, $start, $end - $start);
+
+        self::assertStringContainsString(
+            'foreach ($validators as $fetched)',
+            $branch,
+            'the allowlist must come from the array the fetch returned'
+        );
+        self::assertStringContainsString('ValidatorRepository::idsForOperatorAddresses(', $branch);
+        self::assertStringContainsString('$healthyChainFetches[$chainId] =', $branch);
+    }
+
+    /** Neither `status` nor `fetched_at` may stand in for fetch membership. */
+    public function testStatusAndFetchedAtAreNotUsedAsTheCurrencySignal(): void
+    {
+        $code = self::code(self::source());
+        [$start, $end] = self::blockSpan($code, 'if (!$isPartialFetch)');
+        $branch = substr($code, $start, $end - $start);
+
+        self::assertStringNotContainsString('fetched_at', $branch);
+        self::assertStringNotContainsString("'active'", $branch);
+    }
+
+    public function testEachChainsAllowlistReachesTheMinterIntact(): void
+    {
+        $calls = [];
+        self::dispatch(
+            [10 => [101, 102], 13 => [131]],
+            500,
+            static fn (): array => ['scanned' => 1, 'minted' => 1, 'skipped' => 0, 'errors' => 0],
+            $calls
+        );
+
+        self::assertSame([[10, 500, [101, 102]], [13, 499, [131]]], $calls);
+    }
+
+    /**
+     * ⚠ A validator absent from the allowlist cannot be minted, because the
+     * allowlist is the only thing the minter is given. Asserted positively:
+     * every id the minter receives came from the allowlist.
+     */
+    public function testAValidatorAbsentFromTheAllowlistIsNeverOffered(): void
+    {
+        $calls = [];
+        self::dispatch(
+            [10 => [101, 102]],
+            500,
+            static fn (): array => ['scanned' => 2, 'minted' => 2, 'skipped' => 0, 'errors' => 0],
+            $calls
+        );
+
+        self::assertSame([101, 102], $calls[0][2]);
+        self::assertNotContains(999, $calls[0][2], 'a stale validator id must never appear');
+    }
+
+    /**
+     * ⚠ EMPTY MEANS MINT NONE, not "no filter". Exercised against the REAL
+     * ValidatorPageMinter, and the absence of any database contact is itself
+     * part of the assertion: $wpdb is undefined in this process, so a
+     * repository call would fatal rather than return zeros.
+     */
+    public function testAnEmptyAllowlistMintsNoneAndNeverReachesTheDatabase(): void
+    {
+        if (!defined('ABSPATH')) {
+            define('ABSPATH', sys_get_temp_dir() . '/');
+        }
+        $minter = 'BCC\\Trust\\Onchain\\Services\\ValidatorPageMinter';
+        if (!class_exists($minter, false)) {
+            require dirname(__DIR__, 2) . '/app/Domain/Onchain/Services/ValidatorPageMinter.php';
+        }
+
+        $out = $minter::mintMissing(8, false, 500, []);
+
+        self::assertSame(0, $out['minted']);
+        self::assertSame(0, $out['scanned']);
+        self::assertSame([], $out['minted_ids']);
+        self::assertSame([], $out['error_log']);
+    }
+
+    /** The fail-closed guard must test for [] explicitly, not for falsiness. */
+    public function testTheEmptyAllowlistGuardIsExplicitAboutTheEmptyArray(): void
+    {
+        $src = self::read('app/Domain/Onchain/Services/ValidatorPageMinter.php');
+
+        self::assertStringContainsString(
+            'is_array($onlyValidatorIds) && $onlyValidatorIds === []',
+            self::code($src),
+            'an empty allowlist must be distinguished from null, not merged with it'
+        );
+    }
+
+    /**
+     * The manual CLI backfill is deliberately unchanged: it passes no
+     * allowlist, the parameter defaults to null, and null means no
+     * restriction. An operator running `backfill_pages` is making an
+     * explicit, reviewed request.
+     */
+    public function testTheManualBackfillPathIsUnchanged(): void
+    {
+        $minter = self::code(self::read('app/Domain/Onchain/Services/ValidatorPageMinter.php'));
+        self::assertStringContainsString('?array $onlyValidatorIds = null', $minter);
+
+        $cli = self::code(self::read('app/Domain/Onchain/CLI/BackfillValidatorPagesCommand.php'));
+        self::assertStringContainsString(
+            'ValidatorPageMinter::mintMissing($chainId, $dryRun, $max)',
+            $cli,
+            'the CLI must still call the minter without an allowlist'
+        );
+    }
+
+    /** The repository must refuse an empty allowlist before composing SQL. */
+    public function testTheRepositoryRefusesAnEmptyAllowlistBeforeBuildingSql(): void
+    {
+        $repo = self::code(self::read('app/Domain/Onchain/Repositories/ValidatorRepository.php'));
+
+        [$start, $end] = self::blockSpan($repo, 'if ($onlyValidatorIds !== null)');
+        $guard = substr($repo, $start, $end - $start);
+
+        self::assertStringContainsString('return [];', $guard, 'empty must short-circuit, never compose IN ()');
+        self::assertStringContainsString("'v.id IN ('", $guard);
+    }
+
+    /**
+     * ⚠ THE PRODUCTION DEFAULT MINTER MUST FORWARD THE ALLOWLIST.
+     *
+     * Every behavioural test above injects a fake minter, so none of them
+     * exercises the default closure — and a mutation that dropped $allowlist
+     * from it passed the whole suite. This is the one line that makes the
+     * guarantee real in production, so it is asserted directly.
+     */
+    public function testTheProductionMinterClosureForwardsTheAllowlist(): void
+    {
+        $code = self::code(self::source());
+
+        // Asserted as a CHAIN of custody rather than one spelling: the closure
+        // receives $allowlist, normalises it into $ids, and passes $ids as the
+        // fourth argument. A rename alone should not fail this; dropping the
+        // argument, or passing something not derived from $allowlist, must.
+        self::assertStringContainsString(
+            '$ids = array_values(array_map(static fn ($id): int => (int) $id, $allowlist));',
+            $code,
+            'the normalised list must be derived from the allowlist the caller gave'
+        );
+        self::assertStringContainsString(
+            'ValidatorPageMinter::mintMissing($chainId, false, $max, $ids)',
+            $code,
+            'the default closure must pass that list through, not drop it'
+        );
+        self::assertStringNotContainsString(
+            'ValidatorPageMinter::mintMissing($chainId, false, $max);',
+            $code,
+            'an allowlist-less call would silently mint every eligible validator'
+        );
+    }
+
+    public function testTheAddressToIdLookupIsChunkedRatherThanTruncated(): void
+    {
+        $repo = self::code(self::read('app/Domain/Onchain/Repositories/ValidatorRepository.php'));
+
+        self::assertStringContainsString('function idsForOperatorAddresses(int $chainId, array $operatorAddresses)', $repo);
+        self::assertStringContainsString('array_chunk(array_keys($clean), 200)', $repo);
+        self::assertStringContainsString('SELECT id', $repo, 'no SELECT * (§2)');
     }
 }

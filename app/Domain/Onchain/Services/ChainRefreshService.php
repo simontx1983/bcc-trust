@@ -177,7 +177,7 @@ class ChainRefreshService
             // Page creation is the opposite shape: it acts on PRESENCE, so a
             // truncated fetch elsewhere can only mint a page LATER, never
             // wrongly. Hence a per-chain list for minting only.
-            $healthyChainIds = [];
+            $healthyChainFetches = [];
 
             foreach ($chains as $chain) {
                 $chainId = (int) $chain->id;
@@ -273,7 +273,36 @@ class ChainRefreshService
                             // that option PERSISTS ACROSS RUNS and is months stale for
                             // several chains, so it would report a chain last indexed
                             // in June as healthy.
-                            $healthyChainIds[] = $chainId;
+                            // ⚠ AN EXACT ALLOWLIST, NOT JUST THE CHAIN ID. A healthy
+                            // chain proves the FETCH was good; it does not prove any
+                            // particular stored row is still in the set. Eligibility
+                            // reads `wallet_link_id IS NULL` + no page meta and never
+                            // consults currency, and `status` cannot stand in for it:
+                            // measured 2026-11-02, 149 of 693 staging candidates were
+                            // absent from their chain's latest complete fetch and all
+                            // 149 still read 'active', 56 unseen for over 90 days.
+                            //
+                            // `fetched_at` cannot answer it either — bulkUpsert only
+                            // refreshes it when a row is new, changed, or already >6h
+                            // stale, so a row present in this fetch may carry a stamp
+                            // 6h old and be indistinguishable from one that was absent.
+                            //
+                            // So the allowlist is built from the addresses THIS fetch
+                            // actually returned. An empty list means mint none.
+                            $fetchedAddresses = [];
+                            foreach ($validators as $fetched) {
+                                $address = is_array($fetched)
+                                    ? (string) ($fetched['operator_address'] ?? '')
+                                    : (string) ($fetched->operator_address ?? '');
+                                if ($address !== '') {
+                                    $fetchedAddresses[] = $address;
+                                }
+                            }
+
+                            $healthyChainFetches[$chainId] = ValidatorRepository::idsForOperatorAddresses(
+                                $chainId,
+                                $fetchedAddresses
+                            );
                         }
                     } else {
                         // Empty result from an active chain is suspicious
@@ -337,9 +366,9 @@ class ChainRefreshService
             // ⛔ markDeadValidators() above is UNCHANGED and still gated on the
             // run-wide $hasPartialFetch. It acts on ABSENCE and its UPDATE has
             // no chain_id predicate, so it must keep seeing the whole run.
-            if ($healthyChainIds !== []) {
+            if ($healthyChainFetches !== []) {
                 try {
-                    $mintResult = self::mintForHealthyChains($healthyChainIds, self::MINT_SCAN_BUDGET);
+                    $mintResult = self::mintForHealthyChains($healthyChainFetches, self::MINT_SCAN_BUDGET);
                     if ($mintResult['minted'] > 0 || $mintResult['errors'] > 0) {
                         \BCC\Core\Log\Logger::info(sprintf(
                             '[Onchain] Validator placeholder pages — chains=%d, scanned=%d, minted=%d, errors=%d',
@@ -381,26 +410,38 @@ class ChainRefreshService
      * $minter exists so the budget arithmetic is testable without a database;
      * production always uses the default.
      *
-     * @param list<int> $chainIds
-     * @param (callable(int, int): array{scanned:int,minted:int,skipped:int,errors:int})|null $minter
+     * ⚠ Keyed by chain id, VALUE is that chain's exact allowlist of validator
+     * ids from this run's fetch. An empty allowlist is forwarded as `[]`, which
+     * mintMissing() treats as MINT NONE — never as 'no filter'.
+     *
+     * @param array<int, list<int>> $chainFetches
+     * @param (callable(int, int, list<int>): array{scanned:int,minted:int,skipped:int,errors:int})|null $minter
      * @return array{chains:int,scanned:int,minted:int,skipped:int,errors:int}
      */
     private static function mintForHealthyChains(
-        array $chainIds,
+        array $chainFetches,
         int $budget,
         ?callable $minter = null
     ): array {
-        $minter ??= static fn (int $chainId, int $max): array =>
-            ValidatorPageMinter::mintMissing($chainId, false, $max);
+        // ⚠ Re-keyed to a true list of ints before it crosses the boundary.
+        // mintMissing() distinguishes [] from null, so the shape matters: a
+        // gappy or string-keyed array would still be non-empty and would skip
+        // the fail-closed branch while composing a malformed IN list.
+        $minter ??= static function (int $chainId, int $max, array $allowlist): array {
+            /** @var list<int> $ids */
+            $ids = array_values(array_map(static fn ($id): int => (int) $id, $allowlist));
+
+            return ValidatorPageMinter::mintMissing($chainId, false, $max, $ids);
+        };
 
         $totals = ['chains' => 0, 'scanned' => 0, 'minted' => 0, 'skipped' => 0, 'errors' => 0];
 
-        foreach ($chainIds as $chainId) {
+        foreach ($chainFetches as $chainId => $allowlist) {
             if ($budget <= 0) {
                 break;
             }
 
-            $result = $minter((int) $chainId, $budget);
+            $result = $minter((int) $chainId, $budget, array_values((array) $allowlist));
 
             $totals['chains']++;
             $totals['scanned'] += (int) ($result['scanned'] ?? 0);
