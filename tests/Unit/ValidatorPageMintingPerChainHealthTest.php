@@ -81,10 +81,27 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
      *
      * @return array{0:int,1:int}
      */
-    private static function blockSpan(string $code, string $opener): array
+    /**
+     * ⚠⚠ $occurrence IS LOAD-BEARING. Two different blocks in
+     * ChainRefreshService now open with `if (!$isPartialFetch)` - the
+     * baseline write and the healthy-chain collection - and the baseline
+     * write comes FIRST in the file. Matching only the first occurrence
+     * silently repointed these assertions at the wrong block; they failed
+     * here only because the needle happened to be absent. Had the new block
+     * been added lower down, they would have PASSED while checking nothing
+     * they claimed to. So the occurrence is always stated explicitly.
+     *
+     * @return array{0:int,1:int}
+     */
+    private static function blockSpan(string $code, string $opener, int $occurrence = 1): array
     {
-        $start = strpos($code, $opener);
-        self::assertNotFalse($start, "opener not found: {$opener}");
+        $start = -1;
+        $from  = 0;
+        for ($n = 0; $n < $occurrence; $n++) {
+            $start = strpos($code, $opener, $from);
+            self::assertNotFalse($start, "opener #" . ($n + 1) . " not found: {$opener}");
+            $from = (int) $start + 1;
+        }
 
         $i = strpos($code, '{', $start);
         self::assertNotFalse($i, "no brace after opener: {$opener}");
@@ -231,7 +248,8 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
             'exactly one site may declare a chain healthy'
         );
 
-        [$start, $end] = self::blockSpan($code, 'if (!$isPartialFetch)');
+        // occurrence 2: the healthy-chain collection, not the baseline write
+        [$start, $end] = self::blockSpan($code, 'if (!$isPartialFetch)', 2);
         $branch = substr($code, $start, $end - $start);
 
         self::assertStringContainsString(
@@ -358,7 +376,10 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
             'exactly one dead-marking call site'
         );
 
-        [$start, $end] = self::blockSpan($code, 'if (!$hasPartialFetch)');
+        // ⚠ The gate gained a SECOND condition: an explicit switch that
+        // defaults off, so correcting partial-fetch detection cannot by
+        // itself start marking validators inactive.
+        [$start, $end] = self::blockSpan($code, 'if (!$hasPartialFetch && self::deadMarkingEnabled())');
         $branch = substr($code, $start, $end - $start);
 
         self::assertStringContainsString(
@@ -431,7 +452,12 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     {
         $code = self::code(self::source());
 
-        self::assertStringContainsString('$knownCount > 10 && $returnedCount < (int) ($knownCount * 0.7)', $code);
+        // ⚠ RULE 1 WAS DELIBERATELY REPLACED, not preserved. It compared
+        // against COUNT(*) over every row ever stored, which only grows as
+        // validators leave the set - five chains were permanently partial.
+        // The relative test now compares against a verified clean baseline.
+        self::assertStringNotContainsString('$knownCount > 10 && $returnedCount', $code);
+        self::assertStringContainsString('($returnedCount * 10) < ($baseline * 7)', $code);
         self::assertStringContainsString('$knownCount > 200 && $returnedCount < 50', $code);
         self::assertStringContainsString('$knownCount === 0 && $returnedCount > 0 && $returnedCount < 30', $code);
     }
@@ -471,7 +497,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     public function testTheAllowlistIsBuiltFromThisRunsFetchedAddresses(): void
     {
         $code = self::code(self::source());
-        [$start, $end] = self::blockSpan($code, 'if (!$isPartialFetch)');
+        [$start, $end] = self::blockSpan($code, 'if (!$isPartialFetch)', 2);
         $branch = substr($code, $start, $end - $start);
 
         self::assertStringContainsString(
@@ -487,7 +513,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     public function testStatusAndFetchedAtAreNotUsedAsTheCurrencySignal(): void
     {
         $code = self::code(self::source());
-        [$start, $end] = self::blockSpan($code, 'if (!$isPartialFetch)');
+        [$start, $end] = self::blockSpan($code, 'if (!$isPartialFetch)', 2);
         $branch = substr($code, $start, $end - $start);
 
         self::assertStringNotContainsString('fetched_at', $branch);
