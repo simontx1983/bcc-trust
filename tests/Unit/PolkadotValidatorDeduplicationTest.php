@@ -341,28 +341,187 @@ final class PolkadotValidatorDeduplicationTest extends TestCase
     }
 
     /**
-     * ⚠ A tie keeps the EARLIEST occurrence, which is what makes the rule
-     * total: one response always yields exactly one result.
+     * ⛔⛔ A TIE IS BROKEN BY CANONICAL CONTENT, NOT ARRIVAL ORDER.
+     *
+     * The first version of this rule kept the earliest occurrence, and a
+     * review measured the consequence: two copies with the same
+     * `bonded_total` but different monikers returned 'alpha' for the input
+     * (alpha, beta) and 'beta' for (beta, alpha). Conflicting fields could
+     * therefore flip with page order, run to run.
+     *
+     * ⚠⚠ THE FIXTURE IS CHOSEN SO THE TWO RULES DISAGREE. 'zeta'
+     * arrives first but 'alpha' sorts first, so keeping the earliest would
+     * return 'zeta' and keeping the canonical-smallest returns 'alpha'. A
+     * fixture where the earliest ALSO sorts first - ('first', 'second') -
+     * passes under both rules and proves nothing; that is what the
+     * previous version of this test did.
      */
-    public function testATieKeepsTheEarliestOccurrence(): void
+    public function testATieIsBrokenByCanonicalContentNotArrivalOrder(): void
     {
         $raw = [
-            self::row('1stashB', '400', 'validator', 'first'),
-            self::row('1stashB', '400', 'validator', 'second'),
+            self::row('1stashB', '400', 'validator', 'zeta'),
+            self::row('1stashB', '400', 'validator', 'alpha'),
         ];
 
         /** @var array{rows: list<array<string, mixed>>, dropped: int, divergent: int} $d */
         $d = self::call('dedupeByStash', [$raw]);
 
         self::assertCount(1, $d['rows']);
-        self::assertSame('first', $d['rows'][0]['stash_account_display']['display']);
+        self::assertSame(
+            'alpha',
+            $d['rows'][0]['stash_account_display']['display'],
+            'the canonically smaller copy wins the tie, not the earlier one'
+        );
         self::assertSame(1, $d['divergent'], 'the tie still carried a different moniker');
     }
 
     /**
-     * ⚠ Determinism does not depend on input order. Greatest-stake-wins is
-     * order-independent, which matters precisely because a paginator that
-     * emits duplicates has already shown its ordering cannot be trusted.
+     * ⭐⭐ THE CASE THE REVIEW ASKED FOR: reversing equal-stake
+     * duplicates must produce the SAME result - compared as whole rows,
+     * not just one field, so no difference can hide in an unasserted key.
+     */
+    public function testReversingEqualStakeDuplicatesProducesTheSameResult(): void
+    {
+        $forward = [
+            self::row('1stashT', '400', 'validator', 'zeta'),
+            self::row('1stashT', '400', 'validator', 'alpha'),
+            self::row('1stashT', '400', 'validator', 'mu'),
+        ];
+        $reversed = array_reverse($forward);
+
+        self::assertNotSame($forward, $reversed, 'precondition: the inputs really differ in order');
+
+        /** @var array{rows: list<array<string, mixed>>, dropped: int, divergent: int} $a */
+        $a = self::call('dedupeByStash', [$forward]);
+        /** @var array{rows: list<array<string, mixed>>, dropped: int, divergent: int} $b */
+        $b = self::call('dedupeByStash', [$reversed]);
+
+        self::assertSame($a, $b, 'reversing equal-stake duplicates must change nothing');
+        self::assertCount(1, $a['rows']);
+        self::assertSame('alpha', $a['rows'][0]['stash_account_display']['display']);
+
+        // and the same through the full pipeline, ranks included
+        self::assertSame(
+            self::pipeline($forward),
+            self::pipeline($reversed),
+            'the ranked output must be identical too'
+        );
+    }
+
+    /**
+     * ⚠ Every permutation, not just the reversal - a rule can be
+     * symmetric under reversal and still order-sensitive in the middle.
+     */
+    public function testEqualStakeDuplicatesAreOrderIndependentAcrossEveryPermutation(): void
+    {
+        $rows = [
+            self::row('1stashU', '400', 'validator', 'zeta'),
+            self::row('1stashU', '400', 'validator', 'alpha'),
+            self::row('1stashU', '400', 'validator', 'mu'),
+        ];
+
+        $permutations = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+        $results      = [];
+
+        foreach ($permutations as $order) {
+            $permuted = array_map(static fn (int $i): array => $rows[$i], $order);
+
+            /** @var array{rows: list<array<string, mixed>>, dropped: int, divergent: int} $d */
+            $d = self::call('dedupeByStash', [$permuted]);
+
+            self::assertSame(
+                'alpha',
+                $d['rows'][0]['stash_account_display']['display'],
+                'permutation ' . implode(',', $order) . ' must keep the same copy'
+            );
+            $results[] = $d['rows'];
+        }
+
+        self::assertCount(1, array_unique(array_map('serialize', $results)),
+            'all six permutations must yield byte-identical rows');
+    }
+
+    /**
+     * ⚠⚠ A FRACTIONAL DIFFERENCE IS A TIE, AND IS NOW DETERMINISTIC.
+     *
+     * bccomp() runs at the default scale of 0, so '100.9' and '100.1'
+     * compare EQUAL. Scale is deliberately unchanged - it matches `main`
+     * and Plancks are integers - so this case reaches the tie-break, where
+     * it used to reach first-wins and flip with input order.
+     */
+    public function testAFractionalDifferenceIsATieAndIsStillDeterministic(): void
+    {
+        self::assertSame(
+            0,
+            bccomp('100.9', '100.1'),
+            'precondition: at scale 0 these really are equal'
+        );
+
+        $forward = [
+            self::row('1stashV', '100.9', 'validator', 'nine'),
+            self::row('1stashV', '100.1', 'validator', 'one'),
+        ];
+
+        /** @var array{rows: list<array<string, mixed>>, dropped: int, divergent: int} $a */
+        $a = self::call('dedupeByStash', [$forward]);
+        /** @var array{rows: list<array<string, mixed>>, dropped: int, divergent: int} $b */
+        $b = self::call('dedupeByStash', [array_reverse($forward)]);
+
+        self::assertSame($a, $b, 'a fractional tie must not depend on arrival order');
+    }
+
+    /**
+     * ⚠⚠ THE TIE KEY MUST IGNORE ARRAY KEY ORDER. serialize() keeps
+     * insertion order, so without canonicalCopy()'s recursive ksort two
+     * copies with identical content but differently-ordered keys would get
+     * different keys - and the tie-break would quietly become
+     * order-sensitive again, which is the defect it exists to remove.
+     */
+    public function testTheTieKeyIgnoresArrayKeyOrder(): void
+    {
+        $a = [
+            'stash_account_display' => ['address' => '1x', 'display' => 'd'],
+            'bonded_total'          => '400',
+            'validator_status'      => 'validator',
+        ];
+        $b = [
+            'validator_status'      => 'validator',
+            'bonded_total'          => '400',
+            'stash_account_display' => ['display' => 'd', 'address' => '1x'],
+        ];
+
+        self::assertNotSame(
+            array_keys($a),
+            array_keys($b),
+            'precondition: the key order really differs'
+        );
+        self::assertSame(
+            self::call('tieKey', [$a]),
+            self::call('tieKey', [$b]),
+            'identical content must give an identical tie key'
+        );
+
+        // and a real content difference must still change the key
+        $c = $a;
+        $c['stash_account_display']['display'] = 'OTHER';
+        self::assertNotSame(
+            self::call('tieKey', [$a]),
+            self::call('tieKey', [$c]),
+            'a content difference must change the tie key'
+        );
+    }
+
+    /**
+     * ⚠ Determinism does not depend on input order, which matters
+     * precisely because a paginator that emits duplicates has already shown
+     * its ordering cannot be trusted.
+     *
+     * ⚠ THIS CASE COVERS DISTINCT STAKES ONLY - that limit is the point.
+     * A review found that the claim "independent of page order" was being
+     * made on the strength of this test alone, while the EQUAL-stake path
+     * was order-sensitive and untested. Ties are covered by
+     * testReversingEqualStakeDuplicatesProducesTheSameResult and
+     * testEqualStakeDuplicatesAreOrderIndependentAcrossEveryPermutation.
      */
     public function testTheKeepRuleIsIndependentOfInputOrder(): void
     {
@@ -460,6 +619,28 @@ final class PolkadotValidatorDeduplicationTest extends TestCase
             $bothOut[0]['operator_address'],
             'and the stored address follows the same precedence'
         );
+
+        // ⚠⚠ THE ADDRESS IS STORED VERBATIM - NO NORMALISATION.
+        // A review control that added trim() to the shared helper SURVIVED
+        // the suite, because no fixture carried a padded address. It is the
+        // same hazard as the case-folding control: mapValidator() shares
+        // this helper, so any normalisation moves the STORED address, and
+        // uq_chain_operator (chain_id, operator_address) means the next
+        // index would INSERT a second full set of rows rather than update
+        // the existing one.
+        //
+        // ⚠ Production carries 0 padded addresses, so the control was a
+        // no-op on live data - a latent guard gap, not a live defect. It is
+        // closed here because it costs three assertions.
+        foreach (['  1padded  ', '1MiXeDcAsE', '1under_score', '123'] as $verbatim) {
+            self::assertSame(
+                $verbatim,
+                self::call('stashAddress', [
+                    ['stash_account_display' => ['address' => $verbatim]],
+                ]),
+                'the address must be returned byte-for-byte: ' . $verbatim
+            );
+        }
     }
 
     public function testAddresslessRowsAreDroppedRatherThanCollapsedIntoOne(): void

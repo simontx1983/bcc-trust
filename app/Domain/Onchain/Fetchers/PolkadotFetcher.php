@@ -240,20 +240,43 @@ class PolkadotFetcher implements FetcherInterface
      * the answer observable on the next successful run instead of leaving
      * it open.
      *
-     * The rule: KEEP THE GREATEST `bonded_total`; a tie keeps the EARLIEST
-     * occurrence.
+     * The rule, in two steps:
      *
-     * Greatest-stake wins rather than first-seen because rank is derived
-     * from `bonded_total`, so the kept copy and the rank it receives agree
-     * with each other. It is also independent of page order, which is the
-     * one thing a duplicate-producing paginator has already shown it
-     * cannot be trusted on. The tie-break makes the rule total, so one
-     * response always yields one result.
+     *   1. KEEP THE GREATEST `bonded_total`.
+     *   2. On a TIE, keep the copy whose canonical JSON sorts first.
+     *
+     * Greatest-stake wins step 1 rather than first-seen because rank is
+     * derived from `bonded_total`, so the kept copy and the rank it
+     * receives agree with each other.
+     *
+     * ⛔⛔ STEP 2 REPLACES "a tie keeps the earliest occurrence", AND THE
+     * REASON IS MEASURED. Keeping the earliest made the result depend on
+     * input order exactly when the stakes were equal: two copies with the
+     * same `bonded_total` but different monikers returned 'alpha' for the
+     * input (alpha, beta) and 'beta' for (beta, alpha). So conflicting
+     * fields could flip with page order, run to run - one spurious UPDATE
+     * per address per run, which is a quarter of the defect this whole
+     * change exists to remove rather than none of it.
+     *
+     * ⚠⚠ IT ALSO COVERED A SECOND CASE. bccomp() is called at the
+     * default scale of 0, so values differing only in their fraction -
+     * '100.9' against '100.1' - compare EQUAL and used to fall back to
+     * first-wins. Scale is deliberately left alone (it matches `main`
+     * byte-for-byte, and Plancks are integers), so step 2 is what makes
+     * that case deterministic too.
+     *
+     * ⭐ Step 2 is STABLE, not MEANINGFUL, and the distinction is the
+     * honest part. When two copies claim the same stake there is no
+     * evidence to prefer either, so the tie-break does not pretend to pick
+     * the better one - it picks the SAME one every time, from the set of
+     * copies alone and never from their arrival order. And when the
+     * canonical forms are equal the copies are equivalent, so which is
+     * kept is unobservable.
      *
      * ⚠ The residual uncertainty is stated rather than hidden: nothing in
      * the payload timestamps a copy, so greatest-stake is NOT provably the
-     * freshest. It is deterministic and self-consistent, which is what a
-     * de-duplication rule can honestly promise.
+     * freshest. The rule is deterministic and self-consistent, which is
+     * what a de-duplication rule can honestly promise.
      *
      * ⚠ Addressless rows are dropped, not kept as one empty-address row.
      * They cannot be addressed, and `uq_chain_operator` means the table
@@ -294,7 +317,12 @@ class PolkadotFetcher implements FetcherInterface
                 $divergent++;
             }
 
-            if (bccomp(self::bondedTotal($row), self::bondedTotal($incumbent)) > 0) {
+            $byStake = bccomp(self::bondedTotal($row), self::bondedTotal($incumbent));
+
+            if (
+                $byStake > 0
+                || ($byStake === 0 && strcmp(self::tieKey($row), self::tieKey($incumbent)) < 0)
+            ) {
                 $kept[$address] = $row;
             }
         }
@@ -381,6 +409,73 @@ class PolkadotFetcher implements FetcherInterface
         $displayB = $b['stash_account_display']['display'] ?? null;
 
         return $displayA !== $displayB;
+    }
+
+    /**
+     * A total, order-independent sort key for one copy of a validator.
+     *
+     * Used ONLY to break an equal-`bonded_total` tie. It depends on the
+     * row's CONTENT and nothing else, which is the whole point: the same
+     * set of copies must yield the same winner however the pages arrived.
+     *
+     * ⚠⚠ THE KEY MUST NOT DEPEND ON ARRAY KEY ORDER. json_encode()
+     * and serialize() both preserve insertion order, so two copies with
+     * identical content but differently-ordered keys would produce
+     * different keys and the tie-break would silently become
+     * order-sensitive again - the exact defect it exists to remove. Hence
+     * canonicalCopy() sorts keys recursively first.
+     *
+     * ⚠⚠ JSON RATHER THAN serialize(), AND THAT IS NOT COSMETIC.
+     * serialize() embeds a LENGTH PREFIX before every string, so
+     * `s:2:"mu"` sorts before `s:5:"alpha"` and the rule silently becomes
+     * "shortest value wins" - deterministic, but impossible to state in a
+     * sentence a reviewer can check. Canonical JSON compares on the content
+     * itself, so the rule is exactly "the lexicographically smallest
+     * canonical JSON wins".
+     *
+     * ⚠ serialize() remains the fallback for the one case json_encode()
+     * cannot represent - invalid UTF-8. Both are derived from the content
+     * alone, so the key stays total and order-independent either way.
+     *
+     * @param array<string, mixed> $row
+     */
+    private static function tieKey(array $row): string
+    {
+        $canonical = self::canonicalCopy($row);
+        $json      = json_encode($canonical, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        return is_string($json) ? $json : serialize($canonical);
+    }
+
+    /**
+     * Recursively key-sort an array so its serialization is canonical.
+     *
+     * ⚠ A LIST IS LEFT ALONE. Sorting a list's keys as strings puts 10
+     * before 2, which would reorder nothing semantically but makes the
+     * canonical form needlessly confusing to read in a failure message.
+     *
+     * ⚠ Anything that is neither an array nor a scalar nor null becomes
+     * null. The payload is json_decode output so it cannot contain objects
+     * or resources, and serialize() must stay total regardless.
+     *
+     * @param mixed $value
+     * @return mixed
+     */
+    private static function canonicalCopy($value)
+    {
+        if (is_array($value)) {
+            if (!array_is_list($value)) {
+                ksort($value, SORT_STRING);
+            }
+
+            foreach ($value as $key => $nested) {
+                $value[$key] = self::canonicalCopy($nested);
+            }
+
+            return $value;
+        }
+
+        return is_scalar($value) || $value === null ? $value : null;
     }
 
     /**
