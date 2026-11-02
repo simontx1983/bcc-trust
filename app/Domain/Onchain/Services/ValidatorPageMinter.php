@@ -225,17 +225,32 @@ final class ValidatorPageMinter
 
         $pageId = (int) $insert;
 
-        // Seed the default score row so PageReadModelRepository::syncPage()
-        // has something to project. Matches PeepSoIntegration::onPageCreated.
-        try {
-            Plugin::instance()->scoreRepository()->createDefault($pageId, 0);
-        } catch (\Throwable $e) {
-            \BCC\Core\Log\Logger::error('[ValidatorPageMinter] createDefault failed', [
-                'page_id'      => $pageId,
-                'validator_id' => $row->id,
-                'error'        => $e->getMessage(),
-            ]);
-        }
+        // ⚠ NO SCORE ROW IS SEEDED HERE, DELIBERATELY.
+        //
+        // A placeholder is UNOWNED by design — `post_author => 0` above,
+        // because it exists to carry the WANTED claim CTA until an operator
+        // claims it. `bcc_trust_page_scores` is an OWNER-KEYED table, so
+        // `ScoreRepository::createIfNotExists()` resolves the owner and
+        // THROWS 'No owner ID found for page N' when there is none. That
+        // refusal is the designed behaviour, not an obstacle: an ownerless
+        // score row would be meaningless, and production holds zero rows
+        // with `page_owner_id = 0`.
+        //
+        // Nothing here needs one. `PageReadModelRepository::syncPage()`
+        // treats a null score row as 'no score yet' and projects the neutral
+        // default (it fails closed only on a read that did not RUN), which
+        // is why all 2,920 production `peepso-page` rows render correctly
+        // with no score row at all. The row is created later, with a REAL
+        // owner: by `PeepSoIntegration::onPageCreated()` for a user-created
+        // page, or lazily by `VoteService` on the first vote.
+        //
+        // ⚠ This previously called `createDefault($pageId, 0)` inside a
+        // try/catch that swallowed the guaranteed throw and logged it at
+        // ERROR — one production error line per minted page (76 of them in
+        // the 2026-11-02 Cosmos backfill), for an operation that could never
+        // succeed. The command still reported `errors=0`, because the catch
+        // kept it out of the result counter. Pinned by
+        // ValidatorPlaceholderScoreTest.
 
         // Project into the denormalized read model so the new page shows up
         // in /directory?kind=validator immediately (rather than waiting for
