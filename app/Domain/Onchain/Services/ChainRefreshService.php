@@ -112,6 +112,16 @@ class ChainRefreshService
      * Acquire a MySQL advisory lock for a cron job.
      * Advisory locks are cross-request and don't require persistent object cache.
      */
+    /**
+     * One run's TOTAL scan budget for validator placeholder minting,
+     * shared across every healthy chain.
+     *
+     * ⚠ ValidatorPageMinter::MAX_PER_INVOCATION is clamped PER CALL, so
+     * dispatching per chain without a shared budget would permit 500 x N
+     * pages in one run. This is the run-wide ceiling.
+     */
+    private const MINT_SCAN_BUDGET = 500;
+
     private static function acquireLock(string $job): bool
     {
         $acquired = \BCC\Core\DB\AdvisoryLock::acquire(self::LOCK_GROUP . ':' . $job, 0);
@@ -158,6 +168,16 @@ class ChainRefreshService
             );
 
             $hasPartialFetch = false;
+
+            // ⚠ PER-CHAIN, DELIBERATELY SEPARATE FROM $hasPartialFetch.
+            // $hasPartialFetch is run-wide and stays that way, because
+            // markDeadValidators() is a GLOBAL UPDATE with no chain_id
+            // predicate — one truncated chain can make another chain's live
+            // validators look absent, so that gate must see the whole run.
+            // Page creation is the opposite shape: it acts on PRESENCE, so a
+            // truncated fetch elsewhere can only mint a page LATER, never
+            // wrongly. Hence a per-chain list for minting only.
+            $healthyChainFetches = [];
 
             foreach ($chains as $chain) {
                 $chainId = (int) $chain->id;
@@ -241,6 +261,48 @@ class ChainRefreshService
 
                         if (!$isPartialFetch) {
                             OnchainCircuitBreaker::recordSuccess($chainId);
+
+                            // ⚠ THE ONLY PLACE A CHAIN IS DECLARED HEALTHY, and it is
+                            // the site that already proves it this run. Anything that
+                            // `continue`s earlier (breaker resting, no driver, no
+                            // validator feature), returned empty, or threw never
+                            // reaches here — so it is absent from the list and FAILS
+                            // CLOSED by construction rather than by a check.
+                            //
+                            // ⛔ Never source this from bcc_onchain_indexer_stats:
+                            // that option PERSISTS ACROSS RUNS and is months stale for
+                            // several chains, so it would report a chain last indexed
+                            // in June as healthy.
+                            // ⚠ AN EXACT ALLOWLIST, NOT JUST THE CHAIN ID. A healthy
+                            // chain proves the FETCH was good; it does not prove any
+                            // particular stored row is still in the set. Eligibility
+                            // reads `wallet_link_id IS NULL` + no page meta and never
+                            // consults currency, and `status` cannot stand in for it:
+                            // measured 2026-11-02, 149 of 693 staging candidates were
+                            // absent from their chain's latest complete fetch and all
+                            // 149 still read 'active', 56 unseen for over 90 days.
+                            //
+                            // `fetched_at` cannot answer it either — bulkUpsert only
+                            // refreshes it when a row is new, changed, or already >6h
+                            // stale, so a row present in this fetch may carry a stamp
+                            // 6h old and be indistinguishable from one that was absent.
+                            //
+                            // So the allowlist is built from the addresses THIS fetch
+                            // actually returned. An empty list means mint none.
+                            $fetchedAddresses = [];
+                            foreach ($validators as $fetched) {
+                                $address = is_array($fetched)
+                                    ? (string) ($fetched['operator_address'] ?? '')
+                                    : (string) ($fetched->operator_address ?? '');
+                                if ($address !== '') {
+                                    $fetchedAddresses[] = $address;
+                                }
+                            }
+
+                            $healthyChainFetches[$chainId] = ValidatorRepository::idsForOperatorAddresses(
+                                $chainId,
+                                $fetchedAddresses
+                            );
                         }
                     } else {
                         // Empty result from an active chain is suspicious
@@ -291,15 +353,26 @@ class ChainRefreshService
             // Mint placeholder peepso-page posts for any newly-indexed
             // validators that don't have one yet, so they surface in
             // /directory?kind=validator with the WANTED claim CTA.
-            // Capped per invocation and idempotent — re-running is a no-op
-            // once the placeholders exist. Skipped on partial fetch to
-            // avoid minting pages for a chain whose indexer just hiccuped.
-            if (!$hasPartialFetch) {
+            // Idempotent — re-running is a no-op once the placeholders exist.
+            //
+            // ⚠ SCOPED TO CHAINS PROVEN HEALTHY IN **THIS** RUN, not gated on
+            // $hasPartialFetch. Previously one unhealthy chain blocked page
+            // creation for all fourteen, which is why 228 validators across 9
+            // chains had no page while only 5 chains were actually degraded.
+            // A truncated fetch cannot invent a validator, so minting for a
+            // validator that demonstrably EXISTS is safe regardless of another
+            // chain's health; the worst case is that a page appears a run late.
+            //
+            // ⛔ markDeadValidators() above is UNCHANGED and still gated on the
+            // run-wide $hasPartialFetch. It acts on ABSENCE and its UPDATE has
+            // no chain_id predicate, so it must keep seeing the whole run.
+            if ($healthyChainFetches !== []) {
                 try {
-                    $mintResult = ValidatorPageMinter::mintMissing(null, false);
+                    $mintResult = self::mintForHealthyChains($healthyChainFetches, self::MINT_SCAN_BUDGET);
                     if ($mintResult['minted'] > 0 || $mintResult['errors'] > 0) {
                         \BCC\Core\Log\Logger::info(sprintf(
-                            '[Onchain] Validator placeholder pages — scanned=%d, minted=%d, errors=%d',
+                            '[Onchain] Validator placeholder pages — chains=%d, scanned=%d, minted=%d, errors=%d',
+                            $mintResult['chains'],
                             $mintResult['scanned'],
                             $mintResult['minted'],
                             $mintResult['errors']
@@ -323,6 +396,68 @@ class ChainRefreshService
      * retry/backoff, staggered scheduling, and Redis-based overlap prevention.
      * This method is just the cron entry point.
      */
+    /**
+     * Mint placeholder pages for the given chains under ONE shared budget.
+     *
+     * ⚠ The budget is decremented by SCANNED, not minted. `scanned` is what
+     * bounds the work: a chain whose rows all already have pages reports
+     * minted=0 while still scanning, so decrementing by `minted` would let it
+     * burn unbounded scans and starve the chains after it.
+     *
+     * ⚠ Each chain is passed its OWN id. Never null — null means every chain,
+     * which is exactly the all-or-nothing behaviour this replaces.
+     *
+     * $minter exists so the budget arithmetic is testable without a database;
+     * production always uses the default.
+     *
+     * ⚠ Keyed by chain id, VALUE is that chain's exact allowlist of validator
+     * ids from this run's fetch. An empty allowlist is forwarded as `[]`, which
+     * mintMissing() treats as MINT NONE — never as 'no filter'.
+     *
+     * @param array<int, list<int>> $chainFetches
+     * @param (callable(int, int, list<int>): array{scanned:int,minted:int,skipped:int,errors:int})|null $minter
+     * @return array{chains:int,scanned:int,minted:int,skipped:int,errors:int}
+     */
+    private static function mintForHealthyChains(
+        array $chainFetches,
+        int $budget,
+        ?callable $minter = null
+    ): array {
+        // ⚠ Re-keyed to a true list of ints before it crosses the boundary.
+        // mintMissing() distinguishes [] from null, so the shape matters: a
+        // gappy or string-keyed array would still be non-empty and would skip
+        // the fail-closed branch while composing a malformed IN list.
+        $minter ??= static function (int $chainId, int $max, array $allowlist): array {
+            /** @var list<int> $ids */
+            $ids = array_values(array_map(static fn ($id): int => (int) $id, $allowlist));
+
+            return ValidatorPageMinter::mintMissing($chainId, false, $max, $ids);
+        };
+
+        $totals = ['chains' => 0, 'scanned' => 0, 'minted' => 0, 'skipped' => 0, 'errors' => 0];
+
+        foreach ($chainFetches as $chainId => $allowlist) {
+            if ($budget <= 0) {
+                break;
+            }
+
+            $result = $minter((int) $chainId, $budget, array_values((array) $allowlist));
+
+            $totals['chains']++;
+            $totals['scanned'] += (int) ($result['scanned'] ?? 0);
+            $totals['minted']  += (int) ($result['minted'] ?? 0);
+            $totals['skipped'] += (int) ($result['skipped'] ?? 0);
+            $totals['errors']  += (int) ($result['errors'] ?? 0);
+
+            // ⚠ A minter that reports scanning nothing must still not loop
+            // forever across chains; the foreach bounds that. But guard the
+            // budget against a negative drift so `<= 0` stays meaningful.
+            $budget -= max(0, (int) ($result['scanned'] ?? 0));
+        }
+
+        return $totals;
+    }
+
     public static function refresh_validators(): void
     {
         $stats = EnrichmentScheduler::run();

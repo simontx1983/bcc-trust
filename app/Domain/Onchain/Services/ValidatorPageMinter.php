@@ -84,6 +84,8 @@ final class ValidatorPageMinter
      * @param int|null $chainId   Restrict to a single chain (by id), or null for all.
      * @param bool     $dryRun    When true, enumerates but does not write.
      * @param int      $maxToMint Hard cap (defaults to MAX_PER_INVOCATION).
+     * @param list<int>|null $onlyValidatorIds null = no restriction (the manual
+     *     CLI backfill); [] = MINT NONE, fails closed; a list = only these ids.
      *
      * @return array{
      *     scanned: int,
@@ -97,9 +99,36 @@ final class ValidatorPageMinter
     public static function mintMissing(
         ?int $chainId = null,
         bool $dryRun = false,
-        int $maxToMint = self::MAX_PER_INVOCATION
+        int $maxToMint = self::MAX_PER_INVOCATION,
+        ?array $onlyValidatorIds = null
     ): array {
         $maxToMint = max(0, min($maxToMint, self::MAX_PER_INVOCATION));
+
+        // ⚠ THE THREE STATES OF $onlyValidatorIds ARE NOT INTERCHANGEABLE.
+        //
+        //   null — no restriction. This is the MANUAL CLI backfill's existing
+        //          behaviour and is deliberately preserved: an operator running
+        //          `backfill_pages` is making an explicit, reviewed request.
+        //   []   — MINT NONE, immediately. An allowlist that resolved to
+        //          nothing must never widen back to 'every validator'; that is
+        //          the difference between failing closed and failing open.
+        //   list — exactly these validator ids may receive a page.
+        //
+        // The automatic indexer path always passes a list, built from the
+        // addresses that chain's fetch returned IN THIS RUN — so a validator
+        // the fetch did not contain cannot get a page however `status` labels
+        // it. Measured 2026-11-02: 149 of 693 staging candidates were absent
+        // from their chain's latest complete fetch and all 149 read 'active'.
+        if (is_array($onlyValidatorIds) && $onlyValidatorIds === []) {
+            return [
+                'scanned'    => 0,
+                'minted'     => 0,
+                'skipped'    => 0,
+                'errors'     => 0,
+                'minted_ids' => [],
+                'error_log'  => [],
+            ];
+        }
 
         $result = [
             'scanned'    => 0,
@@ -119,7 +148,7 @@ final class ValidatorPageMinter
             $remaining = $maxToMint - $result['scanned'];
             $batchSize = (int) min(self::BATCH_SIZE, $remaining);
 
-            $rows = ValidatorRepository::findMissingPlaceholderPage($chainId, $batchSize, $offset);
+            $rows = ValidatorRepository::findMissingPlaceholderPage($chainId, $batchSize, $offset, $onlyValidatorIds);
             if (empty($rows)) {
                 break;
             }

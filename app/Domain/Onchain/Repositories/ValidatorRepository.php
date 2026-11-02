@@ -1223,6 +1223,71 @@ final class ValidatorRepository
     }
 
     /**
+     * Resolve a chain's operator addresses to validator row ids.
+     *
+     * Used by the indexer to hand the placeholder minter an EXACT allowlist
+     * of the validators that chain's fetch actually returned in this run, so
+     * a row the fetch did not contain cannot get a page however the `status`
+     * column labels it. Measured 2026-11-02: 149 of 693 staging candidates
+     * were absent from their chain's latest complete fetch and every one was
+     * still labelled `active`, several unseen for over 90 days.
+     *
+     * ⚠ Not `getMonikersByAddresses()`: that is capped at 100 pairs for the
+     * recommender's bounded result set, and a chain's bonded set is larger
+     * (696 on Solana). This chunks instead of truncating — silently dropping
+     * addresses here would shrink the allowlist and DENY pages, which fails
+     * closed but would look like missing data.
+     *
+     * Bounded (§4): chunked `IN (...)` with an explicit LIMIT per chunk,
+     * selecting `id` only.
+     *
+     * @param list<string> $operatorAddresses
+     * @return list<int>
+     */
+    public static function idsForOperatorAddresses(int $chainId, array $operatorAddresses): array
+    {
+        if ($chainId <= 0 || $operatorAddresses === []) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($operatorAddresses as $address) {
+            $address = trim((string) $address);
+            if ($address !== '') {
+                $clean[$address] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $table = self::table();
+        $out   = [];
+
+        foreach (array_chunk(array_keys($clean), 200) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '%s'));
+            $params       = array_merge([$chainId], $chunk);
+
+            /** @var list<string>|null $ids */
+            $ids = $wpdb->get_col($wpdb->prepare(
+                "SELECT id
+                   FROM {$table}
+                  WHERE chain_id = %d
+                    AND operator_address IN ({$placeholders})
+                  LIMIT " . count($chunk),
+                ...$params
+            ));
+
+            foreach (($ids ?: []) as $id) {
+                $out[] = (int) $id;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * Enumerate validators that have NO peepso-page backing yet — neither
      * a user-linked wallet (wallet_link_id IS NULL) nor a system-minted
      * placeholder page (no post_meta `_bcc_onchain_validator_id` row).
@@ -1235,6 +1300,14 @@ final class ValidatorRepository
      * uses the `_bcc_onchain_validator_id` key — index lookup is fast
      * because postmeta has KEY(meta_key, meta_value(N)).
      *
+     * ⚠ $onlyValidatorIds has THREE meanings and they are not interchangeable:
+     *   null  — no restriction (the manual CLI backfill's behaviour, unchanged)
+     *   []    — MINT NONE. Fails closed: an allowlist that resolved to nothing
+     *           must never widen back to every validator.
+     *   list  — restrict to exactly these validator ids.
+     *
+     * @param list<int>|null $onlyValidatorIds
+     *
      * @return list<object{
      *     id: int,
      *     operator_address: string,
@@ -1245,7 +1318,12 @@ final class ValidatorRepository
      *     chain_name: string
      * }>
      */
-    public static function findMissingPlaceholderPage(?int $chainId, int $limit, int $offset): array
+    public static function findMissingPlaceholderPage(
+        ?int $chainId,
+        int $limit,
+        int $offset,
+        ?array $onlyValidatorIds = null
+    ): array
     {
         global $wpdb;
         $table  = self::table();
@@ -1257,6 +1335,26 @@ final class ValidatorRepository
         if ($chainId !== null) {
             $where[]  = 'v.chain_id = %d';
             $params[] = $chainId;
+        }
+
+        // ⚠ EMPTY ALLOWLIST MEANS MINT NONE, not 'no filter'. Returning early
+        // rather than composing an empty IN () — which is a SQL syntax error,
+        // and whose 'fix' of dropping the clause would silently mint everything.
+        if ($onlyValidatorIds !== null) {
+            $ids = [];
+            foreach ($onlyValidatorIds as $id) {
+                $id = (int) $id;
+                if ($id > 0) {
+                    $ids[$id] = true;
+                }
+            }
+            if ($ids === []) {
+                return [];
+            }
+
+            $idList   = array_keys($ids);
+            $where[]  = 'v.id IN (' . implode(',', array_fill(0, count($idList), '%d')) . ')';
+            $params   = array_merge($params, $idList);
         }
 
         $params[] = max(1, min($limit, 500));
