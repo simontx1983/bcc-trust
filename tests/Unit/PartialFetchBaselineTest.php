@@ -252,11 +252,28 @@ final class PartialFetchBaselineTest extends TestCase
      * age-bearing tokens cannot enumerate every way to neutralise an
      * argument. Hence the second assertion: the argument list must be
      * exactly the three locals, each assigned unconditionally above.
+     *
+     * ⛔⛔ AND NEITHER OF THOSE IS ENOUGH, which was MEASURED and is
+     * why the third assertion exists. Both pin the call's TEXT, and the
+     * defect does not have to touch it: inserting
+     *
+     *     $baseline = $baselineFresh ? $baseline : 0;
+     *
+     * on the line ABOVE leaves the call statement byte-identical, passes
+     * php -l, restores the ratchet in full - and left the ENTIRE suite
+     * green, 4922 tests, with the two assertions above satisfied.
+     *
+     * So the guard has to be about the VALUE that reaches the predicate,
+     * not the spelling of the call: within index_validators(), $baseline
+     * is assigned EXACTLY ONCE and that assignment is the raw read. Any
+     * re-gating is then either a second assignment or a changed one, and
+     * it does not matter which line it sits on.
      */
     public function testTheCallSitePassesTheRawBaselineAndCannotReGateItOnAge(): void
     {
+        $code = self::code(self::source());
         $call = self::statementSpan(
-            self::code(self::source()),
+            $code,
             '$isPartialFetch = self::isPartialFetch('
         );
 
@@ -280,6 +297,33 @@ final class PartialFetchBaselineTest extends TestCase
             '$isPartialFetch = self::isPartialFetch( $returnedCount, $knownCount, $baseline );',
             preg_replace('/\s+/', ' ', $call),
             'the call site must pass the raw counts and the RAW baseline'
+        );
+
+        // ⛔⛔ THE VALUE, NOT THE SPELLING - see the docblock. The two
+        // assertions above both pin the call's text, and the defect can be
+        // restored one line higher without touching it.
+        [$from, $to] = self::blockSpan(
+            $code,
+            'public static function index_validators(): void'
+        );
+        $body = substr($code, $from, $to - $from);
+
+        preg_match_all(
+            '/\$baseline\s*(?:[.+\-*\/%]|\?\?)?=(?!=)([^;]*);/',
+            $body,
+            $assignments
+        );
+
+        self::assertCount(
+            1,
+            $assignments[0],
+            '$baseline must be assigned EXACTLY ONCE in index_validators(): a '
+                . 'second assignment re-gates it on age without touching the call'
+        );
+        self::assertSame(
+            'self::baselineTotal($prevEntry)',
+            trim($assignments[1][0]),
+            'that one assignment must be the RAW read, unconditioned'
         );
     }
 
@@ -326,6 +370,36 @@ final class PartialFetchBaselineTest extends TestCase
             'for this chain',
             $call,
             'the dead-marking skip is run-wide, not per-chain'
+        );
+
+        // ⚠⚠ AND IN THE RIGHT SLOT. Every assertion above tests token
+        // PRESENCE, which says nothing about order - so swapping the baseline
+        // and the stored count past each other satisfies all of them while the
+        // log reports the stored count AS the baseline. That is the exact
+        // confusion this fix exists to remove, so the slots are pinned.
+        $flat   = (string) preg_replace('/\s+/', ' ', $call);
+        $needle = "WHOLE RUN.',";
+        $cut    = strpos($flat, $needle);
+        self::assertNotFalse($cut, 'the format must end with the run-wide sentence');
+
+        preg_match_all('/%[sd]/', substr($flat, 0, (int) $cut), $placeholders);
+        self::assertSame(
+            ['%s', '%d', '%s', '%d'],
+            $placeholders[0],
+            'chain, returned, baseline, stored - the baseline is the SECOND %s'
+        );
+
+        $tail = substr($flat, (int) $cut + strlen($needle));
+        $tail = rtrim(rtrim(trim($tail), ';'), ')');
+        self::assertSame(
+            [
+                '$chain->name',
+                '$returnedCount',
+                '$baseline > 0 ? (string) $baseline : \'absent\'',
+                '$knownCount',
+            ],
+            array_map('trim', explode(',', $tail)),
+            'the baseline is argument 3, against the second %s'
         );
     }
 
@@ -456,6 +530,15 @@ final class PartialFetchBaselineTest extends TestCase
             ["string 'off'",          true,  'off',    false],
             ["string 'false'",        true,  'false',  false],
             ["string 'no'",           true,  'no',     false],
+
+            // ⚠⚠ 'on' IS WHAT AN ADMIN CHECKBOX POSTS, and it stays OFF.
+            // (bool) 'on' is true, so a cast would arm the sweep on it. The
+            // allowlist is CLOSED deliberately rather than widened to the
+            // spellings a UI might send: whatever writes this option writes
+            // true, 1 or '1', and a value that merely LOOKS affirmative is
+            // not guessed at. An option meaning "mark validators dead" is
+            // the wrong place to be generous about input.
+            ["string 'on'",           true,  'on',     false],
 
             // ordinary falsy values
             ['boolean false',         true,  false,    false],
