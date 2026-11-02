@@ -60,10 +60,15 @@ final class CardsEndpoint
     // CardViewService::canonicalSlugFor(), which refuses any id that is not
     // the stored slug after zero or one url-decode.
     //
-    // Capped at 200 chars because `wp_posts.post_name` is varchar(200), so
-    // a longer id cannot match a row; the previous 100 left the one
-    // 124-char stored slug unreachable.
-    private const ID_PATTERN      = '[A-Za-z0-9%][A-Za-z0-9_%-]{0,199}';
+    // ⚠ The cap here bounds the URL SPELLING, not the slug, and the two are
+    // not the same length. `post_name` is varchar(200), but the frontend
+    // escapes every `%` as `%25`, so a 200-character slug can arrive as up to
+    // 600 characters — and a real page already needs 215 (`𝐥𝐞𝐬𝐧𝐢𝐤 | 𝐔𝐓𝐒𝐀`,
+    // a 135-character stored slug). A 200 cap here let the resolver accept
+    // that page while the ROUTE still refused it, so it stayed unreachable.
+    // The binding 200-character check is applied to the resolved candidate in
+    // CardViewService::canonicalSlugFor(); this is only the outer bound.
+    private const ID_PATTERN      = '[A-Za-z0-9%][A-Za-z0-9_%-]{0,599}';
 
     public static function register(): void
     {

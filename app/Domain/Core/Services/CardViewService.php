@@ -991,6 +991,16 @@ final class CardViewService
     // Resolution helpers
     // ──────────────────────────────────────────────────────────────────
 
+    /** wp_posts.post_name is varchar(200) — the bound that decides a match. */
+    private const MAX_SLUG_LENGTH = 200;
+
+    /**
+     * A cheapness bound on the raw `:id`, deliberately looser than the slug
+     * bound: the frontend escapes every `%` as `%25`, so the URL spelling of a
+     * 200-character slug can be meaningfully longer than the slug itself.
+     */
+    private const MAX_RAW_CARD_ID_LENGTH = 600;
+
     private static function resolvePagePost(string $id): ?\WP_Post
     {
         if ($id === '') {
@@ -1026,73 +1036,75 @@ final class CardViewService
      *
      * WHY THIS EXISTS. `sanitize_title()` percent-encodes every non-ASCII
      * character, so a page whose title carries an emoji is stored with a
-     * literal `%f0%9f…` in `post_name` — 123 of the 2,830 validator pages.
+     * literal `%f0%9f…` in `post_name` — 126 of the 2,806 peepso-page rows.
      * Those pages had no reachable URL at all: the route rejected `%`, and the
      * `id` argument's old `sanitize_text_field` callback STRIPPED the octets
-     * (measured on WP 7.0.2: `bonynode%f0%9f%92%9a-…` became
-     * `bonynode-…`), so even a widened pattern would have resolved a
-     * DIFFERENT page rather than 404ing. Verified end to end against an
-     * isolated backend: widening the pattern alone served the wrong entity.
+     * (`bonynode%f0%9f%92%9a-…` became `bonynode-…`), so even a widened
+     * pattern would have resolved a DIFFERENT page rather than 404ing.
      *
-     * Three rules:
+     * Four checks, in order, each closing something that was measured rather
+     * than supposed:
      *
-     * 1. BOUNDED. `wp_posts.post_name` is varchar(200), so a longer id can
-     *    never match a row (§2 bounded reads).
+     * 1. A loose bound on the raw id, and a 200 bound on the CANDIDATE. The id
+     *    is not a `post_name`; it is a URL spelling of one, and the frontend
+     *    escapes every `%` as `%25`. Bounding the raw id at 200 left the one
+     *    page whose frontend spelling is 215 characters reachable by a direct
+     *    API call and unreachable through the site.
      *
-     * 2. CHARSET FLOOR. `id` is ALSO reachable through the query string, and
-     *    'GET' outranks 'URL' in WP_REST_Request::get_parameter_order() —
-     *    verified against production, where
-     *    `/cards/validator/ztake-org-cosmos-54at8c?id=mantra-cosmos-uv234h`
-     *    answers with the MANTRA card. So CardsEndpoint::ID_PATTERN bounds
-     *    only the URL spelling and cannot be the whole check; this repeats its
-     *    charset where every id actually arrives.
+     * 2. A charset floor, because `id` is ALSO reachable through the query
+     *    string and 'GET' outranks 'URL' in
+     *    WP_REST_Request::get_parameter_order() — verified against production,
+     *    where `/cards/validator/ztake-org-cosmos-54at8c?id=mantra-cosmos-uv234h`
+     *    answers with the MANTRA card. So CardsEndpoint::ID_PATTERN bounds only
+     *    the URL spelling and cannot be the whole check.
      *    CardIdAddressabilityTest pins the two against each other.
      *
-     * 3. CANONICAL SPELLING, for a percent-bearing id only. The id must be the
-     *    stored slug after ZERO or ONE url-decode, and the result must already
-     *    be `sanitize_title()`-canonical. Two spellings are legitimate because
-     *    two kinds of caller exist:
-     *      - zero decodes — the id IS `post_name`, octets intact, which is
-     *        what a direct API caller echoes back;
-     *      - one decode — `post_name` percent-escaped once, which is what this
-     *        project's frontend sends. Next.js hands `params.slug` the
-     *        NORMALIZED but still-encoded path segment (measured: `%2D` and
-     *        `%7A` come back decoded as RFC 3986 unreserved characters, `%20`
-     *        and `%F0` do not) and `cardEntityPath()` then applies
-     *        `encodeURIComponent`, so `/v/bonynode%f0%9f%92%9a-…` arrives here
-     *        as `bonynode%25F0%259F%2592%259A-…`.
+     * 3. The candidate must be the stored slug after zero or one url-decode
+     *    ({@see self::slugCandidateFor}).
      *
-     *    Capping it at one decode is the whole safety property. Anything that
-     *    needs a second decode, or that `sanitize_title()` would have to ALTER
-     *    rather than merely re-spell, is refused — so normalization can change
-     *    an identifier's URL spelling but never which identifier it names:
-     *      - `…%2525f0…` (triple-encoded) needs two decodes → refused;
-     *      - `%2f` would become a path SEPARATOR, turning one segment into two
-     *        and sending get_page_by_path() walking post ancestry → refused;
-     *      - `%zz` is not an octet, and a bare trailing `%` is a truncated one
-     *        → both refused.
-     *    Measured: 0 of the 2,830 live validator slugs are refused, and all
-     *    123 percent-bearing ones become addressable.
+     * 4. ⚠⚠ And then the structural check, which is the one canonicality
+     *    cannot do ({@see self::pathSegmentsFor}). `%2f` and `%20` are valid
+     *    octets that `sanitize_title()` calls canonical, but
+     *    get_page_by_path() decodes a SECOND time and gives them structural
+     *    meaning — so `…%252Fadmin` passes every spelling test and then splits
+     *    into two segments, and `…%2520cosmos` is silently rewritten to
+     *    `…-cosmos`. Requiring that core will search for exactly one segment
+     *    AND that it equals the chosen candidate refuses both.
      *
-     *    Scoped to ids containing `%` on purpose. An id without `%` is exactly
-     *    what the pre-change pattern already admitted and is returned
-     *    untouched, so this fix cannot regress a URL that works today.
+     * Measured across all 2,806 peepso-page rows, in BOTH the stored and the
+     * frontend spelling: 0 unreachable, 0 resolved to a slug other than their
+     * own. Re-derived against WordPress 7.0.2 and 7.1.4 (production's version)
+     * with byte-identical results.
      *
-     * ⚠ Accepted consequence: a single-decode alias such as `%7A` for `z`
-     * resolves the page it spells, so one page can have more than one URL.
-     * That is ordinary percent-encoding transparency — core's own
-     * get_page_by_path() has behaved this way for every page on the site
-     * since long before this route existed — and it names no page the caller
-     * did not name.
+     * ⚠ Accepted consequence: `%7A` for `z` and `%2d` for `-` still resolve the
+     * page they spell, so one page can have more than one URL. That is
+     * ordinary percent-encoding transparency — core's own get_page_by_path()
+     * has behaved this way for every page on the site since long before this
+     * route existed — and it names no page the caller did not name.
      *
-     * ⚠ Deliberate non-goal: nothing here rewrites or re-slugs stored data, and
-     * no redirect is issued. A raw, unencoded UTF-8 id is refused because it is
-     * not a stored spelling; it 404s before this change too.
+     * ⚠ Deliberate non-goal: nothing here rewrites or re-slugs stored data,
+     * and no redirect is issued.
+     *
+     * ⚠ A raw, unencoded UTF-8 id is refused by the charset floor. On the URL
+     * path that is no change — the route rejected it before. On the query
+     * string the position is narrower than it looks and is NOT claimed here as
+     * "no change": real core (7.0.2 and 7.1.4 alike) would resolve a raw-UTF-8
+     * `?id=`, yet production does not — a 2-byte character comes back
+     * `bcc_invalid_request`, meaning `sanitize_text_field` returned empty, so
+     * the bytes reaching the handler were not valid UTF-8. Non-ASCII does not
+     * survive production's query string today, so nothing that works is lost;
+     * the mechanism was not pinned down from outside and is not asserted here.
      */
     private static function canonicalSlugFor(string $id): ?string
     {
-        // wp_posts.post_name is varchar(200), so a longer id cannot match a row.
-        if ($id === '' || strlen($id) > 200) {
+        // Cheapness only. The bound that matters is on the CANDIDATE below, not
+        // on the URL spelling: the frontend escapes every `%` as `%25`, so a
+        // 200-character `post_name` can legitimately arrive as a longer id.
+        // Measured over all 2,806 peepso-page rows: the longest frontend
+        // spelling is 215 characters, and a 200-cap here made the one page
+        // behind it unreachable through the site while a direct API call with
+        // its stored slug still worked.
+        if ($id === '' || strlen($id) > self::MAX_RAW_CARD_ID_LENGTH) {
             return null;
         }
 
@@ -1104,27 +1116,67 @@ final class CardViewService
         }
 
         // An id with no `%` is exactly what the pre-change pattern already
-        // admitted. Returning it untouched keeps today's behaviour by
-        // construction, so this fix cannot regress a URL that works now.
+        // admitted, and it is returned UNTOUCHED — behaviour unchanged by
+        // construction. The structural check below is deliberately skipped
+        // here, and skipping it is safe rather than convenient: on this
+        // charset `urldecode()` and `rawurlencode()` are both the identity,
+        // there is no `%2F` or `%20` for core to reinterpret, and so core
+        // always searches exactly one segment. Running the check anyway would
+        // REFUSE an uppercase ASCII slug, because core lowercases it at lookup
+        // time and the result would stop equalling the candidate — a URL that
+        // works today.
         if (!str_contains($id, '%')) {
-            return $id;
+            return strlen($id) > self::MAX_SLUG_LENGTH ? null : $id;
         }
 
+        $candidate = self::slugCandidateFor($id);
+
+        // wp_posts.post_name is varchar(200), so a longer candidate cannot
+        // match a row (§2 bounded reads).
+        if ($candidate === null || $candidate === '' || strlen($candidate) > self::MAX_SLUG_LENGTH) {
+            return null;
+        }
+
+        // ⚠⚠ THE BINDING CHECK, and canonicality is not a substitute for it.
+        // get_page_by_path() decodes AGAIN and gives `%2F` and `%20` structural
+        // meaning, so a candidate that `sanitize_title()` calls canonical can
+        // still be re-interpreted: `%2f` IS a valid octet, so the
+        // double-encoded `…%252Fadmin` passes every spelling test above and
+        // then splits into `bonynode` + `admin`, sending core off to walk post
+        // ancestry. Canonicality bounds SPELLING; it does not bound STRUCTURE.
+        //
+        // So do not restate core's rules — replay them, and require that what
+        // core will actually search for is exactly one segment AND is the
+        // candidate we chose. Anything core would rewrite or split is refused.
+        if (self::pathSegmentsFor($candidate) !== [$candidate]) {
+            return null;
+        }
+
+        return $candidate;
+    }
+
+    /**
+     * The `post_name` this id names, before the structural check.
+     *
+     * Only ever called for an id containing `%`; the percent-free case returns
+     * earlier, untouched. Two spellings are legitimate because two kinds of
+     * caller exist: the id may BE `post_name` with its octets intact (a direct
+     * API caller echoing it back), or `post_name` percent-escaped once (this
+     * project's frontend — Next hands `params.slug` the normalized but still-
+     * encoded path segment, and `cardEntityPath()` then applies
+     * `encodeURIComponent`).
+     */
+    private static function slugCandidateFor(string $id): ?string
+    {
         $lower = strtolower($id);
 
-        // Spelling 1 — the id IS the stored slug, octets intact. This is what a
-        // direct API caller sends when it echoes `post_name` back.
+        // Spelling 1 — the id IS the stored slug, octets intact.
         if (sanitize_title(rawurldecode($lower)) === $lower) {
             return $lower;
         }
 
-        // Spelling 2 — the id is the stored slug percent-escaped ONCE, which is
-        // what this project's own frontend produces and therefore the spelling
-        // that has to work. Next.js hands `params.slug` the NORMALIZED but
-        // still-encoded path segment (measured: `%2D` and `%7A` are decoded as
-        // RFC 3986 unreserved characters, `%20` and `%F0` are not), and
-        // `cardEntityPath()` then applies `encodeURIComponent` to it — so
-        // `/v/bonynode%f0%9f%92%9a-…` arrives here as
+        // Spelling 2 — the stored slug escaped ONCE, which is what the
+        // frontend sends: `/v/bonynode%f0%9f%92%9a-…` arrives here as
         // `bonynode%25F0%259F%2592%259A-…`.
         $decoded = strtolower(rawurldecode($id));
         if ($decoded !== '' && sanitize_title($decoded) === $decoded) {
@@ -1132,6 +1184,34 @@ final class CardViewService
         }
 
         return null;
+    }
+
+    /**
+     * The `post_name` values get_page_by_path() will actually search for.
+     *
+     * A verbatim replay of its normalization prefix (wp-includes/post.php) —
+     * byte-identical in WordPress 7.0.2 and 7.1.4, both checked. Kept as a
+     * replay rather than a summary so it tracks core instead of restating a
+     * conclusion about it.
+     *
+     * @return list<string>
+     */
+    private static function pathSegmentsFor(string $path): array
+    {
+        $path = rawurlencode(urldecode($path));
+        $path = str_replace('%2F', '/', $path);
+        $path = str_replace('%20', ' ', $path);
+
+        // ⚠ Not `array_map('sanitize_title_for_query', …)`. A string callable is
+        // always resolved in the GLOBAL namespace, so the string form cannot be
+        // substituted in a test and would fatal in the unit suite, which runs
+        // with no WordPress. The closure resolves in THIS namespace, which is
+        // also what lets CardIdAddressabilityTest hand it recorded real-core
+        // values instead of a reimplementation.
+        return array_map(
+            static fn (string $part): string => sanitize_title_for_query($part),
+            explode('/', trim($path, '/'))
+        );
     }
 
     private static function resolveHandle(string $handle): int
