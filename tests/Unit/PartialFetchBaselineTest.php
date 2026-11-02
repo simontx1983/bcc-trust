@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
+use BCC\Trust\Onchain\Services\DeadMarkingOptionStub;
 use PHPUnit\Framework\Attributes\CoversNothing;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -226,6 +227,108 @@ final class PartialFetchBaselineTest extends TestCase
         );
     }
 
+    /**
+     * ⛔⛔⛔ THE CALL SITE IS WHERE THE DEFECT COMES BACK.
+     *
+     * The predicate is covered behaviourally and structurally, and
+     * $baselineFresh is not in ITS scope - so the age gate cannot be
+     * reinstated inside isPartialFetch(). It can be reinstated on the
+     * ARGUMENT, one line up:
+     *
+     *     $isPartialFetch = self::isPartialFetch(
+     *         $returnedCount,
+     *         $knownCount,
+     *         $baselineFresh ? $baseline : 0   // <- the original defect, exactly
+     *     );
+     *
+     * A zero baseline switches the relative test off, so a chain truncated
+     * for more than a week reads CLEAN and its truncated count is written
+     * back as the new baseline. That is the ratchet, restored in one
+     * expression - and MEASURED to pass the entire suite before this test
+     * existed, because no behavioural case traverses the call site: they
+     * invoke the predicate directly.
+     *
+     * ⚠ So this guard is necessarily STRUCTURAL, and a blacklist of
+     * age-bearing tokens cannot enumerate every way to neutralise an
+     * argument. Hence the second assertion: the argument list must be
+     * exactly the three locals, each assigned unconditionally above.
+     */
+    public function testTheCallSitePassesTheRawBaselineAndCannotReGateItOnAge(): void
+    {
+        $call = self::statementSpan(
+            self::code(self::source()),
+            '$isPartialFetch = self::isPartialFetch('
+        );
+
+        $forbidden = [
+            'baselineUsable',
+            'baselineFresh',
+            'baselineAge',
+            'BASELINE_MAX_AGE',
+            'mintBaselineVerified',
+            '?',
+        ];
+        foreach ($forbidden as $token) {
+            self::assertStringNotContainsString(
+                $token,
+                $call,
+                "the baseline argument must not be conditioned on {$token}"
+            );
+        }
+
+        self::assertSame(
+            '$isPartialFetch = self::isPartialFetch( $returnedCount, $knownCount, $baseline );',
+            preg_replace('/\s+/', ' ', $call),
+            'the call site must pass the raw counts and the RAW baseline'
+        );
+    }
+
+    /**
+     * ⚠⚠ THE WARNING MUST NAME THE NUMBER THE RULE COMPARED.
+     *
+     * It logged $knownCount as "expected ~N" after the baseline became the
+     * comparison basis, so a chain returning 100 with 300 stored and a
+     * baseline of 500 was reported as "expected ~300" while the rule had
+     * compared against 500. That is not cosmetic: clearing last_good_total
+     * is the operator's only remedy for a sustained flag - the accepted cost
+     * of applying detection at any baseline age - and the log was the one
+     * place that cost surfaces.
+     *
+     * ⚠ It also claimed the skip was "for this chain". $hasPartialFetch is
+     * run-wide and markDeadValidators() has no chain_id, so one partial chain
+     * withholds the sweep for every chain.
+     *
+     * ⚠ This test exists because a mutation control found the fix had NO
+     * assertion at all - the same shape of gap this PR is about.
+     */
+    public function testThePartialWarningNamesTheBaselineAndTheRunWideSkip(): void
+    {
+        $call = self::statementSpan(
+            self::code(self::source()),
+            "'[Onchain] Partial fetch detected"
+        );
+
+        self::assertStringContainsString('against baseline %s', $call);
+        self::assertStringContainsString('$baseline', $call, 'the baseline must be an argument');
+        self::assertStringContainsString(
+            '$knownCount',
+            $call,
+            'the stored count stays too - it is what floor A compares'
+        );
+        self::assertStringContainsString('WHOLE RUN', $call);
+
+        self::assertStringNotContainsString(
+            'expected ~',
+            $call,
+            'the stored count is no longer what the rule expects'
+        );
+        self::assertStringNotContainsString(
+            'for this chain',
+            $call,
+            'the dead-marking skip is run-wide, not per-chain'
+        );
+    }
+
     // ── (1) corrected detection cannot mark validators inactive ─────────
 
     public function testDeadMarkingNeedsItsOwnSwitchOnTopOfTheRunWideFlag(): void
@@ -279,6 +382,98 @@ final class PartialFetchBaselineTest extends TestCase
         $body = substr($code, $start, $end - $start);
         self::assertStringNotContainsString('(bool)', $body);
         self::assertStringNotContainsString('!empty', $body);
+    }
+
+    /**
+     * ⭐ THE SWITCH, EXECUTED - not read.
+     *
+     * Every other assertion about deadMarkingEnabled() above is a source
+     * SPELLING check, which is the same gap that hid the staleness defect:
+     * a mutant making this helper `return true;` unconditionally changes
+     * bytes, arms a destructive global sweep, and passes a suite that only
+     * reads the file. This case runs it.
+     *
+     * ⚠ The unit bootstrap defines NO get_option, so the helper could not
+     * be invoked at all until tests/Stubs/dead-marking-switch-stubs.php
+     * supplied a namespaced one. That file documents why it is namespaced
+     * rather than global, and why $strict is mandatory here.
+     *
+     * @param mixed $stored
+     */
+    #[DataProvider('switchValues')]
+    public function testOnlyAnExplicitTruthyValueEnablesDeadMarking(
+        string $label,
+        bool $present,
+        $stored,
+        bool $expected
+    ): void {
+        require_once dirname(__DIR__) . '/Stubs/dead-marking-switch-stubs.php';
+
+        DeadMarkingOptionStub::reset();
+        DeadMarkingOptionStub::$strict = true;
+        if ($present) {
+            DeadMarkingOptionStub::set('bcc_onchain_dead_marking_enabled', $stored);
+        }
+
+        try {
+            $m = self::reflect()->getMethod('deadMarkingEnabled');
+            $m->setAccessible(true);
+
+            self::assertSame($expected, $m->invoke(null), $label);
+
+            // ⚠ ANTI-VACUITY. A stub that was never consulted would answer
+            // every row "off" - the four enabling rows would fail, but the
+            // disabling rows would pass FOR THE WRONG REASON. So prove the
+            // read reached the stub on every row that registered a value.
+            if ($present) {
+                self::assertSame(
+                    1,
+                    DeadMarkingOptionStub::$reads,
+                    "{$label}: the switch was not actually read"
+                );
+            }
+        } finally {
+            // ⚠ Restore transparency even on failure: this stub intercepts
+            // EVERY unqualified get_option() in the service namespace, and the
+            // suite shares one process.
+            DeadMarkingOptionStub::reset();
+        }
+    }
+
+    /** @return list<array{0:string,1:bool,2:mixed,3:bool}> */
+    public static function switchValues(): array
+    {
+        return [
+            // the only three values that may arm it
+            ['boolean true',          true,  true,     true],
+            ['integer 1',             true,  1,        true],
+            ["string '1'",            true,  '1',      true],
+
+            // absent is the shipped state, and it must read OFF
+            ['absent',                false, null,     false],
+
+            // ⛔ the cast trap: (bool) makes BOTH of these true
+            ["string 'off'",          true,  'off',    false],
+            ["string 'false'",        true,  'false',  false],
+            ["string 'no'",           true,  'no',     false],
+
+            // ordinary falsy values
+            ['boolean false',         true,  false,    false],
+            ['integer 0',             true,  0,        false],
+            ["string '0'",            true,  '0',      false],
+            ["empty string",          true,  '',       false],
+            ['explicit null',         true,  null,     false],
+
+            // ⚠ near misses a loose comparison would admit
+            ["string 'true'",         true,  'true',   false],
+            ["string 'yes'",          true,  'yes',    false],
+            ['float 1.0',             true,  1.0,      false],
+            ["string '1' + space",    true,  '1 ',     false],
+            ["string '01'",           true,  '01',     false],
+            ['integer 2',             true,  2,        false],
+            ['integer -1',            true,  -1,       false],
+            ['array [1]',             true,  [1],      false],
+        ];
     }
 
     public function testTheMintPathAndDetectionNeverMarkAnythingInactive(): void

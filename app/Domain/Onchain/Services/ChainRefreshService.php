@@ -467,9 +467,29 @@ class ChainRefreshService
                         );
 
                         if ($isPartialFetch) {
+                            // ⚠ REPORT THE NUMBER THE RULE ACTUALLY COMPARED.
+                            // This logged $knownCount as "expected ~N", which is no
+                            // longer the comparison basis - the relative test compares
+                            // against the BASELINE. A chain returning 100 with 300
+                            // stored and a baseline of 500 was reported as "expected
+                            // ~300" while the rule had compared against 500. Clearing
+                            // last_good_total is the operator's only remedy for a
+                            // sustained flag, so the log has to name it. Both numbers
+                            // appear: the baseline drives the relative test, the
+                            // stored count drives floor A.
+                            //
+                            // ⚠⚠ AND THE SKIP IS RUN-WIDE, NOT PER-CHAIN.
+                            // $hasPartialFetch is a single run-wide flag and
+                            // markDeadValidators() has no chain_id, so ONE partial
+                            // chain withholds the sweep for EVERY chain. The old
+                            // wording sent an operator looking for a per-chain skip
+                            // that does not exist.
                             \BCC\Core\Log\Logger::warning(sprintf(
-                                '[Onchain] Partial fetch detected for %s: got %d, expected ~%d. Skipping dead-validator marking for this chain.',
-                                $chain->name, $returnedCount, $knownCount
+                                '[Onchain] Partial fetch detected for %s: got %d against baseline %s (stored %d). Dead-validator marking is skipped for the WHOLE RUN.',
+                                $chain->name,
+                                $returnedCount,
+                                $baseline > 0 ? (string) $baseline : 'absent',
+                                $knownCount
                             ));
                             $hasPartialFetch = true;
                         }
@@ -538,11 +558,23 @@ class ChainRefreshService
                             // returns 8 validators and dungeon 19, so an unconditional
                             // floor at 30 or 50 would permanently flag real chains.
                             //
-                            // So minting needs TWO AGREEING OBSERVATIONS - a baseline
-                            // from an earlier fetch that itself passed detection, and
-                            // a current fetch that passes against it. A truncated first
-                            // fetch can still become a baseline, but it cannot mint
-                            // pages on the strength of being its own reference.
+                            // So minting requires the count to be REPEATABLE: a
+                            // baseline from an earlier fetch that itself passed
+                            // detection, and a current fetch that agrees with it.
+                            //
+                            // ⚠⚠ REPEATABLE IS NOT COMPLETE, and the difference
+                            // matters. Two fetches that agree are two observations of
+                            // the SAME thing, which may be the same truncation - a
+                            // pagination page-size cap or a fixed first page satisfies
+                            // the comparison trivially, and nothing here can tell that
+                            // apart from a real count. What the baseline does buy is
+                            // narrower and still worth having: a count that has never
+                            // been corroborated by a second fetch cannot create pages,
+                            // and detection is anchored to a count that once passed
+                            // rather than to a stored total that only grows. A
+                            // truncated first fetch can still become a baseline; it
+                            // just cannot mint pages on the strength of being its own
+                            // reference.
                             //
                             // ⛔ Indexing is deliberately NOT withheld: the baseline is
                             // only written on a clean run, so blocking the index would
