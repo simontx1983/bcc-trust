@@ -104,6 +104,23 @@ final class PartialFetchBaselineTest extends TestCase
         self::fail("unbalanced braces after: {$opener}");
     }
 
+    /**
+     * The text of one statement, from a needle to its terminating semicolon.
+     *
+     * ⚠ Use this, not blockSpan(), for an EXPRESSION. blockSpan matches
+     * braces, so on a statement with none it runs on to an unrelated block and
+     * the assertion silently stops meaning anything.
+     */
+    private static function statementSpan(string $code, string $needle): string
+    {
+        $start = strpos($code, $needle);
+        self::assertNotFalse($start, "statement not found: {$needle}");
+        $end = strpos($code, ';', (int) $start);
+        self::assertNotFalse($end, "statement has no terminator: {$needle}");
+
+        return substr($code, (int) $start, (int) $end - (int) $start + 1);
+    }
+
     private static function reflect(): ReflectionClass
     {
         if (!defined('ABSPATH')) {
@@ -121,18 +138,30 @@ final class PartialFetchBaselineTest extends TestCase
      * The detection predicate, reproduced exactly as the source composes it.
      * Pinned against the source by testTheDetectionPredicateMatchesTheSource
      * so this cannot drift into testing a fiction.
+     *
+     * ⛔⛔⛔ THIS IS NO LONGER A MIRROR. It invokes the REAL
+     * predicate through reflection, and that change is itself a fix.
+     *
+     * While a local copy, this reproduced the source expression by hand, so
+     * every drop case below tested the COPY. A mutation control that put the
+     * age gate back on the real detection line passed the entire suite -
+     * measured, not supposed - because no behavioural test could reach the
+     * code it changed, and the one structural assertion was satisfied by the
+     * mutant's own text. The predicate was extracted into
+     * ChainRefreshService::isPartialFetch() so these cases execute it.
+     *
+     * ⚠ There is no age parameter, and its absence is the point: age
+     * governs MINTING only. Section (3a) drives that half.
      */
     private static function isPartial(
         int $returned,
         int $known,
-        int $baseline,
-        bool $baselineUsable
+        int $baseline
     ): bool {
-        $relativeDrop  = $baselineUsable && ($returned * 10) < ($baseline * 7);
-        $absoluteFloor = ($known > 200 && $returned < 50)
-            || ($known === 0 && $returned > 0 && $returned < 30);
+        $m = self::reflect()->getMethod('isPartialFetch');
+        $m->setAccessible(true);
 
-        return $relativeDrop || $absoluteFloor;
+        return (bool) $m->invoke(null, $returned, $known, $baseline);
     }
 
     // ── (0) anti-vacuity ────────────────────────────────────────────────
@@ -158,17 +187,43 @@ final class PartialFetchBaselineTest extends TestCase
         $code = self::code(self::source());
 
         self::assertStringContainsString(
-            '$relativeDrop = $baselineUsable',
+            '$relativeDrop = $baseline > 0',
             $code,
-            'the relative test must be gated on a usable baseline'
+            'the relative test is gated on the baseline EXISTING, nothing more'
         );
+
+        // ⛔⛔⛔ AND IT MUST NOT BE GATED ON AGE. The regression
+        // guard for the defect, as a SECOND line of defence behind the
+        // behavioural one: the drop cases now execute the real predicate, so a
+        // reinstated age gate fails them outright.
+        //
+        // ⚠ The first version of this check used blockSpan(), which matches
+        // BRACES - and an assignment expression has none, so it spanned to some
+        // unrelated block and asserted nothing about the statement. Span to the
+        // statement TERMINATOR instead.
+        $dropExpr = self::statementSpan($code, '$relativeDrop =');
+        self::assertStringContainsString('$baseline > 0', $dropExpr);
+        foreach (['baselineUsable', 'baselineFresh', 'baselineAge', 'BASELINE_MAX_AGE'] as $forbidden) {
+            self::assertStringNotContainsString(
+                $forbidden,
+                $dropExpr,
+                "detection must not consult {$forbidden}"
+            );
+        }
         self::assertStringContainsString('($returnedCount * 10) < ($baseline * 7)', $code);
         self::assertStringContainsString('($knownCount > 200 && $returnedCount < 50)', $code);
         self::assertStringContainsString(
             '($knownCount === 0 && $returnedCount > 0 && $returnedCount < 30)',
             $code
         );
-        self::assertStringContainsString('$isPartialFetch = $relativeDrop || $absoluteFloor;', $code);
+
+        // the predicate composes the three rules and the call site consumes it
+        self::assertStringContainsString('return $relativeDrop || $absoluteFloor;', $code);
+        self::assertStringContainsString(
+            '$isPartialFetch = self::isPartialFetch(',
+            $code,
+            'the loop must take its verdict from the extracted predicate'
+        );
     }
 
     // ── (1) corrected detection cannot mark validators inactive ─────────
@@ -255,21 +310,21 @@ final class PartialFetchBaselineTest extends TestCase
 
     // ── (2) sudden and gradual drops are still detected ─────────────────
 
-    /** @return list<array{0:string,1:int,2:int,3:int,4:bool,5:bool}> */
+    /** @return list<array{0:string,1:int,2:int,3:int,4:bool}> */
     public static function dropCases(): array
     {
         return [
-            // label, returned, known, baseline, baselineUsable, expectPartial
-            ['steady: 180 against a 180 baseline',        180, 318, 180, true,  false],
-            ['sudden: 100 against a 180 baseline',        100, 318, 180, true,  true],
-            ['at the exact 70% edge (126 of 180)',        126, 318, 180, true,  false],
-            ['one below the exact edge (125 of 180)',     125, 318, 180, true,  true],
-            ['catastrophic: 40 returned, 318 known',       40, 318, 180, true,  true],
-            ['catastrophic floor with NO baseline',        40, 318,   0, false, true],
-            ['first index, suspiciously small (12)',       12,   0,   0, false, true],
-            ['first index, plausible (45)',                45,   0,   0, false, false],
-            ['gradual: 5% down from baseline',            171, 318, 180, true,  false],
-            ['gradual: 31% down from baseline',           124, 318, 180, true,  true],
+            // label, returned, known, baseline, expectPartial
+            ['steady: 180 against a 180 baseline',        180, 318, 180, false],
+            ['sudden: 100 against a 180 baseline',        100, 318, 180, true],
+            ['at the exact 70% edge (126 of 180)',        126, 318, 180, false],
+            ['one below the exact edge (125 of 180)',     125, 318, 180, true],
+            ['catastrophic: 40 returned, 318 known',       40, 318, 180, true],
+            ['catastrophic floor with NO baseline',        40, 318,   0, true],
+            ['first index, suspiciously small (12)',       12,   0,   0, true],
+            ['first index, plausible (45)',                45,   0,   0, false],
+            ['gradual: 5% down from baseline',            171, 318, 180, false],
+            ['gradual: 31% down from baseline',           124, 318, 180, true],
         ];
     }
 
@@ -279,12 +334,11 @@ final class PartialFetchBaselineTest extends TestCase
         int $returned,
         int $known,
         int $baseline,
-        bool $usable,
         bool $expected
     ): void {
         self::assertSame(
             $expected,
-            self::isPartial($returned, $known, $baseline, $usable),
+            self::isPartial($returned, $known, $baseline),
             $label
         );
     }
@@ -307,7 +361,7 @@ final class PartialFetchBaselineTest extends TestCase
         // 10% down each run: never trips the relative test
         while ($steps < 40) {
             $returned = (int) floor($returned * 0.9);
-            if (self::isPartial($returned, $known, $baseline, true)) {
+            if (self::isPartial($returned, $known, $baseline)) {
                 break;
             }
             $baseline = $returned; // a clean run advances the baseline
@@ -315,7 +369,7 @@ final class PartialFetchBaselineTest extends TestCase
         }
 
         self::assertTrue(
-            self::isPartial($returned, $known, $baseline, true),
+            self::isPartial($returned, $known, $baseline),
             'erosion must eventually be caught'
         );
         self::assertLessThan(
@@ -327,31 +381,51 @@ final class PartialFetchBaselineTest extends TestCase
 
     // ── (3) stale stats must not make a chain look healthy ──────────────
 
-    public function testAStaleBaselineIsIgnoredRatherThanTrusted(): void
+    /**
+     * ⭐ AN OLD BASELINE STILL CATCHES A LARGE DROP.
+     *
+     * This test asserted the OPPOSITE until the review caught it, and the
+     * assertion it made was the defect written down: "a stale baseline is
+     * ignored, not used in the comparison". Ignoring it is not the
+     * conservative direction. For 100 returned against a 500 baseline with 300
+     * stored, NO floor applies - floor A needs fewer than 50 returned, floor B
+     * needs a first index - so ignoring the only applicable rule returns
+     * CLEAN, and the clean verdict then rewrites the baseline to 100.
+     *
+     * Age is no longer an input to detection at all, which is why the mirror
+     * has no parameter for it.
+     */
+    public function testAnOldBaselineStillCatchesALargeDrop(): void
     {
-        // 100 returned against a 500 baseline is a 80% drop. With a usable
-        // baseline that is partial; with a STALE one the relative test is not
-        // applied, so the verdict must come from the floors alone — it must
-        // never be granted health BY the stale number.
-        self::assertTrue(self::isPartial(100, 300, 500, true), 'fresh baseline catches it');
+        // an 80% drop, caught on the strength of the baseline EXISTING
+        self::assertTrue(self::isPartial(100, 300, 500), '80% drop must be caught');
+
+        // the floors still bite independently where they apply
+        self::assertTrue(self::isPartial(40, 300, 500), 'the floor still applies');
+
+        // and an ABSENT baseline still skips the relative test, which is what
+        // keeps a first index able to establish one rather than deadlocking
         self::assertFalse(
-            self::isPartial(100, 300, 500, false),
-            'a stale baseline is ignored, not used in the comparison'
+            self::isPartial(100, 300, 0),
+            'no baseline means no relative test, so no deadlock'
         );
-        // and the floors still bite where they apply
-        self::assertTrue(self::isPartial(40, 300, 500, false), 'the floor still applies');
     }
 
-    public function testTheBaselineIsOnlyUsableWhenPresentAndFresh(): void
+    public function testMintEligibilityNeedsBothATotalAndAFreshStamp(): void
     {
         $code = self::code(self::source());
 
-        self::assertStringContainsString('$baselineUsable = $baseline > 0', $code);
-        self::assertStringContainsString('&& $baselineAt > 0', $code);
+        // the chain of custody, link by link: a null age cannot be fresh, and
+        // minting requires freshness. Section (3a) drives baselineAge() itself.
+        self::assertStringContainsString('$baselineFresh = $baselineAge !== null', $code);
         self::assertStringContainsString(
-            '&& (time() - $baselineAt) <= self::BASELINE_MAX_AGE;',
+            '&& $baselineAge <= self::BASELINE_MAX_AGE;',
+            $code
+        );
+        self::assertStringContainsString(
+            '$mintBaselineVerified = $baseline > 0 && $baselineFresh;',
             $code,
-            'freshness must be part of usability'
+            'minting needs a total AND a fresh stamp'
         );
         self::assertSame(604800, self::reflect()->getConstant('BASELINE_MAX_AGE'));
     }
@@ -364,9 +438,229 @@ final class PartialFetchBaselineTest extends TestCase
      */
     public function testTheFreshnessWindowDoesNotDependOnAWordPressConstant(): void
     {
-        self::assertStringNotContainsString(
-            'BASELINE_MAX_AGE = 7 * DAY_IN_SECONDS',
-            self::source()
+        // ⚠ A POSITIVE assertion. The negative form this replaced only
+        // rejected one exact spelling, so DAY_IN_SECONDS * 7, or the same
+        // expression without spaces, sailed through - and an innocent comment
+        // containing the phrase failed it. Requiring a bare integer literal
+        // admits no spelling of the hazard.
+        self::assertMatchesRegularExpression(
+            '/private const BASELINE_MAX_AGE = \d+;/',
+            self::code(self::source()),
+            'the window must be a literal integer'
+        );
+    }
+
+    // ── (3a) the baseline helpers, driven BEHAVIOURALLY ─────────
+
+    /**
+     * ⛔⛔⛔ THIS SECTION EXISTS BECAUSE ITS ABSENCE HID A DEFECT.
+     *
+     * Every case above drives a LOCAL MIRROR of the predicate. That is fine
+     * for the predicate, which is pure arithmetic - but it meant nothing ever
+     * executed the code that decides whether a baseline is usable. The rule
+     * was pinned by source SPELLING only, which is why mutation control 8
+     * ("drop the baseline staleness check") killed exactly one assertion: a
+     * string match. No behaviour died.
+     *
+     * What hid there: the old spelling was
+     * strtotime((string) $raw . ' UTC'), and strtotime(' UTC') returns NOW,
+     * measured on PHP 8.2.30. So an empty stamp produced a PERMANENTLY fresh
+     * baseline and the staleness refusal never fired. These cases invoke the
+     * real helpers through reflection.
+     */
+    private const REF_NOW = '2026-11-02 12:00:00';
+
+    private static function refNow(): int
+    {
+        return (new \DateTimeImmutable(
+            self::REF_NOW,
+            new \DateTimeZone('UTC')
+        ))->getTimestamp();
+    }
+
+    /** @param array<string, mixed> $entry */
+    private static function callTotal(array $entry): int
+    {
+        $m = self::reflect()->getMethod('baselineTotal');
+        $m->setAccessible(true);
+
+        return (int) $m->invoke(null, $entry);
+    }
+
+    /** @param array<string, mixed> $entry */
+    private static function callAge(array $entry): ?int
+    {
+        $m = self::reflect()->getMethod('baselineAge');
+        $m->setAccessible(true);
+        $r = $m->invoke(null, $entry, self::refNow());
+
+        return $r === null ? null : (int) $r;
+    }
+
+    /**
+     * Composes the two links this file measures separately: a null or
+     * over-age result cannot be fresh, and the source requires freshness to
+     * mint (testMintEligibilityNeedsBothATotalAndAFreshStamp pins that).
+     *
+     * @param array<string, mixed> $entry
+     */
+    private static function callMintEligible(array $entry): bool
+    {
+        $age = self::callAge($entry);
+
+        return self::callTotal($entry) > 0
+            && $age !== null
+            && $age <= 604800;
+    }
+
+    /** @return list<array{0:string,1:array<string,mixed>,2:int}> */
+    public static function totalCases(): array
+    {
+        return [
+            ['key absent',          [],                              0],
+            ['null',                ['last_good_total' => null],     0],
+            ['zero',                ['last_good_total' => 0],        0],
+            ['negative',            ['last_good_total' => -5],       0],
+            ['an array',            ['last_good_total' => []],       0],
+            ['a float',             ['last_good_total' => 1.9],      0],
+            ['a real int',          ['last_good_total' => 318],    318],
+            ['a numeric string',    ['last_good_total' => '318'],  318],
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $entry
+     */
+    #[DataProvider('totalCases')]
+    public function testBaselineTotalFailsClosed(string $label, array $entry, int $expected): void
+    {
+        self::assertSame($expected, self::callTotal($entry), $label);
+    }
+
+    /**
+     * ⭐ The timestamp table. Anything that is not an exact
+     * `Y-m-d H:i:s` in the past is NULL - unusable - and null can never mint.
+     *
+     * @return list<array{0:string,1:array<string,mixed>,2:int|null}>
+     */
+    public static function ageCases(): array
+    {
+        return [
+            // missing
+            ['key absent',               [],                                           null],
+            ['null',                     ['last_good_at' => null],                     null],
+
+            // ⚠ the fail-open that hid here: '' . ' UTC' parsed as NOW
+            ['empty string',             ['last_good_at' => ''],                       null],
+            ['false (non-string)',       ['last_good_at' => false],                    null],
+            ['int (non-string)',         ['last_good_at' => 0],                        null],
+
+            // malformed
+            ['the string zero',          ['last_good_at' => '0'],                      null],
+            ['word salad',               ['last_good_at' => 'Array'],                  null],
+            ['a bare timezone',          ['last_good_at' => ' UTC'],                   null],
+            ['trailing junk',            ['last_good_at' => '2026-11-02 11:00:00 UTC'], null],
+            ['ISO T separator',          ['last_good_at' => '2026-11-02T11:00:00'],    null],
+            ['date only',                ['last_good_at' => '2026-11-02'],             null],
+            ['impossible, rolls over',   ['last_good_at' => '2026-13-45 99:99:99'],    null],
+
+            // ⭐ THE CASE THAT MAKES THE ROUND-TRIP CHECK BITE. Every other
+            // malformed string above makes createFromFormat return false outright,
+            // and 2026-13-45 rolls into the FUTURE, where the future-refusal
+            // catches it anyway - so dropping the round-trip check passed the
+            // whole suite. October 32nd rolls to 2026-11-01, age 129600s, which
+            // reads FRESH and would authorize minting.
+            ['rolls into the recent past', ['last_good_at' => '2026-10-32 00:00:00'],  null],
+
+            // future - a negative age satisfies '<= MAX_AGE' and read as fresh
+            ['one second ahead',         ['last_good_at' => '2026-11-02 12:00:01'],    null],
+            ['far future',               ['last_good_at' => '2099-01-01 00:00:00'],    null],
+
+            // valid
+            ['the same instant',         ['last_good_at' => '2026-11-02 12:00:00'],       0],
+            ['one minute old',           ['last_good_at' => '2026-11-02 11:59:00'],      60],
+            ['exactly the window',       ['last_good_at' => '2026-10-26 12:00:00'],  604800],
+            ['one second past it',       ['last_good_at' => '2026-10-26 11:59:59'],  604801],
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $entry
+     */
+    #[DataProvider('ageCases')]
+    public function testBaselineAgeParsesStrictlyAndRefusesTheFuture(
+        string $label,
+        array $entry,
+        ?int $expected
+    ): void {
+        self::assertSame($expected, self::callAge($entry), $label);
+    }
+
+    /**
+     * ⛔⛔ THE REQUIREMENT, STATED AS ONE ASSERTION PER BAD STAMP:
+     * a missing, malformed or future-dated timestamp cannot make a chain
+     * eligible to mint. A real total is supplied in every row, so the only
+     * thing under test is the stamp.
+     */
+    #[DataProvider('ageCases')]
+    public function testOnlyAFreshPastStampCanAuthorizeMinting(
+        string $label,
+        array $entry,
+        ?int $expectedAge
+    ): void {
+        $entry['last_good_total'] = 318;
+        $eligible = self::callMintEligible($entry);
+
+        if ($expectedAge === null || $expectedAge > 604800) {
+            self::assertFalse($eligible, "{$label} must NOT authorize minting");
+
+            return;
+        }
+
+        self::assertTrue($eligible, "{$label} is fresh and in the past, so it may mint");
+    }
+
+    /**
+     * ⚠ And a fresh stamp is not enough on its own - the total must be
+     * real too, or a chain with a parseable stamp and no comparable count
+     * would mint on nothing.
+     */
+    public function testAFreshStampWithoutATotalCannotMint(): void
+    {
+        self::assertFalse(self::callMintEligible(['last_good_at' => self::REF_NOW]));
+        self::assertFalse(self::callMintEligible([
+            'last_good_at'    => self::REF_NOW,
+            'last_good_total' => 0,
+        ]));
+        self::assertTrue(self::callMintEligible([
+            'last_good_at'    => self::REF_NOW,
+            'last_good_total' => 318,
+        ]), 'both present and fresh is the only eligible shape');
+    }
+
+    /**
+     * ⭐⭐ THE REGRESSION GUARD FOR THE WHOLE FIX, END TO END.
+     *
+     * An aged baseline must still DETECT while being refused for MINTING.
+     * Before the fix these were one flag, so the aged case lost both at once:
+     * a chain truncated for a week was declared clean and then minted off the
+     * truncated count it had just written back.
+     */
+    public function testAnAgedBaselineDetectsButDoesNotAuthorizeMinting(): void
+    {
+        $aged = ['last_good_total' => 318, 'last_good_at' => '2026-10-20 12:00:00'];
+
+        $age = self::callAge($aged);
+        self::assertNotNull($age);
+        self::assertGreaterThan(604800, $age, 'the fixture must really be over the window');
+
+        // refused for minting
+        self::assertFalse(self::callMintEligible($aged), 'an aged baseline may not mint');
+
+        // and STILL detects - this is the assertion the defect inverted
+        self::assertTrue(
+            self::isPartial(180, 318, self::callTotal($aged)),
+            'an aged baseline must still catch a 43% drop'
         );
     }
 
@@ -443,7 +737,7 @@ final class PartialFetchBaselineTest extends TestCase
     {
         $code = self::code(self::source());
 
-        [$start, $end] = self::blockSpan($code, 'if ($baselineUsable) {');
+        [$start, $end] = self::blockSpan($code, 'if ($mintBaselineVerified) {');
         $branch = substr($code, $start, $end - $start);
 
         self::assertStringContainsString(
@@ -468,7 +762,7 @@ final class PartialFetchBaselineTest extends TestCase
         $code = self::code(self::source());
 
         // recordSuccess and the baseline write sit OUTSIDE the mint gate
-        [$mintStart, $mintEnd] = self::blockSpan($code, 'if ($baselineUsable) {');
+        [$mintStart, $mintEnd] = self::blockSpan($code, 'if ($mintBaselineVerified) {');
         $mintBranch = substr($code, $mintStart, $mintEnd - $mintStart);
 
         self::assertStringNotContainsString('recordSuccess', $mintBranch);
@@ -486,7 +780,13 @@ final class PartialFetchBaselineTest extends TestCase
         $src = self::source();
 
         self::assertStringContainsString('page creation is withheld', $src);
-        self::assertStringContainsString("\$baseline > 0 ? 'stale' : 'absent'", $src);
+
+        // three reasons, not two: a stamp that will not PARSE is a distinct
+        // fact from one that is merely old, and conflating them hid the
+        // strtotime(' UTC') fail-open.
+        self::assertStringContainsString("? 'absent'", $src);
+        self::assertStringContainsString("'unreadable'", $src);
+        self::assertStringContainsString("'stale'", $src);
     }
 
     /**
@@ -513,17 +813,14 @@ final class PartialFetchBaselineTest extends TestCase
     ): void {
         // no baseline => the relative test does not apply
         self::assertFalse(
-            self::isPartial($returned, $known, 0, false),
+            self::isPartial($returned, $known, 0),
             "{$chain}: no floor covers it, so detection alone calls it clean"
         );
 
-        // which is precisely why mint-eligibility must require a usable
-        // baseline rather than a clean verdict
-        self::assertStringContainsString(
-            'if ($baselineUsable) {',
-            self::code(self::source()),
-            "{$chain} must not be able to mint on an unverified first fetch"
-        );
+        // ⚠ The companion assertion that used to sit here was identical
+        // for all three rows and had nothing to do with the row, inflating the
+        // count 3x without adding coverage. The structural fact it claimed is
+        // covered once, by testMintingRequiresAVerifiedBaselineNotJustACleanRun.
     }
 
     /**
@@ -534,7 +831,7 @@ final class PartialFetchBaselineTest extends TestCase
      */
     public function testSmallChainsAreLegitimateAndMustNotTripAFloor(): void
     {
-        self::assertFalse(self::isPartial(8, 10, 8, true), 'kujira: 8 of 10 is real');
-        self::assertFalse(self::isPartial(19, 27, 19, true), 'dungeon: 19 of 27 is real');
+        self::assertFalse(self::isPartial(8, 10, 8), 'kujira: 8 of 10 is real');
+        self::assertFalse(self::isPartial(19, 27, 19), 'dungeon: 19 of 27 is real');
     }
 }

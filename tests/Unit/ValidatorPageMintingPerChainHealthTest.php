@@ -448,7 +448,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
 
     // ── (5) health checks not loosened, saved health not used ───────────
 
-    public function testTheThreeDetectionRulesAreUnchanged(): void
+    public function testRuleOneWasReplacedAndTheTwoFloorsSurvive(): void
     {
         $code = self::code(self::source());
 

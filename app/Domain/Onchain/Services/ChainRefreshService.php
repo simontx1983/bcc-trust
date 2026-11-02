@@ -142,9 +142,14 @@ class ChainRefreshService
     private const DEAD_MARKING_TRUTHY = [true, 1, '1'];
 
     /**
-     * How long a clean-fetch baseline stays usable for the RELATIVE test.
-     * Past this the baseline is ignored - never trusted to declare a chain
-     * healthy - and the absolute floors carry the verdict alone.
+     * How long a clean-fetch baseline authorizes MINTING.
+     *
+     * ⚠⚠ THIS BOUND DOES NOT TOUCH DETECTION, and an earlier
+     * version of it did. Gating the relative test on freshness read as the
+     * conservative direction and was the exact opposite: see baselineTotal().
+     * Past this age a chain still indexes and is still measured against its
+     * last clean total; it simply may not create pages until a fresh clean
+     * fetch re-establishes the baseline.
      * ⚠ A LITERAL, not 7 * DAY_IN_SECONDS. A class-constant initialiser
      * is evaluated on first ACCESS, and an unqualified constant resolves in
      * this NAMESPACE before falling back to global - so the WP constant form
@@ -152,6 +157,115 @@ class ChainRefreshService
      * is not fully booted. 604800 = 7 days.
      */
     private const BASELINE_MAX_AGE = 604800;
+
+    /**
+     * Is this fetch partial? The whole detection rule, in one testable place.
+     *
+     * Rule 1, the relative test: a drop past 30% from the last CLEAN total.
+     *
+     * ⛔⛔⛔ AGE IS NOT A PARAMETER, AND MUST NEVER BECOME ONE. An
+     * earlier version gated this on baseline freshness. That reads as the
+     * conservative direction and is the opposite of it: for most chain shapes
+     * this is the ONLY applicable rule - floor A needs more than 200 stored
+     * rows AND fewer than 50 returned, floor B needs a first index - so
+     * switching it off means "clean". A chain truncated for seven days was
+     * then declared healthy and its truncated count written back as the new
+     * baseline: truncation normalising itself on a timer. Age governs MINTING
+     * only; see baselineAge().
+     *
+     * ⚠ A MISSING baseline must not set partial by itself. The baseline
+     * is only written on a clean run, so a rule that read no-baseline as
+     * partial could never let one be written - a permanent deadlock, and the
+     * exact shape of the bug being fixed. With no baseline the relative test
+     * is simply not applied and the floors decide alone.
+     *
+     * ⚠ INTEGER ARITHMETIC, not (int) ($baseline * 0.7). 180 * 0.7 is
+     * 125.99999999999998 in IEEE754, so the cast truncated to 125 and the
+     * cutoff sat one BELOW the intended 70% at some baselines. Cross-
+     * multiplying is exact at every value.
+     *
+     * Rules 2 and 3, the absolute floors: always applied, need no baseline,
+     * and they are what catch a catastrophic index and the slow erosion the
+     * run-to-run comparison cannot see.
+     */
+    private static function isPartialFetch(
+        int $returnedCount,
+        int $knownCount,
+        int $baseline
+    ): bool {
+        $relativeDrop = $baseline > 0
+            && ($returnedCount * 10) < ($baseline * 7);
+
+        $absoluteFloor = ($knownCount > 200 && $returnedCount < 50)
+            || ($knownCount === 0 && $returnedCount > 0 && $returnedCount < 30);
+
+        return $relativeDrop || $absoluteFloor;
+    }
+
+    /**
+     * The comparable total from a chain's prior stats entry, and NOTHING
+     * about its age.
+     *
+     * ⛔⛔⛔ DETECTION USES THIS WHATEVER ITS AGE. An earlier
+     * version gated the relative test on freshness. That reads as the
+     * conservative direction and is the opposite of it: for most chain shapes
+     * the relative test is the ONLY applicable rule, because floor A needs
+     * more than 200 stored rows AND fewer than 50 returned, and floor B needs
+     * a first index. Ignoring the relative test therefore means "clean" - so a
+     * chain truncated for a week was declared healthy and its truncated count
+     * was written back as the new baseline. Age may withhold MINTING; it may
+     * never relax DETECTION.
+     *
+     * @param array<string, mixed> $prevEntry
+     */
+    private static function baselineTotal(array $prevEntry): int
+    {
+        $raw = $prevEntry['last_good_total'] ?? null;
+        if (!is_int($raw) && !is_string($raw)) {
+            return 0;
+        }
+
+        $total = (int) $raw;
+
+        return $total > 0 ? $total : 0;
+    }
+
+    /**
+     * Age of the baseline in seconds, or NULL when it cannot be trusted.
+     *
+     * ⚠⚠⚠ strtotime() FAILS OPEN ON A BARE TIMEZONE. Measured on
+     * PHP 8.2.30: strtotime(' UTC') returns NOW. The previous spelling was
+     * strtotime((string) $raw . ' UTC'), so an empty string - or false, which
+     * (string) renders empty - produced a baseline that was PERMANENTLY fresh
+     * on every run, bypassing the staleness refusal completely.
+     *
+     * So parse strictly against the one format current_time('mysql', true)
+     * emits, require an exact round-trip (createFromFormat tolerates trailing
+     * junk and rolls impossible dates over), and refuse a FUTURE stamp - a
+     * negative age satisfies "<= BASELINE_MAX_AGE" and would read as fresh.
+     *
+     * @param array<string, mixed> $prevEntry
+     */
+    private static function baselineAge(array $prevEntry, int $now): ?int
+    {
+        $raw = $prevEntry['last_good_at'] ?? null;
+        if (!is_string($raw) || $raw === '') {
+            return null;
+        }
+
+        $at = \DateTimeImmutable::createFromFormat(
+            'Y-m-d H:i:s',
+            $raw,
+            new \DateTimeZone('UTC')
+        );
+        if ($at === false || $at->format('Y-m-d H:i:s') !== $raw) {
+            return null;
+        }
+
+        $age = $now - $at->getTimestamp();
+
+        return $age >= 0 ? $age : null;
+    }
 
     private static function deadMarkingEnabled(): bool
     {
@@ -296,36 +410,61 @@ class ChainRefreshService
                         $prevEntry   = isset($priorStats[$chain->slug]) && is_array($priorStats[$chain->slug])
                             ? $priorStats[$chain->slug]
                             : [];
-                        $baseline    = isset($prevEntry['last_good_total']) ? (int) $prevEntry['last_good_total'] : 0;
-                        $baselineAt  = isset($prevEntry['last_good_at'])
-                            ? (int) strtotime((string) $prevEntry['last_good_at'] . ' UTC')
-                            : 0;
-                        $baselineUsable = $baseline > 0
-                            && $baselineAt > 0
-                            && (time() - $baselineAt) <= self::BASELINE_MAX_AGE;
+                        $baseline      = self::baselineTotal($prevEntry);
+                        $baselineAge   = self::baselineAge($prevEntry, time());
+                        $baselineFresh = $baselineAge !== null
+                            && $baselineAge <= self::BASELINE_MAX_AGE;
 
-                        // ⚠ A MISSING OR STALE BASELINE MUST NOT SET partial BY
-                        // ITSELF. The baseline is only written on a clean run, so a
-                        // rule that treated no-baseline as partial could never let
-                        // one be written - a permanent deadlock, and the exact shape
-                        // of the bug being fixed. Instead the relative test is simply
-                        // NOT APPLIED, and the chain must clear the absolute floors
-                        // on its own merits. A stale baseline therefore never grants
-                        // health; it is ignored.
-                        // ⚠ INTEGER ARITHMETIC, not (int) ($baseline * 0.7). 180 * 0.7 is
-                        // 125.99999999999998 in IEEE754, so the cast truncated to 125 and
-                        // the cutoff sat one BELOW the intended 70% at some baselines.
-                        // Cross-multiplying is exact at every value.
-                        $relativeDrop = $baselineUsable
-                            && ($returnedCount * 10) < ($baseline * 7);
+                        // ⚠⚠ TWO DIFFERENT QUESTIONS, HELD APART ON PURPOSE.
+                        // Can this baseline DETECT a drop is answered by its
+                        // EXISTENCE alone. Can it AUTHORIZE new pages is answered by
+                        // its existence AND its age. Conflating them was the defect:
+                        // one flag did both jobs, so an aged baseline silently
+                        // stopped detecting.
+                        $mintBaselineVerified = $baseline > 0 && $baselineFresh;
 
-                        // Absolute floors - always applied, need no baseline. These
-                        // are what catch a catastrophic index and a decline that the
-                        // run-to-run comparison alone would not see.
-                        $absoluteFloor = ($knownCount > 200 && $returnedCount < 50)
-                            || ($knownCount === 0 && $returnedCount > 0 && $returnedCount < 30);
-
-                        $isPartialFetch = $relativeDrop || $absoluteFloor;
+                        // ⚠ A MISSING baseline must not set partial BY ITSELF.
+                        // The baseline is only written on a clean run, so a rule that
+                        // read no-baseline as partial could never let one be written -
+                        // a permanent deadlock, and the exact shape of the bug being
+                        // fixed. With no baseline the relative test is simply NOT
+                        // APPLIED and the chain must clear the absolute floors alone.
+                        //
+                        // ⛔⛔ AGE IS NOT CONSULTED HERE, AND MUST NOT BE. An
+                        // earlier version had $baselineUsable on this very line, and
+                        // it re-created the ratchet this change exists to remove.
+                        // Worked through with cosmos real numbers: baseline 318, the
+                        // chain truncates to 180, correctly flagged partial, and
+                        // last_good_at is never refreshed because the write below is
+                        // gated on a clean verdict. Seven days later the age bound
+                        // expires, the relative test switches OFF, and no floor
+                        // applies - floor A needs fewer than 50 returned, floor B
+                        // needs a first index - so the chain is declared CLEAN and 180
+                        // is written back as the new baseline. Detection is anchored
+                        // to the truncated value for good, the partial flag clears,
+                        // and the evidence is destroyed. A sustained truncation was
+                        // forgiven on a timer.
+                        //
+                        // A week-old baseline is less PRECISE; it is no less
+                        // indicative of an 80% drop. So age withholds MINTING and
+                        // never forgives a drop. ⚠ The cost is real and accepted:
+                        // a genuine SUDDEN decline past the threshold keeps a chain
+                        // flagged until an operator clears its last_good_total. That
+                        // is the visible, non-destructive direction - minting pauses,
+                        // nothing is written - and is preferred to silent self-
+                        // forgiveness. A GRADUAL genuine decline needs no
+                        // intervention: each step under 30% passes, so the baseline
+                        // walks down with the chain.
+                        // ⚠ The predicate lives in isPartialFetch() so the suite can
+                        // EXECUTE it. It used to be inline here and the tests drove a
+                        // local copy, which meant a mutation to this logic could not
+                        // fail any behavioural test - only a string match on the
+                        // source. That is how the age gate went unnoticed.
+                        $isPartialFetch = self::isPartialFetch(
+                            $returnedCount,
+                            $knownCount,
+                            $baseline
+                        );
 
                         if ($isPartialFetch) {
                             \BCC\Core\Log\Logger::warning(sprintf(
@@ -409,12 +548,14 @@ class ChainRefreshService
                             // only written on a clean run, so blocking the index would
                             // stop any baseline ever forming - the deadlock this whole
                             // change exists to remove.
-                            if (!$baselineUsable) {
+                            if (!$mintBaselineVerified) {
                                 \BCC\Core\Log\Logger::info(sprintf(
                                     '[Onchain] %s indexed and clean, but page creation is withheld: no verified baseline yet (got %d, baseline %s). A later run will mint once a baseline is established.',
                                     $chain->name,
                                     $returnedCount,
-                                    $baseline > 0 ? 'stale' : 'absent'
+                                    $baseline <= 0
+                                        ? 'absent'
+                                        : ($baselineAge === null ? 'unreadable' : 'stale')
                                 ));
                             }
 
@@ -455,7 +596,7 @@ class ChainRefreshService
                                 }
                             }
 
-                            if ($baselineUsable) {
+                            if ($mintBaselineVerified) {
                                 $healthyChainFetches[$chainId] = ValidatorRepository::idsForOperatorAddresses(
                                     $chainId,
                                     $fetchedAddresses
