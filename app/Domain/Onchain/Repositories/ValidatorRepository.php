@@ -89,7 +89,8 @@ if (!defined('ABSPATH')) {
  *     delegator_count: string|null,
  *     jailed_count: string|null,
  *     fetched_at: string,
- *     logo_url: string|null
+ *     logo_url: string|null,
+ *     moniker: string
  * }
  *
  * @phpstan-type ValidatorCardPageRow object{
@@ -107,7 +108,8 @@ if (!defined('ABSPATH')) {
  *     delegator_count: string|null,
  *     jailed_count: string|null,
  *     fetched_at: string,
- *     logo_url: string|null
+ *     logo_url: string|null,
+ *     moniker: string
  * }
  *
  * @phpstan-type ValidatorAggregateStats object{
@@ -452,11 +454,17 @@ final class ValidatorRepository
         $wallets = WalletRepository::table();
         $chains  = ChainRepository::table();
 
+        // ⚠ v.moniker rides along DELIBERATELY. The card's display name
+        // used to come from the frozen post_title; taking it from here means
+        // the batch that already feeds chains, signals and the logo answers
+        // the name too, so a 24-card directory grid pays ZERO extra queries
+        // for it. Both SELECTs below share this list.
         $selectCols =
             "v.id AS validator_id, c.slug AS chain_slug, c.name AS chain_name,
              v.operator_address, v.status, v.uptime_30d, v.commission_rate,
              v.voting_power_rank, v.total_stake, v.self_stake,
-             v.delegator_count, v.jailed_count, v.fetched_at, v.logo_url";
+             v.delegator_count, v.jailed_count, v.fetched_at, v.logo_url,
+             v.moniker";
 
         $ph = implode(',', array_fill(0, count($idList), '%d'));
 
@@ -1863,4 +1871,50 @@ final class ValidatorRepository
         ));
     }
 
+    /**
+     * The validator moniker currently recorded for a page, for display.
+     *
+     * ⚠ SINGLE-CARD PATH ONLY. A list request arrives with the
+     * findCardRowsByPageIds() bundle, which carries `moniker` already, so
+     * CardViewService prefers that and never reaches this method - otherwise
+     * the name would cost one query PER CARD in the directory grid.
+     *
+     * Resolves the same two ways a validator page can be bound as the other
+     * per-page readers in this class: a wallet link for a claimed validator,
+     * and the `_bcc_onchain_validator_id` post_meta for a system-minted
+     * placeholder. Bounded to one row.
+     */
+    public static function findMonikerByPageId(int $pageId): ?string
+    {
+        if ($pageId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $table   = self::table();
+        $wallets = DB::table('wallet_links');
+
+        $moniker = $wpdb->get_var($wpdb->prepare(
+            "SELECT v.moniker
+               FROM {$table} v
+               JOIN {$wallets} w ON w.id = v.wallet_link_id
+              WHERE w.post_id = %d
+              LIMIT 1",
+            $pageId
+        ));
+
+        if ($moniker === null) {
+            $moniker = $wpdb->get_var($wpdb->prepare(
+                "SELECT v.moniker
+                   FROM {$wpdb->postmeta} pm
+                   JOIN {$table} v ON v.id = CAST(pm.meta_value AS UNSIGNED)
+                  WHERE pm.meta_key = '_bcc_onchain_validator_id'
+                    AND pm.post_id = %d
+                  LIMIT 1",
+                $pageId
+            ));
+        }
+
+        return $moniker === null ? null : (string) $moniker;
+    }
 }
