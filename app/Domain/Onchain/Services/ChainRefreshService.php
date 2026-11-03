@@ -340,11 +340,36 @@ class ChainRefreshService
         // built from $stats, which has no last_good_* keys, so without
         // this the baseline would be DROPPED on every run and the
         // relative test would never have anything to compare against.
-        if (isset($prevEntry['last_good_total'])) {
-            $entry['last_good_total'] = (int) $prevEntry['last_good_total'];
+        //
+        // ⛔⛔ AND IT CARRIES THROUGH THE READERS, NOT THROUGH A CAST.
+        // A review found the writer and the reader disagreeing here.
+        // baselineTotal() REFUSES anything that is not int|string, but this
+        // block used to persist `(int) $prevEntry['last_good_total']`
+        // unconditionally - and measured on PHP 8.2, (int) [1,2] === 1,
+        // (int) 1.9 === 1 and (int) true === 1. So a malformed value was
+        // LAUNDERED INTO A BASELINE OF 1: detection ignored it as 0 while
+        // the writer persisted 1, and 1 is > 0, so on the next run it
+        // AUTHORIZED MINTING - off a baseline no relative test can ever
+        // trip, since returned * 10 < 7 needs returned < 1.
+        //
+        // Reading it back through baselineTotal() makes the two agree by
+        // construction: a value detection would ignore is not persisted
+        // either, so the chain has NO baseline and minting is withheld.
+        // That is the fail-closed direction.
+        $carriedTotal = self::baselineTotal($prevEntry);
+        if ($carriedTotal > 0) {
+            $entry['last_good_total'] = $carriedTotal;
         }
-        if (isset($prevEntry['last_good_at'])) {
-            $entry['last_good_at'] = (string) $prevEntry['last_good_at'];
+
+        // ⚠ Same rule for the stamp. baselineAge() requires a non-empty
+        // string, so only that is carried, and verbatim. (string) false
+        // gave '' and (string) [] both raised a conversion notice and gave
+        // 'Array' - unreadable values the WRITER invented. Whether the
+        // string parses stays baselineAge()'s decision; an unparseable one
+        // already fails closed by reading as not-fresh.
+        $carriedAt = $prevEntry['last_good_at'] ?? null;
+        if (is_string($carriedAt) && $carriedAt !== '') {
+            $entry['last_good_at'] = $carriedAt;
         }
 
         // ⛔ THE BASELINE ADVANCES ONLY ON A CLEAN FETCH. This is the

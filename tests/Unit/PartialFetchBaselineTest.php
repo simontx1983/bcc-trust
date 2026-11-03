@@ -958,16 +958,124 @@ final class PartialFetchBaselineTest extends TestCase
     }
 
     /**
-     * array_merge is built from $stats, which carries no last_good_* keys, so
-     * without an explicit carry-forward the baseline would be DROPPED every
-     * run and the relative test would never have anything to compare against.
+     * ⛔⛔ THE WRITER MUST NOT PERSIST WHAT THE READER WOULD REFUSE.
+     *
+     * This replaces two assertStringContainsString checks on the two `isset`
+     * lines. They were satisfied by the exact code that carried the defect, so
+     * they could not have caught it; the property is now asserted by VALUE.
+     *
+     * The defect: baselineTotal() refuses anything that is not int|string and
+     * returns 0, while the writer cast unconditionally. Measured on PHP 8.2,
+     * (int) [1,2], (int) 1.9 and (int) true are ALL 1 - so a malformed value
+     * became a baseline of 1, which is > 0 and therefore authorizes minting,
+     * and which no relative test can trip because returned * 10 < 1 * 7 needs
+     * returned < 1.
+     *
+     * ⚠ The assertion that generalises is the LAST one: whatever goes in, the
+     * reader must see the same baseline before and after the write. A future
+     * cast reintroduced anywhere in the carry-forward breaks that row without
+     * needing a new case for the specific type.
+     *
+     * @param mixed $stored
      */
-    public function testThePreviousBaselineIsCarriedForwardExplicitly(): void
-    {
-        $code = self::code(self::source());
+    #[DataProvider('malformedTotalCases')]
+    public function testAMalformedBaselineIsNotLaunderedIntoAValidOne(
+        string $label,
+        $stored,
+        bool $carried
+    ): void {
+        $prev = [
+            'last_good_total' => $stored,
+            'last_good_at'    => '2026-11-03 00:00:00',
+        ];
 
-        self::assertStringContainsString("if (isset(\$prevEntry['last_good_total'])) {", $code);
-        self::assertStringContainsString("if (isset(\$prevEntry['last_good_at'])) {", $code);
+        $entry = self::compose($prev, 180, true, '2026-11-03 04:00:00');
+
+        if ($carried) {
+            self::assertSame(318, $entry['last_good_total'], $label . ': carried');
+        } else {
+            self::assertArrayNotHasKey(
+                'last_good_total',
+                $entry,
+                $label . ': a value detection refuses must not be persisted either'
+            );
+        }
+
+        self::assertSame(
+            self::callTotal($prev),
+            self::callTotal($entry),
+            $label . ': the reader must see the SAME baseline before and after the write'
+        );
+    }
+
+    /** @return list<array{0:string,1:mixed,2:bool}> */
+    public static function malformedTotalCases(): array
+    {
+        return [
+            // ⛔ The three that used to launder into a baseline of 1.
+            ['a non-empty array',  [1, 2], false],
+            ['a float',            1.9,    false],
+            ['boolean true',       true,   false],
+            // Refused by the reader for other reasons, and now dropped too.
+            ['an empty array',     [],     false],
+            ['a non-numeric string', 'Array', false],
+            ['zero',               0,      false],
+            ['negative',           -5,     false],
+            ['null',               null,   false],
+            // The well-formed pair, unchanged: these must still carry.
+            ['a real int',         318,    true],
+            ['a numeric string',   '318',  true],
+        ];
+    }
+
+    /**
+     * ⚠ THE STAMP MUST NOT BE MANUFACTURED EITHER. (string) false gave '' and
+     * (string) [] gave 'Array' behind a conversion notice - values the writer
+     * invented and the reader then had to refuse. Only a non-empty string is
+     * carried, verbatim.
+     *
+     * @param mixed $stored
+     */
+    #[DataProvider('malformedStampCases')]
+    public function testAMalformedBaselineStampIsDroppedRatherThanManufactured(
+        string $label,
+        $stored,
+        ?string $expected
+    ): void {
+        $prev = [
+            'last_good_total' => 318,
+            'last_good_at'    => $stored,
+        ];
+
+        $entry = self::compose($prev, 180, true, '2026-11-03 04:00:00');
+
+        if ($expected === null) {
+            self::assertArrayNotHasKey('last_good_at', $entry, $label);
+        } else {
+            self::assertSame($expected, $entry['last_good_at'], $label);
+        }
+
+        // ⚠ The total and the stamp are carried INDEPENDENTLY, so a bad stamp
+        // must not cost the chain its total - it costs it only minting
+        // authority, which is the documented split.
+        self::assertSame(318, $entry['last_good_total'], $label . ': the total still carries');
+    }
+
+    /** @return list<array{0:string,1:mixed,2:?string}> */
+    public static function malformedStampCases(): array
+    {
+        return [
+            ['boolean false',     false,                 null],
+            ['an array',          ['2026-11-03'],        null],
+            ['an int',            0,                     null],
+            ['the empty string',  '',                    null],
+            ['null',              null,                  null],
+            // Carried verbatim - including a string the PARSER will refuse,
+            // because that refusal is baselineAge()'s call and already fails
+            // closed as not-fresh.
+            ['word salad',        'Array',               'Array'],
+            ['a real stamp',      '2026-11-03 00:00:00', '2026-11-03 00:00:00'],
+        ];
     }
 
     /** The stored `total` must never be read as the comparison baseline. */
