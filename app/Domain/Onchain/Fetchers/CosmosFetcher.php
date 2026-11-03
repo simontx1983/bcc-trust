@@ -2387,32 +2387,88 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         return round((float) $amount / pow(10, $this->decimals), 6);
     }
 
+    /**
+     * Resolve the validator OPERATOR address for this chain.
+     *
+     * Two different kinds of input reach this method and they must not be
+     * treated alike:
+     *
+     *  - an OPERATOR address, read from `onchain_validators.operator_address`
+     *    (EnrichmentScheduler::enrich). Already canonical, because the chain's
+     *    own validator list is where it came from. Return it untouched.
+     *  - an ACCOUNT address, the user's wallet (WalletSeedService), used to ask
+     *    "is this wallet a validator operator?". This one genuinely has to be
+     *    re-encoded under the operator HRP.
+     *
+     * ⚠⚠⚠ RE-ENCODING IS NOT STRING SUBSTITUTION. A bech32 checksum covers
+     * the HRP, so swapping the prefix in place leaves a checksum that no longer
+     * validates. Doing exactly that produced 1,241 production
+     * `LCD 500 ... decoding bech32 failed: invalid checksum` errors against
+     * Crypto.org between 2026-10-24 and 2026-11-03 -- 81% of all production
+     * errors -- each retried four times, each charging the chain's circuit
+     * breaker, which then skipped that chain's indexing 61 times and so withheld
+     * its validator pages. Decode and re-encode through Support\Bech32, which
+     * verifies the checksum coming in and recomputes it going out.
+     *
+     * ⚠⚠⚠ THE OPERATOR HRP IS NOT ALWAYS `<bech32_prefix>valoper`, AND IT IS
+     * NOT DERIVABLE FROM ANY CONFIGURATION WE HOLD. Crypto.org Chain stores
+     * `bech32_prefix = 'cro'` but its operator HRP is `crocncl`, and the Cosmos
+     * chain-registry publishes no `bech32_config` for that chain, so the
+     * convention gives the WRONG answer and no lookup table of ours can say
+     * otherwise. Only the chain itself can: the addresses its own validator list
+     * returns. That is why an address whose HRP is not this chain's ACCOUNT
+     * prefix is returned UNCHANGED -- the caller is already holding the chain's
+     * own spelling, and overwriting it with a guess is what broke this.
+     *
+     * ⚠ KNOWN LIMITATION, stated rather than papered over: for a chain whose
+     * operator HRP does not follow the convention, converting an ACCOUNT address
+     * still yields the conventional spelling and so will not resolve. It now
+     * fails CLEANLY -- a checksum-valid address the chain simply does not know,
+     * i.e. one 404 -- instead of malformed, which cost four retries and a breaker
+     * charge. Closing it properly needs a per-chain operator HRP, which is a
+     * schema change and is deliberately out of scope here.
+     *
+     * @param string $address Operator address, or the wallet's account address.
+     */
     private function ensureValoperPrefix(string $address): string
     {
+        // Fast path: already a conventional operator address. Deliberately ahead
+        // of any decoding, so per-validator enrichment on standard chains behaves
+        // byte-for-byte as before and pays nothing for this fix. Safe as a
+        // substring test because 'valoper' cannot occur inside a bech32 data
+        // part -- the charset excludes 'o'.
         if (strpos($address, 'valoper') !== false) {
             return $address;
         }
 
-        // Use bech32_prefix from chain config (DB-driven, no code change needed
-        // to add new Cosmos chains). Falls back to hardcoded map for chains
-        // where the config hasn't been populated yet.
         $bech32Prefix = $this->chain->bech32_prefix ?? null;
 
-        // Validate: bech32 HRPs are strictly lowercase alpha. A bad DB value
-        // here would produce broken addresses that silently fail LCD lookups.
-        if ($bech32Prefix && !preg_match('/^[a-z]+$/', $bech32Prefix)) {
-            $bech32Prefix = null; // fall through to hardcoded map
+        // bech32 HRPs are strictly lowercase alpha.
+        if (!is_string($bech32Prefix) || !preg_match('/^[a-z]+$/', $bech32Prefix)) {
+            return $address;
         }
 
-        if ($bech32Prefix) {
-            $pos = strpos($address, '1');
-            if ($pos !== false) {
-                $existingPrefix = substr($address, 0, $pos);
-                return str_replace($existingPrefix . '1', $bech32Prefix . 'valoper1', $address);
-            }
+        // Checksum-verified decode. Anything that is not valid bech32 passes
+        // through untouched: letting the provider reject the caller's own input is
+        // honest, manufacturing a different address out of it is not.
+        $decoded = Bech32::decode($address);
+        if ($decoded === null) {
+            return $address;
         }
 
-        return $address;
+        // Not this chain's ACCOUNT prefix, so it is already an operator address in
+        // the chain's own spelling (Crypto.org's `crocncl`). Leave it exactly as
+        // the chain gave it to us.
+        if ($decoded['hrp'] !== $bech32Prefix) {
+            return $address;
+        }
+
+        $bytes = Bech32::decodeToBytes($address);
+        if ($bytes === null || $bytes === '') {
+            return $address;
+        }
+
+        return Bech32::encode($bech32Prefix . 'valoper', $bytes);
     }
 
     private function parseStatus(string $status): string
