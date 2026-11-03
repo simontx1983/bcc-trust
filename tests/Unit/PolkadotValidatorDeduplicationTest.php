@@ -25,10 +25,14 @@ use ReflectionMethod;
  * 600 rows - so the batch carried at most 600 distinct addresses.
  *
  * The damage is still in the production table: voting_power_rank runs to
- * 2820 across 600 rows, with only 269 distinct values. Rank is the array
- * INDEX (mapValidator's $rank + 1), so duplicates inflate it past the real
- * set size AND collide. bulkUpsert's change detection includes
- * voting_power_rank, which is where the 2400 spurious "updated" came from.
+ * 2820 across 600 rows - past the real set size, because rank is the array
+ * INDEX (mapValidator's $rank + 1) over a batch of 3000. bulkUpsert's
+ * change detection includes voting_power_rank, which is where the 2400
+ * spurious "updated" came from.
+ *
+ * ⚠ Those 600 rows carry only 269 DISTINCT ranks, and that number is NOT
+ * evidence about the copies: see PolkadotFetcher::dedupeByStash()'s
+ * docblock, which retracts the inference that used to be drawn from it.
  *
  * ⛔ THIS FILE DOES NOT TEST WHY INDEXING STOPPED. That is a Subscan HTTP
  * 403 on every run since late August (435 occurrences) and no code change

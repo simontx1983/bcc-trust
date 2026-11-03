@@ -166,11 +166,13 @@ class PolkadotFetcher implements FetcherInterface
         // validator count.
         //
         // The damage is still in the table: voting_power_rank runs to 2820
-        // across 600 rows with only 269 distinct values. Rank is the array
-        // INDEX (mapValidator's $rank + 1), so duplicates both inflate it
-        // past the real set size and collide. ValidatorRepository's change
-        // detection includes voting_power_rank, so each extra copy also
-        // counted as an UPDATE - that is the whole 2400.
+        // across 600 rows, well past the real set size, because rank is the
+        // array INDEX (mapValidator's $rank + 1) over a batch of 3000.
+        // ValidatorRepository's change detection includes voting_power_rank,
+        // so each extra copy also counted as an UPDATE - that is the whole
+        // 2400. (Those 600 rows carry only 269 DISTINCT ranks. That is
+        // recorded as a measurement; see dedupeByStash() for why it says
+        // less than it looks like it does.)
         //
         // Ranking a de-duplicated list is the fix. Nothing here widens the
         // set: de-duplication can only ever shrink a batch, and on a clean
@@ -228,17 +230,34 @@ class PolkadotFetcher implements FetcherInterface
      *
      * ⛔⛔ THE KEEP RULE, AND WHY IT IS THIS ONE.
      *
-     * Duplicate copies CANNOT be assumed identical. The observed
-     * 600-unchanged / 2400-updated split is explained by the
-     * position-derived rank alone, but the ranks left in the table are
-     * not: five identical copies of one address would sort adjacently and
-     * leave ranks at exact multiples of five up to 3000, whereas the table
-     * holds 269 distinct values topping out at 2820. So at least some
-     * copies differed in `bonded_total`, which is both a stored field and
-     * the sort key. Which fields differ, and how often, is NOT
-     * recoverable from retained data - hence $divergent below, which makes
-     * the answer observable on the next successful run instead of leaving
-     * it open.
+     * Duplicate copies CANNOT be ASSUMED identical, so the rule has to be
+     * well defined either way. Whether any of them actually DID differ,
+     * and in which fields, is UNKNOWN: it is not recoverable from retained
+     * data, which keeps only the final row state and, in the logs, only
+     * aggregate counts.
+     *
+     * ⚠⚠ AN EARLIER VERSION OF THIS COMMENT CLAIMED MORE THAN THAT,
+     * AND ITS ARGUMENT DOES NOT HOLD. It read the stored ranks as proof
+     * that some copies differed in `bonded_total`: five identical copies
+     * of one address would sort adjacently, so each address's last copy
+     * would land on an exact multiple of five and the table would hold 600
+     * distinct ranks topping out at 3000 - against the 269 distinct,
+     * topping out at 2820, that it actually holds.
+     *
+     * That arithmetic describes ONE run, and the table cannot be read as
+     * one run. Within a single run every rank is an array index used
+     * exactly once, so one run can never store the same rank value on two
+     * rows - yet 600 rows carry only 269 distinct values. The stored ranks
+     * therefore do not all come from the same run, and a single-run
+     * prediction cannot be compared against them at all. They are
+     * consistent with identical copies and with differing copies alike,
+     * and the 600-unchanged / 2400-updated split is explained by the
+     * position-derived rank on its own.
+     *
+     * What the retained data DOES establish is only that duplicates
+     * existed: 3000 batch entries, `0 new`, 600 rows. Hence $divergent
+     * below - it makes the open question observable on the next successful
+     * run instead of settling it by inference.
      *
      * The rule, in two steps:
      *
