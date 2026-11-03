@@ -306,6 +306,33 @@ final class CardViewService
             ? ($prefetched['validator_logos'][$pageId] ?? null)
             : null;
 
+        // ⛔⛔ A VALIDATOR PROFILE SHOWS THE CURRENT MONIKER.
+        //
+        // $name above is post_title, which ValidatorPageMinter writes ONCE
+        // and nothing resyncs - there is no wp_update_post anywhere in
+        // Domain/Onchain. Measured on production: 61 of 2,906 validator
+        // pages showed a stale name, and some were actively misleading -
+        // one rendered as "Cosmostation" while the operator had renamed
+        // itself "[Shutting down] cosmostation please redelegate".
+        //
+        // ⚠ PAGE IDENTITY IS DELIBERATELY UNTOUCHED. $handle stays
+        // post_name and nothing here writes to wp_posts, so every /v/<slug>
+        // link keeps working across a rename. Freezing the slug is what
+        // makes those links permanent; only the DISPLAY was wrong.
+        //
+        // ⚠ Bundle first, query second, and kind-gated. A list request
+        // carries the prefetched rows, which now include the moniker, so the
+        // directory pays nothing. Only a single-card read falls through to a
+        // query, and only for a validator - a project or creator card must
+        // not pay for a lookup that cannot apply to it.
+        if ($kind === 'validator') {
+            $moniker = is_array($validatorRows)
+                ? (isset($validatorRows[0]->moniker) ? (string) $validatorRows[0]->moniker : null)
+                : ValidatorRepository::findMonikerByPageId($pageId);
+
+            $name = self::preferMoniker($moniker, $name);
+        }
+
         $card = [
             'id'                  => $pageId,
             'name'                => $name,
@@ -2259,5 +2286,28 @@ final class CardViewService
                 'requires_auth' => true,
             ],
         ];
+    }
+    /**
+     * Choose the display name: the current moniker, else the stored title.
+     *
+     * ⭐ PURE ON PURPOSE. The bundle-or-query decision stays at the call
+     * site so this - the part with the actual rule in it - is unit-testable
+     * with no database, no WordPress and no fixtures.
+     *
+     * ⚠ A BLANK MONIKER IS NOT A NAME. Trimmed-empty, whitespace-only and
+     * null all fall back, so a page whose validator row has never been
+     * enriched keeps the title it was minted with rather than rendering
+     * nameless. Production carries monikers with real leading whitespace
+     * (' polkachu.com'), which is why the trim is on the value that gets
+     * DISPLAYED and not only on the emptiness test.
+     *
+     * ⚠ The fallback is returned UNTRIMMED, exactly as stored, so this
+     * cannot change what a non-validator card or an un-enriched page shows.
+     */
+    private static function preferMoniker(?string $moniker, string $fallback): string
+    {
+        $moniker = $moniker === null ? '' : trim($moniker);
+
+        return $moniker !== '' ? $moniker : $fallback;
     }
 }
