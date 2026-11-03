@@ -40,6 +40,20 @@ use PHPUnit\Framework\TestCase;
  * conventional spelling) was COMPUTED with Support\Bech32 rather than typed.
  * A hand-typed bech32 fixture is a guess with a checksum on it.
  *
+ * ── MUTATION CONTROLS (run out of tree: killed=4 survived=1 broken=0) ──
+ * Killed: reverting to `str_replace` (7 failures), dropping the HRP guard so
+ * `crocncl` is rewritten again (2), skipping checksum verification on the way
+ * in (1), and encoding under the account HRP instead of the operator HRP (3).
+ *
+ * ⚠ ONE CONTROL SURVIVES AND IT IS NOT A GAP. Loosening the prefix regex from
+ * `/^[a-z]+$/` to `/^[a-zA-Z]+$/` changes nothing reachable: `Bech32::decode()`
+ * lowercases the HRP it returns, so a prefix containing an uppercase letter can
+ * never satisfy `$decoded['hrp'] === $bech32Prefix` and the conversion is never
+ * entered. Verified over 35 address/prefix combinations with zero behavioural
+ * differences. It is an EQUIVALENT MUTANT, so no test can kill it and none
+ * pretends to; the strict regex is kept because stating the precondition
+ * out loud is worth more than the byte it costs.
+ *
  * @see \BCC\Trust\Onchain\Support\Bech32
  */
 #[CoversClass(CosmosFetcher::class)]
@@ -61,6 +75,28 @@ final class CosmosValoperAddressDerivationTest extends TestCase
     private const HUB_ACCOUNT   = 'cosmos1qphf0ferqcch0jca9hlqfm3x0eds3dpkac4g9j';
     private const HUB_OPERATOR2 = 'cosmosvaloper1qr6sk28w4r6kqsg0737wzgu05505t4glezetwn';
     private const HUB_ACCOUNT2  = 'cosmos1qr6sk28w4r6kqsg0737wzgu05505t4glukd7zq';
+
+    /**
+     * CosmosFetcher declares class constants in terms of WordPress time
+     * constants (`private const NFT_INFO_CACHE_TTL = 7 * DAY_IN_SECONDS`), so
+     * the class cannot initialise without them. The unit bootstrap loads no
+     * WordPress, and these are plain integers with no behaviour, so defining
+     * them here is a harness requirement rather than a stub of anything under
+     * test. Guarded because PHPUnit runs every suite in one process and
+     * several sibling stub files define the same constants.
+     */
+    public static function setUpBeforeClass(): void
+    {
+        if (!\defined('MINUTE_IN_SECONDS')) {
+            \define('MINUTE_IN_SECONDS', 60);
+        }
+        if (!\defined('HOUR_IN_SECONDS')) {
+            \define('HOUR_IN_SECONDS', 3600);
+        }
+        if (!\defined('DAY_IN_SECONDS')) {
+            \define('DAY_IN_SECONDS', 86400);
+        }
+    }
 
     /**
      * Invoke the private resolver on a real CosmosFetcher.
