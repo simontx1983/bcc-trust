@@ -49,11 +49,24 @@ final class DeadMarkingOptionStub
     /** Reads served from $values, so a test can prove the stub was consulted. */
     public static int $reads = 0;
 
+    /**
+     * Frozen clock for current_time(), or null to delegate.
+     *
+     * ⚠ WITHOUT THIS THE ACROSS-RUNS TESTS WOULD BE FLAKY RATHER THAN WRONG.
+     * current_time('mysql') has one-second resolution, so two runs inside the
+     * same test usually produce the IDENTICAL stamp - an assertion that a
+     * clean run moved last_good_at would pass or fail depending on where the
+     * second boundary landed. Freezing it makes "carried" and "advanced"
+     * distinguishable by value instead of by luck.
+     */
+    public static ?string $now = null;
+
     public static function reset(): void
     {
         self::$values = [];
         self::$strict = false;
         self::$reads  = 0;
+        self::$now    = null;
     }
 
     /**
@@ -85,5 +98,31 @@ if (!function_exists(__NAMESPACE__ . '\\get_option')) {
         }
 
         return $default;
+    }
+}
+
+if (!function_exists(__NAMESPACE__ . '\\current_time')) {
+    /**
+     * A namespaced current_time() so the baseline WRITE path is deterministic.
+     *
+     * ⚠ Transparent when unused, exactly like get_option above: with no frozen
+     * clock set it delegates to a real global current_time() when one exists and
+     * otherwise returns a genuine UTC stamp. It never invents a value while a
+     * test has not asked for one.
+     *
+     * @param  int|bool $gmt
+     * @return string
+     */
+    function current_time(string $type, $gmt = 0): string
+    {
+        if (DeadMarkingOptionStub::$now !== null) {
+            return DeadMarkingOptionStub::$now;
+        }
+
+        if (function_exists('\\current_time')) {
+            return (string) \current_time($type, $gmt);
+        }
+
+        return gmdate('Y-m-d H:i:s');
     }
 }

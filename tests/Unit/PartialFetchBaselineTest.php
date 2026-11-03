@@ -1112,4 +1112,187 @@ final class PartialFetchBaselineTest extends TestCase
         self::assertFalse(self::isPartial(8, 10, 8), 'kujira: 8 of 10 is real');
         self::assertFalse(self::isPartial(19, 27, 19), 'dungeon: 19 of 27 is real');
     }
+    /**
+     * ⛔⛔ THE WRITE PATH, EXECUTED ACROSS RUNS RATHER THAN MATCHED AS TEXT.
+     *
+     * An independent review found the gap these cases close: carry-forward and
+     * clean-only advance are the only two statements in this change that mutate
+     * persistent state, and every assertion that could see them was
+     * assertStringContainsString. It named two mutants that passed the whole
+     * suite, and both are now killed by VALUE here:
+     *
+     *   A. carry-forward bodies emptied  -> a partial run loses the baseline,
+     *      so the truncated count becomes the next reference. That is the
+     *      ratchet this change exists to remove, restored.
+     *   B. carry-forward moved BELOW the advance -> the carried value
+     *      overwrites the fresh one, the baseline freezes at its first-ever
+     *      value, and every chain's minting is withheld once that stamp ages
+     *      past BASELINE_MAX_AGE.
+     *
+     * ⚠ Mutant B is invisible to any single-run test. It only shows up on the
+     * SECOND clean run, when there is a carried value available to clobber the
+     * fresh one with - which is why these cases chain runs instead of asserting
+     * on one.
+     */
+    public function testACleanRunWritesTheBaselineFromTheFetchCount(): void
+    {
+        $run = self::compose([], 318, false, '2026-11-03 00:00:00');
+
+        self::assertSame(318, $run['last_good_total'], 'from the FETCH count');
+        self::assertSame('2026-11-03 00:00:00', $run['last_good_at']);
+        self::assertFalse($run['partial']);
+    }
+
+    /** Kills mutant A: an emptied carry-forward drops the key entirely. */
+    public function testAPartialRunCarriesTheBaselineForwardInsteadOfDroppingIt(): void
+    {
+        $clean   = self::compose([], 318, false, '2026-11-03 00:00:00');
+        $partial = self::compose($clean, 180, true, '2026-11-03 04:00:00');
+
+        self::assertArrayHasKey(
+            'last_good_total',
+            $partial,
+            'without the carry-forward the key is GONE, and a gone baseline '
+                . 'disables the relative test on the next run'
+        );
+        self::assertSame(
+            318,
+            $partial['last_good_total'],
+            'a partial run keeps the last CLEAN total and must not adopt its own 180'
+        );
+        self::assertSame(
+            '2026-11-03 00:00:00',
+            $partial['last_good_at'],
+            'and the clean run\'s stamp, not this run\'s time'
+        );
+        self::assertTrue($partial['partial']);
+        self::assertSame(180, $partial['total'], 'the run of record still reports THIS fetch');
+    }
+
+    /** Kills mutant B: the two blocks in the wrong order freeze the baseline. */
+    public function testASecondCleanRunAdvancesTheBaselineRatherThanRestoringTheCarriedOne(): void
+    {
+        $first  = self::compose([], 318, false, '2026-11-03 00:00:00');
+        $middle = self::compose($first, 180, true, '2026-11-03 04:00:00');
+        $second = self::compose($middle, 330, false, '2026-11-03 08:00:00');
+
+        self::assertSame(
+            330,
+            $second['last_good_total'],
+            'ORDER IS LOAD-BEARING: carry-forward must precede the advance. Moved '
+                . 'below it, the carried 318 overwrites the fresh 330 and the '
+                . 'baseline never moves again'
+        );
+        self::assertSame(
+            '2026-11-03 08:00:00',
+            $second['last_good_at'],
+            'the stamp must advance too, or every chain is withheld once it ages out'
+        );
+    }
+
+    /**
+     * The whole property in one sequence: the baseline tracks the most recent
+     * CLEAN fetch and is untouched by everything else.
+     */
+    public function testTheBaselineSurvivesASequenceOfRunsAndOnlyACleanRunMovesIt(): void
+    {
+        $runs = [
+            // [returned, isPartial, now,                   expected total, expected stamp]
+            [318, false, '2026-11-03 00:00:00', 318, '2026-11-03 00:00:00'],
+            [180, true,  '2026-11-03 04:00:00', 318, '2026-11-03 00:00:00'],
+            [120, true,  '2026-11-03 08:00:00', 318, '2026-11-03 00:00:00'],
+            [330, false, '2026-11-03 12:00:00', 330, '2026-11-03 12:00:00'],
+            [50,  true,  '2026-11-03 16:00:00', 330, '2026-11-03 12:00:00'],
+            [340, false, '2026-11-03 20:00:00', 340, '2026-11-03 20:00:00'],
+        ];
+
+        $entry = [];
+        foreach ($runs as $i => [$returned, $partial, $now, $total, $stamp]) {
+            $entry = self::compose($entry, $returned, $partial, $now);
+
+            self::assertSame($total, $entry['last_good_total'], "run {$i}: baseline total");
+            self::assertSame($stamp, $entry['last_good_at'], "run {$i}: baseline stamp");
+        }
+
+        // ⚠ And the baseline the LAST run leaves behind is the one detection
+        // would use, read back through the production reader rather than asserted
+        // on the raw array.
+        self::assertSame(340, self::callTotal($entry));
+    }
+
+    /**
+     * ⚠ The run-of-record fields must NOT be carried. If `timestamp` and
+     * `last_good_at` agree on a partial run, the carry-forward did not happen -
+     * which is mutant A seen from the other side.
+     */
+    public function testTheRunOfRecordFieldsAreWrittenEveryRunAndNeverCarried(): void
+    {
+        $clean   = self::compose([], 318, false, '2026-11-03 00:00:00');
+        $partial = self::compose($clean, 180, true, '2026-11-03 04:00:00');
+
+        self::assertSame('2026-11-03 04:00:00', $partial['timestamp'], 'timestamp is THIS run');
+        self::assertNotSame(
+            $partial['timestamp'],
+            $partial['last_good_at'],
+            'timestamp moves every run while last_good_at moves only on a clean '
+                . 'one, so on a partial run they MUST differ'
+        );
+        self::assertSame('Cosmos', $partial['chain']);
+    }
+
+    /**
+     * Drive the production write path for one run.
+     *
+     * ⚠ $stats carries bulkUpsert's real shape, which deliberately has NO
+     * last_good_* keys - that absence is why the carry-forward has to exist.
+     *
+     * @param  array<string, mixed> $prevEntry
+     * @return array<string, mixed>
+     */
+    private static function compose(
+        array $prevEntry,
+        int $returnedCount,
+        bool $isPartial,
+        string $now
+    ): array {
+        require_once dirname(__DIR__) . '/Stubs/dead-marking-switch-stubs.php';
+
+        DeadMarkingOptionStub::$now = $now;
+
+        $m = self::reflect()->getMethod('composeStatsEntry');
+        $m->setAccessible(true);
+
+        /** @var array<string, mixed> $out */
+        $out = $m->invoke(
+            null,
+            [
+                'total'     => $returnedCount,
+                'new'       => 0,
+                'updated'   => 0,
+                'unchanged' => $returnedCount,
+                'refreshed' => 0,
+            ],
+            $prevEntry,
+            'Cosmos',
+            $returnedCount,
+            $isPartial
+        );
+
+        return $out;
+    }
+
+    /**
+     * ⚠⚠ THE FROZEN CLOCK MUST NOT LEAK. The stub's current_time() wins for
+     * every unqualified call reached from BCC\Trust\Onchain\Services, so a test
+     * that left $now set would hand a fixed stamp to unrelated suites in that
+     * namespace. Resetting here keeps it transparent outside these cases.
+     */
+    protected function tearDown(): void
+    {
+        if (class_exists(DeadMarkingOptionStub::class, false)) {
+            DeadMarkingOptionStub::reset();
+        }
+
+        parent::tearDown();
+    }
 }

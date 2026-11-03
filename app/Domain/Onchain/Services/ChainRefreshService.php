@@ -296,6 +296,71 @@ class ChainRefreshService
         \BCC\Core\DB\AdvisoryLock::release(self::LOCK_GROUP . ':' . $job);
     }
 
+    /**
+     * Compose one chain's stats entry, baseline persistence included.
+     *
+     * ⛔⛔ EXTRACTED SO THE WRITE PATH CAN BE EXECUTED, NOT ONLY READ.
+     * An independent review found that carry-forward and clean-only advance -
+     * the only two statements in this change that mutate persistent state -
+     * were pinned by STRING PRESENCE alone, and named two mutants that pass
+     * the whole suite: emptying the carry-forward bodies, and moving them
+     * BELOW the advance. The first restores the truncation ratchet this
+     * change exists to remove; the second freezes the baseline at its
+     * first-ever value, so every chain's minting is withheld once that stamp
+     * ages past BASELINE_MAX_AGE. Both are now killed behaviourally by
+     * PartialFetchBaselineTest's across-runs cases, which call THIS method.
+     *
+     * ⚠⚠ THE ORDER OF THE TWO BLOCKS IS LOAD-BEARING, not stylistic.
+     * Carry forward FIRST, so a run that came back partial keeps the last
+     * clean reference; advance ONLY on a clean fetch, so the newer value
+     * wins. Reversed, the carried value overwrites the fresh one and the
+     * baseline never moves again.
+     *
+     * ⚠ Nothing here is new behaviour. This is the same sequence that ran
+     * inline in index_validators(), moved verbatim so a test can drive it.
+     *
+     * @param  array{total: int, new: int, updated: int, unchanged: int, refreshed: int} $stats
+     * @param  array<string, mixed> $prevEntry this chain's previous entry, or [].
+     * @return array<string, mixed>
+     */
+    private static function composeStatsEntry(
+        array $stats,
+        array $prevEntry,
+        string $chainName,
+        int $returnedCount,
+        bool $isPartialFetch
+    ): array {
+        $entry = array_merge($stats, [
+            'chain'     => $chainName,
+            'timestamp' => current_time('mysql', true),
+            'partial'   => $isPartialFetch,
+        ]);
+
+        // ⚠ CARRY THE BASELINE FORWARD EXPLICITLY. array_merge above is
+        // built from $stats, which has no last_good_* keys, so without
+        // this the baseline would be DROPPED on every run and the
+        // relative test would never have anything to compare against.
+        if (isset($prevEntry['last_good_total'])) {
+            $entry['last_good_total'] = (int) $prevEntry['last_good_total'];
+        }
+        if (isset($prevEntry['last_good_at'])) {
+            $entry['last_good_at'] = (string) $prevEntry['last_good_at'];
+        }
+
+        // ⛔ THE BASELINE ADVANCES ONLY ON A CLEAN FETCH. This is the
+        // whole point: `total` above is written on every non-empty
+        // fetch including a partial one, so it cannot serve as the
+        // reference. last_good_total is the count from a fetch that
+        // passed detection, which is what truncation must be measured
+        // against.
+        if (!$isPartialFetch) {
+            $entry['last_good_total'] = $returnedCount;
+            $entry['last_good_at']    = current_time('mysql', true);
+        }
+
+        return $entry;
+    }
+
     // ── Validator Indexing (bulk — all validators per chain) ────────────────
 
     /**
@@ -501,33 +566,15 @@ class ChainRefreshService
                         if (!is_array($allStats)) {
                             $allStats = [];
                         }
-                        $entry = array_merge($stats, [
-                            'chain'     => $chain->name,
-                            'timestamp' => current_time('mysql', true),
-                            'partial'   => $isPartialFetch,
-                        ]);
-
-                        // ⚠ CARRY THE BASELINE FORWARD EXPLICITLY. array_merge above is
-                        // built from $stats, which has no last_good_* keys, so without
-                        // this the baseline would be DROPPED on every run and the
-                        // relative test would never have anything to compare against.
-                        if (isset($prevEntry['last_good_total'])) {
-                            $entry['last_good_total'] = (int) $prevEntry['last_good_total'];
-                        }
-                        if (isset($prevEntry['last_good_at'])) {
-                            $entry['last_good_at'] = (string) $prevEntry['last_good_at'];
-                        }
-
-                        // ⛔ THE BASELINE ADVANCES ONLY ON A CLEAN FETCH. This is the
-                        // whole point: `total` above is written on every non-empty
-                        // fetch including a partial one, so it cannot serve as the
-                        // reference. last_good_total is the count from a fetch that
-                        // passed detection, which is what truncation must be measured
-                        // against.
-                        if (!$isPartialFetch) {
-                            $entry['last_good_total'] = $returnedCount;
-                            $entry['last_good_at']    = current_time('mysql', true);
-                        }
+                        // ⚠ Baseline persistence lives in composeStatsEntry() so it can
+                        // be EXECUTED by a test rather than only matched as text.
+                        $entry = self::composeStatsEntry(
+                            $stats,
+                            $prevEntry,
+                            $chain->name,
+                            $returnedCount,
+                            $isPartialFetch
+                        );
 
                         $allStats[$chain->slug] = $entry;
                         update_option('bcc_onchain_indexer_stats', $allStats, false);
