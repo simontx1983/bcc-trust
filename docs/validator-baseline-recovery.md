@@ -29,9 +29,29 @@ miss:
 
 1. `markDeadValidators()` is skipped for the **whole run**, not just that chain,
    because its `UPDATE` carries no `chain_id`.
-2. Once `last_good_at` ages past `BASELINE_MAX_AGE` (7 days), that chain's
-   placeholder-page creation is withheld too — silently, apart from one `info`
-   line per run.
+2. That chain's placeholder-page creation stops **on the very first partial
+   run**, not later and not gradually. Both the mint allowlist and the
+   `page creation is withheld` log line sit inside the `if (!$isPartialFetch)`
+   branch, so a partial chain is never added to the mint set at all.
+
+⚠⚠ **An earlier version of this document got point 2 wrong in both halves**,
+and the correction matters because it changes what you go looking for. It said
+minting continued until `last_good_at` aged past `BASELINE_MAX_AGE` (7 days)
+and that the chain emitted one `info` line per run meanwhile. Neither is true:
+there is **no week of grace**, and a partial chain emits **no withheld line**.
+
+**The line a partial chain does emit** is a WARNING, once per run, and it is
+the one to grep for:
+
+```
+[Onchain] Partial fetch detected for <chain>: got N against baseline M
+(stored S). Dead-validator marking is skipped for the WHOLE RUN.
+```
+
+The 7-day `BASELINE_MAX_AGE` bound is real but applies to a different case: a
+chain that is **clean** while carrying a baseline stamp older than a week. That
+withholds minting for that one run and resolves itself, because the clean run
+writes a fresh stamp. It is not the sustained-drop case this document is about.
 
 ## ⚠ Confirm the drop is real first
 
@@ -66,20 +86,90 @@ Expect `last_good_total` and `last_good_at` alongside `total`, `partial` and
 `timestamp`. Record the two values you are about to remove, so the step is
 reversible by hand.
 
+⚠⚠ **The write must hold the cron's own lock.** `bcc_onchain_indexer_stats`
+is a SINGLE serialized option holding every chain's entry, so the clear is a
+read-modify-write over all of them. `bcc_index_validators` runs every 4 hours
+and rewrites that same option per chain. Without a lock, a run landing between
+your read and your write means either your clear is silently reverted, or —
+worse — **your stale snapshot overwrites every other chain's entry**,
+including a `last_good_total` the run had just advanced. The script below takes
+`bcc_cron:index_validators`, the exact lock `index_validators()` takes, so the
+two cannot interleave.
+
+⚠ It uses **raw `GET_LOCK` through `$wpdb`**, not `AdvisoryLock`: under
+`--skip-plugins` the plugin classes are not loaded, so `AdvisoryLock` does not
+exist in that process. The key is passed to `GET_LOCK` verbatim by that class,
+so the raw call and the plugin call contend for the same lock.
+
+⚠ Accepted cost: the cron takes its lock with timeout 0, so if a run fires
+while you hold it, **that run skips entirely** rather than waiting. One skipped
+index tick is cheaper than a corrupted option.
+
 ```bash
-# 2. Remove ONLY the two baseline keys, for ONE chain.
+# 2. Remove ONLY the two baseline keys, for ONE chain, under the cron's lock.
 wp eval-file - --skip-plugins --skip-themes <<'PHP'
 <?php
-$slug = 'osmosis';                      // <-- the one chain
-$all  = get_option('bcc_onchain_indexer_stats', []);
-if (!isset($all[$slug])) { echo "no entry for {$slug}\n"; return; }
+global $wpdb;
+$slug = 'osmosis';                    // <-- the one chain
+$lock = 'bcc_cron:index_validators';  // the SAME lock index_validators takes
 
-unset($all[$slug]['last_good_total'], $all[$slug]['last_good_at']);
-update_option('bcc_onchain_indexer_stats', $all, false);
+if ((int) $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, %d)', $lock, 0)) !== 1) {
+    echo "LOCK BUSY - an index run is in progress. Try again in a minute.\n";
+    return;
+}
 
-echo isset($all[$slug]['last_good_total']) ? "STILL SET\n" : "cleared {$slug}\n";
+try {
+    // Read INSIDE the lock, so no run can have written since.
+    $all = get_option('bcc_onchain_indexer_stats', []);
+    if (!is_array($all) || !isset($all[$slug])) {
+        echo "no entry for {$slug}\n";
+        return;
+    }
+
+    $hadTotal = $all[$slug]['last_good_total'] ?? '(absent)';
+    $hadAt    = $all[$slug]['last_good_at'] ?? '(absent)';
+    $others   = 0;
+    foreach ($all as $s => $e) {
+        if ($s !== $slug && isset($e['last_good_total'])) { $others++; }
+    }
+
+    unset($all[$slug]['last_good_total'], $all[$slug]['last_good_at']);
+    $ok = update_option('bcc_onchain_indexer_stats', $all, false);
+
+    // Verify from the DATABASE, not from the array we just edited.
+    wp_cache_delete('bcc_onchain_indexer_stats', 'options');
+    $fresh = get_option('bcc_onchain_indexer_stats', []);
+
+    $cleared = !isset($fresh[$slug]['last_good_total'])
+            && !isset($fresh[$slug]['last_good_at']);
+    $kept = 0;
+    foreach ($fresh as $s => $e) {
+        if ($s !== $slug && isset($e['last_good_total'])) { $kept++; }
+    }
+
+    printf("removed: total=%s at=%s\n", $hadTotal, $hadAt);
+    printf("update_option returned: %s\n", var_export($ok, true));
+    printf("%s\n", $cleared ? "VERIFIED cleared for {$slug}" : "FAILED - still set");
+    printf("other chains holding a baseline: %d before, %d after\n", $others, $kept);
+} finally {
+    $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock));
+}
 PHP
 ```
+
+⛔⛔ **Read `VERIFIED cleared`, not the return value.** An earlier version of
+this document checked `isset($all[$slug]['last_good_total'])` — the LOCAL array,
+two lines after `unset()` on it — so it printed `cleared` unconditionally, even
+if the write had failed. The script above re-reads from the database after
+dropping the object-cache entry, which is the only check that can fail.
+
+⚠ `update_option` returning `false` is **not** proof of failure: it also
+returns `false` when the stored value is unchanged. That is why it is printed
+for information and the re-read is the verdict.
+
+⚠ The before/after count of OTHER chains holding a baseline must be equal.
+If it dropped, the write clobbered someone else's entry and the lock did not
+do its job — restore from the values you recorded in step 1 and stop.
 
 ⚠ `--skip-plugins --skip-themes` is not optional. Booting the plugins fires the
 schema pass and the migration runner against that database, which is a much
@@ -146,7 +236,10 @@ read-only investigation above. Nothing is damaged by that outcome.
   separate switch (`bcc_onchain_dead_marking_enabled`, absent and therefore off)
   **and** the run-wide partial-fetch gate.
 - It does not delete, insert or modify a single validator row, page or post.
-- It does not help a chain whose fetch returns **empty**. An empty fetch writes
-  no stats at all, so there is no baseline to clear — that is a provider or
-  credential problem, and the log line is
+- It does not help a chain whose fetch returns **empty**. ⚠ The reason is not
+  that there is no baseline to clear — an earlier version of this document said
+  that and it is wrong. The empty branch simply never touches the stats option,
+  so a chain that already had a baseline keeps it sitting there untouched;
+  clearing it changes nothing because the chain writes no new one either. An
+  empty fetch is a provider or credential problem, and its log line is
   `[Onchain] Validator index returned empty for <chain>`.

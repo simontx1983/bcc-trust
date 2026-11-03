@@ -159,6 +159,38 @@ class ChainRefreshService
     private const BASELINE_MAX_AGE = 604800;
 
     /**
+     * Smallest baseline the RELATIVE test will act on.
+     *
+     * ⛔⛔ WITHOUT THIS, AN ORDINARY FLUCTUATION PINS A SMALL CHAIN
+     * PARTIAL FOREVER. A ratio is meaningless on a handful of validators:
+     * this file's own comments name kujira as legitimately returning 8, and
+     * at a baseline of 8 a return of 5 is a 37.5% drop - so it tripped the
+     * relative test. Losing 3 of 8 is an ordinary week on a small chain.
+     *
+     * ⚠ AND THE CONSEQUENCE WAS PERMANENT, not transient. A partial run
+     * never advances the baseline, so the chain reports partial on EVERY
+     * later run, its placeholder minting stops at once, and the run-wide
+     * $hasPartialFetch is pinned true - which would block
+     * markDeadValidators() for every chain if the switch were ever armed.
+     * The only exit is the manual procedure in
+     * docs/validator-baseline-recovery.md.
+     *
+     * 10 mirrors the guard `main` carried on the old rule
+     * (`$knownCount > 10 && ...`), which this change had dropped. It is
+     * deliberately a floor on the BASELINE and not on knownCount, because
+     * knownCount only grows and is the number the whole change exists to
+     * stop depending on.
+     *
+     * ⚠ THE COST, STATED: a small chain's truncation is not detectable by
+     * ratio at all. Nine of ten validators disappearing from a ten-validator
+     * chain reads clean, because no floor applies either - floor A needs
+     * over 200 stored and floor B needs a first index. That was `main`'s
+     * behaviour for the whole life of this code and it is not made worse
+     * here; what IS fixed is the false permanent flag.
+     */
+    private const RELATIVE_TEST_MIN_BASELINE = 10;
+
+    /**
      * Is this fetch partial? The whole detection rule, in one testable place.
      *
      * Rule 1, the relative test: a drop past 30% from the last CLEAN total.
@@ -193,7 +225,10 @@ class ChainRefreshService
         int $knownCount,
         int $baseline
     ): bool {
-        $relativeDrop = $baseline > 0
+        // ⚠ The minimum is part of the RULE, not an optimisation: see
+        // RELATIVE_TEST_MIN_BASELINE. It also subsumes the old `> 0` check,
+        // since an absent baseline reads 0.
+        $relativeDrop = $baseline > self::RELATIVE_TEST_MIN_BASELINE
             && ($returnedCount * 10) < ($baseline * 7);
 
         $absoluteFloor = ($knownCount > 200 && $returnedCount < 50)

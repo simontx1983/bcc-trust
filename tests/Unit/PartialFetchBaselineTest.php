@@ -187,10 +187,21 @@ final class PartialFetchBaselineTest extends TestCase
     {
         $code = self::code(self::source());
 
+        // ⚠ UPDATED WITH THE SMALL-CHAIN FIX. This used to pin
+        // `$baseline > 0` and say the gate was 'the baseline EXISTING,
+        // nothing more' - which is what let a ratio be applied to a handful
+        // of validators and pin a small chain partial forever. The gate is
+        // now a MINIMUM, and the constant is named so the threshold cannot
+        // be changed silently without this line moving too.
         self::assertStringContainsString(
-            '$relativeDrop = $baseline > 0',
+            '$relativeDrop = $baseline > self::RELATIVE_TEST_MIN_BASELINE',
             $code,
-            'the relative test is gated on the baseline EXISTING, nothing more'
+            'the relative test is gated on a MINIMUM baseline, not mere existence'
+        );
+        self::assertStringContainsString(
+            'private const RELATIVE_TEST_MIN_BASELINE = 10;',
+            $code,
+            'and the minimum is 10, mirroring the guard main carried'
         );
 
         // ⛔⛔⛔ AND IT MUST NOT BE GATED ON AGE. The regression
@@ -203,7 +214,7 @@ final class PartialFetchBaselineTest extends TestCase
         // unrelated block and asserted nothing about the statement. Span to the
         // statement TERMINATOR instead.
         $dropExpr = self::statementSpan($code, '$relativeDrop =');
-        self::assertStringContainsString('$baseline > 0', $dropExpr);
+        self::assertStringContainsString('RELATIVE_TEST_MIN_BASELINE', $dropExpr);
         foreach (['baselineUsable', 'baselineFresh', 'baselineAge', 'BASELINE_MAX_AGE'] as $forbidden) {
             self::assertStringNotContainsString(
                 $forbidden,
@@ -1389,6 +1400,87 @@ final class PartialFetchBaselineTest extends TestCase
         return $out;
     }
 
+    /**
+     * ⛔⛔ AN ORDINARY FLUCTUATION ON A SMALL CHAIN IS NOT A TRUNCATION.
+     *
+     * An independent review found this, and it was a REGRESSION against
+     * `main`: the old rule guarded the relative test with `$knownCount > 10`
+     * and this change had dropped the guard, so a ratio was applied to a
+     * handful of validators. Measured against the real predicate before the
+     * fix, kujira - which this file's own comments name as legitimately
+     * returning 8 - went PARTIAL the moment it returned 5.
+     *
+     * ⚠ AND THE FLAG WAS PERMANENT, not transient. A partial run never
+     * advances the baseline, so the chain reported partial on every later run,
+     * its placeholder minting stopped at once, and the run-wide
+     * $hasPartialFetch was pinned true - which would block
+     * markDeadValidators() for EVERY chain once the switch is armed. The only
+     * exit was the manual procedure in docs/validator-baseline-recovery.md.
+     */
+    #[DataProvider('smallChainCases')]
+    public function testASmallChainFluctuationIsNotPartial(
+        string $label,
+        int $returned,
+        int $known,
+        int $baseline,
+        bool $expected
+    ): void {
+        self::assertSame($expected, self::isPartial($returned, $known, $baseline), $label);
+    }
+
+    /** @return list<array{0:string,1:int,2:int,3:int,4:bool}> */
+    public static function smallChainCases(): array
+    {
+        return [
+            // ⛔ THE REGRESSION CASE. Before the guard this returned TRUE.
+            ['kujira returns 5 against a baseline of 8',      5,  10,   8, false],
+
+            // The rest of that chain's ordinary range, all legitimate.
+            ['kujira steady at 8',                            8,  10,   8, false],
+            ['kujira returns 6 of 8',                          6,  10,   8, false],
+            ['kujira returns 4 of 8',                          4,  10,   8, false],
+            ['a four-validator chain halves',                  2,   4,   3, false],
+
+            // ⚠ THE BOUNDARY, BOTH SIDES. The guard is a THRESHOLD, not a
+            // blanket exemption for whatever feels small, so a baseline one
+            // above the minimum must still be judged by ratio. Without the
+            // second row here the fix could be widened to exempt everything
+            // and the suite would not notice.
+            ['at the minimum: 1 against a baseline of 10',     1,  20,  10, false],
+            ['one above it: 7 against a baseline of 11',       7,  20,  11, true],
+
+            // ⭐ LARGER CHAINS UNCHANGED - this is what the guard must not cost.
+            ['dungeon returns 13 against a baseline of 19',   13,  27,  19, true],
+            ['dungeon steady at 19',                          19,  27,  19, false],
+            ['cosmos returns 120 against a baseline of 180', 120, 318, 180, true],
+            ['cosmos steady at 180',                         180, 318, 180, false],
+
+            // An absent baseline is still simply not compared.
+            ['no baseline at all',                             5,  10,   0, false],
+        ];
+    }
+
+    /**
+     * ⚠ THE EXEMPTION KEYS ON THE BASELINE, NOT ON knownCount. knownCount
+     * only grows - a validator that leaves the bonded set keeps its row - and
+     * it is the number this whole change exists to stop depending on. So a
+     * chain with many stale rows and a genuinely small current set must still
+     * be exempt from the ratio.
+     */
+    public function testTheExemptionKeysOnTheBaselineNotOnTheStoredCount(): void
+    {
+        self::assertFalse(
+            self::isPartial(5, 199, 8),
+            'a small baseline is exempt even with many stale rows stored'
+        );
+
+        // ⚠ ...but the absolute floor is a SEPARATE rule and still fires,
+        // which is what stops the exemption from becoming a hole.
+        self::assertTrue(
+            self::isPartial(5, 201, 8),
+            'floor A still catches it once the stored count passes 200'
+        );
+    }
     /**
      * ⚠⚠ THE FROZEN CLOCK MUST NOT LEAK. The stub's current_time() wins for
      * every unqualified call reached from BCC\Trust\Onchain\Services, so a test
