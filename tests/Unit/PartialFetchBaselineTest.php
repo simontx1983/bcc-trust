@@ -187,21 +187,31 @@ final class PartialFetchBaselineTest extends TestCase
     {
         $code = self::code(self::source());
 
-        // ⚠ UPDATED WITH THE SMALL-CHAIN FIX. This used to pin
-        // `$baseline > 0` and say the gate was 'the baseline EXISTING,
-        // nothing more' - which is what let a ratio be applied to a handful
-        // of validators and pin a small chain partial forever. The gate is
-        // now a MINIMUM, and the constant is named so the threshold cannot
-        // be changed silently without this line moving too.
+        // ⚠ THIS PIN HAS MOVED TWICE, WITH THE RULE EACH TIME. It first
+        // asserted `$baseline > 0` ('the baseline EXISTING, nothing more'),
+        // which applied a ratio to a handful of validators; then a bare
+        // minimum, which switched the ratio off below it entirely. It now
+        // pins TWO tiers and the ceiling's value, so neither the split nor
+        // the threshold can move without this line moving too.
         self::assertStringContainsString(
-            '$relativeDrop = $baseline > self::RELATIVE_TEST_MIN_BASELINE',
+            '$largeChainDrop = $baseline > self::SMALL_BASELINE_MAX',
             $code,
-            'the relative test is gated on a MINIMUM baseline, not mere existence'
+            'above the ceiling the ordinary 70% rule applies'
         );
         self::assertStringContainsString(
-            'private const RELATIVE_TEST_MIN_BASELINE = 10;',
+            '&& ($returnedCount * 2) < $baseline;',
             $code,
-            'and the minimum is 10, mirroring the guard main carried'
+            'at or below it a drop must exceed 50%'
+        );
+        self::assertStringContainsString(
+            '$relativeDrop = $largeChainDrop || $smallChainDrop;',
+            $code,
+            'and the two tiers compose - neither may be dropped'
+        );
+        self::assertStringContainsString(
+            'private const SMALL_BASELINE_MAX = 10;',
+            $code,
+            'the ceiling is 10, mirroring the guard main carried'
         );
 
         // ⛔⛔⛔ AND IT MUST NOT BE GATED ON AGE. The regression
@@ -213,8 +223,8 @@ final class PartialFetchBaselineTest extends TestCase
         // BRACES - and an assignment expression has none, so it spanned to some
         // unrelated block and asserted nothing about the statement. Span to the
         // statement TERMINATOR instead.
-        $dropExpr = self::statementSpan($code, '$relativeDrop =');
-        self::assertStringContainsString('RELATIVE_TEST_MIN_BASELINE', $dropExpr);
+        $dropExpr = self::statementSpan($code, '$largeChainDrop =');
+        self::assertStringContainsString('SMALL_BASELINE_MAX', $dropExpr);
         foreach (['baselineUsable', 'baselineFresh', 'baselineAge', 'BASELINE_MAX_AGE'] as $forbidden) {
             self::assertStringNotContainsString(
                 $forbidden,
@@ -1441,13 +1451,31 @@ final class PartialFetchBaselineTest extends TestCase
             ['kujira returns 4 of 8',                          4,  10,   8, false],
             ['a four-validator chain halves',                  2,   4,   3, false],
 
-            // ⚠ THE BOUNDARY, BOTH SIDES. The guard is a THRESHOLD, not a
-            // blanket exemption for whatever feels small, so a baseline one
-            // above the minimum must still be judged by ratio. Without the
-            // second row here the fix could be widened to exempt everything
-            // and the suite would not notice.
-            ['at the minimum: 1 against a baseline of 10',     1,  20,  10, false],
-            ['one above it: 7 against a baseline of 11',       7,  20,  11, true],
+            // ⛔ A LARGE DROP DOWN HERE IS STILL A TRUNCATION. An earlier
+            // version of this change exempted small baselines from the ratio
+            // ENTIRELY, so these read clean - an 88% loss judged healthy. The
+            // 50% tier is what closes that.
+            ['kujira returns 3 of 8 (63% loss)',               3,  10,   8, true],
+            ['kujira returns 2 of 8',                          2,  10,   8, true],
+            ['kujira returns 1 of 8 (88% loss)',               1,  10,   8, true],
+            ['4 against a baseline of 10 (60% loss)',          4,  20,  10, true],
+
+            // ⚠ THE 50% BOUNDARY, BOTH SIDES. Exactly half is noise; more
+            // than half is evidence.
+            ['exactly half: 4 of 8',                           4,  10,   8, false],
+            ['just past half: 3 of 8',                         3,  10,   8, true],
+            ['exactly half: 5 of 10',                          5,  20,  10, false],
+            ['just past half: 4 of 10',                        4,  20,  10, true],
+
+            // ⚠ THE RESIDUAL HOLE, PINNED SO IT IS A CHOICE AND NOT A
+            // SURPRISE: one of two is exactly 50% and stays clean.
+            ['1 of 2 is noise, not truncation',                1,   4,   2, false],
+            ['1 of 3 is past half',                            1,   4,   3, true],
+
+            // ⚠ THE TIER BOUNDARY, BOTH SIDES. At 11 the 70% rule takes
+            // over, so a 36% loss is partial there and clean at 10.
+            ['one above the ceiling: 7 of 11',                 7,  20,  11, true],
+            ['at the ceiling: 7 of 10 is only 30%',            7,  20,  10, false],
 
             // ⭐ LARGER CHAINS UNCHANGED - this is what the guard must not cost.
             ['dungeon returns 13 against a baseline of 19',   13,  27,  19, true],

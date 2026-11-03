@@ -13,7 +13,24 @@ procedure, not a feature request.
 
 `ChainRefreshService` compares each fetch against `last_good_total` — the count
 from the last fetch that passed detection — and flags the run partial when
-`returned * 10 < baseline * 7`, i.e. the fetch came back under 70% of the last
+two tiers, because a ratio alone is meaningless on a handful of validators:
+
+| the chain's baseline | a run is flagged partial when |
+|---|---|
+| **11 or more** | `returned * 10 < baseline * 7` — under **70%** of it |
+| **10 or fewer** | `returned * 2 < baseline` — a loss of **more than 50%** |
+
+⚠ **Check which tier your chain is in before reading anything below.** At a
+baseline of 8, returning 7, 6, 5 or 4 is healthy and returning 3, 2 or 1 is
+partial — so kujira losing 3 of 8 validators raises nothing, by design. The
+ceiling is `SMALL_BASELINE_MAX` in `ChainRefreshService`. ⚠ At a baseline of 2
+a drop to 1 is exactly 50% and is **never** flagged; a baseline of 1 cannot be
+flagged by ratio at all.
+
+Two absolute floors sit beside the ratio and are unaffected by the tiers: over
+200 stored rows returning under 50, and a first-ever index returning under 30.
+
+The sustained-drop case below is about the fetch coming back under the last
 clean one. Two different situations produce that flag:
 
 | Situation | What to do |
@@ -43,9 +60,18 @@ there is **no week of grace**, and a partial chain emits **no withheld line**.
 **The line a partial chain does emit** is a WARNING, once per run, and it is
 the one to grep for:
 
+⚠ It is **one line** in the log. Grep a short fragment rather than pasting the
+whole sentence — an earlier version of this document wrapped it across two
+lines, so copying the block as a pattern matched nothing:
+
+```bash
+grep 'Partial fetch detected for' ~/domains/<site>/bcc-logs/bcc-*.log | tail -20
 ```
-[Onchain] Partial fetch detected for <chain>: got N against baseline M
-(stored S). Dead-validator marking is skipped for the WHOLE RUN.
+
+The full line reads:
+
+```
+[Onchain] Partial fetch detected for <chain>: got N against baseline M (stored S). Dead-validator marking is skipped for the WHOLE RUN.
 ```
 
 The 7-day `BASELINE_MAX_AGE` bound is real but applies to a different case: a
@@ -136,9 +162,13 @@ try {
     unset($all[$slug]['last_good_total'], $all[$slug]['last_good_at']);
     $ok = update_option('bcc_onchain_indexer_stats', $all, false);
 
-    // Verify from the DATABASE, not from the array we just edited.
-    wp_cache_delete('bcc_onchain_indexer_stats', 'options');
-    $fresh = get_option('bcc_onchain_indexer_stats', []);
+    // Verify by reading wp_options DIRECTLY - no get_option, no cache.
+    $raw   = $wpdb->get_var($wpdb->prepare(
+        "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
+        'bcc_onchain_indexer_stats'
+    ));
+    $fresh = is_string($raw) ? maybe_unserialize($raw) : [];
+    if (!is_array($fresh)) { $fresh = []; }
 
     $cleared = !isset($fresh[$slug]['last_good_total'])
             && !isset($fresh[$slug]['last_good_at']);
@@ -160,8 +190,15 @@ PHP
 ⛔⛔ **Read `VERIFIED cleared`, not the return value.** An earlier version of
 this document checked `isset($all[$slug]['last_good_total'])` — the LOCAL array,
 two lines after `unset()` on it — so it printed `cleared` unconditionally, even
-if the write had failed. The script above re-reads from the database after
-dropping the object-cache entry, which is the only check that can fail.
+if the write had failed. The script above reads the row back, which is the only
+check that can fail.
+
+⚠ **It reads `wp_options` directly rather than calling `get_option()`.** A
+`wp_cache_delete(..., 'options')` plus `get_option()` also works while this
+option stays non-autoloaded — that is the group a non-autoloaded option is
+cached in — but `get_option()` consults `wp_load_alloptions()` **first**, so the
+correctness of the check would depend on the option's autoload state. A direct
+`SELECT` cannot be served from any cache and needs no such reasoning.
 
 ⚠ `update_option` returning `false` is **not** proof of failure: it also
 returns `false` when the stored value is unchanged. That is why it is printed
@@ -190,8 +227,22 @@ foreach (get_option('bcc_onchain_indexer_stats', []) as $slug => $e) {
 PHP
 ```
 
-Every other chain must still show a number. Only the one you named should read
-`ABSENT`.
+Every other chain must still show a number.
+
+⚠⚠ **The chain you cleared may already show a number again, and that is
+SUCCESS, not failure.** This step runs outside the lock, and `bcc_index_validators`
+fires every 4 hours. Its next clean run writes that chain a fresh
+`last_good_total` from its own return — which is the entire point of clearing.
+So read this step as:
+
+| the cleared chain shows | meaning |
+|---|---|
+| `ABSENT` | cleared, and no run has happened yet — the next one re-baselines it |
+| a number **different** from the one you recorded in step 1 | a run has already re-baselined it. Done. |
+| the **same** number you recorded in step 1 | the clear did not take — go back to step 2 |
+
+⚠ Every OTHER chain must still show a number. If one reads `ABSENT` that you
+did not clear, a write clobbered it — restore from step 1's record and stop.
 
 ## What the next two scheduled runs do
 

@@ -159,7 +159,44 @@ class ChainRefreshService
     private const BASELINE_MAX_AGE = 604800;
 
     /**
-     * Smallest baseline the RELATIVE test will act on.
+     * Largest baseline treated as a SMALL chain by the relative test.
+     *
+     * ⛔⛔ THE RELATIVE TEST IS TWO-TIERED, AND BOTH TIERS ACT.
+     * At or below this ceiling a drop must exceed 50% to count; above it the
+     * ordinary 70% rule applies. An earlier version of this change exempted
+     * small baselines from the ratio ENTIRELY, which fixed one bug and opened
+     * its mirror image - see below.
+     *
+     * ⚠ WHY A RATIO ALONE IS WRONG DOWN HERE. This file's own comments name
+     * kujira as legitimately returning 8, and at a baseline of 8 a return of 5
+     * is a 37.5% drop - so the 70% rule flagged it. Losing 3 of 8 is an
+     * ordinary week on a small chain, and the flag was PERMANENT: a partial run
+     * never advances the baseline, so the chain reported partial on every later
+     * run, its minting stopped at once, and the run-wide $hasPartialFetch was
+     * pinned true. The only exit was the manual procedure in
+     * docs/validator-baseline-recovery.md.
+     *
+     * ⚠⚠ AND WHY AN OUTRIGHT EXEMPTION IS ALSO WRONG. With the ratio simply
+     * switched off below the ceiling, EVERY truncation became invisible:
+     * measured through the real predicate, a baseline of 8 returning 1 - an 88%
+     * loss - read clean, and no floor covers it (floor A needs over 200 stored,
+     * floor B needs a first index). The 50% tier is what closes that without
+     * bringing back the false positive.
+     *
+     * Measured at baseline 8: returning 7, 6, 5 or 4 is clean; returning 3, 2
+     * or 1 is partial. The boundary sits between a 50% and a 63% loss.
+     *
+     * ⚠ THE RESIDUAL HOLE, STATED: at a baseline of 2 a drop to 1 is exactly
+     * 50% and stays clean, and a baseline of 1 can never be flagged by ratio at
+     * all. That is accepted - one validator of noise on a two-validator chain
+     * is not evidence of truncation.
+     *
+     * ⚠ BOTH NUMBERS ARE JUDGEMENTS, NOT MEASUREMENTS. 10 mirrors the guard
+     * `main` carried on the old rule (`$knownCount > 10 && ...`); 50% is chosen
+     * to sit above the 37.5% case the comments call ordinary. Small-chain
+     * run-to-run variance has NOT been measured, because kujira's fetch has
+     * returned empty since its last stats entry on 2026-08-03, so there is no
+     * recent variance data for any small chain to calibrate against.
      *
      * ⛔⛔ WITHOUT THIS, AN ORDINARY FLUCTUATION PINS A SMALL CHAIN
      * PARTIAL FOREVER. A ratio is meaningless on a handful of validators:
@@ -188,7 +225,7 @@ class ChainRefreshService
      * behaviour for the whole life of this code and it is not made worse
      * here; what IS fixed is the false permanent flag.
      */
-    private const RELATIVE_TEST_MIN_BASELINE = 10;
+    private const SMALL_BASELINE_MAX = 10;
 
     /**
      * Is this fetch partial? The whole detection rule, in one testable place.
@@ -225,11 +262,27 @@ class ChainRefreshService
         int $knownCount,
         int $baseline
     ): bool {
-        // ⚠ The minimum is part of the RULE, not an optimisation: see
-        // RELATIVE_TEST_MIN_BASELINE. It also subsumes the old `> 0` check,
-        // since an absent baseline reads 0.
-        $relativeDrop = $baseline > self::RELATIVE_TEST_MIN_BASELINE
+        // ⚠ TWO TIERS, AND THE SPLIT IS PART OF THE RULE: see
+        // SMALL_BASELINE_MAX. Integer arithmetic on both, deliberately -
+        // (int) ($baseline * 0.7) sits one BELOW 70% for 180 and that
+        // off-by-one was a real defect here.
+        //
+        // ⚠ `$baseline > 0` ON THE SMALL TIER IS EXPLICIT, NOT LOAD-BEARING,
+        // and a mutation control is what established the difference: deleting
+        // it SURVIVED the whole suite. It cannot change a reachable result,
+        // because `$returnedCount * 2 < 0` is unsatisfiable for a count that
+        // is never negative, and baselineTotal() clamps the baseline to >= 0.
+        // It is kept because 'an absent baseline compares against nothing' is
+        // worth saying out loud rather than leaving to the arithmetic - but it
+        // is an EQUIVALENT MUTANT, so no test can kill it and none pretends to.
+        $largeChainDrop = $baseline > self::SMALL_BASELINE_MAX
             && ($returnedCount * 10) < ($baseline * 7);
+
+        $smallChainDrop = $baseline > 0
+            && $baseline <= self::SMALL_BASELINE_MAX
+            && ($returnedCount * 2) < $baseline;
+
+        $relativeDrop = $largeChainDrop || $smallChainDrop;
 
         $absoluteFloor = ($knownCount > 200 && $returnedCount < 50)
             || ($knownCount === 0 && $returnedCount > 0 && $returnedCount < 30);
