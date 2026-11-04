@@ -340,6 +340,8 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-nft-selections.php';
 // demand + scam signals behind the Verify Collections queue.
 require_once BCC_TRUST_PATH . 'includes/database/schema-collection-signals.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-claims.php';
+// Shared operator branding plus optional per-validator-page overrides.
+require_once BCC_TRUST_PATH . 'includes/database/schema-operator-profiles.php';
 // Validator messaging — durable first-activation record (one row per
 // validator page; the pre-claim backlog belongs to first activation
 // only, transfers never replay it).
@@ -474,6 +476,7 @@ function bcc_onchain_ensure_schema(): bool {
     bcc_onchain_create_user_nft_selections_table();
     bcc_onchain_create_collection_signals_table();
     bcc_onchain_create_claims_table();
+    bcc_onchain_create_operator_profiles_table();
     // Validator messaging first-activation record
     bcc_create_validator_msg_activation_table();
     bcc_create_validator_msg_queue_table();

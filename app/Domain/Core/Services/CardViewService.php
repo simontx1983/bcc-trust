@@ -47,6 +47,7 @@ use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\Permission as PermissionShape;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Repositories\OperatorProfileRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorMsgActivationRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
@@ -81,6 +82,7 @@ if (!defined('ABSPATH')) {
  *   attestation_active_counts?: array<int, int>,
  *   attestation_revoked_counts?: array<int, int>,
  *   validator_rows?: array<int, list<ValidatorCardRow>>,
+ *   operator_profiles?: array<int, array{brand_name: string, bio: string, website_url: string, x_url: string, discord_url: string, telegram_url: string, logo_attachment_id: int|null}>,
  *   page_entities?: array<int, array{entity_type: string, entity_id: int}>
  * }
  *
@@ -306,6 +308,18 @@ final class CardViewService
             ? ($prefetched['validator_logos'][$pageId] ?? null)
             : null;
 
+        $operatorProfile = null;
+        if ($kind === 'validator') {
+            if ($prefetched !== null && isset($prefetched['operator_profiles'])) {
+                $operatorProfile = $prefetched['operator_profiles'][$pageId] ?? null;
+            } else {
+                $operators = ClaimRepository::resolveVerifiedOperatorForPages([$pageId]);
+                $operatorProfile = (new OperatorProfileRepository())
+                    ->findPublicForResolvedPages($operators)[$pageId] ?? null;
+            }
+        }
+        $operatorProfileLogo = self::operatorProfileLogoUrl($operatorProfile);
+
         // ⛔⛔ A VALIDATOR PROFILE SHOWS THE CURRENT MONIKER.
         //
         // $name above is post_title, which ValidatorPageMinter writes ONCE
@@ -339,6 +353,10 @@ final class CardViewService
             'handle'              => $handle,
             'card_kind'           => $kind,
             'bio'                 => self::resolvePageBio($post),
+            // Validator community branding is separate from chain identity
+            // and from the frozen post title/slug. Unclaimed and ambiguous
+            // pages receive null rather than another operator's profile.
+            'operator_profile'   => self::shapeOperatorProfile($operatorProfile, $operatorProfileLogo),
             'trust_score'         => $trustScore,
             'reputation_tier'     => $tier,
             // v1.57: entity cards now carry the SAME trust vocabulary as
@@ -419,7 +437,7 @@ final class CardViewService
                 $name,
                 'tier',
                 $rep['reputation_tier'],
-                self::resolvePageAvatarUrl($pageId, $validatorRows, $validatorLogo)
+                self::resolvePageAvatarUrl($pageId, $validatorRows, $validatorLogo, $operatorProfileLogo)
             ),
             'stats'               => self::buildPageStats($trustScore, $rm),
             // Where a message to this entity would GO — the frontend
@@ -720,6 +738,10 @@ final class CardViewService
             // §K3 — chains is page-only. Always null on member cards
             // for shape uniformity.
             'chains'              => null,
+            // Operator branding is validator-page-only. Always null here
+            // for shape uniformity (§2.9 envelope: the key is always
+            // present, so a client never sees undefined vs null).
+            'operator_profile'   => null,
             // §N8 — members are always claimed (a wp_user exists by
             // being on the platform). WANTED corner stamp targets
             // unclaimed page entities (validator/project/creator); on
@@ -890,6 +912,10 @@ final class CardViewService
             'endorse_unlock_hint' => null,
             'viewer_attestation'  => null,
             'chains'              => null,
+            // Operator branding is validator-page-only. Always null here
+            // for shape uniformity (§2.9 envelope: the key is always
+            // present, so a client never sees undefined vs null).
+            'operator_profile'   => null,
             'is_claimed'          => true,
             // Communities aren't on-chain-claimed — always false, emitted
             // for shape uniformity (mirrors is_claimed above).
@@ -1591,17 +1617,67 @@ final class CardViewService
     }
 
     /**
-     * Resolve a peepso-page's avatar URL — PeepSoPagePhoto first, post
-     * thumbnail second. Empty string when neither resolves; the
-     * frontend renders the initials monogram fallback in that case.
+     * @param array{brand_name: string, bio: string, website_url: string, x_url: string, discord_url: string, telegram_url: string, logo_attachment_id: int|null}|null $profile
+     */
+    private static function operatorProfileLogoUrl(?array $profile): ?string
+    {
+        $attachmentId = $profile['logo_attachment_id'] ?? null;
+        if (!is_int($attachmentId) || $attachmentId <= 0) {
+            return null;
+        }
+
+        // ⚠ BOUNDED SIZE, NOT 'full'. BlogCoverImageWriter accepts up to
+        // 8 MiB and 24 million pixels, and this URL is rendered on every
+        // validator card including directory grids — 'full' shipped the
+        // original to each one. 'medium' matches the card-avatar
+        // convention (resolvePageAvatarUrl uses 'thumbnail') and
+        // wp_get_attachment_image_url falls back to the full URL when the
+        // intermediate size is missing, so nothing breaks for an image
+        // uploaded before this size existed.
+        $url = wp_get_attachment_image_url($attachmentId, 'medium');
+        return is_string($url) && $url !== '' ? $url : null;
+    }
+
+    /**
+     * @param array{brand_name: string, bio: string, website_url: string, x_url: string, discord_url: string, telegram_url: string, logo_attachment_id: int|null}|null $profile
+     * @return array{brand_name: string, bio: string, website_url: string, socials: array{x: string, discord: string, telegram: string}, logo_url: string|null}|null
+     */
+    private static function shapeOperatorProfile(?array $profile, ?string $logoUrl): ?array
+    {
+        if ($profile === null) {
+            return null;
+        }
+
+        return [
+            'brand_name'  => $profile['brand_name'],
+            'bio'         => $profile['bio'],
+            'website_url' => $profile['website_url'],
+            'socials'     => [
+                'x'        => $profile['x_url'],
+                'discord'  => $profile['discord_url'],
+                'telegram' => $profile['telegram_url'],
+            ],
+            'logo_url'    => $logoUrl,
+        ];
+    }
+
+    /**
+     * Resolve a peepso-page's avatar URL — page upload, shared operator
+     * branding, then the chain-imported logo. Empty string when none
+     * resolves; the frontend renders the initials monogram fallback.
      *
      * `$validatorRows` (when non-null) is the page's slice of the
      * PageCardPrefetcher batch — its first row's logo_url replaces the
-     * findLogoByPageId query in step 3.
+     * findLogoByPageId query in the final step.
      *
      * @phpstan-param list<ValidatorCardRow>|null $validatorRows
      */
-    private static function resolvePageAvatarUrl(int $pageId, ?array $validatorRows = null, ?string $batchedValidatorLogo = null): string
+    private static function resolvePageAvatarUrl(
+        int $pageId,
+        ?array $validatorRows = null,
+        ?string $batchedValidatorLogo = null,
+        ?string $operatorProfileLogo = null
+    ): string
     {
         // 1. PeepSo page avatar (manual upload).
         if (class_exists('PeepSoPagePhoto')) {
@@ -1621,7 +1697,13 @@ final class CardViewService
             return $thumb;
         }
 
-        // 3. Auto-imported validator logo (self-hosted). Lowest precedence,
+        // 3. Shared operator branding. A page-specific upload above wins;
+        // one account logo then carries consistently across its chains.
+        if ($operatorProfileLogo !== null && $operatorProfileLogo !== '') {
+            return $operatorProfileLogo;
+        }
+
+        // 4. Auto-imported validator logo (self-hosted). Lowest precedence,
         //    so a claimer/manual image above always overrides it.
         if ($validatorRows !== null) {
             $first = $validatorRows[0] ?? null;
@@ -1643,7 +1725,7 @@ final class CardViewService
             return $logo;
         }
 
-        // 4. Empty → frontend renders the initials monogram fallback.
+        // 5. Empty → frontend renders the initials monogram fallback.
         return '';
     }
 
