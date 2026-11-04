@@ -1400,6 +1400,8 @@ final class Plugin
         // Rank Phase 8: once-only member appeal on a misconduct finding
         // (own finding only; §15.5)
         \BCC\Trust\Core\REST\MeFindingAppealEndpoint::register();
+        // Operator dashboard: the viewer's verified validator pages (§4)
+        \BCC\Trust\Core\REST\MeValidatorPagesEndpoint::register();
 
         // V1 contract: paginated Halls catalog + viewer membership (§4.7)
         \BCC\Trust\Core\REST\HallsEndpoint::register();

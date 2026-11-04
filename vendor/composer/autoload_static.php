@@ -235,6 +235,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\REST\\MeProgressionEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/MeProgressionEndpoint.php',
         'BCC\\Trust\\Core\\REST\\MeReliabilityEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/MeReliabilityEndpoint.php',
         'BCC\\Trust\\Core\\REST\\MeToursSeenEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/MeToursSeenEndpoint.php',
+        'BCC\\Trust\\Core\\REST\\MeValidatorPagesEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/MeValidatorPagesEndpoint.php',
         'BCC\\Trust\\Core\\REST\\MessagesEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/MessagesEndpoint.php',
         'BCC\\Trust\\Core\\REST\\MyAccountActivityEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/MyAccountActivityEndpoint.php',
         'BCC\\Trust\\Core\\REST\\MyAccountEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/MyAccountEndpoint.php',
