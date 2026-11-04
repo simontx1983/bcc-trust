@@ -85,6 +85,7 @@ return array(
     'BCC\\Trust\\Core\\REST\\MeProgressionEndpoint' => $baseDir . '/app/Domain/Core/REST/MeProgressionEndpoint.php',
     'BCC\\Trust\\Core\\REST\\MeReliabilityEndpoint' => $baseDir . '/app/Domain/Core/REST/MeReliabilityEndpoint.php',
     'BCC\\Trust\\Core\\REST\\MeToursSeenEndpoint' => $baseDir . '/app/Domain/Core/REST/MeToursSeenEndpoint.php',
+    'BCC\\Trust\\Core\\REST\\MeValidatorPagesEndpoint' => $baseDir . '/app/Domain/Core/REST/MeValidatorPagesEndpoint.php',
     'BCC\\Trust\\Core\\REST\\MessagesEndpoint' => $baseDir . '/app/Domain/Core/REST/MessagesEndpoint.php',
     'BCC\\Trust\\Core\\REST\\MyAccountActivityEndpoint' => $baseDir . '/app/Domain/Core/REST/MyAccountActivityEndpoint.php',
     'BCC\\Trust\\Core\\REST\\MyAccountEndpoint' => $baseDir . '/app/Domain/Core/REST/MyAccountEndpoint.php',

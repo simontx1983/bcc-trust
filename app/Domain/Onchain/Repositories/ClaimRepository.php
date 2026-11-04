@@ -1013,4 +1013,99 @@ class ClaimRepository {
         ));
     }
 
+
+    /**
+     * Every validator page this user has a VERIFIED operator claim on,
+     * across every chain — the operator dashboard's only data source.
+     *
+     * ⭐ MULTI-CHAIN BY CONSTRUCTION, NOT BY A FLAG. The claims table's
+     * only uniqueness is `uq_user_entity (user_id, entity_type, entity_id)`
+     * and the exclusivity lock in createExclusiveClaim() is keyed
+     * `bcc_claim:{entityType}:{entityId}:{role}`. Neither is scoped to a
+     * user or a chain, so one account holds as many operator claims as it
+     * can prove and a claim on one chain cannot block a claim on another.
+     * This read must never introduce a narrower rule than the table does.
+     *
+     * ⚠ Sibling of listVerifiedValidatorOperatorClaims(), which is the
+     * provisioning sweep's read: that one is NOT user-scoped and selects
+     * only the ids the sweep needs. This one is user-scoped and carries
+     * the display columns. They are deliberately separate queries rather
+     * than one with an optional predicate, because the sweep's bound
+     * (LIMIT 500 over all users) and this one's (per user) are different
+     * safety properties.
+     *
+     * The page join casts postmeta's LONGTEXT meta_value to UNSIGNED
+     * rather than casting v.id to CHAR — the other direction trips a
+     * collation mismatch on this MySQL build (see
+     * ValidatorRepository::findMissingPlaceholderPage()).
+     *
+     * ⚠ A claim whose page has been deleted yields page_id NULL rather
+     * than dropping the row: the operator still holds the claim, and the
+     * dashboard must be able to say so instead of silently losing it.
+     *
+     * @return list<object{
+     *     claim_id: numeric-string,
+     *     claim_role: string,
+     *     claim_status: string,
+     *     validator_id: numeric-string,
+     *     chain_id: numeric-string,
+     *     chain_slug: string|null,
+     *     chain_name: string|null,
+     *     chain_type: string|null,
+     *     moniker: string|null,
+     *     operator_address: string,
+     *     validator_status: string,
+     *     page_id: numeric-string|null,
+     *     page_slug: string|null
+     * }>
+     */
+    public static function listVerifiedValidatorPagesForUser(int $userId, int $limit = 100): array {
+        if ($userId <= 0 || $limit <= 0) {
+            return [];
+        }
+        if ($limit > 200) {
+            $limit = 200;
+        }
+
+        global $wpdb;
+        $table      = self::table();
+        $validators = \BCC\Core\DB\DB::table('onchain_validators');
+        $chains     = \BCC\Core\DB\DB::table('chains');
+
+        /** @var list<object{claim_id: numeric-string, claim_role: string, claim_status: string, validator_id: numeric-string, chain_id: numeric-string, chain_slug: string|null, chain_name: string|null, chain_type: string|null, moniker: string|null, operator_address: string, validator_status: string, page_id: numeric-string|null, page_slug: string|null}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT cl.id            AS claim_id,
+                    cl.claim_role    AS claim_role,
+                    cl.status        AS claim_status,
+                    v.id             AS validator_id,
+                    v.chain_id       AS chain_id,
+                    c.slug           AS chain_slug,
+                    c.name           AS chain_name,
+                    c.chain_type     AS chain_type,
+                    v.moniker        AS moniker,
+                    v.operator_address AS operator_address,
+                    v.status         AS validator_status,
+                    p.ID             AS page_id,
+                    p.post_name      AS page_slug
+               FROM {$table} cl
+              INNER JOIN {$validators} v ON v.id = cl.entity_id
+               LEFT JOIN {$chains} c ON c.id = v.chain_id
+               LEFT JOIN {$wpdb->postmeta} pm
+                      ON pm.meta_key = '_bcc_onchain_validator_id'
+                     AND CAST(pm.meta_value AS UNSIGNED) = v.id
+               LEFT JOIN {$wpdb->posts} p
+                      ON p.ID = pm.post_id
+                     AND p.post_type = 'peepso-page'
+              WHERE cl.user_id     = %d
+                AND cl.entity_type = 'validator'
+                AND cl.claim_role  = 'operator'
+                AND cl.status      = 'verified'
+              ORDER BY c.name ASC, v.id ASC
+              LIMIT %d",
+            $userId,
+            $limit
+        ));
+
+        return $rows ?: [];
+    }
 }

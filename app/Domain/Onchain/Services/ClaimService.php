@@ -252,24 +252,87 @@ class ClaimService {
     }
 
     /**
-     * Match wallet to validator operator address.
-     * For Cosmos: the operator address (valoper) is derived from the same key as the wallet address.
+     * Does one of the viewer's VERIFIED wallets prove operator authority
+     * over this validator?
+     *
+     * ⚠⚠ CASE FOLDING IS PER CHAIN FAMILY, AND THAT IS A SECURITY
+     * PROPERTY, NOT A STYLE CHOICE. The previous version lowercased both
+     * sides before every comparison. That is right for EVM — hex is
+     * case-insensitive and EIP-55 checksum casing carries no identity —
+     * and WRONG for base58 and SS58, where upper and lower case are
+     * DISTINCT characters. Folding a base58 address loses information, so
+     * two different addresses can compare equal after folding. Solana
+     * (base58) and Polkadot (SS58) are both in that family, so the
+     * comparison is now case-sensitive everywhere except EVM.
+     *
+     * ⛔ Nothing here may match on a label, a moniker, or a substring.
+     * Authority is only ever: the same key, proven by a signature that
+     * WalletVerifier already checked before the wallet was linked.
+     *
+     * Per family:
+     *
+     *   cosmos   — the wallet is `cosmos1…` and the operator address is
+     *              `cosmosvaloper1…`. Same 20 bytes, different bech32 HRP,
+     *              and the checksum differs by HRP, so a suffix compare is
+     *              invalid. Decode both and compare raw bytes.
+     *   polkadot — `operator_address` is the validator's STASH account
+     *              (PolkadotFetcher::stashAddress / mapValidator), which is
+     *              an account the operator holds — unlike a Solana identity
+     *              key, which lives on the validator host. A stash key can
+     *              be signed with from a browser extension, so this is a
+     *              legitimate proof. Compared case-sensitively as SS58.
+     *              ⚠ ASSUMPTION STATED: both sides must already be the SAME
+     *              SS58 ENCODING. WalletIdentityService canonicalises a
+     *              linked Polkadot address to prefix-0 via
+     *              PolkadotSignatureVerifier::$lastCanonicalAddress, and the
+     *              indexer stores whatever Subscan returned. If those two
+     *              encodings ever differ, this comparison FAILS CLOSED —
+     *              the claim is refused, never granted. PHP has no SS58
+     *              decoder (the verifier delegates sr25519 to the Next.js
+     *              route), so a public-key-level compare is not available
+     *              here; refusing is the correct behaviour until it is.
+     *   evm      — case-insensitive hex. Retained exactly as before, so no
+     *              existing EVM match changes behaviour.
+     *   solana   — `operator_address` is the vote account's `nodePubkey`,
+     *              the validator IDENTITY key, and the authority that
+     *              actually controls a vote account — `authorizedWithdrawer`
+     *              — is not stored anywhere. A base58 exact compare is kept
+     *              deliberately: it cannot be satisfied by an ordinary
+     *              Phantom wallet, which is the honest outcome. ⛔ Do NOT
+     *              relax this to make Solana claims "work"; it would mean
+     *              asking operators to load a hot signing key into a
+     *              browser wallet. See the Solana note in ClaimFlow.
      *
      * @param list<WalletWithChain> $wallets
      * @param EntityForClaim $entity
      * @return array{wallet_address: string, chain_id: int, role: string}|null
      */
     private static function matchValidator(array $wallets, object $entity): ?array {
-        $operatorAddr = strtolower($entity->operator_address ?? '');
-        if (!$operatorAddr) {
+        $operatorRaw = trim((string) ($entity->operator_address ?? ''));
+        if ($operatorRaw === '') {
             return null;
         }
 
-        foreach ($wallets as $wallet) {
-            $addr = strtolower($wallet->wallet_address);
+        $chainType = (string) ($entity->chain_type ?? '');
+        // EVM is the ONLY family whose addresses may be case-folded.
+        $foldCase = ($chainType === 'evm');
 
-            // Direct match (some chains use same address for operator).
-            if ($addr === $operatorAddr) {
+        $operatorCmp = $foldCase ? strtolower($operatorRaw) : $operatorRaw;
+        // bech32 is canonically lower-case, so the Cosmos byte decode is
+        // fed the folded form regardless of the comparison rule above.
+        $operatorBech32 = strtolower($operatorRaw);
+
+        foreach ($wallets as $wallet) {
+            $walletRaw = trim((string) $wallet->wallet_address);
+            if ($walletRaw === '') {
+                continue;
+            }
+
+            $walletCmp = $foldCase ? strtolower($walletRaw) : $walletRaw;
+
+            // Direct match — chains where the operator address IS the
+            // account address (EVM, and Polkadot's stash).
+            if (hash_equals($operatorCmp, $walletCmp)) {
                 return [
                     'wallet_address' => $wallet->wallet_address,
                     'chain_id'       => (int) $wallet->chain_id,
@@ -277,17 +340,14 @@ class ClaimService {
                 ];
             }
 
-            // Cosmos: valoper prefix swap. If wallet is cosmos1..., operator is cosmosvaloper1...
-            // The underlying 20-byte address is identical — only the bech32 HRP differs.
-            // We must decode both to raw bytes and compare; suffix comparison is invalid
-            // because bech32 checksums differ by HRP.
-            if (($entity->chain_type ?? '') === 'cosmos') {
-                $walletBytes  = self::bech32DecodeToBytes($addr);
-                $valoperBytes = self::bech32DecodeToBytes($operatorAddr);
+            // Cosmos: same 20 bytes under a different bech32 HRP.
+            if ($chainType === 'cosmos') {
+                $walletBytes  = self::bech32DecodeToBytes(strtolower($walletRaw));
+                $valoperBytes = self::bech32DecodeToBytes($operatorBech32);
                 // Both must decode to exactly 20 bytes (standard Cosmos address length).
                 if ($walletBytes !== null && $valoperBytes !== null
                     && strlen($walletBytes) === 20 && strlen($valoperBytes) === 20
-                    && $walletBytes === $valoperBytes) {
+                    && hash_equals($valoperBytes, $walletBytes)) {
                     return [
                         'wallet_address' => $wallet->wallet_address,
                         'chain_id'       => (int) $wallet->chain_id,
