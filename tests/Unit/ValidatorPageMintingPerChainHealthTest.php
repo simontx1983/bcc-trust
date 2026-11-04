@@ -620,35 +620,51 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
     }
 
     /**
-     * ⚠ THE PRODUCTION DEFAULT MINTER MUST FORWARD THE ALLOWLIST.
+     * ⚠ THE PRODUCTION DEFAULT MINTER MUST DERIVE ITS SCOPE FROM THE ALLOWLIST.
      *
      * Every behavioural test above injects a fake minter, so none of them
      * exercises the default closure — and a mutation that dropped $allowlist
-     * from it passed the whole suite. This is the one line that makes the
-     * guarantee real in production, so it is asserted directly.
+     * from it passed the whole suite.
+     *
+     * ⭐ REWRITTEN 2026-11-04. This test used to assert that the closure
+     * forwarded $ids as the fourth argument, i.e. that minting was scoped to
+     * the addresses this run returned. That is no longer the guarantee: a page
+     * is a durable, claimable identity for a validator we have ever seen, not
+     * a statement about current set membership, so a chain that proved healthy
+     * in this run mints for every pageless row it owns. See
+     * ChainRefreshService::mintScopeFor() and
+     * ValidatorPageExistenceIndependentOfMembershipTest.
+     *
+     * ⚠⚠ AND THE OLD TEXT ASSERTION WAS NOT SOUND. It checked for the literal
+     * `mintMissing($chainId, false, $max, $ids)` and for the ABSENCE of
+     * `mintMissing($chainId, false, $max);`. Both still held when the fourth
+     * argument was changed to a hardcoded `null`, so the suite stayed green
+     * across a real behaviour change. The scope decision now lives in a named
+     * method asserted BY VALUE, and what is left here is the chain of custody.
      */
-    public function testTheProductionMinterClosureForwardsTheAllowlist(): void
+    public function testTheProductionMinterClosureDerivesItsScopeFromTheAllowlist(): void
     {
         $code = self::code(self::source());
 
-        // Asserted as a CHAIN of custody rather than one spelling: the closure
-        // receives $allowlist, normalises it into $ids, and passes $ids as the
-        // fourth argument. A rename alone should not fail this; dropping the
-        // argument, or passing something not derived from $allowlist, must.
         self::assertStringContainsString(
             '$ids = array_values(array_map(static fn ($id): int => (int) $id, $allowlist));',
             $code,
             'the normalised list must be derived from the allowlist the caller gave'
         );
         self::assertStringContainsString(
-            'ValidatorPageMinter::mintMissing($chainId, false, $max, $ids)',
+            'ValidatorPageMinter::mintMissing($chainId, false, $max, self::mintScopeFor($ids))',
             $code,
-            'the default closure must pass that list through, not drop it'
+            'the scope must be resolved from $ids, not fabricated'
         );
         self::assertStringNotContainsString(
             'ValidatorPageMinter::mintMissing($chainId, false, $max);',
             $code,
-            'an allowlist-less call would silently mint every eligible validator'
+            'an argument-less call would bypass the fail-closed empty case'
+        );
+        self::assertStringNotContainsString(
+            'ValidatorPageMinter::mintMissing($chainId, false, $max, null)',
+            $code,
+            'a HARDCODED null would mint even when the allowlist resolved to nothing'
         );
     }
 

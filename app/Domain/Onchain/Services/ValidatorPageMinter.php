@@ -106,19 +106,40 @@ final class ValidatorPageMinter
 
         // ⚠ THE THREE STATES OF $onlyValidatorIds ARE NOT INTERCHANGEABLE.
         //
-        //   null — no restriction. This is the MANUAL CLI backfill's existing
-        //          behaviour and is deliberately preserved: an operator running
-        //          `backfill_pages` is making an explicit, reviewed request.
+        //   null — no restriction WITHIN $chainId. Used by the manual CLI
+        //          backfill, and — since 2026-11-04 — by the automatic
+        //          indexer for a chain that proved healthy in that run
+        //          (clean, non-partial fetch AND a fresh verified baseline).
+        //          It is bounded: $chainId scopes the query, $maxToMint and
+        //          the caller's MINT_SCAN_BUDGET scope the volume, and
+        //          findMissingPlaceholderPage() already excludes rows that
+        //          have a page, are claimed, or sit on a chain with no
+        //          bcc_chains row.
         //   []   — MINT NONE, immediately. An allowlist that resolved to
         //          nothing must never widen back to 'every validator'; that is
         //          the difference between failing closed and failing open.
         //   list — exactly these validator ids may receive a page.
         //
-        // The automatic indexer path always passes a list, built from the
-        // addresses that chain's fetch returned IN THIS RUN — so a validator
-        // the fetch did not contain cannot get a page however `status` labels
-        // it. Measured 2026-11-02: 149 of 693 staging candidates were absent
-        // from their chain's latest complete fetch and all 149 read 'active'.
+        // ⭐ WHAT CHANGED, AND WHY. The automatic path used to pass the ids of
+        // the addresses that chain's fetch returned IN THIS RUN, so a
+        // validator the fetch did not contain could not get a page however
+        // `status` labelled it. That made page existence a function of CURRENT
+        // set membership, which is not what a page is for: a page is a
+        // durable, claimable identity for a validator we have ever seen.
+        //
+        // The cost was measurable. Measured 2026-11-02: 149 of 693 staging
+        // candidates were absent from their chain's latest complete fetch and
+        // all 149 read 'active'. Measured 2026-11-04 on production: 90 rows
+        // had no page, ZERO of them appeared in their chain's last clean
+        // fetch, 51 were labelled `inactive` and 39 `active` — i.e. the
+        // pageless set and the out-of-set set were the same population, and
+        // `status` did not separate them.
+        //
+        // ⛔ The per-chain health gate is UNCHANGED and still lives in
+        // ChainRefreshService: only a chain with a clean fetch and a fresh
+        // verified baseline is offered to the minter at all, so a chain whose
+        // provider is failing (no baseline, e.g. THORChain on 2026-11-04)
+        // mints nothing and its rows are left untouched.
         if (is_array($onlyValidatorIds) && $onlyValidatorIds === []) {
             return [
                 'scanned'    => 0,
