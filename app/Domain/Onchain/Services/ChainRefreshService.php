@@ -931,11 +931,39 @@ class ChainRefreshService
         // mintMissing() distinguishes [] from null, so the shape matters: a
         // gappy or string-keyed array would still be non-empty and would skip
         // the fail-closed branch while composing a malformed IN list.
+        // ⭐ THE ALLOWLIST IS PROOF OF CHAIN HEALTH, NOT THE SCOPE OF MINTING.
+        //
+        // A placeholder page is a durable, claimable identity for a validator
+        // we have ever seen on a chain we track. It is NOT a statement that
+        // the validator is in the set today. Scoping minting to the addresses
+        // this run returned conflated the two, and the measurable consequence
+        // was that the only validators left without a page were exactly those
+        // that had left the set before they were ever minted: measured on
+        // production 2026-11-04, 90 pageless rows, ZERO of them present in
+        // their chain's last clean fetch, 51 labelled `inactive` and 39 still
+        // labelled `active`.
+        //
+        // So a chain that proved healthy in THIS run mints for every pageless
+        // row it owns. The scope stays per-chain because
+        // findMissingPlaceholderPage() takes $chainId, and that query has no
+        // `status` predicate — it never did; fetch membership was the only
+        // gate, injected from here.
+        //
+        // Claimability is unaffected in either direction: ClaimService matches
+        // a wallet to `operator_address` by comparing bech32-decoded bytes and
+        // consults neither `status` nor the bonded set, and
+        // getByIdWithChain() applies no status filter.
+        //
+        // ⛔ AN EMPTY ALLOWLIST STILL MEANS MINT NONE. That is a chain whose
+        // returned addresses matched no stored row — the fail-closed case —
+        // and widening THAT to the whole chain would mint off a fetch nothing
+        // corroborates. The empty list is forwarded verbatim so
+        // ValidatorPageMinter's own [] guard refuses before any SQL.
         $minter ??= static function (int $chainId, int $max, array $allowlist): array {
             /** @var list<int> $ids */
             $ids = array_values(array_map(static fn ($id): int => (int) $id, $allowlist));
 
-            return ValidatorPageMinter::mintMissing($chainId, false, $max, $ids);
+            return ValidatorPageMinter::mintMissing($chainId, false, $max, self::mintScopeFor($ids));
         };
 
         $totals = ['chains' => 0, 'scanned' => 0, 'minted' => 0, 'skipped' => 0, 'errors' => 0];
@@ -961,6 +989,43 @@ class ChainRefreshService
 
         return $totals;
     }
+
+    /**
+     * Minting scope for a chain that has ALREADY proved healthy in this run.
+     *
+     * Extracted so the decision is testable on its own. The previous version
+     * lived inline in the production minter closure, and the suite could only
+     * assert its SPELLING — a text assertion that stayed green when the
+     * behaviour was changed underneath it. This method is asserted by value.
+     *
+     * ⭐ Returning null widens minting from "the addresses this run returned"
+     * to "every pageless row this chain owns", which is what makes a page a
+     * durable identity rather than a statement about current set membership.
+     * findMissingPlaceholderPage() still scopes by $chainId and still excludes
+     * rows that have a page, are claimed, or sit on a chain with no
+     * bcc_chains row — and it has never had a `status` predicate, so an
+     * `inactive` validator is eligible by construction once the fetch-scoped
+     * allowlist is lifted.
+     *
+     * ⛔ [] is returned UNCHANGED, not widened. An allowlist that resolved to
+     * nothing means this chain's returned addresses matched no stored row:
+     * the fail-closed case. ValidatorPageMinter refuses an empty list before
+     * composing any SQL, and that refusal must survive.
+     *
+     * ⚠ This method does NOT decide whether the chain is healthy. That gate is
+     * upstream: $healthyChainFetches is populated only inside the
+     * !$isPartialFetch branch and only when $mintBaselineVerified, so a chain
+     * with a failing provider or an absent/stale baseline never reaches here.
+     *
+     * @param list<int> $ids Validator ids resolved from this run's fetch.
+     * @return list<int>|null  An empty list means mint none; null means every
+     *                        pageless row on the chain.
+     */
+    private static function mintScopeFor(array $ids): ?array
+    {
+        return $ids === [] ? [] : null;
+    }
+
 
     public static function refresh_validators(): void
     {
