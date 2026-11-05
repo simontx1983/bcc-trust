@@ -314,6 +314,28 @@ final class DelegatorGroupIntegrationTest extends TestCase
         self::assertSame([], $GLOBALS['__bcc_group_creates']);
     }
 
+    public function testASuspendedOperatorCanNeitherCreateNorEdit(): void
+    {
+        $validatorId = $this->seedClaimedPage();
+        $GLOBALS['__bcc_suspended'] = [self::OPERATOR];
+
+        $before = $this->snapshot();
+        foreach (['create' => $this->post(self::PAGE, $validatorId, '2'), 'edit' => $this->patch(self::PAGE, '2')] as $case => $response) {
+            self::assertSame(403, $response->get_status(), $case);
+            self::assertSame('bcc_forbidden', $response->get_data()['error']['code'], $case);
+            self::assertSame('Your account is suspended.', $response->get_data()['error']['message'], $case);
+        }
+        self::assertSame($before, $this->snapshot());
+        self::assertSame([], $GLOBALS['__bcc_group_creates']);
+
+        // And an existing group's minimum stays put.
+        $GLOBALS['__bcc_suspended'] = [];
+        $groupId = $this->post(self::PAGE, $validatorId, '2')->get_data()['data']['group']['id'];
+        $GLOBALS['__bcc_suspended'] = [self::OPERATOR];
+        self::assertSame(403, $this->patch(self::PAGE, '5')->get_status());
+        self::assertSame('2', ValidatorGroupRepository::readMinStake($groupId));
+    }
+
     public function testSignedOutIs401AndThrottledIs429BeforeAuthorityIsConsulted(): void
     {
         $validatorId = $this->seedClaimedPage();

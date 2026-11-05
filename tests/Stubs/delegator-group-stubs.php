@@ -318,7 +318,7 @@ namespace BCC\Core\Permissions {
         {
             public static function is_not_suspended(int $userId, bool $adminBypass = true): bool
             {
-                return true;
+                return !in_array($userId, $GLOBALS['__bcc_suspended'] ?? [], true);
             }
         }
     }

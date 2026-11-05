@@ -164,7 +164,8 @@ final class PageDelegatorGroupEndpoint
     }
 
     /**
-     * Auth, then throttle, then authority: the part both verbs share.
+     * Auth, then throttle, then suspension, then authority: the part both verbs
+     * share.
      *
      * ⚠ publicReason() and never the decision's own `reason`, which tells a
      * stranger whether this page is unclaimed, held by someone else, or
@@ -182,6 +183,12 @@ final class PageDelegatorGroupEndpoint
 
         if (!\BCC\Core\Security\Throttle::allow('delegator_group_write:' . $userId, self::THROTTLE_LIMIT, self::THROTTLE_WINDOW)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
+        // A suspended account doesn't create or reconfigure a community, same
+        // gate and same place as the join route. Admin bypass off.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
         }
 
         $decision = Authority::decide((int) $request->get_param('id'), $userId);
