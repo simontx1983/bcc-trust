@@ -190,6 +190,40 @@ class ClaimService {
     }
 
     /**
+     * Is this on-chain entity actually attached to this page?
+     *
+     * `claim()` proves a wallet controls an ENTITY and knows nothing about
+     * pages. A caller that goes on to act on a page must prove the entity
+     * belongs to it first, or a valid signature for validator A grants
+     * validator B's page.
+     *
+     * Validators resolve through the same two-leg binding the card read
+     * model uses to build `claim_target`, so every target a card offers
+     * passes. Collections have no placeholder leg: only a wallet link binds
+     * one to a page. Anything else is refused.
+     */
+    public static function isEntityBoundToPage(string $entityType, int $entityId, int $pageId): bool {
+        if ($entityId <= 0 || $pageId <= 0) {
+            return false;
+        }
+
+        if ($entityType === 'validator') {
+            foreach (ValidatorRepository::findAllByPageId($pageId) as $row) {
+                if ($row->validator_id === $entityId) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if ($entityType === 'collection') {
+            return WalletRepository::getPostIdForEntity(CollectionRepository::table(), $entityId) === $pageId;
+        }
+
+        return false;
+    }
+
+    /**
      * Load entity data by type and ID. Delegates to repository.
      *
      * @return EntityForClaim|null
