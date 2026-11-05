@@ -227,10 +227,8 @@ final class NotificationDispatcher
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * Notify the followee when someone watches their card. The
-     * followee is always a user id (watchlist is a projection of
-     * PeepSo follows — see §C2). Self-watches are not possible from
-     * the watchlist UI; we still guard.
+     * Notify the owner when someone watches their card. Self-watches
+     * are not possible from the watchlist UI; we still guard.
      *
      * Note: watches run through §C3's batch aggregator on the feed
      * side (one feed item per 10-min window). The notification side
@@ -241,17 +239,27 @@ final class NotificationDispatcher
      */
     public function onCardWatched(int $viewerId, int $followId, string $targetKind, int $targetId): void
     {
-        unset($followId, $targetKind);
-        if ($viewerId <= 0 || $targetId <= 0 || $viewerId === $targetId) {
+        unset($followId);
+        if ($viewerId <= 0 || $targetId <= 0) {
             return;
         }
         try {
+            $recipientId = self::resolveWatchRecipient(
+                $viewerId,
+                $targetKind,
+                $targetId,
+                fn (int $pageId): int => $this->pageOwnerResolver->getPageOwner($pageId)
+            );
+            if ($recipientId <= 0) {
+                return;
+            }
+
             $actorHandle = self::resolveHandle($viewerId);
             $message     = sprintf('@%s watched your card.', $actorHandle);
 
             $this->dispatch(
                 $viewerId,
-                $targetId,
+                $recipientId,
                 $message,
                 NotificationType::CARD_WATCHED,
                 $viewerId, // external_id → actor profile (where the followee likely wants to land)
@@ -264,6 +272,27 @@ final class NotificationDispatcher
                 'error'     => $e->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Who hears about a watch: 0 means nobody.
+     *
+     * ⚠ `$targetId` is a USER id only for 'member'. For every page kind it
+     * is a POST id, so it must never be used as a recipient directly — that
+     * would notify whichever unrelated user shares the number. An unclaimed
+     * placeholder page has no owner and resolves to 0.
+     *
+     * @param callable(int): int $pageOwnerOf Page id → owner user id, 0 if none.
+     */
+    public static function resolveWatchRecipient(
+        int $viewerId,
+        string $targetKind,
+        int $targetId,
+        callable $pageOwnerOf
+    ): int {
+        $recipientId = $targetKind === 'member' ? $targetId : $pageOwnerOf($targetId);
+
+        return $recipientId === $viewerId ? 0 : $recipientId;
     }
 
     // NOTE: the bcc_trust_endorsement_added bell/push subscriber was

@@ -11,6 +11,8 @@
  * so the frontend dispatches it without doing its own mapping.
  *
  * Implementation:
+ *   0. Refuse unless the entity is bound to this page. The pair is
+ *      client-supplied and the wallet proof only covers the entity.
  *   1. Pre-check idempotency: if the user already has a verified claim
  *      on this entity, return 200 with `status: "already_verified"`
  *      so the frontend doesn't have to distinguish "fresh success" from
@@ -288,6 +290,24 @@ final class PagesEndpoint
             || $post->post_status !== 'publish'
         ) {
             return ApiResponse::error('bcc_not_found', 'Page not found.', 404);
+        }
+
+        // ── Page binding ──────────────────────────────────────────────
+        // `id` and `entity_id` are both client-supplied, and the wallet proof
+        // below covers the entity only. Refuse before anything is read as a
+        // claim or written: everything after this line trusts the pair.
+        if (!ClaimService::isEntityBoundToPage($entityType, $entityId, $pageId)) {
+            Logger::warning('[PagesEndpoint] claim refused: entity is not bound to page', [
+                'user_id'     => $userId,
+                'page_id'     => $pageId,
+                'entity_type' => $entityType,
+                'entity_id'   => $entityId,
+            ]);
+            return ApiResponse::error(
+                'bcc_forbidden',
+                'That entity is not attached to this page.',
+                403
+            );
         }
 
         // ── Idempotency pre-check ─────────────────────────────────────
