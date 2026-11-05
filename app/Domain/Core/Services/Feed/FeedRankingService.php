@@ -368,6 +368,55 @@ final class FeedRankingService
     }
 
     /**
+     * Page stream — the posts written for one validator page. Backs
+     * `GET /bcc/v1/pages/{id}/feed`.
+     *
+     * Shares the author wall's hydration chain and its two user-level
+     * exclusion lists, but NOT its third: the author wall also passes
+     * `resolveRestrictedGroupIds($viewerId)` (the §4.7.x leak gate) and this
+     * path deliberately passes no group exclusion at all.
+     *
+     * ⚠ That is safe by construction, not by oversight, and the construction
+     * is what carries it: `PostsService::createStatus()` refuses a
+     * `target_page_id` together with a `group_id` (asserted by
+     * `PagePostsIntegrationTest::testPageAndGroupTogetherAreRefusedEvenForTheOperator`),
+     * and `stampPageTarget()` is the only writer of `PAGE_TARGET_META`. So a
+     * page-marked post always has `group_id = 0` and can never sit inside a
+     * closed, secret or NFT-gated group. If anything ever stamps that marker
+     * on a group post, this route — `permission_callback => '__return_true'` —
+     * has no second line of defence, so add the group exclusion before
+     * widening who may write the marker.
+     *
+     * The candidate set is keyed on the post marker alone, so a post keeps its
+     * place after its author stops being the page's operator. Confirming the id
+     * is a published validator page is the endpoint's job, before this runs.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    public function getActivityForPage(int $pageId, int $viewerId, ?string $cursor = null, int $limit = 20): array
+    {
+        $excluded = self::mergeExclusions(
+            $this->reputationRepo->getCautionAndRiskyUserIds(),
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
+        );
+
+        $hidden = $this->hiddenRepo->getAllHiddenIds();
+
+        $payload = $this->activityFeed->getActivityForPage(
+            $pageId,
+            $viewerId,
+            $cursor,
+            $limit,
+            $excluded === [] ? null : $excluded,
+            $hidden === []   ? null : $hidden
+        );
+
+        $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
+        return $payload;
+    }
+
+    /**
      * Group-scoped feed — chronological stream of activity inside a
      * single PeepSo group. Backs `GET /bcc/v1/groups/{id}/feed`.
      *

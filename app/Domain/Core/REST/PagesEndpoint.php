@@ -3,6 +3,7 @@
  * Pages Endpoints — handles /bcc/v1/pages/:id/* routes.
  *
  * Phase 1 routes registered:
+ *   - GET  /pages/:id/feed  — public stream of a validator page's posts
  *   - POST /pages/:id/claim — claim a peepso-page (§B5 single-claim-wins)
  *
  * The :id path segment is a peepso-page post_id. The request body
@@ -37,10 +38,12 @@
 namespace BCC\Trust\Core\REST;
 
 use BCC\Core\Log\Logger;
+use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\BlogCoverImageWriter;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 use BCC\Trust\Onchain\Services\ClaimService;
+use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -57,11 +60,46 @@ final class PagesEndpoint
     private const RATE_LIMIT_BUDGET = 10;
     private const RATE_LIMIT_WINDOW = 60;
 
+    private const DEFAULT_FEED_LIMIT = 20;
+    private const MAX_FEED_LIMIT     = 50;
+
     /** @var list<string> */
     private const VALID_ENTITY_TYPES = ['validator', 'collection'];
 
     public static function register(): void
     {
+        // Public stream of a validator page's everyday posts. Same args and
+        // same in-handler gate shape as GET /groups/{id}/feed.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/pages/(?P<id>\d+)/feed',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [new self(), 'feed'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'id' => [
+                        'required'          => true,
+                        'type'              => 'integer',
+                        'sanitize_callback' => 'absint',
+                    ],
+                    'cursor' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ],
+                    'limit' => [
+                        'required'          => false,
+                        'type'              => 'integer',
+                        'default'           => self::DEFAULT_FEED_LIMIT,
+                        'minimum'           => 1,
+                        'maximum'           => self::MAX_FEED_LIMIT,
+                        'sanitize_callback' => 'absint',
+                    ],
+                ],
+            ]
+        );
+
         register_rest_route(
             self::ROUTE_NAMESPACE,
             '/pages/(?P<id>\d+)/claim',
@@ -129,6 +167,45 @@ final class PagesEndpoint
                 ],
             ]
         );
+    }
+
+    /**
+     * GET /pages/:id/feed — the posts written for a validator page, newest
+     * first. Public, and filtered by the post marker only: a post stays here
+     * after its author stops being the page's operator.
+     */
+    public function feed(WP_REST_Request $request): WP_REST_Response
+    {
+        $pageId = (int) $request->get_param('id');
+        if ($pageId <= 0 || !ValidatorPageOperatorAuthority::isValidatorPage($pageId)) {
+            return ApiResponse::error('bcc_not_found', 'Page not found.', 404);
+        }
+
+        $cursorRaw = $request->get_param('cursor');
+        $cursor    = is_string($cursorRaw) && $cursorRaw !== '' ? $cursorRaw : null;
+
+        $limit = (int) $request->get_param('limit');
+        if ($limit < 1) {
+            $limit = self::DEFAULT_FEED_LIMIT;
+        }
+        if ($limit > self::MAX_FEED_LIMIT) {
+            $limit = self::MAX_FEED_LIMIT;
+        }
+
+        $payload = Plugin::instance()->feedRankingService()->getActivityForPage(
+            $pageId,
+            get_current_user_id(),
+            $cursor,
+            $limit
+        );
+
+        $response = ApiResponse::ok($payload);
+        // Same policy as /groups/{id}/feed: per-viewer exclusions (block
+        // lists) make shared caching unsafe, public or not.
+        $response->header('Cache-Control', 'private, no-store');
+        $response->header('Vary', 'Authorization, Cookie');
+
+        return $response;
     }
 
     /**
