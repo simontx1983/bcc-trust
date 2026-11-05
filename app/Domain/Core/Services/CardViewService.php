@@ -494,6 +494,13 @@ final class CardViewService
         // `decide()` answers `not_a_validator_page` for anything else, so
         // calling it for a builder or nft card would do work to reach null.
         if ($kind === 'validator') {
+            // The page stream. Its key is what mounts the public feed, so it
+            // must NOT sit behind the announcements switch below. `can_post`
+            // is resolved fresh, from the same authority.
+            $card['page_stream'] = [
+                'can_post' => ValidatorPageOperatorAuthority::isOperator($pageId, $viewerId),
+            ];
+
             $announcements = AnnouncementCapabilityResolver::forOwnerScope(
                 ValidatorPageOperatorAuthority::decide($pageId, $viewerId),
                 AnnouncementFeature::isEnabled()
@@ -2386,7 +2393,7 @@ final class CardViewService
      * ⚠ The fallback is returned UNTRIMMED, exactly as stored, so this
      * cannot change what a non-validator card or an un-enriched page shows.
      */
-    private static function preferMoniker(?string $moniker, string $fallback): string
+    public static function preferMoniker(?string $moniker, string $fallback): string
     {
         $moniker = $moniker === null ? '' : trim($moniker);
 

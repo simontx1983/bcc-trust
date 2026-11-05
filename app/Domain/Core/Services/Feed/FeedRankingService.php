@@ -368,6 +368,40 @@ final class FeedRankingService
     }
 
     /**
+     * Page stream — the posts written for one validator page. Backs
+     * `GET /bcc/v1/pages/{id}/feed`.
+     *
+     * Same exclusions and hydration chain as the author wall. The candidate
+     * set is keyed on the post marker alone, so a post keeps its place after
+     * its author stops being the page's operator. Confirming the id is a
+     * published validator page is the endpoint's job, before this runs.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    public function getActivityForPage(int $pageId, int $viewerId, ?string $cursor = null, int $limit = 20): array
+    {
+        $excluded = self::mergeExclusions(
+            $this->reputationRepo->getCautionAndRiskyUserIds(),
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
+        );
+
+        $hidden = $this->hiddenRepo->getAllHiddenIds();
+
+        $payload = $this->activityFeed->getActivityForPage(
+            $pageId,
+            $viewerId,
+            $cursor,
+            $limit,
+            $excluded === [] ? null : $excluded,
+            $hidden === []   ? null : $hidden
+        );
+
+        $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
+        return $payload;
+    }
+
+    /**
      * Group-scoped feed — chronological stream of activity inside a
      * single PeepSo group. Backs `GET /bcc/v1/groups/{id}/feed`.
      *
