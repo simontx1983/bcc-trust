@@ -185,7 +185,22 @@ final class BonusService
         // Resolve page_id: entity → wallet_link → post_id.
         $pageId = \BCC\Trust\Onchain\Repositories\WalletRepository::getPostIdForEntity($entityTable, $entityId);
 
-        // Bulk-indexed entities have wallet_link_id = NULL.
+        // Bulk-indexed entities have wallet_link_id = NULL. A system-minted
+        // placeholder page binds to its validator through the
+        // `_bcc_onchain_validator_id` post_meta instead — the same second leg
+        // ValidatorRepository::findAllByPageId() resolves, read the other way.
+        //
+        // ⚠ This leg is load-bearing, not belt-and-braces: it is the ONLY one
+        // that resolves during a first claim on a placeholder page. The
+        // getPageForOwner() fallback below cannot, because
+        // `bcc_onchain_claim_verified` fires inside ClaimService::claim()
+        // while `post_author` is only transferred later, on
+        // `bcc_page_claimed` — so the page is not yet owned, and the scores
+        // row it would otherwise be found by is the row we are creating.
+        if (!$pageId && $entityType === 'validator') {
+            $pageId = ValidatorRepository::findPlaceholderPageId($entityId);
+        }
+
         if (!$pageId) {
             $pageId = \BCC\Core\ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($userId);
         }
