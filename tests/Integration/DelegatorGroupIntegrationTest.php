@@ -19,6 +19,7 @@ use BCC\Trust\Onchain\Services\NftGroupGateService;
 use BCC\Trust\Onchain\Services\ValidatorGroupProvisioningService;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use BCC\Trust\Onchain\Support\Bech32;
+use BCC\Trust\Onchain\ValueObjects\JoinResult;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -980,7 +981,17 @@ final class DelegatorGroupIntegrationTest extends TestCase
 
         $GLOBALS['__bcc_current_user'] = 702;
         $this->insertWallet(702, $this->cosmosChain, 'cosmos1wallet702');
-        self::assertArrayNotHasKey('data', $this->join($groupId)->get_data()['error']);
+        $shortfall = $this->join($groupId)->get_data()['error'];
+
+        // ⚠ This used to assert the shortfall had NO `data` key at all, so
+        // the two refusals were told apart by an ABSENCE. They are still told
+        // apart, but now by an explicit value — which is what a client should
+        // branch on. A shortfall also carries the minimum, because §γ forbids
+        // the frontend rendering `error.message`.
+        self::assertSame('bcc_permission_denied', $shortfall['code']);
+        self::assertSame('not_eligible', $shortfall['data']['reason_code']);
+        self::assertNotSame('opt_out_active', $shortfall['data']['reason_code']);
+        self::assertSame('1 ATOM', $shortfall['data']['min_stake_display']);
     }
 
     public function testTheGroupDetailStatsNameTheChain(): void
@@ -1017,6 +1028,79 @@ final class DelegatorGroupIntegrationTest extends TestCase
             ],
             $method->invoke($service, $context, 701, false, false, 0, null)
         );
+    }
+
+    // ── The not-eligible refusal names the minimum as DATA ───────────
+
+    /**
+     * ⚠ The figure must travel in `error.data`, not only in the sentence.
+     * The frontend's §γ rule forbids rendering `error.message`, so a minimum
+     * that lives only there is a minimum the user never sees — which is
+     * exactly what the card surfaces showed: "you don't delegate enough",
+     * with no amount anywhere.
+     */
+    public function testTheNotEligibleRefusalCarriesTheMinimumAsStructuredData(): void
+    {
+        $validatorId = $this->seedClaimedPage();
+        $group       = $this->post(self::PAGE, $validatorId, '5')->get_data()['data']['group'];
+
+        $endpoint = (new \ReflectionClass(ValidatorGroupsEndpoint::class))->newInstanceWithoutConstructor();
+        $method   = new \ReflectionMethod(ValidatorGroupsEndpoint::class, 'translateFailure');
+
+        /** @var \WP_REST_Response $response */
+        $response = $method->invoke($endpoint, JoinResult::notEligible(5, 0), (int) $group['id']);
+
+        self::assertSame(403, $response->get_status());
+        $error = $response->get_data()['error'];
+        self::assertSame('bcc_permission_denied', $error['code']);
+        self::assertSame('not_eligible', $error['data']['reason_code']);
+
+        // Present, and formatted exactly as the card formats it.
+        self::assertSame('5 ATOM', $error['data']['min_stake_display']);
+        self::assertSame(
+            $group['min_stake_display'],
+            $error['data']['min_stake_display'],
+            'the refusal and the card must never name different minimums'
+        );
+
+        // The sentence still names it too, so nothing regressed for a reader
+        // of the message (the admin log, a non-browser client).
+        self::assertStringContainsString('5 ATOM', $error['message']);
+    }
+
+    public function testTheRefusalDegradesToANullMinimumWhenThereIsNoGateConfig(): void
+    {
+        $endpoint = (new \ReflectionClass(ValidatorGroupsEndpoint::class))->newInstanceWithoutConstructor();
+        $method   = new \ReflectionMethod(ValidatorGroupsEndpoint::class, 'translateFailure');
+
+        /** @var \WP_REST_Response $response */
+        $response = $method->invoke($endpoint, JoinResult::notEligible(5, 0), 999001);
+
+        self::assertSame(403, $response->get_status());
+        $error = $response->get_data()['error'];
+        self::assertSame('not_eligible', $error['data']['reason_code']);
+        // No config ⇒ no number to name. The key is still PRESENT and null,
+        // so a client can tell "unknown" from "absent field".
+        self::assertArrayHasKey('min_stake_display', $error['data']);
+        self::assertNull($error['data']['min_stake_display']);
+        self::assertSame('Delegate to this validator to join its community.', $error['message']);
+    }
+
+    /**
+     * The opt-out refusal shares the 403 and the error code, so it must stay
+     * distinguishable: it carries its own reason_code and NO minimum.
+     */
+    public function testTheOptOutRefusalIsStillToldApartFromNotEligible(): void
+    {
+        $endpoint = (new \ReflectionClass(ValidatorGroupsEndpoint::class))->newInstanceWithoutConstructor();
+        $method   = new \ReflectionMethod(ValidatorGroupsEndpoint::class, 'translateFailure');
+
+        /** @var \WP_REST_Response $response */
+        $response = $method->invoke($endpoint, JoinResult::optOutActive(5), 999001);
+
+        $error = $response->get_data()['error'];
+        self::assertSame('opt_out_active', $error['data']['reason_code']);
+        self::assertArrayNotHasKey('min_stake_display', $error['data']);
     }
 
     // ── The revoke sweep, after the minimum changes ─────────────────────

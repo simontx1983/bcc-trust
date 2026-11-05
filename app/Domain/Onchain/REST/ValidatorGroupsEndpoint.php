@@ -444,10 +444,23 @@ final class ValidatorGroupsEndpoint
                 );
 
             case JoinResult::CODE_NOT_ELIGIBLE:
+                // ⚠ The minimum MUST travel as structured data, not only in
+                // the message. The frontend's §γ rule forbids rendering
+                // `error.message`, so a figure that lives only there cannot
+                // reach the user: the card surfaces showed "you don't delegate
+                // enough" with no amount. `min_stake_display` is the same
+                // pre-formatted string the card and the unlock hint carry.
+                // Null only when the gate config or the chain's native token
+                // is unreadable — the message degrades in step.
+                $refusal = $this->buildNotEligibleRefusal($groupId);
                 return ApiResponse::error(
                     'bcc_permission_denied',
-                    $this->buildNotEligibleHint($groupId),
-                    403
+                    $refusal['message'],
+                    403,
+                    [
+                        'reason_code'       => 'not_eligible',
+                        'min_stake_display' => $refusal['min_stake_display'],
+                    ]
                 );
 
             case JoinResult::CODE_CHAIN_UNSUPPORTED:
@@ -476,11 +489,21 @@ final class ValidatorGroupsEndpoint
         );
     }
 
-    private function buildNotEligibleHint(int $groupId): string
+    /**
+     * The not-eligible refusal, as both the operator-facing sentence and the
+     * machine-readable minimum behind it. One computation, so the two can
+     * never disagree about the number.
+     *
+     * @return array{message: string, min_stake_display: string|null}
+     */
+    private function buildNotEligibleRefusal(int $groupId): array
     {
         $config = ValidatorGroupRepository::getGateConfig($groupId);
         if ($config === null) {
-            return 'Delegate to this validator to join its community.';
+            return [
+                'message'           => 'Delegate to this validator to join its community.',
+                'min_stake_display' => null,
+            ];
         }
 
         $statsRows = ValidatorRepository::findCommunityStatsByIds([$config->validatorId]);
@@ -497,13 +520,19 @@ final class ValidatorGroupsEndpoint
         // Always named: the operator chose this number, and a minimum at or
         // below 1 is as binding as one above it.
         if ($minDisplay !== null) {
-            return $moniker !== null
-                ? sprintf('Delegate at least %s to %s to join this community.', $minDisplay, $moniker)
-                : sprintf('Delegate at least %s to this validator to join.', $minDisplay);
+            return [
+                'message' => $moniker !== null
+                    ? sprintf('Delegate at least %s to %s to join this community.', $minDisplay, $moniker)
+                    : sprintf('Delegate at least %s to this validator to join.', $minDisplay),
+                'min_stake_display' => $minDisplay,
+            ];
         }
 
-        return $moniker !== null
-            ? sprintf('Delegate to %s to join this community.', $moniker)
-            : 'Delegate to this validator to join its community.';
+        return [
+            'message' => $moniker !== null
+                ? sprintf('Delegate to %s to join this community.', $moniker)
+                : 'Delegate to this validator to join its community.',
+            'min_stake_display' => null,
+        ];
     }
 }
