@@ -120,8 +120,11 @@ final class PostsEndpoint
                         // of its canonical write path). Sanitizing twice
                         // would double-encode user input.
                     ],
-                    // Review-only fields. The handler validates per-kind
-                    // so these stay optional at the route level.
+                    // Review fields, plus `target_page_id` on a status post
+                    // (the validator page it is written for; the service
+                    // gates on current operator status). The handler
+                    // validates per-kind so these stay optional at the route
+                    // level.
                     'target_page_id' => [
                         'required'          => false,
                         'type'              => 'integer',
@@ -538,7 +541,8 @@ final class PostsEndpoint
         $service = Plugin::instance()->postsService();
 
         if ($kind === 'status') {
-            $result = $service->createStatus($viewerId, $content, $groupId, $visibility, $hallFeed);
+            $targetPageId = (int) ($request->get_param('target_page_id') ?? 0);
+            $result       = $service->createStatus($viewerId, $content, $groupId, $visibility, $hallFeed, $targetPageId);
         } elseif ($kind === 'review') {
             // Reviews are page-scoped, not wall-scoped — group_id is
             // ignored here on purpose. Surfacing it would create a

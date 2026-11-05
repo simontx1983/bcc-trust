@@ -76,10 +76,34 @@ final class CardAnnouncementsBlockTest extends TestCase
     private static function callSite(): string
     {
         $code = self::code(self::CARD);
-        $at   = strpos($code, 'AnnouncementCapabilityResolver::forOwnerScope(');
-        self::assertNotFalse($at, 'the owner-scope producer is never called');
 
-        return substr($code, max(0, $at - 260), 700);
+        // ⚠ Sliced STRUCTURALLY — the validator branch, from its `if` to the
+        // method's single `return $card;` — and NOT by a byte offset around
+        // forOwnerScope(). The previous version took a fixed 700-character
+        // window, so adding a comment inside the branch pushed
+        // `$card['announcements']` out of view and failed a test whose
+        // subject had not changed at all. A slicer whose verdict depends on
+        // how much prose happens to sit nearby cannot police a contract.
+        $from = strpos($code, "if (\$kind === 'validator') {");
+        self::assertNotFalse($from, 'the validator branch is gone from the card builder');
+
+        $to = strpos($code, 'return $card;', $from);
+        self::assertNotFalse($to, 'the validator branch never reaches the return');
+
+        $site = substr($code, $from, $to - $from);
+
+        // Anti-vacuity: a slicer that silently returns nothing, or the whole
+        // file, would make every assertion below meaningless in one
+        // direction or the other.
+        self::assertNotSame('', trim($site), 'the slice is empty');
+        self::assertLessThan(strlen($code), strlen($site), 'the slice is the whole file');
+        self::assertStringContainsString(
+            'AnnouncementCapabilityResolver::forOwnerScope(',
+            $site,
+            'the owner-scope producer is never called in the validator branch'
+        );
+
+        return $site;
     }
 
     public function testTheKeyIsOmittedRatherThanEmittedAsNull(): void

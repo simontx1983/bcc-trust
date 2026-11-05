@@ -26,15 +26,18 @@
 namespace BCC\Trust\Core\Services\Feed;
 
 use BCC\Core\Feed\ReactionGrammarMap;
+use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\GifRepository;
+use BCC\Trust\Core\Repositories\PageDiscoveryRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\PostShortcodeRepository;
 use BCC\Trust\Core\Repositories\StokeRepository;
 use BCC\Trust\Core\Services\AttestationService;
 use BCC\Trust\Core\Services\AuthorBadgeResolver;
 use BCC\Trust\Core\Services\BlogService;
+use BCC\Trust\Core\Services\CardViewService;
 use BCC\Trust\Core\Services\CommentService;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\Mentions\MentionOverlayService;
@@ -45,6 +48,7 @@ use BCC\Trust\Core\Support\ReactionGrammarRegistry;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -93,6 +97,7 @@ final class FeedHydrationPipeline
         $items = $this->hydrateSocialProofReactors($items);
         $items = self::hydrateViewerPermissions($items, $viewerId);
         $items = $this->hydrateGroupContexts($items, $viewerId);
+        $items = self::hydratePageContexts($items);
         $items = $this->hydrateCommentCounts($items, $viewerId);
         // Links stage runs LAST — after hydrateAuthorBadges/Ranks, so
         // author.handle is final when the permalink is composed.
@@ -170,6 +175,104 @@ final class FeedHydrationPipeline
             $items[$idx]['links'] = $links;
         }
         return $items;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Page context hydration
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Attach `page_context` to every item: the validator page the post was
+     * written for, or null when it carries no marker or the page no longer
+     * resolves to a published page.
+     *
+     *   page_context: { id, name, handle, url, label } | null
+     *
+     * The key is always present, unlike `group`. The label describes the post,
+     * not the author's standing today, so it does not consult the operator
+     * authority and survives the author losing that status.
+     *
+     * `name` follows the card's rule: the live moniker over the frozen post
+     * title, so the label reads the same as the page it links to.
+     *
+     * Batched: one meta prime for the items, then one page read and one
+     * moniker read for the distinct pages. A page of unmarked posts stops
+     * after the meta prime.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private static function hydratePageContexts(array $items): array
+    {
+        if ($items === []) {
+            return [];
+        }
+
+        $postIdsByItem = [];
+        foreach ($items as $i => $item) {
+            $items[$i]['page_context'] = null;
+
+            // external_id, not the act_id — see hydrateGroupContexts.
+            $extId = is_int($item['external_id'] ?? null) ? $item['external_id'] : 0;
+            if ($extId > 0) {
+                $postIdsByItem[$i] = $extId;
+            }
+        }
+        if ($postIdsByItem === []) {
+            return $items;
+        }
+
+        update_meta_cache('post', array_values($postIdsByItem));
+
+        $pageIdsByItem = [];
+        foreach ($postIdsByItem as $i => $postId) {
+            $pageId = (int) get_post_meta($postId, PeepSoActivityRepository::PAGE_TARGET_META, true);
+            if ($pageId > 0) {
+                $pageIdsByItem[$i] = $pageId;
+            }
+        }
+        if ($pageIdsByItem === []) {
+            return $items;
+        }
+
+        $distinctPageIds = array_values(array_unique($pageIdsByItem));
+        $pages           = PageDiscoveryRepository::findPublishedByIds($distinctPageIds);
+        if ($pages === []) {
+            return $items;
+        }
+        $validatorRows = ValidatorRepository::findCardRowsByPageIds(array_keys($pages));
+
+        foreach ($pageIdsByItem as $i => $pageId) {
+            $page = $pages[$pageId] ?? null;
+            if ($page === null) {
+                continue;
+            }
+            $firstRow = $validatorRows[$pageId][0] ?? null;
+
+            $items[$i]['page_context'] = self::pageContext(
+                $pageId,
+                CardViewService::preferMoniker($firstRow?->moniker, (string) $page->post_title),
+                (string) $page->post_name
+            );
+        }
+
+        return $items;
+    }
+
+    /**
+     * The wire shape of `page_context`.
+     *
+     * @return array{id: int, name: string, handle: string, url: string, label: string}
+     */
+    private static function pageContext(int $pageId, string $name, string $handle): array
+    {
+        return [
+            'id'     => $pageId,
+            'name'   => $name,
+            'handle' => $handle,
+            'url'    => CardUrlMap::frontendUrl('validator', $handle),
+            'label'  => 'Operator of ' . $name,
+        ];
     }
 
     // ──────────────────────────────────────────────────────────────────

@@ -129,7 +129,7 @@ final class BlogService
         $items      = [];
         $rowActIds  = [];
         foreach ($rows as $row) {
-            $items[] = FeedItemNormalizer::normalize(
+            $item = FeedItemNormalizer::normalize(
                 $row,
                 $author,
                 $this->hydrateBlogBody($row),
@@ -138,6 +138,10 @@ final class BlogService
                 null,  // attachedCard — V1 default
                 []     // permissions — V1 default
             );
+            // This emitter skips hydrate(), and a blog post is never written
+            // for a page, so the FeedItem key is always null here.
+            $item['page_context'] = null;
+            $items[]     = $item;
             $rowActIds[] = (int) $row->act_id;
         }
 

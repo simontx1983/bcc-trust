@@ -35,6 +35,7 @@ use BCC\Trust\Core\Services\Mentions\MentionExtractor;
 use BCC\Trust\Core\Services\Mentions\MentionPolicy;
 use BCC\Trust\Core\ValueObjects\BlogCategory;
 use BCC\Trust\Core\ValueObjects\GroupType;
+use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use Exception;
 
 if (!defined('ABSPATH')) {
@@ -308,6 +309,11 @@ final class PostsService
      * progression, notification dispatcher, future activity
      * aggregators) attach independently.
      *
+     * `$targetPageId > 0` writes the post for a validator page: still the
+     * author's own status post, plus the page marker. It needs the author to
+     * be that page's operator at this moment; nothing else about the post
+     * changes, so it reaches the wall and the Floor as usual.
+     *
      * @return array{
      *   ok: true,
      *   feed_id: string,
@@ -320,7 +326,8 @@ final class PostsService
         string $content,
         int $groupId = 0,
         string $visibility = self::VISIBILITY_DEFAULT,
-        string $hallFeed = self::HALL_FEED_MAIN
+        string $hallFeed = self::HALL_FEED_MAIN,
+        int $targetPageId = 0
     ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -339,6 +346,23 @@ final class PostsService
         // service is the security boundary.
         $visibility = self::normalizeVisibility($visibility);
         $hallFeed   = self::normalizeHallFeed($hallFeed);
+
+        // Page target. Runs BEFORE the content / mention / throttle gates for
+        // the same reason the group gate does: a refused caller must not burn
+        // a throttle slot. A post has one origin, so naming a group as well
+        // is refused before either target is looked at.
+        if ($targetPageId > 0) {
+            if ($groupId > 0) {
+                return [
+                    'error'   => 'bcc_invalid_request',
+                    'message' => 'A post can target a page or a group, not both.',
+                ];
+            }
+            $pageGateError = self::gatePagePost($authorId, $targetPageId);
+            if ($pageGateError !== null) {
+                return $pageGateError;
+            }
+        }
 
         // §21.3 — a ranked-channel post with no group target is shape-
         // invalid (a wall has no ranked channel); with a group target
@@ -425,6 +449,11 @@ final class PostsService
         // gate already passed above; the read side splits the two Hall
         // channels on this meta).
         self::stampRankedFeed($postId, $hallFeed);
+
+        // Stamped before the event so every subscriber sees the finished post.
+        if ($targetPageId > 0) {
+            self::stampPageTarget($postId, $targetPageId);
+        }
 
         // §A3 event bus — single emission per state change. Subscribers
         // run async via Action Scheduler (cf. Plugin.php's existing
@@ -2287,6 +2316,44 @@ final class PostsService
     {
         if ($postId > 0 && $hallFeed === self::HALL_FEED_RANKED) {
             update_post_meta($postId, self::META_RANKED_FEED, '1');
+        }
+    }
+
+    /**
+     * Only a fresh operator decision lets a post name a validator page. Every
+     * denial returns this one body: the private reason stays in the authority,
+     * so a refusal cannot tell a caller whether the page is unclaimed, held by
+     * someone else, or contested.
+     *
+     * @return array{error: string, message: string, data: array<string, mixed>}|null
+     */
+    private static function gatePagePost(int $authorId, int $pageId): ?array
+    {
+        $decision = ValidatorPageOperatorAuthority::decide($pageId, $authorId);
+        if ($decision['decision'] === ValidatorPageOperatorAuthority::DECISION_OPERATOR) {
+            return null;
+        }
+
+        return [
+            'error'   => 'bcc_forbidden',
+            'message' => 'Only the verified operator of this validator page can post for it.',
+            'data'    => ['reason_code' => ValidatorPageOperatorAuthority::publicReason($decision)],
+        ];
+    }
+
+    /**
+     * Stamp the page marker on a just-written post. If the write fails the post
+     * still exists as a plain wall post and cannot be un-published from here,
+     * so the failure is logged for the operator of the site to see.
+     */
+    private static function stampPageTarget(int $postId, int $pageId): void
+    {
+        $stamped = update_post_meta($postId, PeepSoActivityRepository::PAGE_TARGET_META, (string) $pageId);
+        if ($stamped === false) {
+            Logger::error('[PostsService] page marker write failed', [
+                'post_id' => $postId,
+                'page_id' => $pageId,
+            ]);
         }
     }
 }
