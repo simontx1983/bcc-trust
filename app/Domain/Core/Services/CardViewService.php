@@ -494,20 +494,22 @@ final class CardViewService
         // `decide()` answers `not_a_validator_page` for anything else, so
         // calling it for a builder or nft card would do work to reach null.
         if ($kind === 'validator') {
-            // The page stream. Its key is what mounts the public feed, so it
-            // must NOT sit behind the announcements switch below. `can_post`
-            // is resolved fresh, from the same authority.
-            $card['page_stream'] = [
-                'can_post' => ValidatorPageOperatorAuthority::isOperator($pageId, $viewerId),
-            ];
+            $operatorDecision = ValidatorPageOperatorAuthority::decide($pageId, $viewerId);
 
             $announcements = AnnouncementCapabilityResolver::forOwnerScope(
-                ValidatorPageOperatorAuthority::decide($pageId, $viewerId),
+                $operatorDecision,
                 AnnouncementFeature::isEnabled()
             );
             if ($announcements !== null) {
                 $card['announcements'] = $announcements;
             }
+
+            // The page stream. Its key is what mounts the public feed, so it
+            // must NOT sit behind the announcements switch above. `can_post`
+            // comes from the one decision this card resolves.
+            $card['page_stream'] = [
+                'can_post' => $operatorDecision['decision'] === ValidatorPageOperatorAuthority::DECISION_OPERATOR,
+            ];
         }
 
         return $card;
