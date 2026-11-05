@@ -480,6 +480,22 @@ final class DelegatorGroupIntegrationTest extends TestCase
         self::assertSame($before, $this->snapshot());
     }
 
+    public function testATrashedGroupNeitherBlocksANewOneNorShowsOnTheCard(): void
+    {
+        $validatorId = $this->seedClaimedPage();
+        $old         = $this->post(self::PAGE, $validatorId, '3')->get_data()['data']['group'];
+
+        global $wpdb;
+        $wpdb->update($wpdb->posts, ['post_status' => 'trash'], ['ID' => $old['id']]);
+
+        self::assertNull($this->cardFor(self::OPERATOR)['group'], 'a trashed group is not the page group');
+        self::assertTrue($this->cardFor(self::OPERATOR)['can_create']);
+
+        $response = $this->post(self::PAGE, $validatorId, '4');
+        self::assertSame(201, $response->get_status());
+        self::assertNotSame($old['id'], $response->get_data()['data']['group']['id']);
+    }
+
     public function testASecondGroupOnTheSamePageIsRefusedForADifferentBoundValidator(): void
     {
         [$validatorOne, $validatorTwo] = $this->seedPageWithTwoValidators();
@@ -1213,6 +1229,30 @@ final class DelegatorGroupIntegrationTest extends TestCase
         self::assertSame(2, $stats['revoked'], 'the two whose leave was not refused');
         self::assertSame(2, $this->auditCount('validator_group_revoked'));
         self::assertCount(2, $this->storedNotices());
+    }
+
+    public function testAMemberWhoAlreadyLeftIsNotToldTheyWereRemoved(): void
+    {
+        $groupId = $this->createdGroup('10');
+        $this->addMembers($groupId, 2000, 1, 5.0);
+
+        // They leave on their own while the sweep is checking them, as a
+        // voluntary leave or an overlapping tick would.
+        global $wpdb;
+        $GLOBALS['__bcc_lcd_on_fetch'] = function () use ($wpdb, $groupId): void {
+            $wpdb->query($wpdb->prepare(
+                "DELETE FROM `{$wpdb->prefix}peepso_group_members` WHERE gm_group_id = %d AND gm_user_id = %d",
+                $groupId,
+                2000
+            ));
+        };
+
+        $stats = OnchainPlugin::instance()->validatorGroupRevokeService()->sweep();
+
+        self::assertSame(1, $stats['checked']);
+        self::assertSame(0, $stats['revoked']);
+        self::assertSame([], $this->storedNotices());
+        self::assertSame(0, $this->auditCount('validator_group_revoked'));
     }
 
     public function testAnEligibilityErrorRemovesNobodyAndTheNextTickRetries(): void

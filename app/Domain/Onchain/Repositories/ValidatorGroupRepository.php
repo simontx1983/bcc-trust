@@ -62,22 +62,28 @@ final class ValidatorGroupRepository {
         global $wpdb;
         $placeholders = implode(',', array_fill(0, count($idList), '%s'));
 
-        /** @var list<object{validator_id: numeric-string, group_id: numeric-string}> $rows */
+        // Only a published community counts, the same rule the revoke sweep
+        // walks by: a trashed group must not block a new one with a 409 or
+        // put a dead link on the card.
+        /** @var list<object{validator_id: numeric-string, group_id: numeric-string}>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT pm_validator.meta_value AS validator_id, MIN(pm_validator.post_id) AS group_id
                FROM {$wpdb->postmeta} pm_validator
          INNER JOIN {$wpdb->postmeta} pm_kind ON pm_kind.post_id = pm_validator.post_id
+         INNER JOIN {$wpdb->posts} p ON p.ID = pm_validator.post_id
               WHERE pm_validator.meta_key = %s
                 AND pm_validator.meta_value IN ({$placeholders})
                 AND pm_kind.meta_key   = %s
                 AND pm_kind.meta_value = %s
+                AND p.post_type   = %s
+                AND p.post_status = %s
               GROUP BY pm_validator.meta_value
               LIMIT %d",
-            ...[self::META_VALIDATOR_ID, ...$idList, self::META_KIND, self::KIND_DELEGATORS, count($idList)]
+            ...[self::META_VALIDATOR_ID, ...$idList, self::META_KIND, self::KIND_DELEGATORS, 'peepso-group', 'publish', count($idList)]
         ));
 
         $out = [];
-        foreach ($rows as $row) {
+        foreach ($rows ?: [] as $row) {
             $out[(int) $row->validator_id] = (int) $row->group_id;
         }
         return $out;

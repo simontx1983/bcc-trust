@@ -268,6 +268,14 @@ final class ValidatorGroupRevokeService
      */
     private function revokeMember(int $userId, int $groupId, ValidatorGatedGroupConfig $config, DelegationVerdict $verdict): bool
     {
+        // ⚠ leave() answers true when there is no row to remove, so it can't
+        // tell us this sweep removed anyone. Someone who left between the member
+        // read and now, or whom an overlapping tick already removed, is not
+        // removed here: no audit row, no notice.
+        if (PeepSoGroupRepository::getMembershipStatus($userId, $groupId) === null) {
+            return false;
+        }
+
         NftGroupRevokeService::$systemRevokeInProgress = true;
         try {
             $left = \BCC\Core\PeepSo\PeepSoGroupWriter::leave($userId, $groupId);
@@ -281,7 +289,7 @@ final class ValidatorGroupRevokeService
             return false;
         }
 
-        // SILENT revoke — no notification. Audit only (accountability).
+        // Audit first (accountability), then the bell in notifyRemoved().
         AuditLogger::log(
             'validator_group_revoked',
             $groupId,
