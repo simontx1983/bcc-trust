@@ -38,6 +38,7 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Trust\Core\Announcements\AnnouncementCapabilityResolver;
 use BCC\Trust\Core\Announcements\AnnouncementFeature;
+use BCC\Trust\Onchain\Services\DelegatorGroupView;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Trust\Core\Repositories\PageReadModelRepository;
@@ -84,7 +85,8 @@ if (!defined('ABSPATH')) {
  *   attestation_revoked_counts?: array<int, int>,
  *   validator_rows?: array<int, list<ValidatorCardRow>>,
  *   operator_profiles?: array<int, array{brand_name: string, bio: string, website_url: string, x_url: string, discord_url: string, telegram_url: string, logo_attachment_id: int|null}>,
- *   page_entities?: array<int, array{entity_type: string, entity_id: int}>
+ *   page_entities?: array<int, array{entity_type: string, entity_id: int}>,
+ *   delegator_groups?: array<int, array{id: int, slug: string, url: string, min_stake: string, min_stake_display: string|null, validator: array{id: int, name: string, chain_slug: string, chain_name: string}}>
  * }
  *
  * Already-loaded group data the community-card composer consumes. Both
@@ -538,6 +540,14 @@ final class CardViewService
             $card['page_stream'] = [
                 'can_post' => $operatorDecision['decision'] === ValidatorPageOperatorAuthority::DECISION_OPERATOR,
             ];
+            // Shares the decision above and the batched rows, so a list surface
+            // pays no per-card query for this block.
+            $card['delegator_group'] = DelegatorGroupView::forCard(
+                $pageId,
+                $operatorDecision['decision'] === ValidatorPageOperatorAuthority::DECISION_OPERATOR,
+                $validatorRows,
+                $prefetched['delegator_groups'] ?? null
+            );
         }
 
         return $card;

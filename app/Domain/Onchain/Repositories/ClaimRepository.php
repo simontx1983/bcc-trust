@@ -916,48 +916,6 @@ class ClaimRepository {
     }
 
     /**
-     * Bounded list of VERIFIED validator-operator claims, oldest first.
-     *
-     * Drives the validator-community provisioning backfill
-     * (ValidatorGroupProvisioningService::provisionAll): each row is a
-     * (user_id, entity_id=validator_id) pair whose community should
-     * exist. The INNER JOIN restricts to claims whose validator row
-     * still exists — a stale claim on a deleted validator can't mint a
-     * group.
-     *
-     * Bounded (§4): LIMIT %d (capped at 500); explicit columns only.
-     *
-     * @return list<object{id: string, user_id: string, entity_id: string, chain_id: string}>
-     */
-    public static function listVerifiedValidatorOperatorClaims(int $limit = 200): array {
-        if ($limit <= 0) {
-            return [];
-        }
-        if ($limit > 500) {
-            $limit = 500;
-        }
-
-        global $wpdb;
-        $table      = self::table();
-        $validators = \BCC\Core\DB\DB::table('onchain_validators');
-
-        /** @var list<object{id: string, user_id: string, entity_id: string, chain_id: string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT cl.id, cl.user_id, cl.entity_id, cl.chain_id
-               FROM {$table} cl
-              INNER JOIN {$validators} v ON v.id = cl.entity_id
-              WHERE cl.entity_type = 'validator'
-                AND cl.claim_role  = 'operator'
-                AND cl.status      = 'verified'
-              ORDER BY cl.id ASC
-              LIMIT %d",
-            $limit
-        ));
-
-        return $rows ?: [];
-    }
-
-    /**
      * Compute the total claim bonus for a user's own page.
      *
      * Sums the bonus for every VERIFIED claim the user personally holds,
@@ -1025,14 +983,6 @@ class ClaimRepository {
      * user or a chain, so one account holds as many operator claims as it
      * can prove and a claim on one chain cannot block a claim on another.
      * This read must never introduce a narrower rule than the table does.
-     *
-     * ⚠ Sibling of listVerifiedValidatorOperatorClaims(), which is the
-     * provisioning sweep's read: that one is NOT user-scoped and selects
-     * only the ids the sweep needs. This one is user-scoped and carries
-     * the display columns. They are deliberately separate queries rather
-     * than one with an optional predicate, because the sweep's bound
-     * (LIMIT 500 over all users) and this one's (per user) are different
-     * safety properties.
      *
      * The page join casts postmeta's LONGTEXT meta_value to UNSIGNED
      * rather than casting v.id to CHAR — the other direction trips a

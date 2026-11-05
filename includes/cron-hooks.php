@@ -49,7 +49,7 @@ return [
         // Onchain domain
         'bcc_onchain_daily_refresh'             => ['interval' => 'daily',                        'description' => 'onchain holdings refresh sweep'],
         'bcc_onchain_retry_bonus'               => ['interval' => 'hourly',                       'description' => 'onchain bonus-application retry'],
-        'bcc_gated_group_provision'             => ['interval' => 'daily',                        'description' => 'holder-group + delegator-community provisioning (PeepSo write surface)'],
+        'bcc_gated_group_provision'             => ['interval' => 'daily',                        'description' => 'holder-group provisioning from the requested queue (PeepSo write surface)'],
         // ⚠ `bcc_hall_provision` was here until Halls became
         // administrator-created. It swept the active chain registry daily and
         // created a public open group for every chain that lacked one, so

@@ -1554,6 +1554,51 @@ final class NotificationDispatcher
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // Delegator community — the revoke sweep removed this member
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Tell a member the sweep removed them. Self-notification like the rank
+     * notices: no human took this action, so there is no actor to name, and
+     * naming the group's owner would read as the operator having removed them.
+     *
+     * Bell only, by requirement: no push enqueue here, and the type is excluded
+     * from the digest email in NotificationRepository::findUnreadSince().
+     *
+     * ⚠ The message written here is only the fallback for a group that no longer
+     * resolves. See DelegatorGroupView::removalNotices() for why the notice
+     * itself is rendered at read time.
+     */
+    public function onDelegatorGroupMemberRemoved(int $userId, int $groupId): void
+    {
+        if ($userId <= 0 || $groupId <= 0) {
+            return;
+        }
+        try {
+            $group = PeepSoGroupRepository::findManyByIds([$groupId])[$groupId] ?? null;
+            $title = $group !== null ? mb_strimwidth((string) $group->post_title, 0, 80, '…', 'UTF-8') : 'a delegator group';
+
+            $this->dispatch(
+                $userId,
+                $userId,
+                sprintf(
+                    "You're no longer in %s. It requires a minimum delegation we couldn't confirm. You can rejoin once you meet it.",
+                    $title
+                ),
+                NotificationType::DELEGATOR_GROUP_REMOVED,
+                $groupId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] delegator-group removal bell failed', [
+                'user_id'  => $userId,
+                'group_id' => $groupId,
+                'error'    => $e->getMessage(),
+            ]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // Shared write path
     // ──────────────────────────────────────────────────────────────────
 

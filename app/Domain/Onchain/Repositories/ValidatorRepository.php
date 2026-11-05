@@ -90,7 +90,10 @@ if (!defined('ABSPATH')) {
  *     jailed_count: string|null,
  *     fetched_at: string,
  *     logo_url: string|null,
- *     moniker: string
+ *     moniker: string,
+ *     chain_id: int|numeric-string,
+ *     chain_type: string,
+ *     native_token: string|null
  * }
  *
  * @phpstan-type ValidatorCardPageRow object{
@@ -109,7 +112,10 @@ if (!defined('ABSPATH')) {
  *     jailed_count: string|null,
  *     fetched_at: string,
  *     logo_url: string|null,
- *     moniker: string
+ *     moniker: string,
+ *     chain_id: int|numeric-string,
+ *     chain_type: string,
+ *     native_token: string|null
  * }
  *
  * @phpstan-type ValidatorAggregateStats object{
@@ -464,7 +470,7 @@ final class ValidatorRepository
              v.operator_address, v.status, v.uptime_30d, v.commission_rate,
              v.voting_power_rank, v.total_stake, v.self_stake,
              v.delegator_count, v.jailed_count, v.fetched_at, v.logo_url,
-             v.moniker";
+             v.moniker, v.chain_id, c.chain_type, c.native_token";
 
         $ph = implode(',', array_fill(0, count($idList), '%d'));
 
@@ -1776,7 +1782,9 @@ final class ValidatorRepository
      *     total_stake: string|null,
      *     delegator_count: string|null,
      *     native_token: string|null,
-     *     page_slug: string|null
+     *     chain_name: string|null,
+     *     page_slug: string|null,
+     *     page_title: string|null
      * }>
      */
     public static function findCommunityStatsByIds(array $validatorIds): array
@@ -1808,14 +1816,17 @@ final class ValidatorRepository
          *     total_stake: string|null,
          *     delegator_count: string|null,
          *     native_token: string|null,
-         *     page_slug: string|null
+         *     chain_name: string|null,
+         *     page_slug: string|null,
+         *     page_title: string|null
          * }>|null $rows
          */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT v.id AS validator_id, v.moniker, v.status, v.commission_rate,
                     v.total_stake, v.delegator_count,
-                    c.native_token,
-                    COALESCE(p_wallet.post_name, p_meta.post_name) AS page_slug
+                    c.native_token, c.name AS chain_name,
+                    COALESCE(p_wallet.post_name, p_meta.post_name) AS page_slug,
+                    COALESCE(p_wallet.post_title, p_meta.post_title) AS page_title
                FROM {$table} v
                JOIN {$chains} c ON c.id = v.chain_id
                LEFT JOIN {$wallets} w        ON w.id = v.wallet_link_id
@@ -1845,7 +1856,9 @@ final class ValidatorRepository
                     'total_stake'     => $row->total_stake,
                     'delegator_count' => $row->delegator_count,
                     'native_token'    => $row->native_token,
+                    'chain_name'      => $row->chain_name,
                     'page_slug'       => $row->page_slug,
+                    'page_title'      => $row->page_title,
                 ];
             }
         }
