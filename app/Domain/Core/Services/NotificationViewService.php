@@ -25,6 +25,10 @@
  *                       PARENT post's act_id so the user lands on the
  *                       post on the floor — the FE has no comment-anchor
  *                       consumer in V1.
+ *   - DELEGATOR_GROUP_REMOVED
+ *                    → `/communities/<slug>` from `external_id` (the group),
+ *                       with the message rendered alongside it; `/` and the
+ *                       row's fallback message if the group has since gone
  *   - HALL_POST      → `/halls/<slug>` resolved from `external_id`
  *                       (the Hall's group_id). Falls back to
  *                       `/halls` if the group is no longer a Hall
@@ -115,9 +119,20 @@ final class NotificationViewService
             }
         }
 
+        // Batched for the same reason as the actors above. See
+        // DelegatorGroupView::removalNotices() for why these aren't in the row.
+        $removedFrom = [];
+        foreach ($rows as $row) {
+            $groupId = isset($row->not_external_id) ? (int) $row->not_external_id : 0;
+            if ($groupId > 0 && ($row->not_type ?? '') === NotificationType::DELEGATOR_GROUP_REMOVED) {
+                $removedFrom[$groupId] = true;
+            }
+        }
+        $removalNotices = \BCC\Trust\Onchain\Services\DelegatorGroupView::removalNotices(array_keys($removedFrom));
+
         $items = [];
         foreach ($rows as $row) {
-            $shape = self::shapeRow($row, $actorsById);
+            $shape = self::shapeRow($row, $actorsById, $removalNotices);
             if ($shape !== null) {
                 $items[] = $shape;
             }
@@ -152,9 +167,10 @@ final class NotificationViewService
 
     /**
      * @param array<int, array{id: int, handle: string, display_name: string, avatar_url: string}> $actorsById
+     * @param array<int, array{message: string, link: string}> $removalNotices keyed by group id
      * @return array<string, mixed>|null
      */
-    private static function shapeRow(object $row, array $actorsById = []): ?array
+    private static function shapeRow(object $row, array $actorsById = [], array $removalNotices = []): ?array
     {
         $type = isset($row->not_type) && is_string($row->not_type) ? $row->not_type : '';
         if (!NotificationType::isValid($type)) {
@@ -175,6 +191,11 @@ final class NotificationViewService
 
         $actor = $actorsById[$fromUserId] ?? self::resolveActor($fromUserId, '');
         $link  = self::resolveLink($type, $externalId, $actId, $actor['handle']);
+
+        if ($type === NotificationType::DELEGATOR_GROUP_REMOVED && isset($removalNotices[$externalId])) {
+            $message = $removalNotices[$externalId]['message'];
+            $link    = $removalNotices[$externalId]['link'];
+        }
 
         return [
             'id'         => $id,

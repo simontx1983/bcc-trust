@@ -709,6 +709,7 @@ $created = $GLOBALS['wpdb']->query(
         ID BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         post_title VARCHAR(255) NOT NULL DEFAULT '',
         post_name VARCHAR(200) NOT NULL DEFAULT '',
+        post_content LONGTEXT NULL,
         post_type VARCHAR(20) NOT NULL DEFAULT 'post',
         post_status VARCHAR(20) NOT NULL DEFAULT 'publish',
         PRIMARY KEY (ID),

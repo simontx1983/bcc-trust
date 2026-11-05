@@ -728,6 +728,10 @@ add_action('bcc_trust_daily_contribution_recovery', function () {
 // (`provisioning_state = 'requested'`). Verification is still required and is
 // re-checked per collection; it no longer authorizes anything on its own.
 // Idempotent — re-running creates no duplicates.
+//
+// ⚠ NFT holder groups ONLY. A delegator community is never created by this
+// sweep or by any event: its page's operator chooses to create it through
+// POST /pages/{id}/delegator-group and sets the minimum delegation there.
 add_action('bcc_gated_group_provision', function () {
     $result = \BCC\Trust\Onchain\OnchainPlugin::instance()
         ->gatedGroupProvisioningService()
@@ -735,26 +739,6 @@ add_action('bcc_gated_group_provision', function () {
 
     if ($result['created'] > 0 || !empty($result['errors'])) {
         \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group provisioning sweep', $result);
-    }
-
-    // Validator/delegator communities ride the SAME daily hook (no new
-    // cron registration — deliberate). The `bcc_page_claimed` subscriber
-    // provisions on the claim event; this backfill covers claims that
-    // predate the feature and any missed event. Idempotent. Isolated in
-    // its own try so a validator-side failure can't abort the holder
-    // sweep's already-recorded result.
-    try {
-        $validatorResult = \BCC\Trust\Onchain\OnchainPlugin::instance()
-            ->validatorGroupProvisioningService()
-            ->provisionAll();
-
-        if ($validatorResult['created'] > 0 || !empty($validatorResult['errors'])) {
-            \BCC\Core\Log\Logger::info('[bcc-trust] Delegator-community provisioning sweep', $validatorResult);
-        }
-    } catch (\Throwable $e) {
-        \BCC\Core\Log\Logger::warning('[bcc-trust] Delegator-community provisioning sweep failed', [
-            'error' => $e->getMessage(),
-        ]);
     }
 });
 
@@ -769,43 +753,6 @@ add_action('bcc_gated_group_provision', function () {
 // under `cleanup_only`, and
 // includes/database/unschedule-hall-provision.php clears the event from
 // installs that already carry it.
-
-// Validator/delegator communities — provision on the platform-facing
-// claim event. `bcc_page_claimed` fires only after claim verification
-// (wallet-signature proof), so the claim itself is the arming act: no
-// delegator-count floor. Filtered to validator-operator claims; the
-// operator becomes the group OWNER (moderation has an owner, and the
-// owner is exempt from the gate + revoke by existing guards).
-// Idempotent — re-firing finds the existing group and no-ops.
-add_action('bcc_page_claimed', function ($userId, $pageId, $entityType, $entityId, $role): void {
-    if ((string) $entityType !== 'validator' || (string) $role !== 'operator') {
-        return;
-    }
-
-    try {
-        $result = \BCC\Trust\Onchain\OnchainPlugin::instance()
-            ->validatorGroupProvisioningService()
-            ->provisionForClaim((int) $userId, (int) $entityId);
-
-        if ($result['status'] === 'created' || $result['status'] === 'error') {
-            \BCC\Core\Log\Logger::info('[bcc-trust] Delegator-community provisioning (claim event)', [
-                'user_id'      => (int) $userId,
-                'validator_id' => (int) $entityId,
-                'status'       => $result['status'],
-                'group_id'     => $result['group_id'],
-                'message'      => $result['message'],
-            ]);
-        }
-    } catch (\Throwable $e) {
-        // Never let community provisioning break the claim flow — the
-        // daily backfill retries.
-        \BCC\Core\Log\Logger::warning('[bcc-trust] Delegator-community provisioning (claim event) failed', [
-            'user_id'      => (int) $userId,
-            'validator_id' => (int) $entityId,
-            'error'        => $e->getMessage(),
-        ]);
-    }
-}, 30, 5);
 
 // V2 (PR 4): NFT-gated holder groups — reconcile sweep for users who
 // opted into auto-join via `bcc_auto_join_eligible_groups` user_meta.

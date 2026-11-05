@@ -34,9 +34,15 @@
  * evictions (the listener's delegator-kind arm).
  *
  * Bounded + rotated: at most SWEEP_BATCH_SIZE member re-verifications
- * per tick; the per-wallet 5-minute delegation cache inside the
- * eligibility service means a group's members sharing a validator cost
- * one LCD call per member-wallet, not per (member, group) pair.
+ * and SWEEP_GROUP_BUDGET groups per tick; the per-wallet 5-minute delegation
+ * cache inside the eligibility service means a group's members sharing a
+ * validator cost one LCD call per member-wallet, not per (member, group) pair.
+ *
+ * The walk is a keyset on group id, so every group is eventually reached
+ * however many exist. The saved cursor means "resume at the first group with
+ * an id at or above this, at this member offset"; the offset only applies if
+ * that exact group still exists. A removed member is told by bell, and only a
+ * removed member: see {@see notifyRemoved()}.
  *
  * @package BCC\Trust\Onchain\Services
  */
@@ -44,6 +50,7 @@
 namespace BCC\Trust\Onchain\Services;
 
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Repositories\ValidatorGroupRepository;
 use BCC\Trust\Onchain\ValueObjects\DelegationVerdict;
@@ -58,6 +65,12 @@ final class ValidatorGroupRevokeService
     /** Default per-tick cap on member re-verifications. Filterable. */
     public const SWEEP_BATCH_SIZE = 200;
 
+    /**
+     * Groups visited per tick. A group of nothing but its owner spends no member
+     * budget, so this is what bounds a tick across many of them.
+     */
+    public const SWEEP_GROUP_BUDGET = 500;
+
     /** Option storing the rotation cursor across ticks (own cursor —
      *  never shared with the NFT sweep's). */
     private const CURSOR_OPTION = 'bcc_validator_group_revoke_cursor';
@@ -67,6 +80,8 @@ final class ValidatorGroupRevokeService
 
     public function __construct(
         private readonly DelegationEligibilityService $eligibility,
+        /** @var (\Closure(int, int): void)|null Replaces the bell, for tests only. */
+        private readonly ?\Closure $removalNotifier = null,
     ) {}
 
     /**
@@ -81,121 +96,145 @@ final class ValidatorGroupRevokeService
             $batchCap = self::SWEEP_BATCH_SIZE;
         }
 
-        $groupIds = ValidatorGroupRepository::listAllValidatorGroupIds();
         $stats = ['checked' => 0, 'revoked' => 0, 'skipped_unknown' => 0, 'groups_touched' => 0];
-        if ($groupIds === []) {
-            return $stats;
-        }
 
-        // Cursor → (groupIndex, memberOffset); same group_id + offset
-        // persistence idiom as NftGroupRevokeService so the cursor stays
-        // stable when groups are added/removed between ticks.
-        $cursor       = $this->readCursor();
-        $startGroupId = $cursor['group_id'];
-        $startOffset  = $cursor['offset'];
+        $cursor  = $this->readCursor();
+        $startId = $cursor['group_id'];
 
-        $startIdx = array_search($startGroupId, $groupIds, true);
-        if ($startIdx === false) {
-            $startIdx    = 0;
-            $startOffset = 0;
-        }
+        $processed = 0;
+        $visited   = 0;
+        $afterId   = max(0, $startId - 1);
+        $wrapped   = false;
 
-        $processed   = 0;
-        $groupsCount = count($groupIds);
-        $nextCursor  = ['group_id' => $groupIds[0], 'offset' => 0];
-        $wrapped     = false;
+        while ($visited < self::SWEEP_GROUP_BUDGET) {
+            $groupIds = ValidatorGroupRepository::listValidatorGroupIdsAfter($afterId, self::SWEEP_GROUP_BUDGET - $visited);
 
-        for ($step = 0; $step < $groupsCount; $step++) {
-            $idx     = ($startIdx + $step) % $groupsCount;
-            $groupId = $groupIds[$idx];
-            $offset  = ($step === 0) ? $startOffset : 0;
-
-            $config = ValidatorGroupRepository::getGateConfig($groupId);
-            if ($config === null) {
-                continue; // No longer a delegator community — skip.
+            if ($groupIds === []) {
+                if ($wrapped) {
+                    break; // No delegator communities at all.
+                }
+                // Past the last group: go round to the first.
+                $wrapped = true;
+                $afterId = 0;
+                continue;
             }
 
-            $touchedThisGroup = false;
-
-            // Page through this group's active members.
-            while (true) {
-                if ($processed >= $batchCap) {
-                    // Out of budget mid-group — resume here next tick.
-                    $nextCursor = ['group_id' => $groupId, 'offset' => $offset];
-                    $this->writeCursor($nextCursor);
-                    if ($touchedThisGroup) {
-                        $stats['groups_touched']++;
-                    }
+            foreach ($groupIds as $groupId) {
+                if ($wrapped && $groupId >= $startId) {
+                    // Back where this tick started: the rotation is complete.
+                    $this->writeCursor(['group_id' => $groupId, 'offset' => 0]);
                     return $stats;
                 }
 
-                $remaining = $batchCap - $processed;
-                $pageSize  = (int) min(self::MEMBER_PAGE_SIZE, $remaining);
-                $members   = PeepSoGroupRepository::listGroupMembers($groupId, $offset, $pageSize);
-                if ($members === []) {
-                    break; // End of this group's member list.
+                $visited++;
+                $afterId = $groupId;
+
+                $config = ValidatorGroupRepository::getGateConfig($groupId);
+                if ($config === null) {
+                    continue; // No longer a delegator community — skip.
                 }
 
-                foreach ($members as $member) {
-                    $userId = (int) $member->user_id;
-                    if ($userId <= 0) {
-                        continue;
-                    }
+                // The saved offset belongs to the saved group. If that group
+                // is gone, this is the next one, and it starts from its top.
+                $offset = (!$wrapped && $groupId === $startId) ? $cursor['offset'] : 0;
 
-                    // Owners (the operator) are never revoked.
-                    // PeepSoGroupWriter::leave also refuses them; the
-                    // short-circuit avoids a pointless LCD call.
-                    if ((string) $member->role === 'member_owner') {
-                        continue;
-                    }
-
-                    $touchedThisGroup = true;
-                    $stats['checked']++;
-                    $processed++;
-
-                    $verdict = $this->verdictForMember($userId, $config);
-
-                    if ($verdict->isUnknown()) {
-                        // LCD couldn't verify — FAIL OPEN on revoke:
-                        // skip, retry next tick. Never revoke on a hiccup.
-                        $stats['skipped_unknown']++;
-                        continue;
-                    }
-
-                    if ($verdict->isIneligible()) {
-                        if ($this->revokeMember($userId, $groupId, $config, $verdict)) {
-                            $stats['revoked']++;
-                        }
-                        continue;
-                    }
-                    // ELIGIBLE → keep.
+                if (!$this->sweepGroup($groupId, $config, $offset, $batchCap, $processed, $stats)) {
+                    return $stats; // Out of budget; sweepGroup saved the cursor.
                 }
-
-                $offset += count($members);
-                if (count($members) < $pageSize) {
-                    break; // Short page = end of group.
-                }
-            }
-
-            if ($touchedThisGroup) {
-                $stats['groups_touched']++;
-            }
-
-            $nextIdx    = ($idx + 1) % $groupsCount;
-            $nextCursor = ['group_id' => $groupIds[$nextIdx], 'offset' => 0];
-
-            if ($nextIdx === $startIdx) {
-                $wrapped = true;
-                break;
             }
         }
 
-        if ($wrapped) {
-            $nextCursor = ['group_id' => $groupIds[0], 'offset' => 0];
-        }
-        $this->writeCursor($nextCursor);
+        // Spent the group budget, or found nothing to do: next tick carries on
+        // past the last group visited.
+        $this->writeCursor(['group_id' => $afterId + 1, 'offset' => 0]);
 
         return $stats;
+    }
+
+    /**
+     * Page through one group's active members. False when the member budget ran
+     * out inside it, having saved where to resume.
+     *
+     * ⚠ THE OFFSET ADVANCES PAST MEMBERS STILL PRESENT, NOT PAST THE PAGE.
+     * listGroupMembers() is OFFSET-paged, and a removal moves every later row up
+     * one, so adding the full page size skips as many members as were removed.
+     * A member who stayed, who is the owner, or whose leave() was refused is
+     * still in the list, so they count; only a real removal doesn't. That can't
+     * spin: a removal spends budget and shortens the list, and anything else
+     * moves the offset.
+     *
+     * @param array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int} $stats
+     */
+    private function sweepGroup(int $groupId, ValidatorGatedGroupConfig $config, int $offset, int $batchCap, int &$processed, array &$stats): bool
+    {
+        $touchedThisGroup = false;
+
+        while (true) {
+            if ($processed >= $batchCap) {
+                // Out of budget mid-group — resume here next tick.
+                $this->writeCursor(['group_id' => $groupId, 'offset' => $offset]);
+                if ($touchedThisGroup) {
+                    $stats['groups_touched']++;
+                }
+                return false;
+            }
+
+            $remaining = $batchCap - $processed;
+            $pageSize  = (int) min(self::MEMBER_PAGE_SIZE, $remaining);
+            $members   = PeepSoGroupRepository::listGroupMembers($groupId, $offset, $pageSize);
+            if ($members === []) {
+                break; // End of this group's member list.
+            }
+
+            $removedThisPage = 0;
+
+            foreach ($members as $member) {
+                $userId = (int) $member->user_id;
+                if ($userId <= 0) {
+                    continue;
+                }
+
+                // Owners (the operator) are never revoked.
+                // PeepSoGroupWriter::leave also refuses them; the
+                // short-circuit avoids a pointless LCD call.
+                if ((string) $member->role === 'member_owner') {
+                    continue;
+                }
+
+                $touchedThisGroup = true;
+                $stats['checked']++;
+                $processed++;
+
+                $verdict = $this->verdictForMember($userId, $config);
+
+                if ($verdict->isUnknown()) {
+                    // LCD couldn't verify — FAIL OPEN on revoke:
+                    // skip, retry next tick. Never revoke on a hiccup.
+                    $stats['skipped_unknown']++;
+                    continue;
+                }
+
+                if ($verdict->isIneligible()) {
+                    if ($this->revokeMember($userId, $groupId, $config, $verdict)) {
+                        $stats['revoked']++;
+                        $removedThisPage++;
+                    }
+                    continue;
+                }
+                // ELIGIBLE → keep.
+            }
+
+            $offset += count($members) - $removedThisPage;
+            if (count($members) < $pageSize) {
+                break; // Short page = end of group.
+            }
+        }
+
+        if ($touchedThisGroup) {
+            $stats['groups_touched']++;
+        }
+
+        return true;
     }
 
     /**
@@ -256,7 +295,32 @@ final class ValidatorGroupRevokeService
             $userId
         );
 
+        $this->notifyRemoved($userId, $groupId);
+
         return true;
+    }
+
+    /**
+     * The bell, and only after a real removal: this runs on one line of one path,
+     * so an UNKNOWN verdict, a refused leave() and any leave outside this sweep
+     * can't reach it. The removal has already happened and is audited, so nothing
+     * going wrong here may undo it or stop the rest of the sweep.
+     */
+    private function notifyRemoved(int $userId, int $groupId): void
+    {
+        try {
+            if ($this->removalNotifier !== null) {
+                ($this->removalNotifier)($userId, $groupId);
+                return;
+            }
+            Plugin::instance()->notificationDispatcher()->onDelegatorGroupMemberRemoved($userId, $groupId);
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] delegator-group removal notice failed', [
+                'user_id'  => $userId,
+                'group_id' => $groupId,
+                'error'    => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

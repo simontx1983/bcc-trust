@@ -335,10 +335,12 @@ final class ValidatorGroupsEndpoint
      *     total_stake: string|null,
      *     delegator_count: string|null,
      *     native_token: string|null,
+     *     chain_name?: string|null,
      *     page_slug: string|null
      * }|null $row
      * @return array{
      *     moniker: string|null,
+     *     chain_name: string|null,
      *     status: string|null,
      *     commission: float|null,
      *     total_stake: float|null,
@@ -359,6 +361,7 @@ final class ValidatorGroupsEndpoint
 
         return [
             'moniker'           => $row->moniker !== null && $row->moniker !== '' ? (string) $row->moniker : null,
+            'chain_name'        => isset($row->chain_name) && $row->chain_name !== '' ? (string) $row->chain_name : null,
             'status'            => $row->status !== null && $row->status !== '' ? (string) $row->status : null,
             'commission'        => $row->commission_rate !== null ? (float) $row->commission_rate : null,
             'total_stake'       => $row->total_stake !== null ? (float) $row->total_stake : null,
@@ -376,7 +379,7 @@ final class ValidatorGroupsEndpoint
      * "1 ATOM" / "2.5 OSMO" / "1" (token unknown). Null when the gate is
      * unset — mirrors formatMinBalanceDisplay's null-when-ungated rule.
      */
-    private static function formatMinStakeDisplay(?float $minStake, ?string $nativeToken): ?string
+    public static function formatMinStakeDisplay(?float $minStake, ?string $nativeToken): ?string
     {
         if ($minStake === null || $minStake <= 0.0) {
             return null;
@@ -398,6 +401,7 @@ final class ValidatorGroupsEndpoint
      *     total_stake: string|null,
      *     delegator_count: string|null,
      *     native_token: string|null,
+     *     chain_name?: string|null,
      *     page_slug: string|null
      * }|null $statsRow
      * @param array{posts_last_7d: int, last_activity_at: string|null, heat: string, heat_label: string} $activity
@@ -435,7 +439,8 @@ final class ValidatorGroupsEndpoint
                 return ApiResponse::error(
                     'bcc_permission_denied',
                     'You opted out of this community recently. Try again later or rejoin from the discovery page.',
-                    403
+                    403,
+                    ['reason_code' => 'opt_out_active']
                 );
 
             case JoinResult::CODE_NOT_ELIGIBLE:
@@ -489,7 +494,9 @@ final class ValidatorGroupsEndpoint
             $row !== null ? $row->native_token : null
         );
 
-        if ($minDisplay !== null && $config->minStake > 1.0) {
+        // Always named: the operator chose this number, and a minimum at or
+        // below 1 is as binding as one above it.
+        if ($minDisplay !== null) {
             return $moniker !== null
                 ? sprintf('Delegate at least %s to %s to join this community.', $minDisplay, $moniker)
                 : sprintf('Delegate at least %s to this validator to join.', $minDisplay);
