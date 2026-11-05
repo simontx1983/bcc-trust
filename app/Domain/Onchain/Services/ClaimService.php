@@ -90,7 +90,7 @@ class ClaimService {
         // Load entity data.
         $entity = self::loadEntity($entityType, $entityId);
         if (!$entity) {
-            return ['success' => false, 'message' => 'Entity not found.'];
+            return ['success' => false, 'error' => 'entity_not_found', 'message' => 'Entity not found.'];
         }
 
         $entityChainSlug = $entity->chain_slug ?? '';
@@ -169,7 +169,7 @@ class ClaimService {
         );
 
         if (!$upsertResult) {
-            return ['success' => false, 'message' => 'Failed to save claim.'];
+            return ['success' => false, 'error' => 'transient', 'message' => 'Failed to save claim.'];
         }
 
         $claimId = $upsertResult['id'];

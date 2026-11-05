@@ -36,6 +36,32 @@ namespace BCC\Trust\Core\Services\Feed {
             return false;
         }
     }
+    if (!function_exists(__NAMESPACE__ . '\\get_posts')) {
+        /**
+         * `createBackingPost()` now looks for an existing post for this event
+         * before inserting (the replay guard). This suite is about the CPT
+         * slug, so the lookup always misses and every case still exercises
+         * the insert path. The replay behaviour itself is covered by
+         * ActivityReplayGuardTest.
+         *
+         * ⚠⚠ ONE DECLARATION PER PROCESS. `ReviewBodyHydratorMemberTargetTest`
+         * declares `get_posts` at this same FQN, and only the first file
+         * loaded wins — this file sorts earlier, so a stub of our own with a
+         * private contract silently disabled 1 of its cases. This one
+         * therefore uses THAT suite's globals verbatim
+         * (`bcc_test_get_posts_calls` / `bcc_test_get_posts_result`), so the
+         * two are interchangeable whichever loads first.
+         *
+         * @param array<string, mixed> $args
+         * @return list<mixed>
+         */
+        function get_posts(array $args = []): array
+        {
+            $GLOBALS['bcc_test_get_posts_calls'][] = $args;
+            /** @var list<mixed> */
+            return $GLOBALS['bcc_test_get_posts_result'] ?? [];
+        }
+    }
     if (!function_exists(__NAMESPACE__ . '\\update_post_meta')) {
         /**
          * @param int|string   $postId
@@ -63,13 +89,18 @@ namespace BCC\Trust\Core\Tests\Unit {
         {
             $GLOBALS['bcc_test_insert_post_args']  = [];
             $GLOBALS['bcc_test_post_meta_writes'] = [];
+            // Shared with ReviewBodyHydratorMemberTargetTest — see the stub.
+            $GLOBALS['bcc_test_get_posts_calls']  = [];
+            $GLOBALS['bcc_test_get_posts_result'] = [];
         }
 
         protected function tearDown(): void
         {
             unset(
                 $GLOBALS['bcc_test_insert_post_args'],
-                $GLOBALS['bcc_test_post_meta_writes']
+                $GLOBALS['bcc_test_post_meta_writes'],
+                $GLOBALS['bcc_test_get_posts_calls'],
+                $GLOBALS['bcc_test_get_posts_result']
             );
         }
 

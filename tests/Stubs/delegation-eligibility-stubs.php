@@ -15,6 +15,8 @@
  *                                                 (null = transport failure)
  *   fetch_calls  list<string>                     recorded fetch addresses
  *   written      list<array{int,int,int}>         write-through calls
+ *   wallet_read_fails bool                        true → getForUserOrThrow() throws,
+ *                                                 simulating a read that did not run
  */
 
 declare(strict_types=1);
@@ -40,6 +42,32 @@ namespace BCC\Trust\Onchain\Repositories {
             {
                 return $GLOBALS['__bcc_deleg_fixture']['wallets'] ?? [];
             }
+
+            /**
+             * FAIL-CLOSED sibling. The service must call THIS one, so that a
+             * read which did not run becomes UNKNOWN instead of an empty
+             * wallet list (which the sweep would act on by removing a member).
+             *
+             * Set `wallet_read_fails` in the fixture to simulate the read
+             * failing rather than returning no rows.
+             *
+             * @return list<object>
+             * @throws RepositoryReadFailure
+             */
+            public static function getForUserOrThrow(int $userId, ?string $walletType = null, bool $verifiedOnly = false): array
+            {
+                if (!empty($GLOBALS['__bcc_deleg_fixture']['wallet_read_fails'])) {
+                    throw new RepositoryReadFailure('simulated wallet read failure');
+                }
+
+                return $GLOBALS['__bcc_deleg_fixture']['wallets'] ?? [];
+            }
+        }
+    }
+
+    if (!class_exists(RepositoryReadFailure::class, false)) {
+        class RepositoryReadFailure extends \RuntimeException
+        {
         }
     }
 

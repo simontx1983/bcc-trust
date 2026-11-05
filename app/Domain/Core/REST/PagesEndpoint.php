@@ -394,6 +394,36 @@ final class PagesEndpoint
         $existing = ClaimRepository::getUserClaim($userId, $entityType, $entityId);
         if ($existing !== null && (string) $existing->status === 'verified') {
             $role = (string) $existing->claim_role;
+
+            // ⚠⚠ SELF-REPAIR of an interrupted claim.
+            //
+            // The claim row and the ownership transfer are written by two
+            // different things: the row inside ClaimService::claim(), the
+            // transfer later on `bcc_page_claimed`. If the request died
+            // between them the claim is verified and the page is still
+            // unowned, and a retry used to return 200 `already_verified`
+            // without repairing anything — while
+            // `userHasVerifiedClaimOnPage()` kept passing, so it LOOKED
+            // healthy and the operator never owned their page.
+            //
+            // Re-firing is now safe because all three subscribers are
+            // replay-safe by STRUCTURED IDENTITY, not by title:
+            //   • priority 10 ActivityStreamWriter — createBackingPost()
+            //     reuses the post matching (author, module, sidecar) and
+            //     insertActivityOnce() reuses the row matching
+            //     (act_external_id, act_module_id), so no duplicate wall
+            //     entry;
+            //   • priority 20 PeepSoIntegration — gated on post_author === 0
+            //     and self-disarms once set;
+            //   • priority 30 ValidatorMsgQueueWorker — idempotent by
+            //     construction (INSERT … ON DUPLICATE KEY UPDATE id = id).
+            //
+            // ⚠ Gated on post_author === 0 — "nobody owns this yet" — the
+            // same condition the transfer itself requires. So this finishes
+            // an INTERRUPTED transfer and can never move a page away from an
+            // existing owner, which is the agreed ownership rule.
+            $needsTransfer = (int) get_post_field('post_author', $pageId) === 0;
+
             return self::successResponse(
                 claimId:    (int) $existing->id,
                 pageId:     $pageId,
@@ -404,7 +434,7 @@ final class PagesEndpoint
                 status:     'already_verified',
                 message:    'You are already the verified ' . self::roleLabel($role) . '.',
                 userId:     $userId,
-                fireEvent:  false
+                fireEvent:  $needsTransfer
             );
         }
 
@@ -544,6 +574,34 @@ final class PagesEndpoint
                 'bcc_conflict',
                 'This entity has already been claimed by another user.',
                 409
+            );
+        }
+
+        // ⚠ A SERVER problem must never read as a WALLET problem.
+        //
+        // Before this branch, everything except needs_wallet and
+        // already_claimed fell through to the 403 below — so an advisory-lock
+        // timeout (two quick clicks), a write failure or a transient DB error
+        // told a legitimate operator that their wallet does not match the
+        // validator. The plausible reaction is to unlink a correct wallet or
+        // give up, and the response left support nothing to diagnose with.
+        //
+        // 503 is retryable and matches the house code for "we could not
+        // complete this, try again".
+        if (($result['error'] ?? '') === 'transient') {
+            return ApiResponse::error(
+                'bcc_unavailable',
+                'We could not complete the claim just now. Please try again in a moment.',
+                503
+            );
+        }
+
+        // Not a wallet mismatch either: the entity itself is gone.
+        if (($result['error'] ?? '') === 'entity_not_found') {
+            return ApiResponse::error(
+                'bcc_not_found',
+                'That entity could not be found.',
+                404
             );
         }
 

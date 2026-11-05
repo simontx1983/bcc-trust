@@ -45,6 +45,9 @@ final class PageFollowRepository
     /** Explicit column list — must match schema-page-follows.php. */
     private const COLUMNS = 'id, user_id, page_id, card_kind, tier_at_watch, created_at';
 
+    /** One read page of follow rows; also bounds deleteByIds(). */
+    public const DRAIN_PAGE_SIZE = 5000;
+
     private string $table;
 
     public function __construct()
@@ -209,7 +212,7 @@ final class PageFollowRepository
             'SELECT ' . self::COLUMNS . " FROM {$this->table}
               WHERE page_id = %d
               ORDER BY created_at ASC, id ASC
-              LIMIT 5000",
+              LIMIT " . self::DRAIN_PAGE_SIZE . "",
             $pageId
         ));
 
@@ -239,6 +242,48 @@ final class PageFollowRepository
      * onPageClaimed migration once each row has been promoted to a
      * PeepSo follow. Returns rows-deleted.
      */
+    /**
+     * Delete exactly the rows named, and nothing else.
+     *
+     * ⚠ The companion to {@see deleteByPageId()}, which deletes EVERY row
+     * for a page. The follower drain must only remove rows it actually
+     * handled: a row whose PeepSo follow failed has to survive for the next
+     * attempt, and a page with more rows than one read page must not have
+     * the unread remainder destroyed.
+     *
+     * Bounded (§4): the id list is capped at one read page's worth, and the
+     * caller passes ids it just read.
+     *
+     * @param list<int> $ids
+     * @return int rows deleted (0 on a failed query — the caller must not
+     *             treat 0 as "nothing to do")
+     */
+    public function deleteByIds(array $ids): int
+    {
+        $clean = [];
+        foreach ($ids as $id) {
+            $id = (int) $id;
+            if ($id > 0) {
+                $clean[$id] = true;
+            }
+        }
+        if ($clean === []) {
+            return 0;
+        }
+
+        $list = array_slice(array_keys($clean), 0, self::DRAIN_PAGE_SIZE);
+
+        global $wpdb;
+
+        $placeholders = implode(',', array_fill(0, count($list), '%d'));
+        $deleted      = $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$this->table} WHERE id IN ({$placeholders})",
+            ...$list
+        ));
+
+        return is_int($deleted) ? $deleted : 0;
+    }
+
     public function deleteByPageId(int $pageId): int
     {
         if ($pageId <= 0) {

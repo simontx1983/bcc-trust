@@ -775,7 +775,10 @@ class ClaimRepository {
         // Advisory lock scoped to this specific entity+role.
         $lockKey = "bcc_claim:{$entityType}:{$entityId}:{$role}";
         if (!AdvisoryLock::acquire($lockKey, 5)) {
-            return ['success' => false, 'message' => 'Could not acquire claim lock. Please try again.'];
+            // 'transient' so the route answers 503 (retryable) rather than
+            // the default 403 'your wallet does not match' — a lock timeout
+            // is a busy server, not a wrong wallet.
+            return ['success' => false, 'error' => 'transient', 'message' => 'Could not acquire claim lock. Please try again.'];
         }
 
         try {
@@ -803,7 +806,7 @@ class ClaimRepository {
             $upsertResult = self::upsert($userId, $entityType, $entityId, $walletAddress, $chainId, $role, 'verified');
 
             if (!$upsertResult) {
-                return ['success' => false, 'message' => 'Failed to save claim.'];
+                return ['success' => false, 'error' => 'transient', 'message' => 'Failed to save claim.'];
             }
 
             return ['success' => true, 'claim_id' => $upsertResult['id']];
@@ -819,6 +822,7 @@ class ClaimRepository {
             }
             return [
                 'success' => false,
+                'error'   => 'transient',
                 'message' => 'Temporary database error — please try again in a moment.',
             ];
         } finally {

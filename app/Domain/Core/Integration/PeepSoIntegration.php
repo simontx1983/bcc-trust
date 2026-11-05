@@ -154,6 +154,35 @@ class PeepSoIntegration
 
         $currentAuthor = (int) get_post_field('post_author', $pageId);
         if ($currentAuthor !== 0) {
+            // ⛔ DELIBERATELY NO AUTOMATIC TRANSFER.
+            //
+            // A page keeps its owner. Nothing here moves `post_author`, and
+            // nothing moves the owner-keyed `bcc_trust_page_scores` row.
+            //
+            // The condition this guards is real: claims are deleted when a
+            // wallet is disconnected or an account is removed, which frees
+            // the exclusive operator slot — so a DIFFERENT user can later
+            // hold the only verified claim on this validator while the page
+            // still belongs to the original claimer. Transferring on its own
+            // would take a page away from a live account and strand that
+            // account's score row, and a routine key rotation would trigger
+            // it. So the mismatch is REPORTED, not resolved.
+            //
+            // Reassignment, if it is ever wanted, is an explicit operator- or
+            // admin-initiated action that also decides what happens to the
+            // previous owner's score row.
+            if ($currentAuthor !== $userId) {
+                \BCC\Core\Log\Logger::warning(
+                    '[bcc-trust] page_claimed by a user who is not the page author — ownership left unchanged',
+                    [
+                        'page_id'        => $pageId,
+                        'claiming_user'  => $userId,
+                        'current_author' => $currentAuthor,
+                        'note'           => 'no automatic transfer by design; needs an explicit reassignment decision',
+                    ]
+                );
+            }
+
             return;
         }
 
@@ -194,59 +223,129 @@ class PeepSoIntegration
      * already follow the claimer in PeepSo (rare), the existing
      * follow_id is reused and we just write the missing meta row.
      */
+    /**
+     * Drain `bcc_page_follows` for a freshly claimed page into real PeepSo
+     * follows on the new operator.
+     *
+     * ⚠⚠ DELETES ONLY WHAT IT HANDLED. The previous version read one page
+     * of rows (LIMIT 5000) and then called `deleteByPageId()`, which removes
+     * EVERY row for the page. Two silent losses followed:
+     *
+     *   - a page with more than one read page of follows had the unread
+     *     remainder destroyed without ever being migrated;
+     *   - a row whose PeepSo follow failed was counted as `errored` and then
+     *     deleted anyway, so the follow was gone for good with no retry.
+     *
+     * `deleteByPageId()` also returns 0 on a failed query, so the summary log
+     * reported success either way.
+     *
+     * Now: migrate a page, delete exactly the ids that were migrated or
+     * deliberately skipped, and leave errored rows in place. Repeat while a
+     * pass makes progress, so a page of any size drains. A pass that handles
+     * nothing stops the loop — the remaining rows all errored and are left
+     * for the next claim-time attempt rather than being thrown away.
+     */
     private function migratePageFollowersToPeepSo(int $pageId, int $newAuthorId): void
     {
         $pageFollowRepo = Plugin::instance()->pageFollowRepository();
         $watchMetaRepo  = Plugin::instance()->watchMetaRepository();
 
-        $rows = $pageFollowRepo->findByPageId($pageId);
-        if (empty($rows)) {
-            return;
-        }
+        $migrated = 0;
+        $skipped  = 0;
+        $deleted  = 0;
+        $passes   = 0;
 
-        $migrated  = 0;
-        $skipped   = 0;
-        $errored   = 0;
+        // ⚠ A SET of row ids, not a counter. A row that fails is re-read by
+        // the next pass and fails again, so a counter would report two
+        // casualties for one retained row — and `retained` is derived from
+        // this, so the summary log would overstate what was left behind.
+        /** @var array<int, true> $erroredIds */
+        $erroredIds = [];
 
-        foreach ($rows as $row) {
-            $viewerId = (int) $row->user_id;
+        // Bound the loop independently of row counts: each pass must either
+        // handle at least one row or break, so this cap is a backstop against
+        // an unforeseen non-progressing state, never the normal exit.
+        $maxPasses = 64;
 
-            // Self-follow guard (the claimer's own pull would now be a
-            // self-follow). PeepSoFollowWriter::follow rejects this too,
-            // but we filter here so it doesn't count as an error.
-            if ($viewerId === $newAuthorId) {
-                $skipped++;
-                continue;
+        while ($passes < $maxPasses) {
+            $passes++;
+
+            $rows = $pageFollowRepo->findByPageId($pageId);
+            if ($rows === []) {
+                break;
             }
 
-            try {
-                $followId = \BCC\Core\PeepSo\PeepSoFollowWriter::follow($viewerId, $newAuthorId);
-                if ($followId === 0) {
-                    $errored++;
+            $handledIds   = [];
+            $erroredInRun = 0;
+
+            foreach ($rows as $row) {
+                $viewerId = (int) $row->user_id;
+                $rowId    = (int) $row->id;
+
+                // Self-follow guard (the claimer's own pull would now be a
+                // self-follow). PeepSoFollowWriter::follow rejects this too,
+                // but filtering here keeps it out of the error count. It IS
+                // handled, so it is safe to remove.
+                if ($viewerId === $newAuthorId) {
+                    $skipped++;
+                    $handledIds[] = $rowId;
                     continue;
                 }
 
-                $existingMeta = $watchMetaRepo->find($followId);
-                if ($existingMeta === null) {
-                    $watchMetaRepo->insert(
-                        $followId,
-                        $row->tier_at_watch,
-                        null /* batch_id — Phase 3 */
-                    );
+                try {
+                    $followId = \BCC\Core\PeepSo\PeepSoFollowWriter::follow($viewerId, $newAuthorId);
+                    if ($followId === 0) {
+                        $erroredIds[$rowId] = true;
+                        $erroredInRun++;
+                        continue;
+                    }
+
+                    $existingMeta = $watchMetaRepo->find($followId);
+                    if ($existingMeta === null) {
+                        // ⚠ The follow already exists at this point. If the
+                        // tier meta cannot be written the follow is still
+                        // real, so the row is handled — losing the ribbon
+                        // tier is better than re-following on every claim.
+                        $watchMetaRepo->insert(
+                            $followId,
+                            $row->tier_at_watch,
+                            null /* batch_id — Phase 3 */
+                        );
+                    }
+                    $migrated++;
+                    $handledIds[] = $rowId;
+                } catch (\Throwable $e) {
+                    $erroredIds[$rowId] = true;
+                    $erroredInRun++;
+                    \BCC\Core\Log\Logger::error('[bcc-trust] migratePageFollowersToPeepSo: per-row failure', [
+                        'page_id'   => $pageId,
+                        'viewer_id' => $viewerId,
+                        'author_id' => $newAuthorId,
+                        'error'     => $e->getMessage(),
+                    ]);
                 }
-                $migrated++;
-            } catch (\Throwable $e) {
-                $errored++;
-                \BCC\Core\Log\Logger::error('[bcc-trust] migratePageFollowersToPeepSo: per-row failure', [
-                    'page_id'   => $pageId,
-                    'viewer_id' => $viewerId,
-                    'author_id' => $newAuthorId,
-                    'error'     => $e->getMessage(),
-                ]);
+            }
+
+            if ($handledIds === []) {
+                // Nothing handled this pass: every remaining row errored.
+                // Leave them for the next attempt instead of deleting them.
+                break;
+            }
+
+            $deleted += $pageFollowRepo->deleteByIds($handledIds);
+
+            // A short page means we saw every remaining row.
+            if (count($rows) < \BCC\Trust\Core\Repositories\PageFollowRepository::DRAIN_PAGE_SIZE
+                && $erroredInRun === 0) {
+                break;
             }
         }
 
-        $deleted = $pageFollowRepo->deleteByPageId($pageId);
+        $errored = count($erroredIds);
+
+        if ($migrated === 0 && $skipped === 0 && $errored === 0) {
+            return;
+        }
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Page-follow migration complete', [
             'page_id'  => $pageId,
@@ -255,6 +354,9 @@ class PeepSoIntegration
             'skipped'  => $skipped,
             'errored'  => $errored,
             'deleted'  => $deleted,
+            'passes'   => $passes,
+            // ⚠ Non-zero `errored` means rows were LEFT IN PLACE on purpose.
+            'retained' => $errored,
         ]);
     }
 
