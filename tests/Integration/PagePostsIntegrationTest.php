@@ -662,12 +662,31 @@ final class PagePostsIntegrationTest extends TestCase
     {
         global $wpdb;
 
+        // Add only what the shared bootstrap's wp_posts lacks: other suites
+        // widen that table too, and a second ADD of one column fails.
+        $wanted = [
+            'post_author'   => 'BIGINT UNSIGNED NOT NULL DEFAULT 0',
+            'post_content'  => 'LONGTEXT NULL',
+            'post_excerpt'  => 'TEXT NULL',
+            'post_date_gmt' => "DATETIME NOT NULL DEFAULT '2000-01-01 00:00:00'",
+        ];
+        $existing = $wpdb->get_col($wpdb->prepare(
+            'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s',
+            $wpdb->posts
+        ));
+        $adds = [];
+        foreach ($wanted as $column => $definition) {
+            if (!in_array($column, $existing, true)) {
+                $adds[] = "ADD COLUMN {$column} {$definition}";
+            }
+        }
+
+        $statements = [];
+        if ($adds !== []) {
+            $statements[] = "ALTER TABLE {$wpdb->posts} " . implode(', ', $adds);
+        }
         $statements = [
-            "ALTER TABLE {$wpdb->posts}
-                ADD COLUMN post_author BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                ADD COLUMN post_content LONGTEXT NULL,
-                ADD COLUMN post_excerpt TEXT NULL,
-                ADD COLUMN post_date_gmt DATETIME NOT NULL DEFAULT '2000-01-01 00:00:00'",
+            ...$statements,
             "CREATE TABLE {$wpdb->prefix}peepso_activities (
                 act_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                 act_owner_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
