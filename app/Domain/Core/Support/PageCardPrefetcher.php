@@ -35,6 +35,7 @@ use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\MessagesService;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Repositories\OperatorProfileRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorMsgActivationRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
@@ -68,6 +69,7 @@ if (!defined('ABSPATH')) {
  *   attestation_revoked_counts: array<int, int>,
  *   validator_rows: array<int, list<ValidatorCardRow>>,
  *   validator_logos: array<int, string>,
+ *   operator_profiles: array<int, array{brand_name: string, bio: string, website_url: string, x_url: string, discord_url: string, telegram_url: string, logo_attachment_id: int|null}>,
  *   page_entities: array<int, array{entity_type: string, entity_id: int}>,
  *   page_operators: array<int, array{state: string, user_id: int|null}>,
  *   page_activations: array<int, true>,
@@ -135,6 +137,7 @@ final class PageCardPrefetcher
             'attestation_revoked_counts' => [],
             'validator_rows'             => [],
             'validator_logos'            => [],
+            'operator_profiles'          => [],
             'page_entities'              => [],
             'page_operators'             => [],
             'page_activations'           => [],
@@ -248,8 +251,28 @@ final class PageCardPrefetcher
         // downstream. Skipped entirely when the surface is disarmed.
         $pageOperators   = [];
         $pageActivations = [];
+        $profileOperators = $validatorPageIds !== []
+            ? ClaimRepository::resolveVerifiedOperatorForPages($validatorPageIds)
+            : [];
+        $operatorProfiles = $validatorPageIds !== []
+            ? (new OperatorProfileRepository())->findPublicForResolvedPages($profileOperators)
+            : [];
+
+        // Prime logo attachment rows as a batch so public operator branding
+        // does not add one attachment query per card in directory results.
+        $operatorLogoIds = [];
+        foreach ($operatorProfiles as $profile) {
+            $logoId = $profile['logo_attachment_id'] ?? null;
+            if (is_int($logoId) && $logoId > 0) {
+                $operatorLogoIds[$logoId] = true;
+            }
+        }
+        if ($operatorLogoIds !== []) {
+            _prime_post_caches(array_keys($operatorLogoIds), false, true);
+        }
+
         if ($validatorPageIds !== [] && MessagesService::validatorMessagingEnabled()) {
-            $pageOperators = ClaimRepository::resolveVerifiedOperatorForPages($validatorPageIds);
+            $pageOperators = $profileOperators;
             foreach (ValidatorMsgActivationRepository::getByPageIds($validatorPageIds) as $activatedPageId => $_row) {
                 $pageActivations[$activatedPageId] = true;
             }
@@ -316,6 +339,7 @@ final class PageCardPrefetcher
             'attestation_revoked_counts' => $revokedCounts,
             'validator_rows'             => $validatorRows,
             'validator_logos'            => $validatorLogos,
+            'operator_profiles'          => $operatorProfiles,
             'page_entities'              => $pageEntities,
             'page_operators'             => $pageOperators,
             'page_activations'           => $pageActivations,

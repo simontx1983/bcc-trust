@@ -790,6 +790,22 @@ require_once dirname(__DIR__, 2) . '/includes/database/schema-completion.php';
 require_once dirname(__DIR__, 2) . '/includes/database/schema-wallets.php';
 bcc_onchain_create_wallet_links_table();
 
+// Shared operator branding plus optional per-validator-page overrides.
+//
+// Required here rather than fixtured per-test so the REAL installer builds
+// the REAL schema: `bio TEXT NOT NULL` carries no default (MySQL forbids one
+// on TEXT), so a hand-rolled fixture table with a nullable bio would accept
+// writes that production rejects under STRICT_TRANS_TABLES and the suite
+// would prove the opposite of what it claims.
+//
+// Load order matters: TableRegistry::exists() MEMOIZES its answer per
+// process, so a `false` recorded before these tables exist would make every
+// repository call in the run take the table-missing branch and return
+// empty — silently, with no failure. Creating them during bootstrap means
+// no test can observe the pre-creation state.
+require_once dirname(__DIR__, 2) . '/includes/database/schema-operator-profiles.php';
+bcc_onchain_create_operator_profiles_table();
+
 require_once dirname(__DIR__, 2) . '/includes/database/schema-nft-holdings.php';
 bcc_onchain_create_nft_holdings_table();
 

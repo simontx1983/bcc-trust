@@ -1402,6 +1402,8 @@ final class Plugin
         \BCC\Trust\Core\REST\MeFindingAppealEndpoint::register();
         // Operator dashboard: the viewer's verified validator pages (§4)
         \BCC\Trust\Core\REST\MeValidatorPagesEndpoint::register();
+        // Shared operator profile editor and per-validator overrides.
+        \BCC\Trust\Onchain\REST\OperatorProfileEndpoint::register();
 
         // V1 contract: paginated Halls catalog + viewer membership (§4.7)
         \BCC\Trust\Core\REST\HallsEndpoint::register();
