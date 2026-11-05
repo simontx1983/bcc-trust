@@ -39,6 +39,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Trust\Core\Announcements\AnnouncementCapabilityResolver;
 use BCC\Trust\Core\Announcements\AnnouncementFeature;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
+use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Trust\Core\Repositories\PageReadModelRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
@@ -501,6 +502,33 @@ final class CardViewService
                 AnnouncementFeature::isEnabled()
             );
             if ($announcements !== null) {
+                // `has_any` exists so the page can reserve the bar's height
+                // before the client fetch resolves. Without it the bar sits
+                // at the very top with nothing rendered, then inserts itself
+                // and displaces the heading and everything below.
+                //
+                // ⚠ DETAIL PATH ONLY. `getPageCardForList()` loops this
+                // method once per card, so computing it there would add a
+                // query per validator card in the directory grid — and the
+                // grid never renders the bar, so it would buy nothing. The
+                // key is therefore ABSENT on the list path, which is the same
+                // additive-optional convention as the block that holds it;
+                // the client reserves nothing when it is absent.
+                //
+                // ⚠ Fails to FALSE, deliberately. A read failure must not
+                // reserve a blank strip at the top of every page — false
+                // degrades to the pre-existing behaviour (a shift only where
+                // announcements exist), while true would introduce a gap on
+                // the pages that have none, which is most of them.
+                if ($prefetched === null) {
+                    try {
+                        $announcements['has_any'] = (new AnnouncementRepository())
+                            ->hasActive((int) $pageId);
+                    } catch (\Throwable) {
+                        $announcements['has_any'] = false;
+                    }
+                }
+
                 $card['announcements'] = $announcements;
             }
 

@@ -241,6 +241,40 @@ final class AnnouncementRepository
         return $page['rows'];
     }
 
+    /**
+     * Does the rotator have anything to show on this page?
+     *
+     * Backs `Card.announcements.has_any`, whose only job is to let the page
+     * reserve the bar's height BEFORE the client fetch resolves — without
+     * that, an announcement-bearing page paints with nothing at the top and
+     * then inserts the bar, displacing the heading and everything under it.
+     *
+     * ⚠ It goes through `publicPage()` rather than composing its own
+     * predicate, and it must stay that way. This builder's own docblock says
+     * why: "two hand-written copies of a visibility-bearing query is how one
+     * of them ends up missing a predicate." Because this is the SAME path
+     * `rotator()` takes, differing only in `limit`, it cannot answer true
+     * where the rotator would return nothing — agreement is structural, not
+     * something a test has to keep chasing.
+     *
+     * Bounded (§4): `limit = 1`, so `publicPage()` fetches 2 rows at most.
+     *
+     * @throws RepositoryException when the read fails
+     */
+    public function hasActive(int $pageId): bool
+    {
+        $page = $this->publicPage(
+            $pageId,
+            1,
+            null,
+            KeysetCursor::SURFACE_ANNOUNCEMENTS_ACTIVE,
+            AnnouncementVisibility::notArchivedSql($this->metaTable, 'p'),
+            'active'
+        );
+
+        return $page['rows'] !== [];
+    }
+
     // ── Owner read — the ONLY one that may return unpublished rows ───────
 
     /**
