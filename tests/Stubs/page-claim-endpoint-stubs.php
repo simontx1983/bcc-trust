@@ -53,6 +53,38 @@ namespace {
     }
 }
 
+namespace BCC\Trust\Core\REST {
+    /**
+     * ⚠ Needed since the claim endpoint learned to finish an INTERRUPTED
+     * ownership transfer: both the pre-lock fast path and the authoritative
+     * in-lock re-check read `post_author`. Without this the retry branch
+     * errored with "Call to undefined function" instead of being exercised,
+     * so `testResubmittingAValidClaimChangesNothing` never reached its own
+     * assertions.
+     *
+     * Reads the same `$GLOBALS['__bcc_posts']` store as
+     * announcement-endpoint-stubs' `get_post`, so a test models the transfer
+     * by setting `post_author` on the WP_Post it inserted — which is what
+     * PeepSoIntegration does in production and what this harness, which
+     * registers no subscribers, otherwise never does.
+     */
+    if (!function_exists('BCC\\Trust\\Core\\REST\\get_post_field')) {
+        /**
+         * @param  int|string $postId
+         * @return mixed
+         */
+        function get_post_field(string $field, $postId = 0)
+        {
+            $post = $GLOBALS['__bcc_posts'][(int) $postId] ?? null;
+            if (!is_object($post) || !property_exists($post, $field)) {
+                return '';
+            }
+
+            return $post->{$field};
+        }
+    }
+}
+
 namespace BCC\Core\Security {
     if (!class_exists(Throttle::class, false)) {
         final class Throttle

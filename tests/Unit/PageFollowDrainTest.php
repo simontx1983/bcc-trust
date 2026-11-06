@@ -41,14 +41,20 @@ final class PageFollowDrainTest extends TestCase
         }
 
         $GLOBALS['__bcc_drain'] = [
-            'rows'         => [],
-            'fail_follow'  => [],
-            'throw_follow' => [],
-            'reads'        => 0,
-            'deleted'      => [],
-            'by_page_id'   => 0,
-            'meta'         => [],
-            'info'         => [],
+            'rows'                   => [],
+            'fail_follow'            => [],
+            'throw_follow'           => [],
+            'fail_read'              => 0,
+            'fail_delete'            => 0,
+            'delete_matches_nothing' => false,
+            'reads'                  => 0,
+            'follows'                => 0,
+            'delete_calls'           => [],
+            'deleted'                => [],
+            'by_page_id'             => 0,
+            'meta'                   => [],
+            'info'                   => [],
+            'errors'                 => [],
         ];
 
         require_once __DIR__ . '/../Stubs/page-follow-drain-stubs.php';
@@ -242,6 +248,145 @@ final class PageFollowDrainTest extends TestCase
         $this->assertSame([900], $this->survivors(), "another page's follows must survive");
     }
 
+    // ------------------------------------------------- a failed DELETE
+
+    /**
+     * ⭐ THE AMPLIFICATION REGRESSION, on a FULL batch.
+     *
+     * A failed DELETE leaves every handled row in the table, so
+     * `count($rows) < DRAIN_PAGE_SIZE` stays false and the loop re-reads the
+     * SAME full page. Before the fix `deleteByIds()` returned 0 for a failed
+     * query, which the caller could not tell from "matched nothing", so the
+     * drain simply looped: 64 passes x 5000 rows = 320,000 PeepSo follow
+     * calls inside one claim request, deleting nothing.
+     *
+     * The assertions that bite are the COUNTS: one read, one delete attempt,
+     * exactly DRAIN_PAGE_SIZE follow calls.
+     */
+    public function testAFailedDeleteOnAFullBatchStopsAfterOnePassInsteadOfReprocessingIt(): void
+    {
+        $size = \BCC\Trust\Core\Repositories\PageFollowRepository::DRAIN_PAGE_SIZE;
+        $this->seed(7, range(11, 10 + $size));
+        $GLOBALS['__bcc_drain']['fail_delete'] = 1;
+
+        // ⚠ The new author must sit OUTSIDE the seeded viewer range, or the
+        // self-follow guard skips one row and the follow count is $size - 1 —
+        // which is how this case first failed, by one.
+        $this->drain(7, 999_999);
+
+        $this->assertCount($size, $GLOBALS['__bcc_drain']['rows'], 'a failed delete removes nothing');
+        $this->assertSame(
+            1,
+            $GLOBALS['__bcc_drain']['reads'],
+            'the drain must NOT re-read a full page whose delete failed'
+        );
+        $this->assertSame(
+            [$size],
+            $GLOBALS['__bcc_drain']['delete_calls'],
+            'exactly one delete was attempted'
+        );
+        $this->assertSame(
+            $size,
+            $GLOBALS['__bcc_drain']['follows'],
+            'every row is migrated once, not once per pass'
+        );
+        $this->assertSame([], $GLOBALS['__bcc_drain']['deleted']);
+    }
+
+    public function testAFailedDeleteRetainsTheRowsAndLogsAnError(): void
+    {
+        $this->seed(7, [11, 12]);
+        $GLOBALS['__bcc_drain']['fail_delete'] = 1;
+
+        $this->drain(7, 500);
+
+        $this->assertSame([101, 102], $this->survivors(), 'nothing may be lost when the delete fails');
+
+        $messages = array_column($GLOBALS['__bcc_drain']['errors'], 'message');
+        $this->assertNotSame([], $messages, 'a failed delete must not be silent');
+        $this->assertStringContainsString('delete of handled rows FAILED', implode(' | ', $messages));
+    }
+
+    /**
+     * ⭐ The distinction the old log could not draw: `deleteByIds()` returned
+     * 0 both when the statement errored and when it matched nothing, so the
+     * summary said `deleted: 0` either way — asserting success over a
+     * complete failure.
+     */
+    public function testTheSummaryTellsADeleteFailureApartFromNothingMatched(): void
+    {
+        $this->seed(7, [11, 12]);
+        $GLOBALS['__bcc_drain']['fail_delete'] = 1;
+
+        $this->drain(7, 500);
+
+        $ctx = $GLOBALS['__bcc_drain']['info'][0];
+        $this->assertSame(0, $ctx['deleted']);
+        $this->assertArrayHasKey('delete_failed', $ctx, 'the summary must name the failure');
+        $this->assertSame(2, $ctx['delete_failed']);
+        $this->assertSame(0, $ctx['errored'], 'both rows migrated fine — only the delete failed');
+        $this->assertSame(2, $ctx['retained'], 'retained counts migrated-but-undeletable rows too');
+    }
+
+    public function testNothingMatchedIsReportedAsZeroDeletedWithNoFailure(): void
+    {
+        $this->seed(7, [11, 12]);
+        // The statement runs and matches no rows (someone else removed them).
+        $GLOBALS['__bcc_drain']['delete_matches_nothing'] = true;
+
+        $this->drain(7, 500);
+
+        $ctx = $GLOBALS['__bcc_drain']['info'][0];
+        $this->assertSame(0, $ctx['deleted']);
+        $this->assertSame(0, $ctx['delete_failed'], 'a clean zero is NOT a failure');
+        $this->assertSame(0, $ctx['retained']);
+        $this->assertSame([], $GLOBALS['__bcc_drain']['errors'], 'nothing matched is not an error');
+    }
+
+    // --------------------------------------------------- a failed READ
+
+    /**
+     * A failed read returned `[]`, which the loop took for "no followers
+     * left" — so a broken query looked exactly like a completed drain.
+     */
+    public function testAFailedReadStopsTheDrainAndRetainsEveryRow(): void
+    {
+        $this->seed(7, [11, 12]);
+        $GLOBALS['__bcc_drain']['fail_read'] = 1;
+
+        $this->drain(7, 500);
+
+        $this->assertSame([101, 102], $this->survivors(), 'a failed read must not be treated as success');
+        $this->assertSame(1, $GLOBALS['__bcc_drain']['reads']);
+        $this->assertSame(0, $GLOBALS['__bcc_drain']['follows'], 'nothing was migrated');
+        $this->assertSame([], $GLOBALS['__bcc_drain']['delete_calls'], 'nothing was deleted');
+
+        $messages = array_column($GLOBALS['__bcc_drain']['errors'], 'message');
+        $this->assertStringContainsString('follow read FAILED', implode(' | ', $messages));
+        $this->assertSame(
+            [],
+            $GLOBALS['__bcc_drain']['info'],
+            'no "migration complete" line may contradict the error'
+        );
+    }
+
+    public function testAReadThatFailsAfterProgressIsNamedInTheSummary(): void
+    {
+        // Row 102 errors, so pass 1 handles 101 and the loop runs again;
+        // the second read is the one that fails.
+        $this->seed(7, [11, 12]);
+        $GLOBALS['__bcc_drain']['fail_follow'] = [12];
+        $GLOBALS['__bcc_drain']['fail_read']   = 2;
+
+        $this->drain(7, 500);
+
+        $ctx = $GLOBALS['__bcc_drain']['info'][0];
+        $this->assertTrue($ctx['read_failed'], 'the summary must say the read failed');
+        $this->assertSame(1, $ctx['migrated']);
+        $this->assertSame(1, $ctx['deleted']);
+        $this->assertSame([102], $this->survivors());
+    }
+
     public function testTheSummaryLogReportsRetainedRows(): void
     {
         $this->seed(7, [11, 12, 500]);
@@ -259,5 +404,7 @@ final class PageFollowDrainTest extends TestCase
         $this->assertArrayHasKey('retained', $ctx, 'the log must name what was left behind');
         $this->assertSame(1, $ctx['retained']);
         $this->assertSame(2, $ctx['passes']);
+        $this->assertSame(0, $ctx['delete_failed'], 'the deletes all succeeded here');
+        $this->assertFalse($ctx['read_failed']);
     }
 }

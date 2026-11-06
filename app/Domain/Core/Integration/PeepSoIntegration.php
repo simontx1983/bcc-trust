@@ -244,6 +244,30 @@ class PeepSoIntegration
      * pass makes progress, so a page of any size drains. A pass that handles
      * nothing stops the loop — the remaining rows all errored and are left
      * for the next claim-time attempt rather than being thrown away.
+     *
+     * ⚠⚠ Two DATABASE-LEVEL stop conditions, both of which used to read as
+     * success:
+     *
+     *   - a failed READ returned `[]`, which the loop took for "no followers
+     *     left" and treated as a completed drain;
+     *   - a failed DELETE returned 0, which looked like "nothing matched" —
+     *     and because the handled rows were still in the table, the next
+     *     pass read the SAME full page and migrated every row again, up to
+     *     $maxPasses times, deleting nothing.
+     *
+     * Both now stop the drain, log at error level, and leave every row in
+     * place for a later attempt. Re-migrating a retained row is safe:
+     * PeepSoFollowWriter::follow() returns the existing follow id and the
+     * watch-meta sidecar is only written when absent.
+     *
+     * ⚠ Concurrency: this whole method runs inside the per-page
+     * `bcc_page_claim_event:<pageId>` advisory lock held by
+     * PagesEndpoint::dispatchPageClaimed(), so two overlapping claim
+     * requests for one page cannot drain it at the same time. That matters
+     * beyond tidiness — `peepso_user_followers` has NO unique index on
+     * (uf_active_user_id, uf_passive_user_id) and PeepSo's own writer is
+     * SELECT-then-INSERT, so concurrent drains could otherwise create
+     * duplicate follower rows.
      */
     private function migratePageFollowersToPeepSo(int $pageId, int $newAuthorId): void
     {
@@ -262,6 +286,14 @@ class PeepSoIntegration
         /** @var array<int, true> $erroredIds */
         $erroredIds = [];
 
+        // Rows that were migrated (or deliberately skipped) and then SURVIVED
+        // because the DELETE itself failed. Counted apart from $erroredIds
+        // because the two mean opposite things to whoever reads the log: an
+        // errored row was never migrated and must be retried, while a
+        // delete-failed row IS migrated and only needs removing.
+        $deleteFailed = 0;
+        $readFailed   = false;
+
         // Bound the loop independently of row counts: each pass must either
         // handle at least one row or break, so this cap is a backstop against
         // an unforeseen non-progressing state, never the normal exit.
@@ -270,7 +302,25 @@ class PeepSoIntegration
         while ($passes < $maxPasses) {
             $passes++;
 
-            $rows = $pageFollowRepo->findByPageId($pageId);
+            try {
+                $rows = $pageFollowRepo->findByPageId($pageId);
+            } catch (\BCC\Trust\Core\Exceptions\RepositoryException $e) {
+                // ⚠ A FAILED READ IS NOT AN EMPTY PAGE. The repository now
+                // throws rather than returning `[]`, so this is the one case
+                // the loop could not previously see. Stop — the rows are
+                // still there and the next claim-time attempt reads them
+                // again — and say so, because an empty follow bar on a
+                // freshly claimed page looks completely normal.
+                $readFailed = true;
+                \BCC\Core\Log\Logger::error('[bcc-trust] migratePageFollowersToPeepSo: follow read FAILED - drain stopped, rows retained', [
+                    'page_id'   => $pageId,
+                    'author_id' => $newAuthorId,
+                    'pass'      => $passes,
+                    'reason'    => $e->getMessage(),
+                ]);
+                break;
+            }
+
             if ($rows === []) {
                 break;
             }
@@ -332,7 +382,26 @@ class PeepSoIntegration
                 break;
             }
 
-            $deleted += $pageFollowRepo->deleteByIds($handledIds);
+            $deletedThisPass = $pageFollowRepo->deleteByIds($handledIds);
+
+            if ($deletedThisPass === false) {
+                // ⚠⚠ STOP, do not loop. The handled rows are still in the
+                // table, so the next pass reads the SAME page and
+                // re-migrates every row — on a full page that is $maxPasses
+                // × 5000 PeepSo follow calls inside one claim request, while
+                // deleting nothing. Breaking costs one wasted pass and
+                // retains the rows for a later attempt.
+                $deleteFailed = count($handledIds);
+                \BCC\Core\Log\Logger::error('[bcc-trust] migratePageFollowersToPeepSo: delete of handled rows FAILED - drain stopped, rows retained', [
+                    'page_id'   => $pageId,
+                    'author_id' => $newAuthorId,
+                    'pass'      => $passes,
+                    'retained'  => $deleteFailed,
+                ]);
+                break;
+            }
+
+            $deleted += $deletedThisPass;
 
             // A short page means we saw every remaining row.
             if (count($rows) < \BCC\Trust\Core\Repositories\PageFollowRepository::DRAIN_PAGE_SIZE
@@ -343,20 +412,30 @@ class PeepSoIntegration
 
         $errored = count($erroredIds);
 
-        if ($migrated === 0 && $skipped === 0 && $errored === 0) {
+        if ($migrated === 0 && $skipped === 0 && $errored === 0 && $deleteFailed === 0) {
+            // Nothing was attempted. A read failure on the very first pass
+            // lands here and has already logged at error level above, so it
+            // does not also get a "complete" summary it would contradict.
             return;
         }
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Page-follow migration complete', [
-            'page_id'  => $pageId,
-            'author'   => $newAuthorId,
-            'migrated' => $migrated,
-            'skipped'  => $skipped,
-            'errored'  => $errored,
-            'deleted'  => $deleted,
-            'passes'   => $passes,
-            // ⚠ Non-zero `errored` means rows were LEFT IN PLACE on purpose.
-            'retained' => $errored,
+            'page_id'       => $pageId,
+            'author'        => $newAuthorId,
+            'migrated'      => $migrated,
+            'skipped'       => $skipped,
+            'errored'       => $errored,
+            'deleted'       => $deleted,
+            // ⚠ `deleted: 0, delete_failed: 0` means the DELETE matched
+            // nothing. `deleted: 0, delete_failed: N` means it ERRORED and N
+            // handled rows are still in the table. The old log could not tell
+            // those apart, because deleteByIds() returned 0 for both.
+            'delete_failed' => $deleteFailed,
+            'read_failed'   => $readFailed,
+            'passes'        => $passes,
+            // ⚠ Rows LEFT IN PLACE on purpose: never migrated (errored), or
+            // migrated but not removable (delete_failed).
+            'retained'      => $errored + $deleteFailed,
         ]);
     }
 
