@@ -32,6 +32,7 @@ use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\DelegationRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\ValueObjects\DelegationVerdict;
 use BCC\Trust\Onchain\ValueObjects\ValidatorGatedGroupConfig;
@@ -81,7 +82,29 @@ final class DelegationEligibilityService
             $byChain[$cfg->chainId][] = $cfg;
         }
 
-        $wallets = WalletRepository::getForUser($userId, null, true);
+        // ⚠⚠ FAIL-CLOSED READ. This must be the THROWING variant.
+        //
+        // `getForUser()` logs-and-continues: a failed query returns [], and
+        // the `$chainWallets === []` branch below treats [] as a DEFINITE
+        // non-delegator and returns INELIGIBLE — which the revoke sweep
+        // acts on by removing the member. So a transient DB fault would
+        // evict a delegator who never stopped delegating.
+        //
+        // This is not hypothetical: `getForUserOrThrow()`'s own docblock
+        // records it happening to the holder-group sweep (PR 7.14). The
+        // delegation path was written later and never switched over.
+        //
+        // A read that did not run must reach the verdict as UNKNOWN, which
+        // the sweep skips and the join gate refuses with a retryable 503.
+        try {
+            $wallets = WalletRepository::getForUserOrThrow($userId, null, true);
+        } catch (RepositoryReadFailure $e) {
+            $unknown = [];
+            foreach ($configs as $cfg) {
+                $unknown[$cfg->groupId] = DelegationVerdict::unknown($cfg->minStake, null);
+            }
+            return $unknown;
+        }
 
         $out = [];
         foreach ($byChain as $chainId => $chainConfigs) {

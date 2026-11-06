@@ -222,6 +222,12 @@ final class PageClaimBindingIntegrationTest extends TestCase
         $this->insertWallet(self::USER_ID, self::BYTES_A, $this->chainOne);
         self::assertSame(200, $this->claim(self::PAGE_A, 'validator', $validatorA)->get_status());
 
+        // ⚠ Model what priority 20 does in production. This harness registers
+        // no `bcc_page_claimed` subscribers, so without this the page stays
+        // author 0 for ever and every re-submit legitimately re-fires the
+        // event to finish the transfer — see the next case.
+        $GLOBALS['__bcc_posts'][self::PAGE_A]->post_author = self::USER_ID;
+
         $GLOBALS['__bcc_actions'] = [];
         Logger::reset();
         $before   = $this->snapshot();
@@ -230,6 +236,74 @@ final class PageClaimBindingIntegrationTest extends TestCase
         self::assertSame(200, $response->get_status());
         self::assertSame('already_verified', $response->get_data()['data']['status']);
         $this->assertNoSideEffects($before);
+    }
+
+    /**
+     * The self-repair path, end to end against the real endpoint: the claim
+     * row is verified but the ownership transfer never completed, so a
+     * re-submit must re-fire `bcc_page_claimed` — exactly once, writing no
+     * second claim row.
+     *
+     * The dispatch runs under the real `bcc_page_claim_event:<id>` advisory
+     * lock here — bcc-core's AdvisoryLock is autoloaded in this harness, so
+     * this is a real `GET_LOCK` against the test server. What that buys is
+     * that the lock does not BREAK the claim path: it is acquired, the
+     * dispatch proceeds, and repeated submits still behave.
+     *
+     * ⚠⚠ It does NOT prove the release, and a first version of this comment
+     * wrongly said it did. Removing `AdvisoryLock::release()` leaves this
+     * test green, measured — because `GET_LOCK` is REENTRANT within one
+     * connection and every request in this suite shares one. The release is
+     * pinned by PageClaimEventDispatchTest's trace ordering and its
+     * throwing-subscriber case, both of which a mutation kills.
+     *
+     * ⚠⚠ Nor does it cover the IN-LOCK ownership re-check, also measured:
+     * replacing that condition with `false` leaves this whole suite green.
+     * It cannot be otherwise — the outer `$needsTransfer` fast path already
+     * decides correctly whenever requests are sequential, and this harness
+     * runs one request at a time on one connection. The re-check exists for
+     * the case where the two disagree, which only concurrency produces, so
+     * PageClaimEventDispatchTest (which drives the dispatcher directly) is
+     * its only coverage.
+     */
+    public function testResubmittingAClaimWhoseTransferNeverCompletedRefiresTheEventOnce(): void
+    {
+        $validatorA = $this->insertValidator(self::BYTES_A, $this->chainOne);
+        $this->bindPlaceholder(self::PAGE_A, $validatorA);
+        $this->insertWallet(self::USER_ID, self::BYTES_A, $this->chainOne);
+        self::assertSame(200, $this->claim(self::PAGE_A, 'validator', $validatorA)->get_status());
+
+        // post_author is still 0 — the transfer never happened.
+        self::assertSame(0, $GLOBALS['__bcc_posts'][self::PAGE_A]->post_author);
+
+        $GLOBALS['__bcc_actions'] = [];
+        $before   = $this->snapshot();
+        $response = $this->claim(self::PAGE_A, 'validator', $validatorA);
+
+        self::assertSame(200, $response->get_status());
+        self::assertSame('already_verified', $response->get_data()['data']['status']);
+        self::assertSame(
+            [['bcc_page_claimed', self::USER_ID, self::PAGE_A, 'validator', $validatorA, 'operator']],
+            $GLOBALS['__bcc_actions'],
+            'the interrupted transfer must be re-driven exactly once'
+        );
+        self::assertSame(
+            $before[$GLOBALS['wpdb']->prefix . 'bcc_onchain_claims'],
+            $this->snapshot()[$GLOBALS['wpdb']->prefix . 'bcc_onchain_claims'],
+            'a re-fire must not write a second claim row'
+        );
+
+        // And again: an unrepaired page keeps being re-driven on each submit,
+        // one dispatch per submit, never two.
+        $GLOBALS['__bcc_actions'] = [];
+        $this->claim(self::PAGE_A, 'validator', $validatorA);
+        self::assertCount(1, $GLOBALS['__bcc_actions'], 'one submit, one dispatch');
+
+        // Once the transfer lands, the re-fire stops on its own.
+        $GLOBALS['__bcc_posts'][self::PAGE_A]->post_author = self::USER_ID;
+        $GLOBALS['__bcc_actions'] = [];
+        $this->claim(self::PAGE_A, 'validator', $validatorA);
+        self::assertSame([], $GLOBALS['__bcc_actions'], 'an owned page has nothing left to repair');
     }
 
     /**

@@ -37,6 +37,7 @@
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Core\DB\AdvisoryLock;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\BlogCoverImageWriter;
@@ -65,6 +66,24 @@ final class PagesEndpoint
 
     /** @var list<string> */
     private const VALID_ENTITY_TYPES = ['validator', 'collection'];
+
+    /**
+     * Per-page advisory lock serialising the WHOLE `bcc_page_claimed`
+     * dispatch. 64-char ceiling on MySQL >= 5.7, so the page id is the only
+     * variable part. {@see dispatchPageClaimed()}.
+     */
+    private const CLAIM_EVENT_LOCK_PREFIX = 'bcc_page_claim_event:';
+
+    /**
+     * Seconds to wait for that lock. Matches
+     * ClaimRepository::createExclusiveClaim(), and is a WAIT rather than a
+     * non-blocking try on purpose: a second delivery that is simply dropped
+     * would never write its activity row, and for a distinct second claim on
+     * the same page (a multi-chain operator) there is nothing to re-drive it.
+     * Waiting lets it run after the holder, where the in-lock re-check
+     * decides whether it still has work.
+     */
+    private const CLAIM_EVENT_LOCK_WAIT = 5;
 
     public static function register(): void
     {
@@ -394,6 +413,56 @@ final class PagesEndpoint
         $existing = ClaimRepository::getUserClaim($userId, $entityType, $entityId);
         if ($existing !== null && (string) $existing->status === 'verified') {
             $role = (string) $existing->claim_role;
+
+            // ⚠⚠ SELF-REPAIR of an interrupted claim.
+            //
+            // The claim row and the ownership transfer are written by two
+            // different things: the row inside ClaimService::claim(), the
+            // transfer later on `bcc_page_claimed`. If the request died
+            // between them the claim is verified and the page is still
+            // unowned, and a retry used to return 200 `already_verified`
+            // without repairing anything — while
+            // `userHasVerifiedClaimOnPage()` kept passing, so it LOOKED
+            // healthy and the operator never owned their page.
+            //
+            // Re-firing is safe on two legs, and it needs both:
+            //
+            //   1. the dispatch is SERIALISED per page by
+            //      dispatchPageClaimed()'s advisory lock, so two overlapping
+            //      retries cannot interleave their check-then-insert
+            //      sequences; and
+            //   2. each subscriber is replay-safe by STRUCTURED IDENTITY,
+            //      not by title, so a SEQUENTIAL replay is a no-op.
+            //
+            // Leg 2 alone was not enough. Every guard below is a SELECT
+            // followed by an INSERT with no unique index behind it
+            // (`wp_postmeta` and `wp_peepso_activities` are both unique on
+            // their own primary key only), so without leg 1 two simultaneous
+            // retries both read "absent" and both insert.
+            //
+            // The subscribers:
+            //   • priority 10 ActivityStreamWriter — createBackingPost()
+            //     reuses the post matching (author, module, sidecar) and
+            //     insertActivityOnce() reuses the row matching
+            //     (act_external_id, act_module_id), so no duplicate wall
+            //     entry;
+            //   • priority 20 PeepSoIntegration — gated on post_author === 0
+            //     and self-disarms once set;
+            //   • priority 30 ValidatorMsgQueueWorker — idempotent by
+            //     construction (INSERT … ON DUPLICATE KEY UPDATE id = id).
+            //
+            // ⚠ Gated on post_author === 0 — "nobody owns this yet" — the
+            // same condition the transfer itself requires. So this finishes
+            // an INTERRUPTED transfer and can never move a page away from an
+            // existing owner, which is the agreed ownership rule.
+            //
+            // ⚠⚠ This read is a FAST PATH ONLY, and is not the gate. It runs
+            // outside the lock, so between here and the dispatch a concurrent
+            // request can complete the very transfer it is testing for.
+            // `onlyIfUnowned: true` makes dispatchPageClaimed() re-read it
+            // while holding the lock, and that read is the authoritative one.
+            $needsTransfer = (int) get_post_field('post_author', $pageId) === 0;
+
             return self::successResponse(
                 claimId:    (int) $existing->id,
                 pageId:     $pageId,
@@ -404,7 +473,8 @@ final class PagesEndpoint
                 status:     'already_verified',
                 message:    'You are already the verified ' . self::roleLabel($role) . '.',
                 userId:     $userId,
-                fireEvent:  false
+                fireEvent:  $needsTransfer,
+                onlyIfUnowned: true
             );
         }
 
@@ -471,11 +541,18 @@ final class PagesEndpoint
     /**
      * Build the success response for both fresh and idempotent claims.
      *
-     * Fires the canonical `bcc_page_claimed` action when fireEvent=true
-     * (fresh success only — idempotent re-submits don't re-fire). UI,
-     * notification, feed, and analytics subscribers hook this event;
-     * they MUST NOT subscribe to bcc_onchain_claim_verified, which is
+     * Fires the canonical `bcc_page_claimed` action when fireEvent=true —
+     * on a fresh success, and on a retry whose ownership transfer never
+     * completed. UI, notification, feed, and analytics subscribers hook this
+     * event; they MUST NOT subscribe to bcc_onchain_claim_verified, which is
      * trust-engine-internal.
+     *
+     * @param bool $onlyIfUnowned re-check, under the dispatch lock, that the
+     *        page is still unowned before firing. True for the retry path,
+     *        whose whole purpose is finishing an interrupted transfer; false
+     *        for a fresh claim, which must be announced whoever owns the page
+     *        (a second chain's claim on an already-owned page still needs its
+     *        own activity row and its own messaging activation).
      */
     private static function successResponse(
         int $claimId,
@@ -487,10 +564,11 @@ final class PagesEndpoint
         string $status,
         string $message,
         int $userId,
-        bool $fireEvent
+        bool $fireEvent,
+        bool $onlyIfUnowned = false
     ): WP_REST_Response {
         if ($fireEvent) {
-            do_action('bcc_page_claimed', $userId, $pageId, $entityType, $entityId, $role);
+            self::dispatchPageClaimed($userId, $pageId, $entityType, $entityId, $role, $onlyIfUnowned);
         }
 
         $response = ApiResponse::ok([
@@ -506,6 +584,131 @@ final class PagesEndpoint
         ]);
         $response->header('Cache-Control', 'no-store');
         return $response;
+    }
+
+    /**
+     * Dispatch `bcc_page_claimed` once, under a per-page advisory lock.
+     *
+     * ⚠⚠ WHY A LOCK AT ALL. Every subscriber's idempotency guard is
+     * check-then-act with NO database constraint behind it, measured:
+     *
+     *   - priority 10 ActivityStreamWriter — `get_posts(meta_query)` then
+     *     `wp_insert_post()`, and `wp_postmeta` is unique on `meta_id` only;
+     *     then `findActIdForExternal()` then a plain `$wpdb->insert`, and
+     *     `wp_peepso_activities` is unique on `act_id` only (its
+     *     `act_external_index` and `act_module_index` are two separate
+     *     NON-unique indexes, so there is no composite to violate). Two
+     *     simultaneous deliveries therefore both read "absent" and both
+     *     insert — two backing posts and two wall entries for one claim.
+     *   - priority 20 PeepSoIntegration — reads `post_author`, then writes
+     *     it, then drains `bcc_page_follows` through PeepSo's own
+     *     SELECT-then-INSERT follow writer, over a table with no unique
+     *     (active, passive) index.
+     *   - priority 30 ValidatorMsgQueueWorker — the ONE that is already
+     *     constraint-safe, via `uq_page` + INSERT ... ON DUPLICATE KEY.
+     *
+     * The existing `bcc_claim:<type>:<id>:<role>` lock does not cover any of
+     * this: ClaimRepository::createExclusiveClaim() releases it in its own
+     * `finally` before returning, and the retry path never calls
+     * ClaimService::claim() at all, so it holds no lock whatsoever. Hence a
+     * lock of this dispatch's own, keyed on the PAGE — the thing all three
+     * subscribers write against — rather than on the claim.
+     *
+     * Serialising is deliberately preferred to adding a unique index:
+     * `wp_peepso_activities` is PeepSo's table, shared with PeepSo-native
+     * rows whose `act_external_id` defaults to 0, so a unique
+     * (act_module_id, act_external_id) pair may already be violated by data
+     * this plugin does not own. One lock fixes all three subscribers at once
+     * and needs no migration.
+     *
+     * ⚠ Reentrancy is not a hazard here. MySQL's GET_LOCK is reentrant
+     * within a session, so a nested acquire of this key by a subscriber
+     * would succeed rather than deadlock; none takes it, and the two other
+     * advisory locks in this path (`bcc_claim:...` and `bcc_vmq_page:...`)
+     * use different keys and are not held at this point — the first is
+     * released before ClaimService returns, and the second is taken by a
+     * background job, never inline.
+     *
+     * ON CONTENTION the event is NOT dispatched, and that is logged rather
+     * than swallowed. It stays retryable because nothing anywhere records
+     * "this event was delivered": the retry trigger is the page still having
+     * `post_author === 0`, which a priority-20 run clears. So a contended or
+     * crashed dispatch leaves the page in exactly the state that makes the
+     * next claim submission re-fire it. ⚠ That retry is user-initiated —
+     * there is no cron repair pass — so the warning below is the only
+     * signal an operator gets.
+     *
+     * ⚠⚠ `post_author !== 0` MEANS "THE TRANSFER COMPLETED", NOT "THE
+     * EVENT COMPLETED". The priority-20 subscriber moves `post_author`
+     * FIRST and drains `bcc_page_follows` LAST, so a drain that stopped on a
+     * DB fault after a successful transfer is invisible to the check below
+     * — and that check gates the re-fire, so nothing would ever come back
+     * for it. The drain therefore gets a retry of its own, through a hook of
+     * its own; see the branch below and
+     * PeepSoIntegration::onClaimFollowersDrain().
+     */
+    private static function dispatchPageClaimed(
+        int $userId,
+        int $pageId,
+        string $entityType,
+        int $entityId,
+        string $role,
+        bool $onlyIfUnowned
+    ): void {
+        $lockKey = self::CLAIM_EVENT_LOCK_PREFIX . $pageId;
+
+        if (!AdvisoryLock::acquire($lockKey, self::CLAIM_EVENT_LOCK_WAIT)) {
+            // Held by a concurrent request for the same page (or the lock
+            // itself errored — acquire() returns false for both and logs the
+            // driver error separately). Either way: do not dispatch, do not
+            // release a lock we never took.
+            Logger::warning('[bcc-trust] bcc_page_claimed NOT dispatched - page event lock contended', [
+                'page_id'     => $pageId,
+                'user_id'     => $userId,
+                'entity_type' => $entityType,
+                'entity_id'   => $entityId,
+                'retryable'   => true,
+            ]);
+            return;
+        }
+
+        try {
+            if ($onlyIfUnowned && (int) get_post_field('post_author', $pageId) !== 0) {
+                // ⭐ THE AUTHORITATIVE CHECK, and the reason the lock is
+                // taken before it rather than after. A concurrent delivery
+                // completed the transfer while this request was waiting, so
+                // re-firing the whole event would only re-drive three replay
+                // guards — and two of those writes are not idempotent in a
+                // way a replay guard can fully cover under concurrency.
+                Logger::info('[bcc-trust] bcc_page_claimed re-fire skipped - transfer already completed', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                ]);
+
+                // ⚠ The transfer completing is NOT the event completing
+                // (see the ⚠⚠ note above). Retry the one step that has no
+                // other trigger — the follower drain — and only that step,
+                // under the lock this dispatch already holds, so it cannot
+                // race a concurrent drain of the same page.
+                //
+                // Repeating it is safe BY CONSTRUCTION, not by assumption:
+                // the drain deletes a row only after
+                // PeepSoFollowWriter::follow() has returned a non-zero
+                // follow id for it in that same pass, which for an
+                // already-migrated row is the EXISTING id. So no row is ever
+                // removed on the strength of an earlier pass's claim to have
+                // migrated it. See PeepSoIntegration::onClaimFollowersDrain().
+                do_action('bcc_page_claim_followers_drain', $userId, $pageId);
+                return;
+            }
+
+            do_action('bcc_page_claimed', $userId, $pageId, $entityType, $entityId, $role);
+        } finally {
+            // Released on every exit path, including a subscriber throwing:
+            // the three registered at priorities 10 and 30 catch their own
+            // failures, but priority 20 is bound directly and does not.
+            AdvisoryLock::release($lockKey);
+        }
     }
 
     /**
@@ -544,6 +747,34 @@ final class PagesEndpoint
                 'bcc_conflict',
                 'This entity has already been claimed by another user.',
                 409
+            );
+        }
+
+        // ⚠ A SERVER problem must never read as a WALLET problem.
+        //
+        // Before this branch, everything except needs_wallet and
+        // already_claimed fell through to the 403 below — so an advisory-lock
+        // timeout (two quick clicks), a write failure or a transient DB error
+        // told a legitimate operator that their wallet does not match the
+        // validator. The plausible reaction is to unlink a correct wallet or
+        // give up, and the response left support nothing to diagnose with.
+        //
+        // 503 is retryable and matches the house code for "we could not
+        // complete this, try again".
+        if (($result['error'] ?? '') === 'transient') {
+            return ApiResponse::error(
+                'bcc_unavailable',
+                'We could not complete the claim just now. Please try again in a moment.',
+                503
+            );
+        }
+
+        // Not a wallet mismatch either: the entity itself is gone.
+        if (($result['error'] ?? '') === 'entity_not_found') {
+            return ApiResponse::error(
+                'bcc_not_found',
+                'That entity could not be found.',
+                404
             );
         }
 

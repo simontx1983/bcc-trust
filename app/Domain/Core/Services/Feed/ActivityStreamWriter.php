@@ -106,6 +106,36 @@ final class ActivityStreamWriter
      * FeedRankingService::hydrateBodies can still find the rich body
      * data.
      */
+    /**
+     * Insert the activity row for an event, or reuse the one already there.
+     *
+     * ⚠ The second half of the replay guard. `createBackingPost()` now
+     * returns the SAME post for a repeated event, so the activity row is
+     * identified by the pair PeepSo itself keys on — (act_external_id,
+     * act_module_id) — via `findActIdForExternal()`. A replay therefore
+     * finds the existing row and inserts nothing.
+     *
+     * Distinct events keep their own rows: a different claim / vote / batch
+     * has a different sidecar, so it has a different backing post, so a
+     * different act_external_id.
+     *
+     * Returns the act_id either way, so callers cannot tell a first
+     * delivery from a replay — which is the point.
+     */
+    private function insertActivityOnce(
+        int $actorUserId,
+        int $ownerUserId,
+        string $moduleId,
+        int $wpPostId
+    ): int {
+        $existing = $this->activityWriter->findActIdForExternal($moduleId, $wpPostId);
+        if ($existing > 0) {
+            return $existing;
+        }
+
+        return $this->activityWriter->insert($actorUserId, $ownerUserId, $moduleId, $wpPostId);
+    }
+
     private function createBackingPost(
         int $authorId,
         string $moduleId,
@@ -120,6 +150,55 @@ final class ActivityStreamWriter
         // PeepSoStatusWriter::createSelfBlogPost — module
         // discrimination lives in the META_MODULE post_meta, not the
         // post_type.
+        // ⚠⚠ REPLAY GUARD — by STRUCTURED IDENTITY, never by title.
+        //
+        // This helper used to call wp_insert_post() unconditionally, so any
+        // repeated delivery of `bcc_page_claimed` / `bcc_review_published` /
+        // `bcc_watch_batch_emitted` added a second backing post and (via the
+        // caller) a second activity row — "claimed their page" twice on one
+        // wall for one claim.
+        //
+        // The identity used here is the pair this method itself writes
+        // below: META_MODULE + META_SIDECAR, scoped to the author. The
+        // sidecar is a real foreign key — the claim id, the vote id, the
+        // batch id — so (author, module, sidecar) names ONE event.
+        //
+        // ⛔ The post_title is deliberately NOT the check. It happens to be
+        // derived from the same three values, but a title is display text:
+        // nothing enforces its uniqueness or its shape, and two genuinely
+        // different events must never collapse because their titles matched.
+        // Distinct events differ in sidecar (or module), so they still get
+        // their own post.
+        $existing = get_posts([
+            'post_type'        => 'peepso-post',
+            'post_status'      => 'any',
+            'author'           => $authorId,
+            'posts_per_page'   => 1,
+            'fields'           => 'ids',
+            'no_found_rows'    => true,
+            'suppress_filters' => true,
+            'meta_query'       => [
+                'relation' => 'AND',
+                [
+                    'key'     => self::META_MODULE,
+                    'value'   => $moduleId,
+                    'compare' => '=',
+                ],
+                [
+                    'key'     => self::META_SIDECAR,
+                    'value'   => (string) $sidecarId,
+                    'compare' => '=',
+                ],
+            ],
+        ]);
+
+        if (is_array($existing) && $existing !== []) {
+            // Same event, already recorded. Return the existing post so the
+            // caller's findActIdForExternal() lookup resolves the activity
+            // row that already points at it, instead of inserting a second.
+            return (int) $existing[0];
+        }
+
         $postId = wp_insert_post([
             'post_type'    => 'peepso-post',
             'post_status'  => 'publish',
@@ -197,7 +276,7 @@ final class ActivityStreamWriter
         // = actor) so they surface in the feed of users following the
         // actor. act_external_id points at the wp_post we just created;
         // the sidecar batch row id is in post_meta for body hydration.
-        $actId = $this->activityWriter->insert(
+        $actId = $this->insertActivityOnce(
             $userId,           // actor
             $userId,           // owner (self-wall)
             'watch_batch',
@@ -271,7 +350,7 @@ final class ActivityStreamWriter
             return;
         }
 
-        $actId = $this->activityWriter->insert(
+        $actId = $this->insertActivityOnce(
             $userId,                // actor
             $userId,                // owner (self-wall — see method doc)
             'page_claim',
@@ -332,7 +411,7 @@ final class ActivityStreamWriter
             return;
         }
 
-        $actId = $this->activityWriter->insert(
+        $actId = $this->insertActivityOnce(
             $authorId,    // actor
             $authorId,    // owner (self-wall — review surfaces to followers)
             'review',
@@ -428,7 +507,7 @@ final class ActivityStreamWriter
             return;
         }
 
-        $actId = $this->activityWriter->insert(
+        $actId = $this->insertActivityOnce(
             $authorId,   // actor
             $authorId,   // owner (self-wall — blog surfaces to followers)
             'blog',
@@ -578,6 +657,14 @@ final class ActivityStreamWriter
             return;
         }
 
+        // ⚠ Deliberately NOT routed through insertActivityOnce(): this
+        // handler already carries the identical check a few lines up, on the
+        // same pair — findActIdForExternal('announcement', $announcementId) —
+        // because the announcement wp_post IS its own external id, so there
+        // is no backing post to deduplicate first. Adding the helper here
+        // would run the same lookup twice and would hide the guard from
+        // AnnouncementFeedProjectionTest, which pins it by POSITION
+        // (check before insert, with a `return;` between).
         $actId = $this->activityWriter->insert(
             $operatorId,
             $operatorId,
