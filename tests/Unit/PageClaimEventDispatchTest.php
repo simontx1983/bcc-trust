@@ -245,20 +245,87 @@ final class PageClaimEventDispatchTest extends TestCase
      * the transfer between that read and this dispatch. The authoritative
      * read is this one, and the trace proves it is taken after the lock.
      */
-    public function testARetryWhosePageWasTransferredWhileItWaitedDoesNotFire(): void
+    public function testARetryWhosePageWasTransferredWhileItWaitedDoesNotRefireTheEvent(): void
     {
         $GLOBALS['__bcc_dispatch']['post_author'][self::PAGE] = 55;
 
         $this->dispatch(onlyIfUnowned: true);
 
-        $this->assertSame([], $this->hooks(), 'there is nothing left to repair');
+        $this->assertNotContains(
+            'bcc_page_claimed',
+            $this->hooks(),
+            'the transfer is done; re-firing would re-drive three replay guards'
+        );
         $this->assertSame(
-            ['acquire:' . self::LOCK, 'read:post_author:' . self::PAGE, 'release:' . self::LOCK],
+            [
+                'acquire:' . self::LOCK,
+                'read:post_author:' . self::PAGE,
+                'dispatch:bcc_page_claim_followers_drain',
+                'release:' . self::LOCK,
+            ],
             $GLOBALS['__bcc_dispatch']['trace'],
             'the ownership read must happen INSIDE the lock, or it decides on stale state'
         );
         $this->assertSame(['info'], $this->levels());
         $this->assertSame([self::LOCK], $GLOBALS['__bcc_dispatch']['releases']);
+    }
+
+    /**
+     * WHY THE BRANCH ABOVE IS NOT JUST A `return`. `post_author !== 0` means
+     * the TRANSFER completed, not that the EVENT completed: the priority-20
+     * subscriber moves `post_author` first and drains `bcc_page_follows`
+     * last. So a drain that stopped on a DB fault leaves rows behind on a
+     * page that now fails this very gate -- and the gate is the only retry
+     * trigger there is, which made those rows permanently unreachable.
+     *
+     * The narrow hook retries that one step without re-firing the event.
+     * It must be dispatched INSIDE the lock (asserted in the trace above),
+     * because the drain is what the lock exists to serialise.
+     */
+    public function testARetryWhosePageIsAlreadyOwnedStillRetriesTheFollowerDrain(): void
+    {
+        $GLOBALS['__bcc_dispatch']['post_author'][self::PAGE] = 55;
+
+        $this->dispatch(onlyIfUnowned: true, userId: 41);
+
+        $this->assertSame(
+            [['hook' => 'bcc_page_claim_followers_drain', 'args' => [41, self::PAGE]]],
+            $GLOBALS['__bcc_dispatch']['dispatched'],
+            'exactly one narrow retry, carrying only the claimer and the page'
+        );
+    }
+
+    /**
+     * The fresh path drains inside `bcc_page_claimed` already. Firing both
+     * would run the drain twice in one request -- harmless but wasteful, and
+     * it would make the summary log lie about how many passes it took.
+     */
+    public function testAFreshDeliveryDoesNotAlsoFireTheDrainRetry(): void
+    {
+        $GLOBALS['__bcc_dispatch']['post_author'][self::PAGE] = 55;
+
+        $this->dispatch(onlyIfUnowned: false);
+
+        $this->assertSame(['bcc_page_claimed'], $this->hooks());
+    }
+
+    /**
+     * Contention is refused before the ownership read, so neither the event
+     * nor the narrow retry is dispatched. The drain MUST NOT run outside the
+     * lock: `peepso_user_followers` has no unique index on the pair and
+     * PeepSo's writer is SELECT-then-INSERT, so two concurrent drains of one
+     * page could duplicate follower rows.
+     */
+    public function testAContendedRetryOnAnOwnedPageFiresNeither(): void
+    {
+        $GLOBALS['__bcc_dispatch']['held'][self::LOCK] = ['session' => 'peer', 'depth' => 1];
+        $GLOBALS['__bcc_dispatch']['post_author'][self::PAGE] = 55;
+
+        $this->dispatch(onlyIfUnowned: true);
+
+        $this->assertSame([], $this->hooks());
+        $this->assertSame(0, $GLOBALS['__bcc_dispatch']['reads'], 'refused before it asks anything');
+        $this->assertSame([], $GLOBALS['__bcc_dispatch']['releases']);
     }
 
     public function testARetryOnAStillUnownedPageFires(): void

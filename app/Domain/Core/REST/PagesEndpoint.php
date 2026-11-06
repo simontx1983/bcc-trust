@@ -632,11 +632,20 @@ final class PagesEndpoint
      * ON CONTENTION the event is NOT dispatched, and that is logged rather
      * than swallowed. It stays retryable because nothing anywhere records
      * "this event was delivered": the retry trigger is the page still having
-     * `post_author === 0`, which only a COMPLETED priority-20 run clears. So
-     * a contended or crashed dispatch leaves the page in exactly the state
-     * that makes the next claim submission re-fire it. ⚠ That retry is
-     * user-initiated — there is no cron repair pass — so the warning below
-     * is the only signal an operator gets.
+     * `post_author === 0`, which a priority-20 run clears. So a contended or
+     * crashed dispatch leaves the page in exactly the state that makes the
+     * next claim submission re-fire it. ⚠ That retry is user-initiated —
+     * there is no cron repair pass — so the warning below is the only
+     * signal an operator gets.
+     *
+     * ⚠⚠ `post_author !== 0` MEANS "THE TRANSFER COMPLETED", NOT "THE
+     * EVENT COMPLETED". The priority-20 subscriber moves `post_author`
+     * FIRST and drains `bcc_page_follows` LAST, so a drain that stopped on a
+     * DB fault after a successful transfer is invisible to the check below
+     * — and that check gates the re-fire, so nothing would ever come back
+     * for it. The drain therefore gets a retry of its own, through a hook of
+     * its own; see the branch below and
+     * PeepSoIntegration::onClaimFollowersDrain().
      */
     private static function dispatchPageClaimed(
         int $userId,
@@ -668,12 +677,28 @@ final class PagesEndpoint
                 // ⭐ THE AUTHORITATIVE CHECK, and the reason the lock is
                 // taken before it rather than after. A concurrent delivery
                 // completed the transfer while this request was waiting, so
-                // there is nothing left to repair and re-firing would only
-                // re-drive three replay guards.
+                // re-firing the whole event would only re-drive three replay
+                // guards — and two of those writes are not idempotent in a
+                // way a replay guard can fully cover under concurrency.
                 Logger::info('[bcc-trust] bcc_page_claimed re-fire skipped - transfer already completed', [
                     'page_id' => $pageId,
                     'user_id' => $userId,
                 ]);
+
+                // ⚠ The transfer completing is NOT the event completing
+                // (see the ⚠⚠ note above). Retry the one step that has no
+                // other trigger — the follower drain — and only that step,
+                // under the lock this dispatch already holds, so it cannot
+                // race a concurrent drain of the same page.
+                //
+                // Repeating it is safe BY CONSTRUCTION, not by assumption:
+                // the drain deletes a row only after
+                // PeepSoFollowWriter::follow() has returned a non-zero
+                // follow id for it in that same pass, which for an
+                // already-migrated row is the EXISTING id. So no row is ever
+                // removed on the strength of an earlier pass's claim to have
+                // migrated it. See PeepSoIntegration::onClaimFollowersDrain().
+                do_action('bcc_page_claim_followers_drain', $userId, $pageId);
                 return;
             }
 

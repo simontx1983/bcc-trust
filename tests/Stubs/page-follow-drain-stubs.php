@@ -191,12 +191,40 @@ namespace BCC\Core\Log {
                 $GLOBALS['__bcc_drain']['errors'][] = ['message' => $m, 'ctx' => $ctx];
             }
             /** @param array<string, mixed> $ctx */
-            public static function warning(string $m, array $ctx = []): void {}
+            public static function warning(string $m, array $ctx = []): void
+            {
+                $GLOBALS['__bcc_drain']['warnings'][] = ['message' => $m, 'ctx' => $ctx];
+            }
             /** @param array<string, mixed> $ctx */
             public static function info(string $m, array $ctx = []): void
             {
                 $GLOBALS['__bcc_drain']['info'][] = $ctx;
             }
+        }
+    }
+}
+
+/**
+ * ⚠ Needed by the RETRY entry point (`onClaimFollowersDrain`), not by the
+ * drain itself: the retry reads `post_author` to refuse a claimer who is not
+ * the page author, so without this the non-owner guard could not be
+ * exercised and would have had to be taken on trust.
+ *
+ * Defined in PeepSoIntegration's own namespace, which is where PHP resolves
+ * an unqualified call before falling back to global - the same convention
+ * page-claim-dispatch-stubs.php uses for PagesEndpoint.
+ */
+namespace BCC\Trust\Core\Integration {
+    if (!function_exists('BCC\Trust\Core\Integration\get_post_field')) {
+        /**
+         * @param  int|string $postId
+         * @return mixed
+         */
+        function get_post_field(string $field, $postId = 0)
+        {
+            $GLOBALS['__bcc_drain']['author_reads']++;
+
+            return $GLOBALS['__bcc_drain']['post_author'][(int) $postId] ?? 0;
         }
     }
 }

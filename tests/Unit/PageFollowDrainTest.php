@@ -55,6 +55,9 @@ final class PageFollowDrainTest extends TestCase
             'meta'                   => [],
             'info'                   => [],
             'errors'                 => [],
+            'warnings'               => [],
+            'post_author'            => [],
+            'author_reads'           => 0,
         ];
 
         require_once __DIR__ . '/../Stubs/page-follow-drain-stubs.php';
@@ -406,5 +409,173 @@ final class PageFollowDrainTest extends TestCase
         $this->assertSame(2, $ctx['passes']);
         $this->assertSame(0, $ctx['delete_failed'], 'the deletes all succeeded here');
         $this->assertFalse($ctx['read_failed']);
+    }
+
+    // ------------------------------------------- the retry entry point
+    //
+    // Everything above drives the drain directly. These cases drive
+    // `onClaimFollowersDrain()`, the hook PagesEndpoint fires when a
+    // resubmitted claim finds the transfer already done. It exists because
+    // the transfer is the FIRST thing onPageClaimed() does and the drain is
+    // the LAST, so `post_author !== 0` -- the dispatcher's re-fire gate --
+    // says nothing about whether the drain finished. Without this entry
+    // point a drain that stopped on a DB fault was never re-attempted.
+
+    /** Run the real public retry entry point. */
+    private function retry(int $userId, int $pageId): void
+    {
+        $class = \BCC\Trust\Core\Integration\PeepSoIntegration::class;
+
+        $instance = (new ReflectionClass($class))->newInstanceWithoutConstructor();
+        $instance->onClaimFollowersDrain($userId, $pageId);
+    }
+
+    /**
+     * THE REPAIR, END TO END. A failed DELETE on the first attempt leaves
+     * migrated rows in the table; the page is now owned, so nothing re-fires
+     * `bcc_page_claimed`. The retry is the only thing that comes back for
+     * them, and it clears them.
+     */
+    public function testTheRetryDrainsRowsThatAFailedDeleteLeftBehind(): void
+    {
+        $this->seed(7, [11, 12]);
+        $GLOBALS['__bcc_drain']['fail_delete']    = 1;
+        $GLOBALS['__bcc_drain']['post_author'][7] = 500;
+
+        $this->drain(7, 500);
+
+        $this->assertSame([101, 102], $this->survivors(), 'the failed delete retained both rows');
+        $this->assertSame(2, $GLOBALS['__bcc_drain']['follows'], 'both follows were made');
+
+        // The claim is resubmitted. The transfer is already done, so the
+        // dispatcher fires the drain retry instead of the whole event.
+        $GLOBALS['__bcc_drain']['fail_delete'] = 0;
+
+        $this->retry(500, 7);
+
+        $this->assertSame([], $this->survivors(), 'the retry cleared the leftovers');
+        $this->assertSame(0, $GLOBALS['__bcc_drain']['by_page_id'], 'never by page id');
+    }
+
+    /**
+     * "DO NOT DELETE A ROW UNLESS ITS FOLLOW IS CONFIRMED" -- stated as a
+     * behaviour rather than as a comment. Row 102's follow DID transfer on
+     * the first attempt, but if the confirming call fails during the retry
+     * the row is KEPT anyway, because the drain only ever deletes a row
+     * whose `follow()` returned a non-zero id IN THAT PASS. It never trusts
+     * a previous pass's claim to have migrated it.
+     */
+    public function testARetainedRowIsNotDeletedUnlessItsFollowIsConfirmedAgain(): void
+    {
+        $this->seed(7, [11, 12]);
+        $GLOBALS['__bcc_drain']['fail_delete']    = 1;
+        $GLOBALS['__bcc_drain']['post_author'][7] = 500;
+
+        $this->drain(7, 500);
+        $this->assertSame([101, 102], $this->survivors());
+
+        // Both follows exist in PeepSo. On the retry, row 102's confirming
+        // call fails anyway.
+        $GLOBALS['__bcc_drain']['fail_delete'] = 0;
+        $GLOBALS['__bcc_drain']['fail_follow'] = [12];
+
+        $this->retry(500, 7);
+
+        $this->assertSame(
+            [102],
+            $this->survivors(),
+            'an unconfirmed row survives even though an earlier pass migrated it'
+        );
+        $this->assertSame([101], $GLOBALS['__bcc_drain']['deleted'], 'only the confirmed row is removed');
+    }
+
+    /**
+     * The drain points follows at `$userId`, so running it for someone who
+     * is not the page author would attach this page's watchers to a
+     * non-owner. Same stance as onPageClaimed(): report, change nothing.
+     */
+    public function testTheRetryRefusesWhenTheClaimerIsNotThePageAuthor(): void
+    {
+        $this->seed(7, [11, 12]);
+        $GLOBALS['__bcc_drain']['post_author'][7] = 999;
+
+        $this->retry(500, 7);
+
+        $this->assertSame([101, 102], $this->survivors(), 'nothing may be drained for a non-owner');
+        $this->assertSame(0, $GLOBALS['__bcc_drain']['reads'], 'the follow table is not even read');
+        $this->assertSame(0, $GLOBALS['__bcc_drain']['follows']);
+        $this->assertSame([], $GLOBALS['__bcc_drain']['delete_calls']);
+
+        $this->assertCount(1, $GLOBALS['__bcc_drain']['warnings'], 'the mismatch must be reported');
+        $ctx = $GLOBALS['__bcc_drain']['warnings'][0]['ctx'];
+        $this->assertSame(999, $ctx['current_author']);
+        $this->assertSame(500, $ctx['claiming_user']);
+    }
+
+    /**
+     * An unowned page is the EVENT's business, not the retry's: re-firing
+     * `bcc_page_claimed` is what finishes an interrupted transfer, and the
+     * drain runs inside it. Draining here would migrate followers onto a
+     * user who does not yet own the page.
+     */
+    public function testTheRetryRefusesOnAnUnownedPage(): void
+    {
+        $this->seed(7, [11, 12]);
+        $GLOBALS['__bcc_drain']['post_author'][7] = 0;
+
+        $this->retry(500, 7);
+
+        $this->assertSame([101, 102], $this->survivors());
+        $this->assertSame(0, $GLOBALS['__bcc_drain']['reads']);
+    }
+
+    /**
+     * The cost of the common case, where the first drain already finished.
+     * The retry fires on EVERY resubmitted claim for an owned page, so it
+     * has to be cheap: one bounded read, no writes, and no summary log
+     * claiming a migration that did not happen.
+     */
+    public function testTheRetryOnAFullyDrainedPageIsOneReadAndNoWrites(): void
+    {
+        $GLOBALS['__bcc_drain']['post_author'][7] = 500;
+
+        $this->retry(500, 7);
+
+        $this->assertSame(1, $GLOBALS['__bcc_drain']['reads'], 'exactly one bounded read');
+        $this->assertSame(0, $GLOBALS['__bcc_drain']['follows']);
+        $this->assertSame([], $GLOBALS['__bcc_drain']['delete_calls']);
+        $this->assertSame([], $GLOBALS['__bcc_drain']['info'], 'nothing happened, so nothing is summarised');
+        $this->assertSame([], $GLOBALS['__bcc_drain']['warnings']);
+    }
+
+    /**
+     * A row whose follow cannot be made is not a leftover to clear -- it is
+     * a row with work still owed. The retry must keep it, not delete it.
+     */
+    public function testARowWhoseFollowStillFailsSurvivesTheRetry(): void
+    {
+        $this->seed(7, [11]);
+        $GLOBALS['__bcc_drain']['post_author'][7] = 500;
+        $GLOBALS['__bcc_drain']['fail_follow']    = [11];
+
+        $this->retry(500, 7);
+
+        $this->assertSame([101], $this->survivors());
+        $this->assertSame([], $GLOBALS['__bcc_drain']['deleted']);
+    }
+
+    public function testTheRetryIgnoresNonPositiveIdentifiers(): void
+    {
+        $this->seed(7, [11]);
+
+        $this->retry(0, 7);
+        $this->retry(500, 0);
+
+        $this->assertSame(
+            0,
+            $GLOBALS['__bcc_drain']['author_reads'],
+            'a malformed call must not even ask who owns the page'
+        );
+        $this->assertSame([101], $this->survivors());
     }
 }

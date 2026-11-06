@@ -50,6 +50,15 @@ class PeepSoIntegration
         // is currently author-0; already-owned pages are left alone.
         add_action('bcc_page_claimed', [$this, 'onPageClaimed'], 20, 2);
 
+        // Retry for the FOLLOWER DRAIN ALONE, fired by
+        // PagesEndpoint::dispatchPageClaimed() when a resubmitted claim
+        // finds the ownership transfer already done. onPageClaimed() moves
+        // `post_author` first and drains `bcc_page_follows` last, and the
+        // dispatcher gates its re-fire on `post_author === 0` — so the
+        // drain is the one step of the event that nothing would otherwise
+        // come back for. Same priority as the subscriber it repairs.
+        add_action('bcc_page_claim_followers_drain', [$this, 'onClaimFollowersDrain'], 20, 2);
+
         // Email verification is delegated to PeepSo. When a user completes
         // activation via their shortcode flow, PeepSo fires this action with
         // a PeepSoUser instance; we mirror the verified state into
@@ -209,20 +218,87 @@ class PeepSoIntegration
         // tier_at_watch preserved in bcc_watch_meta so the watchlist UI
         // surfaces the historically-correct tier ribbon.
         //
-        // Best-effort: an individual follow that fails is logged but
-        // does not block the rest of the migration. The placeholder
-        // page-follow rows are deleted in bulk at the end so a partial
-        // migration leaves no stragglers.
+        // Best-effort: an individual follow that fails is logged but does
+        // not block the rest of the migration, and a row it could not
+        // migrate is KEPT rather than deleted — the drain removes only
+        // what it confirmed it had transferred.
+        //
+        // ⚠ This is the LAST step and the transfer above is the FIRST,
+        // so a drain that stops on a DB fault leaves rows behind on a page
+        // that already looks fully claimed. Nothing re-fires this event for
+        // such a page; the repair is `bcc_page_claim_followers_drain` on the
+        // next claim submission — see onClaimFollowersDrain().
         $this->migratePageFollowersToPeepSo($pageId, $userId);
     }
 
     /**
-     * Promote every `bcc_page_follows` row for the given page into a
-     * real PeepSo follow (viewer → claimer) + the matching
-     * `bcc_watch_meta` sidecar. Idempotent: if the viewer happens to
-     * already follow the claimer in PeepSo (rare), the existing
-     * follow_id is reused and we just write the missing meta row.
+     * Retry the follower drain for a page whose ownership transfer has
+     * ALREADY completed.
+     *
+     * onPageClaimed() does three things in order: move `post_author`, bump
+     * the owner's page count, drain `bcc_page_follows`. Only the first is
+     * observable afterwards, and it is exactly what
+     * PagesEndpoint::dispatchPageClaimed() reads to decide whether a
+     * resubmitted claim should re-fire the event. So a drain that stopped
+     * early — a failed read, a failed delete, or rows whose PeepSo
+     * follow refused — left rows behind that nothing would ever return
+     * for: the page is owned, so the re-fire is gated off permanently.
+     *
+     * ⚠⚠ THE LEFTOVERS ARE NOT INERT, which is why this exists at
+     * all. `WatchingService::getWatchlist()` is two-source: it prepends
+     * every `bcc_page_follows` row on page 1 AND subtracts them from the
+     * PeepSo budget (`max(0, $pageSize - count($pageFollowItems))`), while
+     * `countByUserId()` feeds the total. A row whose follow DID transfer
+     * therefore shows that viewer the same operator twice — once as the
+     * placeholder page, once as the operator — and pushes a real follow
+     * off page 1.
+     *
+     * ⭐ WHY REPEATING THE DRAIN IS SAFE, by construction rather than by
+     * assumption: the drain deletes a row only after
+     * PeepSoFollowWriter::follow() returned a NON-ZERO follow id for it in
+     * THAT SAME PASS. For an already-migrated row that call returns the
+     * EXISTING id, which is positive confirmation that the follow is really
+     * there. So no row is ever removed on the strength of an earlier pass's
+     * claim to have migrated it, and a row whose follow still cannot be
+     * made keeps erroring and keeps its row. The `bcc_watch_meta` sidecar
+     * is likewise written only when absent.
+     *
+     * ⛔ OWNERSHIP IS NEITHER CHANGED NOR ASSUMED. The drain points
+     * follows at `$userId`, so it runs only when `$userId` IS the page
+     * author. A claimer who is not the author gets the same treatment as in
+     * onPageClaimed(): nothing moves, and the mismatch is logged. An
+     * author-0 page is refused here too — that is the re-fire path's
+     * job, not this one's.
+     *
+     * Runs inside the caller's `bcc_page_claim_event:<pageId>` advisory
+     * lock, which is what keeps two overlapping drains off
+     * `peepso_user_followers` (no unique index on the pair, and PeepSo's
+     * own writer is SELECT-then-INSERT).
      */
+    public function onClaimFollowersDrain(int $userId, int $pageId): void
+    {
+        if ($userId <= 0 || $pageId <= 0) {
+            return;
+        }
+
+        $currentAuthor = (int) get_post_field('post_author', $pageId);
+
+        if ($currentAuthor !== $userId) {
+            \BCC\Core\Log\Logger::warning(
+                '[bcc-trust] follower-drain retry skipped - claimer is not the page author',
+                [
+                    'page_id'        => $pageId,
+                    'claiming_user'  => $userId,
+                    'current_author' => $currentAuthor,
+                    'note'           => 'no automatic transfer by design; draining would point follows at a non-owner',
+                ]
+            );
+            return;
+        }
+
+        $this->migratePageFollowersToPeepSo($pageId, $userId);
+    }
+
     /**
      * Drain `bcc_page_follows` for a freshly claimed page into real PeepSo
      * follows on the new operator.
@@ -243,7 +319,11 @@ class PeepSoIntegration
      * deliberately skipped, and leave errored rows in place. Repeat while a
      * pass makes progress, so a page of any size drains. A pass that handles
      * nothing stops the loop — the remaining rows all errored and are left
-     * for the next claim-time attempt rather than being thrown away.
+     * in place rather than being thrown away. They are re-attempted on the
+     * next claim submission for this page, via
+     * `bcc_page_claim_followers_drain` — which is user-initiated, so a
+     * page whose operator never resubmits keeps its retained rows. There is
+     * no cron repair pass; see onClaimFollowersDrain().
      *
      * ⚠⚠ Two DATABASE-LEVEL stop conditions, both of which used to read as
      * success:
