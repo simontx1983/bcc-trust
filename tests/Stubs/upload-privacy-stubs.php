@@ -43,6 +43,19 @@ namespace BCC\Trust\Tests\Stubs {
         public static bool $saveSucceeds = true;
 
         /**
+         * Messages the writer logged, newest last.
+         *
+         * ⚠ Needed because on a host that HAS Imagick the writer
+         * enters the Imagick branch FIRST, and these cases probe a path
+         * that does not exist, so the construction throws and is logged
+         * before the editor fallback is reached. Without a Logger that
+         * throw is a fatal missing-class error instead.
+         *
+         * @var list<string>
+         */
+        public static array $warnings = [];
+
+        /**
          * When non-empty, save() reports SUCCESS but claims it wrote here
          * instead — the wp_get_image_editor_output_format() case.
          */
@@ -55,6 +68,7 @@ namespace BCC\Trust\Tests\Stubs {
             self::$mode         = 'editor';
             self::$saveSucceeds = true;
             self::$redirectTo   = '';
+            self::$warnings     = [];
         }
     }
 
@@ -109,6 +123,55 @@ namespace BCC\Trust\Core\Services {
         function is_wp_error(mixed $thing): bool
         {
             return $thing instanceof FakeWpError;
+        }
+    }
+}
+
+/**
+ * ⚠⚠ THE WRITER LOGS, SO THE LOGGER MUST EXIST.
+ *
+ * BlogCoverImageWriter imports BCC\Core\Log\Logger, which lives
+ * in the bcc-core sibling and is NOT loaded by the unit bootstrap. On a
+ * host WITHOUT Imagick that never mattered: the strip went straight to
+ * the editor and logged nothing on the way. On a host WITH Imagick it
+ * matters immediately — the Imagick construction throws for these
+ * cases' probe paths, the catch logs, and the missing class turned five
+ * passing cases into errors the moment imagick was added to CI.
+ *
+ * ⭐ Recording rather than discarding: a swallowed failure and a
+ * reported-and-logged failure look identical from the return value
+ * alone, and that difference is the whole point of failing closed.
+ */
+namespace BCC\Core\Log {
+
+    use BCC\Trust\Tests\Stubs\ImageEditorSpy;
+
+    if (!class_exists('BCC\\Core\\Log\\Logger', false)) {
+        final class Logger
+        {
+            /** @param array<string, mixed> $context */
+            public static function warning(string $message, array $context = []): void
+            {
+                ImageEditorSpy::$warnings[] = 'warning: ' . $message;
+            }
+
+            /** @param array<string, mixed> $context */
+            public static function error(string $message, array $context = []): void
+            {
+                ImageEditorSpy::$warnings[] = 'error: ' . $message;
+            }
+
+            /** @param array<string, mixed> $context */
+            public static function info(string $message, array $context = []): void
+            {
+                ImageEditorSpy::$warnings[] = 'info: ' . $message;
+            }
+
+            /** @param array<string, mixed> $context */
+            public static function debug(string $message, array $context = []): void
+            {
+                ImageEditorSpy::$warnings[] = 'debug: ' . $message;
+            }
         }
     }
 }

@@ -45,12 +45,17 @@ use PHPUnit\Framework\TestCase;
  * the editor being touched at all, and that a failure is REPORTED rather
  * than swallowed — which is what lets upload() fail closed.
  *
- * ⚠⚠ NOT ASSERTED HERE, AND NAMED SO IT IS NOT MISTAKEN FOR COVERED: the
- * actual byte-level strip. Neither GD nor Imagick is loaded in this
- * harness (`php -m` confirms), so `class_exists('\Imagick')` is false and
- * the Imagick branch — the only branch that strips on an Imagick host — is
- * never entered by any test in this file. That branch needs a staging
- * check with a GPS-bearing JPEG before release.
+ * ⚠ NOT ASSERTED HERE, and deliberately so: the actual byte-level
+ * strip. This file reaches the editor through a stub, so it can say a
+ * strip was ATTEMPTED but never that bytes were removed.
+ *
+ * ⭐ That claim is covered next door, in
+ * `CoverImageMetadataStripBehaviourTest`, which drives the same private
+ * method against a genuine Imagick on a JPEG carrying real GPS and
+ * asserts the Exif segment is gone from the stored bytes. Those cases
+ * carry `#[RequiresPhpExtension('imagick')]`, so they SKIP rather than
+ * fail on a host without it — read that suite's skip count before
+ * treating the strip as proven on any given run.
  */
 #[CoversNothing]
 #[RunTestsInSeparateProcesses]
@@ -200,6 +205,49 @@ final class CoverImagePrivacyTest extends TestCase
         $out = $m->invoke(null, $path, $mime);
 
         return $out;
+    }
+
+    /**
+     * ⚠⚠ WHY THE EDITOR IS REACHED AT ALL ON AN IMAGICK HOST, stated
+     * because it looks like luck and is not.
+     *
+     * The writer tries Imagick FIRST. These cases pass a path that does
+     * not exist, so `new \Imagick($path)` cannot read it and throws on
+     * every host that has the extension; the catch logs and execution
+     * falls through to the editor. So the editor-reached assertions below
+     * hold with OR without imagick loaded — by the file's absence, which
+     * this case pins, not by the extension's.
+     *
+     * ⭐ That fall-through is also the real fallback contract: an
+     * Imagick failure must be LOGGED and then handed to the editor, never
+     * swallowed into a silent success.
+     */
+    public function testAnImagickFailureIsLoggedAndThenFallsThroughToTheEditor(): void
+    {
+        $missing = '/tmp/cover-does-not-exist-' . bin2hex(random_bytes(6)) . '.jpg';
+        self::assertFileDoesNotExist($missing, 'the precondition this case rests on');
+
+        self::assertTrue(self::strip($missing, 'image/jpeg'));
+
+        self::assertSame(
+            [$missing],
+            ImageEditorSpy::$requested,
+            'the editor was asked for, whichever branch ran first'
+        );
+
+        if (class_exists('\Imagick')) {
+            self::assertNotSame(
+                [],
+                ImageEditorSpy::$warnings,
+                'an Imagick failure must be logged, not swallowed'
+            );
+        } else {
+            self::assertSame(
+                [],
+                ImageEditorSpy::$warnings,
+                'with no Imagick there is nothing to log on the way to the editor'
+            );
+        }
     }
 
     public function testAStrippableMimeActuallyReachesTheEditor(): void
