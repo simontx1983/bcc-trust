@@ -38,7 +38,16 @@ jobs:
         with:
           php-version: '8.2'
           # gmp is required by simplito/elliptic-php (on-chain crypto).
-          extensions: gmp, mbstring, intl
+          #
+          # ⚠ imagick is here for ONE suite, and its absence does not fail
+          # that suite — it SKIPS it. CoverImageMetadataStripBehaviourTest is the
+          # only place the cover-image EXIF/GPS strip is proven to remove
+          # BYTES rather than merely to have been attempted, and the Imagick
+          # branch is the only one reachable without loading WordPress. Drop
+          # this extension and the privacy control silently stops being
+          # tested, which is why the step below re-runs that suite with
+          # --fail-on-skipped.
+          extensions: gmp, mbstring, intl, imagick
           tools: composer:v2
           coverage: none
 
@@ -59,6 +68,29 @@ jobs:
 
       - name: Unit tests
         run: composer test
+
+      # ⚠⚠ A SKIPPED TEST READS AS A PASSING TEST. The EXIF-strip suite
+      # skips itself when imagick is absent — correct on a developer machine,
+      # wrong here, because this job is the only place that strip is proven to
+      # remove BYTES rather than merely to have been attempted.
+      #
+      # TWO flags, closing two DIFFERENT false greens, both measured:
+      #
+      #   --fail-on-skipped          without imagick the suite prints
+      #                              "OK, but some tests were skipped!" and
+      #                              exits 0. Measured: plain 0, flagged 1.
+      #   --fail-on-empty-test-suite a --filter that matches NOTHING prints
+      #                              "No tests executed!" and also exits 0,
+      #                              so renaming or deleting the class would
+      #                              silently retire this guard. Measured:
+      #                              bogus filter 0 plain, 1 flagged.
+      #
+      # Neither flag substitutes for the other: a real filter with no imagick
+      # still exits 0 under --fail-on-empty-test-suite alone.
+      - name: Cover-image EXIF strip actually ran (not skipped, not vanished)
+        run: |
+          vendor/bin/phpunit --filter CoverImageMetadataStripBehaviourTest \
+            --fail-on-skipped --fail-on-empty-test-suite
 
       - name: Architecture guardrails (incl. PHP syntax)
         run: bash scripts/arch-guardrails.sh bcc-trust

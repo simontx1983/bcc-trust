@@ -86,6 +86,19 @@ final class ValidatorPageMinter
      * @param int      $maxToMint Hard cap (defaults to MAX_PER_INVOCATION).
      * @param list<int>|null $onlyValidatorIds null = no restriction (the manual
      *     CLI backfill); [] = MINT NONE, fails closed; a list = only these ids.
+     * @param (callable(int|null, int, int, list<int>|null): list<object{
+     *     id: int,
+     *     operator_address: string,
+     *     moniker: string|null,
+     *     status: string,
+     *     chain_id: int,
+     *     chain_slug: string,
+     *     chain_name: string
+     * }>)|null $rowFetcher TEST SEAM ONLY — defaults to
+     *     ValidatorRepository::findMissingPlaceholderPage(). Declared with the
+     *     full row shape because a bare `callable` would erase it, and every
+     *     $row-> access below depends on it; the shape is the same one
+     *     mintForValidator() documents for its own parameter.
      *
      * @return array{
      *     scanned: int,
@@ -100,8 +113,17 @@ final class ValidatorPageMinter
         ?int $chainId = null,
         bool $dryRun = false,
         int $maxToMint = self::MAX_PER_INVOCATION,
-        ?array $onlyValidatorIds = null
+        ?array $onlyValidatorIds = null,
+        ?callable $rowFetcher = null
     ): array {
+        // ⭐ $rowFetcher is a TEST SEAM, mirroring
+        // ChainRefreshService::mintForHealthyChains(?callable $minter).
+        // Production passes nothing and gets the repository. It exists
+        // because the offset-progress property below cannot be observed
+        // from outside without controlling what each offset returns, and
+        // a suite that cannot observe it is how the re-scan defect
+        // survived.
+        $rowFetcher ??= self::fetchCandidateRows(...);
         $maxToMint = max(0, min($maxToMint, self::MAX_PER_INVOCATION));
 
         // ⚠ THE THREE STATES OF $onlyValidatorIds ARE NOT INTERCHANGEABLE.
@@ -169,10 +191,16 @@ final class ValidatorPageMinter
             $remaining = $maxToMint - $result['scanned'];
             $batchSize = (int) min(self::BATCH_SIZE, $remaining);
 
-            $rows = ValidatorRepository::findMissingPlaceholderPage($chainId, $batchSize, $offset, $onlyValidatorIds);
+            $rows = $rowFetcher($chainId, $batchSize, $offset, $onlyValidatorIds);
             if (empty($rows)) {
                 break;
             }
+
+            // Counters as they stood BEFORE this batch, so the offset step
+            // below can be computed from this batch alone rather than from
+            // the run total.
+            $erroredBefore = $result['errors'];
+            $skippedBefore = $result['skipped'];
 
             foreach ($rows as $row) {
                 $result['scanned']++;
@@ -217,13 +245,42 @@ final class ValidatorPageMinter
                 $result['minted_ids'][] = $pageId;
             }
 
+            // ── Offset step: move past the rows that STAYED ─────────────
+            //
             // The findMissingPlaceholderPage() result shrinks as we mint, so
-            // offset must NOT advance — each next call sees the next slice
-            // of still-unminted rows. On dry-run we DO advance offset so we
-            // walk the whole table without re-scanning the same rows.
-            if ($dryRun) {
-                $offset += $batchSize;
-            }
+            // a minted row needs no offset step: it stops matching the query
+            // and the next call at the same offset sees the next slice.
+            //
+            // ⚠⚠ BUT A ROW THAT DID NOT MINT DOES NOT LEAVE THE RESULT SET,
+            // and the earlier version of this block stepped for neither.
+            // An errored row keeps no page, so it still matches; a skipped
+            // row already had one but is still returned when the two
+            // queries disagree. With the offset pinned at 0 the next
+            // iteration re-read exactly those rows, and `scanned` climbed
+            // without any new row being examined — so ONE permanently
+            // unmintable validator consumed all of maxToMint.
+            //
+            // ⛔ WHY THAT WAS NOT MERELY WASTE. ChainRefreshService decrements
+            // its cross-chain MINT_SCAN_BUDGET by `scanned` and `break`s at
+            // zero, and it iterates chains in a stable order. So the chain
+            // holding the bad row spent the entire 500-scan budget on every
+            // run, and every chain after it in that order minted nothing —
+            // not once, but on every run, with no self-healing.
+            //
+            // Stepping by errors+skips keeps the shrink property for minted
+            // rows while making a non-minting row cost ONE scan per run
+            // instead of up to maxToMint. It also makes `scanned` mean
+            // "distinct rows examined", which is what the budget arithmetic
+            // in ChainRefreshService already assumes it means.
+            //
+            // On dry-run nothing is written, so no row leaves the set and the
+            // step is the whole batch.
+            $offset += self::offsetStepFor(
+                $dryRun,
+                $batchSize,
+                $result['errors'] - $erroredBefore,
+                $result['skipped'] - $skippedBefore
+            );
 
             if (count($rows) < $batchSize) {
                 break;
@@ -231,6 +288,67 @@ final class ValidatorPageMinter
         }
 
         return $result;
+    }
+
+    /**
+     * The production candidate query: the default behind $rowFetcher.
+     *
+     * ⚠ A separate method rather than an inline closure because a closure
+     * typed `?array $only` is WIDER than
+     * findMissingPlaceholderPage()'s `list<int>|null`, which PHPStan level
+     * 8 rejects — correctly. The narrowing belongs in a docblock on a real
+     * method, not in a cast at the call site.
+     *
+     * @param list<int>|null $onlyValidatorIds
+     * @return list<object{
+     *     id: int,
+     *     operator_address: string,
+     *     moniker: string|null,
+     *     status: string,
+     *     chain_id: int,
+     *     chain_slug: string,
+     *     chain_name: string
+     * }>
+     */
+    private static function fetchCandidateRows(
+        ?int $chainId,
+        int $limit,
+        int $offset,
+        ?array $onlyValidatorIds
+    ): array {
+        return ValidatorRepository::findMissingPlaceholderPage(
+            $chainId,
+            $limit,
+            $offset,
+            $onlyValidatorIds
+        );
+    }
+
+    /**
+     * How far the scan window must move after one batch.
+     *
+     * Pure, and public so it is asserted BY VALUE rather than by reading
+     * the call site — the defect it fixes was a missing branch, and a
+     * source-spelling assertion is exactly what would have stayed green
+     * while the branch was absent.
+     *
+     * A minted row leaves the result set on its own, so it needs no step.
+     * A row that errored or was skipped does NOT leave it, so the window
+     * must step past precisely those or the next query returns them again.
+     * On a dry run nothing is written at all, so no row leaves and the
+     * step is the whole batch.
+     */
+    public static function offsetStepFor(
+        bool $dryRun,
+        int $batchSize,
+        int $erroredInBatch,
+        int $skippedInBatch
+    ): int {
+        if ($dryRun) {
+            return max(0, $batchSize);
+        }
+
+        return max(0, $erroredInBatch) + max(0, $skippedInBatch);
     }
 
     /**
