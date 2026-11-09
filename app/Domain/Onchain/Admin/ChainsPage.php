@@ -670,6 +670,13 @@ class ChainsPage
             case 'skipped':
                 self::redirect_halls('refused', $chainId);
                 // no break
+            // A contended lock is not a failure: another request is already
+            // provisioning this chain and nothing was created. Without this
+            // arm it fell to `default` and told the operator the creation had
+            // failed, which is both wrong and alarming. See #123.
+            case 'busy':
+                self::redirect_halls('busy', $chainId);
+                // no break
             default:
                 self::redirect_halls('failed', $chainId);
         }
@@ -728,6 +735,14 @@ class ChainsPage
                 return [
                     'type'    => 'error',
                     'message' => __('This chain cannot have a Hall yet — check that it has a display name.', 'bcc-trust'),
+                ];
+            case 'busy':
+                return [
+                    'type'    => 'info',
+                    'message' => __(
+                        'Another Hall creation for this chain is already running — nothing was created. Reload in a moment to see the result.',
+                        'bcc-trust'
+                    ),
                 ];
             case 'failed':
                 return [
