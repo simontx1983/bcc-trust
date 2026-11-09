@@ -2685,17 +2685,38 @@ final class VerifyCollectionsPage
                                 <td>
                                     <?php
                                     // Source badge — where the row came from.
-                                    //   manual    → operator added it by hand (safe to remove)
-                                    //   toplist   → auto-pulled from a chain's top-collections
-                                    //               sync (was 'stargaze' pre-Hub-migration)
+                                    //   manual    → an operator added it by hand (safe to remove)
+                                    //   toplist   → an automated job wrote it. MIXED provenance:
+                                    //               the pre-2026 Stargaze marketplace importer
+                                    //               (renamed from 'stargaze' by
+                                    //               includes/database/retire-stargaze-chain.php)
+                                    //               AND CosmWasm discovery, which wrote through
+                                    //               CollectionRepository::bulkUpsert(). Neither is
+                                    //               curated, and neither implies anyone looked.
                                     //   discovery → seen by the holdings transfer indexer
+                                    //
+                                    // ⚠⚠ THE LABEL IS NOT THE STORED VALUE, AND THE KEY MUST NOT
+                                    // CHANGE. 'toplist' is the value on disk — 218 production rows
+                                    // carry it, 190 of them still unverified — and
+                                    // SolanaGateIdentityManifest::EXPECTED_SOURCE asserts it
+                                    // before and after the Solana gate repair. Renaming the key
+                                    // without migrating rows would drop every one of those rows
+                                    // through to the `??` default, silently mislabelling them
+                                    // again, which is the defect this arm exists to fix. Pinned by
+                                    // CollectionSourceBadgeTest. See #206.
+                                    //
+                                    // "Top list" was the old label and it misinformed the one
+                                    // person it is rendered for: it implies a curated marketplace
+                                    // ranking, when the row is the opposite — an automated write
+                                    // nobody has reviewed. This screen is where the operator
+                                    // decides whether to verify it.
                                     $badge = [
-                                        'manual'    => ['Manual', '#2271b1'],
-                                        'toplist'   => ['Top list', '#646970'],
-                                        'discovery' => ['Discovered', '#646970'],
-                                    ][$source] ?? ['Discovered', '#646970'];
+                                        'manual'    => ['Manual',     '#2271b1', 'Added by hand by an operator.'],
+                                        'toplist'   => ['Auto-added', '#646970', 'Written automatically by the legacy marketplace import or the CosmWasm scanner — not curated, not reviewed. Stored source value: toplist.'],
+                                        'discovery' => ['Discovered', '#646970', 'Seen by the holdings transfer indexer — not curated, not reviewed.'],
+                                    ][$source] ?? ['Discovered', '#646970', 'Unrecognised source value — treat as unreviewed.'];
                                     ?>
-                                    <span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:<?php echo esc_attr($badge[1]); ?>;">
+                                    <span title="<?php echo esc_attr($badge[2]); ?>" style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:<?php echo esc_attr($badge[1]); ?>;">
                                         <?php echo esc_html($badge[0]); ?>
                                     </span>
                                 </td>
