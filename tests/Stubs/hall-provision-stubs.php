@@ -58,6 +58,19 @@ namespace {
             /** do_action() calls: [name, args]. */
             public static array $actions = [];
 
+            /**
+             * Make `do_action()` throw for this action name.
+             *
+             * ⚠ WHY A do_action HOOK AND NOT `$createThrows`:
+             * `createHallGroup()` CATCHES every Throwable and returns 0, so a
+             * throwing PeepSoGroup constructor never escapes the service and
+             * could not test a `finally` at all. A subscriber throwing out of
+             * `do_action('bcc_hall_provisioned', ...)` is both realistic --
+             * that fan-out is documented as a stable public hook -- and
+             * genuinely uncaught, so it is the real test of the release path.
+             */
+            public static ?string $throwOnAction = null;
+
             public static function reset(): void
             {
                 self::$currentUserId    = 7;
@@ -70,6 +83,7 @@ namespace {
                 self::$created          = [];
                 self::$deletedPosts     = [];
                 self::$actions          = [];
+                self::$throwOnAction    = null;
             }
 
             /** @return list<string> action names, in order */
@@ -397,16 +411,31 @@ namespace BCC\Trust\Onchain\Repositories {
             /** When false, writeHallMeta() records the call but does not link. */
             public static bool $writeMetaWorks = true;
 
+            /**
+             * Make writeHallMeta() throw, modelling a repository read/write
+             * that fails closed. This escapes EARLIER than the do_action hook,
+             * so the two together cover both ends of the critical section.
+             */
+            public static bool $writeMetaThrows = false;
+
             public static array $metaWrites = [];
+
+            /** @var list<int> every existence read, in order */
+            public static array $existenceReads = [];
 
             public static function findHallForChain(int $chainId): ?int
             {
+                self::$existenceReads[] = $chainId;
+
                 return self::$halls[$chainId] ?? null;
             }
 
             public static function writeHallMeta(int $groupId, int $chainId): void
             {
                 self::$metaWrites[] = [$groupId, $chainId];
+                if (self::$writeMetaThrows) {
+                    throw new \RuntimeException('writeHallMeta failed closed');
+                }
                 if (self::$writeMetaWorks) {
                     self::$halls[$chainId] = $groupId;
                 }
@@ -431,8 +460,85 @@ namespace BCC\Trust\Onchain\Repositories {
             {
                 self::$halls          = [];
                 self::$incomplete     = [];
-                self::$writeMetaWorks = true;
+                self::$writeMetaWorks  = true;
+                self::$writeMetaThrows = false;
                 self::$metaWrites     = [];
+                self::$existenceReads = [];
+            }
+        }
+    }
+}
+
+namespace BCC\Core\DB {
+
+    if (!class_exists(AdvisoryLock::class, false)) {
+        /**
+         * A SPY over the MySQL advisory lock, with REAL mutual exclusion.
+         *
+         * `acquire()` genuinely refuses a name that is already held, so
+         * contention can be driven from one process: take the lock in the
+         * test, then call the service and watch it fail closed. Every
+         * acquire and every release is recorded in order, so "the lock was
+         * released" is OBSERVED rather than inferred from a call that
+         * happened to return.
+         *
+         * ⚠ IT DOES NOT MODEL WAITING. The real `GET_LOCK(name, 5)` blocks
+         * for up to five seconds before refusing, which is what usually
+         * turns a double-submit into `exists` rather than `busy`. That is a
+         * property of MySQL and of `LOCK_WAIT_SECONDS`, and this suite does
+         * not claim it -- it pins the two outcomes the service controls:
+         * refused-and-created-nothing, and released-on-every-path.
+         */
+        final class AdvisoryLock
+        {
+            /** Global override: false makes every acquisition fail. */
+            public static bool $acquirable = true;
+
+            /** @var array<string, bool> name => held */
+            public static array $held = [];
+
+            /** @var list<string> every acquire attempt, in order */
+            public static array $acquired = [];
+
+            /** @var list<string> every release call, in order */
+            public static array $released = [];
+
+            /**
+             * @var list<int> the timeout each acquire asked for
+             *
+             * Recorded because a non-zero wait is load-bearing behaviour, not
+             * a detail: it is what turns the ordinary double-submit into
+             * `exists` instead of `busy`. A mutation to 0 would still pass
+             * every outcome assertion in this suite.
+             */
+            public static array $timeouts = [];
+
+            public static function reset(): void
+            {
+                self::$acquirable = true;
+                self::$held       = [];
+                self::$acquired   = [];
+                self::$released   = [];
+                self::$timeouts   = [];
+            }
+
+            public static function acquire(string $key, int $timeout = 0): bool
+            {
+                self::$acquired[] = $key;
+                self::$timeouts[] = $timeout;
+
+                if (!self::$acquirable || isset(self::$held[$key])) {
+                    return false;
+                }
+                self::$held[$key] = true;
+
+                return true;
+            }
+
+            public static function release(string $key): void
+            {
+                self::$released[] = $key;
+                unset(self::$held[$key]);
             }
         }
     }
@@ -514,6 +620,10 @@ namespace BCC\Trust\Onchain\Services {
         function do_action(string $name, ...$args): void
         {
             \HallTestState::$actions[] = [$name, $args];
+
+            if (\HallTestState::$throwOnAction === $name) {
+                throw new \RuntimeException('a subscriber on ' . $name . ' threw');
+            }
         }
     }
 }

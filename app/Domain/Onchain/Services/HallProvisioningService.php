@@ -96,6 +96,24 @@ final class HallProvisioningService {
     public const FAIL_MARKER_REFUSED   = 'hall_marker_refused';
 
     /**
+     * Another request held this chain's provisioning lock for longer than
+     * {@see LOCK_WAIT_SECONDS}. Nothing was created. 24 chars.
+     */
+    public const FAIL_LOCK_CONTENDED   = 'hall_provision_contended';
+
+    /**
+     * Seconds a second request waits for the per-chain lock before giving up.
+     *
+     * Not zero, deliberately. A double-submit or a browser refresh is the
+     * common case, and five seconds comfortably outlasts one group create --
+     * so the loser WAITS, then runs the existence check inside the lock, sees
+     * the Hall the winner just made, and gets `exists`. That is the honest
+     * answer and the useful one. `busy` is reserved for the rare case where
+     * the winner is genuinely still working after five seconds.
+     */
+    private const LOCK_WAIT_SECONDS    = 5;
+
+    /**
      * Create the Hall for one chain.
      *
      * Idempotent: a chain that already has a Hall returns `exists` and
@@ -106,7 +124,9 @@ final class HallProvisioningService {
      * @return array{status: string, group_id: int, message: string,
      *               failure_code: string|null, owner_id: int,
      *               audit_degraded: bool}
-     *         status ∈ {created, exists, incomplete, skipped, error}.
+     *         status ∈ {created, exists, incomplete, skipped, busy, error}.
+     *         `busy` means another request held this chain's provisioning
+     *         lock: nothing was created, and nothing is wrong.
      *         `incomplete` means the Hall EXISTS but its ownership could not
      *         be reconciled — it is marked and audited, and must never be
      *         reported to an operator as a successful provision.
@@ -134,12 +154,66 @@ final class HallProvisioningService {
 
         $chainSlug = (string) $chain->slug;
 
-        // ── Idempotency, checked BEFORE anything is created ─────────────
-        $existing = HallRepository::findHallForChain($chainId);
-        if ($existing !== null) {
-            return $this->reconcileExistingHall((int) $existing, $chainId, $chainSlug);
+        // ── THE CRITICAL SECTION, AND WHY IT STARTS HERE ────────────────
+        // Everything above this line creates nothing, so it needs no lock --
+        // and holding one across a refusal would let a bad chain id contend
+        // with a real provision.
+        //
+        // Everything BELOW is check-then-create. `findHallForChain()` is a
+        // bounded SELECT and the marker is a `wp_postmeta` write with NO
+        // UNIQUE INDEX behind it, so the database cannot reject a second Hall
+        // carrying the same `_bcc_chain_tag`. Two overlapping runs could both
+        // read "no Hall for this chain" and both go on to create one, and a
+        // duplicate Hall is not a transient glitch: it is a real public group
+        // with its own id, members and content, and `findHallForChain()` then
+        // resolves ambiguously for ever. See #123.
+        //
+        // Sequential retries were always safe — the second run reads the
+        // marker and skips. It is the OVERLAP that had nothing guarding it,
+        // and nothing proved otherwise: there was no lock, no lease and no
+        // constraint anywhere on this path.
+        //
+        // ⚠ The lock is PER CHAIN, not global. Two administrators creating
+        // Halls for two different chains must not block each other; only the
+        // pair that could collide is serialized.
+        $lock = self::lockName($chainId);
+        if (!self::acquire($lock)) {
+            return $this->contended($chainId, $chainSlug);
         }
 
+        // ⚠ EXACTLY ONE RELEASE FOR THE ONE ACQUIRE ABOVE. MySQL's GET_LOCK
+        // is reentrant per session, so an unmatched pair leaks the lock for
+        // the rest of the request. The `finally` covers every return path
+        // below AND anything thrown out of the create — which matters here,
+        // because `createHall()` reaches PeepSo, `wp_insert_post()` and a
+        // `save_post` fan-out, any of which can throw.
+        try {
+            // ── Idempotency, checked BEFORE anything is created, and now
+            //    INSIDE the lock, which is the whole point ────────────────
+            $existing = HallRepository::findHallForChain($chainId);
+            if ($existing !== null) {
+                return $this->reconcileExistingHall((int) $existing, $chainId, $chainSlug);
+            }
+
+            return $this->createHall($chainId, $chainSlug, $name);
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
+        }
+    }
+
+    /**
+     * Create the Hall for a chain that has none, WITH THE PER-CHAIN LOCK
+     * ALREADY HELD.
+     *
+     * Private and lock-dependent on purpose: the existence check and the
+     * marker write have to sit inside one critical section, so there is no
+     * entry point that performs the second without the first.
+     *
+     * @return array{status: string, group_id: int, message: string,
+     *               failure_code: string|null, owner_id: int,
+     *               audit_degraded: bool}
+     */
+    private function createHall(int $chainId, string $chainSlug, string $name): array {
         // ── The acting administrator ────────────────────────────────────
         // Creation is admin-initiated only, so there is always a current
         // user. Without one the two ownership books cannot be made to agree
@@ -568,6 +642,68 @@ final class HallProvisioningService {
      *               failure_code: string|null, owner_id: int,
      *               audit_degraded: bool}
      */
+    /** The advisory-lock name for one chain. Well under MySQL's 64 chars. */
+    private static function lockName(int $chainId): string {
+        return 'bcc_hall_provision:' . $chainId;
+    }
+
+    /**
+     * Claim the per-chain lock, or FAIL CLOSED.
+     *
+     * A false return means "do not create anything". That direction is the
+     * only safe one: a failed acquisition means either a peer is already
+     * provisioning this chain, or we cannot serialize at all — and creating
+     * unlocked in either case is exactly the duplicate this exists to stop.
+     *
+     * ⚠ The two cases are logged differently because only one of them is a
+     * defect. `AdvisoryLock::acquire()` already distinguishes a driver error
+     * (GET_LOCK returned NULL) from a peer holding the lock, and logs the
+     * former itself. A MISSING primitive it cannot report, so that is
+     * reported here — otherwise an environment without bcc-core would make
+     * every Hall creation read as "someone else is busy", for ever.
+     */
+    private static function acquire(string $lock): bool {
+        if (!class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
+            Logger::error('[bcc-trust] Hall creation cannot be serialized: AdvisoryLock is unavailable', [
+                'lock' => $lock,
+            ]);
+
+            return false;
+        }
+
+        return \BCC\Core\DB\AdvisoryLock::acquire($lock, self::LOCK_WAIT_SECONDS);
+    }
+
+    /**
+     * Another request holds this chain's lock. NOTHING was created.
+     *
+     * Deliberately NOT audited. An audit row is for an authorized operation
+     * that did not complete; a double-click that waited its turn and found
+     * someone ahead of it is normal operation, and recording every one would
+     * bury the rows that matter — the same reasoning {@see refuse()} gives.
+     * It is logged, so an operator chasing a confusing notice can find it.
+     *
+     * @return array{status: string, group_id: int, message: string,
+     *               failure_code: string|null, owner_id: int,
+     *               audit_degraded: bool}
+     */
+    private function contended(int $chainId, string $chainSlug): array {
+        Logger::info('[bcc-trust] Hall creation skipped: another run holds this chain', [
+            'chain_id'   => $chainId,
+            'chain_slug' => $chainSlug,
+            'operator'   => get_current_user_id(),
+        ]);
+
+        return [
+            'status'         => 'busy',
+            'group_id'       => 0,
+            'message'        => 'Another Hall creation for this chain is already running; nothing was created.',
+            'failure_code'   => self::FAIL_LOCK_CONTENDED,
+            'owner_id'       => 0,
+            'audit_degraded' => false,
+        ];
+    }
+
     private function refuse(string $message, string $code): array {
         return [
             'status'         => 'skipped',

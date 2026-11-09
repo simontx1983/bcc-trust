@@ -42,6 +42,7 @@ final class HallProvisioningServiceTest extends TestCase
 
         \HallTestState::reset();
         \FakePeepSoLedger::reset();
+        \BCC\Core\DB\AdvisoryLock::reset();
         \BCC\Core\Log\Logger::reset();
         \BCC\Core\PeepSo\PeepSoGroupWriter::reset();
         \BCC\Trust\Core\Security\AuditLogger::reset();
