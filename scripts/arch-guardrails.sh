@@ -21,6 +21,39 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGINS_DIR="$(cd "$SCRIPT_DIR/../../" && pwd)"
 
+# ── Resolve a plugin's directory, WORKTREE-AWARE ─────────────────────────────
+#
+# Normally the WordPress plugins layout holds a sibling directory named after
+# each plugin, so `$PLUGINS_DIR/bcc-trust` is the target.
+#
+# ⚠ In a GIT WORKTREE the checkout root IS the plugin, and it is named after
+# the worktree (`wt-main`, `bcc-trust-s8`, …) rather than after the plugin. So
+# `$PLUGINS_DIR/bcc-trust` does not exist, every check returned early, and the
+# run still printed `PASS: All guardrails satisfied` and exited 0 — a scan of
+# nothing reported as a clean scan. That is the recurring false-green class in
+# this repo. See #203.
+#
+# The worktree case is identified by the plugin's OWN ENTRY FILE, not by the
+# directory name: `<root>/<plugin>.php` is what makes `<root>` that plugin.
+# Returns non-zero when the plugin cannot be resolved at all.
+plugin_root() {
+    local plugin="$1"
+
+    if [[ -d "$PLUGINS_DIR/$plugin" ]]; then
+        printf '%s\n' "$PLUGINS_DIR/$plugin"
+        return 0
+    fi
+
+    local self_root
+    self_root="$(cd "$SCRIPT_DIR/.." && pwd)"
+    if [[ -f "$self_root/$plugin.php" ]]; then
+        printf '%s\n' "$self_root"
+        return 0
+    fi
+
+    return 1
+}
+
 JSON_MODE=false
 TARGET=""
 WITH_CONTRACT=false
@@ -66,6 +99,10 @@ fi
 
 TOTAL_VIOLATIONS=0
 TOTAL_WARNINGS=0
+# ⚠ A scan that matched NOTHING must not be able to report PASS (#203).
+TOTAL_SCANNED=0
+REL_BASE="$PLUGINS_DIR"
+declare -a SKIPPED_PLUGINS=()
 declare -a JSON_ENTRIES=()
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -116,7 +153,8 @@ warning() {
 
 check_wpdb_leaks() {
     local plugin="$1"
-    local plugin_dir="$PLUGINS_DIR/$plugin"
+    local plugin_dir
+    plugin_dir="$(plugin_root "$plugin")" || return
 
     [[ -d "$plugin_dir" ]] || return
 
@@ -155,7 +193,7 @@ check_wpdb_leaks() {
         fi
 
         # Normalize path for display
-        local rel="${file#$PLUGINS_DIR/}"
+        local rel="${file#$REL_BASE/}"
 
         # Known exceptions — the allowed homes for $wpdb (CLAUDE.md §1).
         case "$rel" in
@@ -201,12 +239,13 @@ check_wpdb_leaks() {
 
 check_select_star() {
     local plugin="$1"
-    local plugin_dir="$PLUGINS_DIR/$plugin"
+    local plugin_dir
+    plugin_dir="$(plugin_root "$plugin")" || return
 
     [[ -d "$plugin_dir/app/Repositories" ]] || return
 
     while IFS=: read -r file line content; do
-        local rel="${file#$PLUGINS_DIR/}"
+        local rel="${file#$REL_BASE/}"
         violation "$plugin" "SELECT_STAR" "$rel" "$line" "— use explicit column lists"
     done < <(grep -rn 'SELECT \*' "$plugin_dir/app/Repositories" --include='*.php' 2>/dev/null || true)
 }
@@ -215,7 +254,8 @@ check_select_star() {
 
 check_template_queries() {
     local plugin="$1"
-    local plugin_dir="$PLUGINS_DIR/$plugin"
+    local plugin_dir
+    plugin_dir="$(plugin_root "$plugin")" || return
 
     local -a template_dirs=()
     for d in templates blocks includes/admin includes/partials; do
@@ -225,7 +265,7 @@ check_template_queries() {
     [[ ${#template_dirs[@]} -eq 0 ]] && return
 
     while IFS=: read -r file line content; do
-        local rel="${file#$PLUGINS_DIR/}"
+        local rel="${file#$REL_BASE/}"
         violation "$plugin" "TEMPLATE_QUERY" "$rel" "$line" "— templates must not query DB"
     done < <(grep -rn 'global \$wpdb' "${template_dirs[@]}" --include='*.php' 2>/dev/null || true)
 }
@@ -234,14 +274,15 @@ check_template_queries() {
 
 check_unbounded_queries() {
     local plugin="$1"
-    local plugin_dir="$PLUGINS_DIR/$plugin"
+    local plugin_dir
+    plugin_dir="$(plugin_root "$plugin")" || return
 
     [[ -d "$plugin_dir/app/Repositories" ]] || return
 
     # Find SELECT statements without LIMIT, WHERE...id, IN(), or aggregate
     # This is a heuristic — it catches obvious cases, not all.
     while IFS=: read -r file line content; do
-        local rel="${file#$PLUGINS_DIR/}"
+        local rel="${file#$REL_BASE/}"
         # Skip if the same file+nearby lines have LIMIT, WHERE...=%d, IN(, COUNT(, SUM(, AVG(
         local context
         context=$(sed -n "$((line > 5 ? line - 5 : 1)),$((line + 10))p" "$file" 2>/dev/null || true)
@@ -256,7 +297,8 @@ check_unbounded_queries() {
 
 check_php_syntax() {
     local plugin="$1"
-    local plugin_dir="$PLUGINS_DIR/$plugin"
+    local plugin_dir
+    plugin_dir="$(plugin_root "$plugin")" || return
 
     local -a src_dirs=()
     [[ -d "$plugin_dir/app" ]] && src_dirs+=("$plugin_dir/app")
@@ -267,7 +309,7 @@ check_php_syntax() {
         local result
         result=$(php -l "$file" 2>&1)
         if [[ $? -ne 0 ]]; then
-            local rel="${file#$PLUGINS_DIR/}"
+            local rel="${file#$REL_BASE/}"
             violation "$plugin" "PHP_SYNTAX" "$rel" "" "— $result"
         fi
     done < <(find "${src_dirs[@]}" -name '*.php' 2>/dev/null | head -200)
@@ -286,7 +328,8 @@ check_php_syntax() {
 
 check_no_shortcodes() {
     local plugin="$1"
-    local plugin_dir="$PLUGINS_DIR/$plugin"
+    local plugin_dir
+    plugin_dir="$(plugin_root "$plugin")" || return
 
     local -a search_dirs=()
     for d in app src includes; do
@@ -304,7 +347,7 @@ check_no_shortcodes() {
         if echo "$content" | grep -qE '^\s*(//|\*|#)'; then
             continue
         fi
-        local rel="${file#$PLUGINS_DIR/}"
+        local rel="${file#$REL_BASE/}"
         violation "$plugin" "NO_SHORTCODES" "$rel" "$line" "— add_shortcode() forbidden (No UI in PHP)"
     done < <(grep -rn 'add_shortcode\s*(' "${search_dirs[@]}" "${root_files[@]}" --include='*.php' 2>/dev/null || true)
 }
@@ -316,7 +359,8 @@ check_no_shortcodes() {
 
 check_no_block_registration() {
     local plugin="$1"
-    local plugin_dir="$PLUGINS_DIR/$plugin"
+    local plugin_dir
+    plugin_dir="$(plugin_root "$plugin")" || return
 
     [[ -d "$plugin_dir" ]] || return
 
@@ -324,7 +368,7 @@ check_no_block_registration() {
         if echo "$content" | grep -qE '^\s*(//|\*|#)'; then
             continue
         fi
-        local rel="${file#$PLUGINS_DIR/}"
+        local rel="${file#$REL_BASE/}"
         violation "$plugin" "NO_BLOCK_REG" "$rel" "$line" "— register_block_type() forbidden (No UI in PHP)"
     done < <(grep -rn 'register_block_type\s*(' "$plugin_dir" --include='*.php' --exclude-dir=vendor --exclude-dir=tests 2>/dev/null || true)
 }
@@ -336,7 +380,8 @@ check_no_block_registration() {
 
 check_no_templates_dir() {
     local plugin="$1"
-    local plugin_dir="$PLUGINS_DIR/$plugin"
+    local plugin_dir
+    plugin_dir="$(plugin_root "$plugin")" || return
 
     if [[ -d "$plugin_dir/templates" ]]; then
         violation "$plugin" "NO_TEMPLATE_DIR" "templates/" "" "— directory forbidden (No UI in PHP); delete it"
@@ -356,7 +401,8 @@ check_no_templates_dir() {
 
 check_no_html_echo() {
     local plugin="$1"
-    local plugin_dir="$PLUGINS_DIR/$plugin"
+    local plugin_dir
+    plugin_dir="$(plugin_root "$plugin")" || return
 
     local -a search_dirs=()
     for d in \
@@ -382,7 +428,7 @@ check_no_html_echo() {
         if echo "$content" | grep -qE '^\s*(//|\*|#)'; then
             continue
         fi
-        local rel="${file#$PLUGINS_DIR/}"
+        local rel="${file#$REL_BASE/}"
 
         # Documented admin exceptions
         # 1. Files under any */Admin/ directory
@@ -442,11 +488,17 @@ check_api_contract() {
 # ── Run all checks ───────────────────────────────────────────────────────────
 
 for plugin in "${PLUGINS[@]}"; do
-    plugin_dir="$PLUGINS_DIR/$plugin"
-    if [[ ! -d "$plugin_dir" ]]; then
+    if ! plugin_dir="$(plugin_root "$plugin")"; then
+        SKIPPED_PLUGINS+=("$plugin")
         $JSON_MODE || echo -e "${YELLOW}SKIP${NC} $plugin (not found)"
         continue
     fi
+
+    # Relative paths are printed against the plugin's PARENT, which is
+    # $PLUGINS_DIR in the normal layout and the worktree's parent in a
+    # worktree. Without this, a worktree run printed absolute paths.
+    REL_BASE="$(dirname "$plugin_dir")"
+    TOTAL_SCANNED=$((TOTAL_SCANNED + 1))
 
     $JSON_MODE || echo -e "\n${BOLD}Scanning $plugin${NC}"
 
@@ -486,14 +538,28 @@ if $JSON_MODE; then
 else
     echo ""
     echo "──────────────────────────────────────────"
-    if [[ $TOTAL_VIOLATIONS -gt 0 ]]; then
-        echo -e "${RED}FAIL${NC}: $TOTAL_VIOLATIONS violation(s), $TOTAL_WARNINGS warning(s)"
+    skipped_note=""
+    if [[ ${#SKIPPED_PLUGINS[@]} -gt 0 ]]; then
+        skipped_note=" (${#SKIPPED_PLUGINS[@]} skipped: ${SKIPPED_PLUGINS[*]})"
+    fi
+
+    # ⚠ ORDER MATTERS. Scanning nothing is reported BEFORE the violation
+    # count, because zero violations out of zero files is exactly what a
+    # clean run looks like. See #203.
+    if [[ $TOTAL_SCANNED -eq 0 ]]; then
+        echo -e "${RED}FAIL${NC}: scanned NOTHING${skipped_note}"
+        echo    "       A scan that matched no plugin is not a pass. Run from the"
+        echo    "       plugins layout, or name a plugin whose <plugin>.php this"
+        echo    "       checkout holds (worktrees resolve that way)."
+    elif [[ $TOTAL_VIOLATIONS -gt 0 ]]; then
+        echo -e "${RED}FAIL${NC}: $TOTAL_VIOLATIONS violation(s), $TOTAL_WARNINGS warning(s)${skipped_note}"
     elif [[ $TOTAL_WARNINGS -gt 0 ]]; then
-        echo -e "${YELLOW}WARN${NC}: 0 violations, $TOTAL_WARNINGS warning(s)"
+        echo -e "${YELLOW}WARN${NC}: 0 violations, $TOTAL_WARNINGS warning(s)${skipped_note}"
     else
-        echo -e "${GREEN}PASS${NC}: All guardrails satisfied"
+        echo -e "${GREEN}PASS${NC}: All guardrails satisfied ($TOTAL_SCANNED scanned)${skipped_note}"
     fi
     echo "──────────────────────────────────────────"
 fi
 
-exit $( [[ $TOTAL_VIOLATIONS -eq 0 ]] && echo 0 || echo 1 )
+# Non-zero when a rule was broken OR when nothing was scanned at all.
+exit $( [[ $TOTAL_VIOLATIONS -eq 0 && $TOTAL_SCANNED -gt 0 ]] && echo 0 || echo 1 )
