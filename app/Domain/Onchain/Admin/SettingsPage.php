@@ -2,8 +2,8 @@
 
 namespace BCC\Trust\Onchain\Admin;
 
-use BCC\Trust\Onchain\Support\EndpointDescriptor;
-use BCC\Trust\Onchain\Support\HeliusEndpoint;
+use BCC\Trust\Onchain\Support\NftDriverRegistry;
+use BCC\Trust\Onchain\Support\NftProviderReadiness;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 
 if (!defined('ABSPATH')) {
@@ -498,11 +498,31 @@ class SettingsPage
     }
 
     /**
-     * Warn operators when an RPC endpoint has been observed returning
-     * "method not found" for DAS-family calls (getAssetsByOwner, etc).
-     * The public Solana RPC silently fails this way — NFT collections
-     * appear empty with no other signal. Written by SolanaFetcher on
-     * first detection; persists until the operator clears it.
+     * Warn operators when the RPC endpoint CURRENTLY IN USE for a chain has
+     * been observed refusing DAS-family calls (`getAssetsByOwner`, ...). The
+     * public Solana RPC fails that way silently: NFT collections appear empty
+     * with no other signal. Written by SolanaFetcher on first detection.
+     *
+     * -- WHY THIS ASKS NftProviderReadiness AND NEVER THE OPTION -----------
+     * The mark belongs to ONE endpoint. `endpointRefusal()` applies
+     * `dasMarkApplies()` FIRST, so a mark left behind by an endpoint that is
+     * no longer configured is reported as ABSENT rather than as stale
+     * evidence an operator has no way to clear.
+     *
+     * This renderer used to read the option directly. That was a second copy
+     * of the attribution rule, living outside the class that owns it -- and a
+     * copy that never compared at all. The cost was observable: an operator
+     * repoints a Solana chain at a DAS-capable endpoint, the NFT Discovery
+     * page and `isReady()` both agree the refusal is gone, and this panel
+     * went on saying "NFT collection fetching is disabled". Two admin screens
+     * disagreeing about one chain at one moment, with the wrong one wrong in
+     * the ALARMING direction: it told an operator their fix had not worked
+     * when it had. See #272.
+     *
+     * `message` is UPSTREAM PROVIDER TEXT and `endpointRefusal()` explicitly
+     * does not sanitise it, so it goes through `operatorSafeExcerpt()` here,
+     * exactly as NftDiscoveryPage does. `esc_html()` stops markup executing
+     * and does nothing about a credentialed URL or an absolute path.
      */
     private static function render_das_warnings(): void
     {
@@ -512,27 +532,21 @@ class SettingsPage
 
         $chains = \BCC\Trust\Onchain\Repositories\ChainRepository::getActive();
         foreach ($chains as $chain) {
-            $flag = get_option(HeliusEndpoint::dasUnsupportedOptionKey((int) $chain->id), null);
-            if (!is_array($flag)) {
+            // One null covers every "nothing to say" case, in the one place
+            // that owns the rule: no mark stored, a mark that does not attach
+            // to the endpoint in use, and a chain this driver does not serve.
+            // The loop still visits every active chain.
+            $refusal = NftProviderReadiness::endpointRefusal($chain, NftDriverRegistry::DRIVER_DAS_RPC);
+            if ($refusal === null) {
                 continue;
             }
-            // ⚠⚠ This reads the OPTION, not `NftProviderReadiness::endpointRefusal()`,
-            // so nothing has described the value for it. Every field it prints
-            // must therefore be made safe HERE.
-            //
-            // `display()` is applied to whatever is stored rather than to a
-            // trusted field: a legacy payload has `rpc_url` and no
-            // `endpoint_display`, and legacy `rpc_url` values are query-only
-            // redactions that can still carry a path credential. Both keys are
-            // read and both go through the describer, which reduces anything
-            // undescribable to a bounded placeholder instead of echoing it.
-            $rpc = EndpointDescriptor::display(
-                isset($flag['endpoint_display']) ? (string) $flag['endpoint_display']
-                    : (isset($flag['rpc_url']) ? (string) $flag['rpc_url'] : '')
-            );
-            $code    = isset($flag['code']) ? (int) $flag['code'] : 0;
-            $message = isset($flag['message']) ? (string) $flag['message'] : '';
-            $when    = isset($flag['detected_at']) ? (int) $flag['detected_at'] : 0;
+
+            // Already re-described on the way out: `scheme://host`, with the
+            // comparison identity deliberately not exported.
+            $rpc     = (string) $refusal['endpoint_display'];
+            $code    = (int) $refusal['code'];
+            $message = AdminActionSupport::operatorSafeExcerpt((string) $refusal['message']);
+            $when    = (int) $refusal['detected_at'];
             ?>
             <div class="notice notice-error inline">
                 <p><strong><?php echo esc_html($chain->name); ?> — NFT collection fetching is disabled.</strong>
