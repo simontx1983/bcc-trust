@@ -91,7 +91,10 @@ final class NftProviderReadiness
             return false;
         }
 
-        $rpcUrl  = trim((string) ($chain->rpc_url  ?? ''));
+        // ⚠ `$rpcUrl` used to be read here for the DRIVER_EVM_RPC arm. That arm
+        // now asks `AlchemyCredential::jsonRpcUrlFor()`, which reads the row
+        // itself, so the local copy became dead and is gone rather than left
+        // as a value a future arm might quietly start trusting again (#273).
         $restUrl = trim((string) ($chain->rest_url ?? ''));
         $chainId = (int) ($chain->id ?? 0);
 
@@ -140,7 +143,31 @@ final class NftProviderReadiness
 
             // `eth_call balanceOf` works on any JSON-RPC endpoint, which is
             // why Avalanche and BSC keep ERC-721 gating with no Alchemy key.
-            NftDriverRegistry::DRIVER_EVM_RPC => $rpcUrl !== '',
+            //
+            // ⚠⚠ ASKED OF THE RESOLVER `ethCallResult()` ITSELF USES, for the
+            // same reason as the two Alchemy arms above. This arm used to read
+            // `$rpcUrl !== ''`, which disagreed with the only consumer of this
+            // driver: `EvmFetcher::ethCallResult()` resolves through
+            // `jsonRpcUrlFor()` and refuses a KEYLESS ALCHEMY TEMPLATE
+            // (`https://eth-mainnet.g.alchemy.com/v2/`) with
+            // `kind => credentials_missing`. A template is non-empty, so
+            // readiness answered READY for five seeded chains whose every
+            // `eth_call` was a guaranteed 401. See #273.
+            //
+            // `jsonRpcUrlFor()` is the right predicate and not a narrowing of
+            // it: it returns the Alchemy keyed URL when one resolves, else the
+            // row's own `rpc_url` when that is a REAL node, and null only for
+            // an empty value or a keyless template. So Avalanche and BSC —
+            // real public nodes, absent from the Alchemy map by design — stay
+            // ready, which is the property that made the old condition look
+            // correct in the first place.
+            //
+            // ⚠ Polygon, Arbitrum and Optimism are off-map (DECISION 7), so
+            // nothing resolves their templates and they report NOT ready until
+            // a row carries a complete keyed URL. That is the visible
+            // capability-matrix change this fix makes, and it is the honest
+            // answer rather than a regression.
+            NftDriverRegistry::DRIVER_EVM_RPC => AlchemyCredential::jsonRpcUrlFor($chain) !== null,
 
             // ── Solana: TWO DAS paths, TWO answers ──────────────────────
             //
