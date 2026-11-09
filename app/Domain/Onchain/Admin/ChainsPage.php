@@ -740,7 +740,7 @@ class ChainsPage
                 return [
                     'type'    => 'info',
                     'message' => __(
-                        'Another Hall creation for this chain is already running â nothing was created. Reload in a moment to see the result.',
+                        'Another Hall creation for this chain is already running — nothing was created. Reload in a moment to see the result.',
                         'bcc-trust'
                     ),
                 ];

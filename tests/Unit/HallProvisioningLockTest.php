@@ -470,4 +470,105 @@ final class HallProvisioningLockTest extends TestCase
         sort($public);
         self::assertSame(['provisionOne'], $public, 'provisionOne() must remain the only public entry point');
     }
+    /**
+     * ⚠ THE OPERATOR-FACING COPY IS NOT DOUBLE-ENCODED.
+     *
+     * The `busy` notice shipped once with its em dash written as the SIX
+     * bytes c3 a2 c2 80 c2 94 instead of the three it should be
+     * (e2 80 94, U+2014). That is the signature of UTF-8 bytes read back as
+     * Latin-1 and encoded a second time, and it renders in the admin notice
+     * as three stray glyphs in the middle of a sentence.
+     *
+     * ⚠ NOTHING ELSE IN THE TOOLCHAIN CAN SEE IT. php -l parses it,
+     * PHPStan types it, and every behavioural assertion in this file passes
+     * either way — the service returns a STATUS and the handler maps it, so
+     * no test ever compares the string. It is a defect only a reader or a
+     * byte check catches, which is why it needs a byte check.
+     *
+     * ⚠ THE SEQUENCES ARE BUILT WITH hex2bin() ON PURPOSE. Writing them
+     * as escape sequences is how the defect got here in the first place: an
+     * escape processed one time too many or one time too few is invisible in
+     * a diff. A hex literal cannot be re-encoded by accident.
+     *
+     * Scans the two production files this change touches as BYTES, refusing
+     * the known sequence AND the general shape: a C1 control
+     * (U+0080-U+009F, which never occurs in legitimate text) plus the
+     * continuation lead-ins the other double-encodes produce.
+     */
+    public function testTheOperatorFacingCopyIsNotDoubleEncoded(): void
+    {
+        // (string) because hex2bin() is typed string|false; a literal cannot fail.
+        $emDash        = (string) hex2bin('e28094');       // U+2014, correct
+        $doubleEncoded = (string) hex2bin('c3a2c280c294'); // the same dash, encoded twice
+
+        /**
+         * Returns what it found, or null. Deliberately a byte walk rather
+         * than a regex: no escaping anywhere, so nothing can be mangled.
+         */
+        $flags = static function (string $subject): ?string {
+            $length = strlen($subject);
+
+            for ($i = 0; $i + 1 < $length; $i++) {
+                $lead = ord($subject[$i]);
+                $next = ord($subject[$i + 1]);
+
+                // c2 80..c2 9f is a C1 control: never legitimate in text.
+                if ($lead === 0xC2 && $next >= 0x80 && $next <= 0x9F) {
+                    return 'a C1 control (U+0080-U+009F) at byte ' . $i;
+                }
+
+                // c3 82 / c3 83 / c3 a2 followed by another non-ASCII byte is
+                // the A-circumflex / A-tilde / a-circumflex shape that every
+                // double-encode of punctuation produces.
+                if ($lead === 0xC3
+                    && ($next === 0x82 || $next === 0x83 || $next === 0xA2)
+                    && $i + 2 < $length
+                    && ord($subject[$i + 2]) >= 0x80
+                ) {
+                    return 'a double-encode lead-in at byte ' . $i;
+                }
+            }
+
+            return null;
+        };
+
+        // Anti-vacuity, both directions: a broken scanner would let the real
+        // thing through while this test stayed green, so it is shown working
+        // on a planted positive AND cleared on the correct bytes first.
+        self::assertNotNull(
+            $flags('running ' . $doubleEncoded . ' nothing was created'),
+            'anti-vacuity: the scanner must flag the double-encoded em dash'
+        );
+        self::assertNull(
+            $flags('running ' . $emDash . ' nothing was created'),
+            'the scanner must NOT flag a correctly encoded em dash'
+        );
+
+        $root = dirname(__DIR__, 2);
+
+        // The busy notice itself, by its exact bytes.
+        $page = (string) file_get_contents($root . '/app/Domain/Onchain/Admin/ChainsPage.php');
+        self::assertNotSame('', $page, 'anti-vacuity: the admin page source must be readable');
+        self::assertStringContainsString(
+            'Another Hall creation for this chain is already running ' . $emDash . ' nothing was created.',
+            $page,
+            'the busy notice must carry a real U+2014 em dash (e2 80 94)'
+        );
+        self::assertStringNotContainsString(
+            $doubleEncoded,
+            $page,
+            'the busy notice must not carry the double-encoded em dash (c3 a2 c2 80 c2 94)'
+        );
+
+        // And no double-encode of ANY shape in either file.
+        foreach ([
+            'app/Domain/Onchain/Admin/ChainsPage.php',
+            'app/Domain/Onchain/Services/HallProvisioningService.php',
+        ] as $relative) {
+            $source = (string) file_get_contents($root . '/' . $relative);
+            self::assertNotSame('', $source, "anti-vacuity: {$relative} must be readable");
+            $found = $flags($source);
+            self::assertNull($found, $relative . ' carries ' . ((string) $found) . ' - text was encoded twice');
+        }
+    }
 }
