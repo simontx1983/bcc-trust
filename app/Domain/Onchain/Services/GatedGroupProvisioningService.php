@@ -538,6 +538,17 @@ final class GatedGroupProvisioningService {
      * create have to sit inside one critical section, so there is no entry
      * point that performs the second without the first.
      *
+     * ⚠ `$row` carries the IMPORTED SHAPE, not a bare `object`. Declaring it
+     * loosely compiles and passes every test, and PHPStan then rejects three
+     * things at once: handing it to `reconcileExistingCommunity()`, which
+     * declares the shape, and the two `provisioning_requested_*` reads below.
+     * The shape is named once in `CollectionRepository` and imported at the
+     * top of this class; extracting a method must carry it through rather
+     * than widening it.
+     *
+     * @param CollectionProvisioningRow $row the provisioning row read and
+     *                                       gated by {@see provisionOne()}
+     *
      * @return array{status: string, group_id: int, message: string,
      *               error?: string, failure_code?: string|null,
      *               failure_record: string,
