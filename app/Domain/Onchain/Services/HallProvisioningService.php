@@ -632,16 +632,6 @@ final class HallProvisioningService {
         return true;
     }
 
-    /**
-     * A refusal that never touched anything — bad input, no chain, no name.
-     *
-     * No audit row: nothing changed, and nothing was authorized to change.
-     * Recording every rejected form post would bury the rows that matter.
-     *
-     * @return array{status: string, group_id: int, message: string,
-     *               failure_code: string|null, owner_id: int,
-     *               audit_degraded: bool}
-     */
     /** The advisory-lock name for one chain. Well under MySQL's 64 chars. */
     private static function lockName(int $chainId): string {
         return 'bcc_hall_provision:' . $chainId;
@@ -704,6 +694,16 @@ final class HallProvisioningService {
         ];
     }
 
+    /**
+     * A refusal that never touched anything — bad input, no chain, no name.
+     *
+     * No audit row: nothing changed, and nothing was authorized to change.
+     * Recording every rejected form post would bury the rows that matter.
+     *
+     * @return array{status: string, group_id: int, message: string,
+     *               failure_code: string|null, owner_id: int,
+     *               audit_degraded: bool}
+     */
     private function refuse(string $message, string $code): array {
         return [
             'status'         => 'skipped',
