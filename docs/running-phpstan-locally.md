@@ -42,10 +42,27 @@ So now:
   resolution does not depend on whose PHP ran composer.
   ⚠ It is pinned to the FLOOR, not to production. Production and staging run
   **PHP 8.5.12** while CI runs **8.2**; resolving against 8.5.12 pulls
-  `symfony/finder v8.1.11`, which requires `php >= 8.4.1`, and because
-  `platform` overrides make composer SKIP the real platform check, CI would
-  install 8.4-only code onto 8.2 **without a warning**. Measured: 8.2.0 and
-  8.5.12 differ by that one dev package and nothing else.
+  `symfony/finder v8.1.11`, which requires `php >= 8.4.1`. Measured: 8.2.0
+  and 8.5.12 differ by that one dev package and nothing else, so pinning to
+  production buys no fidelity at all.
+
+  ⚠⚠⚠ **And the resulting lock installs on PHP 8.2 silently — proved by
+  experiment, not reasoned.** With `platform.php = 8.5.12`, a lock holding
+  `symfony/finder v8.1.11` (`php >= 8.4.1`) was installed on real PHP 8.2.30:
+
+  ```
+  Installing dependencies from lock file (including require-dev)
+  Verifying lock file contents can be installed on current platform.
+  Package operations: 1 install, 0 updates, 0 removals
+    - Installing symfony/finder (v8.1.11): Extracting archive
+  install exit=0
+  ```
+
+  No warning, no error, exit 0. ⚠⚠ **`Verifying lock file contents can be
+  installed on current platform.` verifies against the OVERRIDE, not the
+  real platform** — so that line reads like proof of safety and is none
+  whenever `config.platform` is set. Do not take it as evidence that a
+  platform pin is safe for every consumer of the lock.
 
 `--ignore-platform-req=ext-gmp` is required on a machine without the GMP
 extension: `simplito/elliptic-php` declares `ext-gmp`, and without the flag
