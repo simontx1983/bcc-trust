@@ -737,7 +737,10 @@ add_action('bcc_gated_group_provision', function () {
         ->gatedGroupProvisioningService()
         ->processRequested();
 
-    if ($result['created'] > 0 || !empty($result['errors'])) {
+    // ⚠ `contended` is in this condition deliberately. Without it a sweep
+    // that was locked out of EVERY queued row logs nothing at all — the one
+    // shape where counting contention is worth anything. See #368.
+    if ($result['created'] > 0 || ($result['contended'] ?? 0) > 0 || !empty($result['errors'])) {
         \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group provisioning sweep', $result);
     }
 });
