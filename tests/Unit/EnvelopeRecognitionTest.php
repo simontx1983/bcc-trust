@@ -53,7 +53,7 @@ final class EnvelopeRecognitionTest extends TestCase
     public static function recognizedCases(): array
     {
         return [
-            'canonical success'                 => [['data' => ['ok' => true], '_meta' => ['request_id' => 'abc']]],
+            'canonical success'                 => [['data' => ['ok' => true], '_meta' => ['version' => 'v1', 'request_id' => 'abc']]],
             'canonical success, null data'      => [['data' => null, '_meta' => []]],
             'canonical success, extra siblings' => [['data' => [], '_meta' => [], 'extra' => 'irrelevant']],
             'canonical error'                   => [['error' => ['code' => 'bcc_unauthorized', 'message' => 'Sign in.', 'status' => 401]]],
