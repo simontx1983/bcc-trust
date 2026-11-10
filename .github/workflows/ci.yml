@@ -51,17 +51,25 @@ jobs:
           tools: composer:v2
           coverage: none
 
-      # ⚠ BEFORE `composer update`, and deliberately so. The committed vendor/ is
-      # what the deploy rsyncs to staging and production; `composer update` would
-      # regenerate the classmap in the runner and the guard would then pass over
+      # ⚠ BEFORE `composer install`, and deliberately so. The committed vendor/ is
+      # what the deploy rsyncs to staging and production; installing first would
+      # rewrite the classmap in the runner and the guard would then pass over
       # freshly written files instead of the ones this commit actually ships.
       - name: Composer classmap parity (committed vendor, pre-install)
         run: php scripts/composer-classmap-guard.php
 
-      # composer.lock is gitignored in this repo (production vendor/ is committed,
-      # dev deps restored on demand), so resolve from composer.json.
+      # ⚠ `install`, NOT `update` — changed in #191, and the distinction is the
+      # whole point of that issue. composer.lock is now COMMITTED, so `install`
+      # reproduces exactly the set the deploy ships. `update` re-resolved on
+      # every run, which is how CI came to be testing guzzle 7.16.1 and
+      # brick/math 1.0.0 while production ran 7.10.0 and 0.17.1 — drift that
+      # nothing reported, because neither side ever looked at the other.
+      #
+      # If this step ever fails with "lock file is not up to date", the fix is
+      # to run `composer update` locally and commit the lock as its own change.
+      # Do NOT switch this back to `update` to make it green.
       - name: Install dependencies
-        run: composer update --no-interaction --no-progress --prefer-dist
+        run: composer install --no-interaction --no-progress --prefer-dist
 
       - name: PHPStan (level 8)
         run: composer phpstan
@@ -256,8 +264,9 @@ jobs:
           extensions: gmp, mbstring, mysqli
           tools: composer:v2
           coverage: none
+      # `install`, not `update` — see the note in the php job above (#191).
       - name: Install dependencies
-        run: composer update --no-interaction --no-progress --prefer-dist
+        run: composer install --no-interaction --no-progress --prefer-dist
       - name: Integration tests (real $wpdb vs MySQL)
         run: composer test:integration
 
@@ -319,8 +328,9 @@ jobs:
           extensions: gmp, mbstring, mysqli
           tools: composer:v2
           coverage: none
+      # `install`, not `update` — see the note in the php job above (#191).
       - name: Install dependencies
-        run: composer update --no-interaction --no-progress --prefer-dist
+        run: composer install --no-interaction --no-progress --prefer-dist
       - name: Integration tests — MariaDB compatibility group
         run: |
           vendor/bin/phpunit -c phpunit-integration.xml.dist --group mariadb \

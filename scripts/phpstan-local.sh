@@ -8,8 +8,9 @@
 # cannot. bcc-trust #368 shipped with three such errors because this was not
 # run first.
 #
-# Why a script rather than two commands: the dev tools cannot be installed
-# without dirtying ~675 tracked files under vendor/, and putting them back
+# Why a script rather than two commands: installing the dev tools rewrites the
+# TRACKED vendor/composer/autoload_*.php pair into its dev flavour, and putting
+# it back
 # BREAKS PHPStan until it is reinstalled, with an error that names a cached
 # nette container rather than the autoloader. The full reasoning and the
 # measured evidence are in docs/running-phpstan-locally.md.
@@ -60,7 +61,7 @@ RESTORE=1
 restore_vendor() {
     [[ $RESTORE -eq 1 ]] || return 0
     echo ""
-    echo "→ restoring vendor/ (composer update rewrites tracked production deps)"
+    echo "→ restoring vendor/ (the dev install rewrote the tracked autoloader)"
     git checkout -- vendor 2>/dev/null
     git clean -fdq vendor 2>/dev/null
     local dirty
@@ -80,10 +81,16 @@ trap restore_vendor EXIT
 
 # ── Install the dev tools ────────────────────────────────────────────────────
 #
-# `install` cannot work: composer.lock is gitignored by design, so there is
-# nothing to install from. `update` is what CI runs. The gmp flag is needed on
-# a machine without the extension — simplito/elliptic-php declares it, and
-# without the flag composer refuses to resolve at all. PHPStan does not need it.
+# ⚠ `install`, NOT `update` — changed in #191. composer.lock is now COMMITTED,
+# so `install` reproduces exactly the pinned set, which is also what CI runs.
+# Running `update` here would REWRITE that committed lock as a side effect of
+# asking for a type check, and the next person's `install` would silently get
+# a different dependency set. If you genuinely need to move a dependency, run
+# `composer update` by hand and commit the lock as its own reviewable change.
+#
+# The gmp flag is needed on a machine without the extension — simplito/
+# elliptic-php declares it, and without the flag composer refuses even to
+# verify the lock. PHPStan does not need GMP to analyse the code.
 # ⚠⚠ THE TEST IS "CAN THE AUTOLOADER SEE THE EXTENSION", NOT "IS THE BINARY
 # THERE". This script's first version checked for vendor/bin/phpstan and got it
 # wrong in the one state that matters: that path is GITIGNORED, so it survives
@@ -100,14 +107,17 @@ dev_ready() {
 }
 
 if ! dev_ready; then
-    echo "→ installing dev dependencies (this rewrites tracked vendor/ files)"
-    if ! composer update --no-interaction --no-progress --prefer-dist \
+    echo "→ installing dev dependencies from composer.lock"
+    if ! composer install --no-interaction --no-progress --prefer-dist \
             --ignore-platform-req=ext-gmp; then
-        echo -e "${RED}FAIL${NC}: composer update failed"
+        echo -e "${RED}FAIL${NC}: composer install failed"
+        echo "       If it says the lock file is out of date, composer.json moved"
+        echo "       without the lock. Run 'composer update' deliberately and"
+        echo "       commit the lock — do not work around it here."
         exit 2
     fi
     if ! dev_ready; then
-        echo -e "${RED}FAIL${NC}: composer update finished but the WordPress extension is still"
+        echo -e "${RED}FAIL${NC}: composer install finished but the WordPress extension is still"
         echo "       not loadable. See docs/running-phpstan-locally.md."
         exit 2
     fi

@@ -1,12 +1,24 @@
 # Production vendor/ IS committed for GitHub-based deploys (Deployer
 # for Git ships the zip from the repo, doesn't run composer
-# server-side). Dev-only paths below are gitignored so running
-# `composer install` locally to restore phpstan doesn't dirty git status.
+# server-side).
+#
+# composer.lock IS COMMITTED as of #191. It used to be ignored, which let
+# the committed tree and CI's fresh resolution drift apart silently — 272
+# vendor files, 10 production packages, including brick/math 0.17.1 vs
+# 1.0.0. CI now runs `composer install`, so the lock is the single pinned
+# production set and committed == resolved by construction. Regenerate it
+# with `composer update`, deliberately, as its own reviewable change.
+#
+# Dev-only paths below stay gitignored so restoring the dev tools locally
+# does not dirty git status. ⚠ That is only HALF true and always was: a
+# plain `composer install` (with dev) also rewrites the TRACKED
+# vendor/composer/autoload_*.php pair into its dev flavour, because the
+# committed autoloader is generated --no-dev. See
+# docs/running-phpstan-locally.md.
 /vendor/bin/
 /vendor/phpstan/
 /vendor/php-stubs/
 /vendor/szepeviktor/
-composer.lock
 .phpunit.result.cache
 .phpunit.cache/
 *.log
