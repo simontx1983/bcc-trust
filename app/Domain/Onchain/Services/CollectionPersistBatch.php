@@ -12,17 +12,32 @@ if (!defined('ABSPATH')) {
  * Persist a fetched batch of collections for one wallet and report how it went.
  *
  * ── WHY THIS EXISTS ─────────────────────────────────────────────────────
- * Three call sites — wallet seeding, the 4-hourly refresh cron, and the
- * gallery-refresh task — each loop `CollectionRepository::upsert()` over a
- * fetched batch. Before #212 all three DISCARDED the return value, which is
+ * Every call site loops `CollectionRepository::upsert()` over a fetched
+ * batch, and before #212 each one DISCARDED the return value — which is
  * precisely why thousands of rejected writes stayed invisible for months.
- * Handling that result identically in three places invites the same drift
- * back, so the policy lives here once.
+ * Handling that result identically in several places invites the same
+ * drift back, so the policy lives here once. #221 put the DegradationMetrics
+ * recording here for the same reason: a future caller cannot forget it.
  *
- * It also makes the outcome testable. The gallery-refresh caller must not
- * advance its "holdings refreshed" watermark when a write was lost — a
- * partial or total failure has to stay eligible for retry — and that
- * decision needs a value it can branch on.
+ * ⚠ TWO CALLERS, NOT THREE. Measured on `main` 2026-11-10:
+ *   - `WalletSeedService::seedEntities()`     (wallet seeding)
+ *   - `ChainRefreshService` refresh tick      (the 4-hourly cron)
+ * An earlier version of this docblock named a third, "the gallery-refresh
+ * task", and bcc-trust #221 inherited that claim from here. There is no
+ * `CollectionPersistBatch` reference in `Plugin.php` or anywhere else.
+ *
+ * ⚠⚠ AND THE WATERMARK CLAIM WAS WRONG TOO. This docblock used to say the
+ * gallery-refresh caller must not advance its "holdings refreshed"
+ * watermark when a write was lost. No caller does that. The only
+ * withholding of `WalletRepository::markHoldingsRefreshed()` is in
+ * `HoldingsService` (the `!$complete` branch), and it turns on an
+ * INCOMPLETE PROVIDER WALK — a holdings-read concern that never sees a
+ * persist batch. What actually keeps a lost row retryable is narrower and
+ * real: a failed `upsert()` never advances that row's `expires_at`, so the
+ * refresh cron, which selects on `expires_at < NOW()`, picks it up again.
+ *
+ * The return value is still what makes the outcome testable, and both
+ * callers branch on `allPersisted()` to decide whether to log.
  *
  * Deliberately NOT a repository: this orchestrates writes and counts
  * outcomes, it owns no SQL of its own.
@@ -56,6 +71,32 @@ final class CollectionPersistBatch
             }
 
             $result['failed']++;
+        }
+
+        // ── #221: turn the loss into a HEALTH signal ────────────────────
+        //
+        // Both callers already log, and #212 made the counts honest, but a
+        // log line is not a health signal: nothing aggregates `bcc-logs/`,
+        // so the Golden Paths surface stayed green while writes were being
+        // dropped. Subsystem and event names are the canonical ones from
+        // bcc-core's DegradationMetric map (bcc-core #61);
+        // CollectionPersistMetricsTest reconciles them against that file so
+        // a rename on either side cannot pass silently.
+        if ($result['failed'] > 0) {
+            \BCC\Core\Observability\DegradationMetrics::record('collection_persist', 'write_failed');
+
+            // The sharper signal: the wallet made NO progress at all, which
+            // usually means the table or the connection rather than the
+            // data, and wants a different response from partial loss.
+            //
+            // #221 specifies `failed === total && total > 0`. The second
+            // half is already implied and is deliberately NOT re-tested:
+            // `failed > 0` cannot hold on an empty batch, so an empty batch
+            // never reaches this branch. Pinned by
+            // testAnEmptyBatchRecordsNothing so the reasoning cannot rot.
+            if ($result['failed'] === $result['total']) {
+                \BCC\Core\Observability\DegradationMetrics::record('collection_persist', 'batch_total_failure');
+            }
         }
 
         return $result;
