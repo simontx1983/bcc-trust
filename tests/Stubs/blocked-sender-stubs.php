@@ -105,7 +105,96 @@ namespace BCC\Core\Repositories {
     }
 }
 
+namespace BCC\Core\Repositories {
+    /**
+     * Driven stub of the three `PeepSoMessageRepository` primitives the
+     * #122 reveal route gates on. Same reasoning as the block stub
+     * above: bcc-trust's unit jobs do not autoload bcc-core, and what a
+     * unit test can honestly prove here is WHICH questions the service
+     * asks, in what order, and what it does with the answers.
+     *
+     * ⚠ `markConversationAsViewed` records its calls precisely so a
+     * test can assert it was NOT called. A reveal must not clear the
+     * unread badge — the viewer revealed one message, they did not read
+     * the thread.
+     */
+    if (!class_exists('BCC\Core\Repositories\PeepSoMessageRepository', false)) {
+        final class PeepSoMessageRepository
+        {
+            /** @var array<int, int> message or conversation id => its root conversation id */
+            public static array $roots = [];
+
+            /** @var array<string, bool> "viewerId:rootId" => is a participant */
+            public static array $participants = [];
+
+            /** @var list<array{int, int}> every markConversationAsViewed call */
+            public static array $viewedCalls = [];
+
+            /** @var list<string> every question asked, in order */
+            public static array $calls = [];
+
+            public static function reset(): void
+            {
+                self::$roots        = [];
+                self::$participants = [];
+                self::$viewedCalls  = [];
+                self::$calls        = [];
+            }
+
+            public static function findRootConversationId(int $msgId): int
+            {
+                self::$calls[] = 'findRootConversationId(' . $msgId . ')';
+                return self::$roots[$msgId] ?? 0;
+            }
+
+            public static function userIsParticipant(int $userId, int $rootMsgId): bool
+            {
+                self::$calls[] = 'userIsParticipant(' . $userId . ',' . $rootMsgId . ')';
+                return self::$participants[$userId . ':' . $rootMsgId] ?? false;
+            }
+
+            public static function markConversationAsViewed(int $userId, int $rootMsgId): void
+            {
+                self::$viewedCalls[] = [$userId, $rootMsgId];
+            }
+        }
+    }
+}
+
 namespace {
+    /**
+     * ⚠ `WP_Post` and `get_post` are stubbed in several other files in
+     * this directory, all `class_exists`/`function_exists`-guarded, so in
+     * a shared process whichever loads first wins. The reveal tests
+     * therefore run in SEPARATE PROCESSES: one of those other stubs does
+     * NOT declare `post_content`, which the reveal reads, and under PHP
+     * 8.2 setting it would be a dynamic-property deprecation while
+     * reading it would yield an empty body. Fresh processes make these
+     * definitions the ones in play.
+     *
+     * The backing array uses its own key so it cannot be confused with
+     * another stub's store.
+     */
+    if (!class_exists('WP_Post', false)) {
+        class WP_Post
+        {
+            public int $ID = 0;
+            public string $post_type = '';
+            public string $post_status = '';
+            public int $post_author = 0;
+            public string $post_content = '';
+        }
+    }
+
+    if (!function_exists('get_post')) {
+        /** @param mixed $id */
+        function get_post($id = null)
+        {
+            $posts = $GLOBALS['__bcc_122_posts'] ?? [];
+            return $posts[(int) $id] ?? null;
+        }
+    }
+
     if (!function_exists('wp_strip_all_tags')) {
         function wp_strip_all_tags(string $text, bool $removeBreaks = false): string
         {
