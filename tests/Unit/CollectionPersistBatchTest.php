@@ -12,13 +12,18 @@ use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Complete success, partial failure, total failure — the three outcomes the
- * gallery-refresh watermark decision turns on (#212).
+ * Complete success, partial failure, total failure — the three outcomes both
+ * callers branch on (#212).
  *
- * The caller must advance `markHoldingsRefreshed()` ONLY on complete success.
- * Marking a wallet refreshed after losing writes suppresses the next attempt
- * and makes the loss permanent — the same "failure leaves no trace" shape as
- * the original defect.
+ * ⚠ CORRECTED 2026-11-10 (#221). This docblock used to say the caller must
+ * advance `markHoldingsRefreshed()` only on complete success. No caller does
+ * that: the only withholding of that watermark is in `HoldingsService`, on an
+ * INCOMPLETE PROVIDER WALK, which never sees a persist batch. What actually
+ * keeps a lost row retryable is narrower — a failed `upsert()` never advances
+ * that row's `expires_at`, and the refresh cron selects on
+ * `expires_at < NOW()`.
+ *
+ * The health-surface half of this behaviour lives in CollectionPersistMetricsTest.
  */
 #[CoversClass(CollectionPersistBatch::class)]
 #[RunTestsInSeparateProcesses]
@@ -58,7 +63,7 @@ final class CollectionPersistBatchTest extends TestCase
         );
         self::assertTrue(
             CollectionPersistBatch::allPersisted($result),
-            'a clean batch must let the caller advance its refresh watermark'
+            'a clean batch is fully persisted; nothing is left for the cron to pick up'
         );
         self::assertCount(3, CollectionRepository::$calls, 'every row is attempted');
     }
@@ -79,7 +84,7 @@ final class CollectionPersistBatchTest extends TestCase
         );
         self::assertFalse(
             CollectionPersistBatch::allPersisted($result),
-            'one lost write must leave the wallet eligible for retry'
+            'one lost write must leave that row eligible for retry via its unadvanced expires_at'
         );
         self::assertCount(
             3,
