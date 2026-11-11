@@ -275,7 +275,20 @@ class DisputeScheduler
 
         $lastId = $afterId;
         foreach ($candidates as $dispute) {
-            $reconcile($dispute->id);
+            // One dispute whose reconcile always throws must not abort the
+            // batch before the cursor is persisted — that would re-select it
+            // first every run and starve everything behind it, the exact
+            // failure this cursor exists to prevent. Log it and move on; the
+            // next full pass retries it.
+            try {
+                $reconcile($dispute->id);
+            } catch (\Throwable $e) {
+                CoreLogger::error('[bcc-disputes] backstop reconcile failed', [
+                    'dispute_id' => $dispute->id,
+                    'error'      => $e->getMessage(),
+                    'class'      => get_class($e),
+                ]);
+            }
             $lastId = $dispute->id; // ORDER BY id ASC — monotonic.
         }
 

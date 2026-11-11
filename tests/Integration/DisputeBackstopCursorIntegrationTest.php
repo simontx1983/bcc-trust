@@ -136,6 +136,35 @@ final class DisputeBackstopCursorIntegrationTest extends TestCase
         self::assertNotContains($recent, $seen);
     }
 
+    public function testADisputeWhoseReconcileAlwaysThrowsDoesNotStallTheCursor(): void
+    {
+        // 60 disputes; the FIRST one's reconcile always throws (a poison row).
+        $ids = [];
+        for ($i = 0; $i < 60; $i++) {
+            $ids[] = $this->insertDispute(gmdate('Y-m-d H:i:s', 1748743200 + $i * 60));
+        }
+        $poison = $ids[0];
+
+        $runs = [];
+        for ($r = 0; $r < 2; $r++) {
+            $seen = [];
+            DisputeScheduler::runBackstopBatch(
+                self::CUTOFF,
+                self::LIMIT,
+                static function (int $id) use (&$seen, $poison): void {
+                    $seen[] = $id;
+                    if ($id === $poison) {
+                        throw new \RuntimeException('reconcile always fails for this dispute');
+                    }
+                }
+            );
+            $runs[] = $seen;
+        }
+
+        self::assertSame(array_slice($ids, 0, 50), $runs[0], 'the batch continues past the throwing dispute');
+        self::assertSame(array_slice($ids, 50), $runs[1], 'the next run moves past it instead of re-selecting it first');
+    }
+
     public function testAnEmptySetLeavesAZeroCursorUntouched(): void
     {
         self::assertSame([], $this->runOnce());
