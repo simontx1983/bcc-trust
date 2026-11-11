@@ -162,6 +162,29 @@ final class SignalRefreshCursorTest extends TestCase
         self::assertSame([28, 35, 42, 49, 56, 63, 70], \RefreshWorld::$refreshed, 'the retry picks up exactly where it stopped');
     }
 
+    public function testOneOwnersFailureIsSkippedWithoutLosingTheTicksProgress(): void
+    {
+        // Owner 21's page throws every time. The tick logs it, moves past it,
+        // and keeps going — it neither aborts the tick (losing the cursor
+        // progress) nor stalls the cycle on that one owner.
+        \RefreshWorld::$owners = self::owners(5);
+        SignalRefreshService::setTestSeams(
+            static function (int $ownerId): void {
+                if ($ownerId === 21) {
+                    throw new \RuntimeException('provider exploded for this page');
+                }
+                \RefreshWorld::$refreshed[] = $ownerId;
+            },
+            static fn (): int => \RefreshWorld::$now
+        );
+
+        SignalRefreshService::processBatch();
+
+        self::assertSame([7, 14, 28, 35], \RefreshWorld::$refreshed);
+        self::assertArrayNotHasKey(self::CURSOR, \RefreshWorld::$options, 'the cycle completed past the failing owner');
+        self::assertContains('warning:[SignalRefresh] owner refresh failed; skipped for this cycle', \RefreshWorld::$logs);
+    }
+
     public function testAFailedReadOnTheFirstPageOfACycleStillDoesNotEndIt(): void
     {
         \RefreshWorld::$owners = self::owners(5);

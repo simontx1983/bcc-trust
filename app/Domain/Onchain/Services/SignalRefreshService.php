@@ -272,7 +272,20 @@ final class SignalRefreshService
                 }
 
                 foreach ($owners as $ownerId) {
-                    self::refreshOwner($ownerId, $startTimeMic);
+                    // One owner's failure must not cost the tick its progress:
+                    // log it and move past that owner, so a page that always
+                    // throws cannot stall the cycle on itself. The next
+                    // cycle refreshes it again.
+                    try {
+                        self::refreshOwner($ownerId, $startTimeMic);
+                    } catch (\Throwable $e) {
+                        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                            \BCC\Core\Log\Logger::warning('[SignalRefresh] owner refresh failed; skipped for this cycle', [
+                                'user_id' => $ownerId,
+                                'error'   => $e->getMessage(),
+                            ]);
+                        }
+                    }
 
                     // This owner is done: the cursor moves past it NOW, so a
                     // time-out below resumes on the next owner, not on this
