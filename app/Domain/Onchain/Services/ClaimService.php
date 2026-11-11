@@ -77,6 +77,12 @@ class ClaimService {
      * @return array{success: bool, message: string, claim_id?: int, role?: string, needs_wallet?: bool, chain_slug?: string, error?: string, is_primary?: bool}
      */
     public static function claim(int $userId, string $entityType, int $entityId): array {
+        // §M suspension gate at the SERVICE boundary (F-109), admin bypass
+        // OFF. PagesEndpoint gates first; this holds for any future caller.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ['success' => false, 'error' => 'bcc_forbidden', 'message' => 'Your account is suspended.'];
+        }
+
         if (!in_array($entityType, self::ENTITY_TYPES, true)) {
             return ['success' => false, 'message' => 'Invalid entity type.'];
         }
