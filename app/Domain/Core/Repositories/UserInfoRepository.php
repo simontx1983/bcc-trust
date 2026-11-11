@@ -613,16 +613,45 @@ class UserInfoRepository {
     /**
      * Suspend user.
      *
-     * @throws RepositoryException on database failure
+     * ⚠ FAILS LOUDLY ON A MISSING ROW (F-112). `$wpdb->update()` matching zero
+     * rows is not an error, so a user with no user_info row used to "suspend"
+     * silently: the flag every enforcement path reads (is_suspended) never
+     * landed, yet the caller reported success. Callers ensure the row exists
+     * first (ModerationService syncs it via UserSyncService). If it is still
+     * absent here, this throws, so the caller's transaction rolls back the
+     * suspensions row too.
+     *
+     * fraud_triggers is MERGED, not overwritten: the reason and timestamp
+     * are added to the existing JSON (the same read-merge as unsuspendUser),
+     * so earlier fraud evidence on the row is kept.
+     *
+     * @throws RepositoryException on database failure or a missing row
      */
     public function suspendUser(int $userId, string $reason): void {
         global $wpdb;
 
+        // Read the CURRENT triggers straight from the table, not the 5-min
+        // row cache, so the merge cannot drop a key written since.
+        $currentRaw = $wpdb->get_var($wpdb->prepare(
+            "SELECT fraud_triggers FROM {$this->table} WHERE user_id = %d",
+            $userId
+        ));
+        if ($currentRaw === null && !$this->exists($userId)) {
+            throw new RepositoryException('UserInfoRepository::suspendUser: no user_info row for user ' . $userId);
+        }
+
+        $triggers = is_string($currentRaw) && $currentRaw !== '' ? json_decode($currentRaw, true) : [];
+        if (!is_array($triggers)) {
+            $triggers = [];
+        }
+        $triggers['suspension_reason'] = $reason;
+        $triggers['suspended_at']      = current_time('mysql');
+
         $result = $wpdb->update(
             $this->table,
             [
-                'is_suspended' => 1,
-                'fraud_triggers' => json_encode(['suspension_reason' => $reason, 'suspended_at' => current_time('mysql')])
+                'is_suspended'   => 1,
+                'fraud_triggers' => json_encode($triggers),
             ],
             ['user_id' => $userId],
             ['%d', '%s'],
