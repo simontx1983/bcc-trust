@@ -243,6 +243,47 @@ namespace BCC\Trust\Tests\Integration {
             self::assertNotNull($wpdb->get_var($wpdb->prepare("SELECT id FROM `{$wpdb->prefix}bcc_chains` WHERE id = %d", $this->chainId)));
         }
 
+        /**
+         * #425 review L2: after a mid-transaction reconnect the remaining
+         * statements run in AUTOCOMMIT, so the chain-row DELETE must prove its
+         * own precondition. With a child row still present it deletes nothing
+         * (returns 0), and the retirement treats 0 as a failure.
+         */
+        public function testTheChainRowIsNeverDeletedWhileAChildRowRemains(): void
+        {
+            global $wpdb;
+            $this->stargazeFixture(); // leaves a collection + a wallet link on the chain
+
+            $affected = \bcc_trust_stargaze_delete_chain_row_if_childless($this->chainId, [
+                'bcc_user_nft_selections',
+                'bcc_wallet_links',
+                'bcc_onchain_collection_pieces',
+                'bcc_onchain_collections',
+            ]);
+
+            self::assertSame(0, $affected, 'children remain, so the chain row must not go');
+            self::assertNotNull($wpdb->get_var($wpdb->prepare("SELECT id FROM `{$wpdb->prefix}bcc_chains` WHERE id = %d", $this->chainId)));
+        }
+
+        /** Anti-vacuity: with no children left it deletes exactly the one row. */
+        public function testTheChainRowIsDeletedOnceChildless(): void
+        {
+            global $wpdb;
+            $this->stargazeFixture();
+            foreach (['bcc_onchain_collections', 'bcc_wallet_links'] as $suffix) {
+                $wpdb->query($wpdb->prepare("DELETE FROM `{$wpdb->prefix}{$suffix}` WHERE chain_id = %d", $this->chainId));
+            }
+
+            $affected = \bcc_trust_stargaze_delete_chain_row_if_childless($this->chainId, [
+                'bcc_user_nft_selections',
+                'bcc_wallet_links',
+                'bcc_onchain_collection_pieces',
+                'bcc_onchain_collections',
+            ]);
+
+            self::assertSame(1, $affected);
+        }
+
         /** A failed chain lookup is unknown — never "no stargaze chain, done". */
         public function testAFailedChainLookupIsNotStampedDone(): void
         {

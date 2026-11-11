@@ -161,6 +161,33 @@ if (!function_exists('bcc_trust_retire_stargaze_chain')) {
         return $found;
     }
 
+    /**
+     * Delete the chain row ONLY when none of $childSuffixes still has a row
+     * for it (#425 review L2). Returns the affected-row count (1 = deleted,
+     * 0 = children remain or the row is already gone) or false on a query
+     * failure. The precondition lives IN the statement, so it holds even when
+     * a reconnect has dropped the surrounding transaction into autocommit.
+     *
+     * @param list<string> $childSuffixes
+     * @return int|false
+     */
+    function bcc_trust_stargaze_delete_chain_row_if_childless(int $chainId, array $childSuffixes)
+    {
+        global $wpdb;
+        $chains    = $wpdb->prefix . 'bcc_chains';
+        $notExists = [];
+        foreach ($childSuffixes as $suffix) {
+            $notExists[] = "NOT EXISTS (SELECT 1 FROM `{$wpdb->prefix}{$suffix}` WHERE chain_id = %d)";
+        }
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $result = $wpdb->query($wpdb->prepare(
+            "DELETE FROM `{$chains}` WHERE id = %d AND " . implode(' AND ', $notExists),
+            $chainId,
+            ...array_fill(0, count($childSuffixes), $chainId)
+        ));
+        return $result === false ? false : (int) $result;
+    }
+
     function bcc_trust_retire_stargaze_chain(): void
     {
         if (get_option('bcc_trust_stargaze_chain_retired')) {
@@ -257,12 +284,21 @@ if (!function_exists('bcc_trust_retire_stargaze_chain')) {
             bcc_trust_stargaze_retire_failed('read connection id');
             return;
         }
-        foreach ([
+        $childSuffixes = [
             'bcc_user_nft_selections',
             'bcc_wallet_links',
             'bcc_onchain_collection_pieces',
             'bcc_onchain_collections',
-        ] as $suffix) {
+        ];
+        foreach ($childSuffixes as $suffix) {
+            // Re-check the connection before every DELETE: after a silent
+            // reconnect the remaining statements would run in autocommit.
+            [$ok, $connectionNow] = bcc_trust_stargaze_probe('SELECT CONNECTION_ID()');
+            if (!$ok || $connectionNow !== $connectionAtStart) {
+                $wpdb->query('ROLLBACK');
+                bcc_trust_stargaze_retire_failed("connection changed before delete {$suffix}");
+                return;
+            }
             $table = $wpdb->prefix . $suffix;
             // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
             $result = $wpdb->query($wpdb->prepare(
@@ -277,14 +313,17 @@ if (!function_exists('bcc_trust_retire_stargaze_chain')) {
             $deleted[$suffix] = (int) $result;
         }
 
-        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $result = $wpdb->query($wpdb->prepare(
-            "DELETE FROM `{$chains}` WHERE id = %d",
-            $chainId
-        ));
-        if ($result === false) {
+        // The chain-row DELETE proves its OWN precondition (#425 review L2).
+        // A reconnect mid-transaction drops into autocommit, so a connection
+        // check alone cannot stop a later DELETE from committing on its own.
+        // This statement therefore deletes the chain row ONLY if no child
+        // row still references it, and 0 rows affected is a failure: a
+        // partially-applied run is never stamped retired, and a re-run
+        // finishes the children first.
+        $result = bcc_trust_stargaze_delete_chain_row_if_childless($chainId, $childSuffixes);
+        if ($result === false || $result !== 1) {
             $wpdb->query('ROLLBACK');
-            bcc_trust_stargaze_retire_failed('delete chain row');
+            bcc_trust_stargaze_retire_failed($result === false ? 'delete chain row' : 'chain row not deleted: children remain or row already gone');
             return;
         }
         $deleted['bcc_chains'] = (int) $result;
