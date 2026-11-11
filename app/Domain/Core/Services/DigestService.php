@@ -282,10 +282,7 @@ final class DigestService
             array_pop($rows);
         }
 
-        $handle = (string) get_user_meta($userId, 'bcc_handle', true);
-        if ($handle === '') {
-            $handle = $user->user_login;
-        }
+        $handle = \BCC\Trust\Core\Support\PublicIdentity::handle($userId, get_user_meta($userId, 'bcc_handle', true));
 
         $unsub = $this->buildUnsubscribeUrl($userId);
 

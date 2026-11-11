@@ -726,6 +726,10 @@ final class WalletAuthController
             'user_pass'    => $password,
             'display_name' => $displayName !== '' ? $displayName : $handle,
             'role'         => 'subscriber',
+            // Core saves meta_input BEFORE firing user_register, so the
+            // handle-assignment hook in Plugin.php sees the chosen handle
+            // and leaves it alone.
+            'meta_input'   => [HandleService::META_HANDLE => $handle],
         ]);
 
         if (is_wp_error($userId)) {

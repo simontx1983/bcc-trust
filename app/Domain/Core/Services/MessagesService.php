@@ -1492,10 +1492,8 @@ final class MessagesService
         $avatars = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrlBulk(array_keys($rows));
         $out = [];
         foreach ($rows as $uid => $row) {
-            $handle  = $row['handle'] !== null && $row['handle'] !== ''
-                ? $row['handle']
-                : $row['user_login'];
-            $display = $row['display_name'];
+            $handle  = \BCC\Trust\Core\Support\PublicIdentity::handle((int) $uid, $row['handle']);
+            $display = \BCC\Trust\Core\Support\PublicIdentity::displayName($row['display_name'], $row['user_login'], $handle);
 
             $out[$uid] = [
                 'id'           => $uid,

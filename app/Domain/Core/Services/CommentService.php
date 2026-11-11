@@ -939,9 +939,7 @@ final class CommentService
     {
         $out = [];
         foreach ($this->userMiniRepo->getRowsByIds($authorIds) as $uid => $row) {
-            $out[$uid] = $row['handle'] !== null && $row['handle'] !== ''
-                ? $row['handle']
-                : $row['user_login'];
+            $out[$uid] = \BCC\Trust\Core\Support\PublicIdentity::handle((int) $uid, $row['handle']);
         }
         return $out;
     }
