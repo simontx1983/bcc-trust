@@ -113,3 +113,35 @@ namespace BCC\Core\Permissions {
         }
     }
 }
+
+namespace BCC\Core {
+    // F-109: resolve the REAL TrustReadService, as bcc-trust.php does in
+    // production with `add_filter('bcc.resolve.trust_read_service', …)`.
+    // The bootstrap's apply_filters() is a pass-through, so ServiceLocator
+    // received null and fell back to NullTrustReadService, whose
+    // isSuspended() is fail-closed TRUE. Every fixture user therefore read as
+    // SUSPENDED and every claim got a 403. With this shim, suspension is read
+    // from the real user_info table: no row → not suspended (as in prod), and
+    // is_suspended = 1 → suspended.
+    //
+    // Namespace-scoped, so it binds ONLY for unqualified calls in BCC\Core,
+    // where ServiceLocator is the only caller. Every other hook is delegated
+    // to the global function unchanged.
+    if (!function_exists(__NAMESPACE__ . '\\apply_filters')) {
+        /**
+         * @param  mixed $value
+         * @param  mixed ...$args
+         * @return mixed
+         */
+        function apply_filters(string $hook, $value, ...$args)
+        {
+            if ($hook === 'bcc.resolve.trust_read_service') {
+                return new \BCC\Trust\Core\Application\TrustReadService(
+                    new \BCC\Trust\Core\Repositories\VoteRepository()
+                );
+            }
+
+            return \apply_filters($hook, $value, ...$args);
+        }
+    }
+}
