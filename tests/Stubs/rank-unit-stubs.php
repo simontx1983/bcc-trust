@@ -125,6 +125,11 @@ namespace BCC\Trust\Tests\Stubs {
             self::$posts    = [];
             self::$actions  = [];
             self::$userMeta = [];
+            // The Permissions fake's UNKNOWN-suspension list (see its
+            // suspensionState()). Cleared here because these rank suites share
+            // ONE process: a test that marks a user unknown must not leak it
+            // into the next suite (RankFindingAssessmentTest uses the same id).
+            $GLOBALS['__bcc_suspension_unknown'] = [];
         }
 
         /** @return list<string> Hook names fired, in order. */
