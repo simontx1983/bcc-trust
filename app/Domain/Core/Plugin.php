@@ -2605,6 +2605,12 @@ final class Plugin
             $this->notificationDispatcher()->onRankDecayWarning($userId);
         }, 30, 1);
 
+        // F-73 — tell the author their post was auto-hidden (bell only;
+        // the dispatcher method self-isolates with try/catch).
+        add_action('bcc_content_auto_hidden', function (int $actId): void {
+            $this->notificationDispatcher()->onContentAutoHidden($actId);
+        }, 30, 1);
+
         add_action('bcc_rank_finding_issued', function (int $userId, int $findingId, string $severity): void {
             unset($severity); // copy is severity-neutral by design (no shaming)
             $this->notificationDispatcher()->onRankFindingIssued($userId, $findingId);
