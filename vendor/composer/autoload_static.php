@@ -287,6 +287,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Repositories\\BlogChainTagRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/BlogChainTagRepository.php',
         'BCC\\Trust\\Core\\Repositories\\CommentRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/CommentRepository.php',
         'BCC\\Trust\\Core\\Repositories\\ContentReportRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/ContentReportRepository.php',
+        'BCC\\Trust\\Core\\Repositories\\DbWriteCheck' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/DbWriteCheck.php',
         'BCC\\Trust\\Core\\Repositories\\DeviceFingerprintRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/DeviceFingerprintRepository.php',
         'BCC\\Trust\\Core\\Repositories\\EdgeRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/EdgeRepository.php',
         'BCC\\Trust\\Core\\Repositories\\FraudAnalysisRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/FraudAnalysisRepository.php',
