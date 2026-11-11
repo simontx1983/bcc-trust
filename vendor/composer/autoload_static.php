@@ -375,6 +375,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Services\\EliteEligibilityService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/EliteEligibilityService.php',
         'BCC\\Trust\\Core\\Services\\EndorsementService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/EndorsementService.php',
         'BCC\\Trust\\Core\\Services\\FeedColdStartService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/FeedColdStartService.php',
+        'BCC\\Trust\\Core\\Services\\FeedItemReportVisibility' => __DIR__ . '/../..' . '/app/Domain/Core/Services/FeedItemReportVisibility.php',
         'BCC\\Trust\\Core\\Services\\Feed\\ActivityStreamWriter' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Feed/ActivityStreamWriter.php',
         'BCC\\Trust\\Core\\Services\\Feed\\BlogStatusTransitionHandler' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Feed/BlogStatusTransitionHandler.php',
         'BCC\\Trust\\Core\\Services\\Feed\\FeedHydrationPipeline' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Feed/FeedHydrationPipeline.php',

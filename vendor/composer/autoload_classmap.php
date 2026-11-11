@@ -219,6 +219,7 @@ return array(
     'BCC\\Trust\\Core\\Services\\EliteEligibilityService' => $baseDir . '/app/Domain/Core/Services/EliteEligibilityService.php',
     'BCC\\Trust\\Core\\Services\\EndorsementService' => $baseDir . '/app/Domain/Core/Services/EndorsementService.php',
     'BCC\\Trust\\Core\\Services\\FeedColdStartService' => $baseDir . '/app/Domain/Core/Services/FeedColdStartService.php',
+    'BCC\\Trust\\Core\\Services\\FeedItemReportVisibility' => $baseDir . '/app/Domain/Core/Services/FeedItemReportVisibility.php',
     'BCC\\Trust\\Core\\Services\\Feed\\ActivityStreamWriter' => $baseDir . '/app/Domain/Core/Services/Feed/ActivityStreamWriter.php',
     'BCC\\Trust\\Core\\Services\\Feed\\BlogStatusTransitionHandler' => $baseDir . '/app/Domain/Core/Services/Feed/BlogStatusTransitionHandler.php',
     'BCC\\Trust\\Core\\Services\\Feed\\FeedHydrationPipeline' => $baseDir . '/app/Domain/Core/Services/Feed/FeedHydrationPipeline.php',

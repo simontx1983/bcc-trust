@@ -14,6 +14,8 @@ use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
+require_once __DIR__ . '/FeedActivityFixture.php';
+
 /**
  * F-73 (restore side) — a restore closes EVERY pending report on the target
  * and starts a persisted re-hide cooldown. Real SQL, real AutoHideService.
@@ -40,8 +42,7 @@ final class RestoreClosesAllReportsIntegrationTest extends TestCase
     private const POST_ID = 2200000001;
     private const ADMIN   = 940001;
 
-    private bool $activitiesWasOurs = false;
-    private bool $seeded = false;
+    use FeedActivityFixture;
 
     private ModerationQueueService $service;
     private ContentReportRepository $reports;
@@ -50,11 +51,29 @@ final class RestoreClosesAllReportsIntegrationTest extends TestCase
 
     protected function setUp(): void
     {
-        $this->buildFixture();
+        $this->seedFeedActivity(self::ACT_ID, self::POST_ID);
         $GLOBALS['__bcc_test_actions'] = [];
         $this->reports  = new ContentReportRepository();
         $this->hidden   = new HiddenActivityRepository();
-        $this->autoHide = new AutoHideService($this->reports, $this->hidden);
+        // Every reporter here is credible: this suite pins the restore /
+        // cooldown behaviour; reporter credibility is pinned separately by
+        // CredibleReporterAutoHideIntegrationTest.
+        $this->autoHide = new AutoHideService(
+            $this->reports,
+            $this->hidden,
+            new class extends \BCC\Trust\Rank\Services\RankCredibilityGate {
+                public function isCredible(
+                    int $userId,
+                    bool $requireRankState = true,
+                    bool $requireTierNeutral = true,
+                    bool $requireNotSuspended = true,
+                    bool $requireNotInRecovery = false,
+                    bool $requireFraudClear = true
+                ): bool {
+                    return $userId > 0;
+                }
+            }
+        );
         $this->service  = new ModerationQueueService(
             $this->reports,
             $this->hidden,
@@ -72,16 +91,7 @@ final class RestoreClosesAllReportsIntegrationTest extends TestCase
             self::ACT_ID
         ));
         $wpdb->query($wpdb->prepare('DELETE FROM ' . $wpdb->prefix . 'bcc_hidden_activities WHERE act_id = %d', self::ACT_ID));
-        if ($this->seeded) {
-            $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->postmeta} WHERE post_id = %d", self::POST_ID));
-            $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->posts} WHERE ID = %d", self::POST_ID));
-            $wpdb->query($wpdb->prepare('DELETE FROM ' . $wpdb->prefix . 'peepso_activities WHERE act_id = %d', self::ACT_ID));
-            $this->seeded = false;
-        }
-        if ($this->activitiesWasOurs) {
-            $wpdb->query('DROP TABLE IF EXISTS ' . $wpdb->prefix . 'peepso_activities');
-            $this->activitiesWasOurs = false;
-        }
+        $this->removeFeedActivities();
     }
 
     public function testRestoreClosesEveryPendingReportOnTheTarget(): void
@@ -189,60 +199,5 @@ final class RestoreClosesAllReportsIntegrationTest extends TestCase
         $row = $this->reports->findById($reportId);
         self::assertNotNull($row);
         return (int) $row->status;
-    }
-
-    private function buildFixture(): void
-    {
-        global $wpdb;
-
-        $acts = $wpdb->prefix . 'peepso_activities';
-        $exists = (string) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $acts)) === $acts;
-        if (!$exists) {
-            self::assertNotFalse($wpdb->query(
-                "CREATE TABLE {$acts} (
-                    act_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                    act_owner_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                    act_module_id VARCHAR(20) NOT NULL DEFAULT '0',
-                    act_external_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                    act_access INT NOT NULL DEFAULT 10,
-                    PRIMARY KEY (act_id)
-                ) DEFAULT CHARSET=utf8mb4"
-            ), 'create activities: ' . $wpdb->last_error);
-            $this->activitiesWasOurs = true;
-        }
-
-        // Add only what the shared harness wp_posts lacks.
-        $wanted = [
-            'post_author'   => 'BIGINT UNSIGNED NOT NULL DEFAULT 0',
-            'post_date_gmt' => "DATETIME NOT NULL DEFAULT '2000-01-01 00:00:00'",
-        ];
-        $existing = $wpdb->get_col($wpdb->prepare(
-            'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s',
-            $wpdb->posts
-        ));
-        $adds = [];
-        foreach ($wanted as $column => $definition) {
-            if (!in_array($column, (array) $existing, true)) {
-                $adds[] = "ADD COLUMN {$column} {$definition}";
-            }
-        }
-        if ($adds !== []) {
-            self::assertNotFalse($wpdb->query("ALTER TABLE {$wpdb->posts} " . implode(', ', $adds)), $wpdb->last_error);
-        }
-
-        foreach ([[$acts, 'act_id', self::ACT_ID], [$wpdb->posts, 'ID', self::POST_ID]] as [$table, $col, $id]) {
-            $taken = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE {$col} = %d", $id));
-            if ($taken > 0) {
-                self::markTestSkipped("{$table}.{$col}={$id} already exists; refusing to overwrite a real row");
-            }
-        }
-
-        self::assertNotFalse($wpdb->insert($wpdb->posts, [
-            'ID' => self::POST_ID, 'post_type' => 'peepso-post', 'post_status' => 'publish', 'post_author' => 960001,
-        ]), $wpdb->last_error);
-        self::assertNotFalse($wpdb->insert($acts, [
-            'act_id' => self::ACT_ID, 'act_module_id' => '1', 'act_external_id' => self::POST_ID, 'act_owner_id' => 960001,
-        ]), $wpdb->last_error);
-        $this->seeded = true;
     }
 }

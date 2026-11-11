@@ -1106,7 +1106,8 @@ final class Plugin
     {
         return $this->autoHideService ??= new Services\AutoHideService(
             $this->contentReportRepository(),
-            $this->hiddenActivityRepository()
+            $this->hiddenActivityRepository(),
+            $this->rankCredibilityGate()
         );
     }
 
