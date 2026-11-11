@@ -544,7 +544,9 @@ class DeviceFingerprinter {
      * window, capped in total, and never for an admin-whitelisted device or
      * IP (F-103). Returns the points actually added (0 when suppressed).
      *
-     * @param string $reason    'device_sharing' | 'server_fingerprint_sharing'
+     * @param string $reason    'device_sharing' (the server-fingerprint
+     *                          penalty was dropped, F-108; its ledger
+     *                          entries simply age out)
      * @param string $deviceKey the shared fingerprint (client or srv_)
      */
     private function applySharingPenalty(int $userId, string $reason, string $deviceKey, int $requested): int {
@@ -592,13 +594,16 @@ class DeviceFingerprinter {
         // Reuse getFingerprintUserCount to check shared server fingerprints
         $serverSharedCount = $this->getFingerprintUserCount($serverFp);
         if ($serverSharedCount > 1) {
-            // Different accounts, same server-side fingerprint -> strong signal
-            $applied = $this->applySharingPenalty($userId, 'server_fingerprint_sharing', $serverFp, min(30, $serverSharedCount * 8));
-
+            // Recorded for admin review, NO fraud points (F-108, user
+            // decision). Every input to this hash except the IP is a header
+            // the client chooses, and two people behind one router on the
+            // same browser build produce the same value: a weak signal, and
+            // it double-counted the device_sharing penalty, which keys on a
+            // hash of the same headers.
             AuditLogger::log('server_fingerprint_shared', $userId, [
                 'server_fingerprint' => substr($serverFp, 0, 20) . '...',
                 'shared_count'       => $serverSharedCount,
-                'points_applied'     => $applied,
+                'points_applied'     => 0,
             ], 'user');
         }
 
