@@ -201,6 +201,26 @@ function bcc_trust_render_repair_tab() {
             do_action( 'bcc_trust_repair_tab_extra_tools' );
             ?>
 
+            <div style="border:1px solid var(--bcc-border, #ddd);border-radius:6px;padding:16px;">
+                <h3 style="margin-top:0;">Check Tables &amp; Remove Orphans</h3>
+                <p style="font-size:13px;color:var(--bcc-text-secondary, #666);">Confirms every trust table exists, then <strong>deletes</strong> orphaned score and user-info rows (rows whose page or user is gone). Also reports fraud analyses and activity logs past their retention window (reported only, not deleted).</p>
+                <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+                    <?php wp_nonce_field( 'bcc_trust_admin_action' ); ?>
+                    <input type="hidden" name="action" value="bcc_trust_db_check">
+                    <button type="submit" class="button" onclick="return confirm('Check all trust tables and DELETE orphaned score / user-info rows? This cannot be undone.');">Run Check</button>
+                </form>
+            </div>
+
+            <div style="border:1px solid var(--bcc-border, #ddd);border-radius:6px;padding:16px;">
+                <h3 style="margin-top:0;">Clean Up Fraud Records</h3>
+                <p style="font-size:13px;color:var(--bcc-text-secondary, #666);">Deletes expired fraud-analysis records and archives suspensions closed more than <?php echo (int) BCC_TRUST_CLEANUP_SUSPENSIONS; ?> days ago.</p>
+                <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+                    <?php wp_nonce_field( 'bcc_trust_admin_action' ); ?>
+                    <input type="hidden" name="action" value="bcc_trust_cleanup_fraud">
+                    <button type="submit" class="button" onclick="return confirm('Delete expired fraud analyses and archive old closed suspensions?');">Run Cleanup</button>
+                </form>
+            </div>
+
         </div>
     </div>
     <?php

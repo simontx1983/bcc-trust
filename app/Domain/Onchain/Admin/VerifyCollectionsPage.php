@@ -2631,6 +2631,7 @@ final class VerifyCollectionsPage
                             <tr data-collection-id="<?php echo $rowId; ?>">
                                 <td>
                                     <input type="hidden" name="known[]" value="<?php echo $rowId; ?>">
+                                    <input type="hidden" name="was_verified[<?php echo $rowId; ?>]" value="<?php echo $rowVerified ? '1' : '0'; ?>">
                                     <label class="bcc-vc-toggle" style="display:inline-flex;align-items:center;gap:4px;">
                                         <input type="checkbox"
                                                class="bcc-vc-verify"
@@ -3626,6 +3627,40 @@ final class VerifyCollectionsPage
 
 
     /**
+     * Which of the submitted rows THIS operator changed (F-117).
+     *
+     * A row whose checkbox still matches the state it was rendered with
+     * ($was) was not touched here and is skipped, so saving from a stale
+     * tab cannot revert another admin's change. A row with no rendered
+     * state (a page from before was_verified existed) is written as
+     * submitted, the old behaviour.
+     *
+     * @param list<int>          $known   Row ids the page rendered.
+     * @param array<int, true>   $checked Row ids submitted checked.
+     * @param array<int, bool>   $was     Rendered verified state per row id.
+     * @return array{0: list<int>, 1: list<int>, 2: int} [verify, unverify, untouched]
+     */
+    public static function partitionChanges(array $known, array $checked, array $was): array
+    {
+        $verify    = [];
+        $unverify  = [];
+        $untouched = 0;
+        foreach ($known as $collectionId) {
+            $now = isset($checked[$collectionId]);
+            if (array_key_exists($collectionId, $was) && $was[$collectionId] === $now) {
+                $untouched++;
+                continue;
+            }
+            if ($now) {
+                $verify[] = $collectionId;
+            } else {
+                $unverify[] = $collectionId;
+            }
+        }
+        return [$verify, $unverify, $untouched];
+    }
+
+    /**
      * @return list<array{type: string, message: string}>
      */
     private static function handleSave(): array
@@ -3669,15 +3704,22 @@ final class VerifyCollectionsPage
             $checked[(int) $id] = true;
         }
 
-        $verify   = [];
-        $unverify = [];
-        foreach ($known as $collectionId) {
-            if (isset($checked[$collectionId])) {
-                $verify[] = $collectionId;
-            } else {
-                $unverify[] = $collectionId;
-            }
+        // F-117: write only the rows THIS operator changed. Each row also
+        // posts the state it was rendered with (was_verified[id]); a row whose
+        // checkbox still matches it was not touched here, so it is left alone
+        // — otherwise saving from a stale tab re-wrote every row on the page
+        // to its old state and silently reverted other admins' changes.
+        // A row without was_verified (a page rendered before this field
+        // existed) keeps the old write-everything behaviour.
+        $wasRaw = isset($_POST['was_verified']) && is_array($_POST['was_verified'])
+            ? $_POST['was_verified']
+            : [];
+        $was = [];
+        foreach ($wasRaw as $id => $v) {
+            $was[(int) $id] = ((string) $v) === '1';
         }
+
+        [$verify, $unverify, $untouched] = self::partitionChanges($known, $checked, $was);
 
         // PR 6: routed through the service, not straight to the repository.
         // The verification write, the withdrawal of any pending request on a
@@ -3704,6 +3746,7 @@ final class VerifyCollectionsPage
             'unverified' => count($unverify),
             'changed'    => $result['changed'],
             'withdrawn'  => $result['withdrawn'],
+            'untouched'  => $untouched,
             'operator'   => get_current_user_id(),
         ]);
 

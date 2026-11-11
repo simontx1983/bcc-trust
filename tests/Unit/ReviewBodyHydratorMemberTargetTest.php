@@ -75,7 +75,7 @@ namespace BCC\Trust\Core\Tests\Unit {
             $voteRepo = new class ($votes) extends VoteRepository {
                 /**
                  * Skips the parent ctor (TableRegistry + weight
-                 * constants) — findManyByIds is fully overridden.
+                 * constants) — findManyActiveByIds is fully overridden.
                  *
                  * @param array<int, object> $rows
                  */
@@ -87,7 +87,7 @@ namespace BCC\Trust\Core\Tests\Unit {
                  * @param list<int> $voteIds
                  * @return array<int, object>
                  */
-                public function findManyByIds(array $voteIds): array
+                public function findManyActiveByIds(array $voteIds): array
                 {
                     unset($voteIds);
                     return $this->rows;

@@ -31,6 +31,21 @@ namespace BCC\Core\Security {
     }
 }
 
+namespace BCC\Trust\Core\Security {
+    // WatchingEndpoint::watch throttles through bcc-trust's own RateLimiter
+    // (DB-backed in production). Same fixture switch as Throttle above.
+    if (!class_exists(RateLimiter::class, false)) {
+        class RateLimiter
+        {
+            public static function allow(string $action, ?int $limit = null, ?int $window = null): bool
+            {
+                $GLOBALS['__bcc_susp_fixture']['throttle_calls'][] = [$action, (int) $limit, (int) $window];
+                return empty($GLOBALS['__bcc_susp_fixture']['throttled']);
+            }
+        }
+    }
+}
+
 namespace BCC\Core\Permissions {
     if (!class_exists(Permissions::class, false)) {
         class Permissions

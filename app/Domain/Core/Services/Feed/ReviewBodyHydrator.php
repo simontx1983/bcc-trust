@@ -55,7 +55,7 @@ final class ReviewBodyHydrator
             return [];
         }
 
-        $votes = $this->voteRepo->findManyByIds($voteIds);
+        $votes = $this->voteRepo->findManyActiveByIds($voteIds);
         if ($votes === []) {
             return [];
         }

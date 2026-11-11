@@ -65,6 +65,58 @@ final class PostsService
     private const VISIBILITY_DEFAULT = 'members_only';
 
     /**
+     * Sidecar meta holding a DRAFT blog's intended group, and the
+     * visibility to attach it with.
+     *
+     * ⚠ Deliberately not `peepso_group_id`. Every reader of that key —
+     * the group feed, the feed gates, the comment gate — treats the post
+     * as live in the group, and `attachToGroup` fires
+     * `peepso_groups_new_post` the moment it writes it, notifying the
+     * group's followers. A draft must do neither. The real attach happens
+     * once, at draft→publish, in {@see attachParkedBlogGroup}.
+     */
+    public const BLOG_PENDING_GROUP_META = '_bcc_blog_pending_group_id';
+
+    /** @see self::BLOG_PENDING_GROUP_META */
+    public const BLOG_PENDING_VISIBILITY_META = '_bcc_blog_pending_visibility';
+
+    /**
+     * Post ids currently being reverted to draft by
+     * {@see attachParkedBlogGroup}.
+     *
+     * That revert calls `wp_update_post`, which fires
+     * `transition_post_status`, which re-enters the very method doing the
+     * reverting. Membership here makes the second entry a no-op rather
+     * than a loop.
+     *
+     * ⚠ KEYED BY POST ID, not a single boolean. A global flag would
+     * suppress the gate for EVERY post while any one post was reverting —
+     * and a request that publishes several blogs, or any nested
+     * wp_update_post, would then skip the re-gate on the others. The
+     * entry is always removed in a `finally`, so a throw inside the revert
+     * cannot leave a post permanently ungated for the rest of the request.
+     *
+     * @var array<int, true>
+     */
+    private static array $revertingParkedBlog = [];
+
+    /** {@see attachParkedBlogGroup} outcome: the group was attached. */
+    public const PARKED_ATTACHED = 'attached';
+
+    /** Outcome: nothing to do (no parked target, or already attached). */
+    public const PARKED_NOOP = 'noop';
+
+    /**
+     * Outcome: the gate REFUSED and the post was put back to draft.
+     *
+     * ⚠ A caller inside the publish hook MUST stop on this. Everything
+     * that normally follows a publish — the activity row, rank evidence,
+     * the Apprentice confirmation clock — would otherwise run for a post
+     * that is no longer published.
+     */
+    public const PARKED_REVERTED = 'reverted';
+
+    /**
      * The visibility that syndicates a group post to the global /
      * anonymous feed. Setting it is authorization-gated per group (see
      * {@see gateGroupPost} → GroupsService::canUsePublicAll); the other
@@ -852,10 +904,39 @@ final class PostsService
         ?array $disclosure = null,
         ?int $coverImageId = null,
         string $status = 'publish',
-        array $sources = []
+        array $sources = [],
+        int $groupId = 0,
+        string $visibility = self::VISIBILITY_DEFAULT,
+        string $hallFeed = self::HALL_FEED_MAIN
     ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+
+        // ── §D6 group blogs ──────────────────────────────────────────
+        //
+        // Same shape as createStatus: normalize first (the service is the
+        // security boundary, not the REST enum), then gate BEFORE the
+        // content and throttle checks so a non-member never burns a
+        // throttle slot probing whether a group exists.
+        $visibility = self::normalizeVisibility($visibility);
+        $hallFeed   = self::normalizeHallFeed($hallFeed);
+
+        // A blog is main-feed only — a Hall's ranked channel is for short
+        // posts. Refused for ANY blog, with or without a group, because
+        // a wall has no ranked channel either.
+        if ($hallFeed !== self::HALL_FEED_MAIN) {
+            return [
+                'error'   => 'bcc_invalid_request',
+                'message' => 'Blog posts go to the main feed; they cannot target a ranked Hall channel.',
+            ];
+        }
+
+        if ($groupId > 0) {
+            $gateError = self::gateGroupPost($authorId, $groupId, $visibility, $hallFeed);
+            if ($gateError !== null) {
+                return $gateError;
+            }
         }
 
         $excerpt  = trim($excerpt);
@@ -1114,6 +1195,29 @@ final class PostsService
         // Persist chain tags (empty list is a valid "no chains" state).
         $this->chainTagRepo()->replace($postId, $chainIdsClean);
 
+        // ── §D6 group target: attach now, or park it for publish ─────
+        //
+        // PeepSoStatusWriter::attachToGroup stamps `peepso_group_id` AND
+        // `_bcc_post_visibility`, then fires `peepso_groups_new_post`,
+        // which is what notifies the group's followers. That notification
+        // must happen exactly once, at the moment the post becomes
+        // visible — so a DRAFT may not attach: it would tell the whole
+        // group to come and read something that is not published.
+        //
+        // A draft therefore parks its intended target in sidecar meta and
+        // {@see self::attachParkedBlogGroup()} performs the real attach at
+        // the draft→publish transition. The sidecar keys are deliberately
+        // NOT `peepso_group_id` — anything reading that key treats the
+        // post as live in the group.
+        if ($groupId > 0) {
+            if ($status === 'publish') {
+                PeepSoStatusWriter::attachToGroup($postId, $groupId, $visibility);
+            } else {
+                update_post_meta($postId, self::BLOG_PENDING_GROUP_META, (string) $groupId);
+                update_post_meta($postId, self::BLOG_PENDING_VISIBILITY_META, $visibility);
+            }
+        }
+
         // ── §A3 event — publish only ────────────────────────────────
         //
         // Drafts must NOT dispatch bcc_blog_post_created — that event
@@ -1220,7 +1324,9 @@ final class PostsService
         ?array $disclosure,
         ?int $coverImageId,
         ?string $status,
-        ?array $sources = null
+        ?array $sources = null,
+        ?int $groupId = null,
+        ?string $visibility = null
     ): array {
         if ($authorId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
@@ -1254,6 +1360,54 @@ final class PostsService
         // ── Ownership ────────────────────────────────────────────────
         if ((int) $post->post_author !== $authorId) {
             return ['error' => 'bcc_forbidden', 'message' => 'You can only edit your own blog posts.'];
+        }
+
+        // ── §D6 group target ─────────────────────────────────────────
+        //
+        // THE GROUP IS FIXED ONCE PUBLISHED. A published blog cannot be
+        // moved between groups or lifted out of one: its group decided who
+        // was notified, who may comment, and who can see it on the
+        // author's profile, and re-pointing it would silently re-stage all
+        // three for a different audience. A DRAFT has notified nobody and
+        // is on no surface, so its target may still change — re-gated,
+        // because the author's standing may have moved since.
+        //
+        // $groupId: null = field absent (unchanged). 0 = "no group".
+        $liveGroupId   = (int) get_post_meta($postId, 'peepso_group_id', true);
+        $parkedGroupId = (int) get_post_meta($postId, self::BLOG_PENDING_GROUP_META, true);
+        $isPublished   = (string) $post->post_status === 'publish';
+
+        if ($groupId !== null) {
+            if ($isPublished) {
+                // Equal value is a no-op, not an edit — only a real change
+                // is refused, so a client that echoes the whole view-model
+                // back is not punished for including the field.
+                if ($groupId !== $liveGroupId) {
+                    return [
+                        'error'   => 'bcc_invalid_request',
+                        'message' => $liveGroupId > 0
+                            ? 'A published blog post cannot be moved to another group or out of its group.'
+                            : 'A published blog post cannot be moved into a group.',
+                        'data'    => ['group_id' => $liveGroupId],
+                    ];
+                }
+            } elseif ($groupId !== $parkedGroupId) {
+                if ($groupId > 0) {
+                    $visibilityForGate = self::normalizeVisibility(
+                        $visibility ?? (string) get_post_meta($postId, self::BLOG_PENDING_VISIBILITY_META, true)
+                    );
+                    $gateError = self::gateGroupPost($authorId, $groupId, $visibilityForGate, self::HALL_FEED_MAIN);
+                    if ($gateError !== null) {
+                        return $gateError;
+                    }
+                    update_post_meta($postId, self::BLOG_PENDING_GROUP_META, (string) $groupId);
+                    update_post_meta($postId, self::BLOG_PENDING_VISIBILITY_META, $visibilityForGate);
+                } else {
+                    delete_post_meta($postId, self::BLOG_PENDING_GROUP_META);
+                    delete_post_meta($postId, self::BLOG_PENDING_VISIBILITY_META);
+                }
+                $parkedGroupId = $groupId;
+            }
         }
 
         // ── Per-field validation (mirrors createBlog) ───────────────
@@ -1461,6 +1615,24 @@ final class PostsService
                 ];
             }
             $statusClean = $status;
+        }
+
+        // ── §D6 — re-gate a parked group BEFORE publishing ───────────
+        //
+        // The author may have left the group, been removed, or lost the
+        // public_all permission between saving the draft and publishing
+        // it. This is the AUTHORITATIVE check, and it has to live here
+        // rather than in the transition hook for one reason: only here can
+        // we refuse. A hook fires after the status has already changed, so
+        // it can neither keep the post a draft nor return an error to the
+        // caller. On refusal nothing is written at all — the post stays a
+        // draft, keeps its parked target, and the caller gets the gate's
+        // own error, so the editor can say exactly what went wrong.
+        if ($statusClean === 'publish' && !$isPublished && $parkedGroupId > 0) {
+            $gateError = self::gateParkedBlogGroup($postId, $authorId);
+            if ($gateError !== null) {
+                return $gateError;
+            }
         }
 
         // ── Revision FIRST (captures pre-change state) ───────────────
@@ -2169,6 +2341,135 @@ final class PostsService
             }
         }
         return null;
+    }
+
+    /**
+     * Attach a DRAFT blog to the group it parked, at the moment it is
+     * published — the single point where the group notification fires.
+     *
+     * Idempotent: it re-gates the author, no-ops when `peepso_group_id`
+     * is already set, and clears the sidecar either way, so an
+     * unpublish/republish cycle cannot notify the group twice. On a gate
+     * failure it does NOT attach and KEEPS the sidecar, so the intent
+     * stays recoverable; the authoritative refusal lives in updateBlog,
+     * which can keep the post a draft and answer the caller.
+     */
+    public static function attachParkedBlogGroup(int $postId, int $authorId): string
+    {
+        // Re-entrancy guard. The refusal path below calls wp_update_post to
+        // put the post back to draft, which fires transition_post_status
+        // again and lands back here. Without this the two would ping-pong.
+        if (isset(self::$revertingParkedBlog[$postId])) {
+            return self::PARKED_NOOP;
+        }
+
+        if ($postId <= 0 || $authorId <= 0) {
+            return self::PARKED_NOOP;
+        }
+
+        $parked = (int) get_post_meta($postId, self::BLOG_PENDING_GROUP_META, true);
+        if ($parked <= 0) {
+            return self::PARKED_NOOP;
+        }
+
+        // Already attached ⇒ this is a re-publish of something that was
+        // published before (publish → draft → publish, or a stale sidecar
+        // left behind). The notification already went out, and
+        // `peepso_groups_new_post` must fire exactly once per post, so
+        // clear the sidecar and do nothing else. Without this guard an
+        // unpublish/republish cycle would notify the group every time.
+        $alreadyAttached = (int) get_post_meta($postId, 'peepso_group_id', true);
+        if ($alreadyAttached > 0) {
+            delete_post_meta($postId, self::BLOG_PENDING_GROUP_META);
+            delete_post_meta($postId, self::BLOG_PENDING_VISIBILITY_META);
+            return self::PARKED_NOOP;
+        }
+
+        $visibility = self::normalizeVisibility(
+            (string) get_post_meta($postId, self::BLOG_PENDING_VISIBILITY_META, true)
+        );
+
+        // Re-gate at publish time: the author may have left the group, been
+        // removed, or lost the public_all permission since the draft was
+        // written. updateBlog refuses earlier and more usefully for the REST
+        // route; this is the ONLY gate for any other route into a
+        // draft→publish transition (wp-admin, wp-cli, another plugin).
+        //
+        // ⚠⚠ ON REFUSAL THE POST GOES BACK TO DRAFT. It must not stay
+        // published.
+        //
+        // An earlier version only logged and returned, and the comment here
+        // argued that was the conservative choice: "the post stays on the
+        // author's own wall rather than entering a group they may no longer
+        // post to". That reasoning is BACKWARDS. A hook runs after the
+        // transition has already happened, so declining to attach leaves the
+        // post PUBLISHED WITH NO GROUP MARKER — and a members_only group
+        // blog with no group marker is a public wall post. The content was
+        // written for a restricted audience; publishing it to everyone is
+        // the leak, not withholding it from the group.
+        //
+        // The sidecar is KEPT, so the author's intent survives and they can
+        // fix their membership and publish again. Reverting also drives the
+        // handler's publish→draft branch, which removes the activity row, so
+        // the post leaves every surface rather than lingering on one.
+        $gateError = self::gateGroupPost($authorId, $parked, $visibility, self::HALL_FEED_MAIN);
+        if ($gateError !== null) {
+            Logger::warning('[PostsService] parked blog group refused at publish; reverting to draft', [
+                'post_id'  => $postId,
+                'user_id'  => $authorId,
+                'group_id' => $parked,
+                'reason'   => $gateError['error'],
+            ]);
+
+            // Re-entrancy: wp_update_post fires transition_post_status
+            // again and re-enters this method. The guard at the top returns
+            // immediately while this flag is set, so the revert cannot
+            // recurse. Cleared in a `finally` so an exception inside
+            // wp_update_post cannot wedge the flag ON and silently disable
+            // the gate for the rest of the request.
+            self::$revertingParkedBlog[$postId] = true;
+            try {
+                wp_update_post([
+                    'ID'          => $postId,
+                    'post_status' => 'draft',
+                ]);
+            } finally {
+                unset(self::$revertingParkedBlog[$postId]);
+            }
+
+            return self::PARKED_REVERTED;
+        }
+
+        // The single attach: stamps `peepso_group_id` + `_bcc_post_visibility`
+        // and fires `peepso_groups_new_post` once.
+        PeepSoStatusWriter::attachToGroup($postId, $parked, $visibility);
+
+        delete_post_meta($postId, self::BLOG_PENDING_GROUP_META);
+        delete_post_meta($postId, self::BLOG_PENDING_VISIBILITY_META);
+
+        return self::PARKED_ATTACHED;
+    }
+
+    /**
+     * Re-run the group gate for a parked draft, WITHOUT attaching.
+     *
+     * updateBlog calls this before flipping a draft to publish, so a
+     * refusal can keep the post a draft and return the error to the
+     * caller — a transition hook cannot do either.
+     *
+     * @return array{error: string, message: string, data?: array<string, mixed>}|null
+     */
+    public static function gateParkedBlogGroup(int $postId, int $authorId): ?array
+    {
+        $parked = (int) get_post_meta($postId, self::BLOG_PENDING_GROUP_META, true);
+        if ($parked <= 0) {
+            return null;
+        }
+        $visibility = self::normalizeVisibility(
+            (string) get_post_meta($postId, self::BLOG_PENDING_VISIBILITY_META, true)
+        );
+
+        return self::gateGroupPost($authorId, $parked, $visibility, self::HALL_FEED_MAIN);
     }
 
     /**

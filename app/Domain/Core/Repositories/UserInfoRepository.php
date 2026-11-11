@@ -1201,18 +1201,25 @@ class UserInfoRepository {
     /**
      * Delete orphaned user_info records.
      *
-     * @return int Number of rows deleted.
+     * @return int Rows actually deleted.
+     * @throws RepositoryException when the DELETE fails.
      */
     public function deleteOrphaned(): int
     {
         global $wpdb;
 
-        return (int) $wpdb->query($wpdb->prepare(
+        $result = $wpdb->query($wpdb->prepare(
             "DELETE u FROM {$this->table} u
              LEFT JOIN {$wpdb->users} w ON u.user_id = w.ID
              WHERE w.ID IS NULL AND %d",
             1
         ));
+
+        if ($result === false) {
+            throw new RepositoryException('UserInfoRepository::deleteOrphaned failed: ' . $wpdb->last_error);
+        }
+
+        return (int) $result;
     }
 
     /**

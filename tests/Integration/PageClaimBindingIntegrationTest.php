@@ -345,6 +345,46 @@ final class PageClaimBindingIntegrationTest extends TestCase
         }
     }
 
+    // ── suspension (F-109) ──────────────────────────────────────────────
+
+    /**
+     * Every other case here runs a user with NO user_info row, which must
+     * read as NOT suspended (prod has users without one). This is the
+     * complement: the same otherwise-valid claim, made by a user whose
+     * row says is_suspended = 1, is refused before anything is written.
+     */
+    public function testASuspendedUserCannotClaimAnOtherwiseValidPage(): void
+    {
+        $validatorA = $this->insertValidator(self::BYTES_A, $this->chainOne);
+        $this->bindPlaceholder(self::PAGE_A, $validatorA);
+        $this->insertWallet(self::USER_ID, self::BYTES_A, $this->chainOne);
+
+        global $wpdb;
+        $userInfo = $wpdb->prefix . 'bcc_trust_user_info';
+        $wpdb->query($wpdb->prepare("DELETE FROM `{$userInfo}` WHERE user_id = %d", self::USER_ID));
+        $inserted = $wpdb->insert($userInfo, [
+            'user_id'      => self::USER_ID,
+            'user_login'   => 'user' . self::USER_ID,
+            'user_email'   => 'user' . self::USER_ID . '@example.test',
+            'display_name' => 'User ' . self::USER_ID,
+            'is_suspended' => 1,
+        ]);
+        self::assertSame(1, $inserted, (string) $wpdb->last_error);
+
+        try {
+            $before   = $this->snapshot();
+            $response = $this->claim(self::PAGE_A, 'validator', $validatorA);
+
+            self::assertSame(403, $response->get_status());
+            self::assertSame('bcc_forbidden', $this->errorOf($response)['code']);
+            self::assertSame('Your account is suspended.', $this->errorOf($response)['message']);
+            $this->assertNoSideEffects($before);
+            self::assertSame([], $this->verifiedClaims(self::USER_ID));
+        } finally {
+            $wpdb->query($wpdb->prepare("DELETE FROM `{$userInfo}` WHERE user_id = %d", self::USER_ID));
+        }
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────
 
     private function claim(int $pageId, string $entityType, int $entityId): \WP_REST_Response

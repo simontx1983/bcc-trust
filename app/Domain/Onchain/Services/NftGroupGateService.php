@@ -4,7 +4,9 @@
  *
  * Soft gate, suggest-don't-auto-join model:
  *   - joinIfEligible(): explicit user-initiated join. Verifies eligibility,
- *     respects opt-out, calls PeepSoGroupWriter::join.
+ *     calls PeepSoGroupWriter::join. An explicit join OVERRIDES (and on
+ *     success clears) a prior opt-out (F-158); the opt-out only stops
+ *     automatic re-adding.
  *   - findEligibleGroups(): read-side ("you qualify for these").
  *   - reconcileForUser(): batch auto-join — only invoked for users who
  *     opted in via `bcc_auto_join_eligible_groups` user_meta. Default
@@ -37,14 +39,22 @@ final class NftGroupGateService {
     private const PERMANENT_OPT_OUT_TIMESTAMP = 0;
 
     /**
-     * Per-request memo of decoded opt-out maps, keyed by user_id.
+     * Verify eligibility and join via PeepSoGroupWriter. This is the
+     * EXPLICIT, user-initiated Join.
      *
-     * @var array<int, array<int, int>>
-     */
-    private array $optOutCache = [];
-
-    /**
-     * Verify eligibility, respect opt-out, and join via PeepSoGroupWriter.
+     * ⚠ AN EXPLICIT JOIN OVERRIDES A VOLUNTARY OPT-OUT (F-158, product
+     * decision 2026-11-10). The TTL'd opt-out recorded when a member LEAVES
+     * exists to stop AUTOMATIC re-adding: reconcileForUser() →
+     * findEligibleGroups() still skips opted-out groups. It must not stop
+     * the member choosing to come back. This used to refuse with
+     * optOutActive for the whole 90-day TTL, even on a deliberate click.
+     * The user must still pass eligibility (hold the NFT). A successful join
+     * clears the opt-out; a refused one leaves it.
+     *
+     * ⚠⚠ A PERMANENT opt-out still refuses. That is the moderator-eviction
+     * entry (bcc-trust.php, peepso_action_group_user_delete "Path 3"), and
+     * this refusal is what stops an evicted member re-joining the moment
+     * they still qualify. Never relax it as part of "join overrides opt-out".
      *
      * Idempotent: if the user is already a member, returns
      * JoinResult::alreadyMember (success=true, no PeepSo write).
@@ -59,7 +69,7 @@ final class NftGroupGateService {
             return JoinResult::notAHolderGroup();
         }
 
-        if ($this->isOptOutActive($userId, $groupId)) {
+        if ($this->isPermanentOptOut($userId, $groupId)) {
             return JoinResult::optOutActive($config->minBalance);
         }
 
@@ -320,6 +330,20 @@ final class NftGroupGateService {
         $this->persistOptOutMap($userId, $map);
     }
 
+    /**
+     * TRUE only for a PERMANENT opt-out, i.e. a moderator eviction
+     * (recordPermanentOptOut). A voluntary, TTL'd opt-out is FALSE here
+     * even while active: it blocks automatic re-adding, not an explicit
+     * Join (F-158).
+     */
+    public function isPermanentOptOut(int $userId, int $groupId): bool {
+        if ($userId <= 0 || $groupId <= 0) {
+            return false;
+        }
+        $map = $this->loadOptOutMap($userId);
+        return isset($map[$groupId]) && $map[$groupId] === self::PERMANENT_OPT_OUT_TIMESTAMP;
+    }
+
     public function isOptOutActive(int $userId, int $groupId): bool {
         if ($userId <= 0 || $groupId <= 0) {
             return false;
@@ -356,21 +380,26 @@ final class NftGroupGateService {
     }
 
     /**
+     * Read the opt-out map from user meta on EVERY call.
+     *
+     * ⚠ No per-instance memo (#409 / F-158). Since F-158 the join gate refuses
+     * only a PERMANENT opt-out (a moderator eviction). An instance that had
+     * memoized the map while the member had merely left would go on reading
+     * "left" after another instance recorded the eviction, and would let the
+     * evicted member rejoin. WordPress already caches user meta per request
+     * (and in the object cache), so the memo saved only a json_decode.
+     *
      * @return array<int, int>
      */
     private function loadOptOutMap(int $userId): array {
-        if (isset($this->optOutCache[$userId])) {
-            return $this->optOutCache[$userId];
-        }
-
         $raw = (string) get_user_meta($userId, self::USER_META_OPT_OUT, true);
         if ($raw === '') {
-            return $this->optOutCache[$userId] = [];
+            return [];
         }
 
         $decoded = json_decode($raw, true);
         if (!is_array($decoded)) {
-            return $this->optOutCache[$userId] = [];
+            return [];
         }
 
         $map = [];
@@ -381,7 +410,7 @@ final class NftGroupGateService {
                 $map[$gid] = $ts;
             }
         }
-        return $this->optOutCache[$userId] = $map;
+        return $map;
     }
 
     /**
@@ -390,7 +419,6 @@ final class NftGroupGateService {
     private function persistOptOutMap(int $userId, array $map): void {
         if ($map === []) {
             delete_user_meta($userId, self::USER_META_OPT_OUT);
-            $this->optOutCache[$userId] = [];
             return;
         }
         update_user_meta(
@@ -398,6 +426,5 @@ final class NftGroupGateService {
             self::USER_META_OPT_OUT,
             wp_json_encode($map)
         );
-        $this->optOutCache[$userId] = $map;
     }
 }

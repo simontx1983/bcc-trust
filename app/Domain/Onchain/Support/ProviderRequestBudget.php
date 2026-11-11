@@ -48,6 +48,9 @@ final class ProviderRequestBudget
     private int $remaining;
     private int $spent = 0;
 
+    /** @var \Closure(): float */
+    private \Closure $clock;
+
 
     /**
      * Both ceilings are REQUIRED. There is deliberately no default: a default
@@ -55,13 +58,20 @@ final class ProviderRequestBudget
      * coupling this type was split out of. A caller that does not know its own
      * ceiling does not have one.
      *
-     * @param int $requests       Provider calls this invocation may spend.
-     * @param int $runtimeSeconds Wall-clock seconds from now; at least 1.
+     * `$clock` is for TESTS ONLY: it lets a test pin the clock arm ("this
+     * stops on its deadline and resumes where it left off") without depending
+     * on how fast the machine is. Production never passes it, so the deadline
+     * is always real wall-clock time.
+     *
+     * @param int                    $requests       Provider calls this invocation may spend.
+     * @param int                    $runtimeSeconds Wall-clock seconds from now; at least 1.
+     * @param (\Closure(): float)|null $clock         Seconds now; defaults to microtime(true).
      */
-    public function __construct(int $requests, int $runtimeSeconds)
+    public function __construct(int $requests, int $runtimeSeconds, ?\Closure $clock = null)
     {
+        $this->clock     = $clock ?? static fn (): float => microtime(true);
         $this->remaining = $requests;
-        $this->deadline  = microtime(true) + (float) max(1, $runtimeSeconds);
+        $this->deadline  = ($this->clock)() + (float) max(1, $runtimeSeconds);
     }
 
 
@@ -83,7 +93,7 @@ final class ProviderRequestBudget
     /** TRUE once the wall clock is spent — checked before the request budget. */
     public function timedOut(): bool
     {
-        return microtime(true) >= $this->deadline;
+        return ($this->clock)() >= $this->deadline;
     }
 
     /**

@@ -61,8 +61,11 @@ final class ValidatorGroupGateService {
         $minWire = (int) ceil($config->minStake);
 
         // Shared, group-id-keyed opt-out map — same store the NFT gate
-        // and the mod-eviction listener write.
-        if ($this->optOuts->isOptOutActive($userId, $groupId)) {
+        // and the mod-eviction listener write. An explicit Join OVERRIDES a
+        // voluntary (TTL'd) opt-out (F-158, same rule as holder groups); only
+        // a PERMANENT moderator-eviction opt-out still refuses. Auto-add and
+        // the listing keep honouring every opt-out.
+        if ($this->optOuts->isPermanentOptOut($userId, $groupId)) {
             return JoinResult::optOutActive($minWire);
         }
 

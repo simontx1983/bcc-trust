@@ -2502,6 +2502,10 @@ add_action('admin_notices', function () {
 // Missing onchain API key warnings — without these, signals silently
 // return empty data and trust scores are systematically understated.
 add_action('admin_notices', function () {
+    // F-117: names wp-config constants — admins only, not every wp-admin user.
+    if (!current_user_can('manage_options')) {
+        return;
+    }
     $missing = [];
     if (!defined('BCC_ETHERSCAN_API_KEY') || BCC_ETHERSCAN_API_KEY === '') {
         $missing[] = 'BCC_ETHERSCAN_API_KEY';
@@ -2512,7 +2516,7 @@ add_action('admin_notices', function () {
     if (!empty($missing)) {
         printf(
             '<div class="notice notice-error"><p><strong>BCC Trust (Onchain):</strong> Missing API keys in wp-config.php: <code>%s</code>. On-chain trust signals are disabled until these are configured.</p></div>',
-            esc_html(implode('</code>, <code>', $missing))
+            implode('</code>, <code>', array_map('esc_html', $missing))
         );
     }
 });

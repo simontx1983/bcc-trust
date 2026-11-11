@@ -6,7 +6,7 @@ use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Repositories\ScoreRepository;
 use BCC\Trust\Core\Repositories\SuspensionRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
-use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Services\Vote\VoteRemovalService;
 use BCC\Trust\Core\Services\TrustScoreService;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Security\AuditLogger;
@@ -30,17 +30,17 @@ final class ModerationService
 {
     private ScoreRepository $scoreRepository;
     private UserInfoRepository $userInfoRepository;
-    private VoteRepository $voteRepository;
+    private VoteRemovalService $voteRemovalService;
     private SuspensionRepository $suspensionRepository;
 
     public function __construct(
         ScoreRepository $scoreRepository,
         UserInfoRepository $userInfoRepository,
-        VoteRepository $voteRepository
+        VoteRemovalService $voteRemovalService
     ) {
         $this->scoreRepository      = $scoreRepository;
         $this->userInfoRepository   = $userInfoRepository;
-        $this->voteRepository       = $voteRepository;
+        $this->voteRemovalService   = $voteRemovalService;
         $this->suspensionRepository = \BCC\Trust\Core\Plugin::instance()->suspensionRepository();
     }
 
@@ -131,37 +131,89 @@ final class ModerationService
     // ──────────────────────────────────────────────────────────────
 
     /**
-     * Soft-delete all votes cast by a user and recalculate affected page scores.
+     * Remove all active votes cast by a user (moderation removal: restorable,
+     * re-vote blocked) and recalculate the affected pages.
+     *
+     * Delegates to VoteRemovalService, the single bulk-removal path, which
+     * leaves dispute-removed votes untouched and audits the removed vote ids.
      *
      * @param int $userId The voter whose votes to clear.
      * @return array{success: bool, message: string, pages_affected: int}
      */
     public function clearVotes(int $userId): array
     {
-        $affectedPages = $this->voteRepository->getActivePageIdsByVoter($userId);
-
-        $r1 = $this->voteRepository->softDeleteAllByVoter($userId);
-
-        if ($r1 === false) {
+        try {
+            $result = $this->voteRemovalService
+                ->removeVotesCastBy([$userId], 'admin_clear_votes', get_current_user_id());
+        } catch (\Throwable $e) {
             Logger::error('[bcc-trust] clear_votes_failed', [
                 'user_id' => $userId,
+                'error'   => $e->getMessage(),
             ]);
-            echo '<div class="notice notice-error"><p>Failed to clear votes: database error.</p></div>';
+            echo '<div class="notice notice-error"><p>Failed to clear votes: database error. Nothing was removed.</p></div>';
             return ['success' => false, 'message' => 'Failed to clear votes: database error.', 'pages_affected' => 0];
         }
 
-        $this->userInfoRepository->updateVotesCast($userId, 0);
+        $message = sprintf(
+            'Votes cleared: %d removed across %d pages (%d recalculated now, %d queued for the recalculation cron).',
+            $result['removed'],
+            $result['pages'],
+            $result['recalculated'],
+            $result['queued']
+        );
+        echo '<div class="notice notice-success"><p>' . esc_html($message) . '</p></div>';
+        return ['success' => true, 'message' => $message, 'pages_affected' => $result['pages']];
+    }
 
-        foreach ($affectedPages as $pageId) {
-            do_action('bcc.trust.recalculate_score', (int) $pageId);
+    /**
+     * Restore every vote of this user that moderation removed (status 3 → 1)
+     * and is not yet purged, then recalculate the affected pages. The undo
+     * for clearVotes() / ring invalidation, per voter.
+     *
+     * @param int $userId The voter whose moderated votes to restore.
+     * @return array{success: bool, message: string, pages_affected: int}
+     */
+    public function restoreVotes(int $userId): array
+    {
+        try {
+            $result = $this->voteRemovalService
+                ->restoreModeratedVotesCastBy([$userId], 'admin_restore_votes', get_current_user_id());
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] restore_votes_failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            echo '<div class="notice notice-error"><p>Failed to restore votes: database error. Nothing was restored.</p></div>';
+            return ['success' => false, 'message' => 'Failed to restore votes: database error.', 'pages_affected' => 0];
         }
 
-        $this->logAction('admin_clear_votes', $userId, [
-            'pages_affected' => count($affectedPages),
-        ]);
+        $message = sprintf(
+            'Votes restored: %d across %d pages (%d recalculated now, %d queued for the recalculation cron).',
+            $result['removed'],
+            $result['pages'],
+            $result['recalculated'],
+            $result['queued']
+        );
+        echo '<div class="notice notice-success"><p>' . esc_html($message) . '</p></div>';
+        return ['success' => true, 'message' => $message, 'pages_affected' => $result['pages']];
+    }
 
-        echo '<div class="notice notice-success"><p>Votes cleared. ' . count($affectedPages) . ' page scores recalculated.</p></div>';
-        return ['success' => true, 'message' => 'Votes cleared.', 'pages_affected' => count($affectedPages)];
+    /**
+     * How many of this user's moderation-removed votes restoreVotes() would
+     * bring back. Null when the count cannot be read (the button is then
+     * hidden rather than claiming zero).
+     */
+    public function restorableVoteCount(int $userId): ?int
+    {
+        try {
+            return $this->voteRemovalService->countRestorableFor($userId);
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] restorable_vote_count_failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return null;
+        }
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -348,30 +400,26 @@ final class ModerationService
         switch ($action) {
 
             case 'invalidate_votes':
-                // Soft-delete all votes cast by ring members
-                $affectedPages = $this->voteRepository->getActivePageIdsByVoterIds($userIds);
-                $this->voteRepository->softDeleteByVoterIds($userIds);
-
-                // Invalidate inbound votes (votes on pages owned by ring members).
-                // Single batched query instead of one per user.
-                $ownedPages = $this->scoreRepository->getPageIdsByOwners($userIds);
-
-                if (!empty($ownedPages)) {
-                    $this->voteRepository->softDeleteByPageIds($ownedPages);
-                    $affectedPages = array_unique(array_merge($affectedPages, $ownedPages));
+                // Remove every active vote cast BY ring members — including
+                // their votes on each other's pages, which is how a ring
+                // inflates scores. Third-party votes on ring-owned pages are
+                // deliberately NOT removed here (product decision, F-104):
+                // they come from people outside the ring. Moderation status,
+                // restorable, dispute-removed rows untouched, vote ids audited.
+                try {
+                    $result = $this->voteRemovalService
+                        ->removeVotesCastBy(array_values($userIds), 'admin_ring_invalidate_votes', $adminId);
+                    $msg = 'invalidated_' . $result['pages'];
+                } catch (\Throwable $e) {
+                    Logger::error('[bcc-trust] ring_invalidate_votes_failed', [
+                        'ring_users' => $userIds,
+                        'error'      => $e->getMessage(),
+                    ]);
+                    // Unrecognised by the Rings tab on purpose: it renders
+                    // the "check the application log" warning. Nothing was
+                    // removed (the removal is one transaction).
+                    $msg = 'invalidate_failed';
                 }
-
-                // Recalculate affected pages
-                foreach ($affectedPages as $pageId) {
-                    do_action('bcc.trust.recalculate_score', (int) $pageId);
-                }
-
-                $this->logAction('admin_ring_invalidate_votes', 0, [
-                    'ring_users'     => $userIds,
-                    'pages_affected' => count($affectedPages),
-                ]);
-
-                $msg = 'invalidated_' . count($affectedPages);
                 break;
 
             case 'suspend_all':
@@ -542,8 +590,19 @@ final class ModerationService
                     break;
 
                 case 'clear_votes':
-                    $this->voteRepository->softDeleteAllByVoter($uid);
-                    $processed++;
+                    // Same single removal path as clearVotes(): recalc,
+                    // votes_cast reset, caches and an audit entry with the
+                    // vote ids — the bulk case used to do none of that (F-81).
+                    try {
+                        $this->voteRemovalService
+                            ->removeVotesCastBy([$uid], 'admin_clear_votes', $adminId);
+                        $processed++;
+                    } catch (\Throwable $e) {
+                        Logger::error('[bcc-trust] bulk_clear_votes_failed', [
+                            'user_id'  => $uid,
+                            'db_error' => $e->getMessage(),
+                        ]);
+                    }
                     break;
 
                 case 'reanalyze':

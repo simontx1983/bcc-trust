@@ -420,8 +420,10 @@ final class PasswordAuthController
         // /auth/2fa/verify to receive the actual JWT.
         $otpCode        = AuthSupport::generateOtp();
         $challengeToken = bin2hex(random_bytes(32));
-        AuthSupport::store2faOtp($userId, $otpCode);
+        // Challenge FIRST: it becomes the user's one live challenge (and
+        // drops any earlier challenge's OTP); then the OTP bound to it.
         AuthSupport::store2faChallenge($challengeToken, $userId);
+        AuthSupport::store2faOtp($challengeToken, $otpCode);
 
         AuthMailer::send2faCode($userId, (string) $user->user_email, $otpCode);
 

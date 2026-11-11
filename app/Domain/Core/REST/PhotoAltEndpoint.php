@@ -80,6 +80,11 @@ final class PhotoAltEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // §M suspension gate (F-109): alt text is public content.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         $phoId = (int) $request->get_param('pho_id');
         if ($phoId <= 0) {
             return ApiResponse::error(

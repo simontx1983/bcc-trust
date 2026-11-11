@@ -181,6 +181,20 @@ function bcc_trust_render_user_moderation( $user_id ) {
                     <button name="clear_votes" class="button" onclick="return confirm('Clear all votes by this user?');">Clear All Votes</button>
                 </form>
 
+                <!-- Restore moderated votes (undo of Clear All Votes / ring invalidation).
+                     Shown only when there is something to restore; hidden, never "0",
+                     when the count cannot be read. -->
+                <?php $bcc_restorable = \BCC\Trust\Core\Plugin::instance()->moderationService()->restorableVoteCount( (int) $user_id ); ?>
+                <?php if ( $bcc_restorable !== null && $bcc_restorable > 0 ) : ?>
+                <form method="post">
+                    <?php wp_nonce_field( 'bcc_trust_moderation' ); ?>
+                    <input type="hidden" name="user_id" value="<?php echo intval( $user_id ); ?>">
+                    <button name="restore_votes" class="button" onclick="return confirm('Restore this user\'s votes that moderation removed?');">
+                        <?php echo esc_html( sprintf( 'Restore %d Moderated Vote%s', $bcc_restorable, $bcc_restorable === 1 ? '' : 's' ) ); ?>
+                    </button>
+                </form>
+                <?php endif; ?>
+
                 <!-- Clear fingerprints -->
                 <form method="post">
                     <?php wp_nonce_field( 'bcc_trust_moderation' ); ?>

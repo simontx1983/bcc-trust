@@ -184,6 +184,11 @@ final class MyProfileEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // §M suspension gate (F-109): bio and display name are public content.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         // Text-only profile fields: `bio` and — since the display-name
         // hygiene slice (owner-directed 2026-08-06) — `display_name`.
         // At least one must be present.
@@ -272,6 +277,12 @@ final class MyProfileEndpoint
         $userId = get_current_user_id();
         if ($userId <= 0) {
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        // §M suspension gate (F-109): uploading is gated; deleting your own
+        // avatar stays open (removing content).
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
         }
 
         $peepso = self::peepsoUserOrError($userId);
@@ -364,6 +375,12 @@ final class MyProfileEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // §M suspension gate (F-109): uploading is gated; deleting your own
+        // cover stays open (removing content).
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         $peepso = self::peepsoUserOrError($userId);
         if ($peepso instanceof WP_REST_Response) {
             return $peepso;
@@ -439,6 +456,11 @@ final class MyProfileEndpoint
         $userId = get_current_user_id();
         if ($userId <= 0) {
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        // §M suspension gate (F-109): part of the public profile presentation.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
         }
 
         $xRaw = $request->get_param('x');

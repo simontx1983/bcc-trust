@@ -24,11 +24,18 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Feed\FeedItemNormalizer;
+use BCC\Core\Log\Logger;
 use BCC\Core\Repositories\PeepSoActivityRepository;
+use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\BlogChainTagRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\PostShortcodeRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
+use BCC\Trust\Core\Support\GroupAttribution;
+use BCC\Trust\Core\Support\RestrictedGroups;
+use BCC\Trust\Core\ValueObjects\GroupContext;
+use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -92,10 +99,6 @@ final class BlogService
         ?string $cursor = null,
         int $limit = self::DEFAULT_LIMIT
     ): array {
-        unset($viewerId); // V1: blog rows are public; reactions/permissions
-                          // hydrate as defaults. When per-viewer permissions
-                          // land, this becomes the gate.
-
         if ($userId <= 0) {
             return self::emptyPage();
         }
@@ -108,7 +111,86 @@ final class BlogService
         // blog post doesn't surface in its author's tab either.
         $hidden = $this->hiddenRepo->getAllHiddenIds();
 
+        // ── Group visibility (§D6 group blogs) ───────────────────────
+        //
+        // This read USED to discard $viewerId ("V1: blog rows are public").
+        // Once a blog can be published into a group that stopped being
+        // true: a blog in a secret group would have surfaced on its
+        // author's public profile. The rule is now the group's own —
+        // a viewer sees a group blog exactly when they can see the group.
+        //
+        // The repository needs two things from us, and the pair is
+        // load-bearing (see its docblock):
+        //
+        //   $restricted — groups to exclude, or NULL for "cannot say".
+        //   $gateByGroupAccess — drop the global `public_all` requirement
+        //                        and let group access decide instead.
+        //
+        // Without the second, a members_only group blog is invisible to
+        // EVERYONE including the group's own members, because the global
+        // feed gate admits a group-tagged post only when it is public_all.
+        // ⚠⚠ THE VIEWER IS TAKEN FROM THE SESSION, NOT FROM THE ARGUMENT.
+        //
+        // bcc-core's author-scope proof compares two ids the CALLER hands
+        // it — `$authorIds` and `$viewerId` — so it can only prove that the
+        // caller is self-consistent. The natural bug is a caller passing
+        // the PROFILE OWNER as the viewer: the two ids would agree, the
+        // proof would pass, and every visitor to that profile would get the
+        // author's own unrestricted view. One wrong argument here is a
+        // site-wide disclosure, so this method does not trust the argument
+        // for the gate decision. `$viewerId` stays in the signature for
+        // callers and tests, but the gate uses the session.
+        //
+        // An unauthenticated read yields 0, which is correct: anonymous is
+        // a non-member of everything and can never be author-scoped.
+        $sessionViewerId = function_exists('get_current_user_id') ? (int) get_current_user_id() : 0;
+
+        // The argument is kept, and disagreement is reported rather than
+        // silently ignored: a caller passing anything other than the
+        // session viewer is the precise mistake described above, and it
+        // would otherwise be invisible because the gate silently did the
+        // right thing anyway. Logged, never obeyed.
+        if ($viewerId !== $sessionViewerId) {
+            Logger::warning('[BlogService] getUserBlog viewer argument ignored; session used', [
+                'argument_viewer_id' => $viewerId,
+                'session_viewer_id'  => $sessionViewerId,
+                'profile_user_id'    => $userId,
+            ]);
+        }
+
+        if ($sessionViewerId > 0 && $sessionViewerId === $userId) {
+            // The author reading their OWN tab. Every row this query can
+            // return is already their own, so nothing is restricted — and
+            // that stays true after they LEAVE the group: an author does
+            // not lose sight of what they wrote.
+            $restricted    = [];
+            $gateMode      = PeepSoActivityRepository::GROUP_GATE_AUTHOR_SCOPED;
+            $memberGroups  = null;
+        } else {
+            // Anyone else, signed in or anonymous.
+            //
+            // ⚠ NULL means the non-open set could not be PROVEN — a failed
+            // query or a truncated one. An incomplete deny list
+            // under-restricts, which is the leaking direction, so we send
+            // null and the repository keeps its stricter global gate.
+            // NEVER substitute []: that asserts "restricted from nothing"
+            // and would publish every group blog on this profile.
+            $restricted = RestrictedGroups::forViewerOrNull($sessionViewerId);
+            $gateMode   = $restricted === null
+                ? null
+                : PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS;
+            // members_only parity: a member of the post's group reads every
+            // visibility; a non-member of a group they can merely SEE reads
+            // only public_group / public_all.
+            $memberGroups = $restricted === null
+                ? null
+                : RestrictedGroups::memberGroupsForViewer($sessionViewerId);
+        }
+
         // Over-fetch by 1 to detect has_more without a separate count.
+        // The group filter is applied in SQL, so the page is filled AFTER
+        // exclusion and has_more stays truthful — a PHP-side filter here
+        // would hand back short pages reporting has_more:false.
         $rows = PeepSoActivityRepository::getActivities(
             [$userId],
             ['blog'],
@@ -116,7 +198,19 @@ final class BlogService
             $cursorActId,
             $limit + 1,
             null,
-            $hidden === [] ? null : $hidden
+            $hidden === [] ? null : $hidden,
+            null,  // onlyForGroupId — this is the profile tab, not a group feed
+            null,  // excludedGroupIds — INERT in bcc-core, never use it
+            null,  // groupVisibilityIn — group-scoped path only
+            null,  // hashtag
+            null,  // hallFeed
+            null,  // onlyForPageId
+            $restricted,
+            $gateMode,
+            $memberGroups,
+            // The SESSION viewer, so the repository's author-scope proof is
+            // anchored to who is actually signed in.
+            $sessionViewerId
         );
 
         $hasMore = count($rows) > $limit;
@@ -125,6 +219,15 @@ final class BlogService
         }
 
         $author = self::hydrateAuthor($userId);
+
+        // §D6 group attribution — "Posted in {name} →" on a group blog.
+        //
+        // This emitter normalises directly and never passes through
+        // FeedHydrationPipeline, so it has to compose the block itself. The
+        // GATE is not re-implemented: Support\GroupAttribution owns the
+        // secret-group rule for both surfaces. Only the batched reads are
+        // local, and they are the same three the pipeline makes.
+        $groupBlockByPost = $this->hydrateGroupBlocks($rows, $sessionViewerId);
 
         $items      = [];
         $rowActIds  = [];
@@ -141,6 +244,15 @@ final class BlogService
             // This emitter skips hydrate(), and a blog post is never written
             // for a page, so the FeedItem key is always null here.
             $item['page_context'] = null;
+
+            // Set ONLY for a blog that lives in a group, matching the feed:
+            // a wall blog carries no `group` key at all, rather than a null
+            // one, so the two surfaces emit the same shape.
+            $groupBlock = $groupBlockByPost[(int) $row->act_external_id] ?? null;
+            if ($groupBlock !== null) {
+                $item['group'] = $groupBlock;
+            }
+
             $items[]     = $item;
             $rowActIds[] = (int) $row->act_id;
         }
@@ -334,7 +446,49 @@ final class BlogService
 
         $body           = $this->hydrateForPostId($postId, true);
         $body['status'] = (string) $post->post_status;
+
+        // §D6 group blogs — the editor needs to show where this will be
+        // published, read-only once the post is published (the group is
+        // immutable there) and editable while it is a draft.
+        $body['group'] = $this->editGroupBlock($postId);
+
         return $body;
+    }
+
+    /**
+     * The group an edit-load should display: `{id, name, slug}`, or null
+     * for a wall blog.
+     *
+     * For a PUBLISHED blog that is the live `peepso_group_id`. For a DRAFT
+     * it is the PARKED target, because a draft has deliberately not been
+     * attached yet — showing the live marker would show nothing and the
+     * author would think their choice had been lost.
+     *
+     * No privacy gate: this read is already owner-only, and the owner is
+     * the person who chose the group. The name is shown even if they have
+     * since left, because publishing will refuse and they need to know
+     * which group it is refusing.
+     *
+     * @return array{id: int, name: string, slug: string}|null
+     */
+    private function editGroupBlock(int $postId): ?array
+    {
+        $groupId = (int) get_post_meta($postId, 'peepso_group_id', true);
+        if ($groupId <= 0) {
+            $groupId = (int) get_post_meta($postId, PostsService::BLOG_PENDING_GROUP_META, true);
+        }
+        if ($groupId <= 0) {
+            return null;
+        }
+
+        $displays = PeepSoGroupRepository::findManyByIds([$groupId]);
+        $display  = $displays[$groupId] ?? null;
+
+        return [
+            'id'   => $groupId,
+            'name' => $display !== null ? (string) $display->post_title : '',
+            'slug' => $display !== null ? (string) $display->post_name : '',
+        ];
     }
 
     /**
@@ -520,6 +674,104 @@ final class BlogService
             'cover_image_id'  => null,
             'sources'         => [],
         ];
+    }
+
+    /**
+     * The `group` block for every blog on this page that lives in a group,
+     * keyed by wp_post id.
+     *
+     * Three batched reads, mirroring what FeedHydrationPipeline does for
+     * the feed, and no per-item query:
+     *
+     *   1. one warmed meta cache, then the `peepso_group_id` marker per post
+     *   2. one context resolve + one display read for the groups present
+     *   3. for an AUTHED viewer only, one membership read scoped to the
+     *      SECRET groups — anonymous issues no query, and a non-secret
+     *      group needs no membership check because the gate does not
+     *      consult membership for it
+     *
+     * The privacy decision itself is {@see GroupAttribution::compose()},
+     * shared with the feed. A viewer who may not know a secret group exists
+     * receives the same `{id, type, verification}` shape as everyone else,
+     * so the absence of `name`/`link` is not itself a signal.
+     *
+     * ⚠ The viewer here is the SESSION viewer, for the same reason the gate
+     * above uses it: an argument-supplied viewer could be the profile owner
+     * and would hand a visitor the owner's membership.
+     *
+     * @param list<object> $rows
+     * @return array<int, array<string, mixed>>
+     */
+    private function hydrateGroupBlocks(array $rows, int $sessionViewerId): array
+    {
+        if ($rows === []) {
+            return [];
+        }
+
+        $postIds = [];
+        foreach ($rows as $row) {
+            $pid = (int) ($row->act_external_id ?? 0);
+            if ($pid > 0) {
+                $postIds[] = $pid;
+            }
+        }
+        if ($postIds === []) {
+            return [];
+        }
+
+        // One round trip for every marker on the page.
+        update_meta_cache('post', $postIds);
+
+        $groupIdByPost = [];
+        $allGroupIds   = [];
+        foreach ($postIds as $pid) {
+            $gid = (int) get_post_meta($pid, 'peepso_group_id', true);
+            if ($gid > 0) {
+                $groupIdByPost[$pid] = $gid;
+                $allGroupIds[$gid]   = true;
+            }
+        }
+        if ($groupIdByPost === []) {
+            return [];
+        }
+
+        $groupIds = array_keys($allGroupIds);
+        $contexts = Plugin::instance()->groupContextResolver()->forManyGroups($groupIds);
+        if ($contexts === []) {
+            return [];
+        }
+        $displays = PeepSoGroupRepository::findManyByIds($groupIds);
+
+        $secretGroupIds = [];
+        foreach ($contexts as $gid => $ctx) {
+            if ($ctx instanceof GroupContext && $ctx->privacy === PeepSoPrivacy::Secret) {
+                $secretGroupIds[] = (int) $gid;
+            }
+        }
+        $secretMemberships = ($sessionViewerId > 0 && $secretGroupIds !== [])
+            ? PeepSoGroupRepository::findUserMemberships($sessionViewerId, $secretGroupIds)
+            : [];
+
+        $out = [];
+        foreach ($groupIdByPost as $pid => $gid) {
+            $ctx = $contexts[$gid] ?? null;
+            if (!($ctx instanceof GroupContext)) {
+                continue;
+            }
+            $display = $displays[$gid] ?? null;
+
+            $out[$pid] = GroupAttribution::compose(
+                $ctx,
+                $display !== null ? (string) $display->post_title : '',
+                $display !== null ? (string) $display->post_name : '',
+                // isset over the secret-only map == active member. Always
+                // false for a non-secret group (never queried) and for an
+                // anonymous viewer; the gate only consults it for secrets.
+                isset($secretMemberships[$gid])
+            );
+        }
+
+        return $out;
     }
 
     /**

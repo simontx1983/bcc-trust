@@ -502,6 +502,41 @@ final class ContentReportRepository
     }
 
     /**
+     * Reporter ids of the PENDING reports against one target, oldest
+     * first, bounded. Feeds the F-73 credible-reporter count for auto-hide
+     * (one report per reporter per target is a UNIQUE key, so ids are
+     * already distinct).
+     *
+     * @return list<int>
+     */
+    public function listPendingReporterIdsForTarget(string $targetKind, int $targetId, int $limit = 500): array
+    {
+        if ($targetId <= 0) {
+            return [];
+        }
+        global $wpdb;
+        $table = TableRegistry::contentReports();
+
+        $rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT reporter_user_id FROM {$table}
+              WHERE target_kind = %s AND target_id = %d AND status = 0
+              ORDER BY id ASC
+              LIMIT %d",
+            $targetKind,
+            $targetId,
+            max(1, min(500, $limit))
+        ));
+
+        $ids = [];
+        foreach ((array) $rows as $raw) {
+            if (is_numeric($raw) && (int) $raw > 0) {
+                $ids[] = (int) $raw;
+            }
+        }
+        return $ids;
+    }
+
+    /**
      * Move a set of reports from one status to another, GUARDED on the
      * expected current status so a row another moderator has since acted
      * on is left alone. Moving to PENDING clears the resolution columns

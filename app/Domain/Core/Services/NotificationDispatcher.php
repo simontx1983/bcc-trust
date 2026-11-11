@@ -1598,6 +1598,47 @@ final class NotificationDispatcher
         }
     }
 
+    /**
+     * F-73 — the author's post was hidden AUTOMATICALLY (credible-report
+     * threshold). Subscriber for `bcc_content_auto_hidden`
+     * ($actId, $count, $threshold, $reportId); only the act id is used.
+     *
+     * Self-notification (from = to = the author): the copy names no
+     * reporter, count or threshold, and states what happens next.
+     * Bell only (NotificationType::BELL_ONLY keeps it out of the email
+     * digest; no push is enqueued). Copy approved 2026-11-10.
+     */
+    public function onContentAutoHidden(int $actId): void
+    {
+        if ($actId <= 0) {
+            return;
+        }
+        try {
+            $authorId = PeepSoActivityRepository::getAuthorId($actId);
+            if ($authorId <= 0) {
+                return; // activity gone — nobody to tell
+            }
+            $this->dispatch(
+                $authorId,
+                $authorId,
+                self::CONTENT_AUTO_HIDDEN_MESSAGE,
+                NotificationType::CONTENT_AUTO_HIDDEN,
+                $actId,
+                $actId
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] auto-hide notice dispatch failed', [
+                'act_id' => $actId,
+                'error'  => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /** The approved F-73 author notice — exact text (product sign-off 2026-11-10). */
+    public const CONTENT_AUTO_HIDDEN_MESSAGE =
+        'One of your posts was hidden automatically after several members reported it. '
+        . 'A moderator will review it, and if it breaks no rule it will be restored.';
+
     // ──────────────────────────────────────────────────────────────────
     // Shared write path
     // ──────────────────────────────────────────────────────────────────

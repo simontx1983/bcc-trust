@@ -451,17 +451,25 @@ final class ModerationQueueService
             ));
             $this->reportRepo->transitionStatus($closedPendingIds, self::STATUS_PENDING, self::STATUS_DISMISSED, $resolverUserId);
 
+            // The cooldown starts BEFORE the hide is removed: a report that
+            // lands in between must not find the post visible AND
+            // cooldown-free, or it could auto-hide it again in the gap.
+            $cooldownStarted = AutoHideService::startRehideCooldown($targetId);
             $this->hiddenRepo->remove($targetId);
             $this->reportRepo->updateStatus($reportId, self::STATUS_DISMISSED, $resolverUserId);
-            $cooldownStarted = AutoHideService::startRehideCooldown($targetId);
+            // listIdsForTargetByStatus() is bounded at 500; anything still
+            // pending after the bulk close means the target had more. Say so
+            // in the audit rather than letting the cap pass silently.
+            $stillPending = $this->reportRepo->countPendingForTarget($targetKind, $targetId);
             AuditLogger::log(
                 'admin_restore_report',
                 $reportId,
                 [
-                    'target_id'                => $targetId,
-                    'unupheld_report_ids'      => $unupheldIds,
+                    'target_id'                 => $targetId,
+                    'unupheld_report_ids'       => $unupheldIds,
                     'closed_pending_report_ids' => $closedPendingIds,
-                    'rehide_cooldown_started'  => $cooldownStarted,
+                    'closed_pending_has_more'   => $stillPending > 0,
+                    'rehide_cooldown_started'   => $cooldownStarted,
                 ],
                 'content_report',
                 $resolverUserId

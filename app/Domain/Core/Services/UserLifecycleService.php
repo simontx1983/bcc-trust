@@ -156,8 +156,20 @@ class UserLifecycleService
         }
         $this->pendingDeleteHandles[$userId] = $handle;
 
-        // Soft-delete votes
-        $plugin->voteRepository()->softDeleteAllByVoter($userId);
+        // Remove the user's active votes through the single removal path, so
+        // the pages they voted on are recalculated (F-81: this path used to
+        // soft-delete with no recalc at all, leaving phantom scores) and the
+        // vote ids are audited. Dispute-removed votes keep their status.
+        // A failure must not block the WordPress account deletion itself:
+        // it is logged loudly instead.
+        try {
+            $plugin->voteRemovalService()->removeVotesCastBy([$userId], 'user_deleted_votes', get_current_user_id());
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] onUserDelete vote removal failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+        }
 
         // Endorsement parity: the legacy endorsements table is retired.
         // The user's vouch/stand_behind footprint is removed by the
