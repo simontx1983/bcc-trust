@@ -62,9 +62,16 @@ final class PushSubscriptionsOnRevokeAllTest extends TestCase
              * @param array<string, mixed> $where
              * @param list<string>         $format
              */
-            public function delete(string $table, array $where, array $format = []): int
+            public string $last_error = '';
+
+            /** @return int|false */
+            public function delete(string $table, array $where, array $format = [])
             {
                 $GLOBALS['__bcc_ph']['deletes'][] = [$table, $where, $format];
+                if (!empty($GLOBALS['__bcc_ph']['delete_fails'])) {
+                    $this->last_error = 'stub: table locked';
+                    return false;
+                }
                 return 2;
             }
 
@@ -107,6 +114,16 @@ final class PushSubscriptionsOnRevokeAllTest extends TestCase
         self::assertSame(200, $res->get_status());
         self::assertSame([self::EXPECTED_DELETE], $GLOBALS['__bcc_ph']['deletes']);
         self::assertContains('passwordChanged:' . self::USER, $GLOBALS['__bcc_ph']['canary'], 'control: the rotation ran');
+    }
+
+    public function testAFailedDeleteIsLoggedAndTheRevokeStillSucceeds(): void
+    {
+        $GLOBALS['__bcc_ph']['delete_fails'] = true;
+
+        $res = (new SessionController())->logoutEverywhere(new \WP_REST_Request([]));
+
+        self::assertSame(200, $res->get_status(), 'the session revoke is not undone by a push-cleanup failure');
+        self::assertSame(['[bcc-trust] push subscriptions not deleted'], $GLOBALS['__bcc_ph']['log_errors'] ?? []);
     }
 
     public function testAWrongCurrentPasswordDeletesNothing(): void

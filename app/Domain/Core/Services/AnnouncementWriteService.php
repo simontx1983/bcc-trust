@@ -886,6 +886,16 @@ final class AnnouncementWriteService
      * (known Low: kses mangles Markdown autolinks `<https://…>` and code
      * samples containing `<…>`).
      *
+     * ⚠ The window is THIS post's column sanitisation only. kses is put back
+     * on the first `wp_insert_post_data`, which wp_insert_post() fires after
+     * sanitize_post() and before the row is written and before ANY action
+     * (pre_post_update, transition_post_status, save_post, wp_insert_post,
+     * wp_after_insert_post). So a listener that writes another post on
+     * publish — bcc_announcement_published → feed/activity rows — gets core
+     * kses as normal. Previously the filters stayed off for the whole call,
+     * nested writes included. The `finally` is the fallback for a write that
+     * returns before that filter (e.g. an empty-content refusal).
+     *
      * @template T
      * @param callable(): T $write
      * @return T
@@ -900,12 +910,31 @@ final class AnnouncementWriteService
                 $removed[$hook] = (int) $priority;
             }
         }
-        try {
+        if ($removed === []) {
             return $write();
-        } finally {
+        }
+
+        $restored = false;
+        $restore  = static function () use (&$restored, $removed): void {
+            if ($restored) {
+                return;
+            }
+            $restored = true;
             foreach ($removed as $hook => $priority) {
                 add_filter($hook, 'wp_filter_kses', $priority);
             }
+        };
+        $onData = static function ($data) use ($restore) {
+            $restore();
+            return $data;
+        };
+
+        add_filter('wp_insert_post_data', $onData, PHP_INT_MIN);
+        try {
+            return $write();
+        } finally {
+            remove_filter('wp_insert_post_data', $onData, PHP_INT_MIN);
+            $restore();
         }
     }
 
