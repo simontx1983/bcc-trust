@@ -138,20 +138,54 @@ final class BlockedSenderShapeTest extends TestCase
     // ── thread: keeps the real body, by decision ────────────────────────
 
     /**
-     * ⚠ This is the operator's explicit correction to the original plan:
-     * the thread sends the real body plus the flag, and the client
-     * collapses it. A future "tidy-up" that substitutes here too would
-     * break tap-to-reveal, so the real body is asserted PRESENT.
+     * ⚠⚠ DELIBERATELY INVERTED on 2026-11-10, and kept rather than
+     * deleted so the reversal is legible.
+     *
+     * This case previously asserted the thread kept the REAL body, which
+     * was correct for the first decision on #122: send the text, let the
+     * client collapse it, no round trip to reveal. The decision then
+     * became "fetch only when tapped", because the earlier shape left
+     * the text in the viewer's browser whether they revealed it or not.
+     *
+     * So the assertion is now the opposite: the thread carries the
+     * placeholder, and `revealMessageBody` is the only path to the real
+     * text. A test flipped in place with its history written down is
+     * worth more than a deleted one.
      */
-    public function testTheThreadKeepsTheRealBodyForABlockedSender(): void
+    public function testTheThreadNowSubstitutesTheBodyForABlockedSender(): void
     {
         $out = self::shaper('shapeThreadMessageRow')
             ->invoke(null, self::threadRow(11), self::userViews(), [11 => true]);
 
         $this->assertTrue($out['sender_blocked_by_viewer']);
-        $this->assertSame(self::REAL_BODY, $out['body']);
+        $this->assertSame('Message from someone you have blocked', $out['body']);
     }
 
+    /**
+     * The assertion that actually protects the viewer, and the reason
+     * the one above is not enough on its own: the real text must be
+     * absent from the ENTIRE serialised row, not merely replaced in
+     * `body`. A shaper could substitute `body` and leave the text in a
+     * sibling key, and the assertion above would still pass.
+     */
+    public function testTheRealTextIsNowhereInABlockedThreadRow(): void
+    {
+        $out = self::shaper('shapeThreadMessageRow')
+            ->invoke(null, self::threadRow(11), self::userViews(), [11 => true]);
+
+        $this->assertStringNotContainsString(
+            self::REAL_BODY,
+            (string) json_encode($out),
+            'A blocked sender\'s text must not reach the browser until the viewer taps to reveal it.'
+        );
+    }
+
+    /**
+     * The other half of the substitution: a participant who has NOT
+     * blocked the sender still receives the real text in the thread.
+     * Without this, "substitute when blocked" and "substitute always"
+     * are indistinguishable.
+     */
     public function testTheThreadFlagIsFalseForAnOrdinarySender(): void
     {
         $out = self::shaper('shapeThreadMessageRow')
@@ -161,16 +195,25 @@ final class BlockedSenderShapeTest extends TestCase
         $this->assertSame(self::REAL_BODY, $out['body']);
     }
 
-    public function testTheThreadRowNeverCarriesThePlaceholder(): void
+    /**
+     * ⚠⚠ ALSO DELIBERATELY INVERTED on 2026-11-10 — same reversal as
+     * above. It asserted the thread never carried the placeholder;
+     * carrying it is now the point. Kept and flipped rather than
+     * removed.
+     *
+     * ⚠ And it pins that BOTH surfaces use the SAME words. The frontend
+     * matches this string, so an inbox/thread divergence would be a
+     * frontend bug with a backend cause.
+     */
+    public function testBothSurfacesUseTheSamePlaceholderWords(): void
     {
-        $out = self::shaper('shapeThreadMessageRow')
+        $thread = self::shaper('shapeThreadMessageRow')
             ->invoke(null, self::threadRow(11), self::userViews(), [11 => true]);
+        $inbox = self::shaper('shapeInboxLastMessage')
+            ->invoke(null, self::inboxRow(11), self::userViews(), [11 => true]);
 
-        $this->assertStringNotContainsString(
-            'someone you have blocked',
-            (string) json_encode($out),
-            'The thread must not substitute: the client reveals the real body on tap.'
-        );
+        $this->assertSame('Message from someone you have blocked', $thread['body']);
+        $this->assertSame($thread['body'], $inbox['preview']);
     }
 
     public function testBothShapersAlwaysEmitTheFlag(): void
