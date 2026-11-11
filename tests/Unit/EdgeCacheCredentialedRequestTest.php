@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Tests\Unit;
 
+require_once __DIR__ . '/../Stubs/edgecache-session-stubs.php';
+
 use BCC\Trust\Core\Support\BearerAuth;
 use BCC\Trust\Infrastructure\EdgeCache;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -49,11 +51,15 @@ final class EdgeCacheCredentialedRequestTest extends TestCase
         parent::setUp();
         $this->serverBackup = $_SERVER;
         unset($_SERVER['HTTP_AUTHORIZATION'], $_SERVER['REDIRECT_HTTP_AUTHORIZATION']);
+        \BccEdgeCacheSessionState::reset();
     }
 
     protected function tearDown(): void
     {
         $_SERVER = $this->serverBackup;
+        // Global session state is process-wide: leaving it armed would make
+        // every later suite look authenticated.
+        \BccEdgeCacheSessionState::reset();
         parent::tearDown();
     }
 
@@ -145,6 +151,108 @@ final class EdgeCacheCredentialedRequestTest extends TestCase
 
         // appliesTo() is a pure ROUTE predicate and must stay that way —
         // the credential is handled by the separate arm of shouldExclude().
+        self::assertFalse(
+            EdgeCache::appliesTo('/peepso/v1/post'),
+            'appliesTo() must remain a pure route predicate'
+        );
+    }
+
+    // ── The cookie/session arm ───────────────────────────────────────
+    //
+    // isCredentialed() is a disjunction: the Authorization header OR a
+    // WordPress session. Every test above drives the header. Until now the
+    // session arm had NO coverage at all — `function_exists()` is false in a
+    // unit run, so the branch was unreachable and a regression there could
+    // not turn anything red.
+    //
+    // A cookie-authenticated visitor was never the reported exposure (LSCWP
+    // already excludes cookie sessions of its own accord), which is why the
+    // arm reads as belt-and-braces. Belt-and-braces that no test exercises is
+    // just an untested claim.
+
+    /**
+     * The load-bearing one: an authenticated WordPress session is excluded
+     * on a route the route-predicate does NOT cover, with no Authorization
+     * header anywhere.
+     */
+    public function testWordPressSessionAloneExcludesAForeignRoute(): void
+    {
+        // Neutralise the other arm and prove it is off, so a pass cannot be
+        // the header arm answering for the session arm.
+        unset($_SERVER['HTTP_AUTHORIZATION'], $_SERVER['REDIRECT_HTTP_AUTHORIZATION']);
+        self::assertFalse(BearerAuth::hasCredential(), 'precondition: no header credential');
+        self::assertFalse(EdgeCache::appliesTo('/peepso/v1/post'), 'precondition: route is not self-excluding');
+        self::assertFalse(EdgeCache::isCredentialed(), 'precondition: logged out to begin with');
+
+        \BccEdgeCacheSessionState::$loggedIn = true;
+
+        self::assertTrue(
+            EdgeCache::isCredentialed(),
+            'an authenticated WordPress session must count as a credential'
+        );
+        self::assertTrue(
+            EdgeCache::shouldExclude('/peepso/v1/post'),
+            'a logged-in visitor must never have a foreign-route response publicly cached'
+        );
+    }
+
+    /**
+     * The arm must be genuinely reachable — that the guard is satisfied is
+     * the whole precondition for the test above meaning anything.
+     */
+    public function testTheSessionGuardIsSatisfiedInThisEnvironment(): void
+    {
+        self::assertTrue(
+            function_exists('is_user_logged_in'),
+            'without a GLOBAL is_user_logged_in() the session arm short-circuits and is untestable'
+        );
+    }
+
+    /**
+     * Logged out, no header: not credentialed. Previously this was true only
+     * because the guard failed; now the guard passes and the predicate itself
+     * is doing the work, so it is worth pinning separately.
+     */
+    public function testLoggedOutWithNoHeaderIsNotCredentialed(): void
+    {
+        unset($_SERVER['HTTP_AUTHORIZATION'], $_SERVER['REDIRECT_HTTP_AUTHORIZATION']);
+        \BccEdgeCacheSessionState::$loggedIn = false;
+
+        self::assertFalse(EdgeCache::isCredentialed());
+        self::assertFalse(
+            EdgeCache::shouldExclude('/peepso/v1/post'),
+            'anonymous traffic must keep its public cacheability'
+        );
+    }
+
+    /**
+     * Either arm alone is sufficient — the disjunction is not an accidental
+     * conjunction. Also covers both arms together.
+     */
+    public function testEitherArmAloneIsSufficient(): void
+    {
+        // Session only.
+        \BccEdgeCacheSessionState::$loggedIn = true;
+        self::assertTrue(EdgeCache::isCredentialed(), 'session alone');
+
+        // Header only.
+        \BccEdgeCacheSessionState::$loggedIn = false;
+        $_SERVER['HTTP_AUTHORIZATION']       = 'Bearer header.payload.signature';
+        self::assertTrue(EdgeCache::isCredentialed(), 'header alone');
+
+        // Both.
+        \BccEdgeCacheSessionState::$loggedIn = true;
+        self::assertTrue(EdgeCache::isCredentialed(), 'both arms');
+    }
+
+    /**
+     * Session state must not leak into the route predicate, mirroring the
+     * assertion already made for the header arm.
+     */
+    public function testSessionDoesNotWidenTheRoutePredicate(): void
+    {
+        \BccEdgeCacheSessionState::$loggedIn = true;
+
         self::assertFalse(
             EdgeCache::appliesTo('/peepso/v1/post'),
             'appliesTo() must remain a pure route predicate'
