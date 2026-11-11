@@ -160,6 +160,42 @@ final class EmailDigestAdminControlsTest extends TestCase
         self::assertSame([], $GLOBALS['__dg_cron'], 'ensure() acts only after a save');
     }
 
+    public function testRealignPutsADriftedSlotBackOnTheChosenLocalHour(): void
+    {
+        DigestSettings::save(['enabled' => true, 'weekday' => 1, 'hour' => 9]);
+        $want = DigestSettings::nextRunTimestamp(1, 9);
+
+        // WP-cron's "last + 7 days" across a DST change: an hour off.
+        $GLOBALS['__dg_cron'][DigestScheduler::HOOK] = $want + 3600;
+        DigestScheduler::realign();
+        self::assertSame($want, $GLOBALS['__dg_cron'][DigestScheduler::HOOK]);
+
+        // Already right: untouched.
+        DigestScheduler::realign();
+        self::assertSame($want, $GLOBALS['__dg_cron'][DigestScheduler::HOOK]);
+    }
+
+    public function testRealignDoesNothingBeforeASaveOrWhileOff(): void
+    {
+        $GLOBALS['__dg_cron'][DigestScheduler::HOOK] = 12345;
+        DigestScheduler::realign();
+        self::assertSame(12345, $GLOBALS['__dg_cron'][DigestScheduler::HOOK], 'never saved: CronService owns it');
+
+        DigestSettings::save(['enabled' => false]);
+        DigestScheduler::realign();
+        self::assertSame(12345, $GLOBALS['__dg_cron'][DigestScheduler::HOOK], 'off: realign does not schedule');
+    }
+
+    public function testTheOptInCountIsNullNotZeroWhenTheReadFails(): void
+    {
+        self::member(1);
+        self::member(2);
+        self::assertSame(2, \BCC\Trust\Core\Support\NotificationPrefs::countEmailDigestOptIns());
+
+        $GLOBALS['__dg_count_fail'] = true;
+        self::assertNull(\BCC\Trust\Core\Support\NotificationPrefs::countEmailDigestOptIns());
+    }
+
     // ── sending ─────────────────────────────────────────────────────────
 
     public function testACronRunWhileSwitchedOffSendsNothingAndRecordsNothing(): void
