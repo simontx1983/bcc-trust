@@ -616,6 +616,14 @@ final class FeedHydrationPipeline
                 $item['body'] = $pageClaimBodies[$pageClaimExtToSid[$extId]];
             } elseif ($kind === 'review' && isset($reviewExtToSid[$extId], $reviewBodies[$reviewExtToSid[$extId]])) {
                 $item['body'] = $reviewBodies[$reviewExtToSid[$extId]];
+            } elseif ($kind === 'review' && isset($reviewExtToSid[$extId])) {
+                // F-88: the review's vote resolved but is no longer active —
+                // retracted, removed by dispute or removed by moderation
+                // (findManyActiveByIds returns active rows only). Drop the
+                // item rather than render a removed review with an empty
+                // body. Read-time, so it covers every removal path and
+                // reverses itself if the vote is restored or re-cast.
+                continue;
             } elseif ($kind === 'photo' && isset($photoBodies[$extId])) {
                 $item['body'] = $photoBodies[$extId];
             } elseif ($kind === 'gif' && isset($gifBodies[$extId])) {
