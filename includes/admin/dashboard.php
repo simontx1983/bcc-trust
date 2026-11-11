@@ -13,14 +13,16 @@ if (!defined('ABSPATH')) {
  * Register admin menu
  */
 add_action('admin_menu', function () {
-    add_menu_page(
-        'Trust Engine Dashboard',
-        'Trust Engine',
+    // Was the "Trust Engine" top-level menu; now the Trust Analytics item
+    // under BCC Moderation. Slug unchanged.
+    add_submenu_page(
+        \BCC\Trust\Core\Admin\AdminMenus::MODERATION,
+        'Trust Analytics',
+        'Trust Analytics',
         'manage_options',
         'bcc-trust-dashboard',
         'bcc_trust_render_dashboard',
-        'dashicons-shield',
-        26
+        \BCC\Trust\Core\Admin\AdminMenus::ORDER_ANALYTICS
     );
 });
 
@@ -33,7 +35,7 @@ function bcc_trust_render_dashboard() {
     }
 
     echo '<div class="wrap bcc-admin-wrap">';
-    echo '<h1>Trust Engine Dashboard</h1>';
+    echo '<h1>Trust Analytics</h1>';
 
     // Load the view which contains all the tab rendering
     $view_file = BCC_TRUST_PATH . 'includes/dashboard-view.php';

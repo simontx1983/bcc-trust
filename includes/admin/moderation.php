@@ -160,12 +160,13 @@ add_action( 'admin_post_bcc_trust_bulk_action', function () {
 
 add_action( 'admin_menu', function () {
     add_submenu_page(
-        'bcc-trust-dashboard',
+        \BCC\Trust\Core\Admin\AdminMenus::MODERATION,
         'Moderation',
         'Moderation',
         'manage_options',
         'bcc-trust-moderation',
-        'bcc_trust_render_moderation'
+        'bcc_trust_render_moderation',
+        \BCC\Trust\Core\Admin\AdminMenus::ORDER_MODERATION
     );
 } );
 

@@ -1919,7 +1919,6 @@ add_action('plugins_loaded', function (): void {
                 'restUrl' => esc_url_raw(rest_url('bcc/v1/onchain')),
                 'nonce'   => wp_create_nonce('wp_rest'),
             ]);
-            wp_enqueue_style('bcc-onchain-admin', BCC_TRUST_URL . 'assets/css/bcc-onchain.css', [], BCC_TRUST_VERSION);
         }
     });
 
@@ -2564,13 +2563,17 @@ if (is_admin()) {
     // isn't visited.
     require_once BCC_TRUST_PATH . 'includes/admin/tabs/tab-repair.php';
     add_action('admin_menu', function () {
+        // Developer group under BCC System — listed only when
+        // BCC_DEV_TOOLS === true; the page itself stays gated by
+        // BCC_REPAIR_ENABLED.
         add_submenu_page(
-            'bcc-system-health',
+            \BCC\Trust\Core\Admin\AdminMenus::SYSTEM,
             'Repair (dangerous)',
-            '🔧 Repair',
+            'Repair',
             'manage_options',
-            'bcc-system-repair',
-            'bcc_trust_render_repair_tab'
+            \BCC\Trust\Core\Admin\AdminMenus::REPAIR_SLUG,
+            'bcc_trust_render_repair_tab',
+            \BCC\Trust\Core\Admin\AdminMenus::ORDER_REPAIR
         );
     }, 25);
 
@@ -2578,6 +2581,7 @@ if (is_admin()) {
     // health signals (stale chains, dispute
     // adjudication delays, permanent orphans). Replaces N separate
     // banners with one summary banner + a dedicated page.
+    \BCC\Trust\Core\Admin\AdminMenus::register();
     \BCC\Trust\Core\Admin\NotificationCenter::register();
 
     // Phase 3 deferred items — Wallet audit + Sessions surfaces.

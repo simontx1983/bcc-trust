@@ -19,14 +19,16 @@ use BCC\Trust\Core\Services\Admin\TrustDebugService;
 // ── Menu registration ───────────────────────────────────────────────────────
 
 add_action('admin_menu', function () {
+    // Developer group under BCC System — listed only when
+    // BCC_DEV_TOOLS === true (bcc-core AdminMenu); the URL always works.
     add_submenu_page(
-        'bcc-trust-dashboard',
+        \BCC\Trust\Core\Admin\AdminMenus::SYSTEM,
         __('Trust Debug', 'bcc-trust'),
-        __('Debug', 'bcc-trust'),
+        __('Trust Debug', 'bcc-trust'),
         'manage_options',
-        'bcc-trust-debug',
+        \BCC\Trust\Core\Admin\AdminMenus::DEBUG_SLUG,
         'bcc_trust_render_debug_page',
-        99  // Last in submenu
+        \BCC\Trust\Core\Admin\AdminMenus::ORDER_DEBUG
     );
 }, 30);
 
@@ -206,7 +208,7 @@ function bcc_trust_render_debug_page() {
     $fRows = [
         __('Fraud Score', 'bcc-trust')     => sprintf('<strong style="color:%s;">%d</strong> (%s)', esc_attr($riskColor), $fraud['fraud_score'], esc_html($fraud['risk_level'])),
         __('Suspended', 'bcc-trust')       => $fraud['is_suspended'] ? '<span style="color:red;">Yes</span>' : 'No',
-        __('Email Verified', 'bcc-trust')  => $fraud['is_verified'] ? '<span style="color:green;">Yes</span>' : '<span style="color:#e65100;">No</span>',
+        __('Email Verified', 'bcc-trust')  => $fraud['is_verified'] ? '<span style="color:green;">Yes</span>' : '<span style="color:var(--bcc-warning);">No</span>',
         __('Behavior Score', 'bcc-trust')  => $fraud['behavior_score'] . '/100',
         __('Trust Rank', 'bcc-trust')      => round($fraud['trust_rank'], 3),
         __('Automation Score', 'bcc-trust') => $fraud['automation_score'],
@@ -269,7 +271,7 @@ function bcc_trust_render_debug_page() {
     echo '<div class="card" style="max-width:none;">';
     echo '<h2>' . esc_html__('Verifications', 'bcc-trust') . '</h2>';
     echo '<table class="widefat striped" style="border:none;">';
-    printf('<tr><th>Email</th><td>%s</td></tr>', $ver['email'] ? '<span style="color:green;">Verified</span>' : '<span style="color:#e65100;">Not verified</span>');
+    printf('<tr><th>Email</th><td>%s</td></tr>', $ver['email'] ? '<span style="color:green;">Verified</span>' : '<span style="color:var(--bcc-warning);">Not verified</span>');
     if ($ver['github']) {
         printf('<tr><th>GitHub</th><td>@%s (%d followers, %d repos) +%.1f boost</td></tr>',
             esc_html($ver['github']['username']), $ver['github']['followers'], $ver['github']['repos'], $ver['github']['trust_boost']);
@@ -315,9 +317,9 @@ function bcc_trust_render_debug_page() {
     echo '<div class="card" style="max-width:none;margin-top:16px;">';
     printf('<h2>%s (%d)</h2>', esc_html__('Public Flags', 'bcc-trust'), $flagData['count']);
     if ($flagData['count'] === 0) {
-        echo '<p style="color:#888;">' . esc_html__('No flags on this page.', 'bcc-trust') . '</p>';
+        echo '<p style="color:var(--bcc-text-muted);">' . esc_html__('No flags on this page.', 'bcc-trust') . '</p>';
     } else {
-        echo '<p style="color:#666;font-style:italic;">' . esc_html__('Signal only — flags do not affect trust score.', 'bcc-trust') . '</p>';
+        echo '<p style="color:var(--bcc-text-secondary);font-style:italic;">' . esc_html__('Signal only — flags do not affect trust score.', 'bcc-trust') . '</p>';
         echo '<table class="widefat striped"><thead><tr><th>User</th><th>Reason</th><th>Date</th></tr></thead><tbody>';
         foreach ($flagData['recent'] as $flag) {
             printf('<tr><td>%s (#%d)</td><td>%s</td><td>%s</td></tr>',
@@ -361,7 +363,7 @@ function bcc_trust_render_debug_page() {
                 status.textContent = r.success ? 'Done' : 'Failed';
                 if(r.success && r.data){
                     result.style.display='block';
-                    result.innerHTML='<pre style="background:#f0f0f0;padding:8px;font-size:12px;max-height:300px;overflow:auto;">'+JSON.stringify(r.data,null,2)+'</pre>';
+                    result.innerHTML='<pre style="background:var(--bcc-bg-raised);padding:8px;font-size:12px;max-height:300px;overflow:auto;">'+JSON.stringify(r.data,null,2)+'</pre>';
                 }
             });
         });

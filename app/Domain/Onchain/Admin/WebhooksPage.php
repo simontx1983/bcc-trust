@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Admin;
 
+use BCC\Core\Admin\AdminUi;
+use BCC\Trust\Core\Admin\AdminMenus;
+
 use BCC\Trust\Onchain\REST\HeliusWebhookEndpoint;
 use BCC\Trust\Onchain\Services\HeliusDeliveryLog;
 
@@ -35,12 +38,13 @@ final class WebhooksPage
     public static function register_page(): void
     {
         add_submenu_page(
-            'bcc-system-health',
+            AdminMenus::ONCHAIN,
             'Webhooks',
             'Webhooks',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render_page']
+            [self::class, 'render_page'],
+            AdminMenus::ORDER_WEBHOOKS
         );
     }
 
@@ -108,9 +112,9 @@ final class WebhooksPage
 
         echo '<tr><th>Webhook secret</th><td>'
             . ($secretPresent
-                ? self::badge('configured', '#46b450')
-                : self::badge('NOT CONFIGURED', '#dc3232')
-                  . ' <span style="color:#888;font-size:12px;">— define <code>BCC_HELIUS_WEBHOOK_SECRET</code> in wp-config.php</span>')
+                ? AdminUi::badge('configured', AdminUi::OK)
+                : AdminUi::badge('NOT CONFIGURED', AdminUi::BAD)
+                  . ' <span style="color:var(--bcc-text-muted);font-size:12px;">— define <code>BCC_HELIUS_WEBHOOK_SECRET</code> in wp-config.php</span>')
             . '</td></tr>';
 
         echo '<tr><th>Last delivery</th><td>'
@@ -140,7 +144,7 @@ final class WebhooksPage
             '<tr><th>Signature mismatches</th><td>%s%s</td></tr>',
             esc_html(number_format($sigfail)),
             $sigfail > 0
-                ? ' <span style="color:#dba617;font-size:12px;">— probes detected</span>'
+                ? ' <span style="color:var(--bcc-warning);font-size:12px;">— probes detected</span>'
                 : ''
         );
         echo '</tbody></table>';
@@ -154,7 +158,7 @@ final class WebhooksPage
             . esc_html((string) HeliusDeliveryLog::MAX_ENTRIES) . ')</h2>';
 
         if ($rows === []) {
-            echo '<p style="color:#666;">No deliveries logged yet.</p>';
+            echo '<p style="color:var(--bcc-text-secondary);">No deliveries logged yet.</p>';
             self::renderClearButton(false);
             return;
         }
@@ -179,23 +183,23 @@ final class WebhooksPage
             $replays = (int)    ($r['replays']     ?? 0);
             $ip      = (string) ($r['ip']          ?? '');
 
-            $rowBg = $outcome === HeliusDeliveryLog::OUTCOME_AUTH_FAILED ? 'background:#fcf0f1;' : '';
+            $rowBg = $outcome === HeliusDeliveryLog::OUTCOME_AUTH_FAILED ? 'background:var(--bcc-danger-bg);' : '';
 
             echo '<tr style="' . esc_attr($rowBg) . '">';
             printf(
-                '<td><code style="font-size:12px;">%s</code> <span style="color:#888;font-size:11px;">(%s)</span></td>',
+                '<td><code style="font-size:12px;">%s</code> <span style="color:var(--bcc-text-muted);font-size:11px;">(%s)</span></td>',
                 esc_html(gmdate('Y-m-d H:i:s', $when)),
-                esc_html(self::ago($when))
+                esc_html(AdminUi::relative($when))
             );
             echo '<td>' . self::outcomeBadge($outcome) . '</td>';
             echo '<td>' . ($auth
-                ? self::badge('✓', '#46b450')
-                : self::badge('✗', '#dc3232'))
+                ? AdminUi::badge('✓', AdminUi::OK)
+                : AdminUi::badge('✗', AdminUi::BAD))
                 . '</td>';
             echo '<td style="text-align:right;">' . esc_html((string) $txs) . '</td>';
-            echo '<td style="text-align:right;' . ($events > 0 ? 'font-weight:bold;color:#46b450;' : 'color:#888;') . '">'
+            echo '<td style="text-align:right;' . ($events > 0 ? 'font-weight:bold;color:var(--bcc-success);' : 'color:var(--bcc-text-muted);') . '">'
                 . esc_html((string) $events) . '</td>';
-            echo '<td style="text-align:right;' . ($replays > 0 ? 'color:#dba617;' : 'color:#888;') . '">'
+            echo '<td style="text-align:right;' . ($replays > 0 ? 'color:var(--bcc-warning);' : 'color:var(--bcc-text-muted);') . '">'
                 . esc_html((string) $replays) . '</td>';
             echo '<td><code style="font-size:12px;">' . esc_html($ip) . '</code></td>';
             echo '</tr>';
@@ -226,54 +230,33 @@ final class WebhooksPage
     private static function formatLastDelivery(int $ts): string
     {
         if ($ts <= 0) {
-            return self::badge('never', '#dba617');
+            return AdminUi::badge('never', AdminUi::WARN);
         }
 
         $ageSec = time() - $ts;
 
-        $color = '#46b450';
+        $tone = AdminUi::OK;
         if ($ageSec > 14400) {        // > 4h → red (matches X5 freshness signal)
-            $color = '#dc3232';
+            $tone = AdminUi::BAD;
         } elseif ($ageSec > 3600) {   // > 1h → amber
-            $color = '#dba617';
+            $tone = AdminUi::WARN;
         }
 
         return sprintf(
             '<code style="font-size:12px;">%s UTC</code> %s',
             esc_html(gmdate('Y-m-d H:i:s', $ts)),
-            self::badge(self::ago($ts), $color)
+            AdminUi::badge(AdminUi::relative($ts), $tone)
         );
     }
 
     private static function outcomeBadge(string $outcome): string
     {
         return match ($outcome) {
-            HeliusDeliveryLog::OUTCOME_PROCESSED   => self::badge('processed',   '#46b450'),
-            HeliusDeliveryLog::OUTCOME_AUTH_FAILED => self::badge('auth_failed', '#dc3232'),
-            HeliusDeliveryLog::OUTCOME_NO_PAYLOAD  => self::badge('no_payload',  '#dba617'),
-            HeliusDeliveryLog::OUTCOME_NO_CHAIN    => self::badge('no_chain',    '#dba617'),
-            default                                => self::badge($outcome,     '#888'),
+            HeliusDeliveryLog::OUTCOME_PROCESSED   => AdminUi::badge('processed',   AdminUi::OK),
+            HeliusDeliveryLog::OUTCOME_AUTH_FAILED => AdminUi::badge('auth_failed', AdminUi::BAD),
+            HeliusDeliveryLog::OUTCOME_NO_PAYLOAD  => AdminUi::badge('no_payload',  AdminUi::WARN),
+            HeliusDeliveryLog::OUTCOME_NO_CHAIN    => AdminUi::badge('no_chain',    AdminUi::WARN),
+            default                                => AdminUi::badge($outcome,     AdminUi::MUTED),
         };
-    }
-
-    private static function badge(string $text, string $color): string
-    {
-        return sprintf(
-            '<span style="display:inline-block;padding:2px 10px;background:%1$s;color:#fff;border-radius:3px;font-weight:bold;font-size:12px;letter-spacing:0.5px;">%2$s</span>',
-            esc_attr($color),
-            esc_html($text)
-        );
-    }
-
-    private static function ago(int $ts): string
-    {
-        if ($ts <= 0) {
-            return 'never';
-        }
-        $sec = max(0, time() - $ts);
-        if ($sec < 60)     { return $sec . 's ago'; }
-        if ($sec < 3600)   { return floor($sec / 60) . 'm ago'; }
-        if ($sec < 86400)  { return floor($sec / 3600) . 'h ago'; }
-        return floor($sec / 86400) . 'd ago';
     }
 }

@@ -16,6 +16,8 @@
 
 namespace BCC\Trust\Onchain\Admin;
 
+use BCC\Trust\Core\Admin\AdminMenus;
+
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Onchain\OnchainPlugin;
 // ── S4: SIX IMPORTS WENT WITH THE SCANNER PANELS ────────────────────────
@@ -229,15 +231,16 @@ final class VerifyCollectionsPage
 
     public static function register_page(): void
     {
-        // Audit follow-up: relocated under BCC System alongside the
-        // other onchain admin pages. Page slug unchanged.
+        // Landing page of the "BCC On-Chain" top-level menu (registered
+        // in AdminMenus). Page slug unchanged.
         add_submenu_page(
-            'bcc-system-health',
+            AdminMenus::ONCHAIN,
             'Verify Collections',
             'Verify Collections',
             'manage_options',
             self::PAGE_SLUG,
-            [__CLASS__, 'render_page']
+            [__CLASS__, 'render_page'],
+            AdminMenus::ORDER_VERIFY
         );
     }
 
@@ -1036,19 +1039,19 @@ final class VerifyCollectionsPage
             default                         => '#646970',
         };
         ?>
-        <div style="margin-top:6px;padding:6px 8px;border-left:3px solid <?php echo esc_attr($colour); ?>;background:#f6f7f7;max-width:32em;">
+        <div style="margin-top:6px;padding:6px 8px;border-left:3px solid <?php echo esc_attr($colour); ?>;background:var(--bcc-bg-raised);max-width:32em;">
             <div style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:<?php echo esc_attr($colour); ?>;">
                 Collection description — <?php echo esc_html($label); ?>
             </div>
-            <div style="font-size:12px;color:#1d2327;margin-top:2px;">
+            <div style="font-size:12px;color:var(--bcc-text-strong);margin-top:2px;">
                 <?php echo esc_html($text); ?>
             </div>
             <?php if (is_string($source) && trim($source) !== ''): ?>
-                <div style="font-size:11px;color:#646970;margin-top:2px;">
+                <div style="font-size:11px;color:var(--bcc-text-muted);margin-top:2px;">
                     Imported from <code><?php echo esc_html($source); ?></code>
                 </div>
             <?php endif; ?>
-            <div style="font-size:11px;color:#646970;margin-top:2px;">
+            <div style="font-size:11px;color:var(--bcc-text-muted);margin-top:2px;">
                 Stored for review only. It is <strong>not published anywhere</strong> and is never the
                 community&rsquo;s description.
             </div>
@@ -1112,7 +1115,7 @@ final class VerifyCollectionsPage
         $checked = is_string($checkedAt) && $checkedAt !== '' && $checkedAt !== '0000-00-00 00:00:00';
 
         if ($state === '') {
-            echo '<span style="color:#999;" title="This build did not record a metadata state for this row.">&mdash;</span>';
+            echo '<span style="color:var(--bcc-text-muted);" title="This build did not record a metadata state for this row.">&mdash;</span>';
             return;
         }
 
@@ -1122,7 +1125,7 @@ final class VerifyCollectionsPage
             // metadata_checked_at tells them apart.
             if ($state === 'unavailable' && !$checked) {
                 printf(
-                    '<span style="color:#646970;" title="%s">%s</span>',
+                    '<span style="color:var(--bcc-text-muted);" title="%s">%s</span>',
                     esc_attr('No metadata read has been attempted for this row yet, so this is not a statement about the collection.'),
                     esc_html__('Not checked', 'bcc-trust')
                 );
@@ -1136,7 +1139,7 @@ final class VerifyCollectionsPage
             );
         } else {
             printf(
-                '<span style="color:#646970;" title="%s">%s</span>',
+                '<span style="color:var(--bcc-text-muted);" title="%s">%s</span>',
                 esc_attr('Unrecognised metadata state; shown verbatim rather than mapped to a known label.'),
                 esc_html($state)
             );
@@ -1144,7 +1147,7 @@ final class VerifyCollectionsPage
 
         if ($checked) {
             printf(
-                '<div style="color:#646970;font-size:11px;" title="%s">%s</div>',
+                '<div style="color:var(--bcc-text-muted);font-size:11px;" title="%s">%s</div>',
                 esc_attr('When a metadata read was last ATTEMPTED — not when it last succeeded.'),
                 // ⚠ `mysql2date()` returns int|string|false, so the cast is
                 // load-bearing: a false would otherwise reach esc_html().
@@ -1638,7 +1641,7 @@ final class VerifyCollectionsPage
             __('Canonical identifier', 'bcc-trust') => is_string($canonical) && $canonical !== ''
                 ? self::detailMono($canonical)
                     . ($canonical !== $contract
-                        ? '<div style="color:#646970;font-size:11px;">'
+                        ? '<div style="color:var(--bcc-text-muted);font-size:11px;">'
                             . esc_html__('Differs from the contract address above — the canonical form is what identity comparisons use.', 'bcc-trust')
                             . '</div>'
                         : '')
@@ -1652,7 +1655,7 @@ final class VerifyCollectionsPage
             ),
             __('Source', 'bcc-trust')  => self::detailOrNull($row->source ?? null),
             __('Verified', 'bcc-trust') => (int) ($row->is_verified ?? 0) === 1
-                ? '<strong style="color:#00a32a;">' . esc_html__('Yes', 'bcc-trust') . '</strong>'
+                ? '<strong style="color:var(--bcc-success);">' . esc_html__('Yes', 'bcc-trust') . '</strong>'
                 : esc_html__('No', 'bcc-trust'),
         ]);
 
@@ -1675,7 +1678,7 @@ final class VerifyCollectionsPage
         echo '<h2>' . esc_html__('Imported description', 'bcc-trust') . '</h2>';
         $descText = $row->chain_description ?? null;
         if (!is_string($descText) || trim($descText) === '') {
-            echo '<p style="color:#646970;">'
+            echo '<p style="color:var(--bcc-text-muted);">'
                 . esc_html__('No description has been imported for this collection, so there is nothing to review.', 'bcc-trust')
                 . '</p>';
         } else {
@@ -1714,11 +1717,11 @@ final class VerifyCollectionsPage
         printf('<h2>%s</h2>', esc_html($heading));
         echo '<dl style="display:grid;grid-template-columns:minmax(160px,220px) 1fr;gap:6px 16px;margin:0 0 20px 0;">';
         foreach ($rows as $label => $value) {
-            printf('<dt style="font-weight:600;color:#1d2327;">%s</dt>', esc_html((string) $label));
+            printf('<dt style="font-weight:600;color:var(--bcc-text-strong);">%s</dt>', esc_html((string) $label));
             printf(
                 '<dd style="margin:0;">%s</dd>',
                 $value === null || $value === ''
-                    ? '<span style="color:#999;">&mdash;</span>'
+                    ? '<span style="color:var(--bcc-text-muted);">&mdash;</span>'
                     : $value
             );
         }
@@ -1757,7 +1760,7 @@ final class VerifyCollectionsPage
             return $nullTitle === null
                 ? null
                 : sprintf(
-                    '<span style="color:#646970;" title="%s">%s</span>',
+                    '<span style="color:var(--bcc-text-muted);" title="%s">%s</span>',
                     esc_attr($nullTitle),
                     esc_html__('not known', 'bcc-trust')
                 );
@@ -1773,7 +1776,7 @@ final class VerifyCollectionsPage
         if (!$ok) {
             return $absent === null
                 ? null
-                : sprintf('<em style="color:#646970;">%s</em>', esc_html($absent));
+                : sprintf('<em style="color:var(--bcc-text-muted);">%s</em>', esc_html($absent));
         }
 
         $formatted = (string) mysql2date('Y-m-d H:i', (string) $value);
@@ -1792,7 +1795,7 @@ final class VerifyCollectionsPage
             // A LEFT JOIN that found no chain row. Say so: the collection
             // references a chain this install does not have.
             return sprintf(
-                '<span style="color:#d63638;">%s</span>',
+                '<span style="color:var(--bcc-danger);">%s</span>',
                 esc_html__('unknown chain — the referenced chain row is missing', 'bcc-trust')
             );
         }
@@ -1800,7 +1803,7 @@ final class VerifyCollectionsPage
         $label = $name !== '' ? $name : $slug;
         $out   = esc_html($label);
         if ($slug !== '' && $slug !== $label) {
-            $out .= ' <span style="color:#646970;">(' . esc_html($slug) . ')</span>';
+            $out .= ' <span style="color:var(--bcc-text-muted);">(' . esc_html($slug) . ')</span>';
         }
 
         // ⚠ The explorer root only. There is no per-chain path convention
@@ -1842,14 +1845,14 @@ final class VerifyCollectionsPage
             : esc_html__('Scoped to this collection\'s chain family.', 'bcc-trust');
 
         if ($state === '') {
-            return '<span style="color:#999;">&mdash;</span><div style="color:#646970;font-size:12px;">'
+            return '<span style="color:var(--bcc-text-muted);">&mdash;</span><div style="color:var(--bcc-text-muted);font-size:12px;">'
                 . esc_html__('This build recorded no metadata state for this row.', 'bcc-trust')
                 . '</div>';
         }
 
         if ($state === 'unavailable' && !$checked) {
-            return '<strong style="color:#646970;">' . esc_html__('Not checked', 'bcc-trust') . '</strong>'
-                . '<div style="color:#646970;font-size:12px;">'
+            return '<strong style="color:var(--bcc-text-muted);">' . esc_html__('Not checked', 'bcc-trust') . '</strong>'
+                . '<div style="color:var(--bcc-text-muted);font-size:12px;">'
                 . esc_html__('No metadata read has been attempted, so this is not a statement about the collection.', 'bcc-trust')
                 . '</div>';
         }
@@ -1862,7 +1865,7 @@ final class VerifyCollectionsPage
 
         if (!isset($known[$state])) {
             return sprintf(
-                '<span style="color:#646970;">%s</span><div style="color:#646970;font-size:12px;">%s</div>',
+                '<span style="color:var(--bcc-text-muted);">%s</span><div style="color:var(--bcc-text-muted);font-size:12px;">%s</div>',
                 esc_html($state),
                 esc_html__('Unrecognised state, shown verbatim rather than mapped to a known label.', 'bcc-trust')
             );
@@ -1871,7 +1874,7 @@ final class VerifyCollectionsPage
         [$label, $colour, $why] = $known[$state];
 
         return sprintf(
-            '<strong style="color:%s;">%s</strong><div style="color:#646970;font-size:12px;">%s %s</div>',
+            '<strong style="color:%s;">%s</strong><div style="color:var(--bcc-text-muted);font-size:12px;">%s %s</div>',
             esc_attr($colour),
             esc_html($label),
             esc_html($why),
@@ -1907,7 +1910,7 @@ final class VerifyCollectionsPage
         }
 
         if ($groupId === null) {
-            echo '<p style="color:#646970;">'
+            echo '<p style="color:var(--bcc-text-muted);">'
                 . esc_html__('No published holder community is linked to this collection.', 'bcc-trust')
                 . '</p>';
             return;
@@ -1925,7 +1928,7 @@ final class VerifyCollectionsPage
             __('Group id', 'bcc-trust') => (string) $groupId,
             __('Members', 'bcc-trust')  => $members === null
                 ? sprintf(
-                    '<span style="color:#646970;" title="%s">%s</span>',
+                    '<span style="color:var(--bcc-text-muted);" title="%s">%s</span>',
                     esc_attr__('The group exists but its member count could not be read.', 'bcc-trust'),
                     esc_html__('not known', 'bcc-trust')
                 )
@@ -1974,7 +1977,7 @@ final class VerifyCollectionsPage
             echo '</strong> ';
             echo esc_html__('This is a database read failure, not a statement that the collection is visible. Do not act on it.', 'bcc-trust');
             echo '</p></div>';
-            echo '<p style="color:#646970;font-size:12px;">'
+            echo '<p style="color:var(--bcc-text-muted);font-size:12px;">'
                 . esc_html__('Hide and Unhide are operated from the list, where the control and its nonce live.', 'bcc-trust')
                 . '</p>';
             return;
@@ -1983,7 +1986,7 @@ final class VerifyCollectionsPage
         $hidden = $rule === NftSpamContractRepository::RULE_DENY;
 
         if ($hidden) {
-            echo '<p><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:#d63638;">'
+            echo '<p><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:var(--bcc-danger);">'
                 . esc_html__('HIDDEN', 'bcc-trust')
                 . '</span> '
                 . esc_html__('A deny rule on this contract keeps it out of the lists, and survives rediscovery.', 'bcc-trust')
@@ -1995,12 +1998,12 @@ final class VerifyCollectionsPage
                 esc_html($rule)
             );
         } else {
-            echo '<p style="color:#646970;">'
+            echo '<p style="color:var(--bcc-text-muted);">'
                 . esc_html__('No deny rule is recorded for this contract, so it is not hidden.', 'bcc-trust')
                 . '</p>';
         }
 
-        echo '<p style="color:#646970;font-size:12px;">'
+        echo '<p style="color:var(--bcc-text-muted);font-size:12px;">'
             . esc_html__('Hide and Unhide are operated from the list, where the control and its nonce live.', 'bcc-trust')
             . '</p>';
     }
@@ -2292,7 +2295,7 @@ final class VerifyCollectionsPage
             <?php endif; ?>
 
             <?php if ($vstate === CollectionStateClassifier::TAB_NEEDS_ATTENTION): ?>
-                <p style="margin:-6px 0 12px 0;color:#646970;font-size:12px;">
+                <p style="margin:-6px 0 12px 0;color:var(--bcc-text-muted);font-size:12px;">
                     Rows that no other tab describes honestly: verified with no
                     community, a request that has not been created yet, a failed
                     creation, a community whose collection is no longer verified, or a
@@ -2301,7 +2304,7 @@ final class VerifyCollectionsPage
             <?php endif; ?>
 
             <?php if ($vstate === CollectionStateClassifier::TAB_HIDDEN_BY_OPERATOR): ?>
-                <p style="margin:-6px 0 12px 0;color:#646970;font-size:12px;">
+                <p style="margin:-6px 0 12px 0;color:var(--bcc-text-muted);font-size:12px;">
                     Collections an operator has hidden with a platform-wide DENY rule.
                     This records an operator decision — it is not a claim that the
                     collection is a scam, and nothing in the database records one.
@@ -2309,7 +2312,7 @@ final class VerifyCollectionsPage
             <?php endif; ?>
 
             <?php if ($vstate === CollectionStateClassifier::TAB_DISCOVERED_UNVERIFIED && $demandRanked): ?>
-                <p style="margin:-6px 0 12px 0;color:#646970;font-size:12px;">
+                <p style="margin:-6px 0 12px 0;color:var(--bcc-text-muted);font-size:12px;">
                     Queue ranked by <strong>Linked holders</strong> — collections that
                     real platform wallets hold sort first. Linked holders are counted from
                     BCC's own holdings index, which covers EVM and Solana; other chains show
@@ -2317,9 +2320,9 @@ final class VerifyCollectionsPage
                 </p>
             <?php endif; ?>
 
-            <div style="margin:0 0 16px 0;border:1px solid #c3c4c7;border-radius:4px;padding:8px 12px;background:#fff;">
+            <div style="margin:0 0 16px 0;border:1px solid var(--bcc-border-strong);border-radius:4px;padding:8px 12px;background:var(--bcc-bg-card);">
                 <strong>Adding a collection has moved.</strong>
-                <p style="color:#646970;margin:6px 0 0 0;">
+                <p style="color:var(--bcc-text-muted);margin:6px 0 0 0;">
                     Manual intake now lives in the NFT Discovery control plane, where the
                     chain is selected explicitly and the form is bound to it. This page had
                     two different add forms with different validation and different
@@ -2635,7 +2638,7 @@ final class VerifyCollectionsPage
                                                name="verified[<?php echo $rowId; ?>]"
                                                value="1"
                                                <?php checked($rowVerified); ?>>
-                                        <span class="bcc-vc-toggle-status" style="font-size:11px;color:#999;"></span>
+                                        <span class="bcc-vc-toggle-status" style="font-size:11px;color:var(--bcc-text-muted);"></span>
                                     </label>
                                 </td>
                                 <td>
@@ -2670,7 +2673,7 @@ final class VerifyCollectionsPage
                                     ?>
                                     <?php if ($tokenStandard !== ''): ?>
                                         <br>
-                                        <span style="color:#646970;font-size:11px;"><?php echo esc_html($tokenStandard); ?></span>
+                                        <span style="color:var(--bcc-text-muted);font-size:11px;"><?php echo esc_html($tokenStandard); ?></span>
                                     <?php endif; ?>
                                     <?php
                                     // DECISION 17's reader. Rendered inside the
@@ -2749,16 +2752,16 @@ final class VerifyCollectionsPage
                                 ?>
                                 <td>
                                     <?php if ($rowSignal['waitlist'] > 0): ?>
-                                        <strong style="color:#2271b1;"><?php echo number_format_i18n($rowSignal['waitlist']); ?></strong>
+                                        <strong style="color:var(--bcc-accent);"><?php echo number_format_i18n($rowSignal['waitlist']); ?></strong>
                                     <?php else: ?>
-                                        <span style="color:#999;">&mdash;</span>
+                                        <span style="color:var(--bcc-text-muted);">&mdash;</span>
                                     <?php endif; ?>
                                 </td>
                                 <td>
                                     <?php if ($rowSignal['spam'] > 0): ?>
-                                        <strong style="color:#d63638;">⚑ <?php echo number_format_i18n($rowSignal['spam']); ?></strong>
+                                        <strong style="color:var(--bcc-danger);">⚑ <?php echo number_format_i18n($rowSignal['spam']); ?></strong>
                                     <?php else: ?>
-                                        <span style="color:#999;">&mdash;</span>
+                                        <span style="color:var(--bcc-text-muted);">&mdash;</span>
                                     <?php endif; ?>
                                 </td>
                                 <td>
@@ -2775,16 +2778,16 @@ final class VerifyCollectionsPage
                                     );
                                     switch ($demandCell['state']):
                                         case CollectionDemandService::STATE_COUNTED: ?>
-                                        <strong style="color:#00a32a;"><?php echo number_format_i18n((int) $demandCell['count']); ?></strong>
+                                        <strong style="color:var(--bcc-success);"><?php echo number_format_i18n((int) $demandCell['count']); ?></strong>
                                         <?php break;
                                         case CollectionDemandService::STATE_NONE_INDEXED: ?>
-                                        <span style="color:#646970;" title="No linked wallet is recorded as holding this collection in BCC's holdings index. The index can lag behind the chain.">None indexed</span>
+                                        <span style="color:var(--bcc-text-muted);" title="No linked wallet is recorded as holding this collection in BCC's holdings index. The index can lag behind the chain.">None indexed</span>
                                         <?php break;
                                         case CollectionDemandService::STATE_UNAVAILABLE: ?>
-                                        <span style="color:#646970;" title="Linked-holder counts could not be read completely just now, so this row's count is unknown.">Unavailable</span>
+                                        <span style="color:var(--bcc-text-muted);" title="Linked-holder counts could not be read completely just now, so this row's count is unknown.">Unavailable</span>
                                         <?php break;
                                         default: ?>
-                                        <span style="color:#646970;" title="BCC keeps no holdings index for this chain, so it does not count linked holders here. Counts are never fetched from outside services while this page loads.">Not calculated</span>
+                                        <span style="color:var(--bcc-text-muted);" title="BCC keeps no holdings index for this chain, so it does not count linked holders here. Counts are never fetched from outside services while this page loads.">Not calculated</span>
                                     <?php endswitch; ?>
                                 </td>
                                   <td>
@@ -2800,7 +2803,7 @@ final class VerifyCollectionsPage
                                       // than 0 for the same reason. This cell was the one place
                                       // that still conflated them.
                                       if ($row->unique_holders === null) {
-                                          echo '<span style="color:#646970;" title="BCC has no marketplace-wide holder figure for this collection. This is not a count of zero.">&mdash;</span>';
+                                          echo '<span style="color:var(--bcc-text-muted);" title="BCC has no marketplace-wide holder figure for this collection. This is not a count of zero.">&mdash;</span>';
                                       } else {
                                           echo number_format_i18n((int) $row->unique_holders);
                                       }
@@ -2881,10 +2884,10 @@ final class VerifyCollectionsPage
                                             // the canonical lookup cannot resolve. Say so
                                             // rather than rendering "no community", which
                                             // would invite creating a second one.
-                                            echo '<span style="color:#d63638;">community present, identity unresolved</span>';
+                                            echo '<span style="color:var(--bcc-danger);">community present, identity unresolved</span>';
                                         }
                                     } elseif ($rowState === ProvisioningState::REQUESTED) {
-                                        echo '<span style="color:#2271b1;">Requested &mdash; awaiting creation</span>';
+                                        echo '<span style="color:var(--bcc-accent);">Requested &mdash; awaiting creation</span>';
                                         ?>
                                         <button type="button"
                                                 class="button button-small bcc-vc-create-community"
@@ -2895,7 +2898,7 @@ final class VerifyCollectionsPage
                                     } elseif ($rowState === ProvisioningState::FAILED) {
                                         $code = (string) ($row->provisioning_failure_code ?? '');
                                         printf(
-                                            '<span style="color:#d63638;">Failed: %s</span>',
+                                            '<span style="color:var(--bcc-danger);">Failed: %s</span>',
                                             esc_html(ProvisioningFailureCode::label($code))
                                         );
                                       } elseif ($rowState === ProvisioningState::PROVISIONED) {
@@ -2911,15 +2914,15 @@ final class VerifyCollectionsPage
                                           // identity-unresolved arm above already applies that
                                           // reasoning; this state was the one that did not.
                                           printf(
-                                              '<span style="color:#d63638;">%s</span>',
+                                              '<span style="color:var(--bcc-danger);">%s</span>',
                                               esc_html(CollectionStateClassifier::causeLabel(
                                                   CollectionStateClassifier::CAUSE_CONTRADICTORY_STATE
                                               ))
                                           );
                                       } elseif ($rowVerified) {
-                                          echo '<span style="color:#646970;">No community requested</span>';
+                                          echo '<span style="color:var(--bcc-text-muted);">No community requested</span>';
                                     } else {
-                                        echo '<span style="color:#999;">&mdash;</span>';
+                                        echo '<span style="color:var(--bcc-text-muted);">&mdash;</span>';
                                     }
                                     ?>
                                 </td>
@@ -2965,7 +2968,7 @@ final class VerifyCollectionsPage
                                     $isHidden = (int) ($row->is_hidden ?? 0) === 1;
                                     ?>
                                     <?php if ($isHidden): ?>
-                                        <span style="display:inline-block;margin-bottom:4px;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:#d63638;">HIDDEN</span>
+                                        <span style="display:inline-block;margin-bottom:4px;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:var(--bcc-danger);">HIDDEN</span>
                                     <?php endif; ?>
                                     <?php
                                     // VC-B1: the button reaches its own form
@@ -2986,7 +2989,7 @@ final class VerifyCollectionsPage
                                     <button type="submit"
                                             form="vc-a-del-<?php echo $rowId; ?>"
                                             class="button button-small button-link-delete"
-                                            style="color:#b32d2e;"
+                                            style="color:var(--bcc-danger);"
                                             onclick="return confirm('Remove this collection from the list? This deletes the row only — rediscovery can bring it back. Use Hide to keep it away permanently. A collection with a live community can\'t be removed until its community is gone.');">
                                         Remove
                                     </button>
@@ -3002,7 +3005,7 @@ final class VerifyCollectionsPage
                             name="action"
                             value="<?php echo esc_attr(self::ACTION_SAVE); ?>"
                             formaction="<?php echo esc_url(admin_url('admin-post.php')); ?>">Save Verification Changes</button>
-                    <span style="color:#646970;font-size:12px;margin-left:8px;">
+                    <span style="color:var(--bcc-text-muted);font-size:12px;margin-left:8px;">
                         Verify toggles save instantly. This button is a fallback if JavaScript is off.
                     </span>
                 </p>
@@ -3132,7 +3135,7 @@ final class VerifyCollectionsPage
                     post(ACTION_PROVISION, id, 'provision')
                         .then(function (resp) {
                             if (resp && resp.success) {
-                                if (cell) { cell.innerHTML = '<span style="color:#00a32a;font-size:12px;">Community created</span>'; }
+                                if (cell) { cell.innerHTML = '<span style="color:var(--bcc-success);font-size:12px;">Community created</span>'; }
                             } else {
                                 btn.disabled = false;
                                 btn.textContent = 'Create now';

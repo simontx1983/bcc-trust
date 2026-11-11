@@ -2,6 +2,8 @@
 
 namespace BCC\Trust\Onchain\Admin;
 
+use BCC\Trust\Core\Admin\AdminMenus;
+
 use BCC\Trust\Onchain\Support\NftDriverRegistry;
 use BCC\Trust\Onchain\Support\NftProviderReadiness;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
@@ -17,7 +19,6 @@ if (!defined('ABSPATH')) {
 class SettingsPage
 {
     const PAGE_SLUG  = 'bcc-onchain-signals';
-    const OPT_GROUP  = 'bcc_onchain_settings';
 
     /**
      * Sub-tab catalogue. Operators think "onchain system health," not
@@ -43,12 +44,13 @@ class SettingsPage
         // Webhooks + Holder Groups (Phase 2 additions). Page slug
         // unchanged — existing bookmarks still work.
         add_submenu_page(
-            'bcc-system-health',
-            'On-Chain Signals',
-            'On-Chain Signals',
+            AdminMenus::ONCHAIN,
+            'Signals & Indexer',
+            'Signals & Indexer',
             'manage_options',
             self::PAGE_SLUG,
-            [__CLASS__, 'render_page']
+            [__CLASS__, 'render_page'],
+            AdminMenus::ORDER_SIGNALS
         );
     }
 
@@ -73,7 +75,7 @@ class SettingsPage
         }
         ?>
         <div class="wrap">
-            <h1>BCC On-Chain Signals</h1>
+            <h1>BCC Signals &amp; Indexer</h1>
 
             <h2 class="nav-tab-wrapper">
                 <?php foreach (self::TABS as $key => $label):
@@ -450,9 +452,9 @@ class SettingsPage
             <p style="margin-top:8px">
                 <strong>Write rate:</strong> <?php echo $writeRate; ?>% of validators required a DB write.
                 <?php if ($writeRate < 10): ?>
-                    <span style="color:#46b450">&#10003; Lean — most validators unchanged.</span>
+                    <span style="color:var(--bcc-success)">&#10003; Lean — most validators unchanged.</span>
                 <?php elseif ($writeRate > 50): ?>
-                    <span style="color:#d63638">&#9888; High churn — investigate if expected.</span>
+                    <span style="color:var(--bcc-danger)">&#9888; High churn — investigate if expected.</span>
                 <?php endif; ?>
             </p>
         <?php endif;
@@ -490,7 +492,7 @@ class SettingsPage
                 <p style="margin-top:8px">
                     <strong>Failure rate:</strong> <?php echo $failRate; ?>%
                     <?php if ($failRate > 20): ?>
-                        <span style="color:#d63638">&#9888; High failure rate — check LCD endpoint health.</span>
+                        <span style="color:var(--bcc-danger)">&#9888; High failure rate — check LCD endpoint health.</span>
                     <?php endif; ?>
                 </p>
             <?php endif; ?>
@@ -625,10 +627,10 @@ class SettingsPage
                         <td><?php echo esc_html($lastFail); ?></td>
                         <td>
                             <?php if ($breakerOpen): ?>
-                                <span style="color:#d63638;font-weight:600">&#9940; OPEN</span>
+                                <span style="color:var(--bcc-danger);font-weight:600">&#9940; OPEN</span>
                                 <br><small>Cooldown: <?php echo OnchainCircuitBreaker::COOLDOWN_SECONDS - (time() - (int) $health['last_failure']); ?>s remaining</small>
                             <?php else: ?>
-                                <span style="color:#00a32a">&#9989; Closed</span>
+                                <span style="color:var(--bcc-success)">&#9989; Closed</span>
                             <?php endif; ?>
                         </td>
                     </tr>
@@ -681,14 +683,14 @@ class SettingsPage
                     <td><?php echo esc_html($indexedAgo); ?></td>
                     <td>
                         <?php if ($isStale): ?>
-                            <span style="color:#d63638;font-weight:600">STALE (&gt;6h)</span>
+                            <span style="color:var(--bcc-danger);font-weight:600">STALE (&gt;6h)</span>
                         <?php else: ?>
-                            <span style="color:#00a32a">Fresh</span>
+                            <span style="color:var(--bcc-success)">Fresh</span>
                         <?php endif; ?>
                     </td>
                     <td>
                         <?php if ($isPartial): ?>
-                            <span style="color:#dba617">Partial fetch</span>
+                            <span style="color:var(--bcc-warning)">Partial fetch</span>
                         <?php else: ?>
                             <?php echo (int) ($stats['total'] ?? 0); ?> validators
                         <?php endif; ?>
@@ -718,7 +720,7 @@ class SettingsPage
             </strong>
             (<?php echo $budgetPct; ?>%)
         </p>
-        <div style="width:300px;height:20px;background:#ddd;border-radius:3px;overflow:hidden">
+        <div style="width:300px;height:20px;background:var(--bcc-bg-code);border-radius:3px;overflow:hidden">
             <div style="width:<?php echo $budgetPct; ?>%;height:100%;background:<?php echo esc_attr($budgetColor); ?>"></div>
         </div>
         <?php endif;

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Admin;
 
+use BCC\Core\Admin\AdminUi;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\JwtToken;
 
@@ -50,30 +51,66 @@ final class SessionsPage
     public static function registerMenu(): void
     {
         add_submenu_page(
-            'bcc-system-health',
-            'Sessions',
-            'Sessions',
+            AdminMenus::SYSTEM,
+            'Audit Log',
+            'Audit Log',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render']
+            [self::class, 'render'],
+            AdminMenus::ORDER_AUDIT_LOG
         );
     }
 
+    public const TAB_SESSIONS = 'sessions';
+    public const TAB_WALLETS  = 'wallets';
+
     public static function render(): void
+    {
+        $tab = isset($_GET['tab']) ? sanitize_key((string) wp_unslash($_GET['tab'])) : '';
+        self::renderAuditLog($tab === self::TAB_WALLETS ? self::TAB_WALLETS : self::TAB_SESSIONS);
+    }
+
+    /**
+     * "Audit Log" — Sessions and Wallets as two tabs of one page. The
+     * Wallets tab is also what the old bcc-wallets slug renders
+     * ({@see WalletAuditPage::render()}), so existing links keep working.
+     */
+    public static function renderAuditLog(string $tab): void
     {
         if (!current_user_can('manage_options')) {
             wp_die(esc_html__('Sorry, you are not allowed to access this page.'));
         }
 
         echo '<div class="wrap">';
-        echo '<h1>BCC Sessions</h1>';
-        echo '<p style="color:#666;">NextAuth uses stateless JWTs — no server-side session store, so a literal "active session count" '
+        echo '<h1>BCC Audit Log</h1>';
+
+        echo '<nav class="nav-tab-wrapper">';
+        foreach ([self::TAB_SESSIONS => 'Sessions', self::TAB_WALLETS => 'Wallets'] as $key => $label) {
+            printf(
+                '<a href="%s" class="nav-tab%s">%s</a>',
+                esc_url(add_query_arg(['page' => self::PAGE_SLUG, 'tab' => $key], admin_url('admin.php'))),
+                $key === $tab ? ' nav-tab-active' : '',
+                esc_html($label)
+            );
+        }
+        echo '</nav>';
+
+        if ($tab === self::TAB_WALLETS) {
+            WalletAuditPage::renderBody();
+        } else {
+            self::renderBody();
+        }
+
+        echo '</div>';
+    }
+
+    private static function renderBody(): void
+    {
+        echo '<p style="color:var(--bcc-text-secondary);">NextAuth uses stateless JWTs — no server-side session store, so a literal "active session count" '
             . 'is not a meaningful query. What is meaningful: JWT lifetime configuration + recent identity-bearing audit events.</p>';
 
         self::renderJwtConfig();
         self::renderRecentAuthEvents();
-
-        echo '</div>';
     }
 
     // ────────────────────────────────────────────────────────────
@@ -90,24 +127,24 @@ final class SessionsPage
         echo '<table class="widefat striped" style="max-width:560px;"><tbody>';
 
         printf(
-            '<tr><th style="width:240px;">TTL_SECONDS</th><td><code>%d</code> &nbsp; <span style="color:#888;">(%s)</span></td></tr>',
+            '<tr><th style="width:240px;">TTL_SECONDS</th><td><code>%d</code> &nbsp; <span style="color:var(--bcc-text-muted);">(%s)</span></td></tr>',
             $ttl,
             esc_html(self::humanDuration($ttl))
         );
         printf(
-            '<tr><th>REFRESH_GRACE_SECONDS</th><td><code>%d</code> &nbsp; <span style="color:#888;">(%s)</span></td></tr>',
+            '<tr><th>REFRESH_GRACE_SECONDS</th><td><code>%d</code> &nbsp; <span style="color:var(--bcc-text-muted);">(%s)</span></td></tr>',
             $grace,
             esc_html(self::humanDuration($grace))
         );
         printf(
-            '<tr><th>Effective max-age</th><td><code>%d</code> &nbsp; <span style="color:#888;">(%s — TTL + grace)</span></td></tr>',
+            '<tr><th>Effective max-age</th><td><code>%d</code> &nbsp; <span style="color:var(--bcc-text-muted);">(%s — TTL + grace)</span></td></tr>',
             $totalTtl,
             esc_html(self::humanDuration($totalTtl))
         );
 
         echo '</tbody></table>';
 
-        echo '<p style="color:#666;margin-top:8px;">'
+        echo '<p style="color:var(--bcc-text-secondary);margin-top:8px;">'
             . 'V1 posture: 7-day TTL is by-design (see <code>AuthEndpoint::JWT_TTL_SECONDS</code> docblock). '
             . 'Tightening TTL requires building a refresh-token flow first.</p>';
     }
@@ -118,7 +155,7 @@ final class SessionsPage
         $rows = $repo->getRecentActivityByActions(self::AUTH_EVENT_ACTIONS, 30);
 
         echo '<h2 style="margin-top:24px;">Recent auth events (last 30)</h2>';
-        echo '<p style="color:#666;">'
+        echo '<p style="color:var(--bcc-text-secondary);">'
             . 'Identity-bearing actions captured by AuditLogger. Each of these triggers an account-security side-channel '
             . 'email (see AccountSecurityMailer); failures emit <code>account_security_mail.*</code> DegradationMetric '
             . 'events on the System → Health page.</p>';
@@ -143,25 +180,21 @@ final class SessionsPage
             $ip       = (string) ($row->ip_address ?? '');
             $when     = (string) ($row->created_at ?? '');
 
-            $actionColor = match (true) {
+            $actionTone = match (true) {
                 $action === 'account_deleted',
-                $action === 'sessions_revoked_all'    => '#dc3232',
+                $action === 'sessions_revoked_all'    => AdminUi::BAD,
                 $action === 'account_password_changed',
-                $action === 'account_email_changed'   => '#dba617',
-                $action === 'wallet_unlinked'         => '#dba617',
-                $action === 'wallet_linked'           => '#46b450',
-                default                                => '#2271b1',
+                $action === 'account_email_changed'   => AdminUi::WARN,
+                $action === 'wallet_unlinked'         => AdminUi::WARN,
+                $action === 'wallet_linked'           => AdminUi::OK,
+                default                                => AdminUi::INFO,
             };
 
             echo '<tr>';
             echo '<td><code style="font-size:12px;">' . esc_html($when) . '</code></td>';
+            echo '<td>' . AdminUi::badge($action, $actionTone) . '</td>';
             printf(
-                '<td><span style="display:inline-block;padding:2px 8px;background:%1$s;color:#fff;border-radius:3px;font-size:11px;font-weight:bold;">%2$s</span></td>',
-                esc_attr($actionColor),
-                esc_html($action)
-            );
-            printf(
-                '<td>%s <span style="color:#888;">#%d</span></td>',
+                '<td>%s <span style="color:var(--bcc-text-muted);">#%d</span></td>',
                 esc_html($userName !== '' ? $userName : '(user removed)'),
                 $userId
             );

@@ -145,10 +145,10 @@ final class NftIndexerStatusView
                         <td><?php echo $head; ?></td>
                         <td><?php echo $lag; ?></td>
                         <td><?php echo $cuUsed; ?> / <?php echo $dailyBudget; ?></td>
-                        <td<?php echo $callsHot ? ' style="color:#b32d2e;font-weight:bold;"' : ''; ?>>
+                        <td<?php echo $callsHot ? ' style="color:var(--bcc-danger);font-weight:bold;"' : ''; ?>>
                             <?php echo $callsCount; ?> / <?php echo $callsCap; ?>
                         </td>
-                        <td<?php echo $progHasRegression ? ' style="color:#b32d2e;font-weight:bold;"' : ''; ?>>
+                        <td<?php echo $progHasRegression ? ' style="color:var(--bcc-danger);font-weight:bold;"' : ''; ?>>
                             <?php
                             // Sparkline: ↑ advance, — stagnant, ↓ regression.
                             // 4 arrows for 5-entry history (4 deltas). Insufficient
@@ -156,17 +156,17 @@ final class NftIndexerStatusView
                             // accumulate. Pure presentation of the same `deltas`
                             // the snapshot reads; no recomputation here.
                             if ($progSamples === 0) {
-                                echo '<span style="color:#999;font-size:11px;">no data</span>';
+                                echo '<span style="color:var(--bcc-text-muted);font-size:11px;">no data</span>';
                             } else {
                                 $glyphs = [];
                                 foreach ($progDeltas as $d) {
-                                    if ($d > 0)      { $glyphs[] = '<span style="color:#46b450;">&uarr;</span>'; }
-                                    elseif ($d < 0)  { $glyphs[] = '<span style="color:#b32d2e;font-weight:bold;">&darr;</span>'; }
-                                    else             { $glyphs[] = '<span style="color:#999;">&mdash;</span>'; }
+                                    if ($d > 0)      { $glyphs[] = '<span style="color:var(--bcc-success);">&uarr;</span>'; }
+                                    elseif ($d < 0)  { $glyphs[] = '<span style="color:var(--bcc-danger);font-weight:bold;">&darr;</span>'; }
+                                    else             { $glyphs[] = '<span style="color:var(--bcc-text-muted);">&mdash;</span>'; }
                                 }
                                 echo '<span style="font-family:monospace;">' . implode(' ', $glyphs) . '</span>';
                                 if ($progSamples < ChainCheckpointRepository::MAX_PROGRESSION_ENTRIES) {
-                                    echo '<span style="color:#999;font-size:10px;margin-left:6px;">(' . (int) $progSamples . '/' . (int) ChainCheckpointRepository::MAX_PROGRESSION_ENTRIES . ')</span>';
+                                    echo '<span style="color:var(--bcc-text-muted);font-size:10px;margin-left:6px;">(' . (int) $progSamples . '/' . (int) ChainCheckpointRepository::MAX_PROGRESSION_ENTRIES . ')</span>';
                                 }
                             }
                             ?>
@@ -284,7 +284,7 @@ final class NftIndexerStatusView
                 <?php endif; ?>
 
                 <?php if ($summary['regression_chains'] !== []): ?>
-                    <span style="color:#b32d2e;font-weight:bold;" title="Backward progression — last_processed_block went DOWN. Correctness anomaly."><strong>↓ Regression:</strong> <?php echo (int) count($summary['regression_chains']); ?></span>
+                    <span style="color:var(--bcc-danger);font-weight:bold;" title="Backward progression — last_processed_block went DOWN. Correctness anomaly."><strong>↓ Regression:</strong> <?php echo (int) count($summary['regression_chains']); ?></span>
                 <?php endif; ?>
 
                 <?php if ($summary['fake_healthy_chains'] !== []): ?>
@@ -306,7 +306,7 @@ final class NftIndexerStatusView
                 ?>
                     <span style="color:<?php echo esc_attr($hfColor); ?>;font-weight:bold;" title="Solana ingestion has not received a Helius delivery for this long."><strong>Solana silent:</strong> <?php echo esc_html($hfLabel); ?></span>
                 <?php elseif ($hfState === 'never_delivered'): ?>
-                    <span style="color:#9b6c00;" title="Helius webhook is provisioned but no deliveries yet — verify configuration."><strong>Solana ingestion:</strong> never delivered</span>
+                    <span style="color:var(--bcc-warning);" title="Helius webhook is provisioned but no deliveries yet — verify configuration."><strong>Solana ingestion:</strong> never delivered</span>
                 <?php endif; ?>
 
                 <?php if ($summary['dedupe_overgrown']): ?>
@@ -314,7 +314,7 @@ final class NftIndexerStatusView
                 <?php endif; ?>
 
                 <?php if ($summary['v1_fetch_failure_chains'] !== []): ?>
-                    <span style="color:#9b6c00;" title="V1 ownership discovery (Alchemy NFT API) failing on one or more chains. See V1 Discovery panel below."><strong>V1 failures:</strong> <?php echo (int) count($summary['v1_fetch_failure_chains']); ?></span>
+                    <span style="color:var(--bcc-warning);" title="V1 ownership discovery (Alchemy NFT API) failing on one or more chains. See V1 Discovery panel below."><strong>V1 failures:</strong> <?php echo (int) count($summary['v1_fetch_failure_chains']); ?></span>
                 <?php endif; ?>
             </div>
 
@@ -325,7 +325,7 @@ final class NftIndexerStatusView
                     <?php endforeach; ?>
                 </ul>
             <?php else: ?>
-                <p style="margin:8px 0 0 0;color:#646970;font-size:12px;">
+                <p style="margin:8px 0 0 0;color:var(--bcc-text-muted);font-size:12px;">
                     No outstanding issues. Block-walking and holdings writes are flowing for active chains.
                 </p>
             <?php endif; ?>
@@ -382,16 +382,16 @@ final class NftIndexerStatusView
                     $lastErr  = $row['last_error'];
                     $lastAt   = $row['last_error_at'];
                 ?>
-                <tr<?php echo $hot ? ' style="background:#fff8e5;"' : ''; ?>>
+                <tr<?php echo $hot ? ' style="background:var(--bcc-warning-bg);"' : ''; ?>>
                     <td><strong><?php echo esc_html($row['slug']); ?></strong></td>
                     <td><?php echo $attempts; ?></td>
-                    <td<?php echo $hot ? ' style="color:#b32d2e;font-weight:bold;"' : ''; ?>><?php echo $failures; ?></td>
-                    <td<?php echo $hot ? ' style="color:#b32d2e;font-weight:bold;"' : ''; ?>>
+                    <td<?php echo $hot ? ' style="color:var(--bcc-danger);font-weight:bold;"' : ''; ?>><?php echo $failures; ?></td>
+                    <td<?php echo $hot ? ' style="color:var(--bcc-danger);font-weight:bold;"' : ''; ?>>
                         <?php
                         if ($attempts === 0) {
-                            echo '<small style="color:#999;">no samples</small>';
+                            echo '<small style="color:var(--bcc-text-muted);">no samples</small>';
                         } elseif ($attempts < $minSamples) {
-                            printf('<small style="color:#999;">%d%% (insufficient samples)</small>', (int) round($rate * 100));
+                            printf('<small style="color:var(--bcc-text-muted);">%d%% (insufficient samples)</small>', (int) round($rate * 100));
                         } else {
                             printf('%d%%', (int) round($rate * 100));
                         }
@@ -399,10 +399,10 @@ final class NftIndexerStatusView
                     </td>
                     <td>
                         <?php if ($lastErr === null || $lastAt === null): ?>
-                            <small style="color:#999;">—</small>
+                            <small style="color:var(--bcc-text-muted);">—</small>
                         <?php else: ?>
                             <small><?php echo esc_html($lastErr); ?></small>
-                            <br><small style="color:#999;">at <?php echo esc_html(gmdate('c', $lastAt)); ?></small>
+                            <br><small style="color:var(--bcc-text-muted);">at <?php echo esc_html(gmdate('c', $lastAt)); ?></small>
                         <?php endif; ?>
                     </td>
                 </tr>
@@ -438,8 +438,8 @@ final class NftIndexerStatusView
             <code>wp-config.php</code> before provisioning:
         </p>
         <ul style="margin-left:1.5em">
-            <li><code>BCC_HELIUS_API_KEY</code> — <?php echo $apiKeyDefined ? '<strong style="color:green">defined</strong>' : '<strong style="color:#c00">missing</strong>'; ?></li>
-            <li><code>BCC_HELIUS_WEBHOOK_SECRET</code> — <?php echo $secretDefined ? '<strong style="color:green">defined</strong>' : '<strong style="color:#c00">missing</strong>'; ?></li>
+            <li><code>BCC_HELIUS_API_KEY</code> — <?php echo $apiKeyDefined ? '<strong style="color:green">defined</strong>' : '<strong style="color:var(--bcc-danger)">missing</strong>'; ?></li>
+            <li><code>BCC_HELIUS_WEBHOOK_SECRET</code> — <?php echo $secretDefined ? '<strong style="color:green">defined</strong>' : '<strong style="color:var(--bcc-danger)">missing</strong>'; ?></li>
         </ul>
 
         <table class="widefat striped" style="max-width:900px">
@@ -455,7 +455,7 @@ final class NftIndexerStatusView
                 <tr><th>Local managed count (helius_managed = 1)</th>
                     <td><?php echo (int) $status['local_managed_count']; ?></td></tr>
                 <tr><th>Dedupe table size</th>
-                    <td><?php echo $dedupeRows; ?> / <?php echo $dedupeAlarm; ?> <?php if ($dedupeRows > $dedupeAlarm): ?><strong style="color:#c00">OVERGROWN — sweep cron may have stalled</strong><?php endif; ?></td></tr>
+                    <td><?php echo $dedupeRows; ?> / <?php echo $dedupeAlarm; ?> <?php if ($dedupeRows > $dedupeAlarm): ?><strong style="color:var(--bcc-danger)">OVERGROWN — sweep cron may have stalled</strong><?php endif; ?></td></tr>
                 <tr><th>Counters (since last reset)</th>
                     <td>
                         deliveries new: <strong><?php echo $newCount; ?></strong> ·
@@ -471,7 +471,7 @@ final class NftIndexerStatusView
                         if ($fState === 'not_provisioned') {
                             echo '<em>webhook not provisioned</em>';
                         } elseif ($fState === 'never_delivered') {
-                            echo '<strong style="color:#9b6c00;">never — webhook provisioned but no deliveries yet</strong>';
+                            echo '<strong style="color:var(--bcc-warning);">never — webhook provisioned but no deliveries yet</strong>';
                         } else {
                             $color = $fState === 'red' ? '#b32d2e' : ($fState === 'yellow' ? '#9b6c00' : '#46b450');
                             $atIso = $fAt !== null ? gmdate('c', (int) $fAt) : '?';
@@ -479,9 +479,9 @@ final class NftIndexerStatusView
                             echo '<strong style="color:' . esc_attr($color) . ';">' . esc_html($ageStr) . ' ago</strong> ';
                             echo '<small>(' . esc_html($atIso) . ')</small>';
                             if ($fState === 'yellow') {
-                                echo ' <small style="color:#9b6c00;">— could be a quiet window OR a stalled webhook; see top-card issue line</small>';
+                                echo ' <small style="color:var(--bcc-warning);">— could be a quiet window OR a stalled webhook; see top-card issue line</small>';
                             } elseif ($fState === 'red') {
-                                echo ' <small style="color:#b32d2e;">— Solana ingestion is offline; see top-card issue line</small>';
+                                echo ' <small style="color:var(--bcc-danger);">— Solana ingestion is offline; see top-card issue line</small>';
                             }
                         }
                         ?>

@@ -64,12 +64,13 @@ final class NotificationCenter
     public static function registerMenu(): void
     {
         add_submenu_page(
-            'bcc-system-health',
+            AdminMenus::MODERATION,
             'Notifications',
             'Notifications',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render']
+            [self::class, 'render'],
+            AdminMenus::ORDER_NOTIFICATIONS
         );
     }
 
@@ -249,7 +250,7 @@ final class NotificationCenter
 
         echo '<div class="wrap">';
         echo '<h1>BCC Notifications</h1>';
-        echo '<p style="color:#666;">Operational health notices from the BCC plugins. '
+        echo '<p style="color:var(--bcc-text-secondary);">Operational health notices from the BCC plugins. '
             . 'Critical setup failures (missing encryption key, missing dependencies) '
             . 'still render as direct banners — they block work and should be loud. '
             . 'Recurring health signals collect here.</p>';
@@ -276,7 +277,7 @@ final class NotificationCenter
             }
 
             printf(
-                '<h2 style="margin-top:24px;border-top:1px solid #c3c4c7;padding-top:16px;">%s (%d)</h2>',
+                '<h2 style="margin-top:24px;border-top:1px solid var(--bcc-border-strong);padding-top:16px;">%s (%d)</h2>',
                 esc_html($label),
                 count($list)
             );
@@ -289,7 +290,7 @@ final class NotificationCenter
                 printf(
                     '<div class="notice notice-%1$s" style="margin:8px 0;padding:12px;">'
                     . '<p style="margin:0 0 4px 0;"><strong>%2$s</strong> '
-                    . '<code style="font-size:11px;color:#666;">%3$s</code></p>'
+                    . '<code style="font-size:11px;color:var(--bcc-text-secondary);">%3$s</code></p>'
                     . '<p style="margin:0;">%4$s%5$s</p>'
                     . '</div>',
                     esc_attr($level),

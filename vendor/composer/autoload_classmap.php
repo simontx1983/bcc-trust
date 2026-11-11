@@ -8,6 +8,7 @@ $baseDir = dirname($vendorDir);
 return array(
     'AllowDynamicProperties' => $vendorDir . '/symfony/polyfill-php82/Resources/stubs/AllowDynamicProperties.php',
     'Attribute' => $vendorDir . '/symfony/polyfill-php80/Resources/stubs/Attribute.php',
+    'BCC\\Trust\\Core\\Admin\\AdminMenus' => $baseDir . '/app/Domain/Core/Admin/AdminMenus.php',
     'BCC\\Trust\\Core\\Admin\\NotificationCenter' => $baseDir . '/app/Domain/Core/Admin/NotificationCenter.php',
     'BCC\\Trust\\Core\\Admin\\SessionsPage' => $baseDir . '/app/Domain/Core/Admin/SessionsPage.php',
     'BCC\\Trust\\Core\\Admin\\WalletAuditPage' => $baseDir . '/app/Domain/Core/Admin/WalletAuditPage.php',

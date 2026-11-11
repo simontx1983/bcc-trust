@@ -60,7 +60,7 @@ function bcc_trust_render_user_moderation( $user_id ) {
                 <tr><th>Registered</th>   <td><?php echo esc_html( $user->user_registered ); ?></td></tr>
                 <tr><th>Roles</th>        <td><?php echo esc_html( implode( ', ', $user->roles ) ); ?></td></tr>
                 <tr><th>Last Active</th>  <td><?php echo $user_info->usr_last_activity ? esc_html( $user_info->usr_last_activity ) : '—'; ?></td></tr>
-                <tr><th>Verified</th>     <td><?php echo $user_info->is_verified ? '<span style="color:#4caf50;">✓ Yes</span>' : '✗ No'; ?></td></tr>
+                <tr><th>Verified</th>     <td><?php echo $user_info->is_verified ? '<span style="color:var(--bcc-success);">✓ Yes</span>' : '✗ No'; ?></td></tr>
                 <tr>
                     <th>Status</th>
                     <td>
@@ -79,15 +79,15 @@ function bcc_trust_render_user_moderation( $user_id ) {
 
                 <?php bcc_trust_stat_card( 'Fraud Score', function() use ( $user_info, $fraud_critical, $fraud_high ) { ?>
                     <div style="display:flex;align-items:center;gap:10px;">
-                        <div style="width:100px;height:10px;background:#eee;border-radius:5px;overflow:hidden;">
+                        <div style="width:100px;height:10px;background:var(--bcc-bg-code);border-radius:5px;overflow:hidden;">
                             <div style="width:<?php echo esc_attr( intval( $user_info->fraud_score ) ); ?>%;height:100%;background:<?php echo esc_attr( \BCC\Trust\Core\Support\Formatting::scoreColor( $user_info->fraud_score ) ); ?>;"></div>
                         </div>
                         <strong style="font-size:22px;"><?php echo intval( $user_info->fraud_score ); ?></strong>
                     </div>
                     <?php if ( $user_info->fraud_score >= $fraud_critical ): ?>
-                        <p style="color:#f44336;margin:4px 0 0;"><strong>CRITICAL</strong> — consider suspension</p>
+                        <p style="color:var(--bcc-danger);margin:4px 0 0;"><strong>CRITICAL</strong> — consider suspension</p>
                     <?php elseif ( $user_info->fraud_score >= $fraud_high ): ?>
-                        <p style="color:#fd7e14;margin:4px 0 0;"><strong>HIGH RISK</strong> — monitor closely</p>
+                        <p style="color:var(--bcc-warning);margin:4px 0 0;"><strong>HIGH RISK</strong> — monitor closely</p>
                     <?php endif; ?>
                 <?php } ); ?>
 
@@ -99,8 +99,8 @@ function bcc_trust_render_user_moderation( $user_id ) {
 
                 <?php bcc_trust_stat_card( 'Trust Rank', function() use ( $user_info ) { ?>
                     <div style="display:flex;align-items:center;gap:8px;">
-                        <div style="width:80px;height:6px;background:#eee;border-radius:3px;overflow:hidden;">
-                            <div style="width:<?php echo esc_attr( intval( $user_info->trust_rank * 100 ) ); ?>%;height:100%;background:#4caf50;"></div>
+                        <div style="width:80px;height:6px;background:var(--bcc-bg-code);border-radius:3px;overflow:hidden;">
+                            <div style="width:<?php echo esc_attr( intval( $user_info->trust_rank * 100 ) ); ?>%;height:100%;background:var(--bcc-success);"></div>
                         </div>
                         <strong style="font-size:20px;"><?php echo esc_html( number_format( $user_info->trust_rank, 2 ) ); ?></strong>
                     </div>
@@ -108,13 +108,13 @@ function bcc_trust_render_user_moderation( $user_id ) {
 
                 <?php bcc_trust_stat_card( 'Automation Score', function() use ( $user_info, $automation_high ) { ?>
                     <div style="display:flex;align-items:center;gap:8px;">
-                        <div style="width:80px;height:10px;background:#eee;border-radius:5px;overflow:hidden;">
-                            <div style="width:<?php echo esc_attr( intval( $user_info->automation_score ) ); ?>%;height:100%;background:#f44336;"></div>
+                        <div style="width:80px;height:10px;background:var(--bcc-bg-code);border-radius:5px;overflow:hidden;">
+                            <div style="width:<?php echo esc_attr( intval( $user_info->automation_score ) ); ?>%;height:100%;background:var(--bcc-danger);"></div>
                         </div>
                         <strong style="font-size:20px;"><?php echo intval( $user_info->automation_score ?: 0 ); ?>%</strong>
                     </div>
                     <?php if ( $user_info->automation_score >= $automation_high ): ?>
-                        <p style="color:#f44336;margin:4px 0 0;"><strong>HIGH AUTOMATION</strong></p>
+                        <p style="color:var(--bcc-danger);margin:4px 0 0;"><strong>HIGH AUTOMATION</strong></p>
                     <?php endif; ?>
                 <?php } ); ?>
 
@@ -140,9 +140,9 @@ function bcc_trust_render_user_moderation( $user_id ) {
                 ];
                 foreach ( $stats as $label => $val ):
                 ?>
-                    <div style="background:#f8f9f9;padding:15px;text-align:center;border-radius:4px;">
-                        <div style="font-size:11px;color:#666;margin-bottom:4px;"><?php echo esc_html( $label ); ?></div>
-                        <div style="font-size:22px;font-weight:bold;color:#0073aa;"><?php echo esc_html( $val ); ?></div>
+                    <div style="background:var(--bcc-bg-raised);padding:15px;text-align:center;border-radius:4px;">
+                        <div style="font-size:11px;color:var(--bcc-text-secondary);margin-bottom:4px;"><?php echo esc_html( $label ); ?></div>
+                        <div style="font-size:22px;font-weight:bold;color:var(--bcc-accent);"><?php echo esc_html( $val ); ?></div>
                     </div>
                 <?php endforeach; ?>
             </div>
@@ -169,7 +169,7 @@ function bcc_trust_render_user_moderation( $user_id ) {
                             <option value="spam">Spam</option>
                         </select>
                         <input type="text" name="suspend_notes" placeholder="Optional notes…" style="width:200px;">
-                        <button name="suspend_user" class="button" style="background:#f44336;border-color:#d32f2f;color:#fff;"
+                        <button name="suspend_user" class="button" style="background:var(--bcc-danger);border-color:var(--bcc-danger);color:#fff;"
                                 onclick="return confirm('Suspend this user?');">Suspend User</button>
                     <?php endif; ?>
                 </form>
@@ -199,9 +199,9 @@ function bcc_trust_render_user_moderation( $user_id ) {
         </div>
 
         <!-- ══ MANUAL TRUST SCORE OVERRIDE (NEW) ═══════════ -->
-        <div class="bcc-panel" style="border-left:4px solid #ff9800;">
+        <div class="bcc-panel" style="border-left:4px solid var(--bcc-highlight);">
             <h2>Manual Trust Score Override</h2>
-            <p style="color:#666;">Override the calculated trust score for all pages owned by this user. A reason is required and will be logged.</p>
+            <p style="color:var(--bcc-text-secondary);">Override the calculated trust score for all pages owned by this user. A reason is required and will be logged.</p>
             <form method="post" onsubmit="return confirm('Override trust score to ' + document.getElementById('override_score_input').value + '? This affects all pages owned by this user.');">
                 <?php wp_nonce_field( 'bcc_trust_moderation' ); ?>
                 <input type="hidden" name="user_id" value="<?php echo $user_id; ?>">
@@ -211,7 +211,7 @@ function bcc_trust_render_user_moderation( $user_id ) {
                         <td>
                             <input id="override_score_input" type="number" name="override_score_value"
                                    min="0" max="100" step="1" value="50" required style="width:80px;">
-                            <small style="margin-left:8px;color:#666;">Current avg: <?php
+                            <small style="margin-left:8px;color:var(--bcc-text-secondary);">Current avg: <?php
                                 $avg = $repo->getUserPagesAvgScore( $user_id );
                                 echo esc_html( $avg !== null ? number_format( $avg, 1 ) : 'N/A' );
                             ?></small>
@@ -226,7 +226,7 @@ function bcc_trust_render_user_moderation( $user_id ) {
                     </tr>
                 </table>
                 <p>
-                    <button name="override_score" class="button" style="background:#ff9800;border-color:#e68900;color:#fff;">Apply Score Override</button>
+                    <button name="override_score" class="button" style="background:var(--bcc-highlight);border-color:var(--bcc-highlight);color:#fff;">Apply Score Override</button>
                 </p>
             </form>
         </div>
@@ -234,7 +234,7 @@ function bcc_trust_render_user_moderation( $user_id ) {
         <!-- ══ WHITELIST ════════════════════════════════════ -->
         <div class="bcc-panel">
             <h2>Whitelist User's IP / Device</h2>
-            <p style="color:#666;">Whitelist an IP or fingerprint to exclude it from fraud scoring.</p>
+            <p style="color:var(--bcc-text-secondary);">Whitelist an IP or fingerprint to exclude it from fraud scoring.</p>
             <form method="post" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
                 <?php wp_nonce_field( 'bcc_trust_moderation' ); ?>
                 <input type="hidden" name="user_id" value="<?php echo $user_id; ?>">
@@ -273,7 +273,7 @@ function bcc_trust_render_user_moderation( $user_id ) {
                                     <?php echo esc_html( $s->unsuspended_at ); ?>
                                     <br><small>by <?php echo $lift ? esc_html( $lift->display_name ) : 'System'; ?></small>
                                 <?php else: ?>
-                                    <strong style="color:#f44336;">Active</strong>
+                                    <strong style="color:var(--bcc-danger);">Active</strong>
                                 <?php endif; ?>
                             </td>
                         </tr>
@@ -341,8 +341,8 @@ function bcc_trust_render_user_moderation( $user_id ) {
                             <td><code><?php echo esc_html( substr( $fp->fingerprint, 0, 16 ) ); ?>…</code></td>
                             <td>
                                 <div style="display:flex;align-items:center;gap:6px;">
-                                    <div style="width:50px;height:6px;background:#eee;border-radius:3px;overflow:hidden;">
-                                        <div style="width:<?php echo esc_attr( intval( $fp->automation_score ) ); ?>%;height:100%;background:#f44336;"></div>
+                                    <div style="width:50px;height:6px;background:var(--bcc-bg-code);border-radius:3px;overflow:hidden;">
+                                        <div style="width:<?php echo esc_attr( intval( $fp->automation_score ) ); ?>%;height:100%;background:var(--bcc-danger);"></div>
                                     </div>
                                     <?php echo intval( $fp->automation_score ); ?>%
                                 </div>
@@ -379,9 +379,9 @@ function bcc_trust_render_user_moderation( $user_id ) {
                             <td><?php echo intval( $pg->page_id ); ?></td>
                             <td><?php if ( $pg_cpt ): ?>
                                     <a href="<?php echo esc_url( get_edit_post_link( $pg_cpt['cpt_id'] ) ); ?>"><?php echo intval( $pg_cpt['cpt_id'] ); ?></a>
-                                    <br><small style="color:#888;"><?php echo esc_html( $pg_cpt['cpt_type'] ); ?></small>
+                                    <br><small style="color:var(--bcc-text-muted);"><?php echo esc_html( $pg_cpt['cpt_type'] ); ?></small>
                                 <?php else: ?>
-                                    <span style="color:#999;">&mdash;</span>
+                                    <span style="color:var(--bcc-text-muted);">&mdash;</span>
                                 <?php endif; ?>
                             </td>
                             <td><strong><?php echo esc_html( number_format( $pg->total_score, 1 ) ); ?></strong></td>
@@ -434,7 +434,7 @@ function bcc_trust_render_user_moderation( $user_id ) {
                         <tr>
                             <td>
                                 <code><?php echo esc_html( $ip_str ); ?></code>
-                                <?php if ( $whitelisted ): ?> <span style="color:#4caf50;font-size:11px;">✓ Whitelisted</span><?php endif; ?>
+                                <?php if ( $whitelisted ): ?> <span style="color:var(--bcc-success);font-size:11px;">✓ Whitelisted</span><?php endif; ?>
                             </td>
                             <td><?php echo intval( $ip_row->count ); ?></td>
                             <td><?php echo esc_html( $ip_row->last_seen ); ?></td>
@@ -471,7 +471,7 @@ function bcc_trust_render_user_moderation( $user_id ) {
                             <td>
                                 <?php echo esc_html( $act->action ); ?>
                                 <?php if ( strpos( $act->action, 'admin_' ) === 0 ): ?>
-                                    <span style="background:#0073aa;color:#fff;font-size:10px;padding:1px 4px;border-radius:3px;margin-left:4px;">ADMIN</span>
+                                    <span style="background:var(--bcc-accent);color:#fff;font-size:10px;padding:1px 4px;border-radius:3px;margin-left:4px;">ADMIN</span>
                                 <?php endif; ?>
                             </td>
                             <td>
@@ -494,20 +494,6 @@ function bcc_trust_render_user_moderation( $user_id ) {
 
     </div>
 
-    <style>
-    .bcc-panel {
-        background: #fff;
-        padding: 20px;
-        margin-top: 20px;
-        border: 1px solid #ccd0d4;
-        border-radius: 3px;
-    }
-    .bcc-panel h2 {
-        margin-top: 0;
-        padding-bottom: 10px;
-        border-bottom: 1px solid #eee;
-    }
-    </style>
     <?php
 }
 
@@ -516,8 +502,8 @@ function bcc_trust_render_user_moderation( $user_id ) {
 // ──────────────────────────────────────────────────────────────
 
 function bcc_trust_stat_card( $title, $content_cb ) {
-    echo '<div style="background:#f8f9f9;padding:15px;border-radius:4px;">';
-    echo '<div style="font-size:12px;color:#666;margin-bottom:8px;">' . esc_html( $title ) . '</div>';
+    echo '<div style="background:var(--bcc-bg-raised);padding:15px;border-radius:4px;">';
+    echo '<div style="font-size:12px;color:var(--bcc-text-secondary);margin-bottom:8px;">' . esc_html( $title ) . '</div>';
     call_user_func( $content_cb );
     echo '</div>';
 }
