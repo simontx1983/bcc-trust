@@ -247,14 +247,43 @@ final class MysqliWpdb
     }
 
     /**
+     * Rows of the most recent SELECT, as real `wpdb::$last_result`.
+     *
+     * ⚠ REAL `wpdb` STORES OBJECTS HERE REGARDLESS of the `$output` the
+     * caller asked for: `query()` fills it, and `get_results()` /
+     * `get_col()` / `get_var()` / `get_row()` project out of it afterwards.
+     * The null-query form of each of those reads this WITHOUT re-querying,
+     * which is the whole idiom this double could not model before.
+     *
+     * It is public because real `wpdb::$last_result` is public and callers
+     * are entitled to read it.
+     *
+     * @var list<object>
+     */
+    public array $last_result = [];
+
+    /**
      * Run a write/DDL query. Returns affected-row count for DML, true for DDL,
-     * or false on error (mirrors $wpdb->query). Sets insert_id + last_error.
+     * the ROW COUNT for a SELECT, or false on error (mirrors $wpdb->query).
+     * Sets insert_id + last_error.
+     *
+     * ⚠ A SELECT run through here now FILLS `$last_result` and returns the
+     * row count, because that is what real `wpdb::query()` does and it is
+     * what the `query($sql)` then `get_col(null)` idiom depends on. It used
+     * to free the result set and return `true`, storing nothing — so a
+     * caller using that idiom got a TypeError here and correct data in
+     * production. No test drives a SELECT through this method and asserts
+     * its return value (checked), and the write/DDL paths are untouched.
      *
      * @return int|bool
      */
     public function query(string $sql)
     {
         $this->last_error = '';
+        // Real `wpdb::query()` calls `flush()` first, which clears
+        // `last_result`. Modelled, so a failed or non-SELECT query cannot
+        // leave the PREVIOUS query's rows readable through `get_col(null)`.
+        $this->last_result = [];
         if (trim($sql) === '') {
             // See get_results(): an empty query is a refused prepare(), not a crash.
             $this->last_error = 'Empty query (prepare() returned an empty string).';
@@ -277,9 +306,33 @@ final class MysqliWpdb
             $this->rows_affected = max(0, (int) $affected);
             return $affected >= 0 ? $affected : true;
         }
-        // SELECT returned a result set — caller should have used get_*; free it.
+        // A SELECT result set. Real `wpdb` keeps these in `last_result`
+        // and returns the row count; the `get_col(null)` idiom reads them.
+        while ($row = $result->fetch_object()) {
+            $this->last_result[] = $row;
+        }
         $result->free();
-        return true;
+        return count($this->last_result);
+    }
+
+    /**
+     * Project `$last_result` into one of wpdb's output shapes.
+     *
+     * Real `wpdb` holds objects and converts on the way out, so this is
+     * where ARRAY_A / ARRAY_N are produced — never by fetching a different
+     * mysqli shape, or `last_result` would disagree with the return value.
+     *
+     * @return list<object|array<string|int, mixed>>
+     */
+    private function projectLastResult(string $output): array
+    {
+        if ($output === 'ARRAY_A') {
+            return array_map(static fn(object $r): array => (array) $r, $this->last_result);
+        }
+        if ($output === 'ARRAY_N') {
+            return array_map(static fn(object $r): array => array_values((array) $r), $this->last_result);
+        }
+        return $this->last_result;
     }
 
     /**
@@ -299,9 +352,16 @@ final class MysqliWpdb
      * `ARRAY_A` and captures DDL as `ARRAY_N`, so it could not have been
      * covered honestly without this.
      */
-    public function get_results(string $sql, string $output = 'OBJECT'): array
+    public function get_results(?string $sql = null, string $output = 'OBJECT'): array
     {
         $this->last_error = '';
+        // ⚠ THE NULL FORM READS `last_result` WITHOUT RE-QUERYING, which is
+        // what real `wpdb` does and what `query()` then `get_col(null)`
+        // relies on. It must NOT clear `last_error`'s meaning or count a
+        // query, because no query happens.
+        if ($sql === null) {
+            return $this->projectLastResult($output);
+        }
         if (trim($sql) === '') {
             $this->last_error = 'Empty query (prepare() returned an empty string).';
             return [];
@@ -325,33 +385,57 @@ final class MysqliWpdb
             }
             return [];
         }
-        $rows = [];
-        if ($output === 'ARRAY_A') {
-            while ($row = $res->fetch_assoc()) {
-                $rows[] = $row;
-            }
-        } elseif ($output === 'ARRAY_N') {
-            while ($row = $res->fetch_row()) {
-                $rows[] = $row;
-            }
-        } else {
-            while ($row = $res->fetch_object()) {
-                $rows[] = $row;
-            }
+        // Fetch objects ONCE into `last_result`, then project — the order
+        // real `wpdb` uses. Fetching the requested shape directly instead
+        // would leave `last_result` empty or disagreeing with the return.
+        $this->last_result = [];
+        while ($row = $res->fetch_object()) {
+            $this->last_result[] = $row;
         }
         $res->free();
-        return $rows;
+        return $this->projectLastResult($output);
     }
 
-    public function get_row(string $sql): ?object
+    /**
+     * ⚠ `$output` and `$y` ADDED HERE for the same reason `$output` was
+     * added to `get_results()`: real `wpdb::get_row($query, $output, $y)`
+     * takes them, PHP SILENTLY IGNORES a surplus argument to a
+     * user-defined method, and so a caller passing `ARRAY_A` would have
+     * received an object here and an array in production — with no error
+     * anywhere. A latent gap rather than a live break: no current caller
+     * in either plugin passes them (checked). Closed now so it cannot
+     * become one.
+     *
+     * @return object|array<string|int, mixed>|null
+     */
+    public function get_row(?string $sql = null, string $output = 'OBJECT', int $y = 0)
     {
-        $rows = $this->get_results($sql);
-        return $rows[0] ?? null;
+        $rows = $this->get_results($sql, $output);
+        return $rows[$y] ?? null;
     }
 
-    /** @return mixed */
-    public function get_var(string $sql)
+    /**
+     * ⚠ `$x` and `$y` ADDED — same silent-surplus-argument class as
+     * `get_row()` above. A caller asking for column 1 would have been
+     * handed column 0 here and column 1 in production, with no error.
+     * No current caller passes them (checked).
+     *
+     * The single-row fast path is PRESERVED for the ordinary call
+     * (`get_var($sql)`), so every existing call keeps its existing code
+     * path and this change cannot alter their cost or behaviour. Only the
+     * null form and a non-zero `$y` go through `get_results()`, which has
+     * to fetch every row to reach row `$y` — exactly as real `wpdb` does.
+     *
+     * @return mixed
+     */
+    public function get_var(?string $sql = null, int $x = 0, int $y = 0)
     {
+        if ($sql === null || $y > 0) {
+            $rows = $this->get_results($sql, 'ARRAY_N');
+            /** @var array<int, mixed>|null $row */
+            $row = $rows[$y] ?? null;
+            return is_array($row) ? ($row[$x] ?? null) : null;
+        }
         $this->last_error = '';
         if ($this->shouldFail($sql)) {
             // ⚠ NULL, NOT FALSE. Real `wpdb::get_var()` returns null for a
@@ -372,18 +456,38 @@ final class MysqliWpdb
             }
             return null;
         }
-        $row = $res->fetch_row();
+        // The fast path reads one row, so `last_result` is set to just
+        // that row rather than left stale from an earlier query — a stale
+        // value would be readable through a later `get_col(null)`.
+        $obj = $res->fetch_object();
         $res->free();
-        return $row[0] ?? null;
+        $this->last_result = $obj === null ? [] : [$obj];
+        if ($obj === null) {
+            return null;
+        }
+        $vals = array_values((array) $obj);
+        return $vals[$x] ?? null;
     }
 
-    /** @return list<mixed> */
-    public function get_col(string $sql): array
+    /**
+     * ⚠ `$sql` IS NULLABLE AND `$x` EXISTS, because real `wpdb` is
+     * `get_col( $query = null, $x = 0 )` and the null form — project
+     * `last_result` without re-querying — is a documented, used idiom.
+     * bcc-core's `PeepSoGroupRepository` calls `$wpdb->query($prepared)`
+     * then `$wpdb->get_col(null)` at two sites; against the previous
+     * `get_col(string $sql)` that was a hard
+     * `TypeError: Argument #1 ($sql) must be of type string, null given`,
+     * which red-lit bcc-trust's integration suite on EVERY branch,
+     * including main, for code that is correct in production.
+     *
+     * @return list<mixed>
+     */
+    public function get_col(?string $sql = null, int $x = 0): array
     {
         $out = [];
         foreach ($this->get_results($sql) as $row) {
             $vals = array_values((array) $row);
-            $out[] = $vals[0] ?? null;
+            $out[] = $vals[$x] ?? null;
         }
         return $out;
     }
