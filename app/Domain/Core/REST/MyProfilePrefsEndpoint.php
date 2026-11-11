@@ -208,9 +208,17 @@ final class MyProfilePrefsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        $touched = false;
+        // ⚠ ALL-OR-NOTHING (F-97). Phase 1 validates EVERY present field
+        // and the one precondition a write can fail on (PeepSo, for
+        // profile_visibility) before ANYTHING is written. Phase 2 writes.
+        // This used to validate-and-write field by field, so a 422 on a
+        // later field (e.g. a bad default_post_audience) returned an error
+        // while earlier fields, including profile_visibility, which feeds
+        // search and feed gating, were already saved: a "failed" request
+        // that had partly succeeded.
 
-        // profile_visibility → peepso_users.usr_profile_acc
+        // ── Phase 1: validate, collecting the planned writes ─────────────
+        $profileAcc = null; // ?int
         $profileVis = $request->get_param('profile_visibility');
         if ($profileVis !== null) {
             if (!is_string($profileVis) || !isset(self::PROFILE_VISIBILITY_TOKENS[$profileVis])) {
@@ -220,14 +228,15 @@ final class MyProfilePrefsEndpoint
                     422
                 );
             }
-            $err = self::writeProfileAccessibility($userId, self::PROFILE_VISIBILITY_TOKENS[$profileVis]);
-            if ($err instanceof WP_REST_Response) {
-                return $err;
+            if (!class_exists('\\PeepSoUser')) {
+                return self::peepsoUnavailable();
             }
-            $touched = true;
+            $profileAcc = self::PROFILE_VISIBILITY_TOKENS[$profileVis];
         }
 
-        // post_visibility → peepso_profile_post_acc user_meta
+        /** @var array<string, string> $meta user_meta key => value to write */
+        $meta = [];
+
         $postVis = $request->get_param('post_visibility');
         if ($postVis !== null) {
             if (!is_string($postVis) || !isset(self::POST_VISIBILITY_TOKENS[$postVis])) {
@@ -237,43 +246,9 @@ final class MyProfilePrefsEndpoint
                     422
                 );
             }
-            update_user_meta(
-                $userId,
-                'peepso_profile_post_acc',
-                (string) self::POST_VISIBILITY_TOKENS[$postVis]
-            );
-            $touched = true;
+            $meta['peepso_profile_post_acc'] = (string) self::POST_VISIBILITY_TOKENS[$postVis];
         }
 
-        // hide_birthday_year → peepso_hide_birthday_year user_meta
-        $hideBday = $request->get_param('hide_birthday_year');
-        if ($hideBday !== null) {
-            $value = filter_var($hideBday, FILTER_VALIDATE_BOOLEAN);
-            update_user_meta($userId, 'peepso_hide_birthday_year', $value ? '1' : '0');
-            $touched = true;
-        }
-
-        // hide_online → peepso_hide_online_status user_meta
-        $hideOnline = $request->get_param('hide_online');
-        if ($hideOnline !== null) {
-            $value = filter_var($hideOnline, FILTER_VALIDATE_BOOLEAN);
-            update_user_meta($userId, 'peepso_hide_online_status', $value ? '1' : '0');
-            $touched = true;
-        }
-
-        // hide_from_search → peepso_is_hide_profile_from_user_listing user_meta
-        $hideFromSearch = $request->get_param('hide_from_search');
-        if ($hideFromSearch !== null) {
-            $value = filter_var($hideFromSearch, FILTER_VALIDATE_BOOLEAN);
-            update_user_meta(
-                $userId,
-                'peepso_is_hide_profile_from_user_listing',
-                $value ? '1' : '0'
-            );
-            $touched = true;
-        }
-
-        // default_post_audience → peepso_last_used_post_privacy user_meta
         $defaultAudience = $request->get_param('default_post_audience');
         if ($defaultAudience !== null) {
             if (!is_string($defaultAudience) || !isset(self::POST_AUDIENCE_TOKENS[$defaultAudience])) {
@@ -283,30 +258,48 @@ final class MyProfilePrefsEndpoint
                     422
                 );
             }
-            update_user_meta(
-                $userId,
-                'peepso_last_used_post_privacy',
-                (string) self::POST_AUDIENCE_TOKENS[$defaultAudience]
-            );
-            $touched = true;
+            $meta['peepso_last_used_post_privacy'] = (string) self::POST_AUDIENCE_TOKENS[$defaultAudience];
         }
 
-        // mentor_opt_in → bcc_mentor_opt_in user_meta (Rank Phase 7
-        // §21.4). No eligibility check on the WRITE — listing composes
-        // opt-in AND the live capability at read time.
+        // Boolean flags: any value is accepted (FILTER_VALIDATE_BOOLEAN), so
+        // they cannot fail validation.
+        foreach ([
+            'hide_birthday_year' => 'peepso_hide_birthday_year',
+            'hide_online'        => 'peepso_hide_online_status',
+            'hide_from_search'   => 'peepso_is_hide_profile_from_user_listing',
+        ] as $param => $metaKey) {
+            $raw = $request->get_param($param);
+            if ($raw !== null) {
+                $meta[$metaKey] = filter_var($raw, FILTER_VALIDATE_BOOLEAN) ? '1' : '0';
+            }
+        }
+
+        // mentor_opt_in → bcc_mentor_opt_in (Rank Phase 7 §21.4). No
+        // eligibility check on the WRITE: listing composes opt-in AND the
+        // live capability at read time.
         $mentorOptIn = $request->get_param('mentor_opt_in');
-        if ($mentorOptIn !== null) {
-            $value = filter_var($mentorOptIn, FILTER_VALIDATE_BOOLEAN);
-            \BCC\Trust\Core\Plugin::instance()->mentorListingService()->setOptIn($userId, $value);
-            $touched = true;
-        }
+        $mentorValue = $mentorOptIn !== null ? filter_var($mentorOptIn, FILTER_VALIDATE_BOOLEAN) : null;
 
-        if (!$touched) {
+        if ($profileAcc === null && $meta === [] && $mentorValue === null) {
             return ApiResponse::error(
                 'bcc_invalid_request',
                 'No profile preferences provided.',
                 422
             );
+        }
+
+        // ── Phase 2: every field validated; write them all ───────────────
+        if ($profileAcc !== null) {
+            $err = self::writeProfileAccessibility($userId, $profileAcc);
+            if ($err instanceof WP_REST_Response) {
+                return $err;
+            }
+        }
+        foreach ($meta as $metaKey => $value) {
+            update_user_meta($userId, $metaKey, $value);
+        }
+        if ($mentorValue !== null) {
+            \BCC\Trust\Core\Plugin::instance()->mentorListingService()->setOptIn($userId, $mentorValue);
         }
 
         $resp = ApiResponse::ok(self::readAll($userId));
@@ -408,14 +401,19 @@ final class MyProfilePrefsEndpoint
         return is_numeric($value) ? (int) $value : 20;
     }
 
+    private static function peepsoUnavailable(): WP_REST_Response
+    {
+        return ApiResponse::error(
+            'bcc_peepso_unavailable',
+            'Profile preferences require PeepSo. The administrator should activate the PeepSo plugin.',
+            503
+        );
+    }
+
     private static function writeProfileAccessibility(int $userId, int $accInt): ?WP_REST_Response
     {
         if (!class_exists('\\PeepSoUser')) {
-            return ApiResponse::error(
-                'bcc_peepso_unavailable',
-                'Profile preferences require PeepSo. The administrator should activate the PeepSo plugin.',
-                503
-            );
+            return self::peepsoUnavailable();
         }
         $user = \PeepSoUser::get_instance($userId);
         $row = $user->get_peepso_user();
