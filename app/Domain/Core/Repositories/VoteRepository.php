@@ -1388,15 +1388,31 @@ class VoteRepository {
     }
 
     /**
-     * Count active votes by voter since a MySQL DATETIME boundary.
-     * Used by the §O3 living header for today's reviews_written count.
+     * Count votes by voter cast since a MySQL DATETIME boundary (site-local
+     * time, the frame `created_at` is written in).
+     *
+     * Default: ACTIVE votes only — the §O3 living header's "reviews today".
+     * `$activeOnly = false` counts every row cast in the window whatever its
+     * status: the rapid-voting detector (F-102) measures how fast a voter
+     * CASTS, so a burst that is immediately retracted must still count.
+     * (Re-casting a retracted vote resets its created_at, so it counts too.)
      */
-    public function countByVoterSince( int $voterId, string $sinceMysql ): int {
+    public function countByVoterSince( int $voterId, string $sinceMysql, bool $activeOnly = true ): int {
         if ($voterId <= 0 || $sinceMysql === '') {
             return 0;
         }
 
         global $wpdb;
+
+        if ( ! $activeOnly ) {
+            return (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(*) FROM {$this->table}
+                 WHERE voter_user_id = %d
+                   AND created_at   >= %s",
+                $voterId,
+                $sinceMysql
+            ) );
+        }
 
         return (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(*) FROM {$this->table}
