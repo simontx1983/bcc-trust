@@ -312,7 +312,8 @@ final class AnnouncementCapabilityResolver
      *   - `status`            one of the four §4.32.13 READ states
      *   - `is_archived`       bool
      *   - `comments_enabled`  bool
-     *   - `author_user_id`    int   (for the report gate's self-report rung)
+     *   - `author_user_id`    int   (the self-report rung, and — F-147 — the
+     *                                 author-only rung of edit / pin / publish)
      *
      * `$viewer` is the viewer's standing, computed by the caller from the
      * existing services — this class performs no standing check:
@@ -352,9 +353,22 @@ final class AnnouncementCapabilityResolver
         $archived   = self::flag($row, 'is_archived', true);   // absent ⇒ archived
         $published  = self::status($row) === self::STATUS_PUBLISHED;
 
+        // ⚠⚠ F-147: EDIT, PIN AND PUBLISH ARE AUTHOR-ONLY; ARCHIVE IS NOT.
+        // After a claim hand-over the current operator sees the previous
+        // operator's notices on the detail read. Archive is open to them
+        // (AnnouncementWriteService::archive() falls back to the page's public
+        // row), but edit, pin and publish still resolve the row through the
+        // author-bound findForOwner() and answer 404 — so those three must
+        // not advertise a control the route refuses.
+        //
+        // ⚠ The author is a NARROWING input here, never a granting one
+        // (§4.32.2 forbids it as authority): $isAuthor can only be true when
+        // $isOperator already is. An absent / unreadable author fails closed.
+        $isAuthor = $isOperator && self::authoredByOperator($decision, $row);
+
         return [
-            'can_edit'            => self::ownerAction($isOperator, $archived, $featureEnabled),
-            'can_pin'             => self::pin($isOperator, $archived, $published, $featureEnabled),
+            'can_edit'            => self::ownerAction($isAuthor, $archived, $featureEnabled),
+            'can_pin'             => self::pin($isAuthor, $archived, $published, $featureEnabled),
             // ⚠⚠ NARROWED WITH THE ROUTE, and it has to be. The archive route
             // refuses any non-published row (§4.32.6), so leaving this as a
             // plain owner action would hand a client a permitted capability for
@@ -393,7 +407,7 @@ final class AnnouncementCapabilityResolver
             // draft, scheduled, and blocked as the permitted recovery path —
             // proceeds. This capability answers the same question the route
             // answers, so the two cannot disagree about a row.
-            'can_publish'         => self::publish($isOperator, $archived, $published, $featureEnabled),
+            'can_publish'         => self::publish($isAuthor, $archived, $published, $featureEnabled),
             'can_manage_comments' => self::manageComments($isOperator, $featureEnabled),
             'can_comment'         => self::comment($row, $viewer, $archived, $published, $featureEnabled),
             // ⚠ NOT gated on $archived. §4.32.6 keeps an archived
@@ -859,6 +873,21 @@ final class AnnouncementCapabilityResolver
             self::STATUS_PUBLISHED,
             self::STATUS_BLOCKED,
         ], true) ? $status : self::STATUS_DRAFT;
+    }
+
+    /**
+     * F-147: the resolved operator wrote this row. Both ids must be positive
+     * — a zero author (unreadable `post_author`) never matches.
+     *
+     * @param array<string, mixed> $decision
+     * @param array<string, mixed> $row
+     */
+    private static function authoredByOperator(array $decision, array $row): bool
+    {
+        $operatorId = self::id($decision, 'operator_user_id');
+        $authorId   = self::id($row, 'author_user_id');
+
+        return $operatorId > 0 && $authorId === $operatorId;
     }
 
     /**
