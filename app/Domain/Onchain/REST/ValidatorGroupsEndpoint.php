@@ -436,9 +436,13 @@ final class ValidatorGroupsEndpoint
                 );
 
             case JoinResult::CODE_OPT_OUT_ACTIVE:
+                // Since F-158 this is ONLY a moderator eviction (a voluntary
+                // leave no longer blocks an explicit Join), so the copy says
+                // so. The old "try again later or rejoin from the discovery
+                // page" pointed at the very gate that was refusing.
                 return ApiResponse::error(
                     'bcc_permission_denied',
-                    'You opted out of this community recently. Try again later or rejoin from the discovery page.',
+                    'A moderator removed you from this community, so you cannot rejoin it.',
                     403,
                     ['reason_code' => 'opt_out_active']
                 );

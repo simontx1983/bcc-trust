@@ -4,7 +4,9 @@
  *
  * Soft gate, suggest-don't-auto-join model:
  *   - joinIfEligible(): explicit user-initiated join. Verifies eligibility,
- *     respects opt-out, calls PeepSoGroupWriter::join.
+ *     calls PeepSoGroupWriter::join. An explicit join OVERRIDES (and on
+ *     success clears) a prior opt-out (F-158); the opt-out only stops
+ *     automatic re-adding.
  *   - findEligibleGroups(): read-side ("you qualify for these").
  *   - reconcileForUser(): batch auto-join — only invoked for users who
  *     opted in via `bcc_auto_join_eligible_groups` user_meta. Default
@@ -44,7 +46,22 @@ final class NftGroupGateService {
     private array $optOutCache = [];
 
     /**
-     * Verify eligibility, respect opt-out, and join via PeepSoGroupWriter.
+     * Verify eligibility and join via PeepSoGroupWriter. This is the
+     * EXPLICIT, user-initiated Join.
+     *
+     * ⚠ AN EXPLICIT JOIN OVERRIDES A VOLUNTARY OPT-OUT (F-158, product
+     * decision 2026-11-10). The TTL'd opt-out recorded when a member LEAVES
+     * exists to stop AUTOMATIC re-adding: reconcileForUser() →
+     * findEligibleGroups() still skips opted-out groups. It must not stop
+     * the member choosing to come back. This used to refuse with
+     * optOutActive for the whole 90-day TTL, even on a deliberate click.
+     * The user must still pass eligibility (hold the NFT). A successful join
+     * clears the opt-out; a refused one leaves it.
+     *
+     * ⚠⚠ A PERMANENT opt-out still refuses. That is the moderator-eviction
+     * entry (bcc-trust.php, peepso_action_group_user_delete "Path 3"), and
+     * this refusal is what stops an evicted member re-joining the moment
+     * they still qualify. Never relax it as part of "join overrides opt-out".
      *
      * Idempotent: if the user is already a member, returns
      * JoinResult::alreadyMember (success=true, no PeepSo write).
@@ -59,7 +76,7 @@ final class NftGroupGateService {
             return JoinResult::notAHolderGroup();
         }
 
-        if ($this->isOptOutActive($userId, $groupId)) {
+        if ($this->isPermanentOptOut($userId, $groupId)) {
             return JoinResult::optOutActive($config->minBalance);
         }
 
@@ -318,6 +335,20 @@ final class NftGroupGateService {
         }
         unset($map[$groupId]);
         $this->persistOptOutMap($userId, $map);
+    }
+
+    /**
+     * TRUE only for a PERMANENT opt-out, i.e. a moderator eviction
+     * (recordPermanentOptOut). A voluntary, TTL'd opt-out is FALSE here
+     * even while active: it blocks automatic re-adding, not an explicit
+     * Join (F-158).
+     */
+    public function isPermanentOptOut(int $userId, int $groupId): bool {
+        if ($userId <= 0 || $groupId <= 0) {
+            return false;
+        }
+        $map = $this->loadOptOutMap($userId);
+        return isset($map[$groupId]) && $map[$groupId] === self::PERMANENT_OPT_OUT_TIMESTAMP;
     }
 
     public function isOptOutActive(int $userId, int $groupId): bool {
