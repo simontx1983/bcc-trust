@@ -2092,13 +2092,22 @@ class VoteRepository {
     /**
      * Get mutual vote pairs for vote ring detection.
      *
+     * KEYSET-paginated (F-108): rows come ordered by the pair (user_a,
+     * user_b) and the caller passes the last pair it saw. The old LIMIT /
+     * OFFSET walk had no ORDER BY over a GROUP BY, so the group order could
+     * change between pages and the ring cron skipped some pairs and saw
+     * others twice. The scores joins read the canonical category_id = 0 row
+     * only — the PK is (page_id, category_id), so a page with category rows
+     * used to multiply mutual_count and total_weight (the F-142 family).
+     *
      * @param int $minSize    Minimum mutual count threshold.
      * @param int $pageLimit  Maximum rows to return.
-     * @param int $offset     Offset for pagination.
+     * @param int $afterUserA Keyset cursor: user_a of the last pair seen (0 = start).
+     * @param int $afterUserB Keyset cursor: user_b of the last pair seen.
      * @return object[]
      * @phpstan-return list<MutualVotePair>
      */
-    public function getMutualVotePairs( int $minSize, int $pageLimit = 500, int $offset = 0 ): array {
+    public function getMutualVotePairs( int $minSize, int $pageLimit = 500, int $afterUserA = 0, int $afterUserB = 0 ): array {
         global $wpdb;
 
         $scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
@@ -2110,19 +2119,23 @@ class VoteRepository {
                 COUNT(*) as mutual_count,
                 SUM(v1.weight + v2.weight) as total_weight
              FROM {$this->table} v1
-             JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id
+             JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id AND s1.category_id = 0
              JOIN {$this->table} v2 ON v2.voter_user_id = s1.page_owner_id
-             JOIN {$scoresTable} s2 ON v2.page_id = s2.page_id
+             JOIN {$scoresTable} s2 ON v2.page_id = s2.page_id AND s2.category_id = 0
              WHERE v1.status = 1
                AND v2.status = 1
                AND s2.page_owner_id = v1.voter_user_id
                AND v1.voter_user_id != v2.voter_user_id
+               AND (v1.voter_user_id > %d OR (v1.voter_user_id = %d AND v2.voter_user_id > %d))
              GROUP BY v1.voter_user_id, v2.voter_user_id
              HAVING mutual_count >= %d
-             LIMIT %d OFFSET %d",
+             ORDER BY v1.voter_user_id ASC, v2.voter_user_id ASC
+             LIMIT %d",
+            max( 0, $afterUserA ),
+            max( 0, $afterUserA ),
+            max( 0, $afterUserB ),
             $minSize,
-            $pageLimit,
-            $offset
+            $pageLimit
         ) );
     }
 
