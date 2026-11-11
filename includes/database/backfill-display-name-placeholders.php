@@ -63,16 +63,35 @@ if (!function_exists('bcc_trust_backfill_display_name_placeholders')) {
         $emailPattern = '%' . $wpdb->esc_like('@') . '%';
         $loginPattern = $wpdb->esc_like('u_') . '%';
 
+        // v3 adds: display_name = user_login, for ANY login (WordPress's
+        // default for wp-admin / WP-CLI accounts; the collation compares
+        // case-insensitively, as logins do).
+        $where = "(u.display_name LIKE %s
+                   OR u.display_name = u.user_email
+                   OR u.display_name LIKE %s
+                   OR u.display_name = u.user_login)";
+
+        // Dry-run count, logged before any write.
+        $count = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->users} u WHERE {$where}",
+            $emailPattern,
+            $loginPattern
+        ));
+        if ($wpdb->last_error !== '') {
+            return BCC_TRUST_MIGRATION_INCOMPLETE;
+        }
+        \BCC\Core\Log\Logger::info('[bcc-trust] display-name hygiene: rows to rewrite', [
+            'count' => (int) $count,
+        ]);
+
         for ($i = 0; $i < $maxIterations; $i++) {
-            /** @var list<object{ID: string, handle: string|null}> $rows */
+            /** @var list<object{ID: string, handle: string|null, user_login: string}> $rows */
             $rows = $wpdb->get_results($wpdb->prepare(
-                "SELECT u.ID, um.meta_value AS handle
+                "SELECT u.ID, um.meta_value AS handle, u.user_login
                    FROM {$wpdb->users} u
                    LEFT JOIN {$wpdb->usermeta} um
                           ON um.user_id = u.ID AND um.meta_key = %s
-                  WHERE (u.display_name LIKE %s
-                         OR u.display_name = u.user_email
-                         OR u.display_name LIKE %s)
+                  WHERE {$where}
                   LIMIT %d",
                 'bcc_handle',
                 $emailPattern,
@@ -98,9 +117,13 @@ if (!function_exists('bcc_trust_backfill_display_name_placeholders')) {
                 // the email/login patterns, re-selecting the row every
                 // iteration and wedging the loop at INCOMPLETE — such
                 // handles fall to Member <ID> instead.
+                // Same symmetry for v3's login predicate: a handle equal
+                // to the login would re-match forever (and show the
+                // login), so it falls to Member <ID> as well.
                 $placeholder = $handle !== ''
                         && !str_contains($handle, '@')
                         && !str_starts_with($handle, 'u_')
+                        && strcasecmp($handle, trim((string) $row->user_login)) !== 0
                     ? $handle
                     : 'Member ' . $userId;
 

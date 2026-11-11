@@ -238,6 +238,7 @@ require_once BCC_TRUST_PATH . 'includes/database/cleanup-dispute-panel.php';
 require_once BCC_TRUST_PATH . 'includes/database/cleanup-dispute-participations.php';
 require_once BCC_TRUST_PATH . 'includes/database/purge-edge-cache.php';
 require_once BCC_TRUST_PATH . 'includes/database/backfill-display-name-placeholders.php';
+require_once BCC_TRUST_PATH . 'includes/database/rotate-login-handles.php';
 require_once BCC_TRUST_PATH . 'includes/database/flush-object-cache-display-names.php';
 // One-shot repair of NFT-gate pointers orphaned by retire-stargaze-chain.php
 // (deleted chain + collections, surviving PeepSo group posts). Repoints only
