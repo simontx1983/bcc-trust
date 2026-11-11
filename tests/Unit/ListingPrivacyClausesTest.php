@@ -88,6 +88,38 @@ final class ListingPrivacyClausesTest extends TestCase
         self::assertStringContainsString('peepso_is_hide_profile_from_user_listing', $json);
     }
 
+    /**
+     * Admins must be able to find a hidden member in member search —
+     * the one job the "admins exempt" rule exists for.
+     */
+    public function testAdminsAreExemptFromHideFromSearch(): void
+    {
+        $GLOBALS['__bcc_lp']['admin'] = true;
+
+        $json = json_encode(PrivacySettings::filterPeepSoSearchArgs([]));
+        self::assertIsString($json);
+        self::assertStringNotContainsString('peepso_is_hide_profile_from_user_listing', $json);
+    }
+
+    /**
+     * ⛔ But the exemption is SCOPED. `bcc_privacy_discovery_optout` is a
+     * different setting that has always applied to admins too, so an
+     * admin fix must not quietly loosen it. If someone later converts the
+     * exemption into an early return from the method, this fails.
+     */
+    public function testAdminsAreStillSubjectToTheDiscoveryOptOut(): void
+    {
+        $GLOBALS['__bcc_lp']['admin'] = true;
+
+        $json = json_encode(PrivacySettings::filterPeepSoSearchArgs([]));
+        self::assertIsString($json);
+        self::assertStringContainsString(
+            'bcc_privacy_discovery_optout',
+            $json,
+            'the admin exemption must cover hide_from_search ONLY'
+        );
+    }
+
     public function testAnExistingMetaQueryIsPreservedNotOverwritten(): void
     {
         $args = PrivacySettings::filterPeepSoSearchArgs([

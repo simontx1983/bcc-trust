@@ -334,11 +334,25 @@ final class PrivacySettings
             ],
         ];
 
-        $bccClauses = [
-            'relation' => 'AND',
-            $optoutClause,
-            $hideClause,
-        ];
+        // ⚠ ADMINS ARE EXEMPT FROM hide_from_search, per the user's
+        // "admins exempt" rule — otherwise a moderator cannot find a
+        // hidden member in member search, which is the one job that rule
+        // exists for. Mirrors `PeepSo::is_admin()`, the same predicate
+        // `is_accessible_static` and the level-30 clause use, so the three
+        // cannot drift.
+        //
+        // ⛔ SCOPED TO THE HIDE CLAUSE ONLY, NOT AN EARLY RETURN FROM
+        // THIS METHOD. A blanket exemption would also drop
+        // `bcc_privacy_discovery_optout`, which is a DIFFERENT setting
+        // with its own history and which has always applied to admins
+        // too. Loosening it is a product decision nobody has made, so it
+        // is deliberately left alone and raised separately rather than
+        // changed under cover of an admin fix.
+        $isAdmin = class_exists('\\PeepSo') && \PeepSo::is_admin();
+
+        $bccClauses = $isAdmin
+            ? ['relation' => 'AND', $optoutClause]
+            : ['relation' => 'AND', $optoutClause, $hideClause];
 
         if (isset($args['meta_query']) && is_array($args['meta_query'])) {
             $existing = $args['meta_query'];
