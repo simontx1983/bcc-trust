@@ -1045,6 +1045,7 @@ final class NftHoldingsRepository
      * came back is never pruned. A balance > 0 row is never touched.
      *
      * @return int rows removed
+     * @throws \RuntimeException when the DELETE itself fails
      */
     public static function pruneTombstones(int $limit = self::TOMBSTONE_PRUNE_LIMIT): int
     {
@@ -1061,7 +1062,14 @@ final class NftHoldingsRepository
             max(1, min(5000, $limit))
         ));
 
-        return is_int($removed) ? $removed : 0;
+        // A failed DELETE must not read as "pruned 0": the daily hook would
+        // log a healthy-looking zero while tombstones pile up. Throw, so the
+        // hook's catch logs the failure instead.
+        if (!is_int($removed)) {
+            throw new \RuntimeException('NftHoldingsRepository::pruneTombstones DELETE failed: ' . (string) $wpdb->last_error);
+        }
+
+        return $removed;
     }
 
     /**
