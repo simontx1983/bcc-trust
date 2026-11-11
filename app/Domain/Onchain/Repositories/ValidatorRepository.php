@@ -544,14 +544,42 @@ final class ValidatorRepository
 
         $expiresAt = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
 
-        $existing = $wpdb->get_var($wpdb->prepare(
-            "SELECT id FROM {$table}
-             WHERE wallet_link_id = %d AND chain_id = %d AND operator_address = %s
+        // F-141: look the row up by the table's REAL unique key,
+        // uq_chain_operator (chain_id, operator_address). The lookup used to
+        // include wallet_link_id, so a validator the indexer had already
+        // bulk-inserted (wallet_link_id NULL) was missed, the plain INSERT
+        // below then collided with the unique key, and the method returned a
+        // STALE $wpdb->insert_id from an unrelated earlier insert — the
+        // validator was never linked to the verified wallet, silently.
+        $existingRow = $wpdb->get_row($wpdb->prepare(
+            "SELECT id, wallet_link_id FROM {$table}
+             WHERE chain_id = %d AND operator_address = %s
              LIMIT 1",
-            $walletLinkId,
             (int) $data['chain_id'],
             $data['operator_address']
         ));
+        if ($existingRow === null && $wpdb->last_error !== '') {
+            return false;
+        }
+
+        $existing = null;
+        if ($existingRow !== null) {
+            $owner = $existingRow->wallet_link_id === null ? null : (int) $existingRow->wallet_link_id;
+            // A row already linked to a DIFFERENT wallet link is not taken
+            // over here: this path seeds on verify and has no authority to
+            // re-home another link's validator. Unlinked (bulk-indexed) rows
+            // and rows already ours are claimed/refreshed below.
+            if ($owner !== null && $owner !== $walletLinkId) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] validator upsert: row already linked to another wallet; not re-homed', [
+                    'validator_id'      => (int) $existingRow->id,
+                    'chain_id'          => (int) $data['chain_id'],
+                    'existing_link_id'  => $owner,
+                    'requested_link_id' => $walletLinkId,
+                ]);
+                return false;
+            }
+            $existing = (int) $existingRow->id;
+        }
 
         $row = [
             'wallet_link_id'   => $walletLinkId,
@@ -593,13 +621,20 @@ final class ValidatorRepository
             }
         }
 
-        if ($existing) {
-            $wpdb->update($table, $row, ['id' => (int) $existing], $format, ['%d']);
-            return (int) $existing;
+        if ($existing !== null) {
+            if ($wpdb->update($table, $row, ['id' => $existing], $format, ['%d']) === false) {
+                return false;
+            }
+            return $existing;
         }
 
-        $wpdb->insert($table, $row, $format);
-        return $wpdb->insert_id ?: false;
+        // Check the insert itself: on failure $wpdb->insert_id still holds
+        // the id of whatever was inserted last on this connection.
+        if ($wpdb->insert($table, $row, $format) === false) {
+            return false;
+        }
+        $insertId = (int) $wpdb->insert_id;
+        return $insertId > 0 ? $insertId : false;
     }
 
     /**
