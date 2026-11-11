@@ -299,6 +299,11 @@ class BallotRepository
      * cluster findings applied, the post-cap weight actually counted,
      * and whether the ballot counted toward the quorum headcount.
      * Audit-only — snapshot columns are never touched.
+     *
+     * There is deliberately NO reason column. Why an excluded ballot
+     * (counted = 0) was excluded is derived from these columns plus the
+     * confirmed finding's representative — see PollService::exclusionReason()
+     * ('cluster_member' | 'zero_weight') and closureExclusionReasons().
      */
     public function recordClosureAudit(
         int $pollId,
