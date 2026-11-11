@@ -107,6 +107,146 @@ final class ProfileAccess
     public const REASON_PRIVATE = 'profile_private';
 
     /**
+     * Largest id set {@see filterVisible} will judge in one call.
+     *
+     * A list page is a few dozen rows, so this is a defensive bound on
+     * the `IN ()` rather than a real limit. Overflow is REFUSED, not
+     * truncated — see the method.
+     */
+    public const FILTER_VISIBLE_MAX = 500;
+
+    /**
+     * Of $userIds, the subset the CURRENT viewer may see — one query.
+     *
+     * For list surfaces (the member directory's rows, follower and
+     * watcher lists, watching lists). Per-row `canViewProfile()` would
+     * be N+1: each call reads the level AND, at level 30, asks
+     * peepso-friends for a friendship, so a page of 20 could cost 40
+     * queries.
+     *
+     * ── Why PeepSoUserSearch rather than a reimplemented ladder ──────
+     *
+     * Constraining `PeepSoUserSearch` with `include` makes PeepSo's own
+     * privacy SQL do the work for the whole set at once — the same
+     * pattern {@see \BCC\Trust\Core\Services\Mentions\MentionPolicy}
+     * already uses. That keeps ONE definition of "visible", so a list
+     * cannot drift from the single-profile gate or from PeepSo's own
+     * surfaces.
+     *
+     * It filters more than the profile level, all of it privacy-positive
+     * and all of it matching what PeepSo does elsewhere: banned and
+     * unvalidated accounts (`usr_role`), blocks in either direction when
+     * `user_blocking_enable` is on, and `hide_from_search`.
+     *
+     * ── The two exemptions PeepSo's SQL does NOT make ───────────────
+     *
+     * ⚠ `is_accessible_static()` exempts the OWNER and ADMINS before it
+     * consults the ladder. PeepSo's `pre_user_query` does NOT: its
+     * `usr_profile_acc <> ACCESS_PRIVATE` clause is unconditional, so a
+     * private user is absent from their own result set and admins do not
+     * see them either. Left to itself that would make this helper
+     * disagree with the gate on exactly those two cases, so both are
+     * re-applied here:
+     *   - the viewer always sees THEMSELVES;
+     *   - an admin sees everyone.
+     * Without that, a private member would vanish from their own
+     * followers list, which reads as data loss rather than privacy.
+     *
+     * Order is preserved and duplicates collapse, so a caller can use
+     * the result to filter its own page while keeping its sort.
+     *
+     * @param list<int> $userIds
+     * @return list<int>
+     */
+    public static function filterVisible(array $userIds): array
+    {
+        if ($userIds === []) {
+            return [];
+        }
+
+        $unique = [];
+        foreach ($userIds as $id) {
+            $i = (int) $id;
+            if ($i > 0) {
+                $unique[$i] = true;
+            }
+        }
+        if ($unique === []) {
+            return [];
+        }
+
+        // ⚠ REFUSE an oversized set rather than truncate it. Truncating
+        // would silently hide the tail of a list — a caller would get a
+        // short page and no indication why, which looks like missing
+        // data and is impossible to debug from the response.
+        if (count($unique) > self::FILTER_VISIBLE_MAX) {
+            return [];
+        }
+
+        $viewerId = function_exists('get_current_user_id') ? (int) get_current_user_id() : 0;
+
+        // Admin exemption, mirroring is_accessible_static().
+        if (class_exists('\\PeepSo') && \PeepSo::is_admin($viewerId > 0 ? $viewerId : null)) {
+            return self::inOriginalOrder($userIds, $unique);
+        }
+
+        // ⚠ Fail CLOSED when PeepSo is absent: no privacy filter means
+        // no way to judge, so nothing is visible except the viewer. Same
+        // posture as canViewProfile() and MentionPolicy.
+        if (!class_exists('\\PeepSoUserSearch')) {
+            return isset($unique[$viewerId]) ? [$viewerId] : [];
+        }
+
+        $ids    = array_keys($unique);
+        $search = new \PeepSoUserSearch(
+            [
+                'include' => $ids,
+                'number'  => count($ids),
+            ],
+            $viewerId > 0 ? $viewerId : null,
+            ''
+        );
+
+        /** @var list<int|numeric-string> $raw */
+        $raw     = $search->results;
+        $allowed = [];
+        foreach ($raw as $row) {
+            $i = (int) $row;
+            if ($i > 0) {
+                $allowed[$i] = true;
+            }
+        }
+
+        // Owner exemption, mirroring is_accessible_static(). PeepSo's
+        // unconditional privacy clause drops a private viewer from their
+        // own results, which would remove them from their own lists.
+        if ($viewerId > 0 && isset($unique[$viewerId])) {
+            $allowed[$viewerId] = true;
+        }
+
+        return self::inOriginalOrder($userIds, $allowed);
+    }
+
+    /**
+     * @param list<int>          $original
+     * @param array<int, true>   $keep
+     * @return list<int>
+     */
+    private static function inOriginalOrder(array $original, array $keep): array
+    {
+        $out     = [];
+        $emitted = [];
+        foreach ($original as $id) {
+            $i = (int) $id;
+            if ($i > 0 && isset($keep[$i]) && !isset($emitted[$i])) {
+                $out[]        = $i;
+                $emitted[$i]  = true;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * May the current viewer read $ownerId's profile surfaces?
      *
      * ⚠ CURRENT VIEWER ONLY. PeepSo resolves the viewer internally via

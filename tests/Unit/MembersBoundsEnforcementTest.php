@@ -11,7 +11,9 @@ use PHPUnit\Framework\TestCase;
  * `GET /bcc/v1/members` — the bound binds, and it binds BEFORE the work.
  *
  * ── ⚠ WHY THIS IS A SOURCE TEST AND NOT A DISPATCH TEST ─────────────────
- * `UsersEndpoint::members()` reaches `Plugin::instance()`, `WP_User_Query`,
+ * `UsersEndpoint::members()` reaches `Plugin::instance()`, `PeepSoUserSearch`
+ * (which wraps `WP_User_Query` with PeepSo's privacy SQL — the directory was
+ * re-routed through it so private profiles stop being listed),
  * two PeepSo repositories and an eleven-map prefetcher. Standing all of that
  * up in a harness with no WordPress would mean doubling so much that the
  * test would prove things about the doubles. The behaviour is instead proved
@@ -90,7 +92,18 @@ final class MembersBoundsEnforcementTest extends TestCase
     {
         yield 'the global type-count query' => ['getGlobalOwnedPageUserCountsByType'];
         yield 'the member prefetcher'       => ['Prefetcher'];
-        yield 'the user query'              => ['WP_User_Query'];
+        // ⚠ `PeepSoUserSearch`, not `WP_User_Query`. The directory was
+        // re-routed through PeepSo's privacy-aware search, so the bare
+        // `new \WP_User_Query(...)` is gone from members() — only a
+        // comment mentions it now, and membersBody() strips comments.
+        //
+        // The old token would therefore have taken this test's
+        // `markTestSkipped` branch: a GREEN SUITE with SILENTLY ONE
+        // FEWER CHECK, which is the worst of both outcomes. The
+        // invariant itself is unchanged and still worth asserting — the
+        // bounds refusal must precede the query that costs a read — so
+        // the token is updated rather than dropped.
+        yield 'the user query'              => ['PeepSoUserSearch'];
         yield 'the service locator'         => ['Plugin::instance'];
     }
 
