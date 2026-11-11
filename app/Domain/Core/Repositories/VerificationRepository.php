@@ -17,9 +17,6 @@ if (!defined('ABSPATH')) {
 
 class VerificationRepository {
 
-    private const CACHE_GROUP = 'bcc_trust_verifications';
-    private const CACHE_TTL   = 60;
-
     private UserInfoRepository $userInfoRepo;
 
     public function __construct() {
@@ -33,118 +30,6 @@ class VerificationRepository {
     public function isVerified(int $userId): bool {
         $userInfo = $this->userInfoRepo->getByUserId($userId);
         return $userInfo ? (bool) $userInfo->is_verified : false;
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    public function getGithubData(int $userId): array
-    {
-        $empty = [
-            'connected'       => false,
-            'username'        => null,
-            'verified_at'     => null,
-            'github_id'       => null,
-            'followers'       => 0,
-            'public_repos'    => 0,
-            'org_count'       => 0,
-            'trust_boost'     => 0.0,
-            'fraud_reduction' => 0,
-        ];
-
-        if (!$userId) {
-            return $empty;
-        }
-
-        $cache_key = 'github_' . $userId;
-        $cached    = wp_cache_get($cache_key, self::CACHE_GROUP);
-        if ($cached !== false) {
-            return is_array($cached) ? $cached : $empty;
-        }
-
-        global $wpdb;
-        $table = \BCC\Trust\Core\Database\TableRegistry::userVerifications();
-        $row   = $wpdb->get_row($wpdb->prepare(
-            "SELECT provider_id, provider_username, verified_at,
-                    trust_boost, fraud_reduction, meta
-             FROM {$table}
-             WHERE user_id = %d AND type = 'github' AND status = 'active'",
-            $userId
-        ));
-
-        if (!$row || !$row->provider_username) {
-            wp_cache_set($cache_key, 0, self::CACHE_GROUP, self::CACHE_TTL);
-            return $empty;
-        }
-
-        $meta   = $row->meta ? json_decode($row->meta, true) : [];
-        $result = [
-            'connected'       => true,
-            'username'        => $row->provider_username,
-            'verified_at'     => $row->verified_at,
-            'github_id'       => $row->provider_id,
-            'followers'       => (int) ($meta['followers'] ?? 0),
-            'public_repos'    => (int) ($meta['public_repos'] ?? 0),
-            'org_count'       => (int) ($meta['org_count'] ?? 0),
-            'trust_boost'     => (float) $row->trust_boost,
-            'fraud_reduction' => (int) $row->fraud_reduction,
-        ];
-
-        wp_cache_set($cache_key, $result, self::CACHE_GROUP, self::CACHE_TTL);
-        return $result;
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    public function getXData(int $userId): array
-    {
-        $empty = [
-            'connected'       => false,
-            'username'        => null,
-            'email'           => null,
-            'verified_at'     => null,
-            'trust_boost'     => 0.0,
-            'fraud_reduction' => 0,
-        ];
-
-        if (!$userId) {
-            return $empty;
-        }
-
-        $cache_key = 'x_' . $userId;
-        $cached    = wp_cache_get($cache_key, self::CACHE_GROUP);
-        if ($cached !== false) {
-            return is_array($cached) ? $cached : $empty;
-        }
-
-        global $wpdb;
-        $table = \BCC\Trust\Core\Database\TableRegistry::userVerifications();
-        $row   = $wpdb->get_row($wpdb->prepare(
-            "SELECT provider_username, verified_at,
-                    trust_boost, fraud_reduction, meta
-             FROM {$table}
-             WHERE user_id = %d AND type = 'x' AND status = 'active'",
-            $userId
-        ));
-
-        if (!$row || !$row->provider_username) {
-            wp_cache_set($cache_key, 0, self::CACHE_GROUP, self::CACHE_TTL);
-            return $empty;
-        }
-
-        $meta   = $row->meta ? json_decode($row->meta, true) : [];
-        $result = [
-            'connected'       => true,
-            'username'        => $row->provider_username,
-            'email'           => $meta['email'] ?? null,
-            'verified_at'     => $row->verified_at,
-            'trust_boost'     => (float) $row->trust_boost,
-            'fraud_reduction' => (int) $row->fraud_reduction,
-        ];
-
-        wp_cache_set($cache_key, $result, self::CACHE_GROUP, self::CACHE_TTL);
-        return $result;
     }
 
     /**

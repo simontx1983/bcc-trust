@@ -44,6 +44,8 @@ if (!defined('ABSPATH')) {
 
 final class BlogChainTagRepository
 {
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+
     /** Hard ceiling — also enforced by PostsService::BLOG_CHAIN_TAGS_MAX. */
     private const MAX_TAGS_PER_POST = 3;
 
@@ -201,19 +203,25 @@ final class BlogChainTagRepository
         global $wpdb;
         $table = self::table();
 
-        /** @var list<object{chain_id: numeric-string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT chain_id
-               FROM {$table}
-              WHERE post_id = %d
-              ORDER BY created_at ASC
-              LIMIT %d",
-            $postId,
-            self::MAX_TAGS_PER_POST
-        ));
+        // F-101: a failed read used to cache "no chain tags" for CACHE_TTL;
+        // it now reads as none for this call only.
+        try {
+            /** @var list<object{chain_id: numeric-string}> $rows */
+            $rows = self::runRead((string) $wpdb->prepare(
+                "SELECT chain_id
+                   FROM {$table}
+                  WHERE post_id = %d
+                  ORDER BY created_at ASC
+                  LIMIT %d",
+                $postId,
+                self::MAX_TAGS_PER_POST
+            ), __FUNCTION__, true);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+            return [];
+        }
 
         $ids = [];
-        foreach ($rows ?? [] as $row) {
+        foreach ($rows as $row) {
             $cid = (int) $row->chain_id;
             if ($cid > 0) {
                 $ids[] = $cid;
