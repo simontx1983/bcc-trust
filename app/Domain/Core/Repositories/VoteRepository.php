@@ -304,9 +304,13 @@ class VoteRepository {
     }
 
     /**
-     * Bulk-fetch vote rows by primary key. Used by FeedRankingService
-     * to hydrate review post bodies for an entire feed page in one
-     * round trip (vs N+1).
+     * Bulk-fetch ACTIVE (status = 1) vote rows by primary key. Used by
+     * ReviewBodyHydrator to hydrate review post bodies for an entire feed
+     * page in one round trip (vs N+1).
+     *
+     * Active only (F-88): a review whose vote was retracted (0), removed by
+     * dispute (2) or removed by moderation (3) must not render in any feed.
+     * A missing row here is how the feed learns to drop the item.
      *
      * Cache is intentionally bypassed — feed-page hydration is rare
      * enough that the per-vote cache (60s TTL) doesn't help, and the
@@ -314,9 +318,9 @@ class VoteRepository {
      * feed page cap (50 items at a time).
      *
      * @param list<int> $voteIds
-     * @return array<int, object> vote_id → row
+     * @return array<int, object> vote_id → row (active votes only)
      */
-    public function findManyByIds(array $voteIds): array
+    public function findManyActiveByIds(array $voteIds): array
     {
         if ($voteIds === []) {
             return [];
@@ -340,7 +344,8 @@ class VoteRepository {
         /** @var list<object>|null $rows */
         $rows = $wpdb->get_results(
             "SELECT " . self::COLUMNS . " FROM {$this->table}
-              WHERE id IN ({$idList})"
+              WHERE id IN ({$idList})
+                AND status = 1"
         );
 
         $out = [];
