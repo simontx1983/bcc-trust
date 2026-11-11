@@ -160,4 +160,84 @@ namespace {
             return 0;
         }
     }
+
+    /**
+     * Records every action fired, which is what makes "exactly one group
+     * notification per publish" an assertion rather than a claim.
+     * `peepso_groups_new_post` is the one that notifies a group's
+     * followers, so a test can count it directly.
+     */
+    if (!function_exists('do_action')) {
+        function do_action(string $hook, ...$args): void
+        {
+            $GLOBALS['__bcc_actions'][] = [$hook, $args];
+        }
+    }
+
+    /**
+     * Real DELETE, because the sidecar being CLEARED after a successful
+     * attach is load-bearing: it is what stops a re-save from notifying
+     * the group a second time. A no-op here would let that regression
+     * through while the test still passed.
+     */
+    if (!function_exists('delete_post_meta')) {
+        function delete_post_meta(int $postId, string $key, $value = ''): bool
+        {
+            $wpdb = $GLOBALS['wpdb'];
+
+            return $wpdb->query($wpdb->prepare(
+                "DELETE FROM `{$wpdb->postmeta}` WHERE post_id = %d AND meta_key = %s",
+                $postId,
+                $key
+            )) !== false;
+        }
+    }
+
+    /**
+     * Faithful enough to test the hook path: it writes the real row AND
+     * fires the transition, so `BlogStatusTransitionHandler` re-enters
+     * exactly as WordPress would.
+     *
+     * That second part is the point. A shim that only UPDATEd the row
+     * would leave the re-entrancy guard untested, and the guard is the
+     * reason the revert cannot ping-pong with the hook that triggered it.
+     * Counting the invocations lets a test assert the recursion is bounded
+     * rather than assuming it.
+     */
+    if (!function_exists('wp_update_post')) {
+        function wp_update_post($postarr = [], $wpError = false, $fireAfterHooks = true)
+        {
+            $wpdb   = $GLOBALS['wpdb'];
+            $postId = (int) ($postarr['ID'] ?? 0);
+            if ($postId <= 0) {
+                return 0;
+            }
+
+            $before = get_post($postId);
+            $old    = $before !== null ? (string) $before->post_status : '';
+            $new    = (string) ($postarr['post_status'] ?? $old);
+
+            if ($new !== '' && $new !== $old) {
+                $wpdb->query($wpdb->prepare(
+                    "UPDATE `{$wpdb->posts}` SET post_status = %s WHERE ID = %d",
+                    $new,
+                    $postId
+                ));
+
+                $GLOBALS['__bcc_transitions'][] = [$new, $old, $postId];
+
+                // What WordPress does next: fire transition_post_status.
+                // The handler is invoked directly because this harness
+                // registers no hooks.
+                $post = get_post($postId);
+                if ($post !== null) {
+                    (new \BCC\Trust\Core\Services\Feed\BlogStatusTransitionHandler(
+                        new \BCC\Trust\Core\Repositories\PeepSoActivityWriter()
+                    ))->handle($new, $old, $post);
+                }
+            }
+
+            return $postId;
+        }
+    }
 }

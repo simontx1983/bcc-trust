@@ -7,6 +7,7 @@ namespace BCC\Trust\Tests\Integration;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Services\BlogService;
+use BCC\Trust\Core\Services\PostsService;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -54,6 +55,9 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
     private int $pOpenPublic    = 0;
     private int $pSecretPublic  = 0;
     private int $pSecretMembers = 0;
+
+    /** @var list<int> parked drafts this case created, for teardown */
+    private array $parkedDraftIds = [];
 
     protected function setUp(): void
     {
@@ -108,23 +112,54 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
     /**
      * ⚠ The next suite inherits this database — only the bootstrap rebuilds
      * it. Leftover group and activity rows read as real data to anything
-     * that counts them.
+     * that counts them, so this suite cleans up after itself.
+     *
+     * ⚠⚠ BUT IT CLEANS UP ONLY ITS OWN ROWS. An earlier version of this
+     * method ran `DELETE FROM wp_postmeta`, `DELETE FROM wp_posts`,
+     * `DROP TABLE` on two shared tables and `ALTER TABLE … DROP COLUMN`
+     * four times. In a shared integration database that is not cleanup,
+     * it is sabotage of whatever suite runs next: it removes rows and
+     * COLUMNS another suite's fixtures depend on, and because the shared
+     * tables are created with `IF NOT EXISTS` and the columns added only
+     * when missing, leaving them in place is harmless while dropping them
+     * is not. A suite that can only pass by emptying the database is also
+     * a suite whose own result cannot be trusted.
+     *
+     * So: delete the fixture rows by THEIR OWN IDS, leave the schema
+     * alone, and never touch a row this suite did not insert.
      */
     protected function tearDown(): void
     {
         global $wpdb;
 
-        $wpdb->query("DELETE FROM {$wpdb->postmeta}");
-        $wpdb->query("DELETE FROM {$wpdb->posts}");
-        $wpdb->query("DROP TABLE IF EXISTS {$wpdb->prefix}peepso_activities");
-        $wpdb->query("DROP TABLE IF EXISTS {$wpdb->prefix}peepso_group_members");
-        $wpdb->query(
-            "ALTER TABLE {$wpdb->posts}
-                DROP COLUMN post_author,
-                DROP COLUMN post_content,
-                DROP COLUMN post_excerpt,
-                DROP COLUMN post_date_gmt"
-        );
+        $postIds = array_values(array_filter([
+            self::OPEN_GROUP,
+            self::SECRET_GROUP,
+            $this->pNoGroup,
+            $this->pOpenMembers,
+            $this->pOpenPublic,
+            $this->pSecretPublic,
+            $this->pSecretMembers,
+        ]));
+
+        if ($postIds !== []) {
+            $in = implode(',', array_map('intval', $postIds));
+            // Activity rows first — they reference the posts by external id.
+            $wpdb->query("DELETE FROM {$wpdb->prefix}peepso_activities WHERE act_external_id IN ({$in})");
+            $wpdb->query("DELETE FROM {$wpdb->postmeta} WHERE post_id IN ({$in})");
+            $wpdb->query("DELETE FROM {$wpdb->posts} WHERE ID IN ({$in})");
+        }
+
+        foreach ($this->parkedDraftIds as $pid) {
+            $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->prefix}peepso_activities WHERE act_external_id = %d", $pid));
+            $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->postmeta} WHERE post_id = %d", $pid));
+            $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->posts} WHERE ID = %d", $pid));
+        }
+        $this->parkedDraftIds = [];
+
+        $userIds = implode(',', [self::AUTHOR, self::MEMBER, self::NON_MEMBER]);
+        $wpdb->query("DELETE FROM {$wpdb->prefix}peepso_group_members WHERE gm_user_id IN ({$userIds})");
+
         PeepSoGroupRepository::bustNonOpenGroupIdsCache();
         unset($GLOBALS['__bcc_current_user']);
     }
@@ -309,6 +344,120 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
         self::assertContains($this->pNoGroup, $ids, 'a blog in no group is still served');
     }
 
+    // ── M1: a refused publish must UN-publish, not publish ungrouped ──
+
+    /**
+     * THE FAIL-OPEN THIS CLOSES, exercised through the HOOK, not REST.
+     *
+     * `attachParkedBlogGroup` runs on ANY transition to publish — wp-admin,
+     * wp-cli, another plugin — and a hook fires AFTER the status has already
+     * changed. An earlier version only logged on gate refusal and returned,
+     * which left the post PUBLISHED WITH NO GROUP MARKER. A members_only
+     * group blog with no group marker is a public wall post: the content was
+     * written for a restricted audience, so publishing it to everyone is the
+     * leak, not withholding it from the group.
+     *
+     * Here the author is removed from the secret group between saving the
+     * draft and publishing it, which is exactly the real-world case.
+     */
+    public function testARefusedPublishRevertsToDraftInsteadOfGoingPublic(): void
+    {
+        global $wpdb;
+
+        $postId = $this->insertParkedDraft(self::SECRET_GROUP, 'members_only');
+
+        // The author loses their membership after saving the draft.
+        $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->prefix}peepso_group_members WHERE gm_user_id = %d",
+            self::AUTHOR
+        ));
+        PeepSoGroupRepository::bustNonOpenGroupIdsCache();
+
+        $GLOBALS['__bcc_transitions'] = [];
+        $GLOBALS['__bcc_actions'] = [];
+        $GLOBALS['__bcc_current_user'] = self::AUTHOR;
+
+        // Publish it the way any non-REST route would.
+        wp_update_post(['ID' => $postId, 'post_status' => 'publish']);
+
+        $after = get_post($postId);
+        self::assertInstanceOf(\WP_Post::class, $after);
+        self::assertSame(
+            'draft',
+            $after->post_status,
+            'a refused publish must go BACK to draft, not stay published ungrouped'
+        );
+
+        // Never attached: no group marker, so it cannot read as a group post…
+        self::assertSame('', (string) get_post_meta($postId, 'peepso_group_id', true));
+        // …and, critically, it is not sitting on the public wall either.
+        self::assertNotContains($postId, $this->blogIdsFor(self::NON_MEMBER));
+        self::assertNotContains($postId, $this->blogIdsFor(0));
+
+        // The intent survives, so the author can fix their membership and
+        // publish again rather than silently losing the target.
+        self::assertSame(
+            (string) self::SECRET_GROUP,
+            (string) get_post_meta($postId, PostsService::BLOG_PENDING_GROUP_META, true),
+            'the parked target must survive the refusal'
+        );
+
+        // ⚠ AND THE GROUP WAS NEVER NOTIFIED. `attachToGroup` is what fires
+        // `peepso_groups_new_post`; a refusal that still notified would
+        // summon the group to read a post that is no longer published.
+        self::assertSame(
+            0,
+            $this->countAction('peepso_groups_new_post'),
+            'a refused publish must not notify the group'
+        );
+
+        // Bounded recursion: publish→draft and nothing further. The revert
+        // fires the same hook that triggered it, so without the re-entrancy
+        // guard this would not terminate.
+        self::assertCount(
+            2,
+            $GLOBALS['__bcc_transitions'],
+            'expected exactly publish-then-revert; more means the guard failed'
+        );
+    }
+
+    /**
+     * Control for the case above: with the membership INTACT the same hook
+     * path publishes and attaches. Without this, the assertions above could
+     * pass because the fixture never could have published at all.
+     */
+    public function testTheSameHookPathAttachesWhenTheGatePasses(): void
+    {
+        $postId = $this->insertParkedDraft(self::SECRET_GROUP, 'members_only');
+
+        $GLOBALS['__bcc_transitions'] = [];
+        $GLOBALS['__bcc_actions'] = [];
+        $GLOBALS['__bcc_current_user'] = self::AUTHOR;
+
+        wp_update_post(['ID' => $postId, 'post_status' => 'publish']);
+
+        $after = get_post($postId);
+        self::assertSame('publish', $after->post_status, 'a permitted publish must stay published');
+        self::assertSame(
+            (string) self::SECRET_GROUP,
+            (string) get_post_meta($postId, 'peepso_group_id', true),
+            'and it must be attached to the group'
+        );
+        // Sidecar cleared once the attach succeeded, so a re-save cannot
+        // notify the group a second time.
+        self::assertSame('', (string) get_post_meta($postId, PostsService::BLOG_PENDING_GROUP_META, true));
+        self::assertCount(1, $GLOBALS['__bcc_transitions']);
+
+        // EXACTLY ONE group notification. This is the property the parked
+        // sidecar exists to protect: a draft must not notify, and a publish
+        // must notify once — not twice, and not once per later save.
+        self::assertSame(
+            1,
+            $this->countAction('peepso_groups_new_post'),
+            'a permitted publish must notify the group exactly once'
+        );
+    }
+
     // ── helpers ──────────────────────────────────────────────────────
 
     /**
@@ -316,6 +465,14 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
      *
      * @return list<int>
      */
+    /** How many times a given action fired, via the do_action recorder. */
+    private function countAction(string $hook): int
+    {
+        $fired = $GLOBALS['__bcc_actions'] ?? [];
+
+        return count(array_filter($fired, static fn ($a) => ($a[0] ?? '') === $hook));
+    }
+
     private function blogIdsFor(int $sessionUserId): array
     {
         $GLOBALS['__bcc_current_user'] = $sessionUserId;
@@ -339,6 +496,38 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
         }
 
         return $ids;
+    }
+
+    /**
+     * A DRAFT blog whose group target is PARKED but not attached — exactly
+     * what `createBlog` leaves behind for a draft, because attaching would
+     * fire the group notification for something nobody can read yet.
+     *
+     * No activity row: a draft has none until it publishes.
+     */
+    private function insertParkedDraft(int $groupId, string $visibility): int
+    {
+        global $wpdb;
+
+        self::assertNotFalse($wpdb->query($wpdb->prepare(
+            "INSERT INTO {$wpdb->posts}
+                (post_type, post_status, post_name, post_title, post_author, post_excerpt, post_content, post_date_gmt)
+             VALUES ('peepso-post', 'draft', %s, %s, %d, 'excerpt', 'body', '2026-02-02 12:00:00')",
+            'parked-draft-' . $groupId,
+            'parked-draft',
+            self::AUTHOR
+        )), 'draft fixture: ' . $wpdb->last_error);
+
+        $postId = (int) $wpdb->insert_id;
+        self::assertGreaterThan(0, $postId);
+
+        update_post_meta($postId, '_bcc_activity_module', 'blog');
+        update_post_meta($postId, PostsService::BLOG_PENDING_GROUP_META, (string) $groupId);
+        update_post_meta($postId, PostsService::BLOG_PENDING_VISIBILITY_META, $visibility);
+
+        $this->parkedDraftIds[] = $postId;
+
+        return $postId;
     }
 
     private function buildTables(): void
