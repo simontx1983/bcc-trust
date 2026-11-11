@@ -2308,49 +2308,15 @@ final class PostsService
     }
 
     /**
-     * Group-wall write gate.
+     * Attach a DRAFT blog to the group it parked, at the moment it is
+     * published — the single point where the group notification fires.
      *
-     * Two-step check that mirrors the §4.7.5 / §4.7.6 read-side
-     * defense-in-depth pattern:
-     *
-     *   1. {@see GroupsService::resolveGroupAccess} returns null when
-     *      the group does not exist OR the viewer is anonymous OR the
-     *      group is `secret` privacy and the viewer is not a member.
-     *      All three failures collapse to 404 — the error message is
-     *      identical so a probe can't distinguish "no such group" from
-     *      "secret group, not in." This matches §4.7.5's posture.
-     *
-     *   2. With access resolved we then require active membership
-     *      (READ_ALLOWED_STATUSES — same set the comment-count gate
-     *      and FeedRankingService::hydrateGroupContexts use). A non-
-     *      member of an open / closed group sees 403 with a filterable
-     *      "Join the group to post here." message.
-     *
-     * The 403 message can be customised per-deployment via the
-     * `bcc_group_post_membership_required` filter — the contract pin
-     * is the error code (`bcc_permission_denied`); the human-facing
-     * copy is filterable so V2 group-creator overrides ("Only
-     * approved members can post in #foo") slot in without contract
-     * churn.
-     *
-     * Returns null when the gate passes; an error envelope when it
-     * doesn't (so the caller can `return $err` directly).
-     *
-     * `$visibility` is the already-normalized per-post visibility. When it
-     * is `public_all` the author must additionally be authorized to
-     * syndicate to the global feed — a rank-and-file member of a
-     * closed/secret group is REJECTED (not silently down-clamped) so the
-     * boundary is unambiguous and a direct REST call cannot bypass it.
-     * See GroupsService::canUsePublicAll / {@see PublicAllPolicy}.
-     *
-     * `$hallFeed` is the already-normalized §21.3 feed-channel selector.
-     * When it is `ranked` the target must be a Hall AND the author must
-     * pass the post_ranked_hall_feed capability (Journeyman+ AND
-     * Neutral+ AND not suspended AND not in recovery — the resolver is
-     * authoritative). Membership was already required above, so the
-     * full §21.3 predicate (member AND ranked-capable) holds here.
-     *
-     * @return array{error: string, message: string, data?: array<string, mixed>}|null
+     * Idempotent: it re-gates the author, no-ops when `peepso_group_id`
+     * is already set, and clears the sidecar either way, so an
+     * unpublish/republish cycle cannot notify the group twice. On a gate
+     * failure it does NOT attach and KEEPS the sidecar, so the intent
+     * stays recoverable; the authoritative refusal lives in updateBlog,
+     * which can keep the post a draft and answer the caller.
      */
     public static function attachParkedBlogGroup(int $postId, int $authorId): void
     {
@@ -2431,6 +2397,48 @@ final class PostsService
     }
 
     /**
+     * Group-wall write gate.
+     *
+     * Two-step check that mirrors the §4.7.5 / §4.7.6 read-side
+     * defense-in-depth pattern:
+     *
+     *   1. {@see GroupsService::resolveGroupAccess} returns null when
+     *      the group does not exist OR the viewer is anonymous OR the
+     *      group is `secret` privacy and the viewer is not a member.
+     *      All three failures collapse to 404 — the error message is
+     *      identical so a probe can't distinguish "no such group" from
+     *      "secret group, not in." This matches §4.7.5's posture.
+     *
+     *   2. With access resolved we then require active membership
+     *      (READ_ALLOWED_STATUSES — same set the comment-count gate
+     *      and FeedRankingService::hydrateGroupContexts use). A non-
+     *      member of an open / closed group sees 403 with a filterable
+     *      "Join the group to post here." message.
+     *
+     * The 403 message can be customised per-deployment via the
+     * `bcc_group_post_membership_required` filter — the contract pin
+     * is the error code (`bcc_permission_denied`); the human-facing
+     * copy is filterable so V2 group-creator overrides ("Only
+     * approved members can post in #foo") slot in without contract
+     * churn.
+     *
+     * Returns null when the gate passes; an error envelope when it
+     * doesn't (so the caller can `return $err` directly).
+     *
+     * `$visibility` is the already-normalized per-post visibility. When it
+     * is `public_all` the author must additionally be authorized to
+     * syndicate to the global feed — a rank-and-file member of a
+     * closed/secret group is REJECTED (not silently down-clamped) so the
+     * boundary is unambiguous and a direct REST call cannot bypass it.
+     * See GroupsService::canUsePublicAll / {@see PublicAllPolicy}.
+     *
+     * `$hallFeed` is the already-normalized §21.3 feed-channel selector.
+     * When it is `ranked` the target must be a Hall AND the author must
+     * pass the post_ranked_hall_feed capability (Journeyman+ AND
+     * Neutral+ AND not suspended AND not in recovery — the resolver is
+     * authoritative). Membership was already required above, so the
+     * full §21.3 predicate (member AND ranked-capable) holds here.
+     *
      * @return array{error: string, message: string, data?: array<string, mixed>}|null
      */
     private static function gateGroupPost(

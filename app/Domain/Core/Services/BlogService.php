@@ -26,11 +26,16 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Feed\FeedItemNormalizer;
 use BCC\Core\Log\Logger;
 use BCC\Core\Repositories\PeepSoActivityRepository;
+use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\BlogChainTagRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\PostShortcodeRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
+use BCC\Trust\Core\Support\GroupAttribution;
 use BCC\Trust\Core\Support\RestrictedGroups;
+use BCC\Trust\Core\ValueObjects\GroupContext;
+use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -215,6 +220,15 @@ final class BlogService
 
         $author = self::hydrateAuthor($userId);
 
+        // §D6 group attribution — "Posted in {name} →" on a group blog.
+        //
+        // This emitter normalises directly and never passes through
+        // FeedHydrationPipeline, so it has to compose the block itself. The
+        // GATE is not re-implemented: Support\GroupAttribution owns the
+        // secret-group rule for both surfaces. Only the batched reads are
+        // local, and they are the same three the pipeline makes.
+        $groupBlockByPost = $this->hydrateGroupBlocks($rows, $sessionViewerId);
+
         $items      = [];
         $rowActIds  = [];
         foreach ($rows as $row) {
@@ -230,6 +244,15 @@ final class BlogService
             // This emitter skips hydrate(), and a blog post is never written
             // for a page, so the FeedItem key is always null here.
             $item['page_context'] = null;
+
+            // Set ONLY for a blog that lives in a group, matching the feed:
+            // a wall blog carries no `group` key at all, rather than a null
+            // one, so the two surfaces emit the same shape.
+            $groupBlock = $groupBlockByPost[(int) $row->act_external_id] ?? null;
+            if ($groupBlock !== null) {
+                $item['group'] = $groupBlock;
+            }
+
             $items[]     = $item;
             $rowActIds[] = (int) $row->act_id;
         }
@@ -423,7 +446,49 @@ final class BlogService
 
         $body           = $this->hydrateForPostId($postId, true);
         $body['status'] = (string) $post->post_status;
+
+        // §D6 group blogs — the editor needs to show where this will be
+        // published, read-only once the post is published (the group is
+        // immutable there) and editable while it is a draft.
+        $body['group'] = $this->editGroupBlock($postId);
+
         return $body;
+    }
+
+    /**
+     * The group an edit-load should display: `{id, name, slug}`, or null
+     * for a wall blog.
+     *
+     * For a PUBLISHED blog that is the live `peepso_group_id`. For a DRAFT
+     * it is the PARKED target, because a draft has deliberately not been
+     * attached yet — showing the live marker would show nothing and the
+     * author would think their choice had been lost.
+     *
+     * No privacy gate: this read is already owner-only, and the owner is
+     * the person who chose the group. The name is shown even if they have
+     * since left, because publishing will refuse and they need to know
+     * which group it is refusing.
+     *
+     * @return array{id: int, name: string, slug: string}|null
+     */
+    private function editGroupBlock(int $postId): ?array
+    {
+        $groupId = (int) get_post_meta($postId, 'peepso_group_id', true);
+        if ($groupId <= 0) {
+            $groupId = (int) get_post_meta($postId, PostsService::BLOG_PENDING_GROUP_META, true);
+        }
+        if ($groupId <= 0) {
+            return null;
+        }
+
+        $displays = PeepSoGroupRepository::findManyByIds([$groupId]);
+        $display  = $displays[$groupId] ?? null;
+
+        return [
+            'id'   => $groupId,
+            'name' => $display !== null ? (string) $display->post_title : '',
+            'slug' => $display !== null ? (string) $display->post_name : '',
+        ];
     }
 
     /**
@@ -609,6 +674,104 @@ final class BlogService
             'cover_image_id'  => null,
             'sources'         => [],
         ];
+    }
+
+    /**
+     * The `group` block for every blog on this page that lives in a group,
+     * keyed by wp_post id.
+     *
+     * Three batched reads, mirroring what FeedHydrationPipeline does for
+     * the feed, and no per-item query:
+     *
+     *   1. one warmed meta cache, then the `peepso_group_id` marker per post
+     *   2. one context resolve + one display read for the groups present
+     *   3. for an AUTHED viewer only, one membership read scoped to the
+     *      SECRET groups — anonymous issues no query, and a non-secret
+     *      group needs no membership check because the gate does not
+     *      consult membership for it
+     *
+     * The privacy decision itself is {@see GroupAttribution::compose()},
+     * shared with the feed. A viewer who may not know a secret group exists
+     * receives the same `{id, type, verification}` shape as everyone else,
+     * so the absence of `name`/`link` is not itself a signal.
+     *
+     * ⚠ The viewer here is the SESSION viewer, for the same reason the gate
+     * above uses it: an argument-supplied viewer could be the profile owner
+     * and would hand a visitor the owner's membership.
+     *
+     * @param list<object> $rows
+     * @return array<int, array<string, mixed>>
+     */
+    private function hydrateGroupBlocks(array $rows, int $sessionViewerId): array
+    {
+        if ($rows === []) {
+            return [];
+        }
+
+        $postIds = [];
+        foreach ($rows as $row) {
+            $pid = (int) ($row->act_external_id ?? 0);
+            if ($pid > 0) {
+                $postIds[] = $pid;
+            }
+        }
+        if ($postIds === []) {
+            return [];
+        }
+
+        // One round trip for every marker on the page.
+        update_meta_cache('post', $postIds);
+
+        $groupIdByPost = [];
+        $allGroupIds   = [];
+        foreach ($postIds as $pid) {
+            $gid = (int) get_post_meta($pid, 'peepso_group_id', true);
+            if ($gid > 0) {
+                $groupIdByPost[$pid] = $gid;
+                $allGroupIds[$gid]   = true;
+            }
+        }
+        if ($groupIdByPost === []) {
+            return [];
+        }
+
+        $groupIds = array_keys($allGroupIds);
+        $contexts = Plugin::instance()->groupContextResolver()->forManyGroups($groupIds);
+        if ($contexts === []) {
+            return [];
+        }
+        $displays = PeepSoGroupRepository::findManyByIds($groupIds);
+
+        $secretGroupIds = [];
+        foreach ($contexts as $gid => $ctx) {
+            if ($ctx instanceof GroupContext && $ctx->privacy === PeepSoPrivacy::Secret) {
+                $secretGroupIds[] = (int) $gid;
+            }
+        }
+        $secretMemberships = ($sessionViewerId > 0 && $secretGroupIds !== [])
+            ? PeepSoGroupRepository::findUserMemberships($sessionViewerId, $secretGroupIds)
+            : [];
+
+        $out = [];
+        foreach ($groupIdByPost as $pid => $gid) {
+            $ctx = $contexts[$gid] ?? null;
+            if (!($ctx instanceof GroupContext)) {
+                continue;
+            }
+            $display = $displays[$gid] ?? null;
+
+            $out[$pid] = GroupAttribution::compose(
+                $ctx,
+                $display !== null ? (string) $display->post_title : '',
+                $display !== null ? (string) $display->post_name : '',
+                // isset over the secret-only map == active member. Always
+                // false for a non-secret group (never queried) and for an
+                // anonymous viewer; the gate only consults it for secrets.
+                isset($secretMemberships[$gid])
+            );
+        }
+
+        return $out;
     }
 
     /**

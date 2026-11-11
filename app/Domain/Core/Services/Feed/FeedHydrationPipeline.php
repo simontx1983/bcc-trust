@@ -43,6 +43,7 @@ use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\Mentions\MentionOverlayService;
 use BCC\Trust\Core\Services\UserViewService;
 use BCC\Trust\Core\Support\CardUrlMap;
+use BCC\Trust\Core\Support\GroupAttribution;
 use BCC\Trust\Core\Support\NoReactionsGate;
 use BCC\Trust\Core\Support\ReactionGrammarRegistry;
 use BCC\Trust\Core\ValueObjects\GroupContext;
@@ -437,20 +438,13 @@ final class FeedHydrationPipeline
         string $slug,
         bool $viewerIsMember
     ): array {
-        $block = [
-            'id'           => $ctx->groupId,
-            'type'         => $ctx->type->value,
-            'verification' => $ctx->verification?->toApiResponse(),
-        ];
-
-        $mayKnow = $ctx->privacy !== PeepSoPrivacy::Secret || $viewerIsMember;
-        if (!$mayKnow || $name === '' || $slug === '') {
-            return $block;
-        }
-
-        $block['name'] = $name;
-        $block['link'] = CardUrlMap::groupUrl($ctx->type->value, $slug);
-        return $block;
+        // Extracted to Support\GroupAttribution so the profile Blog tab can
+        // compose the same block (§11 — a PRIVACY gate must have exactly one
+        // definition, because two copies drift and only one of them gets
+        // fixed). This method keeps the feed's call-site name and signature,
+        // so the eight cases in FeedGroupAttributionTest pin the extracted
+        // body through this seam, unchanged.
+        return GroupAttribution::compose($ctx, $name, $slug, $viewerIsMember);
     }
 
     // ──────────────────────────────────────────────────────────────────
