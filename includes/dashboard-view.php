@@ -81,7 +81,7 @@ $clusters = [
             'fraud'   => [ 'label' => 'Fraud Detection', 'render' => 'bcc_trust_render_fraud_tab' ],
             'devices' => [ 'label' => 'Devices',         'render' => 'bcc_trust_render_devices_tab' ],
             'rings'   => [ 'label' => 'Vote Rings',      'render' => 'bcc_trust_render_rings_tab' ],
-            'ml'      => [ 'label' => 'ML Insights',     'render' => 'bcc_trust_render_ml_tab' ],
+            'ml'      => [ 'label' => 'Suspicious Activity', 'render' => 'bcc_trust_render_ml_tab' ],
         ],
     ],
     'activity' => [

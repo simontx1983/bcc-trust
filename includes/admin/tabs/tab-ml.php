@@ -1,6 +1,6 @@
 <?php
 /**
- * Admin Dashboard — ML Insights Tab
+ * Admin Dashboard — Suspicious Activity tab (rule-based fraud/ring flags; tab id 'ml' kept for old links)
  *
  * @package BCC\Trust\Core
  */
@@ -33,7 +33,7 @@ function bcc_trust_render_ml_tab() {
 
     <!-- ── Recent pattern detections ─────────────────────────────── -->
     <div class="bcc-panel">
-        <h2>Recent ML Pattern Detections</h2>
+        <h2>Recent Suspicious-Activity Flags</h2>
         <p style="color:var(--bcc-text-secondary);">Last <?php echo intval($data['limit']); ?> detections.</p>
 
         <?php if ( ! $ml_ok ): ?>

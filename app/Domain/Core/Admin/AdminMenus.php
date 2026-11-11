@@ -100,6 +100,12 @@ final class AdminMenus
      */
     public static function parentFor(string $slug): string
     {
+        // Runs on admin_menu for EVERY wp-admin request: an older bcc-core
+        // (no AdminMenu yet) must degrade to "listed under BCC System",
+        // never fatal. Release order is still core → trust.
+        if (!class_exists(AdminMenu::class)) {
+            return self::SYSTEM;
+        }
         return AdminMenu::parentFor(self::SYSTEM, $slug);
     }
 
