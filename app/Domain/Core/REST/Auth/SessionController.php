@@ -123,10 +123,14 @@ final class SessionController
         // Per-TOKEN bucket, before any decode work: every call arrives from
         // the frontend server's single egress IP, so a per-IP bucket would
         // be shared by all users. A hash, so the bucket key is not the token.
+        // The key is passed EXPLICITLY (4th argument): without it, Throttle
+        // folds an anonymous caller's IP subnet into the key, so the bucket
+        // would really be per (token, IP) rather than per token.
         if (!\BCC\Core\Security\Throttle::allow(
-            'auth_session:' . substr(hash('sha256', $token), 0, 32),
+            'auth_session',
             self::SESSION_RATE_LIMIT,
-            60
+            60,
+            'auth_session:' . substr(hash('sha256', $token), 0, 32)
         )) {
             return self::sessionHeaders(ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429));
         }
