@@ -72,6 +72,15 @@ final class ProfileGateWiringTest extends TestCase
         'UserAlbumPhotosEndpoint.php' => ['getList'],
         'UserFollowsEndpoint.php'     => ['respond'],
         'UserGroupsEndpoint.php'      => ['getList'],
+        // ⚠ `GET /cards/member/{handle}` — a per-user route hiding behind
+        // a generic `/cards/{type}/{id}` dispatcher whose other three
+        // types are pages, not people. It resolves its handle inside
+        // CardViewService rather than through UserSlugResolver, so the
+        // sweep that built this inventory did not see it and review
+        // caught it instead. Added after the fact, which is the honest
+        // record: this inventory is only as complete as the sweep behind
+        // it, and that is its standing weakness.
+        'CardsEndpoint.php'           => ['handle'],
     ];
 
     /**
@@ -159,6 +168,73 @@ final class ProfileGateWiringTest extends TestCase
                     . 'from this inventory deliberately.'
                 );
             }
+        }
+    }
+
+    /**
+     * ⚠⚠ THE GUARD AGAINST HOW THIS INVENTORY FAILS.
+     *
+     * `GATED_ROUTES` is hand-maintained, so it is only as complete as
+     * whoever last swept the codebase — and the first sweep DID miss a
+     * route (`/cards/member/{handle}`), because it enumerated callers of
+     * `UserSlugResolver::resolve` while that route resolves its handle
+     * through CardViewService's own private resolver instead. Review
+     * caught it; this test is here so the next one does not need to.
+     *
+     * The rule: **any REST endpoint file that turns a handle into a user
+     * id is a per-user route, and must either be inventoried above or
+     * appear in `UNGATED_BY_DESIGN` with a reason.** There is no third
+     * option, because a file that resolves a handle and does not gate is
+     * exactly the defect F-02 closed.
+     *
+     * Both forward resolvers are matched. Reverse helpers (user id →
+     * handle, as in UserViewService and NotificationDispatcher) are not
+     * lookups and are irrelevant here.
+     */
+    public function testEveryHandleResolvingEndpointIsAccountedFor(): void
+    {
+        /**
+         * Endpoint files that resolve a handle but deliberately carry no
+         * profile gate. Empty today — every such file is inventoried.
+         * Adding an entry here is a deliberate, reviewable act.
+         *
+         * @var list<string>
+         */
+        $ungatedByDesign = [];
+
+        $dir   = new \DirectoryIterator(self::REST_DIR);
+        $found = [];
+
+        foreach ($dir as $entry) {
+            if ($entry->isDot() || $entry->getExtension() !== 'php') {
+                continue;
+            }
+            $src = (string) file_get_contents($entry->getPathname());
+            if (
+                str_contains($src, 'UserSlugResolver::resolve')
+                || str_contains($src, 'resolveMemberCardHandle')
+            ) {
+                $found[] = $entry->getFilename();
+            }
+        }
+
+        sort($found);
+
+        self::assertNotEmpty(
+            $found,
+            'no endpoint file appears to resolve a handle at all — the '
+            . 'scan is broken, so this assertion would be vacuous'
+        );
+
+        foreach ($found as $file) {
+            self::assertTrue(
+                array_key_exists($file, self::GATED_ROUTES) || in_array($file, $ungatedByDesign, true),
+                "{$file} resolves a handle to a user id but is NOT in this test's "
+                . 'inventory and NOT in $ungatedByDesign. That means a per-user '
+                . 'route may have been added without a profile gate — the exact '
+                . 'way `/cards/member/{handle}` was missed. Add the route and its '
+                . 'guard, or allowlist the file with a stated reason.'
+            );
         }
     }
 
