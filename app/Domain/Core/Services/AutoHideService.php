@@ -233,11 +233,16 @@ final class AutoHideService
         if ($postId <= 0) {
             return false;
         }
-        return update_post_meta(
+        update_post_meta(
             $postId,
             self::META_REHIDE_COOLDOWN_UNTIL,
             (string) (time() + self::REHIDE_COOLDOWN_SECONDS)
-        ) !== false;
+        );
+        // update_post_meta() also returns false when the value is UNCHANGED
+        // (a repeat within the same second), so its return would make the
+        // audit's rehide_cooldown_started read false while the cooldown IS
+        // active. Report the stored state instead.
+        return self::inRehideCooldown($actId);
     }
 
     /** End the cooldown early (undo of a Restore). */

@@ -10,7 +10,12 @@
  *
  * The rule REUSES the feeds' own gates rather than restating privacy:
  *
- *   - the backing post must be published and not moderation-hidden;
+ *   - the activity's module must be on bcc-core's public-feed allowlist
+ *     (FeedItemNormalizer::publicFeedModuleIds(), the rule the feed and
+ *     permalink paths use), and the backing post must be published and not
+ *     moderation-hidden;
+ *   - ⚠ FOLLOW-UP: per-post `act_access` is not consulted yet. Update this
+ *     in lockstep when F-02's per-post act_access lands.
  *   - a post that is not group-tagged, or is group-tagged with visibility
  *     `public_all`, is visible in the GLOBAL feed (mirrors bcc-core
  *     ActivityFeedService::isVisibleGlobally(), which is private — keep in
@@ -59,8 +64,6 @@ class FeedItemReportVisibility
     /** The visibility that syndicates a group post into the global feed. */
     public const GLOBAL_VISIBILITY = 'public_all';
 
-    /** PeepSo private messages — never a feed item, never reportable here. */
-    private const MESSAGES_MODULE_ID = '6';
 
     public function __construct(
         private readonly GroupsService $groups,
@@ -84,7 +87,18 @@ class FeedItemReportVisibility
         if ((string) ($activity->act_status ?? '') !== 'publish') {
             return false;
         }
-        if ((string) ($activity->act_module_id ?? '') === self::MESSAGES_MODULE_ID) {
+        // Only modules a feed or permalink can show at all: the SAME
+        // allowlist bcc-core's feed and permalink paths enforce (§11 reuse).
+        // An ALLOWLIST, not a denylist: it excludes private messages (6),
+        // group-join notices (8), page walls (9), polls (30), post
+        // backgrounds (111) and raw peepso-blog posts (6661), and fails
+        // closed on any module added later. Blog posts reach the feed as
+        // module 204 (blog_excerpt), which is on the list.
+        if (!in_array(
+            (int) ($activity->act_module_id ?? 0),
+            \BCC\Core\Feed\FeedItemNormalizer::publicFeedModuleIds(),
+            true
+        )) {
             return false;
         }
         if ($this->hidden->exists($actId)) {

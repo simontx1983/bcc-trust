@@ -45,6 +45,11 @@ final class FeedItemReportVisibilityTest extends TestCase
         parent::setUp();
         require_once __DIR__ . '/../Stubs/halls-gate-stubs.php';
         require_once dirname(__DIR__, 2) . '/../bcc-core/src/Repositories/PeepSoGroupRepository.php';
+        // The REAL public-feed module allowlist, not a copy, so this suite
+        // fails if the two ever disagree.
+        if (!\class_exists('BCC\\Core\\Feed\\FeedItemNormalizer', false)) {
+            require_once dirname(__DIR__, 2) . '/../bcc-core/src/Feed/FeedItemNormalizer.php';
+        }
         $GLOBALS['__bcc_halls_gate_fixture'] = [];
 
         global $wpdb;
@@ -151,6 +156,40 @@ final class FeedItemReportVisibilityTest extends TestCase
 
         $this->wpdb()->hidden = [self::ACT];
         self::assertFalse($this->gate()->canSee(self::VIEWER, $this->activity()), 'moderation-hidden');
+    }
+
+    /** @return array<string, array{0: string}> */
+    public static function nonFeedModules(): array
+    {
+        return [
+            'private messages'     => ['6'],
+            'group-join notice'    => ['8'],
+            'page wall'            => ['9'],
+            'polls'                => ['30'],
+            'post backgrounds'     => ['111'],
+            'raw peepso-blog post' => ['6661'],
+            'an unknown module'    => ['99999'],
+        ];
+    }
+
+    /**
+     * #416 review M1: content NO feed or permalink shows is not reportable,
+     * even when it is published, non-group and not hidden. Before, only
+     * module 6 was refused (a denylist).
+     */
+    #[DataProvider('nonFeedModules')]
+    public function testAModuleNoFeedShowsIsNotReportable(string $module): void
+    {
+        $this->post([]); // not a group post: everything else says "visible"
+        self::assertFalse($this->gate()->canSee(self::VIEWER, $this->activity(module: $module)));
+    }
+
+    public function testFeedModulesStayReportable(): void
+    {
+        $this->post([]);
+        foreach (['1', '4', '202', '204'] as $module) { // status, photo, review, blog_excerpt
+            self::assertTrue($this->gate()->canSee(self::VIEWER, $this->activity(module: $module)), "module {$module}");
+        }
     }
 
     private function gate(): FeedItemReportVisibility

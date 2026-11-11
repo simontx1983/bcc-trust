@@ -151,6 +151,24 @@ final class ContentReportService
             ];
         }
 
+        // Throttle — reuse the FLAG limits (same posture: 5 per 5 min).
+        // Per-reporter, not per (reporter, target), so spinning up many
+        // small reports against different targets still hits the gate.
+        //
+        // ⚠ Runs BEFORE target resolution (F-73 review L1): the resolve step
+        // answers "visible / not found", so throttling only after it would
+        // let a reporter probe ids for closed or secret posts for free.
+        $burstKey = "content_report:{$reporterUserId}:burst";
+        if (!Throttle::allow($burstKey, BCC_TRUST_RATE_LIMIT_FLAG, BCC_TRUST_RATE_WINDOW_FLAG)) {
+            Logger::info('[ContentReportService] report burst seatbelt fired', [
+                'user_id' => $reporterUserId,
+            ]);
+            return [
+                'error'   => 'bcc_rate_limited',
+                'message' => 'Too many reports. Wait a moment before filing another.',
+            ];
+        }
+
         // §K1 self-report rejection, dispatched per kind — the extension this
         // method's own comment asked for ("when more target kinds land …
         // extend this dispatch with their resolvers").
@@ -180,20 +198,6 @@ final class ContentReportService
             return [
                 'error'   => 'bcc_invalid_request',
                 'message' => "You can't report your own post.",
-            ];
-        }
-
-        // Throttle — reuse the FLAG limits (same posture: 5 per 5 min).
-        // Per-reporter, not per (reporter, target), so spinning up many
-        // small reports against different targets still hits the gate.
-        $burstKey = "content_report:{$reporterUserId}:burst";
-        if (!Throttle::allow($burstKey, BCC_TRUST_RATE_LIMIT_FLAG, BCC_TRUST_RATE_WINDOW_FLAG)) {
-            Logger::info('[ContentReportService] report burst seatbelt fired', [
-                'user_id' => $reporterUserId,
-            ]);
-            return [
-                'error'   => 'bcc_rate_limited',
-                'message' => 'Too many reports. Wait a moment before filing another.',
             ];
         }
 
