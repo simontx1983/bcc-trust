@@ -9,15 +9,13 @@
  *
  *   analyzeVotingPattern()      — Vote distribution, timing regularity, burst detection,
  *                                 weight consistency, and vote churn.
- *   analyzeTemporalPattern()    — Hourly distribution, uniform-distribution check,
- *                                 weekend/weekday ratio, daily consistency.
+ *   analyzeTemporalPattern()    — Hourly distribution (night-owl only with a known
+ *                                 timezone), uniform-distribution check, daily
+ *                                 consistency.
  *   analyzeEngagementPattern()  — Session length analysis, action rate, metronome
  *                                 timing detection.
  *   analyzeSocialPattern()      — Page-owner diversity, reciprocal voting, score
  *                                 targeting analysis.
- *   analyzeBrowsingPattern()    — Page-view/vote correlation, minimum dwell time
- *                                 before voting.
- *   analyzeContentPattern()     — Content creation metrics via user_info table.
  *   analyzeConsistencyPattern() — Behavioral consistency over rolling time windows.
  *
  * @package BCC\Trust

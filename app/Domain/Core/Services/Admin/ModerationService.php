@@ -235,9 +235,11 @@ final class ModerationService
      * (F-103, user decision). The undo for a wrongly accumulated score (e.g.
      * a household that shared a device before the once-per-window rule).
      *
-     * Also forgets the member's recorded shared-device penalties (so the
-     * window starts fresh), drops cached fraud / rate-limit state, and flags
-     * every page the member voted on so the fraud discount on their votes is
+     * A clean slate for the penalty window (user decision): the score and
+     * peak go to 0, but the member's recorded shared-device penalties are
+     * KEPT, so the same shared device cannot re-add points until its 30-day
+     * window expires. Drops cached fraud / rate-limit state and flags every
+     * page the member voted on so the fraud discount on their votes is
      * recomputed. Audited with the replaced values.
      *
      * @return array{success: bool, message: string}
@@ -260,7 +262,6 @@ final class ModerationService
             return ['success' => false, 'message' => 'No trust record for this user.'];
         }
 
-        \BCC\Trust\Core\Security\DeviceSharingPenaltyLedger::clear($userId);
         \BCC\Trust\Core\Security\FraudDetector::clearCache($userId);
         \BCC\Trust\Core\Security\RateLimiter::invalidateUserCache($userId);
         $pagesFlagged = $this->userInfoRepository->markVotedPagesForRecalculation($userId);
@@ -272,7 +273,7 @@ final class ModerationService
         ]);
 
         $message = sprintf(
-            'Fraud score reset to 0 (was %d, peak %d). %d voted pages queued for recalculation.',
+            'Fraud score reset to 0 (was %d, peak %d). %d voted pages queued for recalculation. The score reflects live signals and can rise again if new ones appear.',
             $previous['fraud_score'],
             $previous['peak_fraud_score'],
             $pagesFlagged

@@ -68,14 +68,6 @@ final class DeviceSharingPenaltyLedger
         update_user_meta($userId, self::META_KEY, $entries);
     }
 
-    /** Forget every recorded penalty (used by the admin fraud-score reset). */
-    public static function clear(int $userId): void
-    {
-        if ($userId > 0) {
-            delete_user_meta($userId, self::META_KEY);
-        }
-    }
-
     private static function windowSeconds(): int
     {
         return max(1, (int) BCC_TRUST_DEVICE_SHARING_WINDOW_DAYS) * 86400;
