@@ -684,14 +684,23 @@ class TrustGraph {
         $lockHeld    = \BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0);
 
         try {
-            $offset      = (int) (wp_cache_get('vote_ring_offset', self::CACHE_GROUP) ?: 0);
-            $mutualVotes = $this->voteRepo->getMutualVotePairs($minSize, $pageLimit, $offset);
+            // Keyset cursor (F-108): the last (user_a, user_b) pair seen. An
+            // OFFSET over an unordered GROUP BY skipped and repeated pairs.
+            $cursor = wp_cache_get('vote_ring_cursor', self::CACHE_GROUP);
+            [$afterA, $afterB] = (is_array($cursor) && count($cursor) === 2)
+                ? [(int) $cursor[0], (int) $cursor[1]]
+                : [0, 0];
+            $mutualVotes = $this->voteRepo->getMutualVotePairs($minSize, $pageLimit, $afterA, $afterB);
 
             if ($lockHeld) {
-                // Only the lock holder advances the shared cursor. Reset when the
-                // result set was smaller than the page (we've walked the tail).
-                $nextOffset = (count($mutualVotes) === $pageLimit) ? $offset + $pageLimit : 0;
-                wp_cache_set('vote_ring_offset', $nextOffset, self::CACHE_GROUP, self::CACHE_TTL);
+                // Only the lock holder advances the shared cursor. Full page →
+                // resume after its last pair; short page → the tail was
+                // walked, start again from the beginning.
+                $last = end($mutualVotes);
+                $next = (count($mutualVotes) === $pageLimit && is_object($last))
+                    ? [(int) $last->user_a, (int) $last->user_b]
+                    : [0, 0];
+                wp_cache_set('vote_ring_cursor', $next, self::CACHE_GROUP, self::CACHE_TTL);
             }
         } finally {
             if ($lockHeld) {
@@ -840,10 +849,15 @@ class TrustGraph {
         $pageLimit  = 500;
         $lockKey    = 'bcc_slow_endorse_ring_cursor';
         $lockHeld   = \BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0);
-        $offsetKey  = 'slow_endorsement_ring_offset_w' . $windowDays;
+        // Keyset cursor (F-143): the last (user_a, user_b) pair seen. An
+        // OFFSET over an unordered GROUP BY skipped and repeated pairs.
+        $cursorKey  = 'slow_endorsement_ring_cursor_w' . $windowDays;
 
         try {
-            $offset  = (int) (wp_cache_get($offsetKey, self::CACHE_GROUP) ?: 0);
+            $cursor = wp_cache_get($cursorKey, self::CACHE_GROUP);
+            [$afterA, $afterB] = (is_array($cursor) && count($cursor) === 2)
+                ? [(int) $cursor[0], (int) $cursor[1]]
+                : [0, 0];
             // mutual_count threshold = 1: any reciprocity in the window
             // surfaces; component-size gates further. (Vote rings use
             // $minSize for both pair- and component-thresholds; for
@@ -854,12 +868,18 @@ class TrustGraph {
                 $windowDays,
                 1,
                 $pageLimit,
-                $offset
+                $afterA,
+                $afterB
             );
 
             if ($lockHeld) {
-                $nextOffset = (count($mutuals) === $pageLimit) ? $offset + $pageLimit : 0;
-                wp_cache_set($offsetKey, $nextOffset, self::CACHE_GROUP, self::CACHE_TTL);
+                // Full page → resume after its last pair; short page → the
+                // tail was walked, start again from the beginning.
+                $last = end($mutuals);
+                $next = (count($mutuals) === $pageLimit && $last !== false)
+                    ? [(int) $last->user_a, (int) $last->user_b]
+                    : [0, 0];
+                wp_cache_set($cursorKey, $next, self::CACHE_GROUP, self::CACHE_TTL);
             }
         } finally {
             if ($lockHeld) {

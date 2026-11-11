@@ -37,6 +37,16 @@ namespace BCC\Trust\Core\Services {
             {
                 $GLOBALS['__bcc_ph']['canary'][] = 'recoveryEmailConfirmed:' . $newEmail;
             }
+
+            public static function passwordChanged(int $userId): void
+            {
+                $GLOBALS['__bcc_ph']['canary'][] = 'passwordChanged:' . $userId;
+            }
+
+            public static function sessionsRevokedAll(int $userId): void
+            {
+                $GLOBALS['__bcc_ph']['canary'][] = 'sessionsRevokedAll:' . $userId;
+            }
         }
     }
 }
@@ -46,6 +56,17 @@ namespace {
         function get_current_user_id(): int
         {
             return (int) ($GLOBALS['__bcc_ph']['current_user'] ?? 0);
+        }
+    }
+    if (!function_exists('wp_set_password')) {
+        function wp_set_password(string $password, int $userId): void
+        {
+            $GLOBALS['__bcc_ph']['passwords'][$userId] = $password;
+        }
+    }
+    if (!function_exists('wp_clear_auth_cookie')) {
+        function wp_clear_auth_cookie(): void
+        {
         }
     }
 }
