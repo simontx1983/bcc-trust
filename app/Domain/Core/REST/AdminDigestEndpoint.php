@@ -44,11 +44,14 @@ final class AdminDigestEndpoint
 {
     private const ROUTE_NAMESPACE = 'bcc/v1';
 
-    /** Min seconds between manual runs across the whole instance. */
-    private const RUN_COOLDOWN_SECONDS = 300;
+    /**
+     * Min seconds between manual runs across the whole instance. Shared
+     * with the wp-admin Email Digest page's "Run now" button.
+     */
+    public const RUN_COOLDOWN_SECONDS = 300;
 
-    /** wp_options key for last-run timestamp. */
-    private const COOLDOWN_OPTION = 'bcc_admin_digest_last_run';
+    /** wp_options key for last-run timestamp (shared, see above). */
+    public const COOLDOWN_OPTION = 'bcc_admin_digest_last_run';
 
     public static function register(): void
     {
@@ -79,7 +82,9 @@ final class AdminDigestEndpoint
             return $cooldownGate;
         }
 
-        $sent = Plugin::instance()->digestService()->sendWeeklyDigest();
+        $sent = Plugin::instance()->digestService()->sendWeeklyDigest(
+            \BCC\Trust\Core\Services\DigestService::TRIGGER_MANUAL
+        );
         update_option(self::COOLDOWN_OPTION, time(), false);
 
         $resp = ApiResponse::ok([
