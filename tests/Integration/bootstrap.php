@@ -390,6 +390,14 @@ if (!function_exists('current_time')) {
     }
 }
 
+// F-181: CollectionRepository's controllable clock (namespaced time() /
+// current_time(); a pass-through until a test sets __bcc_collection_clock).
+// ⚠ It MUST be declared here, before any test runs: PHP binds an unqualified
+// call site to the namespaced or the global function ONCE per process, on its
+// first execution. Required from a test's setUp(), it is silently ignored
+// whenever an earlier test in the same process already ran upsert().
+require_once __DIR__ . '/collection-clock-stubs.php';
+
 // Used by ChainCheckpointRepository when it re-encodes the bounded block
 // progression history.
 if (!function_exists('wp_json_encode')) {

@@ -43,7 +43,7 @@ final class CollectionUpsertCanonicalKeyIntegrationTest extends TestCase
 
     protected function setUp(): void
     {
-        require_once __DIR__ . '/collection-clock-stubs.php';
+        // The clock stub is required by tests/Integration/bootstrap.php (F-181).
         unset($GLOBALS['__bcc_collection_clock']);
 
         $wpdb = $GLOBALS['wpdb'];
