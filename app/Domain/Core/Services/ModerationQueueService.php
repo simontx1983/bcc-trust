@@ -439,12 +439,30 @@ final class ModerationQueueService
             ));
             $this->reportRepo->transitionStatus($unupheldIds, self::STATUS_RESOLVED, self::STATUS_DISMISSED, $resolverUserId);
 
+            // F-73 — the verdict covers the whole target, so EVERY pending
+            // report on it closes too. Before, only the clicked report
+            // closed: the other pending ones still counted toward the
+            // auto-hide threshold, and a single new report re-hid the post.
+            // Plus a re-hide cooldown: auto-hide is withheld for
+            // AutoHideService::REHIDE_COOLDOWN_SECONDS (reports still queue).
+            $closedPendingIds = array_values(array_filter(
+                $this->reportRepo->listIdsForTargetByStatus($targetKind, $targetId, self::STATUS_PENDING),
+                static fn (int $id): bool => $id !== $reportId
+            ));
+            $this->reportRepo->transitionStatus($closedPendingIds, self::STATUS_PENDING, self::STATUS_DISMISSED, $resolverUserId);
+
             $this->hiddenRepo->remove($targetId);
             $this->reportRepo->updateStatus($reportId, self::STATUS_DISMISSED, $resolverUserId);
+            $cooldownStarted = AutoHideService::startRehideCooldown($targetId);
             AuditLogger::log(
                 'admin_restore_report',
                 $reportId,
-                ['target_id' => $targetId, 'unupheld_report_ids' => $unupheldIds],
+                [
+                    'target_id'                => $targetId,
+                    'unupheld_report_ids'      => $unupheldIds,
+                    'closed_pending_report_ids' => $closedPendingIds,
+                    'rehide_cooldown_started'  => $cooldownStarted,
+                ],
                 'content_report',
                 $resolverUserId
             );
@@ -460,7 +478,8 @@ final class ModerationQueueService
                 $priorHiderUserId,
                 $priorReasonCode,
                 $priorRelatedReportId,
-                $unupheldIds
+                $unupheldIds,
+                $closedPendingIds
             );
 
             return [
@@ -654,12 +673,8 @@ final class ModerationQueueService
                 : null;
             $priorHider   = isset($undo['prior_hider_user_id']) ? (int) $undo['prior_hider_user_id'] : 0;
             $priorRelated = isset($undo['prior_related_report_id']) ? (int) $undo['prior_related_report_id'] : 0;
-            $unupheldIds  = [];
-            foreach ((array) ($undo['unupheld_report_ids'] ?? []) as $raw) {
-                if (is_numeric($raw) && (int) $raw > 0) {
-                    $unupheldIds[] = (int) $raw;
-                }
-            }
+            $unupheldIds      = self::idList($undo['unupheld_report_ids'] ?? []);
+            $closedPendingIds = self::idList($undo['closed_pending_report_ids'] ?? []);
 
             $rehidden = false;
             if ($priorReason !== null) {
@@ -671,6 +686,10 @@ final class ModerationQueueService
                 );
             }
             $this->reportRepo->transitionStatus($unupheldIds, self::STATUS_DISMISSED, self::STATUS_RESOLVED, $adminUserId);
+            // F-73 — reopen the pending reports the restore closed, and end
+            // the re-hide cooldown it started.
+            $this->reportRepo->transitionStatus($closedPendingIds, self::STATUS_DISMISSED, self::STATUS_PENDING, $adminUserId);
+            AutoHideService::clearRehideCooldown($targetId);
             $this->reportRepo->setPending($reportId);
             AuditLogger::log(
                 'admin_undo_restore',
@@ -681,6 +700,7 @@ final class ModerationQueueService
                     'prior_reason_code'       => $priorReason ?? '',
                     'prior_related_report_id' => $priorRelated,
                     'reupheld_report_ids'     => $unupheldIds,
+                    'reopened_report_ids'     => $closedPendingIds,
                 ],
                 'content_report',
                 $adminUserId
@@ -712,6 +732,8 @@ final class ModerationQueueService
      *
      * @param list<int> $unupheldReportIds restore only — sibling reports the
      *        restore moved from status 1 to 2, returned to 1 on undo
+     * @param list<int> $closedPendingReportIds restore only — sibling reports
+     *        the restore moved from status 0 to 2, returned to 0 on undo
      * @return array{token: string, expires_at: string, ttl_seconds: int}|null
      */
     private function issueUndoToken(
@@ -724,7 +746,8 @@ final class ModerationQueueService
         ?int $priorHiderUserId,
         ?string $priorReasonCode,
         ?int $priorRelatedReportId = null,
-        array $unupheldReportIds = []
+        array $unupheldReportIds = [],
+        array $closedPendingReportIds = []
     ): ?array {
         // 32 hex chars = 128 bits of randomness. wp_generate_password
         // with special_chars=false yields [A-Za-z0-9]; bin2hex(random_bytes(16))
@@ -752,6 +775,7 @@ final class ModerationQueueService
             'prior_reason_code'         => $priorReasonCode,
             'prior_related_report_id'   => $priorRelatedReportId,
             'unupheld_report_ids'       => $unupheldReportIds,
+            'closed_pending_report_ids' => $closedPendingReportIds,
             'issued_at'                 => $now,
         ];
 
@@ -1061,6 +1085,23 @@ final class ModerationQueueService
             'display_name' => '(deleted user)',
             'profile_url'  => '',
         ];
+    }
+
+    /**
+     * Positive int ids from an undo-payload list (transient data — never
+     * trusted to be well-typed).
+     *
+     * @return list<int>
+     */
+    private static function idList(mixed $raw): array
+    {
+        $ids = [];
+        foreach ((array) $raw as $v) {
+            if (is_numeric($v) && (int) $v > 0) {
+                $ids[] = (int) $v;
+            }
+        }
+        return $ids;
     }
 
     private static function statusLabel(int $status): string
