@@ -92,6 +92,11 @@ return [
         // Fire-once bootstrap jobs.
         'bcc_trust_initial_user_sync',
         'bcc_trust_initial_read_model_sync',
+        // F-13: same-day continuations of a budget-cut daily rank sweep
+        // (RankScheduler). Fire-once; cleared here so a deactivate between
+        // a sweep and its continuation leaves nothing queued.
+        'bcc_rank_daily_evaluate_continue',
+        'bcc_rank_daily_tier_snapshot_continue',
         // Retired automatic NFT collection discovery. These five ran
         // unattended chain-wide sweeps: `bcc_index_collections` walked
         // every active EVM/Solana/Cosmos chain for "top collections", and
