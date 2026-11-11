@@ -67,6 +67,41 @@ if (!defined('BCC_TRUST_MIGRATION_INCOMPLETE')) {
     define('BCC_TRUST_MIGRATION_INCOMPLETE', 'incomplete');
 }
 
+if (!function_exists('bcc_trust_migration_backoff_active')) {
+    /**
+     * Retry backoff for the standalone `init`-hooked migrations (F-150).
+     *
+     * Those migrations stamp a done-option of their own instead of going
+     * through the runner, and they used to stamp it even when a statement
+     * had failed — so a failed FK drop, DROP or ALTER was never retried.
+     * They now leave the option unstamped on failure. This backoff keeps a
+     * statement that fails PERMANENTLY from being re-run (and re-logged) on
+     * every request: one attempt per hour per migration.
+     */
+    function bcc_trust_migration_backoff_active(string $migrationId): bool
+    {
+        return (bool) get_transient('bcc_trust_migration_backoff_' . $migrationId);
+    }
+
+    /**
+     * Record a failed migration step: log the server error and start the
+     * one-hour retry backoff. The caller then returns WITHOUT stamping its
+     * done-option, so the next attempt re-runs the whole idempotent body.
+     */
+    function bcc_trust_migration_step_failed(string $migrationId, string $step): void
+    {
+        global $wpdb;
+        set_transient('bcc_trust_migration_backoff_' . $migrationId, 1, HOUR_IN_SECONDS);
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] migration step failed; not marking done, retrying in 1h', [
+                'migration' => $migrationId,
+                'step'      => $step,
+                'db_error'  => $wpdb->last_error,
+            ]);
+        }
+    }
+}
+
 if (!function_exists('bcc_trust_pending_migrations')) {
 
     /**

@@ -28,8 +28,11 @@ if (!function_exists('bcc_trust_create_peepso_reaction_indexes')) {
      * @param string $table     Fully-qualified table name (prefix + suffix).
      * @param string $indexName Fixed literal index name (no user input).
      * @param string $columns   Fixed literal column list (no user input).
+     * @return bool true when the index exists afterwards (already present or
+     *              just created); false when the CREATE failed (F-150 — the
+     *              caller must not stamp the migration done).
      */
-    function bcc_trust_create_peepso_reaction_index_if_missing(string $table, string $indexName, string $columns): void
+    function bcc_trust_create_peepso_reaction_index_if_missing(string $table, string $indexName, string $columns): bool
     {
         global $wpdb;
 
@@ -43,7 +46,7 @@ if (!function_exists('bcc_trust_create_peepso_reaction_indexes')) {
         ));
 
         if (!empty($existing)) {
-            return;
+            return true;
         }
 
         // CREATE INDEX doesn't accept prepared placeholders for the
@@ -59,7 +62,7 @@ if (!function_exists('bcc_trust_create_peepso_reaction_indexes')) {
                     'error' => $wpdb->last_error,
                 ]);
             }
-            return;
+            return false;
         }
 
         if (class_exists('\\BCC\\Core\\Log\\Logger')) {
@@ -68,6 +71,7 @@ if (!function_exists('bcc_trust_create_peepso_reaction_indexes')) {
                 'index' => $indexName,
             ]);
         }
+        return true;
     }
 
     function bcc_trust_create_peepso_reaction_indexes(): void
@@ -75,35 +79,49 @@ if (!function_exists('bcc_trust_create_peepso_reaction_indexes')) {
         if (get_option('bcc_peepso_reaction_indexes_v1') === '1') {
             return;
         }
+        // F-150: a failed CREATE leaves this unstamped; retry at most hourly.
+        if (bcc_trust_migration_backoff_active('peepso_reaction_indexes_v1')) {
+            return;
+        }
 
         global $wpdb;
 
+        // Every index is attempted (each is independent); the migration is
+        // stamped only when ALL of them exist afterwards.
+        $allPresent = true;
+
         // peepso_reactions covering index for "solids given by user"
         // — covers WHERE reaction_user_id = ? AND reaction_type = ?
-        bcc_trust_create_peepso_reaction_index_if_missing(
+        $allPresent = bcc_trust_create_peepso_reaction_index_if_missing(
             $wpdb->prefix . 'peepso_reactions',
             'idx_bcc_reactions_user_type',
             'reaction_user_id, reaction_type'
-        );
+        ) && $allPresent;
 
         // peepso_reactions covering index for "solids received since"
         // — covers JOIN by reaction_act_id + filter on reaction_type
         // + reaction_timestamp boundary.
-        bcc_trust_create_peepso_reaction_index_if_missing(
+        $allPresent = bcc_trust_create_peepso_reaction_index_if_missing(
             $wpdb->prefix . 'peepso_reactions',
             'idx_bcc_reactions_act_type_time',
             'reaction_act_id, reaction_type, reaction_timestamp'
-        );
+        ) && $allPresent;
 
         // peepso_activities — speeds up "received" query's JOIN target
         // (the act_owner_id filter). PeepSo's default schema has indexes
         // on act_user_id but not always act_owner_id; covering this
         // explicitly avoids the table scan when filtering by content owner.
-        bcc_trust_create_peepso_reaction_index_if_missing(
+        $allPresent = bcc_trust_create_peepso_reaction_index_if_missing(
             $wpdb->prefix . 'peepso_activities',
             'idx_bcc_activities_owner',
             'act_owner_id'
-        );
+        ) && $allPresent;
+
+        if (!$allPresent) {
+            // Each failed CREATE already logged its own error above.
+            bcc_trust_migration_step_failed('peepso_reaction_indexes_v1', 'create index');
+            return;
+        }
 
         update_option('bcc_peepso_reaction_indexes_v1', '1', false);
     }

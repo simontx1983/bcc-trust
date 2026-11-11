@@ -219,6 +219,7 @@ final class HelpfulMarkEndpoint
             return ApiResponse::error('bcc_not_found', 'Comment not found.', 404);
         }
 
-        return GroupInteractionGate::checkPost($userId, (int) $meta->parent_post_id);
+        // Same message as the unknown-comment 404 above (secret-group oracle).
+        return GroupInteractionGate::checkPost($userId, (int) $meta->parent_post_id, 'Comment not found.');
     }
 }

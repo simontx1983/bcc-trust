@@ -21,7 +21,7 @@ function bcc_trust_render_devices_tab() {
     <div class="bcc-panel">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
             <h2 style="margin:0;">Device Fingerprints</h2>
-            <span style="color:#666;font-size:13px;">
+            <span style="color:var(--bcc-text-secondary);font-size:13px;">
                 High automation threshold: ≥<?php echo $thresholds['high']; ?>% &nbsp;|&nbsp;
                 Suspicious: ≥<?php echo $thresholds['medium']; ?>%
             </span>
@@ -63,7 +63,7 @@ function bcc_trust_render_devices_tab() {
                         <td>
                             <code style="font-size:11px;"><?php echo esc_html( $fp_short ); ?></code>
                             <?php if ( $is_wl ): ?>
-                                <span style="background:#4caf50;color:#fff;font-size:10px;padding:1px 4px;border-radius:2px;margin-left:4px;">WL</span>
+                                <span style="background:var(--bcc-success);color:#fff;font-size:10px;padding:1px 4px;border-radius:2px;margin-left:4px;">WL</span>
                             <?php endif; ?>
                         </td>
                         <td>
@@ -75,14 +75,14 @@ function bcc_trust_render_devices_tab() {
                         </td>
                         <td>
                             <div style="display:flex;align-items:center;gap:6px;">
-                                <div style="width:60px;height:8px;background:#eee;border-radius:4px;overflow:hidden;">
+                                <div style="width:60px;height:8px;background:var(--bcc-bg-code);border-radius:4px;overflow:hidden;">
                                     <div style="width:<?php echo esc_attr(intval($d->automation_score)); ?>%;height:100%;background:<?php echo esc_attr($d->automation_color ?? '#4caf50'); ?>;border-radius:4px;"></div>
                                 </div>
                                 <strong style="color:<?php echo esc_attr($d->automation_color ?? '#333'); ?>;"><?php echo intval($d->automation_score); ?>%</strong>
                                 <?php if ( $d->automation_score >= $thresholds['high'] ): ?>
-                                    <span style="color:#f44336;font-size:11px;font-weight:bold;">HIGH</span>
+                                    <span style="color:var(--bcc-danger);font-size:11px;font-weight:bold;">HIGH</span>
                                 <?php elseif ( $d->automation_score >= $thresholds['medium'] ): ?>
-                                    <span style="color:#ff9800;font-size:11px;font-weight:bold;">MED</span>
+                                    <span style="color:var(--bcc-warning);font-size:11px;font-weight:bold;">MED</span>
                                 <?php endif; ?>
                             </div>
                         </td>
@@ -94,7 +94,7 @@ function bcc_trust_render_devices_tab() {
                         <td>
                             <?php echo $d->user_count; ?>
                             <?php if ( $d->user_count >= BCC_TRUST_RING_MIN_SIZE ): ?>
-                                <span style="color:#f44336;font-size:11px;font-weight:bold;margin-left:4px;">⚠ Ring?</span>
+                                <span style="color:var(--bcc-danger);font-size:11px;font-weight:bold;margin-left:4px;">⚠ Ring?</span>
                             <?php endif; ?>
                         </td>
                         <td style="font-size:12px;"><?php echo esc_html( date( 'Y-m-d H:i', strtotime( $d->first_seen ) ) ); ?></td>

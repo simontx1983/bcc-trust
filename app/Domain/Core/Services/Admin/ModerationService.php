@@ -56,6 +56,7 @@ final class ModerationService
      */
     public function suspendUser(int $userId, string $reason = 'manual_suspension', string $notes = ''): array
     {
+        $this->ensureUserInfoRow($userId);
         $fraudScore = $this->userInfoRepository->getFraudScore($userId);
 
         // Atomic: the suspensions row and the user_info gate flag must land
@@ -77,6 +78,8 @@ final class ModerationService
             echo '<div class="notice notice-error"><p>Failed to suspend user: database error.</p></div>';
             return ['success' => false, 'message' => 'Failed to suspend user: database error.'];
         }
+
+        $this->revokeSessions($userId);
 
         $this->logAction('admin_suspend', $userId, [
             'reason' => $reason,
@@ -374,6 +377,7 @@ final class ModerationService
             case 'suspend_all':
                 $suspended = 0;
                 foreach ($userIds as $uid) {
+                    $this->ensureUserInfoRow($uid);
                     $fraudScore = $this->userInfoRepository->getFraudScore($uid);
 
                     try {
@@ -381,6 +385,7 @@ final class ModerationService
                             $this->suspensionRepository->create($uid, $adminId, 'vote_ring', 'Suspended as part of vote ring action.', $fraudScore);
                             $this->userInfoRepository->suspendUser($uid, 'vote_ring');
                         });
+                        $this->revokeSessions($uid);
                         $suspended++;
                     } catch (\Throwable $e) {
                         // Skip this user but keep going; count only the ones
@@ -501,12 +506,14 @@ final class ModerationService
         foreach ($userIds as $uid) {
             switch ($action) {
                 case 'suspend':
+                    $this->ensureUserInfoRow($uid);
                     $score = $this->userInfoRepository->getFraudScore($uid);
                     try {
                         \BCC\Trust\Core\Security\TransactionManager::run(function () use ($uid, $adminId, $score) {
                             $this->suspensionRepository->create($uid, $adminId, 'manual_suspension', '', $score);
                             $this->userInfoRepository->suspendUser($uid, 'manual_suspension');
                         });
+                        $this->revokeSessions($uid);
                         $processed++;
                     } catch (\Throwable $e) {
                         // Log + skip; count only users who actually suspended,
@@ -629,5 +636,35 @@ final class ModerationService
     public function isFingerprintWhitelisted(string $fp): bool
     {
         return isset($this->getFingerprintWhitelist()[$fp]);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // SUSPEND-PATH HELPERS (F-112 / F-119)
+    // ──────────────────────────────────────────────────────────────
+
+    /**
+     * Make sure the user has a user_info row before suspending (F-112).
+     * The gate every enforcement path reads (is_suspended) lives on that
+     * row, so a missing one used to make a suspension a silent no-op. Reuses
+     * UserSyncService, the one place that builds a row from the WP user.
+     * UserInfoRepository::suspendUser() still throws if the row is absent.
+     */
+    private function ensureUserInfoRow(int $userId): void
+    {
+        if ($userId <= 0 || $this->userInfoRepository->exists($userId)) {
+            return;
+        }
+        \BCC\Trust\Core\Plugin::instance()->userSyncService()->sync($userId);
+    }
+
+    /**
+     * Revoke every Bearer token the user holds (F-119), so a session minted
+     * before the suspension stops authenticating everywhere at once, not
+     * just at routes that check suspension. Called only after the suspension
+     * transaction committed. Same mechanism as a password change.
+     */
+    private function revokeSessions(int $userId): void
+    {
+        \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
     }
 }
