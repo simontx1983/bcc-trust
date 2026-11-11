@@ -101,7 +101,7 @@ final class NftCapabilityEditorPanel
     {
         ?>
         <h2 style="margin-top:28px;">Capability editor</h2>
-        <p style="max-width:900px;color:#646970;">
+        <p style="max-width:900px;color:var(--bcc-text-muted);">
             Choose <strong>Edit capability</strong> on a chain above to change what BCC permits for
             it. Nothing is selected, so nothing can be changed from here.
         </p>
@@ -134,7 +134,7 @@ final class NftCapabilityEditorPanel
          * now a reminder rather than the only statement of the rule.
          */
         ?>
-        <p style="max-width:900px;color:#646970;margin-top:0;">
+        <p style="max-width:900px;color:var(--bcc-text-muted);margin-top:0;">
             Whether BCC treats this chain as one it does NFT collections for. It is a product
             decision, never a claim about the blockchain — a chain can be perfectly CW-721 capable
             and sit at off because BCC has not taken it on. It does not claim any provider is
@@ -185,7 +185,7 @@ final class NftCapabilityEditorPanel
             </tbody>
         </table>
 
-        <p style="max-width:900px;color:#646970;">
+        <p style="max-width:900px;color:var(--bcc-text-muted);">
             Disabling also sets the manual discovery permission to off, in the same database write.
             A permission left behind on an unsupported chain is invisible everywhere in the product
             — and would come back already granted the day support is restored.
@@ -219,7 +219,7 @@ final class NftCapabilityEditorPanel
         $grantable = ($chain['manual_intake'] ?? null) === true;
         ?>
         <h3 style="margin-bottom:4px;">Manual discovery permission</h3>
-        <p style="max-width:900px;color:#646970;margin-top:0;">
+        <p style="max-width:900px;color:var(--bcc-text-muted);margin-top:0;">
             Whether an administrator is permitted to <em>submit one contract</em> on this chain
             through manual intake. <strong>It does not schedule or start anything by
             itself</strong> — no cron reads it, because every recurring discovery hook was
@@ -295,7 +295,7 @@ final class NftCapabilityEditorPanel
                             chain projection.</em>
                         <?php else: ?>
                             <?php if ($product !== true): ?>
-                                <p style="margin-top:0;color:#dba617;">
+                                <p style="margin-top:0;color:var(--bcc-warning);">
                                     <strong>Granting is refused while product support is off.</strong>
                                     Enable product support above first — the server re-checks it at the
                                     moment the request runs, so what is on screen never decides this.
@@ -342,7 +342,7 @@ final class NftCapabilityEditorPanel
         $available  = ($chain['overrides_available'] ?? false) === true;
         ?>
         <h3 style="margin-bottom:4px;">Driver overrides</h3>
-        <p style="max-width:900px;color:#646970;margin-top:0;">
+        <p style="max-width:900px;color:var(--bcc-text-muted);margin-top:0;">
             An override can only <strong>narrow or reorder capability the code already declares</strong>.
             It can never add a driver this build does not have, point a real driver at a chain it
             does not serve, or assign one to an operation it does not perform — and it does not make
@@ -520,7 +520,7 @@ final class NftCapabilityEditorPanel
         }
         ?>
         <h3 style="margin-bottom:4px;">Leftover override rows (inert)</h3>
-        <p style="max-width:900px;color:#646970;margin-top:0;">
+        <p style="max-width:900px;color:var(--bcc-text-muted);margin-top:0;">
             These rows name an operation, a driver, or a driver-and-chain pairing
             <strong>this build does not have</strong> — normally the residue of a downgrade, a
             restored backup, or a driver retired between releases.
@@ -549,7 +549,7 @@ final class NftCapabilityEditorPanel
                     <tr>
                         <td><code><?php echo esc_html($operation); ?></code></td>
                         <td><code><?php echo esc_html($driverKey); ?></code></td>
-                        <td style="font-size:12px;color:#646970;">
+                        <td style="font-size:12px;color:var(--bcc-text-muted);">
                             <?php echo esc_html(self::staleReasonSentence($reason)); ?>
                         </td>
                         <td>
@@ -650,19 +650,19 @@ final class NftCapabilityEditorPanel
     private static function printTriState(mixed $state, string $yes, string $no): void
     {
         if ($state === null) {
-            echo '<span style="color:#d63638;font-weight:600;">Unknown</span>'
-                . ' <span style="color:#646970;font-size:12px;">— this install cannot store the value</span>';
+            echo '<span style="color:var(--bcc-danger);font-weight:600;">Unknown</span>'
+                . ' <span style="color:var(--bcc-text-muted);font-size:12px;">— this install cannot store the value</span>';
 
             return;
         }
 
         if ($state === true) {
-            echo '<span style="color:#00a32a;font-weight:600;">' . esc_html($yes) . '</span>';
+            echo '<span style="color:var(--bcc-success);font-weight:600;">' . esc_html($yes) . '</span>';
 
             return;
         }
 
-        echo '<span style="color:#646970;font-weight:600;">' . esc_html($no) . '</span>';
+        echo '<span style="color:var(--bcc-text-muted);font-weight:600;">' . esc_html($no) . '</span>';
     }
 
     /** The three override states, said in words rather than left to a symbol. */
@@ -670,21 +670,21 @@ final class NftCapabilityEditorPanel
     {
         switch ($state) {
             case NftChainCapability::OVERRIDE_STATE_DISABLED:
-                echo '<span style="color:#d63638;font-weight:600;">Disabled</span>'
-                    . '<div style="font-size:11px;color:#646970;">an override row switches it off</div>';
+                echo '<span style="color:var(--bcc-danger);font-weight:600;">Disabled</span>'
+                    . '<div style="font-size:11px;color:var(--bcc-text-muted);">an override row switches it off</div>';
 
                 return;
 
             case NftChainCapability::OVERRIDE_STATE_ENABLED:
-                echo '<span style="color:#00a32a;font-weight:600;">Enabled</span>'
-                    . '<div style="font-size:11px;color:#646970;">priority ' . (int) $priority
+                echo '<span style="color:var(--bcc-success);font-weight:600;">Enabled</span>'
+                    . '<div style="font-size:11px;color:var(--bcc-text-muted);">priority ' . (int) $priority
                     . ' (code default ' . (int) $default . ')</div>';
 
                 return;
         }
 
-        echo '<span style="color:#646970;font-weight:600;">Code default</span>'
-            . '<div style="font-size:11px;color:#646970;">no override row · priority '
+        echo '<span style="color:var(--bcc-text-muted);font-weight:600;">Code default</span>'
+            . '<div style="font-size:11px;color:var(--bcc-text-muted);">no override row · priority '
             . (int) $default . '</div>';
     }
 

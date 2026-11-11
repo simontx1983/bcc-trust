@@ -735,10 +735,16 @@ final class WalletAuthController
         $userIdInt = (int) $userId;
         update_user_meta($userIdInt, HandleService::META_HANDLE, $handle);
 
-        // Wallet-signup users authenticate via cryptographic signature —
-        // email is a placeholder or optional. Mark as verified so they
-        // are never blocked by the email-verification gate in login().
-        update_user_meta($userIdInt, AuthSupport::META_EMAIL_VERIFIED, '1');
+        // The email is NOT verified: it is either a placeholder or an address
+        // the caller typed, and a wallet signature proves nothing about who
+        // owns that inbox. Never '1' here — OAuth sign-in links by email only
+        // into a '1' account, so marking an unproven address verified let an
+        // attacker sign up with a victim's address and receive the victim's
+        // later Google sign-in. '0' does not affect this user: they sign in
+        // with their wallet, not the password gate in login(). The
+        // verification email (real addresses only) is sent once the wallet
+        // link below commits — see startWalletSignupEmailVerification().
+        update_user_meta($userIdInt, AuthSupport::META_EMAIL_VERIFIED, '0');
 
         // Link the wallet via the canonical write contract. If this
         // fails (concurrent signup race claimed the same wallet between
@@ -774,6 +780,10 @@ final class WalletAuthController
         // verifyAndLink, so listeners don't need to care which path the
         // link came from.
         do_action('bcc_wallet_verified', $userIdInt, (string) $chain->slug, $walletAddress);
+
+        // The account is now committed (the link-race rollback above can no
+        // longer delete it), so it is safe to mail.
+        AuthSupport::startWalletSignupEmailVerification($userIdInt, $email);
 
         wp_set_current_user($userIdInt);
         wp_set_auth_cookie($userIdInt, true);

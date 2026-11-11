@@ -9,7 +9,7 @@
  *
  * Body shape (PATCH) — every field optional:
  *   {
- *     "profile_visibility":     "public" | "members" | "private",
+ *     "profile_visibility":     "public" | "members" | "friends" | "private",
  *     "post_visibility":        "members" | "private",
  *     "hide_birthday_year":     bool,
  *     "hide_online":            bool,
@@ -26,6 +26,14 @@
  *                               This is the column PeepSo's own user-search
  *                               joins against, so writing through here keeps
  *                               search and feed gating coherent.
+ *                               ⚠ "friends" is 30, which is
+ *                               `PeepSoFriendsPlugin::ACCESS_FRIENDS` —
+ *                               defined and enforced by the peepso-friends
+ *                               plugin, not by PeepSo core. The value is
+ *                               ENFORCED on BCC's own read surfaces by
+ *                               {@see \BCC\Trust\Core\Support\ProfileAccess},
+ *                               which delegates to
+ *                               `PeepSoUser::is_accessible_static()`.
  *   - post_visibility        → `peepso_profile_post_acc` user_meta. Read via
  *                               `PeepSoUser::get_profile_post_accessibility()`,
  *                               write directly with `update_user_meta`. PeepSo
@@ -92,9 +100,46 @@ final class MyProfilePrefsEndpoint
     /** PeepSo access constants — duplicated as ints to keep the file phpstan-clean
      *  even when PeepSo isn't loaded. Verified against peepso.php:70-72.
      *
+     * ⚠ `friends` (30) does NOT come from peepso.php. It is
+     * `PeepSoFriendsPlugin::ACCESS_FRIENDS`, defined in the peepso-friends
+     * plugin, which is also what ENFORCES it — both through PeepSo's
+     * `peepso_user_is_accessible` filter and through a raw clause its
+     * `pre_user_query` appends to user search. Writing 30 here is
+     * therefore only meaningful while that plugin is active; when it is
+     * absent, `is_accessible_static` leaves 30 at deny, which is the
+     * fail-closed direction. See {@see \BCC\Trust\Core\Support\ProfileAccess}.
+     *
+     * The level was previously unreachable through this API: a member
+     * could not set "friends" at all, only through PeepSo's own profile
+     * UI, even though every other surface already understood it.
+     *
      * @var array<string, int>
      */
     private const PROFILE_VISIBILITY_TOKENS = [
+        'public'  => 10,
+        'members' => 20,
+        'friends' => 30,
+        'private' => 40,
+    ];
+
+    /**
+     * `default_post_audience` (`peepso_last_used_post_privacy`) keeps the
+     * THREE-token set it has always accepted.
+     *
+     * ⚠ Deliberately a separate map, not a reuse of the one above. The
+     * two shared a constant until `friends` was added for the profile
+     * field; continuing to share it would have silently widened a SECOND
+     * public enum in the same change, without that being asked for or
+     * reviewed.
+     *
+     * Extending this one to `friends` is defensible on its own merits —
+     * `act_access = 30` is a real PeepSo post level that peepso-friends
+     * gates — but it is a separate contract change and belongs in its own
+     * PR.
+     *
+     * @var array<string, int>
+     */
+    private const POST_AUDIENCE_TOKENS = [
         'public'  => 10,
         'members' => 20,
         'private' => 40,
@@ -171,7 +216,7 @@ final class MyProfilePrefsEndpoint
             if (!is_string($profileVis) || !isset(self::PROFILE_VISIBILITY_TOKENS[$profileVis])) {
                 return ApiResponse::error(
                     'bcc_invalid_request',
-                    '`profile_visibility` must be one of: public, members, private.',
+                    '`profile_visibility` must be one of: public, members, friends, private.',
                     422
                 );
             }
@@ -231,7 +276,7 @@ final class MyProfilePrefsEndpoint
         // default_post_audience → peepso_last_used_post_privacy user_meta
         $defaultAudience = $request->get_param('default_post_audience');
         if ($defaultAudience !== null) {
-            if (!is_string($defaultAudience) || !isset(self::PROFILE_VISIBILITY_TOKENS[$defaultAudience])) {
+            if (!is_string($defaultAudience) || !isset(self::POST_AUDIENCE_TOKENS[$defaultAudience])) {
                 return ApiResponse::error(
                     'bcc_invalid_request',
                     '`default_post_audience` must be one of: public, members, private.',
@@ -241,7 +286,7 @@ final class MyProfilePrefsEndpoint
             update_user_meta(
                 $userId,
                 'peepso_last_used_post_privacy',
-                (string) self::PROFILE_VISIBILITY_TOKENS[$defaultAudience]
+                (string) self::POST_AUDIENCE_TOKENS[$defaultAudience]
             );
             $touched = true;
         }
@@ -307,9 +352,22 @@ final class MyProfilePrefsEndpoint
             'hide_birthday_year'    => self::flag($userId, 'peepso_hide_birthday_year', false),
             'hide_online'           => self::flag($userId, 'peepso_hide_online_status', false),
             'hide_from_search'      => self::flag($userId, 'peepso_is_hide_profile_from_user_listing', false),
+            // ⚠ POST_AUDIENCE_TOKENS, matching this field's WRITE path.
+            // Both maps hold the same three entries, so this read is
+            // byte-identical to before; the point is that read and write
+            // stay pinned to the SAME map now that the profile field's map
+            // has a fourth token. Had this kept reading the profile map, a
+            // client could GET 'friends' here and then be refused on PUT.
+            //
+            // 📌 PRE-EXISTING, not introduced here: a user whose stored
+            // `peepso_last_used_post_privacy` is 30 (settable in PeepSo's
+            // own UI) is reported as 'members', and a client round-trip
+            // would then write 20 back — LOOSENING friends to members.
+            // That is true on main today and is logged as a follow-up
+            // rather than silently changed under cover of this PR.
             'default_post_audience' => self::tokenForAcc(
                 self::readLastUsedPostPrivacy($userId),
-                self::PROFILE_VISIBILITY_TOKENS,
+                self::POST_AUDIENCE_TOKENS,
                 'members' // PeepSo's safest default for posts
             ),
             'mentor_opt_in'             => $mentor['opted_in'],

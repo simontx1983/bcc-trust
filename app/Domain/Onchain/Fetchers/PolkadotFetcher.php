@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
+use BCC\Trust\Onchain\Support\StakeAmount;
 
 /**
  * Polkadot Validator Fetcher
@@ -376,37 +377,15 @@ class PolkadotFetcher implements FetcherInterface
     /**
      * `bonded_total` as a string bccomp() can take.
      *
-     * ⚠ A non-numeric value previously reached bccomp() raw, which THROWS
-     * on PHP 8 - a fatal inside the index cron. It now sorts as 0. Scale is
-     * left at the default, so numeric comparisons are unchanged.
-     *
-     * ⚠⚠ TWO CHECKS, AND BOTH ARE LOAD-BEARING. The regex is the
-     * correctness guard: bcmath accepts only well-formed decimals, so an
-     * exponent form like '1e5' passes is_numeric() and still makes bccomp()
-     * throw. is_numeric() is what makes the numeric-string return type TRUE
-     * rather than merely asserted - it is the narrowing the analyser can
-     * verify, and it is a real statement about the value, not a suppression.
+     * The rule — and why both of its checks are load-bearing — now lives in
+     * {@see StakeAmount::sortable()}, shared by every validator fetcher (F-66).
      *
      * @param array<string, mixed> $v
      * @return numeric-string
      */
     private static function bondedTotal(array $v): string
     {
-        $raw = $v['bonded_total'] ?? '0';
-
-        if (is_int($raw)) {
-            return (string) $raw;
-        }
-
-        if (
-            !is_string($raw)
-            || preg_match('/^\d+(\.\d+)?$/', $raw) !== 1
-            || !is_numeric($raw)
-        ) {
-            return '0';
-        }
-
-        return $raw;
+        return StakeAmount::sortable($v['bonded_total'] ?? '0');
     }
 
     /**

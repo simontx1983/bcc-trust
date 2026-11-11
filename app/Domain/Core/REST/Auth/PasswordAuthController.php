@@ -245,23 +245,14 @@ final class PasswordAuthController
         // Mark the account as pending email verification. The login gate
         // in login() checks this meta and blocks '0' values, so the user
         // cannot sign in until /auth/verify-email succeeds.
-        // Wallet-signup users skip this path entirely and get '1' directly.
+        // (Wallet signup also starts at '0' — see WalletAuthController.)
         update_user_meta($userIdInt, AuthSupport::META_EMAIL_VERIFIED, '0');
 
-        // Generate a 6-digit OTP (OTP path) and a 32-byte hex token
-        // (link path). Store both so the user can verify via either route.
-        $otpCode     = AuthSupport::generateOtp();
-        $verifyToken = AuthSupport::generateVerifyToken();
-        AuthSupport::storeOtpForUser($userIdInt, $otpCode);
-        AuthSupport::storeVerifyToken($verifyToken, $userIdInt);
-
-        // Build the one-shot verify URL and dispatch the email.
-        // Best-effort: a mail failure records a DegradationMetric but
-        // does NOT roll back account creation — the user can resend from
-        // /verify-email via /auth/resend-verification.
-        $verifyPath = '/verify-email?email=' . rawurlencode($email) . '&token=' . rawurlencode($verifyToken);
-        $verifyUrl  = FrontendRedirect::defaultReturn($verifyPath);
-        AuthMailer::sendVerificationEmail($userIdInt, $email, $otpCode, $verifyUrl);
+        // OTP (code path) + single-use token (link path), stored, then the
+        // verification email. Best-effort: a mail failure records a
+        // DegradationMetric but does NOT roll back account creation — the
+        // user can resend from /verify-email via /auth/resend-verification.
+        AuthSupport::beginEmailVerification($userIdInt, $email);
 
         Logger::audit('user_signup', [
             'user_id' => $userIdInt,
@@ -342,7 +333,8 @@ final class PasswordAuthController
         // '0' = set at email-signup and cleared by /auth/verify-email.
         // ''  = not present (legacy user, pre-verification-gate) → allow.
         // '1' = verified → allow.
-        // Wallet-signup users have '1' set at wallet-signup time → allow.
+        // Wallet-signup users start at '0' too, but sign in with their wallet;
+        // their password is a random 64-char value they never see.
         $emailVerified = (string) get_user_meta($userId, AuthSupport::META_EMAIL_VERIFIED, true);
         if ($emailVerified === '0') {
             return ApiResponse::error(

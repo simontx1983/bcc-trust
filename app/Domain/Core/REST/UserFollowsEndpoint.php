@@ -29,6 +29,7 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Services\UserFollowsService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\UserSlugResolver;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -111,6 +112,17 @@ final class UserFollowsEndpoint
         $targetId = UserSlugResolver::resolve($slug);
         if ($targetId === 0) {
             return ApiResponse::error('bcc_not_found', 'User not found.', 404);
+        }
+
+        // §F-02 profile-wide gate. Note this route is a RELATIONSHIP
+        // listing: the follower/following lists of a private profile
+        // disclose who that person is connected to, which is arguably
+        // more sensitive than the profile body itself. Gated on the
+        // PROFILE OWNER; whether individual listed users should also be
+        // filtered by their own visibility is the separate F-26 question
+        // and is deliberately not answered here.
+        if (!ProfileAccess::canViewProfile($targetId)) {
+            return ProfileAccess::forbidden();
         }
 
         $offset = (int) $request->get_param('offset');

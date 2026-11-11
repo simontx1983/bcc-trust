@@ -137,29 +137,29 @@ function bcc_trust_render_verified_tab() {
 
         <!-- Summary Stats with Config Context -->
         <div class="stats-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0;">
-            <div class="stat-card" style="background: #fff; padding: 20px; border: 1px solid #ccd0d4; border-radius: 5px; border-left: 4px solid #46b450;">
-                <h3 style="margin:0 0 5px 0; font-size:14px; color:#555;">Total Verified</h3>
+            <div class="stat-card" style="background: var(--bcc-bg-card); padding: 20px; border: 1px solid var(--bcc-border); border-radius: 5px; border-left: 4px solid var(--bcc-success);">
+                <h3 style="margin:0 0 5px 0; font-size:14px; color:var(--bcc-text-secondary);">Total Verified</h3>
                 <div class="stat-value" style="font-size: 32px; font-weight: bold;"><?php echo esc_html($verified_num($total_verified)); ?></div>
                 <small><?php echo esc_html($verified_num($recent_verifications)); ?> in last 30 days</small>
             </div>
 
-            <div class="stat-card" style="background: #fff; padding: 20px; border: 1px solid #ccd0d4; border-radius: 5px;">
-                <h3 style="margin:0 0 5px 0; font-size:14px; color:#555;">Avg Net Impact</h3>
+            <div class="stat-card" style="background: var(--bcc-bg-card); padding: 20px; border: 1px solid var(--bcc-border); border-radius: 5px;">
+                <h3 style="margin:0 0 5px 0; font-size:14px; color:var(--bcc-text-secondary);">Avg Net Impact</h3>
                 <div class="stat-value" style="font-size: 32px; font-weight: bold;"><?php echo esc_html($verified_dec($avg_net_impact)); ?></div>
                 <small>Trust Boost - Fraud Reduction</small>
             </div>
 
-            <div class="stat-card" style="background: #fff; padding: 20px; border: 1px solid #ccd0d4; border-radius: 5px;">
-                <h3 style="margin:0 0 5px 0; font-size:14px; color:#555;">High Quality</h3>
+            <div class="stat-card" style="background: var(--bcc-bg-card); padding: 20px; border: 1px solid var(--bcc-border); border-radius: 5px;">
+                <h3 style="margin:0 0 5px 0; font-size:14px; color:var(--bcc-text-secondary);">High Quality</h3>
                 <div class="stat-value" style="font-size: 32px; font-weight: bold;"><?php echo esc_html($verified_num($high_quality_count)); ?></div>
                 <small>100+ GitHub followers</small>
             </div>
 
-            <div class="stat-card" style="background: #fff; padding: 20px; border: 1px solid #ccd0d4; border-radius: 5px;">
-                <h3 style="margin:0 0 5px 0; font-size:14px; color:#555;">Trust Boost Tiers</h3>
+            <div class="stat-card" style="background: var(--bcc-bg-card); padding: 20px; border: 1px solid var(--bcc-border); border-radius: 5px;">
+                <h3 style="margin:0 0 5px 0; font-size:14px; color:var(--bcc-text-secondary);">Trust Boost Tiers</h3>
                 <div class="stat-value" style="font-size: 14px;">
-                    <span style="color:#4caf50;">Elite: <?php echo intval($trustBoostElite); ?>%</span> |
-                    <span style="color:#2196f3;">Trusted: <?php echo intval($trustBoostTrusted); ?>%</span>
+                    <span style="color:var(--bcc-success);">Elite: <?php echo intval($trustBoostElite); ?>%</span> |
+                    <span style="color:var(--bcc-accent);">Trusted: <?php echo intval($trustBoostTrusted); ?>%</span>
                 </div>
                 <small>From config.php</small>
             </div>
@@ -256,7 +256,7 @@ function bcc_trust_render_verified_tab() {
                                 <br><small>ID: <?php echo intval($user->user_id); ?></small>
                                 <br><small><?php echo esc_html($user->user_email); ?></small>
                                 <?php if ($user->fraud_score > $fraudMedium): ?>
-                                    <br><span style="color:#f44336; font-weight:bold;">⚠️ Risk: <?php echo intval($user->fraud_score); ?></span>
+                                    <br><span style="color:var(--bcc-danger); font-weight:bold;">⚠️ Risk: <?php echo intval($user->fraud_score); ?></span>
                                 <?php endif; ?>
                             </td>
                             <td>
@@ -271,7 +271,7 @@ function bcc_trust_render_verified_tab() {
                                     <div>
                                         <strong>@<?php echo esc_html($user->github_username); ?></strong>
                                         <?php if ($user->has_verified_email): ?>
-                                            <br><small style="color:#4caf50;">✓ Verified Email</small>
+                                            <br><small style="color:var(--bcc-success);">✓ Verified Email</small>
                                         <?php endif; ?>
                                     </div>
                                 </a>
@@ -331,7 +331,7 @@ function bcc_trust_render_verified_tab() {
                                     <a href="<?php echo esc_url(admin_url('admin.php?page=bcc-trust-moderation&user_id=' . intval($user->user_id))); ?>" class="button button-small">View User</a>
                                     <a href="https://github.com/<?php echo esc_attr($user->github_username); ?>" class="button button-small" target="_blank">GitHub Profile</a>
                                     <?php if ($user->fraud_score > $fraudMedium): ?>
-                                        <span style="color:#f44336; font-size:11px;">⚠️ Review needed</span>
+                                        <span style="color:var(--bcc-danger); font-size:11px;">⚠️ Review needed</span>
                                     <?php endif; ?>
                                 </div>
                             </td>

@@ -647,6 +647,27 @@ final class CardViewService
     }
 
     /**
+     * Resolve a member-card handle to a user id, for a CALLER THAT MUST
+     * GATE on the same user this service will render.
+     *
+     * ⚠⚠ EXISTS SO THE GATE AND THE PAYLOAD CANNOT DISAGREE, and that is
+     * not hypothetical. This service's `resolveHandle()` matches ONLY the
+     * `bcc_handle` meta, whereas {@see UserSlugResolver::resolve()} also
+     * falls back to `user_login` and then to a sluggified
+     * `user_nicename`. The two therefore resolve DIFFERENT sets: a legacy
+     * account with no `bcc_handle` resolves through UserSlugResolver and
+     * not through this one. A gate built on the other resolver would
+     * judge one user's privacy and then render — or 404 — a different
+     * one, which is how a gate ends up protecting the wrong person.
+     *
+     * @see \BCC\Trust\Core\REST\CardsEndpoint::handle()
+     */
+    public static function resolveMemberCardHandle(string $handle): int
+    {
+        return self::resolveHandle($handle);
+    }
+
+    /**
      * @return array<string, mixed>|null
      */
     private function getMemberCard(string $handle, int $viewerId): ?array

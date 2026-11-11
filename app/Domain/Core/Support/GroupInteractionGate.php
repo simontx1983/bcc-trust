@@ -48,19 +48,31 @@ final class GroupInteractionGate
      * let them write rows against a nonexistent act. A comment act whose
      * parent can't be resolved (e.g. unpublished) gets the same 404 and is
      * never gated on its own post row.
+     *
+     * Only FEED activities qualify (F-163): the lookup is restricted to
+     * FeedItemNormalizer::publicFeedModuleIds(), the same canonical
+     * allowlist the feed and the single-item permalink gate enforce. A DM
+     * (PeepSo module 6), a group-join stream row or any unknown module is
+     * an act too, but it is not something a feed route may touch, so it
+     * gets the same 404 as an act that does not exist.
      */
     public static function check(int $userId, int $actId): ?WP_REST_Response
     {
         $comment = Plugin::instance()->commentRepository()->getCommentMeta($actId);
         if ($comment !== null) {
             $parentPostId = (int) $comment->parent_post_id;
-            if ($parentPostId <= 0) {
+            // A comment hanging off a trashed/draft parent is not reachable
+            // on any feed, so it is "not found" too.
+            if ($parentPostId <= 0 || get_post_status($parentPostId) !== 'publish') {
                 return self::notFound();
             }
             return self::checkPost($userId, $parentPostId);
         }
 
-        $row = PeepSoActivityRepository::getById($actId);
+        $row = PeepSoActivityRepository::getById(
+            $actId,
+            \BCC\Core\Feed\FeedItemNormalizer::publicFeedModuleIds()
+        );
         if ($row === null) {
             return self::notFound();
         }
@@ -77,9 +89,11 @@ final class GroupInteractionGate
         return self::checkPost($userId, $postId);
     }
 
-    private static function notFound(): WP_REST_Response
+    private const NOT_FOUND_POST = 'Post not found.';
+
+    private static function notFound(string $message = self::NOT_FOUND_POST): WP_REST_Response
     {
-        return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
+        return ApiResponse::error('bcc_not_found', $message, 404);
     }
 
     /**
@@ -88,8 +102,19 @@ final class GroupInteractionGate
      * comment's own activity row carries no `peepso_group_id`, so the
      * gate must resolve membership off the PARENT post the comment hangs
      * under (its `act_comment_object_id`).
+     *
+     * ⚠ EXISTENCE ORACLE (F-163). resolveGroupAccess() returns null for
+     * "no such group" AND for "secret group, viewer not a member". That must
+     * read as NOT FOUND, byte-identical to the caller's own unknown-id 404.
+     * A "join the group" 403 there would confirm a secret group's post or
+     * comment exists. The 403 stays for closed and open groups, whose
+     * existence is public.
+     *
+     * $notFoundMessage is the caller's OWN unknown-id message, so the bodies
+     * match exactly. The comment routes say "Comment not found." for an
+     * unknown comment, so they pass that.
      */
-    public static function checkPost(int $userId, int $postId): ?WP_REST_Response
+    public static function checkPost(int $userId, int $postId, string $notFoundMessage = self::NOT_FOUND_POST): ?WP_REST_Response
     {
         if ($postId <= 0) {
             return null;
@@ -103,7 +128,12 @@ final class GroupInteractionGate
         }
 
         $access = Plugin::instance()->groupsService()->resolveGroupAccess($userId, $groupId);
-        if ($access === null || $access['isMember'] !== true) {
+        if ($access === null) {
+            // Missing group, or SECRET + non-member: indistinguishable from
+            // an id that does not exist.
+            return self::notFound($notFoundMessage);
+        }
+        if ($access['isMember'] !== true) {
             return ApiResponse::error(
                 'bcc_permission_denied',
                 'Join the group to react here.',

@@ -38,7 +38,14 @@ namespace BCC\Core\Repositories {
             if ($row === null) {
                 return null;
             }
-            return (object) ['act_id' => $actId, 'act_external_id' => $row['external_id']];
+            // Faithful to the real query: an allowlist is a SQL `IN (...)` on
+            // act_module_id, and an empty list matches nothing.
+            $module = (int) ($row['module'] ?? 1);
+            if ($allowedModuleIds !== null && !in_array($module, $allowedModuleIds, true)) {
+                return null;
+            }
+            $GLOBALS['__bcc_gig']['allowlists'][] = $allowedModuleIds;
+            return (object) ['act_id' => $actId, 'act_external_id' => $row['external_id'], 'act_module_id' => $module];
         }
     }
 }
@@ -141,6 +148,14 @@ namespace {
         function get_post_type($post = null)
         {
             return $GLOBALS['__bcc_gig']['post_type'][(int) $post] ?? false;
+        }
+    }
+
+    if (!function_exists('get_post_status')) {
+        /** @return string|false */
+        function get_post_status($post = null)
+        {
+            return $GLOBALS['__bcc_gig']['post_status'][(int) $post] ?? 'publish';
         }
     }
 }
