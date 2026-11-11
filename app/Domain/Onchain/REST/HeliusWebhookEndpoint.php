@@ -99,11 +99,6 @@ final class HeliusWebhookEndpoint
 
         if ($expectedAuth === '' || !hash_equals($expectedAuth, $providedAuth)) {
             self::logSignatureFailure();
-            HeliusDeliveryLog::record([
-                'outcome'     => HeliusDeliveryLog::OUTCOME_AUTH_FAILED,
-                'auth_passed' => false,
-                'ip'          => IpResolver::getClientIp(),
-            ]);
             return self::ok();
         }
 
@@ -284,9 +279,22 @@ final class HeliusWebhookEndpoint
     }
 
     /**
-     * Log signature-mismatch attempts at most once per
-     * SIGFAIL_WINDOW_SECONDS per source IP. Defends against
-     * log-flood amplification while preserving evidence of probing.
+     * Record a signature mismatch at most ONCE per SIGFAIL_WINDOW_SECONDS
+     * per source IP (F-49).
+     *
+     * An unauthenticated caller used to cost a transient write, a counter
+     * read-modify-write AND a read-modify-write of the whole 200-row
+     * HeliusDeliveryLog option on EVERY request — write load on demand,
+     * and a junk flood evicted the real delivery history the admin
+     * dashboard reads. Now the first failure from an IP in a window writes
+     * (window marker + sigfail_total + one auth_failed delivery-log row +
+     * one warning); every further failure from that IP in the window is a
+     * single read and NO write.
+     *
+     * sigfail_total therefore counts (IP, window) failures, not raw
+     * requests. It still climbs while signatures keep failing — e.g. a
+     * rotated secret makes Helius's own IPs fail each window — which is the
+     * signal NftIndexerHealthSnapshot points operators at.
      */
     private static function logSignatureFailure(): void
     {
@@ -295,18 +303,23 @@ final class HeliusWebhookEndpoint
         // the SIGFAIL transient is keyed on the IP, so collapsing every
         // probe behind a CDN to one bucket would silently disable the
         // attack-detection signal.
-        $ip = IpResolver::getClientIp();
+        $ip  = IpResolver::getClientIp();
         $key = self::SIGFAIL_TRANSIENT_PREFIX . md5($ip);
-        $count = (int) (get_transient($key) ?: 0);
 
-        if ($count === 0) {
-            \BCC\Core\Log\Logger::warning('[HeliusWebhookEndpoint] signature mismatch', [
-                'source_ip' => $ip,
-            ]);
+        if (get_transient($key) !== false) {
+            return; // Already recorded for this IP in this window — no write.
         }
 
-        set_transient($key, $count + 1, self::SIGFAIL_WINDOW_SECONDS);
+        set_transient($key, 1, self::SIGFAIL_WINDOW_SECONDS);
+        \BCC\Core\Log\Logger::warning('[HeliusWebhookEndpoint] signature mismatch', [
+            'source_ip' => $ip,
+        ]);
         self::bumpCounter('sigfail_total');
+        HeliusDeliveryLog::record([
+            'outcome'     => HeliusDeliveryLog::OUTCOME_AUTH_FAILED,
+            'auth_passed' => false,
+            'ip'          => $ip,
+        ]);
     }
 
     private static function bumpCounter(string $name): void
