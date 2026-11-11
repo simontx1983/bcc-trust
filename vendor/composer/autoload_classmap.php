@@ -286,6 +286,7 @@ return array(
     'BCC\\Trust\\Core\\Services\\UserSyncService' => $baseDir . '/app/Domain/Core/Services/UserSyncService.php',
     'BCC\\Trust\\Core\\Services\\UserViewService' => $baseDir . '/app/Domain/Core/Services/UserViewService.php',
     'BCC\\Trust\\Core\\Services\\VoteService' => $baseDir . '/app/Domain/Core/Services/VoteService.php',
+    'BCC\\Trust\\Core\\Services\\Vote\\ReviewVisibilityScoreSync' => $baseDir . '/app/Domain/Core/Services/Vote/ReviewVisibilityScoreSync.php',
     'BCC\\Trust\\Core\\Services\\Vote\\VoteEligibilityChecker' => $baseDir . '/app/Domain/Core/Services/Vote/VoteEligibilityChecker.php',
     'BCC\\Trust\\Core\\Services\\Vote\\VoteFraudAnalyzer' => $baseDir . '/app/Domain/Core/Services/Vote/VoteFraudAnalyzer.php',
     'BCC\\Trust\\Core\\Services\\Vote\\VoteJobDispatcher' => $baseDir . '/app/Domain/Core/Services/Vote/VoteJobDispatcher.php',
