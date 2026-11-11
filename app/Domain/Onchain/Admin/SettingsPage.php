@@ -388,7 +388,7 @@ class SettingsPage
                         <td><?php echo $head; ?></td>
                         <td><?php echo $lag; ?></td>
                         <td><?php echo (int) $cp->cu_used_today; ?></td>
-                        <td><?php echo $cp->last_error !== null ? esc_html((string) $cp->last_error) : '—'; ?></td>
+                        <td><?php echo $cp->last_error !== null ? esc_html(AdminActionSupport::operatorSafeExcerpt((string) $cp->last_error)) : '—'; ?></td>
                     </tr>
                     <?php endforeach; ?>
                 <?php endif; ?>
