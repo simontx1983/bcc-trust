@@ -227,6 +227,61 @@ final class ModerationService
     }
 
     // ──────────────────────────────────────────────────────────────
+    // RESET FRAUD SCORE
+    // ──────────────────────────────────────────────────────────────
+
+    /**
+     * Admin reset of a member's fraud score — current AND peak — to 0
+     * (F-103, user decision). The undo for a wrongly accumulated score (e.g.
+     * a household that shared a device before the once-per-window rule).
+     *
+     * Also forgets the member's recorded shared-device penalties (so the
+     * window starts fresh), drops cached fraud / rate-limit state, and flags
+     * every page the member voted on so the fraud discount on their votes is
+     * recomputed. Audited with the replaced values.
+     *
+     * @return array{success: bool, message: string}
+     */
+    public function resetFraudScore(int $userId): array
+    {
+        try {
+            $previous = $this->userInfoRepository->resetFraudScore($userId);
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] reset_fraud_score_failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            echo '<div class="notice notice-error"><p>Failed to reset the fraud score: database error.</p></div>';
+            return ['success' => false, 'message' => 'Failed to reset the fraud score: database error.'];
+        }
+
+        if ($previous === null) {
+            echo '<div class="notice notice-error"><p>No trust record exists for this user, so there is nothing to reset.</p></div>';
+            return ['success' => false, 'message' => 'No trust record for this user.'];
+        }
+
+        \BCC\Trust\Core\Security\DeviceSharingPenaltyLedger::clear($userId);
+        \BCC\Trust\Core\Security\FraudDetector::clearCache($userId);
+        \BCC\Trust\Core\Security\RateLimiter::invalidateUserCache($userId);
+        $pagesFlagged = $this->userInfoRepository->markVotedPagesForRecalculation($userId);
+
+        $this->logAction('admin_fraud_score_reset', $userId, [
+            'previous_fraud_score' => $previous['fraud_score'],
+            'previous_peak_score'  => $previous['peak_fraud_score'],
+            'pages_flagged'        => $pagesFlagged,
+        ]);
+
+        $message = sprintf(
+            'Fraud score reset to 0 (was %d, peak %d). %d voted pages queued for recalculation.',
+            $previous['fraud_score'],
+            $previous['peak_fraud_score'],
+            $pagesFlagged
+        );
+        echo '<div class="notice notice-success"><p>' . esc_html($message) . '</p></div>';
+        return ['success' => true, 'message' => $message];
+    }
+
+    // ──────────────────────────────────────────────────────────────
     // CLEAR FINGERPRINTS
     // ──────────────────────────────────────────────────────────────
 
@@ -821,7 +876,7 @@ final class ModerationService
      */
     public function isIpWhitelisted(string $ip): bool
     {
-        return isset($this->getIpWhitelist()[$ip]);
+        return \BCC\Trust\Core\Security\FraudWhitelist::isIpWhitelisted($ip);
     }
 
     /**
@@ -832,7 +887,7 @@ final class ModerationService
      */
     public function isFingerprintWhitelisted(string $fp): bool
     {
-        return isset($this->getFingerprintWhitelist()[$fp]);
+        return \BCC\Trust\Core\Security\FraudWhitelist::isFingerprintWhitelisted($fp);
     }
 
     // ──────────────────────────────────────────────────────────────
