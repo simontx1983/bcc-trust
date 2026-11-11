@@ -26,8 +26,9 @@
  *  - Each migration has its own durable completion option; completions are
  *    independent — one migration failing never marks another complete.
  *  - A migration is marked complete ONLY when it reports every eligible row
- *    processed successfully. Any failure (or a batch-cap hit with rows still
- *    remaining) leaves it INCOMPLETE and retryable on the next request.
+ *    processed successfully. A batch-cap hit with rows still remaining
+ *    (MORE) resumes on the next request; any failure (INCOMPLETE) leaves it
+ *    retryable after a one-hour backoff (F-151), never on every request.
  *  - A crash-safe, session-scoped advisory lock per migration
  *    ({@see \BCC\Core\DB\AdvisoryLock}, GET_LOCK) stops two concurrent
  *    requests from processing the same migration. MySQL releases the lock
@@ -59,12 +60,28 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-/** A migration reports one of these from its callback. */
+/**
+ * A migration reports one of these from its callback.
+ *
+ *  - COMPLETE   — every eligible row done; the done-option is stamped.
+ *  - MORE       — the per-request batch cap was hit and rows remain. NOT a
+ *                 failure: progress is persisted and the next request
+ *                 resumes, with no backoff.
+ *  - INCOMPLETE — anything else that is not done: a failed statement, an
+ *                 unreadable probe, a missing dependency, an unarmed gate.
+ *                 F-151: the runner backs the migration off for an hour
+ *                 (bcc_trust_migration_step_failed), so a migration that
+ *                 fails PERMANENTLY is retried hourly, not on every request.
+ *                 An unknown return value is treated the same way.
+ */
 if (!defined('BCC_TRUST_MIGRATION_COMPLETE')) {
     define('BCC_TRUST_MIGRATION_COMPLETE', 'complete');
 }
 if (!defined('BCC_TRUST_MIGRATION_INCOMPLETE')) {
     define('BCC_TRUST_MIGRATION_INCOMPLETE', 'incomplete');
+}
+if (!defined('BCC_TRUST_MIGRATION_MORE')) {
+    define('BCC_TRUST_MIGRATION_MORE', 'more');
 }
 
 if (!function_exists('bcc_trust_migration_backoff_active')) {
@@ -460,6 +477,14 @@ if (!function_exists('bcc_trust_pending_migrations')) {
             return;
         }
 
+        // 2b. F-151: a migration that reported a failure (INCOMPLETE) within
+        //     the last hour is skipped. Checked before the lock so a backed-off
+        //     migration costs one transient read per request, nothing more.
+        $migrationId = (string) $migration['id'];
+        if (bcc_trust_migration_backoff_active($migrationId)) {
+            return;
+        }
+
         // 3. Crash-safe, session-scoped, non-blocking lock. If another
         //    request holds it, that request is processing this migration —
         //    skip this pass rather than double-process.
@@ -483,6 +508,10 @@ if (!function_exists('bcc_trust_pending_migrations')) {
             //    keeps future no-op checks free.
             if ($status === BCC_TRUST_MIGRATION_COMPLETE) {
                 update_option($doneOption, time(), true);
+            } elseif ($status !== BCC_TRUST_MIGRATION_MORE) {
+                // 7. F-151: not done and not mere batch progress — back off
+                //    for an hour instead of re-running on every request.
+                bcc_trust_migration_step_failed($migrationId, 'returned ' . $status);
             }
         } finally {
             // Always release — including on a thrown error — so a caught

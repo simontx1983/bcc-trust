@@ -416,15 +416,15 @@ class DeviceFingerprinter {
 
             // If multiple accounts detected, update user_info
             if ($multipleAccounts) {
-                $fraudIncrement = min(20, $sharedCount * 5);
-                $this->userInfoRepo->incrementFraudScore($userId, $fraudIncrement, 'device_sharing');
+                $applied = $this->applySharingPenalty($userId, 'device_sharing', $fingerprint, min(20, $sharedCount * 5));
 
                 AuditLogger::log('device_sharing_detected', $userId, [
                     'fingerprint' => $fingerprint,
                     'shared_count' => $sharedCount,
                     'other_users' => wp_list_pluck($existingUsers, 'user_id'),
                     'automation_score' => $automationData['confidence'] ?? 0,
-                    'risk_level' => $riskLevel
+                    'risk_level' => $riskLevel,
+                    'points_applied' => $applied,
                 ], 'user');
             }
 
@@ -447,15 +447,15 @@ class DeviceFingerprinter {
 
             // If multiple accounts detected, update user_info
             if ($multipleAccounts) {
-                $fraudIncrement = min(20, $sharedCount * 5);
-                $this->userInfoRepo->incrementFraudScore($userId, $fraudIncrement, 'device_sharing');
+                $applied = $this->applySharingPenalty($userId, 'device_sharing', $fingerprint, min(20, $sharedCount * 5));
 
                 AuditLogger::log('device_sharing_detected', $userId, [
                     'fingerprint' => $fingerprint,
                     'shared_count' => $sharedCount,
                     'other_users' => wp_list_pluck($existingUsers, 'user_id'),
                     'automation_score' => $automationData['confidence'] ?? 0,
-                    'risk_level' => $riskLevel
+                    'risk_level' => $riskLevel,
+                    'points_applied' => $applied,
                 ], 'user');
             }
 
@@ -538,7 +538,47 @@ class DeviceFingerprinter {
         
         return $formats;
     }
-    
+
+    /**
+     * Apply a shared-device fraud penalty — at most once per device per
+     * window, capped in total, and never for an admin-whitelisted device or
+     * IP (F-103). Returns the points actually added (0 when suppressed).
+     *
+     * @param string $reason    'device_sharing' | 'server_fingerprint_sharing'
+     * @param string $deviceKey the shared fingerprint (client or srv_)
+     */
+    private function applySharingPenalty(int $userId, string $reason, string $deviceKey, int $requested): int {
+        if (FraudWhitelist::isFingerprintWhitelisted($deviceKey)
+            || FraudWhitelist::isIpWhitelisted($this->getClientIp())) {
+            return 0;
+        }
+
+        // Allowance → increment → record must be atomic per account, or two
+        // concurrent votes could both see "not yet penalised" and both add
+        // the penalty. Non-blocking: a request that loses the race applies
+        // nothing now; a later vote applies it if it is still due.
+        $lockKey  = 'bcc_device_sharing_' . $userId;
+        $hasLocks = class_exists('\\BCC\\Core\\DB\\AdvisoryLock');
+        if ($hasLocks && !\BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0)) {
+            return 0;
+        }
+
+        try {
+            $points = DeviceSharingPenaltyLedger::allowance($userId, $reason, $deviceKey, $requested);
+            if ($points <= 0) {
+                return 0;
+            }
+
+            $this->userInfoRepo->incrementFraudScore($userId, $points, $reason);
+            DeviceSharingPenaltyLedger::record($userId, $reason, $deviceKey, $points);
+            return $points;
+        } finally {
+            if ($hasLocks) {
+                \BCC\Core\DB\AdvisoryLock::release($lockKey);
+            }
+        }
+    }
+
     /**
      * Store fingerprint for user, also recording the server-side fingerprint.
      *
@@ -553,12 +593,12 @@ class DeviceFingerprinter {
         $serverSharedCount = $this->getFingerprintUserCount($serverFp);
         if ($serverSharedCount > 1) {
             // Different accounts, same server-side fingerprint -> strong signal
-            $fraudIncrement = min(30, $serverSharedCount * 8);
-            $this->userInfoRepo->incrementFraudScore($userId, $fraudIncrement, 'server_fingerprint_sharing');
+            $applied = $this->applySharingPenalty($userId, 'server_fingerprint_sharing', $serverFp, min(30, $serverSharedCount * 8));
 
             AuditLogger::log('server_fingerprint_shared', $userId, [
                 'server_fingerprint' => substr($serverFp, 0, 20) . '...',
                 'shared_count'       => $serverSharedCount,
+                'points_applied'     => $applied,
             ], 'user');
         }
 

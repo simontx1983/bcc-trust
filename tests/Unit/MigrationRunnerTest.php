@@ -31,6 +31,7 @@ final class MigrationRunnerTest extends TestCase
         $GLOBALS['__bcc_lock_grant']   = true;
         $GLOBALS['__bcc_lock_calls']   = [];
         $GLOBALS['__bcc_mig_calls']    = [];
+        $GLOBALS['__bcc_transients']   = [];
     }
 
     /**
@@ -185,10 +186,10 @@ final class MigrationRunnerTest extends TestCase
     {
         $donePath = 'done_resumable';
 
-        // Pass 1: reports INCOMPLETE (batch cap / transient) → not completed.
+        // Pass 1: reports MORE (batch cap hit) → not completed, no backoff.
         bcc_trust_run_pending_migrations([[
             'id' => 'resumable', 'done_option' => $donePath,
-            'callback' => static fn(): string => BCC_TRUST_MIGRATION_INCOMPLETE,
+            'callback' => static fn(): string => BCC_TRUST_MIGRATION_MORE,
         ]]);
         self::assertArrayNotHasKey($donePath, $GLOBALS['__bcc_opts']);
 
@@ -198,6 +199,71 @@ final class MigrationRunnerTest extends TestCase
             'callback' => static fn(): string => BCC_TRUST_MIGRATION_COMPLETE,
         ]]);
         self::assertArrayHasKey($donePath, $GLOBALS['__bcc_opts']);
+    }
+
+    // ── F-151: failure backoff ──────────────────────────────────────────
+
+    /**
+     * A migration that reports INCOMPLETE is a failure: it is not retried on
+     * every request but backed off for an hour, then retried.
+     */
+    public function testAFailedMigrationBacksOffForAnHourThenRetries(): void
+    {
+        $m = $this->migration('flaky', BCC_TRUST_MIGRATION_INCOMPLETE);
+
+        bcc_trust_run_pending_migrations([$m]);
+        self::assertSame(['flaky'], $this->ran());
+        self::assertSame(
+            HOUR_IN_SECONDS,
+            $GLOBALS['__bcc_transients']['bcc_trust_migration_backoff_flaky']['expiration'] ?? null,
+            'a one-hour backoff was set'
+        );
+
+        bcc_trust_run_pending_migrations([$m]);
+        bcc_trust_run_pending_migrations([$m]);
+        self::assertSame(['flaky'], $this->ran(), 'not re-run on every request while backed off');
+        self::assertCount(2, $GLOBALS['__bcc_lock_calls'],
+            'one acquire + one release from the first run only: a backed-off migration does not even take the lock');
+
+        unset($GLOBALS['__bcc_transients']['bcc_trust_migration_backoff_flaky']); // the hour passes
+        bcc_trust_run_pending_migrations([$m]);
+        self::assertSame(['flaky', 'flaky'], $this->ran(), 'retried after the backoff');
+        self::assertArrayNotHasKey('done_flaky', $GLOBALS['__bcc_opts']);
+    }
+
+    /** Batch progress is NOT a failure: the next request resumes at once. */
+    public function testBatchProgressResumesNextRequestWithoutBackoff(): void
+    {
+        $m = $this->migration('batched', BCC_TRUST_MIGRATION_MORE);
+
+        bcc_trust_run_pending_migrations([$m]);
+        bcc_trust_run_pending_migrations([$m]);
+
+        self::assertSame(['batched', 'batched'], $this->ran());
+        self::assertArrayNotHasKey('bcc_trust_migration_backoff_batched', $GLOBALS['__bcc_transients']);
+        self::assertArrayNotHasKey('done_batched', $GLOBALS['__bcc_opts']);
+    }
+
+    /** An unrecognised status is not "done" and not progress: it backs off. */
+    public function testAnUnknownStatusBacksOff(): void
+    {
+        bcc_trust_run_pending_migrations([$this->migration('odd', 'garbage')]);
+
+        self::assertArrayHasKey('bcc_trust_migration_backoff_odd', $GLOBALS['__bcc_transients']);
+        self::assertArrayNotHasKey('done_odd', $GLOBALS['__bcc_opts']);
+    }
+
+    /** One migration's backoff never holds back another. */
+    public function testABackoffIsPerMigration(): void
+    {
+        bcc_trust_run_pending_migrations([
+            $this->migration('bad', BCC_TRUST_MIGRATION_INCOMPLETE),
+            $this->migration('good', BCC_TRUST_MIGRATION_COMPLETE),
+        ]);
+
+        self::assertSame(['bad', 'good'], $this->ran());
+        self::assertArrayHasKey('done_good', $GLOBALS['__bcc_opts']);
+        self::assertArrayNotHasKey('bcc_trust_migration_backoff_good', $GLOBALS['__bcc_transients']);
     }
 
     public function testSchemaPathAndRuntimePathCoexistWithoutDoubleProcessing(): void

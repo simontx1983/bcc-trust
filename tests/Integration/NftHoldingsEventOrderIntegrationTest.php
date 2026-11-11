@@ -335,6 +335,19 @@ final class NftHoldingsEventOrderIntegrationTest extends TestCase
         self::assertSame(1, $this->row(self::WALLET, self::CONTRACT, 'old-live')['balance'] ?? null, 'a holding is never pruned, however old');
     }
 
+    public function testAFailedPruneThrowsRatherThanReportingZero(): void
+    {
+        // The daily hook logs the count it gets back; a failed DELETE that
+        // returned 0 would look like a healthy run with nothing to prune.
+        $GLOBALS['wpdb']->failQueriesMatching = '/DELETE FROM `?' . preg_quote(NftHoldingsRepository::table(), '/') . '/';
+        try {
+            $this->expectException(\RuntimeException::class);
+            NftHoldingsRepository::pruneTombstones();
+        } finally {
+            $GLOBALS['wpdb']->clearFaultInjection();
+        }
+    }
+
     public function testPruneIsBounded(): void
     {
         foreach (['a', 'b', 'c'] as $t) {

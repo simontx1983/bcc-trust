@@ -440,8 +440,11 @@ final class BlogService
 
         // Ownership — only the author may load their own post for
         // editing (drafts included). Matches updateBlog's gate verbatim.
+        // ⚠ EXISTENCE ORACLE (F-47): someone else's post reads as NOT
+        // FOUND, byte-identical to a missing id. A 403 here confirmed that
+        // an id was another member's blog, including an unpublished draft.
         if ((int) $post->post_author !== $viewerId) {
-            return ['error' => 'bcc_forbidden', 'message' => 'You can only edit your own blog posts.'];
+            return ['error' => 'bcc_not_found', 'message' => 'Blog post not found.'];
         }
 
         $body           = $this->hydrateForPostId($postId, true);

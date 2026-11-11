@@ -63,7 +63,7 @@ if (!function_exists('bcc_trust_cleanup_last_seen_rank_usermeta')) {
 
         if ((int) $deleted === $batchSize) {
             // A full batch means more rows may remain — resume next request.
-            return BCC_TRUST_MIGRATION_INCOMPLETE;
+            return BCC_TRUST_MIGRATION_MORE;
         }
 
         \BCC\Core\Log\Logger::info('[bcc-trust] last-seen-rank usermeta cleanup complete', [

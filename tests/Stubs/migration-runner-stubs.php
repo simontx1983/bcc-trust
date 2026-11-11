@@ -31,6 +31,32 @@ namespace {
             return true;
         }
     }
+
+    // F-151: the runner backs a failed migration off through a transient.
+    // Expiry is recorded, not enforced — a test "lets the hour pass" by
+    // deleting the entry.
+    if (!defined('HOUR_IN_SECONDS')) {
+        define('HOUR_IN_SECONDS', 3600);
+    }
+    if (!function_exists('get_transient')) {
+        /** @return mixed */
+        function get_transient(string $name)
+        {
+            return $GLOBALS['__bcc_transients'][$name]['value'] ?? false;
+        }
+    }
+    if (!function_exists('set_transient')) {
+        /** @param mixed $value */
+        function set_transient(string $name, $value, int $expiration = 0): bool
+        {
+            $GLOBALS['__bcc_transients'][$name] = ['value' => $value, 'expiration' => $expiration];
+            return true;
+        }
+    }
+    // bcc_trust_migration_step_failed() logs $wpdb->last_error.
+    if (!isset($GLOBALS['wpdb'])) {
+        $GLOBALS['wpdb'] = (object) ['last_error' => ''];
+    }
 }
 
 namespace BCC\Core\DB {
