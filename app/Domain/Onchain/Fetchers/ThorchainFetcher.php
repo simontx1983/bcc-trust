@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
+use BCC\Trust\Onchain\Support\StakeAmount;
 
 /**
  * THORChain Node Fetcher
@@ -110,13 +111,32 @@ class ThorchainFetcher implements FetcherInterface
             return [];
         }
 
-        // Sort by total_bond descending for rank assignment.
-        usort($nodes, function ($a, $b) {
-            return bccomp($b['total_bond'] ?? '0', $a['total_bond'] ?? '0');
+        // ⚠ F-66: COMPLETE OR EMPTY. A node list that is not a list of node
+        // objects is unreadable as a whole, and `[]` is the index run's
+        // partial signal (no upsert, no baseline, no dead-marking). Reading
+        // it item by item threw a TypeError on the first non-array node — an
+        // Error, which used to escape the run's per-chain catch and abort
+        // every chain after this one.
+        if (!array_is_list($nodes)) {
+            return [];
+        }
+        $valid = [];
+        foreach ($nodes as $node) {
+            if (!is_array($node) || !is_string($node['node_address'] ?? null) || $node['node_address'] === '') {
+                \BCC\Core\Log\Logger::warning('[THORChain Fetcher] unreadable node in /thorchain/nodes; index treated as incomplete');
+                return [];
+            }
+            $valid[] = $node;
+        }
+
+        // Sort by total_bond descending for rank assignment. Never a raw
+        // provider value into bccomp(): see StakeAmount::sortable().
+        usort($valid, static function (array $a, array $b): int {
+            return StakeAmount::compareDesc($a, $b, 'total_bond');
         });
 
         $results = [];
-        foreach ($nodes as $rank => $node) {
+        foreach ($valid as $rank => $node) {
             // Skip disabled nodes — they've left the network.
             $status = $node['status'] ?? '';
             if ($status === 'Disabled') {
@@ -167,18 +187,21 @@ class ThorchainFetcher implements FetcherInterface
     private function mapNode(array $node, int $rank): array
     {
         $chainId    = (int) $this->chain->id;
-        $nodeAddr   = $node['node_address'] ?? '';
-        $totalBond  = $this->toDisplay($node['total_bond'] ?? '0');
-        $status     = $this->mapStatus($node['status'] ?? '');
+        $nodeAddr   = is_string($node['node_address'] ?? null) ? $node['node_address'] : '';
+        $totalBond  = $this->toDisplay(StakeAmount::sortable($node['total_bond'] ?? '0'));
+        $status     = $this->mapStatus(is_string($node['status'] ?? null) ? $node['status'] : '');
         $slashPts   = (int) ($node['slash_points'] ?? 0);
         $operatorAddr = $node['node_operator_address'] ?? '';
 
         // Self-bond: find the bond provider matching the node operator.
         $selfBond = null;
         $providers = $node['bond_providers']['providers'] ?? [];
+        if (!is_array($providers)) {
+            $providers = [];
+        }
         foreach ($providers as $provider) {
-            if (($provider['bond_address'] ?? '') === $operatorAddr) {
-                $selfBond = $this->toDisplay($provider['bond'] ?? '0');
+            if (is_array($provider) && ($provider['bond_address'] ?? '') === $operatorAddr) {
+                $selfBond = $this->toDisplay(StakeAmount::sortable($provider['bond'] ?? '0'));
                 break;
             }
         }

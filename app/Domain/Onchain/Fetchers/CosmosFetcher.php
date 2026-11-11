@@ -2747,10 +2747,22 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     private const BONDED_PAGE_LIMIT = 500;
 
     /**
-     * Most bonded-set pages followed (2,000 validators — far above any
-     * chain's max_validators). A set still paging after this is INCOMPLETE.
+     * Largest bonded set accepted as complete — far above any chain's
+     * max_validators. A set that grows past this is INCOMPLETE.
+     *
+     * ⚠ THE CAP IS ON VALIDATORS, NOT PAGES. Some public LCD gateways silently
+     * clamp pagination.limit (100 is common). A page cap of 4 then meant any
+     * chain with more than 400 bonded validators hit the cap on every run:
+     * partial for ever, never indexed, with only a warning to show for it.
      */
-    private const BONDED_MAX_PAGES = 4;
+    private const BONDED_MAX_VALIDATORS = 2000;
+
+    /**
+     * Request ceiling for one walk, separate from the validator cap: it only
+     * bounds how many calls a gateway that clamps pages very small can cost.
+     * At 2,000 validators it still admits pages as small as 50.
+     */
+    private const BONDED_MAX_PAGES = 40;
 
     /**
      * Get the bonded validator set for this chain, sorted by tokens desc.
@@ -2765,9 +2777,10 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * heuristics cannot see a page-size cap (two truncated fetches agree with
      * each other).
      *
-     * Now the walk follows `next_key` for at most {@see BONDED_MAX_PAGES}
-     * pages. A transport failure on any page, an unreadable page, or a set
-     * still paging at the cap returns `[]`: the index run reads an empty
+     * Now the walk follows `next_key` until the set ends, accepting at most
+     * {@see BONDED_MAX_VALIDATORS} validators in at most {@see BONDED_MAX_PAGES}
+     * requests. A transport failure on any page, an unreadable page, or a set
+     * that passes either bound returns `[]`: the index run reads an empty
      * index as PARTIAL (no upsert, no baseline, no mint, no dead-marking).
      *
      * ⚠ `[]` IS STILL CACHED FOR THE PROCESS, on purpose. Every later caller in
@@ -2819,19 +2832,39 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
                 $vals[] = $v;
             }
 
-            $nextKey = $response['pagination']['next_key'] ?? null;
-            if (!is_string($nextKey) || $nextKey === '') {
+            if (count($vals) > self::BONDED_MAX_VALIDATORS) {
+                \BCC\Core\Log\Logger::warning('[Cosmos Fetcher] bonded set exceeds the validator cap; set treated as incomplete', [
+                    'chain_id'       => $chainId,
+                    'max_validators' => self::BONDED_MAX_VALIDATORS,
+                ]);
+                self::$validatorListCache[$chainId] = [];
+                return [];
+            }
+
+            $rawNext = $response['pagination']['next_key'] ?? null;
+            $nextKey = is_string($rawNext) ? $rawNext : '';
+            $hasMore = $nextKey !== '';
+
+            if ($hasMore && $page === 0 && count($pageVals) < self::BONDED_PAGE_LIMIT) {
+                // The node returned a short page and still has more: it is
+                // clamping pagination.limit. Not an error — the walk follows
+                // next_key either way — but it is what spends the request
+                // ceiling, so say what the node actually returned.
+                \BCC\Core\Log\Logger::info(sprintf(
+                    '[Cosmos Fetcher] chain %d clamps bonded-validator pages: asked for %d, got %d',
+                    $chainId,
+                    self::BONDED_PAGE_LIMIT,
+                    count($pageVals)
+                ));
+            }
+
+            if (!$hasMore) {
                 // Last page: the set is complete.
-                // ⚠ bccomp() THROWS a ValueError on a non-numeric operand, and
-                // the index run's catch is \Exception, which an Error is not —
-                // so one malformed `tokens` would abort the whole run. An
-                // unreadable amount sorts as 0 instead.
-                $tokensOf = static function (array $v): string {
-                    $t = $v['tokens'] ?? null;
-                    return (is_string($t) && is_numeric($t) && ctype_digit($t)) ? $t : '0';
-                };
-                usort($vals, static function (array $a, array $b) use ($tokensOf): int {
-                    return bccomp($tokensOf($b), $tokensOf($a));
+                // ⚠ Never a raw provider value into bccomp(): it THROWS (an
+                // Error, not an Exception) on a malformed operand. See
+                // StakeAmount::sortable(); an unreadable amount sorts as 0.
+                usort($vals, static function (array $a, array $b): int {
+                    return \BCC\Trust\Onchain\Support\StakeAmount::compareDesc($a, $b, 'tokens');
                 });
 
                 self::$validatorListCache[$chainId] = $vals;
@@ -2840,9 +2873,10 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             $pageKey = $nextKey;
         }
 
-        \BCC\Core\Log\Logger::warning('[Cosmos Fetcher] bonded set exceeds the page cap; set treated as incomplete', [
+        \BCC\Core\Log\Logger::warning('[Cosmos Fetcher] bonded walk reached the request ceiling; set treated as incomplete', [
             'chain_id'  => $chainId,
             'max_pages' => self::BONDED_MAX_PAGES,
+            'fetched'   => count($vals),
         ]);
         self::$validatorListCache[$chainId] = [];
         return [];

@@ -146,4 +146,60 @@ final class IndexRunPartialSkipsDestructiveStepsTest extends TestCase
         self::assertSame([self::CHAIN_A], \IndexRunRecorder::callsOf('breaker.recordSuccess'));
         self::assertSame(40, \IndexRunRecorder::$options['bcc_onchain_indexer_stats']['chain-b']['last_good_total']);
     }
+
+    // ── F-66: an Error from one chain is that chain's partial fetch ─────
+
+    /** @return array<string, array{0: \Throwable}> */
+    public static function errors(): array
+    {
+        return [
+            'TypeError (typed mapper, non-array item)' => [new \TypeError('mapNode(): Argument #1 ($node) must be of type array, string given')],
+            'ValueError (bccomp, non-numeric amount)'  => [new \ValueError('bccomp(): Argument #1 ($num1) is not well-formed')],
+            'plain Error'                              => [new \Error('Cannot access offset of type string on string')],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('errors')]
+    public function testAnErrorOnOneChainDoesNotAbortTheRunForTheNext(\Throwable $error): void
+    {
+        // Chain A throws an Error, not an Exception. Before F-66 the
+        // per-chain catch was \Exception, so this escaped the loop and chain
+        // B was never indexed.
+        $this->chain(self::CHAIN_A, 'chain-a');
+        $this->chain(self::CHAIN_B, 'chain-b');
+        \IndexRunRecorder::$fetchResults[self::CHAIN_A] = $error;
+        \IndexRunRecorder::$fetchResults[self::CHAIN_B] = self::validators(40);
+
+        ChainRefreshService::index_validators();
+
+        self::assertSame([self::CHAIN_A, self::CHAIN_B], \IndexRunRecorder::callsOf('fetch_all_validators'));
+        self::assertSame([40], \IndexRunRecorder::callsOf('validators.bulkUpsert'), 'chain B is still indexed');
+        self::assertSame([self::CHAIN_B], \IndexRunRecorder::callsOf('mintMissing'));
+        // …and chain A counts as partial, so the global sweep is withheld.
+        self::assertSame([], \IndexRunRecorder::callsOf('markDeadValidators'));
+        self::assertSame([self::CHAIN_A], \IndexRunRecorder::callsOf('breaker.recordFailure'));
+        self::assertSame(40, \IndexRunRecorder::$options['bcc_onchain_indexer_stats']['chain-a']['last_good_total']);
+        $errors = \IndexRunRecorder::callsOf('log.error');
+        self::assertCount(1, $errors);
+        self::assertStringContainsString('Validator index failed for Chain-a', (string) $errors[0]);
+    }
+
+    public function testNoCatchInTheServiceNarrowsToException(): void
+    {
+        // refresh_collections() is not reachable through these fakes, so its
+        // per-row catch is pinned here: every catch in the service must take
+        // \Throwable. Comments are stripped so prose cannot satisfy or break it.
+        $src = (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Onchain/Services/ChainRefreshService.php');
+        $code = '';
+        foreach (token_get_all($src) as $tok) {
+            if (is_array($tok) && in_array($tok[0], [T_COMMENT, T_DOC_COMMENT], true)) {
+                continue;
+            }
+            $code .= is_array($tok) ? $tok[1] : $tok;
+        }
+
+        preg_match_all('/catch\s*\(\s*([^\s$)]+)/', $code, $m);
+        self::assertCount(3, $m[1], 'the service has exactly three catch sites');
+        self::assertSame(['\\Throwable', '\\Throwable', '\\Throwable'], $m[1]);
+    }
 }
