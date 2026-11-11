@@ -194,6 +194,9 @@ function bcc_trust_render_moderation(): void {
         'clear_votes'        => static function () use ( $mod ) {
             $mod->clearVotes( absint( $_POST['user_id'] ?? 0 ) );
         },
+        'restore_votes'      => static function () use ( $mod ) {
+            $mod->restoreVotes( absint( $_POST['user_id'] ?? 0 ) );
+        },
         'clear_fingerprints' => static function () use ( $mod ) {
             $mod->clearFingerprints( absint( $_POST['user_id'] ?? 0 ) );
         },

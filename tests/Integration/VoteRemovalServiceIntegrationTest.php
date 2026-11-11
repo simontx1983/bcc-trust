@@ -150,10 +150,10 @@ final class VoteRemovalServiceIntegrationTest extends TestCase
         return $svc;
     }
 
-    private function service(?ScoreRepository $scoreRepo = null): VoteRemovalService
+    private function service(?ScoreRepository $scoreRepo = null, ?VoteRepository $voteRepo = null): VoteRemovalService
     {
         return new VoteRemovalService(
-            new VoteRepository(),
+            $voteRepo ?? new VoteRepository(),
             $scoreRepo ?? new ScoreRepository(),
             new UserInfoRepository(),
             $this->voteService()
@@ -310,5 +310,93 @@ final class VoteRemovalServiceIntegrationTest extends TestCase
         self::assertSame(VoteRepository::STATUS_ACTIVE, $this->voteStatus($a), 'the status flip must roll back with the failed flag');
         self::assertSame(3, $this->votesCast(self::RING_VOTER));
         self::assertSame([], $this->auditMetas('itest_fail'), 'no audit entry claims a removal that did not happen');
+    }
+
+    public function testPerVoterRestoreBringsBackOnlyThatVotersModeratedVotes(): void
+    {
+        $mine      = $this->vote(self::RING_VOTER, $this->pageA, VoteRepository::STATUS_ACTIVE);
+        $mineB     = $this->vote(self::RING_VOTER, $this->pageB, VoteRepository::STATUS_ACTIVE);
+        $disputed  = $this->vote(self::RING_VOTER, $this->pageA, VoteRepository::STATUS_DISPUTE_REMOVED, 7);
+        $theirs    = $this->vote(self::OTHER_VOTER, $this->pageA, VoteRepository::STATUS_ACTIVE);
+        $this->service()->removeVotesCastBy([self::RING_VOTER, self::OTHER_VOTER], 'itest_ring', 1);
+        self::assertSame(2, $this->service()->countRestorableFor(self::RING_VOTER), 'the button count matches what restore will move');
+
+        $restored = $this->service()->restoreModeratedVotesCastBy([self::RING_VOTER], 'itest_restore_voter', 7);
+
+        self::assertSame([$mine, $mineB], $restored['vote_ids']);
+        self::assertSame(VoteRepository::STATUS_ACTIVE, $this->voteStatus($mine));
+        self::assertSame(VoteRepository::STATUS_ACTIVE, $this->voteStatus($mineB));
+        self::assertSame(VoteRepository::STATUS_DISPUTE_REMOVED, $this->voteStatus($disputed), 'never revives a dispute removal');
+        self::assertSame(VoteRepository::STATUS_MODERATION_REMOVED, $this->voteStatus($theirs), 'another voter stays removed');
+        self::assertSame(2, $this->votesCast(self::RING_VOTER));
+        self::assertSame(1, $this->scoreVoteCount($this->pageA), 'page A counts the restored vote again');
+        self::assertSame(1, $this->scoreVoteCount($this->pageB));
+        self::assertSame(0, $this->service()->countRestorableFor(self::RING_VOTER));
+        self::assertSame([$mine, $mineB], $this->auditMetas('itest_restore_voter')[0]['vote_ids']);
+    }
+
+    /**
+     * #428 review L1 + L2: a vote changed by a concurrent request between the
+     * read and the flip must be neither audited as removed nor zeroed out of
+     * votes_cast. Modelled by a repository whose flip skips one id.
+     */
+    public function testOnlyVotesThatActuallyMovedAreAuditedAndVotesCastIsRecounted(): void
+    {
+        $moves = $this->vote(self::RING_VOTER, $this->pageA, VoteRepository::STATUS_ACTIVE);
+        $stays = $this->vote(self::RING_VOTER, $this->pageB, VoteRepository::STATUS_ACTIVE);
+
+        $racing = new class ($stays) extends VoteRepository {
+            public function __construct(private readonly int $skipId)
+            {
+                parent::__construct();
+            }
+
+            public function transitionStatus(array $voteIds, int $fromStatus, int $toStatus): int
+            {
+                return parent::transitionStatus(
+                    array_values(array_filter($voteIds, fn (int $id): bool => $id !== $this->skipId)),
+                    $fromStatus,
+                    $toStatus
+                );
+            }
+        };
+
+        $result = $this->service(null, $racing)->removeVotesCastBy([self::RING_VOTER], 'itest_race', 1);
+
+        self::assertSame([$moves], $result['vote_ids'], 'L2: report only what moved');
+        self::assertSame([$moves], $this->auditMetas('itest_race')[0]['vote_ids'], 'L2: audit only what moved');
+        self::assertSame(1, $result['pages'], 'only the moved vote\'s page is touched');
+        self::assertSame(VoteRepository::STATUS_ACTIVE, $this->voteStatus($stays));
+        self::assertSame(1, $this->votesCast(self::RING_VOTER), 'L1: the still-active vote stays counted (was hard-set to 0)');
+    }
+
+    /**
+     * #428 review L3 (the bcc-core #69 failure class): when wpdb::prepare()
+     * yields no statement, the read must fail loudly — never "no votes".
+     */
+    public function testAnEmptyPreparedStatementFailsInsteadOfReadingNothing(): void
+    {
+        $a    = $this->vote(self::RING_VOTER, $this->pageA, VoteRepository::STATUS_ACTIVE);
+        $real = $GLOBALS['wpdb'];
+
+        $GLOBALS['wpdb'] = new class ($real) {
+            public function __construct(private object $inner) {}
+            public function prepare(string $query, ...$args): string { return ''; }
+            public function __get(string $name): mixed { return $this->inner->$name; }
+            public function __set(string $name, mixed $value): void { $this->inner->$name = $value; }
+            /** @param array<mixed> $args */
+            public function __call(string $name, array $args): mixed { return $this->inner->$name(...$args); }
+        };
+
+        try {
+            (new VoteRepository())->getVoteRefsByVoters([self::RING_VOTER], VoteRepository::STATUS_ACTIVE, 0, 10);
+            self::fail('an empty prepared statement must throw');
+        } catch (RepositoryException $e) {
+            self::assertStringContainsString('prepare() produced no statement', $e->getMessage());
+        } finally {
+            $GLOBALS['wpdb'] = $real;
+        }
+
+        self::assertSame(VoteRepository::STATUS_ACTIVE, $this->voteStatus($a));
     }
 }

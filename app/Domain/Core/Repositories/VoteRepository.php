@@ -2105,16 +2105,15 @@ class VoteRepository {
     // through VoteRemovalService, which uses the two helpers below.
 
     /**
-     * Active votes (status = 1) cast by any of the given voters, as minimal
-     * refs, keyset-paginated by id. Read inside the removal transaction so
-     * the ids that are flipped are exactly the ones that are audited.
+     * Votes in `$status` cast by any of the given voters, as minimal refs,
+     * keyset-paginated by id. Read inside the removal/restore transaction.
      *
      * @param list<int> $voterIds
      * @return list<object{id: int, voter_user_id: int, page_id: int}>
      * @throws RepositoryException on database failure (wpdb returns [] on
      *         error, so the error is detected via last_error, not the result)
      */
-    public function getActiveVoteRefsByVoters(array $voterIds, int $afterId, int $limit): array
+    public function getVoteRefsByVoters(array $voterIds, int $status, int $afterId, int $limit): array
     {
         $voterIds = array_values(array_unique(array_filter(array_map('intval', $voterIds), static fn (int $v): bool => $v > 0)));
         if ($voterIds === []) {
@@ -2124,19 +2123,21 @@ class VoteRepository {
         global $wpdb;
         $placeholders = implode(',', array_fill(0, count($voterIds), '%d'));
 
-        // wpdb resets last_error at the start of every query, so a non-empty
-        // value here belongs to THIS read.
-        $rows = $wpdb->get_results($wpdb->prepare(
+        $sql = self::preparedOrThrow($wpdb->prepare(
             "SELECT id, voter_user_id, page_id FROM {$this->table}
               WHERE voter_user_id IN ({$placeholders})
                 AND status = %d
                 AND id > %d
               ORDER BY id ASC
               LIMIT %d",
-            ...array_merge($voterIds, [self::STATUS_ACTIVE, $afterId, max(1, $limit)])
-        ));
+            ...array_merge($voterIds, [$status, $afterId, max(1, $limit)])
+        ), __METHOD__);
+
+        // wpdb resets last_error at the start of every query, so a non-empty
+        // value here belongs to THIS read.
+        $rows = $wpdb->get_results($sql);
         if ($wpdb->last_error !== '') {
-            throw new RepositoryException('VoteRepository::getActiveVoteRefsByVoters failed: ' . $wpdb->last_error);
+            throw new RepositoryException('VoteRepository::getVoteRefsByVoters failed: ' . $wpdb->last_error);
         }
 
         $out = [];
@@ -2165,12 +2166,14 @@ class VoteRepository {
         foreach (array_chunk(self::positiveIds($voteIds), self::BULK_CHUNK) as $chunk) {
             $placeholders = implode(',', array_fill(0, count($chunk), '%d'));
 
-            $rows = $wpdb->get_results($wpdb->prepare(
+            $sql = self::preparedOrThrow($wpdb->prepare(
                 "SELECT id, voter_user_id, page_id FROM {$this->table}
                   WHERE id IN ({$placeholders}) AND status = %d
                   ORDER BY id ASC",
                 ...array_merge($chunk, [$status])
-            ));
+            ), __METHOD__);
+
+            $rows = $wpdb->get_results($sql);
             if ($wpdb->last_error !== '') {
                 throw new RepositoryException('VoteRepository::getVoteRefsByIdsAndStatus failed: ' . $wpdb->last_error);
             }
@@ -2207,12 +2210,14 @@ class VoteRepository {
         foreach (array_chunk($ids, self::BULK_CHUNK) as $chunk) {
             $placeholders = implode(',', array_fill(0, count($chunk), '%d'));
 
-            $result = $wpdb->query($wpdb->prepare(
+            $sql = self::preparedOrThrow($wpdb->prepare(
                 "UPDATE {$this->table}
                     SET status = %d, updated_at = %s
                   WHERE id IN ({$placeholders}) AND status = %d",
                 ...array_merge([$toStatus, $now], $chunk, [$fromStatus])
-            ));
+            ), __METHOD__);
+
+            $result = $wpdb->query($sql);
             if ($result === false) {
                 throw new RepositoryException('VoteRepository::transitionStatus failed: ' . $wpdb->last_error);
             }
@@ -2224,6 +2229,54 @@ class VoteRepository {
         }
 
         return $changed;
+    }
+
+    /**
+     * How many of a voter's votes are moderation-removed and not yet purged —
+     * exactly what VoteRemovalService::restoreModeratedVotesCastBy() would
+     * bring back. (cleanupOldDeleted() purges them once they are older than
+     * MODERATION_RESTORE_WINDOW_DAYS.)
+     *
+     * @throws RepositoryException on database failure
+     */
+    public function countModeratedByVoter(int $voterId): int
+    {
+        if ($voterId <= 0) {
+            return 0;
+        }
+        global $wpdb;
+
+        $sql = self::preparedOrThrow($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->table}
+              WHERE voter_user_id = %d
+                AND status = %d",
+            $voterId,
+            self::STATUS_MODERATION_REMOVED
+        ), __METHOD__);
+
+        $count = $wpdb->get_var($sql);
+        if ($wpdb->last_error !== '') {
+            throw new RepositoryException('VoteRepository::countModeratedByVoter failed: ' . $wpdb->last_error);
+        }
+        return (int) $count;
+    }
+
+    /**
+     * #69 failure class: `$wpdb->prepare()` returns '' (or null) on a
+     * placeholder/argument mismatch, after which get_results()/query() run
+     * NOTHING and leave last_error empty — a read that "succeeds" with no
+     * rows. The removal/restore helpers must never mistake that for "no
+     * votes", so it is a hard failure here.
+     *
+     * @param mixed $prepared
+     * @throws RepositoryException
+     */
+    private static function preparedOrThrow($prepared, string $where): string
+    {
+        if (!is_string($prepared) || $prepared === '') {
+            throw new RepositoryException($where . ': wpdb::prepare() produced no statement');
+        }
+        return $prepared;
     }
 
     /**
