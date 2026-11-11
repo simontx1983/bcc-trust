@@ -100,6 +100,27 @@ final class TwoFactorController
             return ApiResponse::error('bcc_invalid_2fa_token', 'This session has expired. Please sign in again.', 401);
         }
 
+        // Count EVERY attempt BEFORE comparing (L2): the wrong-code bucket
+        // below only counts after a failed compare, so N concurrent guesses
+        // racing past it could all be compared before any was counted. This
+        // bucket caps COMPARISONS per (user, challenge) at TWO_FA_MAX_FAILURES
+        // — correct attempts included, so a legitimate user sequence (up to
+        // MAX-1 wrong, then right) is unaffected — and any attempt beyond it
+        // burns the code and the challenge without comparing. A degraded
+        // limiter fails closed (burns).
+        $challengeKey = substr(hash('sha256', $challengeToken), 0, 32);
+        if (!\BCC\Core\Security\Throttle::allow(
+            '2fa_attempt',
+            AuthSupport::TWO_FA_MAX_FAILURES,
+            AuthSupport::TWO_FA_CHALLENGE_TTL,
+            '2fa_attempt:' . $userId . ':' . $challengeKey
+        )) {
+            AuthSupport::burn2faOtp($challengeToken);
+            AuthSupport::consume2faChallenge($challengeToken);
+            Logger::audit('2fa_attempts_exhausted', ['user_id' => $userId]);
+            return ApiResponse::error('bcc_invalid_2fa_token', 'Too many incorrect codes. Please sign in again.', 401);
+        }
+
         if (!AuthSupport::consume2faOtp($challengeToken, $code)) {
             // Attempt cap (F-124), per (user, challenge): a bounded Throttle
             // bucket with an EXPLICIT key (so it is not split by client IP)
@@ -110,7 +131,7 @@ final class TwoFactorController
             // which the frontend already routes back to sign-in). Keyed on
             // the challenge too, so a stale challenge's failures can never
             // burn a fresh login. A degraded limiter fails closed (burns).
-            $failKey = '2fa_fail:' . $userId . ':' . substr(hash('sha256', $challengeToken), 0, 32);
+            $failKey = '2fa_fail:' . $userId . ':' . $challengeKey;
             if (!\BCC\Core\Security\Throttle::allow(
                 '2fa_fail',
                 AuthSupport::TWO_FA_MAX_FAILURES - 1,
