@@ -78,6 +78,33 @@ final class UserInfoReadFailureTest extends TestCase
         self::assertSame([], $GLOBALS['__bcc_cache']);
     }
 
+    /**
+     * The suspension path needs "could not read" told apart from "no row":
+     * getByUserIdOrThrow() throws on a failed read (and caches nothing),
+     * while getByUserId() keeps answering null for its other callers.
+     */
+    public function testOrThrowThrowsOnAFailedReadAndCachesNothing(): void
+    {
+        global $wpdb;
+        $wpdb->script = [['error' => 'Deadlock found when trying to get lock']];
+
+        try {
+            (new UserInfoRepository())->getByUserIdOrThrow(self::USER);
+            self::fail('a failed read must throw, not answer "no row"');
+        } catch (\BCC\Trust\Core\Exceptions\RepositoryException) {
+            // expected
+        }
+        self::assertSame([], $GLOBALS['__bcc_cache']);
+    }
+
+    public function testOrThrowReturnsNullForAGenuinelyMissingRow(): void
+    {
+        global $wpdb;
+        $wpdb->script = [['rows' => []]];
+
+        self::assertNull((new UserInfoRepository())->getByUserIdOrThrow(self::USER));
+    }
+
     public function testAGenuinelyMissingRowIsStillCached(): void
     {
         global $wpdb;

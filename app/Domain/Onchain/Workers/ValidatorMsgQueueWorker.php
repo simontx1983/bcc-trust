@@ -314,6 +314,17 @@ final class ValidatorMsgQueueWorker
         // anyone is legitimately blocked).
         $attempts = (int) $row->attempt_count;
 
+        // ⚠ An UNKNOWN sender suspension (null: it could not be read) DEFERS,
+        // exactly like an unreadable block table below (F-99): suppression is
+        // TERMINAL, so a DB blip must never turn into `sender_suspended`.
+        // Bounded backoff, then a loud failed_terminal at the attempt cap.
+        // A known answer is cached for this run by Permissions, so
+        // resolveSenderSuppression() below reads the same state.
+        if (\BCC\Core\Permissions\Permissions::suspensionState($senderId, false) === null) {
+            self::handleFailure($rowId, $leaseToken, $attempts, 'suspension_read_failed');
+            return;
+        }
+
         $suppressReason = self::resolveSenderSuppression($senderId, $operatorId);
 
         // ⚠⚠ THE RECIPIENT-SIDE GATE IS TRI-STATE, AND NEITHER FALLBACK

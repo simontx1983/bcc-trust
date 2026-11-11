@@ -55,7 +55,7 @@ final class RankPromotionTransitionSemanticsTest extends TestCase
      * @param array{rank_slug: string, recovery_status: string, recovery_deadline: string|null} $row
      * @return array{0: RankPromotionEngine, 1: object}
      */
-    private function engine(array $row, string $target): array
+    private function engine(array $row, string $target, bool $suspensionUnknown = false): array
     {
         $state = new class extends RankStateRepository {
             /** @var list<array{0: int, 1: string, 2: string, 3: string|null}> */
@@ -108,6 +108,7 @@ final class RankPromotionTransitionSemanticsTest extends TestCase
         $engine = new class (
             $row,
             $target,
+            $suspensionUnknown,
             $state,
             $events,
             $login,
@@ -121,6 +122,7 @@ final class RankPromotionTransitionSemanticsTest extends TestCase
             public function __construct(
                 private readonly array $fakeRow,
                 private readonly string $fakeTarget,
+                private readonly bool $fakeSuspensionUnknown,
                 RankStateRepository $state,
                 RankEventsRepository $events,
                 LoginDaysRepository $login,
@@ -155,11 +157,34 @@ final class RankPromotionTransitionSemanticsTest extends TestCase
                         'veteran'    => $order[$this->fakeTarget] >= 3,
                     ],
                     'target'             => $this->fakeTarget,
+                    'suspension_unknown' => $this->fakeSuspensionUnknown,
                 ];
             }
         };
 
         return [$engine, $state];
+    }
+
+    /**
+     * An UNKNOWN suspension (bcc-core suspensionState() null: it could not be
+     * read) must persist NOTHING. Here the grace deadline has expired and the
+     * target is lower, so a normal run would DEMOTE. A DB blip must never do
+     * that, nor start a recovery.
+     */
+    public function testAnUnknownSuspensionPersistsNothing(): void
+    {
+        $expired = gmdate('Y-m-d H:i:s', time() - 86400);
+        foreach (['evaluate', 'evaluateImmediate'] as $method) {
+            [$engine, $state] = $this->engine(
+                ['rank_slug' => 'journeyman', 'recovery_status' => 'grace', 'recovery_deadline' => $expired],
+                'apprentice',
+                true
+            );
+            $engine->{$method}(self::USER);
+
+            self::assertSame([], $state->persisted, $method . ' must persist nothing while suspension is unknown');
+        }
+        self::assertSame([], RankUnitWpFakes::firedHooks(), 'no rank_demoted / rank_awarded');
     }
 
     public function testPromotionWhenHigherRungSatisfied(): void

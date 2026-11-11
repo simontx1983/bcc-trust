@@ -7,6 +7,7 @@ namespace BCC\Trust\Tests\Integration;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningFailureCode;
 use BCC\Trust\Onchain\ValueObjects\ProvisioningState;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -73,13 +74,18 @@ final class CollectionProvisioningMigrationIntegrationTest extends TestCase
      * legal state rather than NULL — which would satisfy no predicate and
      * fall out of every tab.
      */
+    #[Group('mariadb')]
     public function testTheStateColumnIsNotNullAndDefaultsToNone(): void
     {
         $col = $this->column('provisioning_state');
 
         self::assertNotNull($col);
         self::assertSame('NO', $col->IS_NULLABLE);
-        self::assertSame('none', $col->COLUMN_DEFAULT);
+        // F-180: MariaDB 11.8 reports a string default QUOTED ("'none'"),
+        // MySQL unquoted ("none"). Strip one pair of surrounding quotes so the
+        // same assertion holds on both engines. A NULL default stays the bare
+        // string "NULL" on either, so it still fails.
+        self::assertSame('none', preg_replace("/^'(.*)'$/s", '$1', (string) $col->COLUMN_DEFAULT));
         self::assertSame(20, (int) $col->CHARACTER_MAXIMUM_LENGTH);
     }
 

@@ -43,6 +43,9 @@ final class CollectionUpsertCanonicalKeyIntegrationTest extends TestCase
 
     protected function setUp(): void
     {
+        // The clock stub is required by tests/Integration/bootstrap.php (F-181).
+        unset($GLOBALS['__bcc_collection_clock']);
+
         $wpdb = $GLOBALS['wpdb'];
         $wpdb->query('DELETE FROM `' . CollectionRepository::table() . '`');
 
@@ -60,6 +63,7 @@ final class CollectionUpsertCanonicalKeyIntegrationTest extends TestCase
 
     protected function tearDown(): void
     {
+        unset($GLOBALS['__bcc_collection_clock']);
         $GLOBALS['wpdb']->query('DELETE FROM `' . CollectionRepository::table() . '`');
     }
 
@@ -278,11 +282,19 @@ final class CollectionUpsertCanonicalKeyIntegrationTest extends TestCase
      * reports ZERO affected rows because nothing changed — that is a success,
      * not a failure, and `wpdb::query()` returns int 0 which a loose check
      * would misread as false.
+     *
+     * F-181: the clock is FROZEN across both writes. upsert() stamps
+     * fetched_at and expires_at from the clock, so a replay that straddled a
+     * second boundary wrote different timestamps, UPDATED the row and failed
+     * the zero-affected guard below — intermittently, under load. The
+     * assertion is the point of the test and is not weakened; the fixture
+     * now makes both writes byte-identical. See the straddle test below.
      */
     public function testIdenticalReplayWithZeroAffectedRowsStillSucceeds(): void
     {
         $wpdb    = $GLOBALS['wpdb'];
         $payload = $this->payload('Replay Fixture', 'https://cdn.example/replay.png', 7);
+        $GLOBALS['__bcc_collection_clock'] = 1_800_000_000;
 
         $first = CollectionRepository::upsert($payload, self::WALLET_A);
         self::assertSame('created', $first['status']);
@@ -299,6 +311,27 @@ final class CollectionUpsertCanonicalKeyIntegrationTest extends TestCase
         self::assertGreaterThan(0, $replay['id']);
         self::assertSame('', (string) $wpdb->last_error, 'a no-op replay must leave no SQL error');
         self::assertSame(1, $this->rowCount());
+    }
+
+    /**
+     * F-181 anti-vacuity: the exact flake, forced. With the clock one second
+     * later on the replay, the same payload DOES change the row — proving the
+     * clock seam controls what upsert() writes, so freezing it above is what
+     * makes that test deterministic (and not a coincidence of timing).
+     */
+    public function testAReplayThatStraddlesASecondRewritesTheTimestamps(): void
+    {
+        $wpdb    = $GLOBALS['wpdb'];
+        $payload = $this->payload('Replay Fixture', 'https://cdn.example/replay.png', 7);
+
+        $GLOBALS['__bcc_collection_clock'] = 1_800_000_000;
+        CollectionRepository::upsert($payload, self::WALLET_A);
+        $GLOBALS['__bcc_collection_clock'] = 1_800_000_001;
+        CollectionRepository::upsert($payload, self::WALLET_A);
+
+        self::assertGreaterThan(0, (int) $wpdb->rows_affected, 'a one-second straddle rewrites fetched_at/expires_at');
+        self::assertSame('2027-01-15 08:00:01', (string) $this->row()->fetched_at);
+        self::assertSame('2027-01-15 12:00:01', (string) $this->row()->expires_at, 'expires_at = clock + the 4 h default TTL');
     }
 
     /** Malformed input is rejected as `failed` rather than silently ignored. */
