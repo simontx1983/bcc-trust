@@ -28,25 +28,58 @@ if (!defined('ABSPATH')) {
 
 final class GroupInteractionGate
 {
+    /** wp_posts.post_type of a PeepSo comment's own post row. */
+    private const COMMENT_POST_TYPE = 'peepso-comment';
+
     /**
      * Returns an error response to short-circuit on, or null when the
      * interaction is allowed (non-group post, or viewer is an active
      * member).
+     *
+     * ⚠ Accepts ANY act id, and a comment is an act too. A comment's own
+     * wp_post carries no `peepso_group_id`, so gating on it directly would
+     * wave every comment in a closed or secret group through. A comment act
+     * is therefore gated on its PARENT post, the same resolution
+     * CommentStokeEndpoint uses (CommentRepository::getCommentMeta +
+     * checkPost).
+     *
+     * Fails CLOSED on an act it cannot place, with a 404. The writers behind
+     * this gate (stoke, helpful-mark) insert blindly, so a null here used to
+     * let them write rows against a nonexistent act. A comment act whose
+     * parent can't be resolved (e.g. unpublished) gets the same 404 and is
+     * never gated on its own post row.
      */
     public static function check(int $userId, int $actId): ?WP_REST_Response
     {
+        $comment = Plugin::instance()->commentRepository()->getCommentMeta($actId);
+        if ($comment !== null) {
+            $parentPostId = (int) $comment->parent_post_id;
+            if ($parentPostId <= 0) {
+                return self::notFound();
+            }
+            return self::checkPost($userId, $parentPostId);
+        }
+
         $row = PeepSoActivityRepository::getById($actId);
         if ($row === null) {
-            // Unknown act — not a group-gate concern; let the caller's
-            // own not-found/failure path surface it.
-            return null;
+            return self::notFound();
         }
         $postId = (int) $row->act_external_id;
         if ($postId <= 0) {
-            return null;
+            return self::notFound();
+        }
+        if (get_post_type($postId) === self::COMMENT_POST_TYPE) {
+            // A comment act getCommentMeta() could not resolve to a
+            // published parent. Never gate it on its own post row.
+            return self::notFound();
         }
 
         return self::checkPost($userId, $postId);
+    }
+
+    private static function notFound(): WP_REST_Response
+    {
+        return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
     }
 
     /**
