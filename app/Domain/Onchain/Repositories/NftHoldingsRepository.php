@@ -28,7 +28,8 @@ if (!defined('ABSPATH')) {
  *
  * Writes (NftHoldingsIndexer-only consumer):
  *   - upsertMany
- *   - deleteByWalletAndToken
+ *   - tombstoneByWalletAndToken (a transfer-out keeps a balance-0 row)
+ *   - pruneTombstones
  *   - markStatus
  *
  * Enrichment writes (NftEnrichmentService-only consumer):
@@ -136,6 +137,7 @@ final class NftHoldingsRepository
             "SELECT {$cols}
                FROM {$table}
               WHERE wallet_link_id = %d
+                AND balance > 0
                 AND chain_id = %d
                 AND metadata_status IN (%d, %d)
               ORDER BY indexed_at DESC
@@ -180,6 +182,7 @@ final class NftHoldingsRepository
                     COUNT(DISTINCT wallet_link_id) AS wallets
                FROM {$table}
               WHERE metadata_status IN (%d, %d)
+                AND balance > 0
               GROUP BY chain_id, contract_address
               ORDER BY wallets DESC
               LIMIT %d",
@@ -272,6 +275,7 @@ final class NftHoldingsRepository
             "SELECT wallet_link_id, CAST(SUM(balance) AS UNSIGNED) AS total
                FROM {$table}
               WHERE chain_id = %d
+                AND balance > 0
                 AND contract_address = %s
                 AND metadata_status IN (%d, %d)
                 AND wallet_link_id IN ({$placeholders})
@@ -322,6 +326,7 @@ final class NftHoldingsRepository
             "SELECT {$cols}
                FROM {$table}
               WHERE wallet_link_id = %d
+                AND balance > 0
                 AND chain_id = %d
                 AND metadata_status IN (%d, %d)
                 AND enriched_at IS NOT NULL
@@ -354,6 +359,7 @@ final class NftHoldingsRepository
             "SELECT 1
                FROM {$table}
               WHERE wallet_link_id = %d
+                AND balance > 0
                 AND chain_id = %d
                 AND metadata_status IN (%d, %d)
                 AND enriched_at IS NOT NULL
@@ -384,6 +390,7 @@ final class NftHoldingsRepository
             "SELECT 1
                FROM {$table}
               WHERE wallet_link_id = %d
+                AND balance > 0
                 AND chain_id = %d
               LIMIT 1",
             $walletLinkId,
@@ -479,6 +486,7 @@ final class NftHoldingsRepository
             "SELECT {$cols}
                FROM {$table}
               WHERE wallet_link_id = %d
+                AND balance > 0
               ORDER BY indexed_at DESC
               LIMIT %d",
             $walletLinkId,
@@ -509,6 +517,7 @@ final class NftHoldingsRepository
             "SELECT {$cols}
                FROM {$table}
               WHERE chain_id = %d
+                AND balance > 0
                 AND metadata_status = %d
               ORDER BY indexed_at DESC
               LIMIT %d",
@@ -549,6 +558,7 @@ final class NftHoldingsRepository
             "SELECT {$cols}
                FROM {$table}
               WHERE chain_id IN ({$placeholders})
+                AND balance > 0
                 AND metadata_status = %d
               ORDER BY indexed_at DESC
               LIMIT %d",
@@ -676,18 +686,30 @@ final class NftHoldingsRepository
     }
 
     /**
-     * Delete a holding row (called on transfer-out events). Idempotent —
-     * returns true if a row was deleted, false if no match. Caller
+     * Record a transfer-out as a TOMBSTONE (balance 0) rather than deleting.
+     * Returns true when a held row was zeroed by this call. Caller
      * (ingestBatch) is responsible for bumping the generation counter
      * AFTER its transaction commits; see upsertMany for why.
      *
      * ⚠ F-65: EVENT-ORDER GUARD. `$atBlock` is the block (Solana: slot) of
-     * the transfer-out. Only a row this OUT is NOT OLDER than is deleted: a
+     * the transfer-out. Only a row this OUT is NOT OLDER than is zeroed: a
      * stale OUT delivered after a newer IN leaves the newer holding alone. An
-     * equal block deletes — within one block/slot the last arrival wins, as
-     * before. A missing block (<= 0) refuses rather than delete unguarded.
+     * equal block zeroes — within one block/slot the last arrival wins, as
+     * before. A missing block (<= 0) refuses rather than write unguarded.
+     *
+     * ⚠⚠ WHY A TOMBSTONE AND NOT A DELETE (F-65 part B). Batches can arrive
+     * out of order. When the NEWER OUT lands first there is no row to delete,
+     * so a delete is a no-op and the OLDER IN that follows recreated the row —
+     * the wallet showed a token it no longer held until a full reindex. The
+     * tombstone remembers the OUT's block, so upsertMany()'s block guard
+     * refuses that older IN, while a NEWER IN sets the balance back.
+     *
+     * Every reader filters `balance > 0`, so a tombstone is never a holding.
+     * pruneTombstones() removes old ones; see it for the lateness bound.
+     *
+     * @param array{chain_id?: int, confirmed_at?: string, token_standard?: string|null} $context
      */
-    public static function deleteByWalletAndToken(int $walletLinkId, string $contract, string $tokenId, int $atBlock): bool
+    public static function tombstoneByWalletAndToken(int $walletLinkId, string $contract, string $tokenId, int $atBlock, array $context = []): bool
     {
         if ($walletLinkId <= 0 || $contract === '' || $tokenId === '') {
             return false;
@@ -699,25 +721,56 @@ final class NftHoldingsRepository
             return false;
         }
 
+        $chainId     = (int) ($context['chain_id'] ?? 0);
+        $confirmedAt = (string) ($context['confirmed_at'] ?? '');
+        if ($chainId <= 0 || $confirmedAt === '') {
+            // The tombstone INSERT needs both (NOT NULL). Refuse rather than
+            // fall back to an unremembered delete.
+            \BCC\Core\Log\Logger::warning('[NftHoldingsRepository] transfer-out without chain/confirmed_at refused', [
+                'wallet_link_id' => $walletLinkId,
+            ]);
+            return false;
+        }
+
         global $wpdb;
         $table = self::table();
+        $now   = current_time('mysql', true);
 
         // ⚠ NOT folded. `contract_address`'s collation is case-INSENSITIVE,
-        // so this still matches a legacy row that was stored folded — the
-        // delete works on both old and new rows without rewriting either.
-        $deleted = $wpdb->query($wpdb->prepare(
-            "DELETE FROM {$table}
-              WHERE wallet_link_id = %d
-                AND contract_address = %s
-                AND token_id = %s
-                AND last_seen_block <= %d",
+        // so this still matches a legacy row that was stored folded.
+        //
+        // balance, confirmed_at and indexed_at change only when this OUT is
+        // not older than the row (the guarded assignments precede the
+        // GREATEST, as in upsertMany). A stale OUT therefore leaves the row
+        // EXACTLY as it was — including its timestamps, so it is not counted
+        // as a change (affected rows 0).
+        $affected = $wpdb->query($wpdb->prepare(
+            "INSERT INTO {$table}
+                (wallet_link_id, chain_id, contract_address, token_id,
+                 token_standard, balance, metadata_status, last_seen_block,
+                 confirmed_at, indexed_at)
+             VALUES (%d, %d, %s, %s, %s, 0, %d, %d, %s, %s)
+             ON DUPLICATE KEY UPDATE
+                indexed_at = IF(VALUES(last_seen_block) >= last_seen_block, VALUES(indexed_at), indexed_at),
+                balance = IF(VALUES(last_seen_block) >= last_seen_block, 0, balance),
+                confirmed_at = IF(VALUES(last_seen_block) >= last_seen_block, GREATEST(confirmed_at, VALUES(confirmed_at)), confirmed_at),
+                last_seen_block = GREATEST(last_seen_block, VALUES(last_seen_block))",
             $walletLinkId,
+            $chainId,
             $contract,
             $tokenId,
-            $atBlock
+            (string) ($context['token_standard'] ?? ''),
+            self::STATUS_PENDING,
+            $atBlock,
+            $confirmedAt,
+            $now
         ));
 
-        return is_int($deleted) && $deleted > 0;
+        // Affected rows: 1 = a fresh tombstone was INSERTed (no holding was
+        // visible, so nothing was "deleted"); 2 = an existing row changed —
+        // its balance went to 0 (or an existing tombstone moved forward,
+        // which only costs an extra cache bump); 0 = a stale OUT, no change.
+        return is_int($affected) && $affected === 2;
     }
 
     /**
@@ -778,7 +831,7 @@ final class NftHoldingsRepository
      * upsert+delete on the same wallet only invalidates once.
      *
      * @param list<array<string, mixed>>                                $upserts
-     * @param list<array{wallet_link_id: int, contract: string, token_id: string, block: int}> $deletes
+     * @param list<array{wallet_link_id: int, contract: string, token_id: string, block: int, chain_id: int, confirmed_at: string, token_standard: string|null}> $deletes
      * @param list<array<string, mixed>>                                $deltas   ERC-1155 signed balance deltas.
      * @return array{inserts: int, deletes: int}
      * @throws \RuntimeException when the batch fails to commit
@@ -824,7 +877,7 @@ final class NftHoldingsRepository
                 if ($linkId <= 0 || $contract === '' || $tokenId === '') {
                     continue;
                 }
-                if (self::deleteByWalletAndToken($linkId, $contract, $tokenId, (int) ($d['block'] ?? 0))) {
+                if (self::tombstoneByWalletAndToken($linkId, $contract, $tokenId, (int) ($d['block'] ?? 0), $d)) {
                     $result['deletes']++;
                     $touchedWallets[$linkId] = true;
                 }
@@ -941,16 +994,20 @@ final class NftHoldingsRepository
                 throw new \RuntimeException('applyDeltas balance upsert failed: ' . (string) $wpdb->last_error);
             }
 
-            // Zero-cleanup: a holding decremented to zero (or a negative-only
-            // seed) leaves no row, matching the 721 delete semantics and
-            // keeping SUM(balance) gates + the gallery clean. Idempotent.
-            $removed = $wpdb->query($wpdb->prepare(
-                "DELETE FROM {$table}
-                  WHERE wallet_link_id = %d AND contract_address = %s AND token_id = %s AND balance <= 0",
+            // ⚠ F-65 part B: a holding decremented to zero (or a negative-only
+            // seed) is KEPT as a balance-0 tombstone, not deleted. It carries
+            // the block, so the strict guard above refuses an OLDER positive
+            // delta that arrives later — which a deleted row could not. Every
+            // reader filters `balance > 0`, so SUM(balance) gates and the
+            // gallery see no row; pruneTombstones() removes it eventually.
+            $balanceNow = $wpdb->get_var($wpdb->prepare(
+                "SELECT balance FROM {$table}
+                  WHERE wallet_link_id = %d AND contract_address = %s AND token_id = %s
+                  LIMIT 1",
                 $walletLinkId, $contract, $tokenId
             ));
 
-            if (is_int($removed) && $removed > 0) {
+            if ($balanceNow !== null && (int) $balanceNow === 0) {
                 $deletes++;
             } else {
                 $upserts++;
@@ -963,6 +1020,48 @@ final class NftHoldingsRepository
             'deletes' => $deletes,
             'touched' => array_map('intval', array_keys($touched)),
         ];
+    }
+
+    /** Tombstones older than this are pruned. See pruneTombstones(). */
+    public const TOMBSTONE_RETENTION_DAYS = 30;
+
+    /** Tombstones removed per prune run (one daily tick). */
+    public const TOMBSTONE_PRUNE_LIMIT = 500;
+
+    /**
+     * Delete old balance-0 tombstones, bounded. Hooked to the daily
+     * `bcc_onchain_daily_refresh`.
+     *
+     * ⚠ THE LATENESS BOUND. A tombstone exists to refuse a STALE transfer-in
+     * that arrives after the newer transfer-out (F-65). Once pruned, it can no
+     * longer do that: a stale IN arriving after the prune would recreate the
+     * row. So the retention window must exceed the worst delivery lateness of
+     * the event sources. Helius retries a webhook for hours, not weeks, and
+     * the EVM indexer walks ranges in order; 30 days is a wide margin. Past
+     * it, the recovery is a full reindex of the wallet.
+     *
+     * Race-safe as ONE statement: a fresh IN that commits `balance > 0` (and a
+     * new indexed_at) under the row lock no longer matches, so a token that
+     * came back is never pruned. A balance > 0 row is never touched.
+     *
+     * @return int rows removed
+     */
+    public static function pruneTombstones(int $limit = self::TOMBSTONE_PRUNE_LIMIT): int
+    {
+        global $wpdb;
+        $table  = self::table();
+        $cutoff = gmdate('Y-m-d H:i:s', time() - self::TOMBSTONE_RETENTION_DAYS * 86400);
+
+        $removed = $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$table}
+              WHERE balance = 0
+                AND indexed_at < %s
+              LIMIT %d",
+            $cutoff,
+            max(1, min(5000, $limit))
+        ));
+
+        return is_int($removed) ? $removed : 0;
     }
 
     /**
@@ -1029,6 +1128,7 @@ final class NftHoldingsRepository
             "SELECT {$cols}
                FROM {$table}
               WHERE chain_id = %d
+                AND balance > 0
                 AND enriched_at IS NULL
                 AND metadata_status IN (%d, %d)
               ORDER BY indexed_at DESC

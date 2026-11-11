@@ -6,7 +6,10 @@
  *   - an exact origin string (scheme + host + optional port), or
  *   - a regex pattern prefixed with "regex:", matched case-SENSITIVELY and
  *     force-anchored against a whole request Origin. Used for Vercel preview
- *     URLs, e.g. regex:^https://bcc-frontend-[a-z0-9]+-team\.vercel\.app$
+ *     URLs, and ONLY in the one shape isSafePreviewPattern() accepts (F-121):
+ *       regex:^https://bcc-frontend-[a-z0-9]{9}-<team-slug>\.vercel\.app$
+ *     Any other regex entry is IGNORED and logged. Git-branch aliases must
+ *     be exact (non-regex) entries.
  *
  *     The pattern is wrapped as `^(?:…)$` at match time, so an entry written
  *     without anchors still cannot match a substring. See match() for why
@@ -98,12 +101,87 @@ final class FrontendOrigin
     {
         $patterns = [];
         foreach (self::entries() as $entry) {
-            if (self::isPattern($entry)) {
-                $patterns[] = substr($entry, strlen(self::REGEX_PREFIX));
+            if (!self::isPattern($entry)) {
+                continue;
             }
+            $pattern = substr($entry, strlen(self::REGEX_PREFIX));
+            if (!self::isSafePreviewPattern($pattern)) {
+                self::reportUnsafePattern($pattern);
+                continue;
+            }
+            $patterns[] = $pattern;
         }
 
         return $patterns;
+    }
+
+    /**
+     * The ONLY regex shape the allowlist accepts (F-121): a Vercel preview
+     * deployment of ONE project in ONE team.
+     *
+     *   ^https://<project>-[a-z0-9]{N}-<team-slug>\.vercel\.app$
+     *
+     *   <project>   literal, lowercase labels joined by single hyphens, with
+     *               no label equal to "git"
+     *   [a-z0-9]{N} the deployment hash: hyphen-free, EXACT length, 8 ≤ N ≤ 16
+     *   <team-slug> literal, the Vercel scope slug that owns the project
+     *
+     * ## Why anything looser is refused
+     * Vercel preview hosts are `<project>-<hash>-<team>.vercel.app` and
+     * git-branch aliases are `<project>-git-<branch>-<team>.vercel.app`. An
+     * attacker controls their OWN project name, branch name and team slug,
+     * and can register any team slug still free. So:
+     *   - a hyphen-capable slot (`[a-z0-9-]+`, `.*`) lets their host swallow
+     *     an extra label and end in our team slug, e.g. via a team named
+     *     `x-<our-team>`;
+     *   - a hyphen-free but variable-length slot (`[a-z0-9]+`) still matches
+     *     "git". Project `bcc-frontend` + branch `phillip` + team
+     *     `simon-s-projects` gives `bcc-frontend-git-phillip-simon-s-projects
+     *     .vercel.app`, which the old documented example accepted.
+     * With an exact-length random-hash slot and literals everywhere else, an
+     * attacker's host can match only if Vercel's RANDOM hash happens to equal
+     * a label of our project name. A `git` label in <project> would reopen
+     * the branch-alias path, so it is refused too.
+     *
+     * Exact (non-regex) entries are never affected, so the production origin
+     * cannot be locked out by this guard. A refused pattern matches nothing:
+     * the preview loses CORS, a visible and safe failure.
+     */
+    public static function isSafePreviewPattern(string $pattern): bool
+    {
+        $label = '[a-z0-9]+';
+        $slug  = $label . '(?:-' . $label . ')*';
+        $shape = '#^\^https://(?<project>' . $slug . ')-\[a-z0-9\]\{(?<n>[0-9]{1,2})\}-(?<team>' . $slug . ')\\\\\.vercel\\\\\.app\$$#D';
+
+        if (preg_match($shape, $pattern, $m) !== 1) {
+            return false;
+        }
+        $n = (int) $m['n'];
+        if ($n < 8 || $n > 16) {
+            return false;
+        }
+
+        return !in_array('git', explode('-', $m['project']), true);
+    }
+
+    /** @var array<string, true> patterns already reported this request */
+    private static array $reported = [];
+
+    private static function reportUnsafePattern(string $pattern): void
+    {
+        if (isset(self::$reported[$pattern])) {
+            return;
+        }
+        self::$reported[$pattern] = true;
+
+        if (class_exists(\BCC\Core\Log\Logger::class)) {
+            \BCC\Core\Log\Logger::error(
+                '[bcc-trust] BCC_FRONTEND_ORIGIN regex entry REFUSED (F-121): it does not match the only safe shape '
+                . '^https://<project>-[a-z0-9]{N}-<team-slug>\.vercel\.app$ (literal project without a "git" label, '
+                . 'exact N in 8..16, literal team slug). It is ignored and matches nothing.',
+                ['pattern' => $pattern]
+            );
+        }
     }
 
     /**

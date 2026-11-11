@@ -2642,10 +2642,19 @@ final class VerifyCollectionsPage
                                     </label>
                                 </td>
                                 <td>
-                                    <?php if (!empty($row->image_url)): ?>
-                                        <img src="<?php echo esc_url($row->image_url); ?>"
-                                             alt=""
-                                             style="width:40px;height:40px;border-radius:4px;object-fit:cover;">
+                                    <?php
+                                    // F-117: no remote fetch from wp-admin. image_url is chosen by
+                                    // the collection / its metadata host, so an <img> here made every
+                                    // admin's browser call that host on every page view (IP + UA leak,
+                                    // and a beacon on admin visits). A neutral placeholder instead; the
+                                    // image opens only on an explicit click, https-only, no referrer.
+                                    $imageHref = \BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules::sanitizeImageUrl($row->image_url ?? null);
+                                    ?>
+                                    <?php if ($imageHref !== null): ?>
+                                        <span aria-hidden="true" style="display:inline-block;width:40px;height:40px;border-radius:4px;background:var(--bcc-bg-raised, #f0f0f1);vertical-align:middle;"></span>
+                                        <a href="<?php echo esc_url($imageHref); ?>"
+                                           target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer"
+                                           style="font-size:11px;margin-left:4px;">open image &#8599;</a>
                                     <?php endif; ?>
                                 </td>
                                 <td>

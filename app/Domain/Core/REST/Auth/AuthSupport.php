@@ -89,7 +89,7 @@ final class AuthSupport
     public const LOGIN_ACCOUNT_RATE_WINDOW = 900;
     /** Anon-IP-keyed throttle for the public wallet-nonce route. Same budget as the authed nonce. */
     public const WALLET_NONCE_RATE_LIMIT = 10;
-    /** Anon-IP-keyed throttle for wallet-login. Sibling of /auth/login. */
+    /** Per-WALLET (chain + address) throttle for wallet-login, per minute (F-123; was per IP). */
     public const WALLET_LOGIN_RATE_LIMIT = 5;
     /** Anon-IP-keyed throttle for wallet-signup. Sibling of /auth/signup. */
     public const WALLET_SIGNUP_RATE_LIMIT = 5;
@@ -142,8 +142,46 @@ final class AuthSupport
      * spreads guesses across addresses.
      */
     public const TWO_FA_MAX_FAILURES = 5;
-    /** Anon-IP-keyed (per-minute) throttle for /auth/oauth. */
+    /** Per-PROVIDER-IDENTITY (provider + provider_id) throttle for /auth/oauth, per minute (F-131; was per IP). */
     public const OAUTH_LOGIN_RATE_LIMIT = 10;
+
+    /**
+     * Route-wide ceilings (per 60 s) for the two sign-in routes the frontend
+     * calls SERVER-SIDE (F-123 / F-131). Their per-identity buckets replace
+     * the per-IP ones: every call arrives from the BFF's single egress IP, so
+     * a per-IP bucket was one shared bucket — anyone could lock every user
+     * out. The ceiling bounds total load; it is set well above peak sign-ins.
+     */
+    public const WALLET_LOGIN_GLOBAL_LIMIT = 300;
+    public const OAUTH_LOGIN_GLOBAL_LIMIT  = 300;
+
+    /**
+     * Throttle a sign-in attempt per IDENTITY plus a route-wide ceiling, both
+     * with EXPLICIT bucket keys (Throttle otherwise keys an anonymous caller
+     * by action + client IP — the shared-BFF-IP problem this replaces).
+     *
+     * $identity is hashed, so the bucket key never carries the raw wallet
+     * address or provider id. Returns false (→ 429) when either bucket is
+     * exhausted.
+     */
+    public static function allowIdentityAttempt(string $action, string $identity, int $perIdentity, int $global): bool
+    {
+        if (!\BCC\Core\Security\Throttle::allow($action . '_global', $global, 60, $action . '_global')) {
+            // The route-wide ceiling tripping means EVERY identity is now
+            // refused — a flood, or the ceiling set too low for real traffic.
+            // Count it so it is visible, never silent.
+            if (class_exists(\BCC\Core\Observability\DegradationMetrics::class)) {
+                \BCC\Core\Observability\DegradationMetrics::record('auth_throttle', $action . '_ceiling');
+            }
+            return false;
+        }
+        return \BCC\Core\Security\Throttle::allow(
+            $action,
+            $perIdentity,
+            60,
+            $action . ':' . substr(hash('sha256', $identity), 0, 32)
+        );
+    }
     /** Anon-IP-keyed (per-minute) throttle for /auth/oauth-complete. */
     public const OAUTH_COMPLETE_RATE_LIMIT = 5;
     /** OAuth provider-token transient TTL: 15 minutes. */

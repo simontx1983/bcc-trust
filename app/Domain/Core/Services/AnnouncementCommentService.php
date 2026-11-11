@@ -71,6 +71,18 @@ final class AnnouncementCommentService
     private AnnouncementCommentRepository $comments;
     private AnnouncementRepository $announcements;
 
+    /**
+     * F-151: Authority::decide() is deliberately uncached and costs a claim
+     * query. listThread() called it once PER COMMENT (N queries for N rows,
+     * plus one in canComment()), and remove() resolved it twice — so the
+     * capability shown could differ from the one that authorized the action.
+     * Memoised per (page, viewer) for this service's lifetime (one request):
+     * one query, one answer for every caller. A thrown lookup is not cached.
+     *
+     * @var array<string, array{decision: string, reason: string|null, operator_user_id: int|null}>
+     */
+    private array $decisions = [];
+
     public function __construct(
         ?AnnouncementCommentRepository $comments = null,
         ?AnnouncementRepository $announcements = null
@@ -556,6 +568,16 @@ final class AnnouncementCommentService
     }
 
     /** Is this viewer the resolved operator of the announcement's page? */
+    /**
+     * @return array{decision: string, reason: string|null, operator_user_id: int|null}
+     */
+    private function decide(int $pageId, int $viewerId): array
+    {
+        $key = $pageId . ':' . $viewerId;
+
+        return $this->decisions[$key] ??= Authority::decide($pageId, $viewerId);
+    }
+
     private function isOperatorOf(\stdClass $row, int $viewerId): bool
     {
         if ($viewerId <= 0) {
@@ -568,7 +590,7 @@ final class AnnouncementCommentService
         }
 
         try {
-            $decision = Authority::decide($pageId, $viewerId);
+            $decision = $this->decide($pageId, $viewerId);
         } catch (\Throwable $e) {
             return false;
         }
@@ -592,7 +614,7 @@ final class AnnouncementCommentService
         $pageId = (int) ($row->page_id ?? ($row->post_parent ?? 0));
 
         try {
-            $decision = Authority::decide($pageId, $viewerId);
+            $decision = $this->decide($pageId, $viewerId);
         } catch (\Throwable $e) {
             $decision = ['decision' => 'denied', 'reason' => null, 'operator_user_id' => null];
         }

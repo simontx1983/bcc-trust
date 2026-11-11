@@ -67,11 +67,22 @@ class FraudDetector {
     }
 
     /**
-     * Detect rapid voting using config thresholds
+     * Rapid voting: more than BCC_TRUST_RAPID_VOTE_LIMIT votes CAST within
+     * the last BCC_TRUST_RAPID_VOTE_WINDOW minutes.
+     *
+     * F-102: this used to count audit-log rows with action 'vote_up' /
+     * 'vote_down' — actions nothing writes — so it was always 0 and both the
+     * VoteService gate and the +30 `rapid_voting` fraud signal were dead.
+     * It now counts the votes table itself (every status, so a burst that is
+     * immediately retracted still counts). No new writes.
      */
     public static function detectRapidVoting(int $userId): bool {
 
-        $count = self::auditLogRepo()->countRecentVoteActions($userId, BCC_TRUST_RAPID_VOTE_WINDOW);
+        // created_at is written with current_time('mysql') (site-local), so
+        // the cutoff is computed in the same frame.
+        $since = gmdate('Y-m-d H:i:s', (int) current_time('timestamp') - BCC_TRUST_RAPID_VOTE_WINDOW * 60);
+
+        $count = self::voteRepo()->countByVoterSince($userId, $since, false);
 
         return $count > BCC_TRUST_RAPID_VOTE_LIMIT;
     }

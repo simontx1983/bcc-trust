@@ -68,6 +68,7 @@ final class HiddenActivityRepository
         }
 
         self::bustCache();
+        self::visibilityChanged($actId);
         return true;
     }
 
@@ -90,7 +91,25 @@ final class HiddenActivityRepository
         }
 
         self::bustCache();
+        self::visibilityChanged($actId);
         return true;
+    }
+
+    /**
+     * Signal that an activity's moderation visibility actually changed (a
+     * new hide row, or a hide row removed — never an idempotent re-hide).
+     *
+     * Fired HERE, at the single write point, so every hide/restore path —
+     * auto-hide, admin hide, admin restore, undo-of-restore — is covered
+     * without each caller remembering to. Consumer:
+     * ReviewVisibilityScoreSync, which recalculates the score of the page a
+     * hidden/restored REVIEW counts toward (a hidden review does not count;
+     * user decision). Same pattern as UserInfoRepository's
+     * `bcc_user_suspension_changed`.
+     */
+    private static function visibilityChanged(int $actId): void
+    {
+        do_action('bcc_trust_activity_visibility_changed', $actId);
     }
 
     /**

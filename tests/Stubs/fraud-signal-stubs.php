@@ -327,6 +327,12 @@ namespace BCC\Trust\Core\Repositories {
     if (!class_exists('BCC\Trust\Core\Repositories\VoteRepository', false)) {
         class VoteRepository
         {
+            /** F-102: rapid voting now counts the votes table (all statuses). */
+            public function countByVoterSince(int $voterId, string $sinceMysql, bool $activeOnly = true): int
+            {
+                return $activeOnly ? 0 : W::$rapidVotes;
+            }
+
             public function getVoteTypeStats(int $userId, int $days): ?object
             {
                 return W::$voteTypeStats;
@@ -365,11 +371,6 @@ namespace BCC\Trust\Core\Repositories {
     if (!class_exists('BCC\Trust\Core\Repositories\AuditLogRepository', false)) {
         class AuditLogRepository
         {
-            public function countRecentVoteActions(int $userId, int $minutes): int
-            {
-                return W::$rapidVotes;
-            }
-
             public function countDistinctUsersForIp(string $ipBinary, int $userId, int $hours): int
             {
                 return W::$distinctUsersForIp;

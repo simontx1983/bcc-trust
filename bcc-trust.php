@@ -1688,6 +1688,33 @@ add_action('plugins_loaded', function (): void {
     // Prune quarantined bonus entries (>14 days or >100 rows) on daily refresh.
     add_action('bcc_onchain_daily_refresh', [\BCC\Trust\Onchain\Services\BonusRetryService::class, 'pruneQuarantine'], 20);
 
+    // F-65 part B: prune old balance-0 holdings tombstones (bounded; see
+    // NftHoldingsRepository::pruneTombstones() for the lateness bound).
+    //
+    // ⚠ A CLOSURE, NOT [class, 'pruneTombstones']. do_action() with no
+    // arguments still passes ONE argument, '', to a callback registered with
+    // the default accepted_args = 1 — and '' into `int $limit` is a TypeError
+    // that would take down every later bcc_onchain_daily_refresh callback.
+    // The closure takes nothing and calls with the default limit; the catch
+    // keeps a prune failure from reaching its siblings either.
+    add_action('bcc_onchain_daily_refresh', static function (): void {
+        try {
+            $limit   = \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::TOMBSTONE_PRUNE_LIMIT;
+            $removed = \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::pruneTombstones($limit);
+            if (class_exists('BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::info('[bcc-trust] holdings tombstones pruned', ['removed' => $removed, 'limit' => $limit]);
+                if ($removed >= $limit) {
+                    // More old tombstones than one run removes: a build-up.
+                    \BCC\Core\Log\Logger::warning('[bcc-trust] holdings tombstone prune hit its cap; more remain', ['limit' => $limit]);
+                }
+            }
+        } catch (\Throwable $e) {
+            if (class_exists('BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] holdings tombstone prune failed', ['error' => $e->getMessage()]);
+            }
+        }
+    }, 30);
+
     // Domain event hooks.
     add_action('bcc_onchain_claim_verified', [\BCC\Trust\Onchain\Services\BonusService::class, 'applyClaimBonus'], 10, 4);
 

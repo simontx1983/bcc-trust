@@ -1298,6 +1298,16 @@ final class Plugin
         return $this->adminDashboardRepository ??= new Repositories\AdminDashboardRepository();
     }
 
+    private ?Services\Vote\ReviewVisibilityScoreSync $reviewVisibilityScoreSync = null;
+    /** Recalculates a review's page when moderation hides / restores the review. */
+    public function reviewVisibilityScoreSync(): Services\Vote\ReviewVisibilityScoreSync
+    {
+        return $this->reviewVisibilityScoreSync ??= new Services\Vote\ReviewVisibilityScoreSync(
+            $this->voteRepository(),
+            $this->voteService()
+        );
+    }
+
     private ?Services\Vote\VoteRemovalService $voteRemovalService = null;
     /** The single bulk vote-removal path (moderation, ring invalidation, account deletion). */
     public function voteRemovalService(): Services\Vote\VoteRemovalService
@@ -2135,7 +2145,11 @@ final class Plugin
             }
         }, 10, 2);
 
-        add_action('bcc_announcement_archived', function (int $announcementId): void {
+        // F-151: `bcc_announcement_withdrawn` (the row left `publish` by any
+        // other path — wp-admin trash/draft, wp_delete_post) withdraws the feed
+        // card exactly like archival. The handler is idempotent and treats a
+        // missing activity as nothing to do.
+        $withdrawAnnouncementCard = function (int $announcementId): void {
             try {
                 $this->activityStreamWriter()->handleAnnouncementArchived($announcementId);
             } catch (\Throwable $e) {
@@ -2144,7 +2158,9 @@ final class Plugin
                     'error'           => $e->getMessage(),
                 ]);
             }
-        }, 10, 1);
+        };
+        add_action('bcc_announcement_archived', $withdrawAnnouncementCard, 10, 1);
+        add_action('bcc_announcement_withdrawn', $withdrawAnnouncementCard, 10, 1);
 
         // §D6 PR-A — WP transition_post_status bridge for blog posts.
         //
@@ -2622,6 +2638,13 @@ final class Plugin
         add_action('bcc_content_auto_hidden', function (int $actId): void {
             $this->notificationDispatcher()->onContentAutoHidden($actId);
         }, 30, 1);
+
+        // A moderation-hidden review stops counting toward its page's score
+        // and tallies; restoring it counts again (user decision). Fired by
+        // HiddenActivityRepository on every real hide/unhide.
+        add_action('bcc_trust_activity_visibility_changed', function (int $actId): void {
+            $this->reviewVisibilityScoreSync()->onVisibilityChanged($actId);
+        }, 20, 1);
 
         add_action('bcc_rank_finding_issued', function (int $userId, int $findingId, string $severity): void {
             unset($severity); // copy is severity-neutral by design (no shaming)

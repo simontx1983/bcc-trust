@@ -218,25 +218,10 @@ class AuditLogRepository {
         ) );
     }
 
-    /**
-     * Count vote actions for a user within a time window.
-     *
-     * @param int $userId
-     * @param int $minutes Lookback window in minutes.
-     * @return int
-     */
-    public function countRecentVoteActions( int $userId, int $minutes ): int {
-        global $wpdb;
-
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM {$this->table}
-             WHERE user_id = %d
-             AND action IN ('vote_up', 'vote_down')
-             AND created_at > (UTC_TIMESTAMP() - INTERVAL %d MINUTE)",
-            $userId,
-            $minutes
-        ) );
-    }
+    // countRecentVoteActions() removed (F-102): it counted 'vote_up' /
+    // 'vote_down' audit rows, which nothing writes, so rapid-vote detection
+    // was always 0. FraudDetector::detectRapidVoting() now counts the votes
+    // table via VoteRepository::countByVoterSince().
 
     /**
      * Count distinct users sharing an IP address (excluding a given user) within a time window.

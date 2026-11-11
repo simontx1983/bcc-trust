@@ -765,7 +765,11 @@ class VoteRepository {
 
         return (int) $wpdb->get_var(
             $wpdb->prepare(
-                "SELECT COUNT(*) FROM {$this->table} WHERE page_id = %d AND status = 1",
+                // Moderation-hidden reviews do not count (user decision; see
+                // hiddenReviewExclusion()).
+                "SELECT COUNT(*) FROM {$this->table} v
+                  WHERE v.page_id = %d AND v.status = 1
+                    AND " . $this->hiddenReviewExclusion('v'),
                 $pageId
             )
         );
@@ -903,6 +907,13 @@ class VoteRepository {
      * vested_weight; production had zero legacy rows relying on the fallback
      * when it was removed (measured 2026-11-10).
      *
+     * ── moderation-hidden reviews ──
+     * A review whose feed activity is moderation-hidden does not count while
+     * it is hidden, and counts again once restored (user decision). Same
+     * predicate as the review list reads (hiddenReviewExclusion(), F-55).
+     * Hide / restore re-trigger this recalculation for the page via
+     * ReviewVisibilityScoreSync.
+     *
      * ── retroactive fraud discount ──
      * SAFETY CONTRACT: the SQL implements a simplified fraud_score-only model.
      * The full multi-signal logic (automation, device, behaviour,
@@ -979,6 +990,7 @@ class VoteRepository {
                 LEFT JOIN {$wpdb->users} u ON v.voter_user_id = u.ID
                 WHERE v.page_id = %d
                   AND v.status  = 1
+                  AND " . $this->hiddenReviewExclusion('v') . "
              ) d",
             $minVoterAgeDays, // maturity: INTERVAL %d DAY for user_registered cutoff
             $fraudMedium,   // fraud: current <= threshold → no discount
@@ -1265,6 +1277,55 @@ class VoteRepository {
     }
 
     /**
+     * The page whose score a REVIEW activity feeds, or null when the activity
+     * is not a review (or PeepSo's table is absent). The reverse of the
+     * hiddenReviewExclusion() join: activity → backing wp_post → review
+     * sidecar meta → votes row → page_id.
+     *
+     * Status is deliberately not filtered: hiding or restoring a review whose
+     * vote has since been removed still warrants a recalculation of its page.
+     *
+     * @throws RepositoryException on database failure
+     */
+    public function findReviewPageIdByActivity(int $actId): ?int
+    {
+        if ($actId <= 0) {
+            return null;
+        }
+        global $wpdb;
+        $activities = $wpdb->prefix . 'peepso_activities';
+        if (!\BCC\Trust\Core\Database\TableRegistry::exists($activities)) {
+            return null;
+        }
+
+        $sql = $wpdb->prepare(
+            "SELECT v.page_id
+               FROM {$activities} a
+               INNER JOIN {$wpdb->postmeta} pm_mod
+                       ON pm_mod.post_id = a.act_external_id
+                      AND pm_mod.meta_key = '_bcc_activity_module'
+                      AND pm_mod.meta_value = 'review'
+               INNER JOIN {$wpdb->postmeta} pm_sc
+                       ON pm_sc.post_id = a.act_external_id
+                      AND pm_sc.meta_key = '_bcc_activity_sidecar_id'
+               INNER JOIN {$this->table} v
+                       ON v.id = CAST(pm_sc.meta_value AS UNSIGNED)
+              WHERE a.act_id = %d
+              LIMIT 1",
+            $actId
+        );
+        if (!is_string($sql) || $sql === '') {
+            throw new RepositoryException('VoteRepository::findReviewPageIdByActivity: wpdb::prepare() produced no statement');
+        }
+
+        $pageId = $wpdb->get_var($sql);
+        if ($wpdb->last_error !== '') {
+            throw new RepositoryException('VoteRepository::findReviewPageIdByActivity failed: ' . $wpdb->last_error);
+        }
+        return $pageId === null ? null : (int) $pageId;
+    }
+
+    /**
      * Count total active votes by voter.
      */
     public function countByVoter( int $voterId ): int {
@@ -1327,15 +1388,31 @@ class VoteRepository {
     }
 
     /**
-     * Count active votes by voter since a MySQL DATETIME boundary.
-     * Used by the §O3 living header for today's reviews_written count.
+     * Count votes by voter cast since a MySQL DATETIME boundary (site-local
+     * time, the frame `created_at` is written in).
+     *
+     * Default: ACTIVE votes only — the §O3 living header's "reviews today".
+     * `$activeOnly = false` counts every row cast in the window whatever its
+     * status: the rapid-voting detector (F-102) measures how fast a voter
+     * CASTS, so a burst that is immediately retracted must still count.
+     * (Re-casting a retracted vote resets its created_at, so it counts too.)
      */
-    public function countByVoterSince( int $voterId, string $sinceMysql ): int {
+    public function countByVoterSince( int $voterId, string $sinceMysql, bool $activeOnly = true ): int {
         if ($voterId <= 0 || $sinceMysql === '') {
             return 0;
         }
 
         global $wpdb;
+
+        if ( ! $activeOnly ) {
+            return (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(*) FROM {$this->table}
+                 WHERE voter_user_id = %d
+                   AND created_at   >= %s",
+                $voterId,
+                $sinceMysql
+            ) );
+        }
 
         return (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(*) FROM {$this->table}
@@ -1387,9 +1464,10 @@ class VoteRepository {
                 MAX(created_at) as last_vote_at,
                 AVG(CASE WHEN vote_type > 0 THEN weight ELSE NULL END) as avg_upvote_weight,
                 AVG(CASE WHEN vote_type < 0 THEN weight ELSE NULL END) as avg_downvote_weight
-             FROM {$this->table}
-             WHERE page_id = %d
-               AND status  = 1",
+             FROM {$this->table} v
+             WHERE v.page_id = %d
+               AND v.status  = 1
+               AND " . $this->hiddenReviewExclusion('v'),
             $pageId
         ) );
 
@@ -1423,9 +1501,10 @@ class VoteRepository {
                 "SELECT vote_type,
                         COUNT(DISTINCT voter_user_id) as count,
                         SUM(weight) as total_weight
-                 FROM {$this->table}
-                 WHERE page_id = %d
-                   AND status  = 1
+                 FROM {$this->table} v
+                 WHERE v.page_id = %d
+                   AND v.status  = 1
+                   AND " . $this->hiddenReviewExclusion('v') . "
                  GROUP BY vote_type",
                 $pageId
             )
