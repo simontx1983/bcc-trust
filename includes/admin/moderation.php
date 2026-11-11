@@ -119,7 +119,11 @@ add_action( 'admin_post_bcc_trust_ring_action', function () {
     }
 
     \BCC\Trust\Core\Plugin::instance()->moderationService()
-        ->handleRingAction( $resolved['user_ids'], $resolved['action'] );
+        ->handleRingAction(
+            $resolved['user_ids'],
+            $resolved['action'],
+            sanitize_textarea_field( wp_unslash( (string) ( $_POST['reason'] ?? '' ) ) )
+        );
 } );
 
 /**

@@ -344,6 +344,33 @@ final class RingsTabRenderTest extends TestCase
         self::assertStringContainsString('No ring member was suspended', $html);
     }
 
+    public function testSkippedMembersAreNamedWithWhy(): void
+    {
+        // F-114: the acting admin, administrators and already-suspended
+        // members are skipped, never (re-)suspended.
+        $_GET['ring_msg'] = 'suspended_2_skipped_1';
+        RingsRenderWorld::reset();
+        RingsRenderWorld::$skips = ['carol: already suspended'];
+
+        $html = $this->render();
+
+        self::assertStringContainsString('2 ring members were suspended. 1 member was skipped: carol: already suspended.', $html);
+        self::assertStringContainsString('notice-success', $html);
+    }
+
+    public function testAllSkippedIsAWarningNotADatabaseFailure(): void
+    {
+        $_GET['ring_msg'] = 'suspended_0_skipped_2';
+        RingsRenderWorld::reset();
+        RingsRenderWorld::$skips = ['admin: you cannot suspend yourself', 'bob: already suspended'];
+
+        $html = $this->render();
+
+        self::assertStringContainsString('notice-warning', $html);
+        self::assertStringNotContainsString('Every attempt failed', $html);
+        self::assertStringContainsString('2 members were skipped: admin: you cannot suspend yourself; bob: already suspended.', $html);
+    }
+
     public function testARefusedActionSaysNothingWasChanged(): void
     {
         // The fingerprint no longer matches a detected ring: a stale tab, or

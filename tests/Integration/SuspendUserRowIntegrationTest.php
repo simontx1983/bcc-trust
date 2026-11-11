@@ -133,5 +133,37 @@ namespace BCC\Trust\Tests\Integration {
             self::assertSame(1, (int) $row->is_suspended);
             self::assertSame('manual_suspension', json_decode((string) $row->fraud_triggers, true)['suspension_reason'] ?? null);
         }
+
+        /**
+         * F-114: inside TransactionManager::run() the repository does NOT
+         * flush. Flushed there, a read before COMMIT re-cached the old state
+         * for up to the cache TTL. The caller flushes once, after the commit.
+         */
+        public function testInsideATransactionTheFlushIsLeftToTheCallerAfterCommit(): void
+        {
+            $this->insertRow(self::UID_PRESENT, null);
+            $repo = new UserInfoRepository();
+
+            \BCC\Trust\Core\Security\TransactionManager::run(function () use ($repo): void {
+                $repo->suspendUser(self::UID_PRESENT, 'manual_suspension');
+                self::assertSame([], $GLOBALS['bcc_itest_suspend_actions'], 'no flush inside the transaction (suspend)');
+            });
+            self::assertSame(1, (int) $this->row(self::UID_PRESENT)?->is_suspended, 'committed');
+            self::assertSame([], $GLOBALS['bcc_itest_suspend_actions'], 'nor on commit by itself');
+
+            $repo->notifySuspensionChanged(self::UID_PRESENT);
+            self::assertSame(['bcc_user_suspension_changed'], $GLOBALS['bcc_itest_suspend_actions'], 'the caller flushes once');
+
+            $GLOBALS['bcc_itest_suspend_actions'] = [];
+            \BCC\Trust\Core\Security\TransactionManager::run(function () use ($repo): void {
+                $repo->unsuspendUser(self::UID_PRESENT);
+                self::assertSame([], $GLOBALS['bcc_itest_suspend_actions'], 'no flush inside the transaction (unsuspend)');
+            });
+            self::assertSame(0, (int) $this->row(self::UID_PRESENT)?->is_suspended);
+
+            // Outside a transaction the write is already committed: it flushes itself.
+            $repo->suspendUser(self::UID_PRESENT, 'manual_suspension');
+            self::assertSame(['bcc_user_suspension_changed'], $GLOBALS['bcc_itest_suspend_actions']);
+        }
     }
 }

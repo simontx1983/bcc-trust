@@ -58,6 +58,124 @@ final class ModerationService
     // SUSPEND / UNSUSPEND
     // ──────────────────────────────────────────────────────────────
 
+    /** Why a suspension was refused or skipped (F-114). */
+    private const SUSPEND_SKIP_LABELS = [
+        'self'              => 'you cannot suspend yourself',
+        'admin'             => 'an administrator cannot be suspended; remove their admin role first',
+        'already_suspended' => 'already suspended',
+    ];
+
+    /** Per-admin, short-lived: the names a bulk or ring suspend skipped, for the next page view. */
+    private const SUSPEND_SKIPS_TRANSIENT = 'bcc_trust_suspend_skips_';
+
+    /**
+     * The one guard for every suspend path: single, bulk and ring (F-114).
+     * Null = go ahead.
+     *
+     *  - 'self': the acting admin;
+     *  - 'admin': a manage_options account (demote first, user decision);
+     *  - 'already_suspended': re-suspending wrote a SECOND suspensions row and
+     *    overwrote the original reason in fraud_triggers.
+     *
+     * The suspended read goes to the table, not the row cache.
+     *
+     * @return 'self'|'admin'|'already_suspended'|null
+     */
+    private function suspensionRefusal(int $userId, int $adminId): ?string
+    {
+        if ($userId === $adminId) {
+            return 'self';
+        }
+        if (user_can($userId, 'manage_options')) {
+            return 'admin';
+        }
+        if ($this->userInfoRepository->getSuspendedUserIds([$userId]) !== []) {
+            return 'already_suspended';
+        }
+        return null;
+    }
+
+    /**
+     * Suspend atomically, then the after-commit work.
+     *
+     * Atomic: the suspensions row and the user_info gate flag must land
+     * together. Written non-transactionally, a crash between them leaves a
+     * suspensions row with is_suspended still 0 — an "audited but ungated"
+     * window where every enforcement path (Permissions::is_not_suspended,
+     * getSuspendedUserIds) still lets the account through.
+     *
+     * The caches are flushed AFTER the commit (F-114): flushed inside it, a
+     * read before COMMIT re-cached the unsuspended state for up to the TTL.
+     *
+     * @throws \Throwable when the transaction fails (nothing was written)
+     */
+    private function suspendAtomically(int $userId, int $adminId, string $reason, string $notes): void
+    {
+        $this->ensureUserInfoRow($userId);
+        $fraudScore = $this->userInfoRepository->getFraudScore($userId);
+
+        \BCC\Trust\Core\Security\TransactionManager::run(function () use ($userId, $adminId, $reason, $notes, $fraudScore) {
+            $this->suspensionRepository->create($userId, $adminId, $reason, $notes, $fraudScore);
+            $this->userInfoRepository->suspendUser($userId, $reason);
+        });
+
+        $this->userInfoRepository->notifySuspensionChanged($userId);
+        $this->revokeSessions($userId);
+    }
+
+    /**
+     * Unsuspend atomically, then the after-commit cache flush (F-114).
+     *
+     * @throws \Throwable when the transaction fails (nothing was written)
+     */
+    private function unsuspendAtomically(int $userId, int $adminId): void
+    {
+        \BCC\Trust\Core\Security\TransactionManager::run(function () use ($userId, $adminId) {
+            $this->suspensionRepository->closeActive($userId, $adminId);
+            $this->userInfoRepository->unsuspendUser($userId);
+        });
+
+        $this->userInfoRepository->notifySuspensionChanged($userId);
+    }
+
+    /**
+     * Remember what a bulk or ring suspend skipped, for the admin's next page.
+     *
+     * @param array<int, string> $skipped user id => skip key
+     */
+    private function rememberSuspendSkips(int $adminId, array $skipped): void
+    {
+        if ($skipped === []) {
+            delete_transient(self::SUSPEND_SKIPS_TRANSIENT . $adminId);
+            return;
+        }
+        set_transient(self::SUSPEND_SKIPS_TRANSIENT . $adminId, $skipped, 300);
+    }
+
+    /**
+     * One line per user the current admin's last bulk or ring suspend
+     * skipped, e.g. "alice: already suspended". Read once: it is cleared.
+     *
+     * @return list<string>
+     */
+    public function takeSuspendSkips(): array
+    {
+        $key     = self::SUSPEND_SKIPS_TRANSIENT . get_current_user_id();
+        $skipped = get_transient($key);
+        delete_transient($key);
+        if (!is_array($skipped)) {
+            return [];
+        }
+
+        $lines = [];
+        foreach ($skipped as $uid => $why) {
+            $user    = get_userdata((int) $uid);
+            $name    = $user !== false ? (string) $user->user_login : '#' . (int) $uid;
+            $lines[] = $name . ': ' . (self::SUSPEND_SKIP_LABELS[$why] ?? 'skipped');
+        }
+        return $lines;
+    }
+
     /**
      * Suspend a user by inserting a suspension record and flagging user_info.
      *
@@ -66,20 +184,15 @@ final class ModerationService
      */
     public function suspendUser(int $userId, string $reason = 'manual_suspension', string $notes = ''): array
     {
-        $this->ensureUserInfoRow($userId);
-        $fraudScore = $this->userInfoRepository->getFraudScore($userId);
+        $refusal = $this->suspensionRefusal($userId, get_current_user_id());
+        if ($refusal !== null) {
+            $message = 'User not suspended: ' . self::SUSPEND_SKIP_LABELS[$refusal] . '.';
+            echo '<div class="notice notice-error"><p>' . esc_html($message) . '</p></div>';
+            return ['success' => false, 'message' => $message];
+        }
 
-        // Atomic: the suspensions row and the user_info gate flag must land
-        // together. Written non-transactionally, a crash between them leaves a
-        // suspensions row with is_suspended still 0 — an "audited but ungated"
-        // window where every enforcement path (Permissions::is_not_suspended,
-        // getSuspendedUserIds) still lets the account through. Mirrors the
-        // already-atomic unsuspendUser().
         try {
-            \BCC\Trust\Core\Security\TransactionManager::run(function () use ($userId, $reason, $notes, $fraudScore) {
-                $this->suspensionRepository->create($userId, get_current_user_id(), $reason, $notes, $fraudScore);
-                $this->userInfoRepository->suspendUser($userId, $reason);
-            });
+            $this->suspendAtomically($userId, get_current_user_id(), $reason, $notes);
         } catch (\Throwable $e) {
             Logger::error('[bcc-trust] suspend_failed', [
                 'user_id'  => $userId,
@@ -88,8 +201,6 @@ final class ModerationService
             echo '<div class="notice notice-error"><p>Failed to suspend user: database error.</p></div>';
             return ['success' => false, 'message' => 'Failed to suspend user: database error.'];
         }
-
-        $this->revokeSessions($userId);
 
         $this->logAction('admin_suspend', $userId, [
             'reason' => $reason,
@@ -113,10 +224,7 @@ final class ModerationService
     public function unsuspendUser(int $userId): array
     {
         try {
-            \BCC\Trust\Core\Security\TransactionManager::run(function () use ($userId) {
-                $this->suspensionRepository->closeActive($userId, get_current_user_id());
-                $this->userInfoRepository->unsuspendUser($userId);
-            });
+            $this->unsuspendAtomically($userId, get_current_user_id());
         } catch (\Throwable $e) {
             Logger::error('[bcc-trust] unsuspend_failed', [
                 'user_id'  => $userId,
@@ -318,21 +426,35 @@ final class ModerationService
      */
     public function reanalyzeUser(int $userId): array
     {
-        \BCC\Trust\Core\Security\FraudDetector::clearCache($userId);
-        $newScore = \BCC\Trust\Core\Security\FraudDetector::getEnhancedFraudScore($userId);
-        $analysis = \BCC\Trust\Core\Security\FraudDetector::analyzeFraud($userId);
-
-        $this->userInfoRepository->updateFraudFields(
-            $userId,
-            (int) $newScore,
-            $analysis['risk_level'] ?? 'unknown',
-            (int) ($analysis['details']['behavior_score'] ?? 0)
-        );
+        $newScore = $this->reanalyze($userId);
 
         $this->logAction('admin_reanalyze', $userId, ['new_score' => $newScore]);
 
         echo '<div class="notice notice-success"><p>Reanalysis complete. New fraud score: <strong>' . intval($newScore) . '</strong></p></div>';
         return ['success' => true, 'message' => 'Reanalysis complete.', 'new_score' => (int) $newScore];
+    }
+
+    /**
+     * Recompute and PERSIST a user's fraud fields; returns the new score.
+     * The one reanalysis for the single and bulk actions: bulk used to only
+     * clear the detector cache and report success (F-114).
+     *
+     * @throws \Throwable when the analysis or the write fails
+     */
+    private function reanalyze(int $userId): int
+    {
+        \BCC\Trust\Core\Security\FraudDetector::clearCache($userId);
+        $newScore = (int) \BCC\Trust\Core\Security\FraudDetector::getEnhancedFraudScore($userId);
+        $analysis = \BCC\Trust\Core\Security\FraudDetector::analyzeFraud($userId);
+
+        $this->userInfoRepository->updateFraudFields(
+            $userId,
+            $newScore,
+            $analysis['risk_level'] ?? 'unknown',
+            (int) ($analysis['details']['behavior_score'] ?? 0)
+        );
+
+        return $newScore;
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -597,9 +719,10 @@ final class ModerationService
      * @param array  $userIds Array of user IDs in the ring.
      * @param int[]  $userIds
      * @param string $action  One of 'invalidate_votes' or 'suspend_all'.
+     * @param string $note    suspend_all: the admin's reason, kept as the suspension note.
      * @return void
      */
-    public function handleRingAction(array $userIds, string $action): void
+    public function handleRingAction(array $userIds, string $action, string $note = ''): void
     {
         if (!current_user_can('manage_options')) {
             wp_die('Unauthorized');
@@ -641,17 +764,21 @@ final class ModerationService
                 break;
 
             case 'suspend_all':
+                // The Rings form REQUIRES a reason; it used to be dropped
+                // for a fixed note (F-114). The reason code stays 'vote_ring'.
+                $note      = trim($note) !== '' ? $note : 'Suspended as part of vote ring action.';
                 $suspended = 0;
+                /** @var array<int, string> $skipped */
+                $skipped   = [];
                 foreach ($userIds as $uid) {
-                    $this->ensureUserInfoRow($uid);
-                    $fraudScore = $this->userInfoRepository->getFraudScore($uid);
+                    $refusal = $this->suspensionRefusal($uid, $adminId);
+                    if ($refusal !== null) {
+                        $skipped[$uid] = $refusal;
+                        continue;
+                    }
 
                     try {
-                        \BCC\Trust\Core\Security\TransactionManager::run(function () use ($uid, $adminId, $fraudScore) {
-                            $this->suspensionRepository->create($uid, $adminId, 'vote_ring', 'Suspended as part of vote ring action.', $fraudScore);
-                            $this->userInfoRepository->suspendUser($uid, 'vote_ring');
-                        });
-                        $this->revokeSessions($uid);
+                        $this->suspendAtomically($uid, $adminId, 'vote_ring', $note);
                         $suspended++;
                     } catch (\Throwable $e) {
                         // Skip this user but keep going; count only the ones
@@ -666,9 +793,12 @@ final class ModerationService
                 $this->logAction('admin_ring_suspend_all', 0, [
                     'ring_users' => $userIds,
                     'suspended'  => $suspended,
+                    'skipped'    => $skipped,
+                    'note'       => $note,
                 ]);
+                $this->rememberSuspendSkips($adminId, $skipped);
 
-                $msg = 'suspended_' . $suspended;
+                $msg = 'suspended_' . $suspended . '_skipped_' . count($skipped);
                 break;
 
             default:
@@ -768,18 +898,19 @@ final class ModerationService
 
         $adminId   = get_current_user_id();
         $processed = 0;
+        /** @var array<int, string> $skipped */
+        $skipped   = [];
 
         foreach ($userIds as $uid) {
             switch ($action) {
                 case 'suspend':
-                    $this->ensureUserInfoRow($uid);
-                    $score = $this->userInfoRepository->getFraudScore($uid);
+                    $refusal = $this->suspensionRefusal($uid, $adminId);
+                    if ($refusal !== null) {
+                        $skipped[$uid] = $refusal;
+                        break;
+                    }
                     try {
-                        \BCC\Trust\Core\Security\TransactionManager::run(function () use ($uid, $adminId, $score) {
-                            $this->suspensionRepository->create($uid, $adminId, 'manual_suspension', '', $score);
-                            $this->userInfoRepository->suspendUser($uid, 'manual_suspension');
-                        });
-                        $this->revokeSessions($uid);
+                        $this->suspendAtomically($uid, $adminId, 'manual_suspension', '');
                         $processed++;
                     } catch (\Throwable $e) {
                         // Log + skip; count only users who actually suspended,
@@ -794,10 +925,7 @@ final class ModerationService
 
                 case 'unsuspend':
                     try {
-                        \BCC\Trust\Core\Security\TransactionManager::run(function () use ($uid, $adminId) {
-                            $this->suspensionRepository->closeActive($uid, $adminId);
-                            $this->userInfoRepository->unsuspendUser($uid);
-                        });
+                        $this->unsuspendAtomically($uid, $adminId);
                         $processed++;
                     } catch (\Throwable $e) {
                         Logger::error('[bcc-trust] bulk_unsuspend_failed', [
@@ -824,8 +952,17 @@ final class ModerationService
                     break;
 
                 case 'reanalyze':
-                    \BCC\Trust\Core\Security\FraudDetector::clearCache($uid);
-                    $processed++;
+                    // The same recompute + persist as reanalyzeUser(); it
+                    // used to clear the detector cache only (F-114).
+                    try {
+                        $this->reanalyze($uid);
+                        $processed++;
+                    } catch (\Throwable $e) {
+                        Logger::error('[bcc-trust] bulk_reanalyze_failed', [
+                            'user_id' => $uid,
+                            'error'   => $e->getMessage(),
+                        ]);
+                    }
                     break;
             }
         }
@@ -833,9 +970,14 @@ final class ModerationService
         $this->logAction('admin_bulk_' . $action, 0, [
             'users'     => $userIds,
             'processed' => $processed,
+            'skipped'   => $skipped,
         ]);
+        $this->rememberSuspendSkips($adminId, $skipped);
 
-        wp_safe_redirect(add_query_arg('bulk', $processed, wp_get_referer()));
+        wp_safe_redirect(add_query_arg(
+            ['bulk' => $processed, 'bulk_skipped' => count($skipped)],
+            wp_get_referer()
+        ));
         exit;
     }
 

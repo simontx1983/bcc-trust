@@ -87,6 +87,16 @@ function bcc_trust_render_user_list() {
         $n = intval( $_GET['bulk'] );
         echo '<div class="notice notice-success is-dismissible"><p>Bulk action applied to ' . $n . ' user(s).</p></div>';
     }
+    // F-114: a bulk suspend skips the acting admin, administrators and
+    // already-suspended users instead of suspending (again). Say who.
+    $bulk_skipped = isset( $_GET['bulk_skipped'] ) ? intval( $_GET['bulk_skipped'] ) : 0;
+    if ( $bulk_skipped > 0 ) {
+        $bulk_skip_lines = \BCC\Trust\Core\Plugin::instance()->moderationService()->takeSuspendSkips();
+        echo '<div class="notice notice-warning is-dismissible"><p>'
+            . esc_html( sprintf( 'Skipped %d user(s): ', $bulk_skipped ) )
+            . esc_html( $bulk_skip_lines !== [] ? implode( '; ', $bulk_skip_lines ) . '.' : 'see the audit log for who and why.' )
+            . '</p></div>';
+    }
     ?>
 
     <div style="margin-top:0;">
