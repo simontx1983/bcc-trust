@@ -57,6 +57,13 @@ final class HeliusSubscriptionManager
      * the reconcile as backstop) — a deferred change, never a dropped one.
      */
     private const LIST_LOCK         = 'bcc_helius_address_list';
+
+    /**
+     * Shrink floor for a resync PUT (F-64 review): with at least this many
+     * remote addresses, a resync that would leave fewer than half of them is
+     * refused unless an operator overrides it.
+     */
+    private const SHRINK_FLOOR_MIN_REMOTE = 10;
     private const LIST_LOCK_TIMEOUT = 10;
 
     /**
@@ -236,9 +243,14 @@ final class HeliusSubscriptionManager
      * table. Used by the admin "Resync addresses" button + as a
      * recovery tool when bookkeeping drift is detected.
      *
-     * @return array{remote_count: int, local_count: int, applied: bool}|null
+     * `$allowShrink` is the OPERATOR override for the shrink floor (see
+     * resyncLocked()): the admin Resync form passes it only when an operator
+     * has ticked "I have confirmed a mass unlink". The reconcile cron never
+     * does.
+     *
+     * @return array{remote_count: int, local_count: int, applied: bool, refused?: string}|null
      */
-    public static function resyncFromWalletLinks(): ?array
+    public static function resyncFromWalletLinks(bool $allowShrink = false): ?array
     {
         $webhookId = (string) get_option(self::OPTION_WEBHOOK_ID, '');
         if ($webhookId === '') {
@@ -250,16 +262,16 @@ final class HeliusSubscriptionManager
             return null;
         }
 
-        return self::withListLock(static fn (): ?array => self::resyncLocked($webhookId, (int) $solanaChain->id));
+        return self::withListLock(static fn (): ?array => self::resyncLocked($webhookId, (int) $solanaChain->id, $allowShrink));
     }
 
     /**
      * resyncFromWalletLinks()'s read-modify-write. Runs ONLY under the list
      * lock.
      *
-     * @return array{remote_count: int, local_count: int, applied: bool}|null
+     * @return array{remote_count: int, local_count: int, applied: bool, refused?: string}|null
      */
-    private static function resyncLocked(string $webhookId, int $solanaChainId): ?array
+    private static function resyncLocked(string $webhookId, int $solanaChainId, bool $allowShrink): ?array
     {
         // ⚠ F-64: FAIL-CLOSED READS. The result is PUT as the WHOLE list, so a
         // failed DB read that came back [] wiped every subscription.
@@ -281,6 +293,11 @@ final class HeliusSubscriptionManager
         }
         $localList = array_keys($localAddresses);
         if (count($localList) > self::MAX_ADDRESSES) {
+            // L3: say so — the addresses past the cap are not subscribed.
+            \BCC\Core\Log\Logger::warning('[HeliusSubscriptionManager] local set exceeds the webhook address cap; truncating', [
+                'local' => count($localList),
+                'cap'   => self::MAX_ADDRESSES,
+            ]);
             $localList = array_slice($localList, 0, self::MAX_ADDRESSES);
         }
 
@@ -294,6 +311,31 @@ final class HeliusSubscriptionManager
         $localSorted = $localList;
         sort($localSorted);
         if ($remote !== $localSorted) {
+            // ⚠ F-64 review: SHRINK FLOOR. The PUT replaces the WHOLE list, so a
+            // local read that came back far smaller than reality would
+            // unsubscribe everyone missing from it. Fail-closed reads remove the
+            // known causes; this is the backstop for an unknown one. Refused:
+            // shrinking a non-empty remote list to empty, or — with at least
+            // SHRINK_FLOOR_MIN_REMOTE remote addresses — to under half. Small
+            // lists are exempt from the ratio so an ordinary unlink converges.
+            // A genuine mass unlink needs the operator override.
+            $remoteCount = count($remote);
+            $localCount  = count($localList);
+            $shrinksToEmpty = $remoteCount > 0 && $localCount === 0;
+            $shrinksByHalf  = $remoteCount >= self::SHRINK_FLOOR_MIN_REMOTE && $localCount * 2 < $remoteCount;
+            if (!$allowShrink && ($shrinksToEmpty || $shrinksByHalf)) {
+                \BCC\Core\Log\Logger::warning('[HeliusSubscriptionManager] resync refused: it would shrink the remote list sharply', [
+                    'remote_count' => $remoteCount,
+                    'local_count'  => $localCount,
+                ]);
+                return [
+                    'remote_count' => $remoteCount,
+                    'local_count'  => $localCount,
+                    'applied'      => false,
+                    'refused'      => 'shrink',
+                ];
+            }
+
             if (!self::patchAddresses($webhookId, $localList)) {
                 return null;
             }
@@ -414,15 +456,33 @@ final class HeliusSubscriptionManager
      */
     private static function withListLock(callable $fn): mixed
     {
-        if (!\BCC\Core\DB\AdvisoryLock::acquire(self::LIST_LOCK, self::LIST_LOCK_TIMEOUT)) {
+        $lock = self::listLockName();
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($lock, self::LIST_LOCK_TIMEOUT)) {
             \BCC\Core\Log\Logger::info('[HeliusSubscriptionManager] address list busy; deferring');
             return null;
         }
         try {
             return $fn();
         } finally {
-            \BCC\Core\DB\AdvisoryLock::release(self::LIST_LOCK);
+            \BCC\Core\DB\AdvisoryLock::release($lock);
         }
+    }
+
+    /**
+     * The list lock's name, prefixed with this site's table prefix.
+     *
+     * ⚠ GET_LOCK names are SERVER-WIDE. Staging and production sharing one
+     * MySQL server would otherwise serialise against each other's Helius
+     * writes. MySQL caps a lock name at 64 characters; the prefix plus the
+     * base name stays well inside it for any sane prefix, and the name is
+     * truncated defensively rather than letting GET_LOCK error.
+     */
+    private static function listLockName(): string
+    {
+        global $wpdb;
+        $prefix = isset($wpdb->prefix) ? (string) $wpdb->prefix : '';
+
+        return substr($prefix . self::LIST_LOCK, 0, 64);
     }
 
     /**
@@ -468,18 +528,22 @@ final class HeliusSubscriptionManager
             return false;
         }
 
-        $response = ApiRetry::request(
-            static fn () => wp_remote_request(
-                self::HELIUS_API_BASE . '/v0/webhooks/' . rawurlencode($webhookId)
-                . '?api-key=' . rawurlencode($apiKey),
-                [
-                    'method'    => 'PUT',
-                    'timeout'   => self::HTTP_TIMEOUT,
-                    'headers'   => ['Content-Type' => 'application/json'],
-                    'body'      => $body,
-                    'sslverify' => true,
-                ]
-            ),
+        // ⚠ Through ApiRetry::post — which runs SafeHttpClient::prepareArgs()
+        // (metadata-host blocklist, public-IP validation, the resolved-IP pin,
+        // the negative DNS cache) — not a bare wp_remote_request(). The
+        // webhook GET and the provisioning POST already went this way; only
+        // this PUT did not. wp_remote_post() lets the caller's `method`
+        // override POST, so the request is still a PUT.
+        $response = ApiRetry::post(
+            self::HELIUS_API_BASE . '/v0/webhooks/' . rawurlencode($webhookId)
+            . '?api-key=' . rawurlencode($apiKey),
+            [
+                'method'    => 'PUT',
+                'timeout'   => self::HTTP_TIMEOUT,
+                'headers'   => ['Content-Type' => 'application/json'],
+                'body'      => $body,
+                'sslverify' => true,
+            ],
             ['label' => 'Helius webhook patch addresses']
         );
 

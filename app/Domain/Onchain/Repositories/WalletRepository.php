@@ -860,6 +860,9 @@ final class WalletRepository
         return self::readSolanaSync($chainId, $heliusManaged, false);
     }
 
+    /** Row ceiling for one Solana-sync read (the Helius list holds at most 100 000). */
+    private const SOLANA_SYNC_READ_LIMIT = 100000;
+
     /**
      * FAIL-CLOSED variant for HeliusSubscriptionManager::resyncFromWalletLinks().
      *
@@ -900,8 +903,10 @@ final class WalletRepository
         global $wpdb;
         $table = self::table();
 
-        $count = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*)
+        // runRead, not get_var: see GuardsReadFailures::runRead() for the
+        // stale-`last_result` path that get_var() cannot see.
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT COUNT(*) AS n
                FROM {$table}
               WHERE chain_id = %d
                 AND BINARY wallet_address = %s
@@ -909,11 +914,9 @@ final class WalletRepository
             $chainId,
             $walletAddress,
             max(0, $excludeId)
-        ));
+        ), 'countOtherLinksForChainAddress', true);
 
-        self::guardReadOrThrow('countOtherLinksForChainAddress');
-
-        return (int) $count;
+        return isset($rows[0]->n) ? (int) $rows[0]->n : 0;
     }
 
     /**
@@ -929,26 +932,29 @@ final class WalletRepository
         global $wpdb;
         $table = self::table();
 
-        /** @var list<object{id: string, wallet_address: string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        // ⚠ runRead, not get_results: the resync PUTs this as the WHOLE
+        // webhook address list, so a stale `last_result` from wpdb's silent
+        // early-return path must never pass for this query's rows. See
+        // GuardsReadFailures::runRead().
+        /** @var list<object{id: string, wallet_address: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
             "SELECT id, wallet_address
                FROM {$table}
               WHERE chain_id = %d
                 AND helius_managed = %d
               ORDER BY id ASC
-              LIMIT 100000",
+              LIMIT %d",
             $chainId,
-            $heliusManaged ? 1 : 0
-        ));
+            $heliusManaged ? 1 : 0,
+            self::SOLANA_SYNC_READ_LIMIT
+        ), $failClosed ? 'listForChainBySolanaSyncOrThrow' : 'listForChainBySolanaSync', $failClosed);
 
-        if ($failClosed) {
-            self::guardReadOrThrow('listForChainBySolanaSyncOrThrow');
-        } else {
-            self::guardRead('listForChainBySolanaSync');
-        }
-
-        if (!is_array($rows)) {
-            return [];
+        if (count($rows) >= self::SOLANA_SYNC_READ_LIMIT) {
+            // A full page means the set may be larger than one read returns.
+            \BCC\Core\Log\Logger::warning('[WalletRepository] Solana sync read hit its row limit; the set may be truncated', [
+                'limit'          => self::SOLANA_SYNC_READ_LIMIT,
+                'helius_managed' => $heliusManaged,
+            ]);
         }
 
         $out = [];
