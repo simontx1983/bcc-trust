@@ -254,7 +254,7 @@ class ReportListTable extends WP_List_Table
                     .   'style="width:55px;height:28px;padding:2px 4px;" title="Points to deduct (1-20)" />'
                     . '<input type="text" name="penalty_reason" placeholder="Reason..." '
                     .   'style="width:120px;height:28px;padding:2px 4px;font-size:12px;" />'
-                    . '<button type="submit" class="button button-small" style="color:#d63638;">Apply</button>'
+                    . '<button type="submit" class="button button-small" style="color:var(--bcc-danger);">Apply</button>'
                     . '</form>',
                     esc_url(admin_url('admin.php')),
                     $item->id,

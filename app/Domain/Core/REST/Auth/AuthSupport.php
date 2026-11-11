@@ -23,12 +23,14 @@ namespace BCC\Trust\Core\REST\Auth;
 
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Services\AccountRecoveryService;
 use BCC\Trust\Core\Services\AuthMailer;
 use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Services\UserViewService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\FrontendRedirect;
 use BCC\Trust\Core\Support\JwtToken;
+use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Response;
 
 if (!defined('ABSPATH')) {
@@ -262,6 +264,16 @@ final class AuthSupport
         wp_set_current_user($userId);
         wp_set_auth_cookie($userId, true);
 
+        // Email ownership just changed hands from "unproven" to "proven".
+        // Revoke every Bearer token minted before this point: if someone
+        // else created the account with this address (the pre-hijack case),
+        // their sessions must not survive the inbox owner's verification.
+        // Every account reaching here had a TYPED address (password, X,
+        // wallet, or a legacy account via resend) — provider-verified
+        // signups never do — so this runs on every verification.
+        // Revoke FIRST, then mint: the token below carries the bumped
+        // version and is the verifier's working session.
+        JwtToken::revokeAllForUser($userId);
         $token = JwtToken::encode($userId, $handle);
 
         Logger::audit('email_verified', [
@@ -287,10 +299,37 @@ final class AuthSupport
             'expires_in'       => self::JWT_TTL_SECONDS,
             'token_type'       => 'Bearer',
             'in_good_standing' => self::resolveInGoodStanding($userId),
+            // How many wallets are linked to the account the caller just
+            // proved the email of. > 0 tells the frontend to show "this
+            // account has a wallet linked — is it yours?" (it lists them via
+            // the owner-only GET /wallets with the fresh token above, and
+            // removes one via DELETE /wallets/{id}). A count only — no wallet
+            // detail rides an auth response (wallet-privacy policy).
+            'linked_wallet_count' => self::linkedWalletCount($userId),
         ]);
         $response->header('Cache-Control', 'no-store');
 
         return $response;
+    }
+
+    /**
+     * Number of wallet links on the account, for the post-verification
+     * "is this wallet yours?" prompt. Reads through the fail-CLOSED
+     * repository path; if the read does not run, logs and returns 0 so the
+     * verification itself still completes (the prompt is advisory — the
+     * owner can always review wallets in Settings).
+     */
+    private static function linkedWalletCount(int $userId): int
+    {
+        try {
+            return count(WalletRepository::getForUserOrThrow($userId));
+        } catch (\Throwable $e) {
+            Logger::warning('[bcc-trust] verify-email: linked wallet count unavailable', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return 0;
+        }
     }
 
     /**
@@ -338,6 +377,99 @@ final class AuthSupport
     public static function storeVerifyToken(string $token, int $userId): void
     {
         set_transient('bcc_vt_' . $token, (string) $userId, self::TOKEN_TTL);
+    }
+
+    /**
+     * Start (or restart) email verification for $userId at $email.
+     *
+     * Generates a fresh OTP (overwriting any previous one, so only the newest
+     * mail's code works) and a single-use verify token, stores both, and
+     * mails the standard verification email with a one-shot link to
+     * /verify-email. The user completes it via POST /auth/verify-email
+     * (EmailVerificationController), whose finalizeVerification() is the
+     * ONLY place that sets META_EMAIL_VERIFIED = '1' for user_email.
+     *
+     * Does NOT touch META_EMAIL_VERIFIED — callers set '0' themselves where
+     * the account is pending. Best-effort: AuthMailer never throws, and a
+     * mail failure records a DegradationMetric without rolling anything back
+     * (the user can resend via /auth/resend-verification).
+     *
+     * Shared by password signup, X signup (oauth-complete), wallet signup and
+     * resendVerification — one sequence, so the paths cannot drift.
+     */
+    public static function beginEmailVerification(int $userId, string $email): void
+    {
+        $otpCode     = self::generateOtp();
+        $verifyToken = self::generateVerifyToken();
+        self::storeOtpForUser($userId, $otpCode);
+        self::storeVerifyToken($verifyToken, $userId);
+
+        $verifyPath = '/verify-email?email=' . rawurlencode($email) . '&token=' . rawurlencode($verifyToken);
+        AuthMailer::sendVerificationEmail(
+            $userId,
+            $email,
+            $otpCode,
+            FrontendRedirect::defaultReturn($verifyPath)
+        );
+    }
+
+    /**
+     * Email state for a freshly created wallet-signup account.
+     *
+     * Sets META_EMAIL_VERIFIED = '0' — a wallet signature proves control of
+     * the wallet, not of the inbox. A caller-supplied (real) address gets the
+     * standard verification email, so its owner can prove it; a wallet
+     * placeholder (`wallet-…@noreply.bcc.local`, no inbox) gets no mail and
+     * stays '0'. Wallet users sign in with their wallet, so '0' gates nothing
+     * for them except OAuth link-by-email (mayLinkOauthByEmail).
+     */
+    public static function startWalletSignupEmailVerification(int $userId, string $email): void
+    {
+        update_user_meta($userId, self::META_EMAIL_VERIFIED, '0');
+
+        if ($email === '' || AccountRecoveryService::isPlaceholderEmail($email)) {
+            return;
+        }
+
+        self::beginEmailVerification($userId, $email);
+    }
+
+    /**
+     * Whether an OAuth sign-in may be linked into an existing account by
+     * EMAIL match (oauthLogin's fallback after the provider-id lookup).
+     *
+     * Only an account whose user_email ownership was proven — exactly '1',
+     * set by finalizeVerification() after an OTP/link verify, or by a
+     * provider-verified signup — may be linked. Fail closed on '0'
+     * (pending), '' (legacy, never verified) and anything else: an email
+     * match against an unproven address proves nothing about identity, and
+     * linking would let whoever typed a victim's address first receive the
+     * victim's later sign-in (pre-account-takeover).
+     */
+    public static function mayLinkOauthByEmail(string $emailVerifiedFlag): bool
+    {
+        return $emailVerifiedFlag === '1';
+    }
+
+    /**
+     * Whether an email forwarded by the OAuth bridge counts as verified BY
+     * THE PROVIDER — the only case in which it may (a) be email-matched to an
+     * existing account and (b) start a new account at '1'.
+     *
+     * Requires the signed bridge payload to say so explicitly
+     * (`email_verified` is the JSON boolean `true` — not "1", not 1, not
+     * "true") for a provider whose verification we trust (Google), and a
+     * well-formed address. Everything else fails closed: an email's mere
+     * presence proves nothing, since a provider can return an unverified one.
+     *
+     * @param mixed $emailVerifiedClaim the bridge's `email_verified` value
+     */
+    public static function isProviderVerifiedEmail(string $provider, string $email, $emailVerifiedClaim): bool
+    {
+        return $provider === 'google'
+            && $emailVerifiedClaim === true
+            && $email !== ''
+            && is_email($email) !== false;
     }
 
     /**

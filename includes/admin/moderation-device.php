@@ -39,7 +39,7 @@ function bcc_trust_render_fingerprint_moderation( $fingerprint ) {
     <div class="wrap bcc-admin-wrap">
         <h1>Device Fingerprint Investigation
             <?php if ( $is_whitelisted ): ?>
-                <span style="background:#4caf50;color:#fff;font-size:13px;padding:3px 10px;border-radius:3px;margin-left:8px;">✓ Whitelisted</span>
+                <span style="background:var(--bcc-success);color:#fff;font-size:13px;padding:3px 10px;border-radius:3px;margin-left:8px;">✓ Whitelisted</span>
             <?php endif; ?>
         </h1>
 
@@ -79,7 +79,7 @@ function bcc_trust_render_fingerprint_moderation( $fingerprint ) {
                     <td>
                         <strong><?php echo intval($user_count); ?></strong>
                         <?php if ( $user_count >= $ring_min_size ): ?>
-                            <span style="color:#f44336;font-weight:bold;margin-left:8px;">⚠ Possible Vote Ring</span>
+                            <span style="color:var(--bcc-danger);font-weight:bold;margin-left:8px;">⚠ Possible Vote Ring</span>
                         <?php endif; ?>
                     </td>
                 </tr>
@@ -91,14 +91,14 @@ function bcc_trust_render_fingerprint_moderation( $fingerprint ) {
                     <th>Max Automation Score</th>
                     <td>
                         <div style="display:flex;align-items:center;gap:10px;">
-                            <div style="width:100px;height:10px;background:#eee;border-radius:5px;overflow:hidden;">
-                                <div style="width:<?php echo esc_attr(intval($max_automation)); ?>%;height:100%;background:#f44336;"></div>
+                            <div style="width:100px;height:10px;background:var(--bcc-bg-code);border-radius:5px;overflow:hidden;">
+                                <div style="width:<?php echo esc_attr(intval($max_automation)); ?>%;height:100%;background:var(--bcc-danger);"></div>
                             </div>
                             <strong><?php echo intval($max_automation); ?>%</strong>
                             <?php if ( $max_automation >= $automation_high ): ?>
-                                <span style="color:#f44336;font-weight:bold;">HIGH AUTOMATION — Bot likely</span>
+                                <span style="color:var(--bcc-danger);font-weight:bold;">HIGH AUTOMATION — Bot likely</span>
                             <?php elseif ( $max_automation >= $automation_medium ): ?>
-                                <span style="color:#ff9800;font-weight:bold;">MEDIUM AUTOMATION — Suspicious</span>
+                                <span style="color:var(--bcc-warning);font-weight:bold;">MEDIUM AUTOMATION — Suspicious</span>
                             <?php endif; ?>
                         </div>
                     </td>
@@ -129,8 +129,8 @@ function bcc_trust_render_fingerprint_moderation( $fingerprint ) {
                             <td><span style="padding:2px 6px;border-radius:3px;background:<?php echo esc_attr( \BCC\Trust\Core\Support\Formatting::riskColor( $r->risk_level ?: 'unknown' ) ); ?>;color:#fff;"><?php echo esc_html( ucfirst( $r->risk_level ?: 'Unknown' ) ); ?></span></td>
                             <td>
                                 <div style="display:flex;align-items:center;gap:6px;">
-                                    <div style="width:50px;height:6px;background:#eee;border-radius:3px;overflow:hidden;">
-                                        <div style="width:<?php echo esc_attr(intval($r->automation_score)); ?>%;height:100%;background:#f44336;"></div>
+                                    <div style="width:50px;height:6px;background:var(--bcc-bg-code);border-radius:3px;overflow:hidden;">
+                                        <div style="width:<?php echo esc_attr(intval($r->automation_score)); ?>%;height:100%;background:var(--bcc-danger);"></div>
                                     </div>
                                     <?php echo intval($r->automation_score); ?>%
                                 </div>

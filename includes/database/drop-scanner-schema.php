@@ -283,6 +283,35 @@ if (!function_exists('bcc_trust_drop_scanner_schema')) {
             );
         }
 
+        // ── 1b. ARMING GATE (F-149) ─────────────────────────────────────
+        //
+        // This drops three populated tables and eight columns, and it runs
+        // from the runner on an ordinary web request. The only safeguard used
+        // to be a runbook sentence ("take a fresh backup first"), which a
+        // restored or cloned database never reads. When there is real work
+        // to do, it now runs only once an operator has deliberately armed it
+        // AFTER taking that backup:
+        //
+        //   wp option update bcc_trust_allow_drop_scanner_schema 1
+        //
+        // Unarmed, it changes nothing and returns INCOMPLETE (no stamp), so
+        // it runs the moment it is armed. A database with nothing left to
+        // drop (fresh install, or already dropped) completes without arming
+        // — the gate guards destruction, not bookkeeping. Production and
+        // staging are already stamped done and never reach this.
+        if (!$nothingToDo && !get_option('bcc_trust_allow_drop_scanner_schema')) {
+            // The runner retries an INCOMPLETE migration every request; log
+            // the refusal at most hourly so it cannot flood the log.
+            if ($hasLogger && !get_transient('bcc_trust_scanner_drop_unarmed_logged')) {
+                set_transient('bcc_trust_scanner_drop_unarmed_logged', 1, HOUR_IN_SECONDS);
+                \BCC\Core\Log\Logger::warning(
+                    '[bcc-trust] scanner-schema drop skipped, not armed: take a backup, then set bcc_trust_allow_drop_scanner_schema',
+                    $inventory
+                );
+            }
+            return BCC_TRUST_MIGRATION_INCOMPLETE;
+        }
+
         // ── 2. THE INDEX FIRST, EXPLICITLY ──────────────────────────────
         foreach ($ckIndexes as $index) {
             // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared

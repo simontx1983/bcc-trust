@@ -192,6 +192,68 @@ namespace BCC\Trust\Tests\Integration {
             self::assertNotFalse(\get_option(self::DROPPED_OPTION));
         }
 
+        // ── #396 review follow-up: the refusal must not be permanent ───────
+
+        /**
+         * A KNOWN shortfall clears the seed stamp, so the idempotent seed
+         * walks again and the system converges instead of refusing hourly
+         * forever. End-to-end: refuse → re-seed → drop.
+         */
+        public function testAKnownShortfallClearsTheSeedStampAndTheSystemSelfHeals(): void
+        {
+            $this->seedLegacy(14, 82.0);
+            $this->markSeeded(); // stamped, but member 14 was never relocated
+
+            \bcc_trust_drop_legacy_reputation();
+            $this->assertTableExists(true);
+            self::assertFalse(\get_option(self::SEEDED_OPTION), 'a known shortfall must clear the seed stamp');
+
+            \bcc_trust_seed_self_pages(); // the next request's seed re-walks
+            self::assertNotFalse(\get_option(self::SEEDED_OPTION));
+
+            unset($GLOBALS['__bcc_test_transients'][self::REFUSED_TRANSIENT]); // the hour passes
+            \bcc_trust_drop_legacy_reputation();
+            $this->assertTableExists(false);
+            self::assertNotFalse(\get_option(self::DROPPED_OPTION));
+        }
+
+        /** An UNKNOWN answer (the check failed) leaves the seed stamp alone. */
+        public function testAnUnknownRefusalKeepsTheSeedStamp(): void
+        {
+            global $wpdb;
+            $this->seedLegacy(15, 82.0);
+            $this->markSeeded();
+
+            $wpdb->failQueriesMatching = '/LEFT JOIN\s+\S*bcc_trust_page_scores/i';
+            \bcc_trust_drop_legacy_reputation();
+            self::assertGreaterThan(0, $wpdb->injectedFailures, 'the fault must actually have fired');
+            $wpdb->clearFaultInjection();
+
+            $this->assertTableExists(true);
+            self::assertNotFalse(\get_option(self::SEEDED_OPTION), 'a failed check is not evidence the copy failed');
+        }
+
+        /**
+         * The seed stores |delta| / scale in DECIMAL(5,2). A delta that rounds
+         * to 0.00 there leaves a correctly-seeded row all-zero; the predicate
+         * must accept that row rather than refuse forever. Whatever the
+         * configured scale, the expectation follows the 0.006 threshold.
+         */
+        public function testASubRoundingDeltaFollowsTheStorageThreshold(): void
+        {
+            $scale = \BCC\Trust\Core\Services\TrustScoreService::weightScoreScale();
+            $delta = max(0.01, round(0.005 * $scale, 2)); // smallest 2dp delta at/under the rounding point
+            $this->seedLegacy(16, 50.0 + $delta);
+            $this->insertSelfPage(16, 0.0, 0.0); // what a seed of this delta can leave stored
+
+            $expected = ($delta / $scale) >= 0.006 ? 1 : 0;
+            self::assertSame(
+                $expected,
+                \bcc_trust_count_unreconciled_reputation($this->legacy),
+                "delta {$delta} at scale {$scale}"
+            );
+        }
+
         // ── helpers ────────────────────────────────────────────────────────
 
         private static function selfPageBase(): int

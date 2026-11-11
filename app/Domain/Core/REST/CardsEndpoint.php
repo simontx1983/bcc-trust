@@ -27,8 +27,10 @@
 namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Services\CardViewService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\BoundedIntParam;
+use BCC\Trust\Core\Support\ProfileAccess;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -118,6 +120,34 @@ final class CardsEndpoint
 
         if ($type === '' || $id === '') {
             return ApiResponse::error('bcc_invalid_request', 'type and id are required.', 400);
+        }
+
+        // §F-02 profile-wide gate for the MEMBER card.
+        //
+        // ⚠ THIS ROUTE WAS MISSED BY THE FIRST SWEEP, and the reason is
+        // worth keeping: that sweep enumerated callers of
+        // `UserSlugResolver::resolve`, but this path resolves its handle
+        // INSIDE CardViewService via a private resolver of its own. So a
+        // per-user route hid behind a generic `/cards/{type}/{id}`
+        // dispatcher whose other three types are pages, not people. The
+        // member card returns bio, stats, chains, trust_score, rank and
+        // operator_profile — the same substance as `GET /users/:handle`,
+        // which was gated — so leaving it open would have made the rest
+        // of F-02 cosmetic for anyone who knew this URL.
+        //
+        // ⚠ Gated on `CardViewService::resolveMemberCardHandle()`, NOT on
+        // UserSlugResolver, deliberately: the two resolve different sets
+        // (see that method's docblock), and gating on the other one would
+        // judge one user's privacy while rendering another's card.
+        if ($type === 'member') {
+            $cardUserId = CardViewService::resolveMemberCardHandle($id);
+            // A handle that resolves to nobody falls through to the
+            // service and its existing 404 — the gate must not turn an
+            // unknown handle into a 403, which would newly disclose
+            // which handles exist.
+            if ($cardUserId > 0 && !ProfileAccess::canViewProfile($cardUserId)) {
+                return ProfileAccess::forbidden();
+            }
         }
 
         $viewerId = get_current_user_id();
