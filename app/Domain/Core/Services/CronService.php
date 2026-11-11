@@ -157,10 +157,13 @@ class CronService
                     $voteService->recalculateScore((int) $page_id, true);
                     do_action('bcc_trust_score_recalculated', (int) $page_id);
                     $processed++;
-                } catch (\Exception $e) {
-                    // Individual page failure should not stop the batch.
+                } catch (\Throwable $e) {
+                    // Individual page failure should not stop the batch —
+                    // \Throwable, not \Exception: a TypeError/Error from one
+                    // page used to escape and abort the whole sweep (F-166).
                     \BCC\Core\Log\Logger::error('[CronService] hourlyRecalc failed', [
                         'page_id' => $page_id,
+                        'type'    => get_class($e),
                         'error'   => $e->getMessage(),
                     ]);
                 }
@@ -758,7 +761,13 @@ class CronService
                         do_action('bcc_trust_score_recalculated', (int) $pageId);
                         $processed++;
 
-                    } catch (\Exception $e) {
+                    } catch (\Throwable $e) {
+                        // \Throwable, not \Exception (F-166). A TypeError /
+                        // Error used to escape here and abort the WHOLE tick
+                        // without counting the failure, so the page was never
+                        // quarantined, stayed first in the queue (ordered by
+                        // last_calculated_at ASC) and starved every page
+                        // behind it on every tick.
                         $failed++;
 
                         // Increment failure counter
