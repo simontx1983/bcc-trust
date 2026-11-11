@@ -2047,6 +2047,8 @@ class VoteRepository {
      * @phpstan-return list<object{voter_user_id: int|numeric-string, registered: string|null}>
      */
     public function getRecentVotersWithRegistration( int $pageId, int $days = 1 ): array {
+        // (Day-scale window: FraudDetector's async fan-in analysis. The
+        // synchronous pre-gate uses countRecentDistinctVoters() below.)
         global $wpdb;
 
         $userInfoTable = \BCC\Trust\Core\Database\TableRegistry::userInfo();
@@ -2061,6 +2063,28 @@ class VoteRepository {
              GROUP BY v.voter_user_id",
             $pageId,
             $days
+        ) );
+    }
+
+    /**
+     * Distinct voters with an ACTIVE vote cast on the page since a DATETIME
+     * boundary (site-local, the frame created_at is written in). Used by the
+     * synchronous fan-in pre-gate, which only needs the count over a short
+     * window (F-105: 5 minutes).
+     */
+    public function countRecentDistinctVoters( int $pageId, string $sinceMysql ): int {
+        if ( $pageId <= 0 || $sinceMysql === '' ) {
+            return 0;
+        }
+        global $wpdb;
+
+        return (int) $wpdb->get_var( $wpdb->prepare(
+            "SELECT COUNT(DISTINCT voter_user_id) FROM {$this->table}
+              WHERE page_id = %d
+                AND status = 1
+                AND created_at >= %s",
+            $pageId,
+            $sinceMysql
         ) );
     }
 
