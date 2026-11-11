@@ -331,6 +331,7 @@ return array(
     'BCC\\Trust\\Core\\Support\\PeepSoFriendGate' => $baseDir . '/app/Domain/Core/Support/PeepSoFriendGate.php',
     'BCC\\Trust\\Core\\Support\\Permission' => $baseDir . '/app/Domain/Core/Support/Permission.php',
     'BCC\\Trust\\Core\\Support\\PrivacySettings' => $baseDir . '/app/Domain/Core/Support/PrivacySettings.php',
+    'BCC\\Trust\\Core\\Support\\ProfileAccess' => $baseDir . '/app/Domain/Core/Support/ProfileAccess.php',
     'BCC\\Trust\\Core\\Support\\PublicAllPolicy' => $baseDir . '/app/Domain/Core/Support/PublicAllPolicy.php',
     'BCC\\Trust\\Core\\Support\\PushMetrics' => $baseDir . '/app/Domain/Core/Support/PushMetrics.php',
     'BCC\\Trust\\Core\\Support\\PushPayload' => $baseDir . '/app/Domain/Core/Support/PushPayload.php',
