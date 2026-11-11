@@ -56,6 +56,10 @@ if (!function_exists('bcc_trust_drop_legacy_orphans')) {
         if (get_option('bcc_trust_legacy_orphans_dropped')) {
             return;
         }
+        // F-150: a failed step leaves this unstamped; retry at most hourly.
+        if (bcc_trust_migration_backoff_active('legacy_orphans')) {
+            return;
+        }
 
         global $wpdb;
 
@@ -69,9 +73,16 @@ if (!function_exists('bcc_trust_drop_legacy_orphans')) {
                AND CONSTRAINT_NAME = 'fk_endorsement_type'",
             $endorsements
         ));
+        if ($fk === null && $wpdb->last_error !== '') {
+            bcc_trust_migration_step_failed('legacy_orphans', 'probe fk_endorsement_type');
+            return;
+        }
         if ($fk === 'fk_endorsement_type') {
             // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-            $wpdb->query("ALTER TABLE {$endorsements} DROP FOREIGN KEY fk_endorsement_type");
+            if ($wpdb->query("ALTER TABLE {$endorsements} DROP FOREIGN KEY fk_endorsement_type") === false) {
+                bcc_trust_migration_step_failed('legacy_orphans', 'drop fk_endorsement_type');
+                return;
+            }
         }
 
         // Step 2: drop each orphan (guarded; idempotent).
@@ -79,9 +90,16 @@ if (!function_exists('bcc_trust_drop_legacy_orphans')) {
         foreach (bcc_trust_legacy_orphan_suffixes() as $suffix) {
             $table  = $wpdb->prefix . $suffix;
             $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+            if ($exists === null && $wpdb->last_error !== '') {
+                bcc_trust_migration_step_failed('legacy_orphans', "probe {$suffix}");
+                return;
+            }
             if ($exists === $table) {
                 // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-                $wpdb->query("DROP TABLE IF EXISTS {$table}");
+                if ($wpdb->query("DROP TABLE IF EXISTS {$table}") === false) {
+                    bcc_trust_migration_step_failed('legacy_orphans', "drop {$suffix}");
+                    return;
+                }
                 $dropped[] = $suffix;
             }
         }

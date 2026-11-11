@@ -50,6 +50,10 @@ final class MyPushSubscriptionEndpoint
 {
     private const ROUTE_NAMESPACE = 'bcc/v1';
 
+    /** F-133: 10 registrations per user per hour (explicit-toggle surface). */
+    public const REGISTER_RATE_LIMIT  = 10;
+    public const REGISTER_RATE_WINDOW = 3600;
+
     public static function register(): void
     {
         $instance = new self();
@@ -118,6 +122,15 @@ final class MyPushSubscriptionEndpoint
         $userId = get_current_user_id();
         if ($userId <= 0) {
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        // Per-user throttle (F-133), ahead of all parsing. Each registration
+        // costs a DNS resolution (the SSRF gate below) plus a row upsert, so
+        // an unthrottled caller could amplify DNS lookups and grow the table.
+        // The frontend registers only on an explicit push-toggle gesture, so
+        // the budget is tight.
+        if (!\BCC\Core\Security\Throttle::allow('push_subscription_register', self::REGISTER_RATE_LIMIT, self::REGISTER_RATE_WINDOW)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many push registrations. Please wait.', 429);
         }
 
         if (self::vapidPublicKey() === null) {

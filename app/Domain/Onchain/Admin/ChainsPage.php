@@ -2,6 +2,8 @@
 
 namespace BCC\Trust\Onchain\Admin;
 
+use BCC\Trust\Core\Admin\AdminMenus;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -47,7 +49,7 @@ class ChainsPage
         // Audit follow-up: relocated under BCC System alongside the
         // other onchain admin pages. Page slug unchanged.
         add_submenu_page(
-            'bcc-system-health',
+            AdminMenus::ONCHAIN,
             'Chains',
             'Chains',
             'manage_options',
@@ -361,11 +363,11 @@ class ChainsPage
                     <td><?php echo $lastFetch ? esc_html($lastFetch) : '<em>Never</em>'; ?></td>
                     <td>
                         <?php if (!$isActive): ?>
-                            <span style="color:#d63638;">Inactive</span>
+                            <span style="color:var(--bcc-danger);">Inactive</span>
                         <?php elseif (!$hasDriver): ?>
-                            <span style="color:#dba617;">No Driver</span>
+                            <span style="color:var(--bcc-warning);">No Driver</span>
                         <?php else: ?>
-                            <span style="color:#00a32a;">Active</span>
+                            <span style="color:var(--bcc-success);">Active</span>
                         <?php endif; ?>
                     </td>
                     <td>
@@ -378,7 +380,7 @@ class ChainsPage
                         </button>
                         <span class="bcc-chain-status" style="margin-left:8px;font-size:12px;"></span>
                         <?php else: ?>
-                        <span style="color:#94a3b8;font-size:12px;">—</span>
+                        <span style="color:var(--bcc-text-muted);font-size:12px;">—</span>
                         <?php endif; ?>
                     </td>
                 </tr>
@@ -572,7 +574,7 @@ class ChainsPage
                                 <br>
                                 <strong
                                     id="bcc-hall-warn-<?php echo (int) $cid; ?>"
-                                    style="color:#b32d2e;"
+                                    style="color:var(--bcc-danger);"
                                 >
                                     Ownership incomplete — this Hall is not owned by the
                                     canonical administrator account. Use Repair ownership.
@@ -817,7 +819,7 @@ class ChainsPage
     public static function render_sweep_bar(): void
     {
         ?>
-        <div style="margin:8px 0 16px 0;padding:10px 12px;background:#f6f7f7;border:1px solid #c3c4c7;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <div style="margin:8px 0 16px 0;padding:10px 12px;background:var(--bcc-bg-raised);border:1px solid var(--bcc-border-strong);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <strong style="margin-right:4px;">Run cron now:</strong>
             <?php foreach (self::sweepControls() as $sweep): ?>
                 <form method="post"
@@ -832,7 +834,7 @@ class ChainsPage
                     </button>
                 </form>
             <?php endforeach; ?>
-            <span style="color:#646970;font-size:11px;margin-left:auto;">
+            <span style="color:var(--bcc-text-muted);font-size:11px;margin-left:auto;">
                 Clears the &ldquo;Chain data is stale&rdquo; notice via <code>OnchainCircuitBreaker::recordSuccess</code> on the chains that respond.
             </span>
         </div>
@@ -1175,7 +1177,7 @@ class ChainsPage
                                 <code><?php echo esc_html((string) $review['incumbent_normalized']); ?></code>
                             <?php else: ?>
                                 <code><?php echo esc_html((string) $review['incumbent_display']); ?></code>
-                                <br><span style="color:#d63638;">Off-policy value — not shown in full.</span>
+                                <br><span style="color:var(--bcc-danger);">Off-policy value — not shown in full.</span>
                             <?php endif; ?>
                         </td></tr>
                     <tr><th>New endpoint</th>
@@ -1475,7 +1477,7 @@ class ChainsPage
             $cid = (int) $chain->id;
         ?>
         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
-              style="margin:0 0 12px 0;padding:12px;background:#fff;border:1px solid #c3c4c7;max-width:1100px;">
+              style="margin:0 0 12px 0;padding:12px;background:var(--bcc-bg-card);border:1px solid var(--bcc-border-strong);max-width:1100px;">
             <?php wp_nonce_field(self::ACTION_IDENTITY_SAVE, 'bcc_chain_identity_nonce'); ?>
             <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_IDENTITY_SAVE); ?>">
             <input type="hidden" name="chain_id" value="<?php echo esc_attr((string) $cid); ?>">

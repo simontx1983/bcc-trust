@@ -29,6 +29,7 @@ namespace BCC\Trust\Core\REST;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\PublicAllPolicy;
 use BCC\Trust\Core\Support\UserSlugResolver;
 use BCC\Trust\Core\ValueObjects\GroupContext;
@@ -78,6 +79,14 @@ final class UserGroupsEndpoint
         $targetId  = UserSlugResolver::resolve($slug);
         if ($targetId === 0) {
             return ApiResponse::error('bcc_not_found', 'User not found.', 404);
+        }
+
+        // §F-02 profile-wide gate. This route already narrows the GROUP
+        // list by the viewer's own access, but that is a per-group
+        // decision — it does not stop a stranger confirming which groups
+        // an "only me" profile belongs to via the public ones.
+        if (!ProfileAccess::canViewProfile($targetId)) {
+            return ProfileAccess::forbidden();
         }
 
         $viewerId = get_current_user_id();
