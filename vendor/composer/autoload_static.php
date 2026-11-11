@@ -165,6 +165,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'AllowDynamicProperties' => __DIR__ . '/..' . '/symfony/polyfill-php82/Resources/stubs/AllowDynamicProperties.php',
         'Attribute' => __DIR__ . '/..' . '/symfony/polyfill-php80/Resources/stubs/Attribute.php',
         'BCC\\Trust\\Core\\Admin\\AdminMenus' => __DIR__ . '/../..' . '/app/Domain/Core/Admin/AdminMenus.php',
+        'BCC\\Trust\\Core\\Admin\\AdminUiCompat' => __DIR__ . '/../..' . '/app/Domain/Core/Admin/AdminUiCompat.php',
         'BCC\\Trust\\Core\\Admin\\NotificationCenter' => __DIR__ . '/../..' . '/app/Domain/Core/Admin/NotificationCenter.php',
         'BCC\\Trust\\Core\\Admin\\SessionsPage' => __DIR__ . '/../..' . '/app/Domain/Core/Admin/SessionsPage.php',
         'BCC\\Trust\\Core\\Admin\\WalletAuditPage' => __DIR__ . '/../..' . '/app/Domain/Core/Admin/WalletAuditPage.php',

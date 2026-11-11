@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Admin;
 
-use BCC\Core\Admin\AdminUi;
+use BCC\Trust\Core\Admin\AdminUiCompat as AdminUi;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\JwtToken;
 
