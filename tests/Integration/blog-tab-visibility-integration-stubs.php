@@ -120,4 +120,44 @@ namespace {
         {
         }
     }
+
+    /**
+     * The blog body's cover image. Returns '' — this suite asserts WHICH
+     * POSTS come back, never what their cover looks like, and '' is what
+     * the real function yields for a post with no thumbnail, which is
+     * every fixture here.
+     *
+     * ⚠ This is the THIRD function found this way. `get_post` and
+     * `_prime_post_caches` were the first two, and each round of actually
+     * RUNNING the suite surfaced the next one — nothing had exercised
+     * BlogService::getUserBlog inside the integration harness before, so
+     * reading the code was never going to enumerate them reliably.
+     */
+    if (!function_exists('get_the_post_thumbnail_url')) {
+        function get_the_post_thumbnail_url($post = null, $size = 'post-thumbnail')
+        {
+            return '';
+        }
+    }
+
+    /**
+     * Cover-image attachment id. 0 means "no thumbnail", which the body
+     * hydrator maps to a null `cover_image_id` — and none of these
+     * fixtures sets a cover.
+     *
+     * ⚠ This is the LAST one, and it is the last by MEASUREMENT rather
+     * than by hope: every WP-looking call across the whole read path
+     * (BlogService, GroupContextResolver, CardUrlMap,
+     * PostShortcodeRepository, BlogChainTagRepository, GroupAttribution,
+     * RestrictedGroups and bcc-core's FeedItemNormalizer) was enumerated
+     * and checked against the harness plus this file. 20 candidates, and
+     * this was the only remaining gap. Discovering them one failing run
+     * at a time was costing a full run each.
+     */
+    if (!function_exists('get_post_thumbnail_id')) {
+        function get_post_thumbnail_id($post = null)
+        {
+            return 0;
+        }
+    }
 }
