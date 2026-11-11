@@ -141,6 +141,6 @@ if (!function_exists('bcc_trust_backfill_display_name_placeholders')) {
         }
 
         // Batch cap hit with rows possibly remaining — resume next request.
-        return BCC_TRUST_MIGRATION_INCOMPLETE;
+        return BCC_TRUST_MIGRATION_MORE;
     }
 }

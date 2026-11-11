@@ -71,6 +71,6 @@ final class CanonicalHandlesStatusTest extends TestCase
 
         $status = bcc_trust_backfill_canonical_handles();
 
-        self::assertSame(BCC_TRUST_MIGRATION_INCOMPLETE, $status, 'cap hit must not report complete');
+        self::assertSame(BCC_TRUST_MIGRATION_MORE, $status, 'cap hit must not report complete, and is batch progress, not a failure (F-151)');
     }
 }

@@ -110,8 +110,28 @@ final class HalfOpenProbeOwnershipTest extends TestCase
         self::assertNotSame([], $sites, 'anti-vacuity: the mutating check must still exist somewhere');
         self::assertSame(
             [
-                'Domain/Onchain/Support/ApiRetry.php:200',
-                'Domain/Onchain/Support/ApiRetry.php:599',
+                // ⚠⚠ LINE-PINNED, AND THE PIN IS THE FRAGILE PART. ANY edit
+                // above a claim site moves these numbers and fails this file
+                // without anything being wrong. F-156(b) moved them TWICE in
+                // one PR — once by adding the deadline checks, then again by
+                // adding a docblock to a method that merely sits above
+                // getBatchSameHost().
+                //
+                // The invariant actually being guarded is "exactly two claim
+                // sites, both in ApiRetry"; the line numbers are incidental
+                // to it, and a line number cannot even tell you the claim is
+                // in the RIGHT METHOD — which is the thing that matters.
+                // Asserting the enclosing method instead would be both
+                // stronger and stable; proposed separately rather than done
+                // here, because relaxing a guard this change does not own is
+                // not a decision to slip into an unrelated PR.
+                //
+                // ⇒ Until then: when these numbers move, CHECK THE ENCLOSING
+                // METHODS are still request() and getBatchSameHost() before
+                // pasting the new ones. Renumbering without that check is how
+                // a real regression would get waved through.
+                'Domain/Onchain/Support/ApiRetry.php:306',
+                'Domain/Onchain/Support/ApiRetry.php:782',
             ],
             $sites,
             "the half-open probe has exactly one owner — ApiRetry. Found:\n  " . implode("\n  ", $sites)

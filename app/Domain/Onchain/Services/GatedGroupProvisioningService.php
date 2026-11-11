@@ -59,6 +59,7 @@
 namespace BCC\Trust\Onchain\Services;
 
 use BCC\Core\Log\Logger;
+use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
@@ -592,6 +593,11 @@ final class GatedGroupProvisioningService {
         }
 
         // ── Create. NOT transactional; compensated below. ───────────────
+        // Who RAN this — 0 under the daily cron, or an admin acting on
+        // someone else's request. Read before the create, which runs as the
+        // requester for the constructor alone (F-160).
+        $actingUserId = get_current_user_id();
+
         $groupId = $this->createPeepSoGroup($ownerId, $name);
         if ($groupId === 0) {
             \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'group_create_failed');
@@ -599,10 +605,36 @@ final class GatedGroupProvisioningService {
                 'Community creation failed; see the bcc-trust error log.', 0);
         }
 
+        // ── F-160: the requester must hold member_owner, read back ──────
+        // Asked of PeepSo's membership ledger, not inferred from the create
+        // returning an id. A failed read returns null, so an unconfirmable
+        // ownership fails closed exactly like a wrong one.
+        $ownerStatus = PeepSoGroupRepository::getMembershipStatus($ownerId, $groupId);
+        if ($ownerStatus !== 'member_owner') {
+            Logger::error('[bcc-trust] holder group created without the requester as owner; compensating', [
+                'collection_id' => $collectionId,
+                'group_id'      => $groupId,
+                'owner_id'      => $ownerId,
+                'owner_status'  => $ownerStatus,
+            ]);
+
+            $this->invalidateGroupCaches($groupId);
+            $auditOk = $this->compensate($groupId, $collectionId, $ownerId, $chainId);
+            \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'group_create_failed');
+
+            return $this->fail(
+                $collectionId,
+                ProvisioningFailureCode::GROUP_CREATE_FAILED,
+                'Community creation was rolled back; its owner could not be set.',
+                0,
+                $auditOk === false
+            );
+        }
+
         // ── Finalize: gate meta + state + checked audit, atomically ─────
         try {
             TransactionManager::run(function () use (
-                $groupId, $chainId, $chainFamily, $canonical, $collectionId, $ownerId, $row
+                $groupId, $chainId, $chainFamily, $canonical, $collectionId, $ownerId, $row, $actingUserId
             ) {
                 $wrote = GatedGroupRepository::writeGateConfig(
                     $groupId, $chainId, $chainFamily, $canonical,
@@ -642,6 +674,7 @@ final class GatedGroupProvisioningService {
                         'chain_family'     => $chainFamily,
                         'group_id'         => $groupId,
                         'operator_user_id' => $ownerId,
+                        'acting_user_id'   => $actingUserId,
                         'previous_state'   => ProvisioningState::REQUESTED,
                         'new_state'        => ProvisioningState::PROVISIONED,
                     ],
@@ -1343,7 +1376,19 @@ final class GatedGroupProvisioningService {
             ],
         ];
 
+        // F-160: `owner_id` sets only post_author. PeepSo's create() makes
+        // the CURRENT user `member_owner` — the admin who happened to press
+        // the button, or user 0 under the daily cron, where it writes a
+        // gm_user_id = 0 owner row nobody can ever act as. So the requester
+        // is made the current user for the constructor alone, and the
+        // previous identity is restored on every path, including a throw.
+        $previousUserId = get_current_user_id();
+        $swapped        = $previousUserId !== $ownerId;
+
         try {
+            if ($swapped) {
+                wp_set_current_user($ownerId);
+            }
             /** @phpstan-ignore-next-line — PeepSo classes are runtime-only. */
             $group = new \PeepSoGroup(null, $data);
             /** @phpstan-ignore-next-line */
@@ -1355,6 +1400,10 @@ final class GatedGroupProvisioningService {
                 'error'      => $e->getMessage(),
             ]);
             return 0;
+        } finally {
+            if ($swapped) {
+                wp_set_current_user($previousUserId);
+            }
         }
     }
 }

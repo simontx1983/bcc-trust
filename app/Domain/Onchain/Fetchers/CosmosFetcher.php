@@ -932,16 +932,20 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * @param array<string, mixed> $queryArr  e.g. ['tokens' => ['owner' => '...']]
      * @return array<string, mixed>|null
      */
-    private function wasmSmartQuery(string $contractAddress, array $queryArr, bool $contractRefusalIsAnswer = false): ?array
-    {
+    private function wasmSmartQuery(
+        string $contractAddress,
+        array $queryArr,
+        bool $contractRefusalIsAnswer = false,
+        ?int $deadlineAt = null
+    ): ?array {
         $path = self::wasmSmartQueryPath($contractAddress, $queryArr);
         if ($path === null) {
             return null;
         }
 
         $response = $contractRefusalIsAnswer
-            ? $this->lcdGetResultData($path)
-            : $this->lcdGet($path);
+            ? $this->lcdGetResultData($path, $deadlineAt)
+            : $this->lcdGet($path, [], null, $deadlineAt);
         if (!is_array($response) || !isset($response['data']) || !is_array($response['data'])) {
             return null;
         }
@@ -1195,7 +1199,7 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *     attributes: list<array{trait_type: string, value: string|int|float|bool, rarity_pct?: float}>
      * }
      */
-    public function fetchTokenMetadata(string $contract, string $tokenId): array
+    public function fetchTokenMetadata(string $contract, string $tokenId, ?int $deadlineAt = null): array
     {
         $empty = [
             'name'            => null,
@@ -1226,7 +1230,12 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         // Token ids reach here from the anonymous NFT-piece route, so a
         // contract refusing an unknown/invalid id must not retry or charge
         // the breaker (F-154).
-        $data = $this->wasmSmartQuery($contract, ['nft_info' => ['token_id' => $tokenId]], true);
+        $data = $this->wasmSmartQuery(
+            $contract,
+            ['nft_info' => ['token_id' => $tokenId]],
+            true,
+            $deadlineAt
+        );
         if ($data === null) {
             // Don't cache transport failures — a flaky LCD shouldn't poison
             // a 7-day cache window with empty results.
@@ -1466,7 +1475,7 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *
      * @return array{wallet_address: string}|null
      */
-    public function cw721OwnerOf(string $contract, string $tokenId): ?array
+    public function cw721OwnerOf(string $contract, string $tokenId, ?int $deadlineAt = null): ?array
     {
         if ($contract === '' || $tokenId === '') {
             return null;
@@ -1490,7 +1499,7 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         // is an answer, not a node fault (F-154).
         $data = $this->wasmSmartQuery($contract, [
             'owner_of' => ['token_id' => $tokenId],
-        ], true);
+        ], true, $deadlineAt);
         if ($data === null) {
             // Don't cache transport failures.
             return null;
@@ -1548,9 +1557,9 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *
      * @return array<int, array{validator_address: string, shares: string|null, amount: float|null}>
      */
-    public function fetch_delegations(string $delegatorAddress): array
+    public function fetch_delegations(string $delegatorAddress, ?int $deadlineAt = null): array
     {
-        return $this->fetch_delegations_result($delegatorAddress) ?? [];
+        return $this->fetch_delegations_result($delegatorAddress, $deadlineAt) ?? [];
     }
 
     /**
@@ -1570,8 +1579,25 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *
      * @return array<int, array{validator_address: string, shares: string|null, amount: float|null}>|null
      */
-    public function fetch_delegations_result(string $delegatorAddress): ?array
+    public function fetch_delegations_result(string $delegatorAddress, ?int $deadlineAt = null): ?array
     {
+        // ⚠⚠ F-156: THE DEADLINE IS A PARAMETER AND IS NOT DEFAULTED HERE,
+        // AND THAT IS THE WHOLE DESIGN.
+        //
+        // This walk has three callers with opposite needs. The delegator JOIN
+        // gate runs inside a user's request and must be bounded. The revoke
+        // sweep and wallet seeding are cron, where an incomplete answer is
+        // expensive and latency is free — and note which way an unfinished
+        // walk falls below: `null` = UNKNOWN, which the sweep SKIPS. A
+        // deadline hardcoded here would therefore not break the sweep, it
+        // would quietly stop it revoking on a slow LCD, which is worse than
+        // slow because nothing would say so.
+        //
+        // ⚠ AN INSTANT, NOT A DURATION. Up to DELEGATIONS_MAX_PAGES pages
+        // are walked here and the caller may walk them once PER WALLET, so a
+        // per-call duration would multiply by both. One instant, computed by
+        // the caller with the user waiting, bounds the whole thing.
+
         // ⚠ F-63: EVERY ANSWER HERE IS EITHER COMPLETE OR null.
         //
         // The revoke sweep removes a member on INELIGIBLE, and "no row for
@@ -1591,7 +1617,12 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
                 $params['pagination.key'] = $pageKey;
             }
 
-            $response = $this->lcdGet("/cosmos/staking/v1beta1/delegations/{$delegatorAddress}", $params);
+            $response = $this->lcdGet(
+                "/cosmos/staking/v1beta1/delegations/{$delegatorAddress}",
+                $params,
+                null,
+                $deadlineAt
+            );
 
             if ($response === null) {
                 // Transport failure — on ANY page — preserves UNKNOWN. Rows
@@ -2111,9 +2142,13 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * @param array<string, string|int> $params
      * @return array<string, mixed>|null
      */
-    private function lcdGet(string $path, array $params = [], ?ProviderOutcomeReceipt $outcome = null): ?array
-    {
-        $result = $this->lcdGetResult($path, $params, false, $outcome);
+    private function lcdGet(
+        string $path,
+        array $params = [],
+        ?ProviderOutcomeReceipt $outcome = null,
+        ?int $deadlineAt = null
+    ): ?array {
+        $result = $this->lcdGetResult($path, $params, false, $outcome, false, $deadlineAt);
 
         return $result['ok'] ? $result['data'] : null;
     }
@@ -2124,9 +2159,9 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *
      * @return array<string, mixed>|null
      */
-    private function lcdGetResultData(string $path): ?array
+    private function lcdGetResultData(string $path, ?int $deadlineAt = null): ?array
     {
-        $result = $this->lcdGetResult($path, [], false, null, true);
+        $result = $this->lcdGetResult($path, [], false, null, true, $deadlineAt);
 
         return $result['ok'] ? $result['data'] : null;
     }
@@ -2165,7 +2200,8 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         array $params = [],
         bool $smartQuery = false,
         ?ProviderOutcomeReceipt $outcome = null,
-        bool $contractRefusalIsAnswer = false
+        bool $contractRefusalIsAnswer = false,
+        ?int $deadlineAt = null
     ): array {
         $classifier = \BCC\Trust\Onchain\Services\CosmwasmClassifier::class;
         $chainId    = (int) ($this->chain->id ?? 0);
@@ -2204,6 +2240,17 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             // caller judging an empty result cannot charge the same failure twice.
             'outcome'     => $outcome,
         ];
+
+        // ⚠ F-156: an ABSOLUTE instant, supplied by whichever caller has a
+        // user waiting on it, and SHARED by every call that caller makes.
+        // Absent (the default, and every background caller) = no deadline,
+        // which is today's behaviour exactly. Set here rather than inside
+        // this class because the same LCD methods serve the revoke sweep and
+        // wallet seeding, where completing the walk matters more than latency
+        // — see fetch_delegations_result().
+        if ($deadlineAt !== null) {
+            $retryOptions['deadline_at'] = $deadlineAt;
+        }
 
         // ONLY smart queries may reinterpret a 5xx. A code listing or a
         // contract listing that 500s really is a node problem, and must

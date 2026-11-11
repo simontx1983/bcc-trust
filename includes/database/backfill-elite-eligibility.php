@@ -140,7 +140,9 @@ if (!function_exists('bcc_trust_backfill_elite_eligibility')) {
                 '[bcc-trust] elite-eligibility backfill: partial pass, will resume',
                 ['evaluated' => $evaluated, 'had_failure' => $hadFailure]
             );
-            return BCC_TRUST_MIGRATION_INCOMPLETE;
+            // F-151: a per-page failure backs off for an hour; a clean pass
+            // that only hit the batch cap resumes on the next request.
+            return $hadFailure ? BCC_TRUST_MIGRATION_INCOMPLETE : BCC_TRUST_MIGRATION_MORE;
         }
 
         \BCC\Core\Log\Logger::info(

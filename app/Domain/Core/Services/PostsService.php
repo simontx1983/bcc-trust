@@ -254,6 +254,21 @@ final class PostsService
     }
 
     /**
+     * F-47: the "can this viewer see this post at all" rule, shared with
+     * comments, reports and the feeds. Built lazily (set by reflection in
+     * tests) so the constructor and Plugin.php wiring are unchanged.
+     */
+    private ?FeedItemReportVisibility $visibility = null;
+
+    private function visibility(): FeedItemReportVisibility
+    {
+        return $this->visibility ??= new FeedItemReportVisibility(
+            \BCC\Trust\Core\Plugin::instance()->groupsService(),
+            \BCC\Trust\Core\Plugin::instance()->hiddenActivityRepository()
+        );
+    }
+
+    /**
      * Lazily resolve the chain-tag repo. Production calls always come
      * through Plugin's accessor, which supplies the singleton — this
      * path is the legacy 3-arg test-harness fallback only.
@@ -773,6 +788,13 @@ final class PostsService
         $isOwner = (int) $activity->act_user_id === $viewerId;
         $isAdmin = current_user_can('manage_options');
         if (!$isOwner && !$isAdmin) {
+            // ⚠ EXISTENCE ORACLE (F-47): someone else's post that this viewer
+            // cannot see (a secret group, a members-only group post, a hidden
+            // or unpublished post) reads as NOT FOUND, byte-identical to a
+            // missing id. Only a post they can see keeps the 403.
+            if (!$this->visibility()->canSee($viewerId, $activity)) {
+                return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
+            }
             return ['error' => 'bcc_forbidden', 'message' => 'You can only delete your own posts.'];
         }
 
@@ -1358,8 +1380,10 @@ final class PostsService
         }
 
         // ── Ownership ────────────────────────────────────────────────
+        // ⚠ EXISTENCE ORACLE (F-47): someone else's post reads as NOT
+        // FOUND, byte-identical to a missing id (same as getBlogForEdit).
         if ((int) $post->post_author !== $authorId) {
-            return ['error' => 'bcc_forbidden', 'message' => 'You can only edit your own blog posts.'];
+            return ['error' => 'bcc_not_found', 'message' => 'Blog post not found.'];
         }
 
         // ── §D6 group target ─────────────────────────────────────────

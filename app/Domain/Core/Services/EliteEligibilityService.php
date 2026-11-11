@@ -47,6 +47,7 @@ final class EliteEligibilityService
 {
     private ScoreRepository $scoreRepository;
     private AttestationRepository $attestationRepository;
+    private EliteOverridePin $pin;
 
     /**
      * MemberSelfPageService is deliberately NOT injected: this service only
@@ -59,10 +60,12 @@ final class EliteEligibilityService
      */
     public function __construct(
         ScoreRepository $scoreRepository,
-        AttestationRepository $attestationRepository
+        AttestationRepository $attestationRepository,
+        ?EliteOverridePin $pin = null
     ) {
         $this->scoreRepository       = $scoreRepository;
         $this->attestationRepository = $attestationRepository;
+        $this->pin                   = $pin ?? new EliteOverridePin();
     }
 
     /**
@@ -167,7 +170,10 @@ final class EliteEligibilityService
         );
 
         $wasEligible = $this->currentFlag($pageId);
-        $eligible    = $verdict['eligible'];
+        // F-113: an admin's manual Elite grant STICKS until an admin removes
+        // it (product decision). isElitePinned() fails closed, so a read
+        // error answers "not pinned" and the evaluated verdict stands.
+        $eligible    = $verdict['eligible'] || $this->pin->isElitePinned($pageId);
 
         // Racy tail: the columns could vanish from under us only if someone
         // dropped them, but setEliteEligibility re-checks and reports honestly.
