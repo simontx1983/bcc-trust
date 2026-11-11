@@ -16,6 +16,51 @@ if (!defined('ABSPATH')) {
 final class UserSyncRepository
 {
     /**
+     * §F-02 — the JOIN and WHERE fragments that exclude level-30
+     * ("friends only") profiles from a `WP_User_Query` listing.
+     *
+     * Lives here because this repository already owns reads against
+     * `peepso_users`, and the arch guardrail is right to keep `$wpdb`
+     * out of the Support layer: a clause built there is a second place
+     * that knows PeepSo's schema and free to drift from this one.
+     * {@see \BCC\Trust\Core\Support\PrivacySettings::filterPeepSoUserQuery}
+     * decides WHETHER to apply it and owns the privacy meaning; this
+     * method only renders SQL, which is why the level to exclude is a
+     * parameter rather than a constant in here.
+     *
+     * ⚠ A missing `peepso_users` row is NOT excluded. Absence means
+     * "never set", whose schema default is public, so treating it as 30
+     * would hide unsynced accounts for no reason — hence LEFT JOIN plus
+     * the IS NULL arm.
+     *
+     * ⚠ The alias is returned because the caller uses it to detect a
+     * double append: `pre_user_query` can fire more than once on one
+     * query, and a second join fails the whole listing with "Not unique
+     * table/alias".
+     *
+     * @return array{from: string, where: string, alias: string}
+     */
+    public static function listingProfileAccessClause(int $viewerId, int $excludedLevel): array
+    {
+        global $wpdb;
+
+        $alias = 'bcc_acc';
+
+        return [
+            'alias' => $alias,
+            'from'  => ' LEFT JOIN `' . $wpdb->prefix . 'peepso_users` `' . $alias . '`'
+                . ' ON `' . $alias . '`.`usr_id` = `' . $wpdb->users . '`.`ID`',
+            'where' => (string) $wpdb->prepare(
+                ' AND (`' . $alias . '`.`usr_profile_acc` IS NULL'
+                . ' OR `' . $alias . '`.`usr_profile_acc` <> %d'
+                . ' OR `' . $wpdb->users . '`.`ID` = %d)',
+                $excludedLevel,
+                $viewerId
+            ),
+        ];
+    }
+
+    /**
      * Batch-fetch aggregate counts for a chunk of user IDs.
      *
      * Returns pages_owned, groups_owned, posts_created, comments_made,

@@ -254,26 +254,29 @@ final class PrivacySettings
             return;
         }
 
-        global $wpdb;
-
         $viewerId = (int) ($query->query_vars['_peepso_user_id'] ?? 0);
 
-        // Own join and own alias (`bcc_acc`), so this does not depend on
-        // PeepSo's `acc` join existing or on hook ordering.
-        $query->query_from .= ' LEFT JOIN `' . $wpdb->prefix . 'peepso_users` `bcc_acc`'
-            . ' ON `bcc_acc`.`usr_id` = `' . $wpdb->users . '`.`ID`';
-
-        // Exclude level 30 unless the row IS the viewer. A missing
-        // peepso_users row is NOT excluded — absence means "never set",
-        // whose schema default is public, and treating it as 30 would
-        // hide unsynced accounts for no reason.
-        $query->query_where .= $wpdb->prepare(
-            ' AND (`bcc_acc`.`usr_profile_acc` IS NULL'
-            . ' OR `bcc_acc`.`usr_profile_acc` <> %d'
-            . ' OR `' . $wpdb->users . '`.`ID` = %d)',
-            self::PROFILE_ACC_FRIENDS,
-            $viewerId
+        // Own join and own alias, so this does not depend on PeepSo's
+        // `acc` join existing or on hook ordering. The SQL itself belongs
+        // to the repository that owns `peepso_users`; this method decides
+        // WHETHER to exclude and what "friends only" means.
+        $clause = \BCC\Trust\Core\Repositories\UserSyncRepository::listingProfileAccessClause(
+            $viewerId,
+            self::PROFILE_ACC_FRIENDS
         );
+
+        // ⚠ `pre_user_query` is not guaranteed to fire once per query:
+        // `WP_User_Query::prepare_query()` can run again on the same
+        // object. A second copy of the join is not a cosmetic duplicate —
+        // MySQL rejects the entire statement with "Not unique
+        // table/alias", so the listing fails hard rather than returning
+        // slightly wrong rows.
+        if (str_contains($query->query_from, $clause['alias'])) {
+            return;
+        }
+
+        $query->query_from  .= $clause['from'];
+        $query->query_where .= $clause['where'];
     }
 
     /**

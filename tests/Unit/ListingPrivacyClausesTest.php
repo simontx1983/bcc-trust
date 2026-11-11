@@ -220,4 +220,34 @@ final class ListingPrivacyClausesTest extends TestCase
         self::assertNotSame('', $q->query_where);
         self::assertNotSame('', $q->query_from);
     }
+
+    /**
+     * `pre_user_query` is not guaranteed to fire once per query —
+     * `WP_User_Query::prepare_query()` can run again on the same object.
+     * A second copy of the join is not a cosmetic duplicate: MySQL
+     * rejects the whole statement with "Not unique table/alias", so the
+     * listing fails hard rather than returning slightly wrong rows.
+     */
+    public function testFilteringTheSameQueryTwiceAppendsTheJoinOnlyOnce(): void
+    {
+        $q = $this->query(42);
+
+        PrivacySettings::filterPeepSoUserQuery($q);
+        $afterFirst = [$q->query_from, $q->query_where];
+        PrivacySettings::filterPeepSoUserQuery($q);
+
+        // ⚠ Count 'LEFT JOIN', not the alias: one append names the alias
+        // twice (its declaration and the ON clause), so counting the
+        // alias reads 2 after a single, correct append.
+        self::assertSame(
+            1,
+            substr_count($q->query_from, 'LEFT JOIN'),
+            'a second firing must not add a second join'
+        );
+        self::assertSame(
+            $afterFirst,
+            [$q->query_from, $q->query_where],
+            'the second firing must be a complete no-op, WHERE arm included'
+        );
+    }
 }
