@@ -72,6 +72,23 @@ final class PeepSoAlbumAccess
             return $viewerId > 0;
         }
         if ($albumAccess === self::ACCESS_FRIENDS) {
+            // ⛔⛔ DO NOT ADD AN ADMIN EXEMPTION HERE. This looks like an
+            // oversight and is not: the user decided (2026-11-11) that
+            // level-30 albums stay OWNER-ONLY, deliberately stricter than
+            // profiles, which DO exempt admins via
+            // {@see \BCC\Trust\Core\Support\ProfileAccess}.
+            //
+            // So an admin passes the §F-02 profile gate on
+            // /users/:slug/albums and is then refused here, and that
+            // asymmetry is the intended product behaviour rather than a
+            // gap between two gates.
+            //
+            // ⚠ Since peepso-friends was removed from production
+            // (2026-11-11, F-178) `$isFriend` is ALWAYS false — the gate
+            // short-circuits when `PeepSoFriendsModel` is absent — so this
+            // arm now resolves to owner-only in practice as well as by
+            // policy. That is the fail-closed direction and is correct;
+            // BCC has no friends feature.
             return $isFriend;
         }
         // ACCESS_PRIVATE and any unknown enum default to owner-only.
