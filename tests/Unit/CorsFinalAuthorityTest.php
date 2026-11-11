@@ -88,7 +88,8 @@ final class CorsFinalAuthorityTest extends TestCase
     {
         return [
             'testRegexAllowlistEntryIsResolvedThroughFrontendOrigin'
-                => self::PROD . ',regex:^https://bcc-frontend-[a-z0-9-]+\.vercel\.app$',
+                // The one regex shape FrontendOrigin accepts since F-121.
+                => self::PROD . ',regex:^https://bcc-frontend-[a-z0-9]{9}-team\.vercel\.app$',
         ];
     }
 
@@ -492,10 +493,10 @@ final class CorsFinalAuthorityTest extends TestCase
 
     public function testRegexAllowlistEntryIsResolvedThroughFrontendOrigin(): void
     {
-        $preview = 'https://bcc-frontend-abc123-git-main.vercel.app';
+        $preview = 'https://bcc-frontend-abc123xyz-team.vercel.app';
 
         self::assertSame($preview, $this->acao($preview), 'regex entry must resolve');
-        self::assertNull($this->acao('https://bcc-frontend-abc123.vercel.app.evil.com'), 'anchored, so no suffix');
+        self::assertNull($this->acao($preview . '.evil.com'), 'anchored, so no suffix');
         self::assertSame(self::PROD, $this->acao(self::PROD), 'exact entries still work alongside');
         self::assertNoCredentials();
     }

@@ -61,7 +61,13 @@
  *
  *   define('BCC_FRONTEND_ORIGIN',
  *       'https://bluecollarcrypto.io' .
- *       ',regex:^https://bcc-frontend-[a-z0-9]+-phillip-simon-s-projects\.vercel\.app$'
+ *       ',regex:^https://bcc-frontend-[a-z0-9]{9}-phillip-simon-s-projects\.vercel\.app$'
+ *
+ *   ⚠ The regex shape is restricted (F-121, FrontendOrigin::isSafePreviewPattern):
+ *   an exact-length hash slot and a literal team slug. The old example
+ *   `[a-z0-9]+` matched an attacker's git-branch alias
+ *   (bcc-frontend-git-phillip-simon-s-projects.vercel.app from a project in
+ *   THEIR OWN team "simon-s-projects") and is now ignored.
  *   );
  *
  * @package BCC\Trust\Core\Support
