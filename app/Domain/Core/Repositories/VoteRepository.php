@@ -1431,18 +1431,6 @@ class VoteRepository {
     }
 
     /**
-     * Get PeepSo category IDs for a page.
-     *
-     * Delegates to PeepSoQueryRepository (centralised PeepSo table access).
-     *
-     * @return object[] Array of objects with term_id property.
-     * @phpstan-return list<object{term_id: int|numeric-string}>
-     */
-    public function getPageCategories(int $pageId): array {
-        return PeepSoQueryRepository::getPageCategories($pageId);
-    }
-
-    /**
      * Get vote statistics for a page.
      *
      * Results are cached in the WordPress object cache for 60 seconds.
@@ -1908,7 +1896,7 @@ class VoteRepository {
         return $wpdb->get_results( $wpdb->prepare(
             "SELECT DISTINCT v.page_id, s.page_owner_id
              FROM {$this->table} v
-             JOIN {$scoresTable} s ON v.page_id = s.page_id
+             JOIN {$scoresTable} s ON v.page_id = s.page_id AND s.category_id = 0
              WHERE v.voter_user_id = %d AND v.status = 1
              LIMIT %d",
             $userId,
@@ -1932,9 +1920,9 @@ class VoteRepository {
         return (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(DISTINCT v1.page_id)
              FROM {$this->table} v1
-             JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id
+             JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id AND s1.category_id = 0
              JOIN {$this->table} v2 ON v2.voter_user_id = s1.page_owner_id
-             JOIN {$scoresTable} s2 ON v2.page_id = s2.page_id
+             JOIN {$scoresTable} s2 ON v2.page_id = s2.page_id AND s2.category_id = 0
              WHERE v1.voter_user_id = %d
                AND v2.voter_user_id = s1.page_owner_id
                AND s2.page_owner_id = %d
@@ -1961,9 +1949,9 @@ class VoteRepository {
         return (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(*)
              FROM {$this->table} v1
-             JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id
+             JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id AND s1.category_id = 0
              JOIN {$this->table} v2 ON v2.voter_user_id = s1.page_owner_id
-             JOIN {$scoresTable} s2 ON v2.page_id = s2.page_id
+             JOIN {$scoresTable} s2 ON v2.page_id = s2.page_id AND s2.category_id = 0
              WHERE v1.voter_user_id = %d
                AND v2.voter_user_id = s1.page_owner_id
                AND s2.page_owner_id = %d

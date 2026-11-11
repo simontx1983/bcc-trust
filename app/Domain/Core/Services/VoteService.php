@@ -926,28 +926,27 @@ class VoteService {
     }
 
     /**
-     * Resolve ALL category IDs for a page.
+     * The category rows a vote is written under: always the single canonical
+     * row, category_id = 0 (F-84; user decision — a page has ONE trust score).
      *
-     * Every vote now applies to all categories on the page. Returns an array
-     * of term_id integers, or [0] (uncategorised sentinel) when the page
-     * has no category assignments.
+     * This used to return EVERY PeepSo category of the page, writing one
+     * votes row per category. A page with two categories then held two rows
+     * for one member's vote, and every page-level read that sums rows — the
+     * authoritative recalc, the vote tallies, trust-graph edges, ring scans —
+     * counted that vote twice. It also sent the instant per-vote delta only
+     * to the category score rows, so the canonical category-0 row every
+     * reader uses stayed stale until the next recalc.
      *
-     * @return int[]
+     * Writing once at 0 makes every reader correct by construction, whatever
+     * categories a page has (PeepSo is now limited to one category per page,
+     * but pages that already carry several remain). The array shape is kept
+     * so castVote's per-category loop stays unchanged.
+     *
+     * @return list<int>
      */
     private function resolveVoteCategoryIds(int $pageId): array {
-        $categories = $this->getPageCategories($pageId);
-        if (empty($categories)) {
-            return [0]; // uncategorized sentinel
-        }
-        return array_map(fn($t) => (int) $t->term_id, $categories);
-    }
-
-    /**
-     * @return object[]
-     * @phpstan-return list<object{term_id: int|numeric-string}>
-     */
-    private function getPageCategories(int $pageId): array {
-        return $this->voteRepo->getPageCategories($pageId);
+        unset($pageId);
+        return [0];
     }
 
     private function getPageOwnerId(int $pageId): int {
