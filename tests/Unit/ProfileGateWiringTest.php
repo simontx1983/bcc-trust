@@ -45,6 +45,16 @@ final class ProfileGateWiringTest extends TestCase
     private const REST_DIR = __DIR__ . '/../../app/Domain/Core/REST/';
 
     /**
+     * Every REST tree the accounting scan walks, recursively.
+     *
+     * @var list<string>
+     */
+    private const REST_ROOTS = [
+        __DIR__ . '/../../app/Domain/Core/REST/',
+        __DIR__ . '/../../app/Domain/Onchain/REST/',
+    ];
+
+    /**
      * The inventory, maintained BY HAND on purpose. A new per-user route
      * must be added here deliberately, which is the moment someone has
      * to think about whether it needs the gate.
@@ -190,6 +200,24 @@ final class ProfileGateWiringTest extends TestCase
      * Both forward resolvers are matched. Reverse helpers (user id →
      * handle, as in UserViewService and NotificationDispatcher) are not
      * lookups and are irrelevant here.
+     *
+     * ⚠⚠ WHAT THIS CANNOT CATCH, stated plainly so nobody mistakes a
+     * green run for a proof. It matches TWO LITERAL TOKENS —
+     * `UserSlugResolver::resolve` and `resolveMemberCardHandle` — by
+     * substring. It therefore does NOT see:
+     *   - a THIRD resolver written tomorrow under some other name. That
+     *     is exactly how `/cards/member/{handle}` escaped the first
+     *     sweep, so the failure mode is proven, not theoretical;
+     *   - a call reached through a variable, an alias, or a `::class`
+     *     indirection;
+     *   - an inline `get_users(['meta_key' => 'bcc_handle', ...])` that
+     *     resolves a handle without going through either helper. There
+     *     are three such lookups in the plugin today (UserSlugResolver,
+     *     CardViewService, and ModerationQueueService which is
+     *     capability-gated); a fourth added inline would be invisible
+     *     here.
+     * Adding a new way to turn a handle into a user id means adding its
+     * token to this scan. The scan narrows the gap; it does not close it.
      */
     public function testEveryHandleResolvingEndpointIsAccountedFor(): void
     {
@@ -202,21 +230,38 @@ final class ProfileGateWiringTest extends TestCase
          */
         $ungatedByDesign = [];
 
-        $dir   = new \DirectoryIterator(self::REST_DIR);
+        // ⚠ RECURSIVE, and across EVERY REST tree — not just
+        // Domain/Core/REST's top level. `Domain/Core/REST/Auth/` and
+        // `Domain/Onchain/REST/` are real directories, and a flat
+        // DirectoryIterator over one of them would have reported "all
+        // accounted for" while never opening the others. A scan whose
+        // blind spot is a subdirectory is the same failure as the sweep
+        // that missed the member card in the first place.
         $found = [];
 
-        foreach ($dir as $entry) {
-            if ($entry->isDot() || $entry->getExtension() !== 'php') {
+        foreach (self::REST_ROOTS as $root) {
+            if (!is_dir($root)) {
                 continue;
             }
-            $src = (string) file_get_contents($entry->getPathname());
-            if (
-                str_contains($src, 'UserSlugResolver::resolve')
-                || str_contains($src, 'resolveMemberCardHandle')
-            ) {
-                $found[] = $entry->getFilename();
+            $it = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS)
+            );
+            foreach ($it as $entry) {
+                /** @var \SplFileInfo $entry */
+                if (!$entry->isFile() || $entry->getExtension() !== 'php') {
+                    continue;
+                }
+                $src = (string) file_get_contents($entry->getPathname());
+                if (
+                    str_contains($src, 'UserSlugResolver::resolve')
+                    || str_contains($src, 'resolveMemberCardHandle')
+                ) {
+                    $found[] = $entry->getFilename();
+                }
             }
         }
+
+        $found = array_values(array_unique($found));
 
         sort($found);
 

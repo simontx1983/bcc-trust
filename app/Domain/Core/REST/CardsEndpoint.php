@@ -141,11 +141,30 @@ final class CardsEndpoint
         // judge one user's privacy while rendering another's card.
         if ($type === 'member') {
             $cardUserId = CardViewService::resolveMemberCardHandle($id);
-            // A handle that resolves to nobody falls through to the
-            // service and its existing 404 — the gate must not turn an
-            // unknown handle into a 403, which would newly disclose
-            // which handles exist.
-            if ($cardUserId > 0 && !ProfileAccess::canViewProfile($cardUserId)) {
+
+            // ⚠ UNRESOLVED ⇒ ANSWER 404 HERE, do not fall through.
+            //
+            // The first version let a 0 fall through to the service,
+            // reasoning that the service's own 404 would catch it and
+            // that the gate must not turn an unknown handle into a 403
+            // (which would newly disclose which handles exist). The
+            // second half of that is still right — this is a 404, not a
+            // 403, and it is deliberately indistinguishable from the
+            // service's.
+            //
+            // What was wrong was falling through, because it meant the
+            // handle got resolved TWICE and only the FIRST read was
+            // gated. The resolver is a database read, so the two can
+            // disagree: a transient failure here returns 0, the gate is
+            // skipped as "nothing to gate", and then the service's own
+            // resolve succeeds and renders an UNGATED card. Rare, and
+            // exactly the shape of bug that never reproduces. One read,
+            // one decision.
+            if ($cardUserId === 0) {
+                return ApiResponse::error('bcc_not_found', 'Card not found.', 404);
+            }
+
+            if (!ProfileAccess::canViewProfile($cardUserId)) {
                 return ProfileAccess::forbidden();
             }
         }
