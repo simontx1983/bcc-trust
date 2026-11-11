@@ -59,6 +59,10 @@ if (!function_exists('bcc_trust_drop_legacy_indexes')) {
         if (get_option('bcc_trust_legacy_indexes_trimmed_v2')) {
             return;
         }
+        // F-150: a failed step leaves this unstamped; retry at most hourly.
+        if (bcc_trust_migration_backoff_active('legacy_indexes_v2')) {
+            return;
+        }
 
         global $wpdb;
 
@@ -87,6 +91,10 @@ if (!function_exists('bcc_trust_drop_legacy_indexes')) {
                 $table,
                 $index
             ));
+            if ($exists === null && $wpdb->last_error !== '') {
+                bcc_trust_migration_step_failed('legacy_indexes_v2', "probe {$suffix}.{$index}");
+                return;
+            }
             if ($exists !== '1') {
                 continue;
             }
@@ -94,7 +102,13 @@ if (!function_exists('bcc_trust_drop_legacy_indexes')) {
             // Index name is a fixed literal from the list above (no user input);
             // identifiers can't be bound placeholders.
             // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-            $wpdb->query("ALTER TABLE {$table} DROP INDEX `{$index}`");
+            if ($wpdb->query("ALTER TABLE {$table} DROP INDEX `{$index}`") === false) {
+                // The v1 failure class this file's header documents: a drop
+                // that errors (e.g. an index an FK still needs, errno 1553)
+                // must be retried, not stamped as trimmed.
+                bcc_trust_migration_step_failed('legacy_indexes_v2', "drop {$suffix}.{$index}");
+                return;
+            }
             $dropped[] = "{$suffix}.{$index}";
         }
 
