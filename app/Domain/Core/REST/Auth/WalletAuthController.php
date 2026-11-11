@@ -463,11 +463,14 @@ final class WalletAuthController
         // called server-side by the frontend, so every request shares one IP
         // and a per-IP bucket let anyone lock out all wallet logins. Placed
         // AFTER the nonce consume on purpose: only a request carrying a
-        // server-issued nonce for this address counts against its bucket —
-        // nonces are issued to the browser per real client IP
-        // (/auth/wallet-nonce) — so junk requests cannot drain a victim's
-        // bucket. Lower-casing makes case-distinct base58/SS58 addresses
-        // share a bucket: fail-closed (stricter), never looser.
+        // server-issued nonce for this address counts against its bucket, so
+        // a bare junk request costs the attacker nothing against it. This
+        // RAISES the cost of draining a victim's bucket, it does not prevent
+        // it: the anonymous /auth/wallet-nonce issues a nonce for any address
+        // (per-IP throttled), so an attacker rotating IPs can still mint
+        // nonces for a victim's address and spend that wallet's 5/min.
+        // Lower-casing makes case-distinct base58/SS58 addresses share a
+        // bucket: fail-closed (stricter), never looser.
         if (!AuthSupport::allowIdentityAttempt(
             'wallet_login',
             (string) $chain->id . "\n" . strtolower($walletAddress),

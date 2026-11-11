@@ -48,6 +48,18 @@ namespace BCC\Core {
     }
 }
 
+namespace BCC\Core\Observability {
+    if (!class_exists(DegradationMetrics::class, false)) {
+        final class DegradationMetrics
+        {
+            public static function record(string $subsystem, string $event = 'activation'): void
+            {
+                $GLOBALS['__bcc_ph']['metrics'][] = $subsystem . ':' . $event;
+            }
+        }
+    }
+}
+
 namespace BCC\Core\Crypto {
     if (!class_exists(WalletVerifier::class, false)) {
         final class WalletVerifier

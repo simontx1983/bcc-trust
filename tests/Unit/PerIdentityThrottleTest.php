@@ -23,7 +23,8 @@ use PHPUnit\Framework\TestCase;
  *     (never split or merged by IP), plus a 300/min route-wide ceiling;
  *   - exhausting one identity's bucket does not touch another's;
  *   - wallet-login counts only requests that carry a server-issued nonce for
- *     that address (junk cannot drain a victim's bucket); /auth/oauth counts
+ *     that address (a bare junk request does not count — though nonces for
+ *     any address can be minted via /auth/wallet-nonce); /auth/oauth counts
  *     only requests that pass the signed bridge gate.
  *
  * ## Isolation
@@ -98,6 +99,16 @@ final class PerIdentityThrottleTest extends TestCase
         $GLOBALS['__bcc_ph']['throttle_hits']['oauth_login_global'] = AuthSupport::OAUTH_LOGIN_GLOBAL_LIMIT;
 
         self::assertSame(429, self::oauth('sub-fresh'));
+        self::assertSame(['auth_throttle:oauth_login_ceiling'], $GLOBALS['__bcc_ph']['metrics'] ?? [], 'a tripped ceiling is counted, never silent');
+    }
+
+    public function testAPerIdentityLimitDoesNotCountAsACeilingTrip(): void
+    {
+        for ($i = 1; $i <= AuthSupport::OAUTH_LOGIN_RATE_LIMIT + 1; $i++) {
+            self::oauth('sub-a');
+        }
+
+        self::assertSame([], $GLOBALS['__bcc_ph']['metrics'] ?? []);
     }
 
     // ── /auth/wallet-login (F-123) ──────────────────────────────────────
@@ -151,5 +162,6 @@ final class PerIdentityThrottleTest extends TestCase
         $GLOBALS['__bcc_ph']['throttle_hits']['wallet_login_global'] = AuthSupport::WALLET_LOGIN_GLOBAL_LIMIT;
 
         self::assertSame(429, self::walletLogin('cosmos1freshwallet'));
+        self::assertSame(['auth_throttle:wallet_login_ceiling'], $GLOBALS['__bcc_ph']['metrics'] ?? []);
     }
 }

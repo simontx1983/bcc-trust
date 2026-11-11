@@ -167,6 +167,12 @@ final class AuthSupport
     public static function allowIdentityAttempt(string $action, string $identity, int $perIdentity, int $global): bool
     {
         if (!\BCC\Core\Security\Throttle::allow($action . '_global', $global, 60, $action . '_global')) {
+            // The route-wide ceiling tripping means EVERY identity is now
+            // refused — a flood, or the ceiling set too low for real traffic.
+            // Count it so it is visible, never silent.
+            if (class_exists(\BCC\Core\Observability\DegradationMetrics::class)) {
+                \BCC\Core\Observability\DegradationMetrics::record('auth_throttle', $action . '_ceiling');
+            }
             return false;
         }
         return \BCC\Core\Security\Throttle::allow(
