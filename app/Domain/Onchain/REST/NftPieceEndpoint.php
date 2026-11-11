@@ -43,6 +43,29 @@ final class NftPieceEndpoint
     private const SUPPORTED_CHAIN_SLUGS = ['ethereum', 'solana', 'cosmos'];
 
     /**
+     * Per-caller throttle, the figure api-contract-v1.md §4.17 already
+     * documents ("60/min/user (anonymous: 60/min/IP)") but the route never
+     * enforced (F-154). Throttle::allow keys anonymous callers by /24 or
+     * /64 subnet, signed-in callers by user id.
+     */
+    private const RATE_LIMIT  = 60;
+    private const RATE_WINDOW = 60;
+
+    /**
+     * token_id shape per chain type, matching what the indexers store:
+     *   evm     decimal uint256 (EvmFetcher::hexToDecimalString), ≤ 78 digits
+     *   solana  the mint pubkey, base58, 32–44 chars (SolanaFetcher stores
+     *           mint as both contract_address and token_id)
+     *   cosmos  CW-721 ids are arbitrary strings, so ≤ 128 chars with no
+     *           whitespace or control/format characters
+     */
+    private const TOKEN_ID_PATTERNS = [
+        'evm'    => '/^[0-9]{1,78}$/D',
+        'solana' => '/^[1-9A-HJ-NP-Za-km-z]{32,44}$/D',
+        'cosmos' => '/^[^\p{C}\s]{1,128}$/Du',
+    ];
+
+    /**
      * §4.17 cache windows per chain class.
      *
      * These are SHARED-cacheable (no `private`), which is only safe
@@ -102,6 +125,13 @@ final class NftPieceEndpoint
      */
     public function getPiece(WP_REST_Request $request): WP_REST_Response
     {
+        // Throttle FIRST, before any lookup or upstream call. The route is
+        // public, and a miss costs an upstream provider call (Alchemy,
+        // Helius, a Cosmos LCD) per request.
+        if (!\BCC\Core\Security\Throttle::allow('nft_piece', self::RATE_LIMIT, self::RATE_WINDOW)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429);
+        }
+
         $chainSlug       = (string) $request->get_param('chainSlug');
         $contractAddress = (string) $request->get_param('contractAddress');
         // WordPress URL-decodes path params once; the contract spec
@@ -146,12 +176,14 @@ final class NftPieceEndpoint
                 422
             );
         }
-        // Bound the size so a malicious caller can't ship a 1MB token
-        // ID through the URL. CW-721 tokens are typically ≤ 64 chars.
-        if (strlen($tokenId) > 255) {
+        // Bound length AND charset per chain, so a malformed id is refused
+        // here instead of becoming an upstream call (F-154). An unknown chain
+        // type has no pattern and is refused too.
+        $pattern = self::TOKEN_ID_PATTERNS[$chainType] ?? null;
+        if ($pattern === null || preg_match($pattern, $tokenId) !== 1) {
             return ApiResponse::error(
                 'bcc_invalid_request',
-                'token_id exceeds maximum length.',
+                'token_id is malformed for the chain.',
                 422
             );
         }
