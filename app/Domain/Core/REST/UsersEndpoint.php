@@ -743,9 +743,17 @@ final class UsersEndpoint
         }
 
         // WP_User_Query handles offset pagination + search across
-        // user_login + display_name + user_nicename. Email is excluded
-        // via search_columns to avoid leaking address fragments back
-        // through search hits.
+        // display_name + user_nicename. Email is excluded via
+        // search_columns to avoid leaking address fragments back through
+        // search hits.
+        //
+        // ⚠ user_login is NOT searched (F-175). This route is anonymous, so
+        // a `q` matched against the login made it a login-name existence
+        // oracle: guess a login, and a hit confirms an account to attack.
+        // user_nicename stays: it is the public, sanitized slug (bcc-search
+        // already returns it), so matching it reveals nothing new. It is
+        // dropped for SIGNED-IN callers too, because an account is free and
+        // an anonymous-only rule would be one sign-up away from useless.
         $args = [
             'number'  => $perPage,
             'offset'  => ($page - 1) * $perPage,
@@ -765,7 +773,7 @@ final class UsersEndpoint
             // double-escape and silently break inputs like "O'Brien".
             $needle = mb_substr($q, 0, 64);
             $args['search']         = '*' . $needle . '*';
-            $args['search_columns'] = ['user_login', 'display_name', 'user_nicename'];
+            $args['search_columns'] = ['display_name', 'user_nicename'];
         }
 
         // ⚠⚠ ROUTED THROUGH PeepSoUserSearch, NOT a bare WP_User_Query.

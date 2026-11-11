@@ -194,4 +194,25 @@ final class MembersBoundsEnforcementTest extends TestCase
             'mention-search was already correct and must stay that way'
         );
     }
+
+    /**
+     * F-175: `q` must not be matched against `user_login`. The route is
+     * anonymous, so a login match made it a login-name existence oracle
+     * (guess a login; a hit confirms an account to attack). display_name and
+     * the public user_nicename slug stay searchable. Email was never searched.
+     */
+    public function testTheSearchNeverMatchesTheLoginOrEmail(): void
+    {
+        $body = self::membersBody();
+
+        self::assertSame(
+            1,
+            preg_match("/'search_columns'\\]\\s*=\\s*\\[([^\\]]*)\\]/", $body, $m),
+            'members() must set search_columns explicitly (an unset list makes WP pick columns, login included)'
+        );
+        self::assertStringNotContainsString("'user_login'", $m[1], 'the login must not be searchable (F-175)');
+        self::assertStringNotContainsString("'user_email'", $m[1]);
+        self::assertStringContainsString("'display_name'", $m[1]);
+        self::assertStringContainsString("'user_nicename'", $m[1]);
+    }
 }
