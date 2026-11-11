@@ -196,23 +196,28 @@ final class MembersBoundsEnforcementTest extends TestCase
     }
 
     /**
-     * F-175: `q` must not be matched against `user_login`. The route is
-     * anonymous, so a login match made it a login-name existence oracle
-     * (guess a login; a hit confirms an account to attack). display_name and
-     * the public user_nicename slug stay searchable. Email was never searched.
+     * F-175 (product decision): `q` matches DISPLAY NAMES and @HANDLES
+     * (bcc_handle) ONLY, for every caller. The route is anonymous, and a
+     * login match made it a login-name existence oracle (guess a login; a hit
+     * confirms an account to attack). user_nicename is excluded too, because
+     * WordPress derives it from the login. Email never was matched.
      */
-    public function testTheSearchNeverMatchesTheLoginOrEmail(): void
+    public function testTheSearchMatchesOnlyDisplayNamesAndHandles(): void
     {
-        $body = self::membersBody();
+        $members = self::membersBody();
+        self::assertStringContainsString('self::searchCandidateIds(', $members, 'members() must resolve q through the candidate helper');
+        self::assertStringNotContainsString("'search'", $members, 'no WP `search` arg in members(): its columns would include the login');
 
-        self::assertSame(
-            1,
-            preg_match("/'search_columns'\\]\\s*=\\s*\\[([^\\]]*)\\]/", $body, $m),
-            'members() must set search_columns explicitly (an unset list makes WP pick columns, login included)'
-        );
-        self::assertStringNotContainsString("'user_login'", $m[1], 'the login must not be searchable (F-175)');
-        self::assertStringNotContainsString("'user_email'", $m[1]);
-        self::assertStringContainsString("'display_name'", $m[1]);
-        self::assertStringContainsString("'user_nicename'", $m[1]);
+        $code  = self::source();
+        $start = strpos($code, 'function searchCandidateIds(');
+        self::assertIsInt($start, 'searchCandidateIds() not found');
+        $next   = strpos($code, ' function ', $start + 10);
+        $helper = $next === false ? substr($code, $start) : substr($code, $start, $next - $start);
+
+        foreach (["'user_login'", "'user_nicename'", "'user_email'"] as $forbidden) {
+            self::assertStringNotContainsString($forbidden, $helper, $forbidden . ' must never be matched (F-175)');
+        }
+        self::assertSame(1, preg_match("/'search_columns'\\s*=>\\s*\\[\\s*'display_name'\\s*\\]/", $helper), 'the name half searches display_name ONLY');
+        self::assertStringContainsString("'meta_key'     => 'bcc_handle'", $helper, 'the handle half matches the bcc_handle meta');
     }
 }

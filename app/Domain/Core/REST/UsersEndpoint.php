@@ -742,18 +742,13 @@ final class UsersEndpoint
             $typeRestrictedIds = $intersected;
         }
 
-        // WP_User_Query handles offset pagination + search across
-        // display_name + user_nicename. Email is excluded via
-        // search_columns to avoid leaking address fragments back through
-        // search hits.
-        //
-        // ⚠ user_login is NOT searched (F-175). This route is anonymous, so
-        // a `q` matched against the login made it a login-name existence
-        // oracle: guess a login, and a hit confirms an account to attack.
-        // user_nicename stays: it is the public, sanitized slug (bcc-search
-        // already returns it), so matching it reveals nothing new. It is
-        // dropped for SIGNED-IN callers too, because an account is free and
-        // an anonymous-only rule would be one sign-up away from useless.
+        // ⚠ `q` matches DISPLAY NAMES and @HANDLES (the bcc_handle meta)
+        // ONLY (F-175, a product decision), for every caller, signed in or
+        // not. It used to match user_login, which on this anonymous route
+        // made it a login-name existence oracle: guess a login, and a hit
+        // confirms an account to attack. user_nicename is not matched
+        // either, because WordPress derives it from the login. Email never
+        // was.
         $args = [
             'number'  => $perPage,
             'offset'  => ($page - 1) * $perPage,
@@ -766,14 +761,19 @@ final class UsersEndpoint
             $args['include'] = $typeRestrictedIds;
         }
         if ($q !== '') {
-            // Bound the query string to a sane length so a deliberately
-            // pathological search doesn't blow up the LIKE planner.
-            // WP_User_Query::prepare_query() already applies esc_like() +
-            // $wpdb->prepare() to the `search` arg, so escaping here would
-            // double-escape and silently break inputs like "O'Brien".
-            $needle = mb_substr($q, 0, 64);
-            $args['search']         = '*' . $needle . '*';
-            $args['search_columns'] = ['display_name', 'user_nicename'];
+            // WP_User_Query ANDs `search` with `meta_query`, so "display
+            // name OR handle" cannot be one query. The two matches are
+            // resolved as a bounded candidate set and passed as `include`.
+            // PeepSoUserSearch below still applies privacy, order and the
+            // exact total INSIDE its query, over that set.
+            $candidates = self::searchCandidateIds(mb_substr($q, 0, 64));
+            if ($typeRestrictedIds !== null) {
+                $candidates = array_values(array_intersect($candidates, $typeRestrictedIds));
+            }
+            if ($candidates === []) {
+                return self::membersEmptyResponse($page, $perPage, $typeCounts);
+            }
+            $args['include'] = $candidates;
         }
 
         // ⚠⚠ ROUTED THROUGH PeepSoUserSearch, NOT a bare WP_User_Query.
@@ -808,12 +808,12 @@ final class UsersEndpoint
         //
         // SEARCH: the third constructor argument is deliberately EMPTY and
         // must stay so. PeepSo's own search clause is `if (!empty($search))`,
-        // so an empty string skips it and WP's `search` / `search_columns`
-        // above keep doing the work. ⛔ Do NOT pass `$q` here: PeepSo
-        // searches a first/last-name concat plus `user_login`, and
-        // optionally `user_email` behind the `members_email_searchable`
-        // option — which would widen this route to email fragments the
-        // contract deliberately excludes.
+        // so an empty string skips it and the `include` candidate set above
+        // (searchCandidateIds) does the matching. ⛔ Do NOT pass `$q` here:
+        // PeepSo searches a first/last-name concat plus `user_login` (the
+        // F-175 oracle), and optionally `user_email` behind the
+        // `members_email_searchable` option, which would widen this route to
+        // email fragments the contract deliberately excludes.
         //
         // TOTAL: `pre_user_query` smuggles a `GROUP BY` into
         // `query_orderby`. That is not a typo of theirs to work around —
@@ -925,6 +925,55 @@ final class UsersEndpoint
         }
 
         return $response;
+    }
+
+    /**
+     * Upper bound on each half of the `q` candidate set (§3: no unbounded
+     * reads). Far above the directory's size today; a broader query is still
+     * served, but its `total` stops counting past this many matches per half.
+     */
+    private const MEMBER_SEARCH_MAX_CANDIDATES = 1000;
+
+    /**
+     * `q` → user ids whose DISPLAY NAME or @HANDLE (bcc_handle meta)
+     * contains it (F-175). Never user_login, user_nicename (derived from the
+     * login) or email. A leading "@" is ignored, so "@alice" finds handle
+     * "alice". These are candidate ids only: privacy is applied afterwards by
+     * PeepSoUserSearch, in its query.
+     *
+     * Both lookups go through WP_User_Query, which escapes `search` and adds
+     * the LIKE wildcards itself, so the needle is passed raw. Pre-escaping or
+     * adding "%" here would match a literal percent sign.
+     *
+     * @return list<int>
+     */
+    private static function searchCandidateIds(string $needle): array
+    {
+        $needle = trim($needle);
+        $handle = ltrim($needle, '@');
+
+        $byName = get_users([
+            'search'         => '*' . $needle . '*',
+            'search_columns' => ['display_name'],
+            'fields'         => 'ID',
+            'number'         => self::MEMBER_SEARCH_MAX_CANDIDATES,
+        ]);
+        $byHandle = $handle === '' ? [] : get_users([
+            'meta_key'     => 'bcc_handle',
+            'meta_value'   => $handle,
+            'meta_compare' => 'LIKE',
+            'fields'       => 'ID',
+            'number'       => self::MEMBER_SEARCH_MAX_CANDIDATES,
+        ]);
+
+        $ids = [];
+        foreach (array_merge($byName, $byHandle) as $id) {
+            if (is_numeric($id) && (int) $id > 0) {
+                $ids[(int) $id] = true;
+            }
+        }
+
+        return array_keys($ids);
     }
 
     /**
