@@ -26,7 +26,10 @@ namespace BCC\Core\Security {
         {
             public static function allow(string $key, int $limit, int $window): bool
             {
-                return true;
+                // Records every bucket key; denies only when a test sets
+                // $GLOBALS['__bcc_ph']['throttle_deny'] (default: allow).
+                $GLOBALS['__bcc_ph']['throttle_keys'][] = $key;
+                return empty($GLOBALS['__bcc_ph']['throttle_deny']);
             }
 
             /** @return null */

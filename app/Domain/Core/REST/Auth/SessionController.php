@@ -5,6 +5,8 @@
  * Routes:
  *   - POST /auth/logout-everywhere — revoke every outstanding token
  *   - POST /auth/refresh           — silent-refresh an expired-OK JWT
+ *   - GET  /auth/session           — validate the presented Bearer JWT and
+ *                                     say whose session it is (no refresh grace)
  *
  * Split out of AuthEndpoint (Phase 11 architecture split #3 of 4). Route
  * blocks + handler bodies are VERBATIM; shared helpers + constants moved
@@ -21,6 +23,7 @@ use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\BearerAuth;
 use BCC\Trust\Core\Support\JwtToken;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -65,6 +68,105 @@ final class SessionController
                 'permission_callback' => '__return_true',
             ]
         );
+
+        // GET /auth/session — server-side validation of a Bearer JWT for the
+        // frontend's NextAuth `bcc-verified` provider, so it builds a session
+        // from what the SERVER says the token is, never from a POST body.
+        // Auth is decided inside the handler from the presented token itself.
+        register_rest_route(
+            AuthSupport::ROUTE_NAMESPACE,
+            '/auth/session',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [$instance, 'session'],
+                'permission_callback' => '__return_true',
+            ]
+        );
+    }
+
+    /** Per-TOKEN ceiling for GET /auth/session (calls arrive from one BFF IP). */
+    public const SESSION_RATE_LIMIT = 60;
+
+    /**
+     * GET /auth/session — whose session is this Bearer token?
+     *
+     * Validates the token PRESENTED in the Authorization header — read with
+     * BearerAuth's own header reader and decoded with the canonical
+     * JwtToken::decode() (signature, iss, aud, exp + 60 s skew, token-version
+     * revocation; NOT decodeForRefresh's grace window). It deliberately does
+     * NOT use get_current_user_id(): BearerAuth defers to any earlier auth, so
+     * a request carrying a valid WP cookie plus a forged Bearer would read as
+     * the cookie's user — exactly the "trust something other than the token"
+     * this route exists to remove.
+     *
+     * 200 `{ user_id, handle, in_good_standing, expires_at }`:
+     *   - handle: the CURRENT handle from user meta (the token's claim goes
+     *     stale after a handle change);
+     *   - in_good_standing: AuthSupport::resolveInGoodStanding — FAILS OPEN,
+     *     so it is display state, never a security gate;
+     *   - expires_at: the token's own `exp` (unix seconds). decode() accepts
+     *     a token up to 60 s past it.
+     * 401 `bcc_unauthorized` for a missing, malformed, invalid, expired or
+     * revoked token, or a deleted user — one code, no reason (the reason goes
+     * to the audit log only). 409 `bcc_invalid_state` when the user has no
+     * handle. 429 per token, checked BEFORE decode.
+     */
+    public function session(WP_REST_Request $request): WP_REST_Response
+    {
+        unset($request);
+
+        $token = BearerAuth::readBearerToken();
+        if ($token === null) {
+            return self::sessionUnauthorized('missing');
+        }
+
+        // Per-TOKEN bucket, before any decode work: every call arrives from
+        // the frontend server's single egress IP, so a per-IP bucket would
+        // be shared by all users. A hash, so the bucket key is not the token.
+        if (!\BCC\Core\Security\Throttle::allow(
+            'auth_session:' . substr(hash('sha256', $token), 0, 32),
+            self::SESSION_RATE_LIMIT,
+            60
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
+        $decoded = JwtToken::decode($token);
+        if (!$decoded['ok']) {
+            return self::sessionUnauthorized($decoded['error']);
+        }
+        $payload = $decoded['payload'];
+
+        $userId = (int) ($payload['user_id'] ?? 0);
+        $exp    = (int) ($payload['exp'] ?? 0);
+        if ($userId <= 0 || $exp <= 0 || !(get_userdata($userId) instanceof \WP_User)) {
+            return self::sessionUnauthorized('user');
+        }
+
+        $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
+        if ($handle === '') {
+            return ApiResponse::error('bcc_invalid_state', 'Account is missing a handle — contact support.', 409);
+        }
+
+        $response = ApiResponse::ok([
+            'user_id'          => $userId,
+            'handle'           => $handle,
+            'in_good_standing' => AuthSupport::resolveInGoodStanding($userId),
+            'expires_at'       => $exp,
+        ]);
+        $response->header('Cache-Control', 'no-store');
+        $response->header('Vary', 'Authorization');
+        return $response;
+    }
+
+    /** One 401 for every rejection; the reason is logged, never returned. */
+    private static function sessionUnauthorized(string $reason): WP_REST_Response
+    {
+        Logger::audit('auth_session_rejected', ['reason' => $reason]);
+        $response = ApiResponse::error('bcc_unauthorized', 'Not signed in.', 401);
+        $response->header('Cache-Control', 'no-store');
+        $response->header('Vary', 'Authorization');
+        return $response;
     }
 
     /**
