@@ -643,6 +643,10 @@ final class NftIndexerStatusView
                     <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_HELIUS_RESYNC); ?>">
                     <?php wp_nonce_field(self::ACTION_HELIUS_RESYNC); ?>
                     <button type="submit" class="button">Resync addresses from wallet_links</button>
+                    <label style="margin-left:8px">
+                        <input type="checkbox" name="allow_shrink" value="1">
+                        Allow a large shrink (I have confirmed a mass unlink)
+                    </label>
                 </form>
                 <small style="margin-left:8px">Rebuilds the remote address list from the canonical local table. Use after <code>helius_managed</code> drift.</small>
             <?php endif; ?>
@@ -805,8 +809,12 @@ final class NftIndexerStatusView
         AdminActionSupport::requirePost();
         AdminActionSupport::requireNonce(self::ACTION_HELIUS_RESYNC);
 
+        // The shrink-floor override: only an explicit, posted "1" (the nonce
+        // above already proved this POST came from the form).
+        $allowShrink = isset($_POST['allow_shrink']) && sanitize_text_field(wp_unslash((string) $_POST['allow_shrink'])) === '1';
+
         try {
-            $stats = HeliusSubscriptionManager::resyncFromWalletLinks();
+            $stats = HeliusSubscriptionManager::resyncFromWalletLinks($allowShrink);
         } catch (\Throwable $e) {
             $ref = AdminActionSupport::failure($e, 'admin_helius_resync_failed', 'helius_webhook');
             self::redirect('helius_resync_failed', 0, $ref);
@@ -817,12 +825,28 @@ final class NftIndexerStatusView
             self::redirect('helius_resync_failed', 0);
         }
 
+        if (($stats['refused'] ?? '') === 'shrink') {
+            AdminActionSupport::audit(
+                'admin_helius_resync_refused_shrink',
+                'helius_webhook',
+                null,
+                ['remote_count' => (int) $stats['remote_count'], 'local_count' => (int) $stats['local_count']]
+            );
+            AdminActionSupport::redirect([
+                'page'           => SettingsPage::PAGE_SLUG,
+                'tab'            => 'nft',
+                'bcc_nft_result' => 'helius_resync_refused_shrink',
+                'bcc_remote'     => (int) $stats['remote_count'],
+                'bcc_local'      => (int) $stats['local_count'],
+            ]);
+        }
+
         $applied = (bool) $stats['applied'];
         AdminActionSupport::audit(
             $applied ? 'admin_helius_addresses_resynced' : 'admin_helius_resync_noop',
             'helius_webhook',
             null,
-            ['remote_count' => (int) $stats['remote_count'], 'local_count' => (int) $stats['local_count']]
+            ['remote_count' => (int) $stats['remote_count'], 'local_count' => (int) $stats['local_count'], 'allow_shrink' => $allowShrink]
         );
 
         AdminActionSupport::redirect([
@@ -927,6 +951,16 @@ final class NftIndexerStatusView
             $notices[$result] = ['updated', sprintf(
                 'Resync %s. Remote: %d addresses · Local: %d addresses.',
                 $result === 'helius_resynced' ? 'applied' : 'no-op (already in sync)',
+                $remote,
+                $local
+            )];
+        }
+
+        if ($result === 'helius_resync_refused_shrink') {
+            $remote = isset($_GET['bcc_remote']) ? (int) $_GET['bcc_remote'] : 0;
+            $local  = isset($_GET['bcc_local']) ? (int) $_GET['bcc_local'] : 0;
+            $notices[$result] = ['error', sprintf(
+                'Resync refused: it would shrink the remote list from %d to %d addresses. If that is expected (a confirmed mass unlink), tick "Allow a large shrink" and resync again.',
                 $remote,
                 $local
             )];
