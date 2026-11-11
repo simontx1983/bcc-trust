@@ -19,7 +19,9 @@
  * self-lockout guard only relaxes once a real inbox is proven.
  *
  *   POST /bcc/v1/me/account/recovery-email         — prove wallet, stage email, mail OTP
- *   POST /bcc/v1/me/account/recovery-email/verify  — confirm OTP, promote to user_email
+ *   POST /bcc/v1/me/account/recovery-email/verify  — confirm OTP, promote to user_email;
+ *                                                     revokes earlier Bearer tokens and
+ *                                                     returns a fresh one (store it)
  *
  * The wallet challenge is issued by the existing GET /auth/nonce (authed)
  * and consumed here, so no new nonce surface is added. The signed message
@@ -40,8 +42,10 @@ use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\AccountRecoveryService;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Services\AuthMailer;
+use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Services\PendingEmailService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\JwtToken;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -227,6 +231,18 @@ final class RecoveryEmailEndpoint
         $pendingEmail = $confirmed['email'];
         $oldEmail     = $confirmed['old_email'];
 
+        // The account's email credential just changed, so — exactly like
+        // MyAccountEndpoint::verifyEmailChange and patchPassword — revoke every
+        // earlier Bearer token, then mint a fresh one for the caller (returned
+        // below; the client must store it). Without this, a session held by
+        // anyone else survives the account gaining a recovery address.
+        // Revoke FIRST: the fresh token carries the bumped version.
+        JwtToken::revokeAllForUser($userId);
+        $freshToken = JwtToken::encode(
+            $userId,
+            (string) get_user_meta($userId, HandleService::META_HANDLE, true)
+        );
+
         AuditLogger::log('recovery_email_confirmed', $userId, [], 'user', $userId);
 
         // Out-of-band notification. Replacing the synthetic placeholder →
@@ -238,7 +254,13 @@ final class RecoveryEmailEndpoint
             AccountSecurityMailer::emailChanged($userId, $oldEmail, $pendingEmail);
         }
 
-        $resp = ApiResponse::ok(['ok' => true, 'email' => $pendingEmail]);
+        $resp = ApiResponse::ok([
+            'ok'         => true,
+            'email'      => $pendingEmail,
+            'token'      => $freshToken,
+            'expires_in' => JwtToken::TTL_SECONDS,
+            'token_type' => 'Bearer',
+        ]);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
     }
