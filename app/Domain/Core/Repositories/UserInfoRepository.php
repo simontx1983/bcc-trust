@@ -889,7 +889,9 @@ class UserInfoRepository {
             // runRead shape: query() can fail WITHOUT setting last_error (the
             // silent !ready path), and get_row($sql) would then hand back the
             // previous statement's row. Check the return AND last_error, then
-            // read the row this query left.
+            // read the row this query left in last_result. ⚠ NOT get_row(null):
+            // real wpdb returns null for that without reading last_result, so
+            // every add/remove would see "no row" and silently do nothing.
             $sql = $wpdb->prepare(
                 "SELECT pages_owned, page_ids_owned FROM {$this->table} WHERE user_id = %d LIMIT 1",
                 $userId
@@ -897,7 +899,7 @@ class UserInfoRepository {
             if (!is_string($sql) || $wpdb->query($sql) === false || $wpdb->last_error !== '') {
                 throw new RepositoryException('UserInfoRepository: owned-pages read failed for user ' . $userId . ': ' . $wpdb->last_error);
             }
-            $row = $wpdb->get_row(null);
+            $row = $wpdb->last_result[0] ?? null;
             if ($row === null) {
                 return; // no user_info row: the UPDATE always matched nothing here
             }

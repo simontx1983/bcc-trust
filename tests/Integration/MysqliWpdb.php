@@ -433,13 +433,7 @@ final class MysqliWpdb
     public function get_row(?string $sql = null, string $output = 'OBJECT', int $y = 0)
     {
         if ($sql === null) {
-            // Real wpdb: get_row(null) reads the row the PREVIOUS query left
-            // in last_result (the runRead shape: query() → check → get_row(null)).
-            $row = $this->last_result[$y] ?? null;
-            if ($row === null) {
-                return null;
-            }
-            return $output === 'ARRAY_A' ? (array) $row : $row;
+            return null;
         }
         $rows = $this->get_results($sql, $output);
         return $rows === null ? null : ($rows[$y] ?? null);
