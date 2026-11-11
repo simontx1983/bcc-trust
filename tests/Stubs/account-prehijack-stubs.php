@@ -357,7 +357,7 @@ namespace {
          */
         function get_option(string $key, $default = false)
         {
-            return $default;
+            return $GLOBALS['__bcc_ph']['options'][$key] ?? $default;
         }
     }
     if (!function_exists('get_bloginfo')) {
