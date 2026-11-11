@@ -244,6 +244,23 @@ final class MigrationRunnerTest extends TestCase
         self::assertArrayNotHasKey('done_batched', $GLOBALS['__bcc_opts']);
     }
 
+    /**
+     * WAITING (blocked on an operator, e.g. the scanner-drop arming option)
+     * is not a failure: no runner backoff, so the run right after the
+     * operator acts picks it up (#458 review L1).
+     */
+    public function testAWaitingMigrationIsNotBackedOff(): void
+    {
+        $m = $this->migration('gated', BCC_TRUST_MIGRATION_WAITING);
+
+        bcc_trust_run_pending_migrations([$m]);
+        bcc_trust_run_pending_migrations([$m]);
+
+        self::assertSame(['gated', 'gated'], $this->ran());
+        self::assertArrayNotHasKey('bcc_trust_migration_backoff_gated', $GLOBALS['__bcc_transients']);
+        self::assertArrayNotHasKey('done_gated', $GLOBALS['__bcc_opts']);
+    }
+
     /** An unrecognised status is not "done" and not progress: it backs off. */
     public function testAnUnknownStatusBacksOff(): void
     {
