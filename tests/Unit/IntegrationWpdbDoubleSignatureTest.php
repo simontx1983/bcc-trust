@@ -145,6 +145,58 @@ final class IntegrationWpdbDoubleSignatureTest extends TestCase
     }
 
     /**
+     * ⚠⚠ ONLY TWO OF THE FOUR READERS HAVE A NULL FORM THAT READS
+     * `last_result`, and an earlier revision of this harness got it
+     * backwards — it let `get_results(null)` and `get_row(null)` return
+     * rows, and shipped two tests PINNING that. Real `wpdb`:
+     *
+     *     get_row()      if ( $query ) { ... } else { return null; }
+     *     get_results()  if ( $query ) { ... } else { return null; }
+     *     get_var()      if ( $query ) { ... }   <- no else, reads on
+     *     get_col()      if ( $query ) { ... }   <- no else, reads on
+     *
+     * So `query($sql)` then `get_col(null)` is the idiom, and
+     * `get_results(null)` is just null. A double that answers rows there
+     * is MORE PERMISSIVE than production, which is the false-green class
+     * this file exists to close — so the return types are asserted here,
+     * in the unit job, needing no database.
+     *
+     * The behavioural half is
+     * `WpdbDoubleLastResultIntegrationTest`; this is the half that
+     * cannot be skipped by a missing engine.
+     */
+    public function testOnlyTheTwoRealNullReadersReturnNonNull(): void
+    {
+        $ref = new ReflectionClass(MysqliWpdb::class);
+
+        foreach (['get_results', 'get_row'] as $method) {
+            $type = $ref->getMethod($method)->getReturnType();
+            // get_row is deliberately untyped (object|array|null is not
+            // expressible pre-8.0 union-in-all-positions here), so an
+            // absent type is acceptable; a NON-nullable one is not.
+            if ($type !== null) {
+                $this->assertTrue(
+                    $type->allowsNull(),
+                    sprintf(
+                        'wpdb::%s() returns NULL for the null form, so the double must be able to.',
+                        $method
+                    )
+                );
+            }
+        }
+
+        // get_col always returns an array, never null — real wpdb builds
+        // `$new_array` and returns it unconditionally.
+        $colType = $ref->getMethod('get_col')->getReturnType();
+        $this->assertInstanceOf(ReflectionNamedType::class, $colType);
+        $this->assertSame('array', $colType->getName());
+        $this->assertFalse(
+            $colType->allowsNull(),
+            'real wpdb::get_col() always returns an array, so a nullable return here would be wrong too'
+        );
+    }
+
+    /**
      * `last_result` is the state the null form reads. Real
      * `wpdb::$last_result` is public, and a private one here would make
      * the idiom untestable and unreadable from a test.

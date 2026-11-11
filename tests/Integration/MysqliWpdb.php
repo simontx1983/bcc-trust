@@ -250,10 +250,17 @@ final class MysqliWpdb
      * Rows of the most recent SELECT, as real `wpdb::$last_result`.
      *
      * ⚠ REAL `wpdb` STORES OBJECTS HERE REGARDLESS of the `$output` the
-     * caller asked for: `query()` fills it, and `get_results()` /
-     * `get_col()` / `get_var()` / `get_row()` project out of it afterwards.
-     * The null-query form of each of those reads this WITHOUT re-querying,
-     * which is the whole idiom this double could not model before.
+     * caller asked for: `query()` fills it and the readers project out of
+     * it afterwards.
+     *
+     * ⚠⚠ BUT ONLY TWO OF THE FOUR READERS HAVE A NULL FORM THAT READS IT,
+     * and getting this wrong is how a double drifts from production while
+     * looking more capable. In `class-wpdb.php`, `get_row()` and
+     * `get_results()` open `if ( $query ) { ... } else { return null; }`,
+     * so passing null to either returns **null** and never touches
+     * `last_result`. `get_var()` and `get_col()` have NO else branch: they
+     * fall through and read it. So `query($sql)` then `get_col(null)` is
+     * the idiom, and `get_results(null)` is simply null.
      *
      * It is public because real `wpdb::$last_result` is public and callers
      * are entitled to read it.
@@ -352,16 +359,27 @@ final class MysqliWpdb
      * `ARRAY_A` and captures DDL as `ARRAY_N`, so it could not have been
      * covered honestly without this.
      */
-    public function get_results(?string $sql = null, string $output = 'OBJECT'): array
+    public function get_results(?string $sql = null, string $output = 'OBJECT'): ?array
     {
-        $this->last_error = '';
-        // ⚠ THE NULL FORM READS `last_result` WITHOUT RE-QUERYING, which is
-        // what real `wpdb` does and what `query()` then `get_col(null)`
-        // relies on. It must NOT clear `last_error`'s meaning or count a
-        // query, because no query happens.
+        // ⚠ NULL, NOT THE ROWS. Real `wpdb::get_results()` is
+        // `if ( $query ) { ... } else { return null; }` — the null form is
+        // not a "read last_result" shorthand, that is `get_col()` and
+        // `get_var()` only. Returning rows here would make the double MORE
+        // permissive than production, which is the same false-green class
+        // this file exists to close.
         if ($sql === null) {
-            return $this->projectLastResult($output);
+            return null;
         }
+        $this->last_error = '';
+        // ⚠⚠ FLUSH FIRST, on EVERY path below. Real `wpdb` reaches its
+        // result-reading code only through `query()`, which calls `flush()`
+        // and empties `last_result` before anything can fail. The branches
+        // below (empty query, injected fault, mysqli error) return WITHOUT
+        // going through `query()`, so without this a failed read would
+        // leave the PREVIOUS query's rows readable through a later
+        // `get_col(null)` — and at the bcc-core call site those rows are an
+        // exclusion list, so stale data there excludes the wrong groups.
+        $this->last_result = [];
         if (trim($sql) === '') {
             $this->last_error = 'Empty query (prepare() returned an empty string).';
             return [];
@@ -406,12 +424,19 @@ final class MysqliWpdb
      * in either plugin passes them (checked). Closed now so it cannot
      * become one.
      *
+     * ⚠ The null form returns NULL, like real
+     * `wpdb::get_row()`'s `else { return null; }` — it does NOT read
+     * `last_result`. Only `get_var()` and `get_col()` do.
+     *
      * @return object|array<string|int, mixed>|null
      */
     public function get_row(?string $sql = null, string $output = 'OBJECT', int $y = 0)
     {
+        if ($sql === null) {
+            return null;
+        }
         $rows = $this->get_results($sql, $output);
-        return $rows[$y] ?? null;
+        return $rows === null ? null : ($rows[$y] ?? null);
     }
 
     /**
@@ -420,33 +445,63 @@ final class MysqliWpdb
      * handed column 0 here and column 1 in production, with no error.
      * No current caller passes them (checked).
      *
+     * ⚠ It reads `last_result` DIRECTLY rather than through
+     * `get_results(null)`, which returns null (see above). Real `wpdb`'s
+     * `get_var()` has no else branch at all: it runs the query when given
+     * one, then reads `last_result` either way.
+     *
      * The single-row fast path is PRESERVED for the ordinary call
-     * (`get_var($sql)`), so every existing call keeps its existing code
-     * path and this change cannot alter their cost or behaviour. Only the
-     * null form and a non-zero `$y` go through `get_results()`, which has
-     * to fetch every row to reach row `$y` — exactly as real `wpdb` does.
+     * (`get_var($sql)`), so every existing call keeps its cost and
+     * behaviour. A non-zero `$y` fetches every row, because it has to
+     * reach row `$y`.
+     *
+     * ⚠ `get_var($sql)` now reads the row through `(array) $object`, so
+     * DUPLICATE COLUMN NAMES COLLAPSE — `SELECT a.id, b.id` yields one
+     * entry, and column index 1 is whatever came third. That is exactly
+     * what production does (real `wpdb` stores objects too), and the
+     * previous `fetch_row()` did NOT collapse them. A test that relied on
+     * positional access across duplicate names would change meaning here,
+     * and it changes it TOWARDS production.
      *
      * @return mixed
      */
     public function get_var(?string $sql = null, int $x = 0, int $y = 0)
     {
-        if ($sql === null || $y > 0) {
-            $rows = $this->get_results($sql, 'ARRAY_N');
-            /** @var array<int, mixed>|null $row */
-            $row = $rows[$y] ?? null;
-            return is_array($row) ? ($row[$x] ?? null) : null;
+        if ($sql !== null) {
+            $this->runForLastResult($sql, $y > 0);
         }
-        $this->last_error = '';
-        if ($this->shouldFail($sql)) {
-            // ⚠ NULL, NOT FALSE. Real `wpdb::get_var()` returns null for a
-            // failed query — it never returns false — and the difference is
-            // the whole point of the fault. `bcc_onchain_probe_count()` casts
-            // a non-null to int, so a `false` here becomes 0, and a probe
-            // that never ran reads as "the column is absent": exactly the
-            // conversion these tests exist to forbid. A double that cannot
-            // produce production's failure value tests nothing.
-            $this->last_error = 'injected fault';
+        $row = $this->last_result[$y] ?? null;
+        if ($row === null) {
             return null;
+        }
+        $vals = array_values((array) $row);
+        return $vals[$x] ?? null;
+    }
+
+    /**
+     * Execute `$sql` and leave the rows in `last_result`, flushing first.
+     *
+     * Factored out of `get_var()` so its fast path and its `$y > 0` path
+     * share one set of failure semantics. `$all = false` fetches a single
+     * row, which is what an ordinary `get_var($sql)` needs.
+     */
+    private function runForLastResult(string $sql, bool $all): void
+    {
+        $this->last_error = '';
+        // ⚠ Flush first — see get_results(). Every early return below
+        // must leave `last_result` empty, not stale.
+        $this->last_result = [];
+        if ($this->shouldFail($sql)) {
+            // ⚠ The CALLER returns null, not false. Real
+            // `wpdb::get_var()` returns null for a failed query — it never
+            // returns false — and the difference is the whole point of the
+            // fault. `bcc_onchain_probe_count()` casts a non-null to int,
+            // so a `false` there becomes 0, and a probe that never ran
+            // reads as "the column is absent": exactly the conversion
+            // these tests exist to forbid. Leaving `last_result` empty is
+            // what makes the caller return null.
+            $this->last_error = 'injected fault';
+            return;
         }
         $this->queryCount++;
         $res = @$this->db->query($sql);
@@ -454,19 +509,19 @@ final class MysqliWpdb
             if ($res === false) {
                 $this->last_error = $this->db->error;
             }
-            return null;
+            return;
         }
-        // The fast path reads one row, so `last_result` is set to just
-        // that row rather than left stale from an earlier query — a stale
-        // value would be readable through a later `get_col(null)`.
-        $obj = $res->fetch_object();
+        if ($all) {
+            while ($row = $res->fetch_object()) {
+                $this->last_result[] = $row;
+            }
+        } else {
+            $obj = $res->fetch_object();
+            if ($obj !== null) {
+                $this->last_result[] = $obj;
+            }
+        }
         $res->free();
-        $this->last_result = $obj === null ? [] : [$obj];
-        if ($obj === null) {
-            return null;
-        }
-        $vals = array_values((array) $obj);
-        return $vals[$x] ?? null;
     }
 
     /**
@@ -480,12 +535,20 @@ final class MysqliWpdb
      * which red-lit bcc-trust's integration suite on EVERY branch,
      * including main, for code that is correct in production.
      *
+     * ⚠ Like real `wpdb::get_col()` it has no else branch: it runs the
+     * query when given one and then reads `last_result` DIRECTLY — not
+     * via `get_results(null)`, which returns null.
+     *
      * @return list<mixed>
      */
     public function get_col(?string $sql = null, int $x = 0): array
     {
+        if ($sql !== null) {
+            // Fills (and flushes) `last_result`; its return is irrelevant.
+            $this->get_results($sql);
+        }
         $out = [];
-        foreach ($this->get_results($sql) as $row) {
+        foreach ($this->last_result as $row) {
             $vals = array_values((array) $row);
             $out[] = $vals[$x] ?? null;
         }
