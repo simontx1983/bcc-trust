@@ -196,7 +196,11 @@ final class EmailDigestPage
             '<tr><th>Digest</th><td>%s</td></tr>',
             $s['enabled'] ? AdminUiCompat::badge('on', AdminUiCompat::OK) : AdminUiCompat::badge('off', AdminUiCompat::MUTED)
         );
-        printf('<tr><th>Members opted in</th><td>%d</td></tr>', NotificationPrefs::countEmailDigestOptIns());
+        $optedIn = NotificationPrefs::countEmailDigestOptIns();
+        printf(
+            '<tr><th>Members opted in</th><td>%s</td></tr>',
+            $optedIn === null ? esc_html('unknown (the count could not be read)') : (string) $optedIn
+        );
         printf('<tr><th>Next run</th><td>%s</td></tr>', esc_html($nextText));
         if (!$s['custom_schedule']) {
             echo '<tr><th>Schedule</th><td>Every 7 days from when it was first set up. Save the settings below to pick a day and time.</td></tr>';
@@ -257,9 +261,11 @@ final class EmailDigestPage
             self::NONCE_RUN,
             'Run the digest now',
             'button button-primary',
-            'Send this week\'s digest to every opted-in member now?'
+            'Send this week\'s digest to every opted-in member now? This sends even if the digest is switched off.'
         );
         echo '</p>';
+        echo '<p class="description">"Run the digest now" sends straight away, even while the digest is switched off. '
+            . 'The test goes only to you.</p>';
     }
 
     private static function actionButton(string $action, string $label, string $class, string $confirm = ''): void

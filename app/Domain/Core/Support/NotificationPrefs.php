@@ -352,8 +352,8 @@ final class NotificationPrefs
             ->findUserIdsByMetaFlag($key, $limit, $afterUserId);
     }
 
-    /** Opted-in member count, for the admin Email Digest page. */
-    public static function countEmailDigestOptIns(): int
+    /** Opted-in member count, for the admin Email Digest page; null if unreadable. */
+    public static function countEmailDigestOptIns(): ?int
     {
         return \BCC\Trust\Core\Plugin::instance()
             ->notificationRepository()

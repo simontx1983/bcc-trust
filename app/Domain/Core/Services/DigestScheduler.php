@@ -108,6 +108,45 @@ final class DigestScheduler
         }
     }
 
+    /**
+     * After a cron run: put the next event back on the chosen weekday + hour.
+     *
+     * WP-cron reschedules a recurring event as "last run + 7 × 86400" before
+     * calling the hook, so across a DST change the slot drifts an hour (and
+     * stays drifted). Recomputing from weekday + hour in the site timezone
+     * corrects it. No-op until an admin has chosen a slot, or while off.
+     *
+     * ⚠⚠ The next slot is searched from ONE DAY AFTER the run that just
+     * happened, never from "now". On the autumn change the drifted event
+     * fires at 08:00 on the chosen day; "next 09:00 after now" is today
+     * 09:00 — one hour later — and every member would get the digest twice.
+     * The same applies to any run that fires before the hour on the chosen
+     * weekday (a late or early wp-cron tick).
+     *
+     * @param int|null           $now for tests; defaults to time()
+     * @param \DateTimeZone|null $tz  for tests; defaults to the site timezone
+     */
+    public static function realign(?int $now = null, ?\DateTimeZone $tz = null): void
+    {
+        $s = DigestSettings::get();
+        if (!$s['custom_schedule'] || !$s['enabled']) {
+            return;
+        }
+
+        $want = DigestSettings::nextRunTimestamp(
+            $s['weekday'],
+            $s['hour'],
+            ($now ?? time()) + DAY_IN_SECONDS,
+            $tz
+        );
+        $have = wp_next_scheduled(self::HOOK);
+        if ($have === (int) $want) {
+            return;
+        }
+        wp_clear_scheduled_hook(self::HOOK);
+        wp_schedule_event($want, self::SCHEDULE, self::HOOK);
+    }
+
     /** Next scheduled run (UTC timestamp), or null. */
     public static function next(): ?int
     {

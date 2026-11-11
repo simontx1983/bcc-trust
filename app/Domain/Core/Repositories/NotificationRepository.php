@@ -300,9 +300,10 @@ final class NotificationRepository
     }
 
     /**
-     * How many users have $metaKey = '1'. Admin display only.
+     * How many users have $metaKey = '1'. Admin display only. Null when the
+     * read fails — a DB error must not display as "0 members".
      */
-    public function countUsersByMetaFlag(string $metaKey): int
+    public function countUsersByMetaFlag(string $metaKey): ?int
     {
         if ($metaKey === '') {
             return 0;
@@ -310,10 +311,17 @@ final class NotificationRepository
 
         global $wpdb;
 
-        return (int) $wpdb->get_var($wpdb->prepare(
+        $wpdb->last_error = '';
+        $n = $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value = %s",
             $metaKey,
             '1'
         ));
+
+        $lastError = (string) $wpdb->last_error;
+        if (strlen($lastError) > 0 || !is_numeric($n)) {
+            return null;
+        }
+        return (int) $n;
     }
 }

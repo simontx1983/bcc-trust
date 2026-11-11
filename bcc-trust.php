@@ -702,6 +702,8 @@ add_action('bcc_trust_weekly_digest', function () {
     \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest(
         \BCC\Trust\Core\Services\DigestService::TRIGGER_CRON
     );
+    // Keep the slot on the chosen local weekday + hour across DST.
+    \BCC\Trust\Core\Services\DigestScheduler::realign();
 });
 // Admin-chosen digest weekday/hour + on/off (Email Digest page).
 \BCC\Trust\Core\Services\DigestScheduler::register();

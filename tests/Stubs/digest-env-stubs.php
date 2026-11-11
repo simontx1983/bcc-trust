@@ -76,6 +76,10 @@ if (!class_exists('DigestFakeWpdb')) {
 
         public function get_var(string $sql)
         {
+            if (!empty($GLOBALS['__dg_count_fail'])) {
+                $this->last_error = 'simulated read failure';
+                return null;
+            }
             return (string) count($GLOBALS['__dg_optins']);
         }
     }
