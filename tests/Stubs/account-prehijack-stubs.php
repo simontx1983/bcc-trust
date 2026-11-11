@@ -93,6 +93,7 @@ namespace {
             public string $user_email;
             public string $user_login;
             public string $display_name;
+            public string $user_pass = 'stub-hash';
 
             public function __construct(int $id, string $email, string $login, string $display)
             {
@@ -186,8 +187,50 @@ namespace {
                 if ($field === 'email' && strtolower($u['email']) === strtolower((string) $value)) {
                     return new \WP_User($id, $u['email'], $u['login'], $u['display']);
                 }
+                if ($field === 'id' && (int) $id === (int) $value) {
+                    return new \WP_User($id, $u['email'], $u['login'], $u['display']);
+                }
             }
             return false;
+        }
+    }
+    if (!function_exists('email_exists')) {
+        /** @return int|false */
+        function email_exists(string $email)
+        {
+            foreach ($GLOBALS['__bcc_ph']['users'] as $id => $u) {
+                if (strtolower($u['email']) === strtolower($email)) {
+                    return (int) $id;
+                }
+            }
+            return false;
+        }
+    }
+    if (!function_exists('wp_update_user')) {
+        /**
+         * @param array<string, mixed> $data
+         * @return int
+         */
+        function wp_update_user(array $data)
+        {
+            $id = (int) $data['ID'];
+            if (isset($data['user_email'])) {
+                $GLOBALS['__bcc_ph']['users'][$id]['email'] = (string) $data['user_email'];
+            }
+            return $id;
+        }
+    }
+    if (!function_exists('is_wp_error')) {
+        /** @param mixed $thing */
+        function is_wp_error($thing): bool
+        {
+            return $thing instanceof \WP_Error;
+        }
+    }
+    if (!function_exists('wp_check_password')) {
+        function wp_check_password(string $password, string $hash, int $userId = 0): bool
+        {
+            return ($GLOBALS['__bcc_ph']['passwords'][$userId] ?? null) === $password;
         }
     }
     if (!function_exists('get_userdata')) {

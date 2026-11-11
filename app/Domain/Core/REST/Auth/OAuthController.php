@@ -239,17 +239,27 @@ final class OAuthController
             return ApiResponse::error('bcc_invalid_request', 'provider_id is required.', 400);
         }
 
+        // Is the forwarded email one the PROVIDER verified? Only when the
+        // signed bridge payload says so explicitly (`email_verified: true`,
+        // a JSON boolean) AND the provider is one whose verification we
+        // trust (Google). Fail closed otherwise — an email's mere presence
+        // proves nothing (a provider can return an unverified address).
+        $emailVerifiedByProvider = AuthSupport::isProviderVerifiedEmail(
+            $provider,
+            $email,
+            $request->get_param('email_verified')
+        );
+
         // Lookup order:
         //   1. Exact provider-ID match in user meta (fastest; covers users who
         //      previously signed in or linked via this provider).
         //   2. Email match (covers users who signed up with email/password and
         //      are signing in via OAuth for the first time with the same email).
-        //      Only applies when the provider supplies a verified email (Google
-        //      always does; Twitter never does) AND the matched account's own
-        //      email is not pending verification — see the gate below.
+        //      Only applies when the provider VERIFIED the email (above) AND
+        //      the matched account's own email is proven — see the gate below.
         $userId = AuthSupport::findUserByOauthProvider($provider, $providerId);
 
-        if ($userId === null && $email !== '' && is_email($email)) {
+        if ($userId === null && $emailVerifiedByProvider) {
             $wpUser = get_user_by('email', $email);
             if ($wpUser instanceof \WP_User) {
                 $candidateId = (int) $wpUser->ID;
@@ -315,10 +325,13 @@ final class OAuthController
         // collect a handle and create the account via /auth/oauth-complete.
         $providerToken = bin2hex(random_bytes(32));
         AuthSupport::storeOauthProviderToken($providerToken, [
-            'provider'     => $provider,
-            'provider_id'  => $providerId,
-            'email'        => $email,
-            'display_name' => $displayName,
+            'provider'       => $provider,
+            'provider_id'    => $providerId,
+            'email'          => $email,
+            // Carried server-side so oauth-complete never has to infer it
+            // from the email's presence.
+            'email_verified' => $emailVerifiedByProvider,
+            'display_name'   => $displayName,
         ]);
 
         $response = ApiResponse::ok([
@@ -395,15 +408,20 @@ final class OAuthController
             $displayName = $handle;
         }
 
-        // Google supplies a provider-verified email. Twitter's OAuth2
-        // user-context never returns one, so /signup/complete-profile
-        // collects it directly — required here whenever the provider didn't
-        // supply one. A collected email is USER-TYPED, not provider-verified:
-        // it must NOT be trusted for identity (see the email-fallback gate in
-        // oauthLogin()), so it starts pending and goes through the standard
-        // verify-email flow.
-        $emailProviderVerified = $email !== '' && is_email($email);
-        if (!$emailProviderVerified) {
+        // '1' ONLY when the bridge explicitly said the provider verified this
+        // email (stored on the provider token by oauthLogin as
+        // `email_verified === true`, Google only). Fail closed: a stored
+        // email without that bit — including every token minted before this
+        // field existed — is treated as unverified, so the account starts
+        // '0' and goes through the standard verify-email flow. Twitter's
+        // OAuth2 user-context never returns an email, so
+        // /signup/complete-profile collects it directly — required here
+        // whenever the provider supplied none. A collected email is
+        // USER-TYPED: never trusted for identity (see the email-fallback gate
+        // in oauthLogin()).
+        $emailProviderVerified = ($data['email_verified'] ?? false) === true
+            && AuthSupport::isProviderVerifiedEmail($provider, $email, true);
+        if ($email === '' || !is_email($email)) {
             $email = sanitize_email((string) $request->get_param('email'));
             if ($email === '' || !is_email($email)) {
                 return ApiResponse::error(

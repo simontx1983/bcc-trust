@@ -424,6 +424,27 @@ final class AuthSupport
     }
 
     /**
+     * Whether an email forwarded by the OAuth bridge counts as verified BY
+     * THE PROVIDER — the only case in which it may (a) be email-matched to an
+     * existing account and (b) start a new account at '1'.
+     *
+     * Requires the signed bridge payload to say so explicitly
+     * (`email_verified` is the JSON boolean `true` — not "1", not 1, not
+     * "true") for a provider whose verification we trust (Google), and a
+     * well-formed address. Everything else fails closed: an email's mere
+     * presence proves nothing, since a provider can return an unverified one.
+     *
+     * @param mixed $emailVerifiedClaim the bridge's `email_verified` value
+     */
+    public static function isProviderVerifiedEmail(string $provider, string $email, $emailVerifiedClaim): bool
+    {
+        return $provider === 'google'
+            && $emailVerifiedClaim === true
+            && $email !== ''
+            && is_email($email) !== false;
+    }
+
+    /**
      * Verify the submitted OTP code against the stored HMAC hash and,
      * on match, delete the transient (single-use). Returns true on match,
      * false on mismatch or expired/missing transient.

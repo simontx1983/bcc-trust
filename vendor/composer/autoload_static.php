@@ -415,6 +415,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Services\\PageOwnerResolver' => __DIR__ . '/../..' . '/app/Domain/Core/Services/PageOwnerResolver.php',
         'BCC\\Trust\\Core\\Services\\PageReadModelSync' => __DIR__ . '/../..' . '/app/Domain/Core/Services/PageReadModelSync.php',
         'BCC\\Trust\\Core\\Services\\PeepSoPageResolver' => __DIR__ . '/../..' . '/app/Domain/Core/Services/PeepSoPageResolver.php',
+        'BCC\\Trust\\Core\\Services\\PendingEmailService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/PendingEmailService.php',
         'BCC\\Trust\\Core\\Services\\PolarizationTransitionNotifier' => __DIR__ . '/../..' . '/app/Domain/Core/Services/PolarizationTransitionNotifier.php',
         'BCC\\Trust\\Core\\Services\\PostsService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/PostsService.php',
         'BCC\\Trust\\Core\\Services\\PushDispatcher' => __DIR__ . '/../..' . '/app/Domain/Core/Services/PushDispatcher.php',

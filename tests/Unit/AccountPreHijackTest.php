@@ -80,9 +80,18 @@ final class AccountPreHijackTest extends TestCase
     }
 
     /** @return array<string, mixed> */
-    private static function googleSignIn(string $email, string $providerId = 'google-sub-victim'): array
-    {
-        $params = ['provider' => 'google', 'provider_id' => $providerId, 'email' => $email, 'display_name' => 'Victim'];
+    private static function googleSignIn(
+        string $email,
+        string $providerId = 'google-sub-victim',
+        mixed $emailVerified = true,
+        string $provider = 'google'
+    ): array {
+        // Default: a Google email the provider VERIFIED (the bridge says so
+        // explicitly) — so the account-side gate is what each case exercises.
+        $params = ['provider' => $provider, 'provider_id' => $providerId, 'email' => $email, 'display_name' => 'Victim'];
+        if ($emailVerified !== null) {
+            $params['email_verified'] = $emailVerified;
+        }
         $req    = new \WP_REST_Request($params);
         $ts     = (string) time();
         $nonce  = bin2hex(random_bytes(8));
@@ -253,6 +262,66 @@ final class AccountPreHijackTest extends TestCase
         self::assertSame($links, isset($data['token']));
         self::assertSame($links ? 'google-sub-victim' : '', self::oauthLink(self::OWNER));
         self::assertSame($links, AuthSupport::mayLinkOauthByEmail((string) $flag));
+    }
+
+    // ── the PROVIDER must have verified the email, explicitly ───────────
+
+    /** @return array<string, array{0: mixed, 1: string, 2: bool}> */
+    public static function providerClaimCases(): array
+    {
+        return [
+            'google + email_verified true links'   => [true, 'google', true],
+            'google, no email_verified field'      => [null, 'google', false],
+            'google, email_verified false'         => [false, 'google', false],
+            'google, email_verified "true" string' => ['true', 'google', false],
+            'google, email_verified 1'             => [1, 'google', false],
+            'twitter claiming true'                => [true, 'twitter', false],
+        ];
+    }
+
+    #[DataProvider('providerClaimCases')]
+    public function testLinkByEmailRequiresAnExplicitProviderVerification(mixed $claim, string $provider, bool $links): void
+    {
+        // A verified account — so only the provider-side claim decides.
+        self::addUser(self::OWNER, self::VICTIM, '1');
+
+        $data = self::googleSignIn(self::VICTIM, 'sub-claim', $claim, $provider);
+
+        self::assertSame($links, isset($data['token']));
+        self::assertSame(
+            $links ? 'sub-claim' : '',
+            (string) ($GLOBALS['__bcc_ph']['meta'][self::OWNER][AuthSupport::META_OAUTH_PREFIX . $provider] ?? '')
+        );
+    }
+
+    /** @return array<string, mixed> */
+    private static function providerToken(string $token): array
+    {
+        $raw = $GLOBALS['__bcc_ph']['transients']['bcc_oauth_pt_' . $token] ?? null;
+        self::assertIsString($raw);
+        $decoded = json_decode($raw, true);
+        self::assertIsArray($decoded);
+        return $decoded;
+    }
+
+    public function testTheProviderTokenCarriesTheVerifiedBitForOauthComplete(): void
+    {
+        // No existing account → handle_required + a provider token.
+        $verified   = self::googleSignIn('new-verified@gmail.com', 'sub-a', true);
+        $unverified = self::googleSignIn('new-unverified@gmail.com', 'sub-b', null);
+
+        self::assertTrue(self::providerToken((string) $verified['provider_token'])['email_verified']);
+        self::assertFalse(self::providerToken((string) $unverified['provider_token'])['email_verified']);
+    }
+
+    public function testOauthCompleteTrustsOnlyTheStoredVerifiedBit(): void
+    {
+        // oauth-complete needs the full WordPress user stack to run; pin the
+        // decision it makes instead: '1' only from the token's explicit bit.
+        $src = self::src('OAuthController.php');
+        self::assertStringContainsString("\$emailProviderVerified = (\$data['email_verified'] ?? false) === true", $src);
+        self::assertStringNotContainsString("\$emailProviderVerified = \$email !== '' && is_email(\$email);", $src);
+        self::assertStringContainsString("AuthSupport::META_EMAIL_VERIFIED, \$emailProviderVerified ? '1' : '0'", $src);
     }
 
     // ── wallet signup email state ───────────────────────────────────────
