@@ -11,6 +11,8 @@ use BCC\Trust\Core\Repositories\PostShortcodeRepository;
 use BCC\Trust\Core\Services\ModerationQueueService;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -30,6 +32,8 @@ use PHPUnit\Framework\TestCase;
  */
 #[Group('integration')]
 #[Group('mariadb')]
+#[RunTestsInSeparateProcesses]
+#[PreserveGlobalState(false)]
 #[CoversClass(ModerationQueueService::class)]
 #[CoversClass(ContentReportRepository::class)]
 final class ModerationRestoreIntegrationTest extends TestCase
@@ -44,6 +48,8 @@ final class ModerationRestoreIntegrationTest extends TestCase
 
     protected function setUp(): void
     {
+        // Separate process: these stubs must never reach a sibling suite.
+        require_once dirname(__DIR__) . '/Stubs/moderation-integration-stubs.php';
         $this->cleanup();
         $GLOBALS['__bcc_test_actions'] = [];
         $this->reports = new ContentReportRepository();

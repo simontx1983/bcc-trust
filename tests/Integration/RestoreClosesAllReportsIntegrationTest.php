@@ -12,6 +12,8 @@ use BCC\Trust\Core\Services\AutoHideService;
 use BCC\Trust\Core\Services\ModerationQueueService;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/FeedActivityFixture.php';
@@ -34,6 +36,8 @@ require_once __DIR__ . '/FeedActivityFixture.php';
  */
 #[Group('integration')]
 #[Group('mariadb')]
+#[RunTestsInSeparateProcesses]
+#[PreserveGlobalState(false)]
 #[CoversClass(ModerationQueueService::class)]
 #[CoversClass(AutoHideService::class)]
 final class RestoreClosesAllReportsIntegrationTest extends TestCase
@@ -51,6 +55,8 @@ final class RestoreClosesAllReportsIntegrationTest extends TestCase
 
     protected function setUp(): void
     {
+        // Separate process: these stubs must never reach a sibling suite.
+        require_once dirname(__DIR__) . '/Stubs/moderation-integration-stubs.php';
         $this->seedFeedActivity(self::ACT_ID, self::POST_ID);
         $GLOBALS['__bcc_test_actions'] = [];
         $this->reports  = new ContentReportRepository();
