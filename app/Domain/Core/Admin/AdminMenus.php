@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Admin;
 
+use BCC\Core\Admin\AdminMenu;
 use BCC\Trust\Onchain\Admin\VerifyCollectionsPage;
 
 /**
@@ -18,11 +19,17 @@ use BCC\Trust\Onchain\Admin\VerifyCollectionsPage;
  *
  * Page SLUGS never change (admin-post handlers and PRG redirects target
  * them); only parent, title and order do. A top-level menu's slug is its
- * landing page's slug, registered at priority 5 so every submenu that
- * names it as parent (priority 10–30) finds it already in place.
+ * landing page's slug, registered at priority 5 so every submenu naming
+ * it as parent finds it in place.
  *
- * Developer pages are contributed to bcc-core's `bcc_admin_dev_pages`
- * filter, which drops them from the menu unless BCC_DEV_TOOLS === true.
+ * ORDER is not set per add_submenu_page() call: bcc-core's
+ * AdminMenu::sortMenus() orders each menu by the slug lists contributed
+ * here (bcc_admin_menu_order), and drops WP's auto-inserted duplicate
+ * first item.
+ *
+ * Hidden pages (dev pages while BCC_DEV_TOOLS is off; the Wallets alias)
+ * register through {@see parentFor()} — an empty parent keeps the URL
+ * working without a menu entry.
  */
 final class AdminMenus
 {
@@ -38,31 +45,30 @@ final class AdminMenus
     public const DEBUG_SLUG  = 'bcc-trust-debug';
     public const REPAIR_SLUG = 'bcc-system-repair';
 
-    /** Submenu order. */
-    public const ORDER_NOTIFICATIONS   = 0;
-    public const ORDER_MODERATION      = 10;
-    public const ORDER_DISPUTES        = 20;
-    public const ORDER_REPORTS         = 30;
-    public const ORDER_FINDINGS        = 40;
-    public const ORDER_ANALYTICS       = 50;
+    private const MODERATION_ORDER = [
+        NotificationCenter::PAGE_SLUG,
+        'bcc-trust-moderation',
+        'bcc-disputes',
+        'bcc-reports',
+        'bcc-rank-findings',
+        'bcc-trust-dashboard',
+    ];
 
-    public const ORDER_VERIFY          = 0;
-    public const ORDER_CHAINS          = 10;
-    public const ORDER_NFT_DISCOVERY   = 20;
-    public const ORDER_HOLDER_GROUPS   = 30;
-    public const ORDER_SIGNALS         = 40;
-    public const ORDER_WEBHOOKS        = 50;
-
-    /** Inside BCC System (bcc-core uses 0/10/20 and 80 for Developer). */
-    public const ORDER_AUDIT_LOG       = 30;
-    public const ORDER_DEBUG           = 81;
-    public const ORDER_REPAIR          = 82;
+    private const ONCHAIN_ORDER = [
+        VerifyCollectionsPage::PAGE_SLUG,
+        'bcc-onchain-chains',
+        'bcc-onchain-nft-discovery',
+        'bcc-holder-groups',
+        'bcc-onchain-signals',
+        'bcc-onchain-webhooks',
+    ];
 
     public static function register(): void
     {
         add_action('admin_menu', [self::class, 'registerTopLevel'], 5);
         add_filter('bcc_admin_dev_pages', [self::class, 'devPages']);
         add_filter('bcc_admin_hidden_pages', [self::class, 'hiddenPages']);
+        add_filter('bcc_admin_menu_order', [self::class, 'menuOrder']);
     }
 
     public static function registerTopLevel(): void
@@ -89,6 +95,15 @@ final class AdminMenus
     }
 
     /**
+     * BCC System parent for $slug, or '' (unlisted, URL still works) when
+     * bcc-core marks it hidden.
+     */
+    public static function parentFor(string $slug): string
+    {
+        return AdminMenu::parentFor(self::SYSTEM, $slug);
+    }
+
+    /**
      * @param mixed $slugs
      * @return list<string>
      */
@@ -112,5 +127,17 @@ final class AdminMenus
         $slugs   = is_array($slugs) ? array_values(array_map('strval', $slugs)) : [];
         $slugs[] = WalletAuditPage::PAGE_SLUG;
         return $slugs;
+    }
+
+    /**
+     * @param mixed $orders
+     * @return array<string, mixed>
+     */
+    public static function menuOrder($orders): array
+    {
+        $orders = is_array($orders) ? $orders : [];
+        $orders[self::MODERATION] = self::MODERATION_ORDER;
+        $orders[self::ONCHAIN]    = self::ONCHAIN_ORDER;
+        return $orders;
     }
 }

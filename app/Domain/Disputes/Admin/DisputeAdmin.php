@@ -30,8 +30,7 @@ class DisputeAdmin
             __('Disputes', 'bcc-trust'),
             'manage_options',
             'bcc-disputes',
-            [self::class, 'render_page'],
-            AdminMenus::ORDER_DISPUTES
+            [self::class, 'render_page']
         );
 
         add_submenu_page(
@@ -40,8 +39,7 @@ class DisputeAdmin
             __('User Reports', 'bcc-trust'),
             'manage_options',
             'bcc-reports',
-            [self::class, 'render_reports_page'],
-            AdminMenus::ORDER_REPORTS
+            [self::class, 'render_reports_page']
         );
     }
 

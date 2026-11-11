@@ -239,8 +239,7 @@ final class VerifyCollectionsPage
             'Verify Collections',
             'manage_options',
             self::PAGE_SLUG,
-            [__CLASS__, 'render_page'],
-            AdminMenus::ORDER_VERIFY
+            [__CLASS__, 'render_page']
         );
     }
 

@@ -165,8 +165,7 @@ add_action( 'admin_menu', function () {
         'Moderation',
         'manage_options',
         'bcc-trust-moderation',
-        'bcc_trust_render_moderation',
-        \BCC\Trust\Core\Admin\AdminMenus::ORDER_MODERATION
+        'bcc_trust_render_moderation'
     );
 } );
 

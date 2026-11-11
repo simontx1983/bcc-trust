@@ -40,13 +40,12 @@ final class WalletAuditPage
     public static function registerMenu(): void
     {
         add_submenu_page(
-            AdminMenus::SYSTEM,
+            AdminMenus::parentFor(self::PAGE_SLUG),
             'Audit Log',
             'Wallets',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render'],
-            AdminMenus::ORDER_AUDIT_LOG + 1
+            [self::class, 'render']
         );
     }
 

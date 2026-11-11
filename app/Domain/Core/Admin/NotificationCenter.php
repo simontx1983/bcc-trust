@@ -69,8 +69,7 @@ final class NotificationCenter
             'Notifications',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render'],
-            AdminMenus::ORDER_NOTIFICATIONS
+            [self::class, 'render']
         );
     }
 

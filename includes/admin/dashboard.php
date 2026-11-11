@@ -21,8 +21,7 @@ add_action('admin_menu', function () {
         'Trust Analytics',
         'manage_options',
         'bcc-trust-dashboard',
-        'bcc_trust_render_dashboard',
-        \BCC\Trust\Core\Admin\AdminMenus::ORDER_ANALYTICS
+        'bcc_trust_render_dashboard'
     );
 });
 

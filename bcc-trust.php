@@ -2567,13 +2567,12 @@ if (is_admin()) {
         // BCC_DEV_TOOLS === true; the page itself stays gated by
         // BCC_REPAIR_ENABLED.
         add_submenu_page(
-            \BCC\Trust\Core\Admin\AdminMenus::SYSTEM,
+            \BCC\Trust\Core\Admin\AdminMenus::parentFor(\BCC\Trust\Core\Admin\AdminMenus::REPAIR_SLUG),
             'Repair (dangerous)',
             'Repair',
             'manage_options',
             \BCC\Trust\Core\Admin\AdminMenus::REPAIR_SLUG,
-            'bcc_trust_render_repair_tab',
-            \BCC\Trust\Core\Admin\AdminMenus::ORDER_REPAIR
+            'bcc_trust_render_repair_tab'
         );
     }, 25);
 

@@ -45,8 +45,7 @@ class FindingsAdmin
             __('Rank Findings', 'bcc-trust'),
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render_page'],
-            AdminMenus::ORDER_FINDINGS
+            [self::class, 'render_page']
         );
     }
 

@@ -43,8 +43,7 @@ final class WebhooksPage
             'Webhooks',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render_page'],
-            AdminMenus::ORDER_WEBHOOKS
+            [self::class, 'render_page']
         );
     }
 

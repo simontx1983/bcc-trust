@@ -56,8 +56,7 @@ final class SessionsPage
             'Audit Log',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render'],
-            AdminMenus::ORDER_AUDIT_LOG
+            [self::class, 'render']
         );
     }
 

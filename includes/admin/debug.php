@@ -22,13 +22,12 @@ add_action('admin_menu', function () {
     // Developer group under BCC System — listed only when
     // BCC_DEV_TOOLS === true (bcc-core AdminMenu); the URL always works.
     add_submenu_page(
-        \BCC\Trust\Core\Admin\AdminMenus::SYSTEM,
+        \BCC\Trust\Core\Admin\AdminMenus::parentFor(\BCC\Trust\Core\Admin\AdminMenus::DEBUG_SLUG),
         __('Trust Debug', 'bcc-trust'),
         __('Trust Debug', 'bcc-trust'),
         'manage_options',
         \BCC\Trust\Core\Admin\AdminMenus::DEBUG_SLUG,
-        'bcc_trust_render_debug_page',
-        \BCC\Trust\Core\Admin\AdminMenus::ORDER_DEBUG
+        'bcc_trust_render_debug_page'
     );
 }, 30);
 

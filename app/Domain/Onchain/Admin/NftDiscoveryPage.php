@@ -109,8 +109,7 @@ class NftDiscoveryPage
             'NFT Discovery',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render_page'],
-            AdminMenus::ORDER_NFT_DISCOVERY
+            [self::class, 'render_page']
         );
     }
 

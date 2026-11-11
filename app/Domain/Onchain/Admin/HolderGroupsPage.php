@@ -64,8 +64,7 @@ final class HolderGroupsPage
             'Holder Groups',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render_page'],
-            AdminMenus::ORDER_HOLDER_GROUPS
+            [self::class, 'render_page']
         );
     }
 

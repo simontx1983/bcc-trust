@@ -49,8 +49,7 @@ class SettingsPage
             'Signals & Indexer',
             'manage_options',
             self::PAGE_SLUG,
-            [__CLASS__, 'render_page'],
-            AdminMenus::ORDER_SIGNALS
+            [__CLASS__, 'render_page']
         );
     }
 
