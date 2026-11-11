@@ -125,6 +125,11 @@ namespace BCC\Trust\Tests\Stubs {
             self::$posts    = [];
             self::$actions  = [];
             self::$userMeta = [];
+            // The Permissions fake's UNKNOWN-suspension list (see its
+            // suspensionState()). Cleared here because these rank suites share
+            // ONE process: a test that marks a user unknown must not leak it
+            // into the next suite (RankFindingAssessmentTest uses the same id).
+            $GLOBALS['__bcc_suspension_unknown'] = [];
         }
 
         /** @return list<string> Hook names fired, in order. */
@@ -169,6 +174,19 @@ namespace BCC\Core\Permissions {
                     return true;
                 }
                 return !in_array($userId, self::$suspended, true);
+            }
+
+            /**
+             * Tri-state mirror of bcc-core Permissions::suspensionState() (#84):
+             * TRUE suspended, FALSE not, NULL unknown. Ids listed in
+             * $GLOBALS['__bcc_suspension_unknown'] read as UNKNOWN.
+             */
+            public static function suspensionState(?int $userId = null, bool $allowAdminBypass = true): ?bool
+            {
+                if (in_array($userId, $GLOBALS['__bcc_suspension_unknown'] ?? [], true)) {
+                    return null;
+                }
+                return !self::is_not_suspended((int) $userId, $allowAdminBypass);
             }
 
             public static function owns_page(int $pageId, int $userId): bool

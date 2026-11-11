@@ -77,11 +77,29 @@ class UserInfoRepository {
     }
     
     /**
-     * Get user info by user ID.
+     * Get user info by user ID. FAIL-OPEN: a read failure returns null, the
+     * same as "no row" (not cached; see below). For callers where an unknown
+     * answer must not read as "no row", use getByUserIdOrThrow().
      *
      * @phpstan-return UserInfoRow|null
      */
     public function getByUserId(int $userId): ?object {
+        try {
+            return $this->getByUserIdOrThrow($userId);
+        } catch (RepositoryException) {
+            return null; // logged and not cached by getByUserIdOrThrow()
+        }
+    }
+
+    /**
+     * Get user info by user ID, telling "no row" (null) apart from "could not
+     * read" (exception). Used by the suspension check, which must fail CLOSED
+     * on a read it cannot trust.
+     *
+     * @phpstan-return UserInfoRow|null
+     * @throws RepositoryException when the read failed; nothing is cached
+     */
+    public function getByUserIdOrThrow(int $userId): ?object {
         $cached = wp_cache_get('user_info_' . $userId, 'bcc_trust');
         if ($cached !== false) {
             return $cached ?: null;
@@ -98,19 +116,19 @@ class UserInfoRepository {
         // null was cached as "no row" for BCC_TRUST_CACHE_USER (5 minutes).
         // One blip therefore made the user read as NOT suspended (and with
         // no trust data) for five minutes, everywhere suspension is checked.
-        // A failed read still returns null (the gates fail open on it,
-        // deliberately: failing closed would lock every user out on a DB
-        // blip), but the very next call retries. Same trust test as
-        // HiddenActivityRepository::runRead() / bcc-core runProbe(): query()
-        // can fail WITHOUT setting last_error, so both signals are checked.
+        // A failed read now THROWS and is not cached, so the very next call
+        // retries. Same trust test as HiddenActivityRepository::runRead() /
+        // bcc-core runProbe(): query() can fail WITHOUT setting last_error,
+        // so both signals are checked.
         $this->clearLastError();
         $ok = $wpdb->query($sql);
         if ($ok === false || $this->lastReadFailed()) {
+            $error = (string) $wpdb->last_error;
             \BCC\Core\Log\Logger::error('[UserInfoRepository] user_info read failed; not cached', [
                 'user_id' => $userId,
-                'error'   => (string) $wpdb->last_error,
+                'error'   => $error,
             ]);
-            return null;
+            throw new RepositoryException('user_info read failed for user ' . $userId . ($error !== '' ? ': ' . $error : ''));
         }
         // ⚠ NOT get_row(null): real wpdb::get_row() with no query returns
         // null without reading anything. A successful query() leaves the

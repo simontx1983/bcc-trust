@@ -216,6 +216,36 @@ final class FirstClaimReleaseDeferTest extends TestCase
     }
 
     /**
+     * Same rule for the SENDER's suspension. bcc-core suspensionState()
+     * returns null when it could not be read, and `sender_suspended` is a
+     * TERMINAL suppression, so unknown must defer through the same retry
+     * path, and be decided BEFORE resolveSenderSuppression() could turn it
+     * into a suppression.
+     */
+    public function testAnUnknownSenderSuspensionDefersAndNeverSuppresses(): void
+    {
+        $src = (string) file_get_contents(
+            (string) (new ReflectionClass(\BCC\Trust\Onchain\Workers\ValidatorMsgQueueWorker::class))
+                ->getFileName()
+        );
+
+        $check = strpos($src, 'Permissions::suspensionState($senderId, false) === null');
+        $defer = strpos($src, "self::handleFailure(\$rowId, \$leaseToken, \$attempts, 'suspension_read_failed')");
+        $sender = strpos($src, 'resolveSenderSuppression($senderId, $operatorId);');
+
+        $this->assertIsInt($check, 'the worker must ask for the tri-state, not the boolean');
+        $this->assertIsInt($defer, 'unknown must defer through the ordinary retry path');
+        $this->assertIsInt($sender);
+        $this->assertLessThan($defer, $check);
+        $this->assertLessThan($sender, $defer, 'the defer must happen before any sender suppression is decided');
+        $this->assertSame(
+            0,
+            substr_count($src, "markSuppressed(\$rowId, \$leaseToken, 'suspension_read_failed')"),
+            'an unreadable suspension must NEVER produce a terminal suppression'
+        );
+    }
+
+    /**
      * ⚠ `handleFailure` takes the REASON, not an exception. F-99's
      * `block_read_failed` has no `\Throwable` behind it, and fabricating
      * one purely to smuggle a reason code through the signature would be

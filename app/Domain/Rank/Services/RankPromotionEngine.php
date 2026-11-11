@@ -112,7 +112,8 @@ class RankPromotionEngine
      *     outcome_types: int,
      *     windows: array<string, array{qualifying: int, required: int, window: int, min_tier: string}>,
      *     satisfied: array<string, bool>,
-     *     target: string
+     *     target: string,
+     *     suspension_unknown: bool
      * }|null
      */
     public function assess(int $userId): ?array
@@ -200,7 +201,14 @@ class RankPromotionEngine
             ];
         }
 
-        $suspensionClear = \BCC\Core\Permissions\Permissions::is_not_suspended($userId, false);
+        // ⚠ Tri-state. An UNKNOWN suspension (null: it could not be read)
+        // reads as not-clear for this assessment, but is FLAGGED so that
+        // evaluate()/evaluateImmediate() persist NOTHING for this member this
+        // run: an unmet rung is saved and can start recovery or demote, and a
+        // DB blip must never do that. Read-only callers (progressionFor) still
+        // get a full assessment.
+        $suspension      = \BCC\Core\Permissions\Permissions::suspensionState($userId, false);
+        $suspensionClear = $suspension === false;
 
         // §15.3 ceiling AND-term (mirrors $suspensionClear): any rung
         // ABOVE the lowest active finding ceiling is unsatisfiable.
@@ -257,7 +265,26 @@ class RankPromotionEngine
             'windows'            => $windows,
             'satisfied'          => $satisfied,
             'target'             => $target,
+            'suspension_unknown' => $suspension === null,
         ];
+    }
+
+    /**
+     * True when the assessment could not read the member's suspension. The
+     * persisting paths then skip this member for this run (logged); the
+     * next run re-reads.
+     *
+     * @param array{suspension_unknown: bool} $assessment
+     */
+    private static function skipForUnknownSuspension(int $userId, array $assessment): bool
+    {
+        if (!$assessment['suspension_unknown']) {
+            return false;
+        }
+        \BCC\Core\Log\Logger::warning('[RankPromotionEngine] suspension state unknown; member skipped this run', [
+            'user_id' => $userId,
+        ]);
+        return true;
     }
 
     /**
@@ -268,7 +295,7 @@ class RankPromotionEngine
     public function evaluate(int $userId): void
     {
         $assessment = $this->assess($userId);
-        if ($assessment === null) {
+        if ($assessment === null || self::skipForUnknownSuspension($userId, $assessment)) {
             return;
         }
 
@@ -389,7 +416,7 @@ class RankPromotionEngine
     public function evaluateImmediate(int $userId): void
     {
         $assessment = $this->assess($userId);
-        if ($assessment === null) {
+        if ($assessment === null || self::skipForUnknownSuspension($userId, $assessment)) {
             return;
         }
 
