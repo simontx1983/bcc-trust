@@ -199,8 +199,10 @@ final class AnnouncementReportTargetTest extends TestCase
 
     /**
      * The author arm is DISPATCHED, not appended — the extension this
-     * method's own comment invited. A second `resolveFeedItemAuthor()` call
+     * method's own comment invited. A second feed-arm resolver call
      * for the new kind would resolve a feed activity by an announcement id.
+     * (F-73 renamed the feed arm resolveFeedItemAuthor → resolveFeedItemTarget
+     * when it began deciding reportability too.)
      */
     public function testTheAuthorResolutionIsDispatchedPerKind(): void
     {
@@ -208,7 +210,7 @@ final class AnnouncementReportTargetTest extends TestCase
 
         self::assertStringContainsString('KIND_ANNOUNCEMENT', $body, 'the announcement arm exists');
         self::assertStringContainsString('resolveAnnouncementTarget(', $body);
-        self::assertStringContainsString('resolveFeedItemAuthor(', $body, 'and the feed arm survives');
+        self::assertStringContainsString('resolveFeedItemTarget(', $body, 'and the feed arm survives');
 
         // ⚠ The announcement arm returns the resolver's error envelope
         // BEFORE any author comparison — so an unreportable target answers
