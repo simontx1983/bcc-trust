@@ -208,14 +208,18 @@ final class MyProfilePrefsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        // ⚠ ALL-OR-NOTHING (F-97). Phase 1 validates EVERY present field
-        // and the one precondition a write can fail on (PeepSo, for
-        // profile_visibility) before ANYTHING is written. Phase 2 writes.
-        // This used to validate-and-write field by field, so a 422 on a
-        // later field (e.g. a bad default_post_audience) returned an error
-        // while earlier fields, including profile_visibility, which feeds
-        // search and feed gating, were already saved: a "failed" request
-        // that had partly succeeded.
+        // ⚠ ALL VALIDATION BEFORE ANY WRITE (F-97). Phase 1 validates EVERY
+        // present field and the one precondition a write can fail on
+        // (PeepSo, for profile_visibility) before anything is written, so a
+        // 422 or 503 writes nothing. This used to validate-and-write field by
+        // field, so a 422 on a later field (e.g. a bad default_post_audience)
+        // returned an error while earlier fields, including
+        // profile_visibility, which feeds search and feed gating, were
+        // already saved: a "failed" request that had partly succeeded.
+        //
+        // 📌 NOT a transaction: Phase 2 does not detect a WRITE that fails
+        // after validation passed (a DB error during update_user_meta or the
+        // PeepSo row update). That is a separate follow-up.
 
         // ── Phase 1: validate, collecting the planned writes ─────────────
         $profileAcc = null; // ?int
@@ -288,7 +292,7 @@ final class MyProfilePrefsEndpoint
             );
         }
 
-        // ── Phase 2: every field validated; write them all ───────────────
+        // ── Phase 2: every field validated; write them ───────────────────
         if ($profileAcc !== null) {
             $err = self::writeProfileAccessibility($userId, $profileAcc);
             if ($err instanceof WP_REST_Response) {

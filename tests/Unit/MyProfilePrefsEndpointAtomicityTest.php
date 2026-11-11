@@ -14,7 +14,7 @@ use PHPUnit\Framework\TestCase;
 use ReflectionClass;
 
 /**
- * F-97: PATCH /me/profile-prefs is all-or-nothing.
+ * F-97: PATCH /me/profile-prefs validates everything before any write.
  *
  * The handler used to validate and write field by field, so a bad value in a
  * LATER field returned 422 while every earlier field, profile_visibility
