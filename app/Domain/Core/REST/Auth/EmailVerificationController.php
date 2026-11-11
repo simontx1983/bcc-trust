@@ -157,6 +157,22 @@ final class EmailVerificationController
             return ApiResponse::error('bcc_already_verified', 'This email is already verified.', 409);
         }
 
+        // Count EVERY attempt BEFORE comparing (L2) — see TwoFactorController:
+        // caps comparisons per (user, current code) at VERIFY_EMAIL_MAX_FAILURES
+        // even under concurrent guesses; an attempt beyond it burns the code
+        // without comparing. Same generic answer. Only while a code is pending.
+        $otpId = AuthSupport::emailOtpIdentity($userId);
+        if ($otpId !== null && !\BCC\Core\Security\Throttle::allow(
+            'verify_email_attempt',
+            AuthSupport::VERIFY_EMAIL_MAX_FAILURES,
+            AuthSupport::OTP_TTL,
+            'verify_email_attempt:' . $userId . ':' . $otpId
+        )) {
+            AuthSupport::burnEmailOtp($userId);
+            \BCC\Core\Log\Logger::audit('verify_email_attempts_exhausted', ['user_id' => $userId]);
+            return ApiResponse::error('bcc_invalid_otp', 'Invalid or expired code.', 400);
+        }
+
         if (!AuthSupport::consumeOtpForUser($userId, $code)) {
             // Attempt cap (F-48), per (user, current code): a correct code
             // signs the caller in, so guesses spread across IPs must be
@@ -167,7 +183,6 @@ final class EmailVerificationController
             // (a separate, unguessable token) and resend keep working, and
             // the answer stays the generic one — no new enumeration signal.
             // A degraded limiter fails closed (burns).
-            $otpId = AuthSupport::emailOtpIdentity($userId);
             if ($otpId !== null && !\BCC\Core\Security\Throttle::allow(
                 'verify_email_fail',
                 AuthSupport::VERIFY_EMAIL_MAX_FAILURES - 1,
