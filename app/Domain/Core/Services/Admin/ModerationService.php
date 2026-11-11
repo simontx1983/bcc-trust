@@ -32,16 +32,26 @@ final class ModerationService
     private UserInfoRepository $userInfoRepository;
     private VoteRemovalService $voteRemovalService;
     private SuspensionRepository $suspensionRepository;
+    private \BCC\Trust\Core\Services\EliteOverridePin $elitePin;
+    private \BCC\Trust\Core\Services\ScoreOverrideLedger $overrideLedger;
+    /** @var (\Closure(int): void)|null re-evaluates a page's elite flag; null = Plugin's service */
+    private ?\Closure $eliteRecompute;
 
     public function __construct(
         ScoreRepository $scoreRepository,
         UserInfoRepository $userInfoRepository,
-        VoteRemovalService $voteRemovalService
+        VoteRemovalService $voteRemovalService,
+        ?\BCC\Trust\Core\Services\EliteOverridePin $elitePin = null,
+        ?\BCC\Trust\Core\Services\ScoreOverrideLedger $overrideLedger = null,
+        ?\Closure $eliteRecompute = null
     ) {
         $this->scoreRepository      = $scoreRepository;
         $this->userInfoRepository   = $userInfoRepository;
         $this->voteRemovalService   = $voteRemovalService;
         $this->suspensionRepository = \BCC\Trust\Core\Plugin::instance()->suspensionRepository();
+        $this->elitePin             = $elitePin ?? new \BCC\Trust\Core\Services\EliteOverridePin();
+        $this->overrideLedger       = $overrideLedger ?? new \BCC\Trust\Core\Services\ScoreOverrideLedger();
+        $this->eliteRecompute       = $eliteRecompute;
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -311,49 +321,86 @@ final class ModerationService
         // would otherwise present as an admin action that "didn't take".
         $tier = TrustScoreService::tierFor((float) $newScore, (float) $newScore, true);
 
-        $affectedPageIds = $this->scoreRepository->getPageIdsByOwner($userId);
+        // One override or undo per user at a time: the ledger is a
+        // read-modify-write, and two admins racing would double-apply.
+        $lock = 'bcc_score_override_' . $userId;
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($lock, 5)) {
+            echo '<div class="notice notice-error"><p>Another score change for this member is in progress. Try again.</p></div>';
+            return ['success' => false, 'message' => 'Another score change for this member is in progress.'];
+        }
 
-        $updated = 0;
-        $now     = gmdate('Y-m-d H:i:s');
+        $updated  = 0;
+        $now      = gmdate('Y-m-d H:i:s');
+        $adminId  = (int) get_current_user_id();
+        $ledgerId = '';
+        /** @var array<int, array{delta: float, prev_pin: array{admin_id: int, granted_at: string}|null}> $ledgerPages */
+        $ledgerPages = [];
 
-        foreach ($affectedPageIds as $pid) {
-            $pid = (int) $pid;
+        try {
+            $affectedPageIds = $this->scoreRepository->getPageIdsByOwner($userId);
 
-            // 1. Fresh canonical recompute FIRST, so the delta below is
-            //    measured against the value every future recalc will
-            //    reproduce — not against a stale row.
-            do_action('bcc.trust.recalculate_score', $pid);
+            foreach ($affectedPageIds as $pid) {
+                $pid = (int) $pid;
 
-            $row     = $this->scoreRepository->getByPageId($pid);
-            $current = $row !== null ? $row->getTotalScore() : 50.0;
-            $delta   = (float) $newScore - $current;
+                // 1. Fresh canonical recompute FIRST, so the delta below is
+                //    measured against the value every future recalc will
+                //    reproduce — not against a stale row.
+                do_action('bcc.trust.recalculate_score', $pid);
 
-            // 2. Accumulate the difference as admin fiat. applyPenalty
-            //    recomputes total_score + reputation_tier inline via the
-            //    canonical formula, mirrors the tier, and invalidates the
-            //    score cache — total_score lands exactly on the target.
-            try {
-                if (abs($delta) > 0.0001) {
-                    $this->scoreRepository->applyPenalty($pid, $delta);
+                $row     = $this->scoreRepository->getByPageId($pid);
+                $current = $row !== null ? $row->getTotalScore() : 50.0;
+                $delta   = (float) $newScore - $current;
+
+                // 2. Accumulate the difference as admin fiat. applyPenalty
+                //    recomputes total_score + reputation_tier inline via the
+                //    canonical formula, mirrors the tier, and invalidates the
+                //    score cache — total_score lands exactly on the target.
+                $applied = 0.0;
+                try {
+                    if (abs($delta) > 0.0001) {
+                        $this->scoreRepository->applyPenalty($pid, $delta);
+                        $applied = $delta;
+                    }
+                    $updated++;
+                } catch (\Throwable $e) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] score override failed for page', [
+                        'page_id' => $pid,
+                        'user_id' => $userId,
+                        'error'   => $e->getMessage(),
+                    ]);
+                    continue;
                 }
-                $updated++;
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] score override failed for page', [
-                    'page_id' => $pid,
-                    'user_id' => $userId,
-                    'error'   => $e->getMessage(),
-                ]);
-                continue;
+
+                // F-113: record exactly what changed, so undo can reverse it.
+                $ledgerPages[$pid] = ['delta' => $applied, 'prev_pin' => $this->elitePin->read($pid)];
+
+                // 3. Elite. An override TO elite STICKS until an admin
+                //    removes it (product decision): the pin is what the
+                //    nightly sweep honours. Any other target REMOVES a pin
+                //    and re-evaluates the flag, so an earlier manual grant
+                //    can no longer outlive an override down.
+                if ($tier === 'elite') {
+                    $this->elitePin->pin($pid, $adminId, $now);
+                    $this->scoreRepository->setEliteEligibility($pid, true, $now);
+                } else {
+                    $this->elitePin->unpin($pid);
+                }
+
+                // 4. Second recompute now REPRODUCES the target (the adjustment
+                //    is a formula input) and pushes it to the read model via the
+                //    priority-20 subscriber — proving durability on the spot.
+                do_action('bcc.trust.recalculate_score', $pid);
+
+                if ($tier !== 'elite') {
+                    $this->recomputeElite($pid);
+                }
             }
 
-            if ($tier === 'elite') {
-                $this->scoreRepository->setEliteEligibility($pid, true, $now);
-            }
-
-            // 3. Second recompute now REPRODUCES the target (the adjustment
-            //    is a formula input) and pushes it to the read model via the
-            //    priority-20 subscriber — proving durability on the spot.
-            do_action('bcc.trust.recalculate_score', $pid);
+            $ledgerId = $ledgerPages === []
+                ? ''
+                : $this->overrideLedger->push($userId, $adminId, $newScore, $reason, $now, $ledgerPages);
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
         }
 
         $this->logAction('admin_score_override', $userId, [
@@ -361,10 +408,101 @@ final class ModerationService
             'new_tier'      => $tier,
             'reason'        => $reason,
             'pages_updated' => $updated,
+            'ledger_id'     => $ledgerId,
+            'elite_pinned'  => $tier === 'elite',
         ]);
 
-        echo '<div class="notice notice-success"><p>Trust score overridden to <strong>' . $newScore . '</strong> (' . esc_html($tier) . ') for ' . intval($updated) . ' page(s). Reason: ' . esc_html($reason) . '</p></div>';
-        return ['success' => true, 'message' => 'Trust score overridden.', 'tier' => $tier, 'pages_updated' => $updated];
+        $eliteNote = $tier === 'elite' ? ' Elite granted manually; stays until removed.' : '';
+        $undoNote  = ($ledgerPages !== [] && $ledgerId === '')
+            ? ' ⚠ The undo record could not be saved, so this override cannot be undone.'
+            : '';
+        echo '<div class="notice notice-success"><p>Trust score overridden to <strong>' . $newScore . '</strong> (' . esc_html($tier) . ') for ' . intval($updated) . ' page(s). Reason: ' . esc_html($reason) . '.' . esc_html($eliteNote . $undoNote) . '</p></div>';
+        return ['success' => true, 'message' => 'Trust score overridden.', 'tier' => $tier, 'pages_updated' => $updated, 'ledger_id' => $ledgerId];
+    }
+
+    /**
+     * Undo the member's LATEST not-yet-undone score override (F-113).
+     *
+     * Applies the inverse of each page's recorded delta (penalties are
+     * additive, so this cancels exactly even if dispute penalties landed
+     * since), restores the elite pin that existed before the override, then
+     * recomputes the score and the elite flag. Refuses when there is nothing
+     * to undo. ⚠ Only the last ScoreOverrideLedger::MAX_ENTRIES overrides per
+     * member are undoable.
+     *
+     * @return array{success: bool, message: string, pages_restored?: int}
+     */
+    public function undoScoreOverride(int $userId): array
+    {
+        $lock = 'bcc_score_override_' . $userId;
+        if ($userId <= 0 || !\BCC\Core\DB\AdvisoryLock::acquire($lock, 5)) {
+            echo '<div class="notice notice-error"><p>Another score change for this member is in progress. Try again.</p></div>';
+            return ['success' => false, 'message' => 'Another score change for this member is in progress.'];
+        }
+
+        $restored = 0;
+        try {
+            $entry = $this->overrideLedger->latestUndoable($userId);
+            if ($entry === null) {
+                echo '<div class="notice notice-error"><p>There is no score override to undo for this member.</p></div>';
+                return ['success' => false, 'message' => 'There is no score override to undo.'];
+            }
+
+            // Mark FIRST: a crash mid-way must not leave the entry undoable,
+            // or a retry would apply the inverse twice.
+            if (!$this->overrideLedger->markUndone($userId, $entry['id'])) {
+                echo '<div class="notice notice-error"><p>Could not record the undo; nothing was changed.</p></div>';
+                return ['success' => false, 'message' => 'Could not record the undo; nothing was changed.'];
+            }
+
+            foreach ($entry['pages'] as $pidKey => $page) {
+                $pid = (int) $pidKey;
+                try {
+                    if (abs($page['delta']) > 0.0001) {
+                        $this->scoreRepository->applyPenalty($pid, -$page['delta']);
+                    }
+                } catch (\Throwable $e) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] score override undo failed for page', [
+                        'page_id' => $pid,
+                        'user_id' => $userId,
+                        'error'   => $e->getMessage(),
+                    ]);
+                    continue;
+                }
+
+                $prev = $page['prev_pin'];
+                if ($prev !== null) {
+                    $this->elitePin->pin($pid, $prev['admin_id'], $prev['granted_at']);
+                } else {
+                    $this->elitePin->unpin($pid);
+                }
+
+                do_action('bcc.trust.recalculate_score', $pid);
+                $this->recomputeElite($pid);
+                $restored++;
+            }
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
+        }
+
+        $this->logAction('admin_score_override_undone', $userId, [
+            'ledger_id'      => $entry['id'],
+            'undone_score'   => $entry['new_score'],
+            'pages_restored' => $restored,
+        ]);
+
+        echo '<div class="notice notice-success"><p>Score override undone for ' . intval($restored) . ' page(s).</p></div>';
+        return ['success' => true, 'message' => 'Score override undone.', 'pages_restored' => $restored];
+    }
+
+    /** Re-evaluate a page's elite flag (it honours the pin). */
+    private function recomputeElite(int $pageId): void
+    {
+        if ($this->eliteRecompute !== null) {
+            ($this->eliteRecompute)($pageId);
+            return;
+        }
+        \BCC\Trust\Core\Plugin::instance()->eliteEligibilityService()->recomputeFor($pageId);
     }
 
     // ──────────────────────────────────────────────────────────────
