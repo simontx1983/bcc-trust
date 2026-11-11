@@ -57,6 +57,17 @@ final class RepairService
             $self()->syncUsers();
         });
 
+        // Repair-page buttons (2026-11-11). Both handlers already ran
+        // securityCheck() — BCC_REPAIR_ENABLED, manage_options, nonce —
+        // and wrote a log line; they simply had no route until now.
+        add_action('admin_post_bcc_trust_db_check', function () use ($self) {
+            $self()->runDbCheck();
+        });
+
+        add_action('admin_post_bcc_trust_cleanup_fraud', function () use ($self) {
+            $self()->cleanupFraud();
+        });
+
     }
 
     // ── Security ────────────────────────────────────────────────────────
@@ -410,10 +421,27 @@ final class RepairService
             }
         }
 
-        set_transient('bcc_trust_repair_results', $results, 60);
+        $details = [];
+        foreach ($results['tables_checked'] as $name => $status) {
+            $details[] = "table {$name}: {$status}";
+        }
+        foreach ($results['issues_found'] as $issue) {
+            $details[] = $issue;
+        }
+        $report = [
+            'action'       => $results['action'],
+            'tables'       => count($results['tables_checked']),
+            'issues_found' => count($results['issues_found']),
+            'issues_fixed' => $results['issues_fixed'],
+            'details'      => $details,
+        ];
+
+        set_transient('bcc_trust_repair_results', $report, 60);
         Logger::info('[bcc-trust] Repair action complete', [
-            'action'   => $results['action'],
-            'operator' => get_current_user_id(),
+            'action'       => $results['action'],
+            'operator'     => get_current_user_id(),
+            'issues_found' => count($results['issues_found']),
+            'issues_fixed' => $results['issues_fixed'],
         ]);
         wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
         exit;
@@ -442,8 +470,10 @@ final class RepairService
 
         set_transient('bcc_trust_repair_results', $results, 60);
         Logger::info('[bcc-trust] Repair action complete', [
-            'action'   => $results['action'],
-            'operator' => get_current_user_id(),
+            'action'                 => $results['action'],
+            'operator'               => get_current_user_id(),
+            'fraud_analyses_removed' => $results['fraud_analyses_removed'],
+            'suspensions_archived'   => $results['suspensions_archived'],
         ]);
         wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
         exit;
