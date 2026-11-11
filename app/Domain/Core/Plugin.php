@@ -2298,6 +2298,21 @@ final class Plugin
             });
         }, 20, 3);
 
+        // Restore (F-111): the content was judged fine, so no report
+        // against it stands as upheld — reverse the report_upheld credit
+        // of the restored report and of every report the restore moved
+        // off status 1. Reversing a never-ingested id matches zero rows.
+        add_action('bcc_content_restored_by_admin', function ($targetId, $resolverUserId, $reportId, $unupheldIds = []) use ($rankIngest): void {
+            $ids = array_unique(array_merge([(int) $reportId], array_map('intval', (array) $unupheldIds)));
+            $rankIngest(function (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) use ($ids): void {
+                foreach ($ids as $id) {
+                    if ($id > 0) {
+                        $i->reverse('report_upheld', $id, 'content_restored');
+                    }
+                }
+            });
+        }, 20, 4);
+
         // Args: ($reportId, $adminUserId, $action). Reversal is
         // unconditional across undo kinds — reversing an event that was
         // never ingested (e.g. a dismissed report's) matches zero rows.
