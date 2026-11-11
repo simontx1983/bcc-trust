@@ -55,8 +55,13 @@ if (!function_exists('bcc_trust_cleanup_feature_override_usermeta')) {
             $batchSize
         ));
 
-        if ($deleted === false || (int) $deleted === $batchSize) {
+        if ($deleted === false) {
             return BCC_TRUST_MIGRATION_INCOMPLETE;
+        }
+
+        if ((int) $deleted === $batchSize) {
+            // A full batch means more rows may remain — resume next request.
+            return BCC_TRUST_MIGRATION_MORE;
         }
 
         \BCC\Core\Log\Logger::info('[bcc-trust] feature-override usermeta cleanup complete', [

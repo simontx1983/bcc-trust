@@ -214,7 +214,7 @@ if (!function_exists('bcc_trust_backfill_wallet_placeholder_emails')) {
                 '[bcc-trust] Wallet placeholder-email backfill: batch cap reached, more remain — will resume',
                 ['rewritten' => $rewritten]
             );
-            return BCC_TRUST_MIGRATION_INCOMPLETE;
+            return BCC_TRUST_MIGRATION_MORE;
         }
 
         \BCC\Core\Log\Logger::info(
