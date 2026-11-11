@@ -108,6 +108,18 @@ namespace {
 }
 
 namespace BCC\Core\DB {
+    if (!class_exists(__NAMESPACE__ . '\\DB', false)) {
+        // Same convention as the real bcc-core DB::table(): {prefix}bcc_{name}.
+        final class DB
+        {
+            public static function table(string $name): string
+            {
+                $prefix = isset($GLOBALS['wpdb']->prefix) ? (string) $GLOBALS['wpdb']->prefix : '';
+                return $prefix . 'bcc_' . $name;
+            }
+        }
+    }
+
     if (!class_exists(__NAMESPACE__ . '\\AdvisoryLock', false)) {
         class AdvisoryLock
         {

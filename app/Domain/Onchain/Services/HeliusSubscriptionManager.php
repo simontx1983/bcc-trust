@@ -56,7 +56,8 @@ final class HeliusSubscriptionManager
      * already treat as "retry later" (bounded backoff in bcc-trust.php, with
      * the reconcile as backstop) — a deferred change, never a dropped one.
      */
-    private const LIST_LOCK         = 'bcc_helius_address_list';
+    /** Lock-name segment; listLockName() resolves it as {prefix}bcc_helius_address_list. */
+    private const LIST_LOCK         = 'helius_address_list';
 
     /**
      * Shrink floor for a resync PUT (F-64 review): with at least this many
@@ -469,20 +470,20 @@ final class HeliusSubscriptionManager
     }
 
     /**
-     * The list lock's name, prefixed with this site's table prefix.
+     * The list lock's name, carrying this site's table prefix.
      *
      * ⚠ GET_LOCK names are SERVER-WIDE. Staging and production sharing one
      * MySQL server would otherwise serialise against each other's Helius
-     * writes. MySQL caps a lock name at 64 characters; the prefix plus the
-     * base name stays well inside it for any sane prefix, and the name is
-     * truncated defensively rather than letting GET_LOCK error.
+     * writes. The prefix comes from DB::table() — the sanctioned accessor —
+     * because a service may not touch $wpdb (arch guardrail
+     * WPDB_OUTSIDE_REPO); it yields "{prefix}bcc_helius_address_list". The
+     * value names a lock, not a table. MySQL caps a lock name at 64
+     * characters, so it is truncated defensively rather than letting
+     * GET_LOCK error.
      */
     private static function listLockName(): string
     {
-        global $wpdb;
-        $prefix = isset($wpdb->prefix) ? (string) $wpdb->prefix : '';
-
-        return substr($prefix . self::LIST_LOCK, 0, 64);
+        return substr(\BCC\Core\DB\DB::table(self::LIST_LOCK), 0, 64);
     }
 
     /**
