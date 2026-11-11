@@ -288,7 +288,9 @@ final class PushSubscriptionRepository
      * email-change verify. The frontend re-subscribes on the next opted-in
      * login.
      *
-     * Returns the number of rows deleted.
+     * Returns the number of rows deleted; 0 also on a DB error, which is
+     * logged — callers cutting off revoked devices would otherwise read a
+     * failure as "nothing to delete" and keep pushing to them.
      */
     public function deleteAllForUser(int $userId): int
     {
@@ -298,7 +300,14 @@ final class PushSubscriptionRepository
 
         global $wpdb;
         $deleted = $wpdb->delete($this->table, ['user_id' => $userId], ['%d']);
-        return is_int($deleted) ? $deleted : 0;
+        if (!is_int($deleted)) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] push subscriptions not deleted', [
+                'user_id' => $userId,
+                'error'   => (string) ($wpdb->last_error ?? ''),
+            ]);
+            return 0;
+        }
+        return $deleted;
     }
 
     /**
