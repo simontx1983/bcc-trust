@@ -816,31 +816,19 @@ class UserInfoRepository {
         global $wpdb;
 
         if ($pageId) {
-            $userInfo = $this->getByUserId($userId);
-            $pageIds = $userInfo && $userInfo->page_ids_owned ? json_decode($userInfo->page_ids_owned, true) : [];
-            if (!is_array($pageIds)) $pageIds = [];
-            $pageIds[] = $pageId;
-
-            $result = $wpdb->update(
-                $this->table,
-                [
-                    'pages_owned' => ($userInfo ? $userInfo->pages_owned : 0) + 1,
-                    'page_ids_owned' => json_encode(array_unique($pageIds))
-                ],
-                ['user_id' => $userId],
-                ['%d', '%s'],
-                ['%d']
-            );
-        } else {
-            $result = $wpdb->query($wpdb->prepare(
-                "UPDATE {$this->table} SET pages_owned = pages_owned + 1 WHERE user_id = %d",
-                $userId
-            ));
+            $this->mutateOwnedPages($userId, (int) $pageId, true);
+            return;
         }
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table} SET pages_owned = pages_owned + 1 WHERE user_id = %d",
+            $userId
+        ));
 
         if ($result === false) {
             throw new RepositoryException('UserInfoRepository::incrementPageCount failed for user ' . $userId . ': ' . $wpdb->last_error);
         }
+        $this->invalidateCache($userId);
     }
     
     /**
@@ -852,30 +840,110 @@ class UserInfoRepository {
         global $wpdb;
 
         if ($pageId) {
-            $userInfo = $this->getByUserId($userId);
-            $pageIds = $userInfo && $userInfo->page_ids_owned ? json_decode($userInfo->page_ids_owned, true) : [];
-            if (!is_array($pageIds)) $pageIds = [];
-            $pageIds = array_values(array_diff($pageIds, [$pageId]));
+            $this->mutateOwnedPages($userId, (int) $pageId, false);
+            return;
+        }
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table} SET pages_owned = GREATEST(pages_owned - 1, 0) WHERE user_id = %d",
+            $userId
+        ));
+
+        if ($result === false) {
+            throw new RepositoryException('UserInfoRepository::decrementPageCount failed for user ' . $userId . ': ' . $wpdb->last_error);
+        }
+        $this->invalidateCache($userId);
+    }
+
+    /**
+     * F-146 — add or remove one page on a user's owned-pages list and count,
+     * without losing a concurrent or recent change.
+     *
+     * This used to read the row through getByUserId() — a 5-minute OBJECT
+     * CACHE the write never invalidated — then write back count+1 and the
+     * re-encoded JSON list. Two page creations inside that window (or two
+     * concurrent ones) wrote over each other: a page id vanished from
+     * page_ids_owned and pages_owned drifted. Adding the same page twice
+     * de-duplicated the list but still bumped the count.
+     *
+     * Now, under a per-user advisory lock: re-read the row UNCACHED, apply
+     * the change idempotently (adding a listed page or removing an unlisted
+     * one changes nothing), write, invalidate the cache.
+     *
+     * Legacy rows that carry a count but no list (written by the pageId-less
+     * path) keep decrementing on a remove, as before; a row WITH a list only
+     * decrements for a page that is actually on it.
+     *
+     * @throws RepositoryException on database failure or lock contention
+     */
+    private function mutateOwnedPages(int $userId, int $pageId, bool $add): void
+    {
+        global $wpdb;
+
+        $lock = 'bcc_user_pages_' . $userId;
+        if (!class_exists('\\BCC\\Core\\DB\\AdvisoryLock') || !\BCC\Core\DB\AdvisoryLock::acquire($lock, 5)) {
+            throw new RepositoryException('UserInfoRepository: owned-pages lock unavailable for user ' . $userId);
+        }
+
+        try {
+            // runRead shape: query() can fail WITHOUT setting last_error (the
+            // silent !ready path), and get_row($sql) would then hand back the
+            // previous statement's row. Check the return AND last_error, then
+            // read the row this query left.
+            $sql = $wpdb->prepare(
+                "SELECT pages_owned, page_ids_owned FROM {$this->table} WHERE user_id = %d LIMIT 1",
+                $userId
+            );
+            if (!is_string($sql) || $wpdb->query($sql) === false || $wpdb->last_error !== '') {
+                throw new RepositoryException('UserInfoRepository: owned-pages read failed for user ' . $userId . ': ' . $wpdb->last_error);
+            }
+            $row = $wpdb->get_row(null);
+            if ($row === null) {
+                return; // no user_info row: the UPDATE always matched nothing here
+            }
+
+            $decoded = is_string($row->page_ids_owned) && $row->page_ids_owned !== ''
+                ? json_decode($row->page_ids_owned, true)
+                : [];
+            $pageIds = is_array($decoded) ? array_values(array_unique(array_map('intval', $decoded))) : [];
+            $count   = (int) $row->pages_owned;
+            $listed  = in_array($pageId, $pageIds, true);
+
+            if ($add) {
+                if ($listed) {
+                    return; // idempotent: already counted
+                }
+                $pageIds[] = $pageId;
+                $count++;
+            } else {
+                if ($listed) {
+                    $pageIds = array_values(array_diff($pageIds, [$pageId]));
+                    $count   = max(0, $count - 1);
+                } elseif ($pageIds === []) {
+                    $count = max(0, $count - 1); // legacy row: count without a list
+                } else {
+                    return; // not on a real list: nothing to remove
+                }
+            }
 
             $result = $wpdb->update(
                 $this->table,
                 [
-                    'pages_owned' => max(0, ($userInfo ? $userInfo->pages_owned : 0) - 1),
-                    'page_ids_owned' => !empty($pageIds) ? json_encode($pageIds) : null
+                    'pages_owned'    => $count,
+                    'page_ids_owned' => $pageIds !== [] ? (string) json_encode($pageIds) : null,
                 ],
                 ['user_id' => $userId],
                 ['%d', '%s'],
                 ['%d']
             );
-        } else {
-            $result = $wpdb->query($wpdb->prepare(
-                "UPDATE {$this->table} SET pages_owned = GREATEST(pages_owned - 1, 0) WHERE user_id = %d",
-                $userId
-            ));
-        }
-
-        if ($result === false) {
-            throw new RepositoryException('UserInfoRepository::decrementPageCount failed for user ' . $userId . ': ' . $wpdb->last_error);
+            if ($result === false) {
+                throw new RepositoryException(
+                    'UserInfoRepository: owned-pages write failed for user ' . $userId . ': ' . $wpdb->last_error
+                );
+            }
+            $this->invalidateCache($userId);
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
         }
     }
     
