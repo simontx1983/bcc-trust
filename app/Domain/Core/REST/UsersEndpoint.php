@@ -34,6 +34,7 @@ use BCC\Trust\Core\Services\Mentions\MentionSearchService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\BoundedIntParam;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\UserSlugResolver;
 use BCC\Trust\Infrastructure\EdgeCache;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
@@ -431,6 +432,15 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $viewerId = get_current_user_id();
         // Rich shape per the §3.1 extension — wraps the canonical User
         // view-model with the profile-page additions (card, standing,
@@ -478,6 +488,15 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $cursorParam = $request->get_param('cursor');
         $cursor      = is_string($cursorParam) && $cursorParam !== '' ? $cursorParam : null;
 
@@ -507,6 +526,15 @@ final class UsersEndpoint
         $userId = UserSlugResolver::resolve($handle);
         if ($userId === 0) {
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
+        }
+
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
         }
 
         $cursorParam = $request->get_param('cursor');
@@ -556,6 +584,15 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $service      = Plugin::instance()->endorsementService();
         $endorsements = $service->getUserEndorsements($userId, $limit);
         $items        = $service->hydrateEndorsementItems($endorsements);
@@ -564,11 +601,22 @@ final class UsersEndpoint
             'items' => $items,
             'total' => count($items),
         ]);
-        // Public read with per-page snapshot — short shared cache absorbs
-        // tab-strip toggles. Vary on Authorization so an auth flip
-        // (sign-in / sign-out) doesn't serve a cached anon response.
-        $response->header('Cache-Control', 'public, max-age=15');
-        $response->header('Vary', 'Authorization');
+        // ⚠ PRIVATE, not public — this answer is now VIEWER-DEPENDENT.
+        //
+        // §F-02 added the profile gate above, so whether this route
+        // returns a payload or a 403 depends on who is asking (owner,
+        // admin, friend, signed-in member, stranger). A shared cache
+        // holding one viewer's 200 would serve it to a viewer the gate
+        // refused — which is a worse leak than the ungated read the gate
+        // was added to close. `Vary: Authorization` alone is NOT enough:
+        // the owner/admin/friend distinctions turn on the SESSION, and
+        // two different signed-in viewers can send byte-identical
+        // Authorization headers from a shared-cache point of view.
+        //
+        // The gate and this header MUST move together. Flipping the gate
+        // on while leaving `public` here would have been a regression.
+        $response->header('Cache-Control', 'private, max-age=15');
+        $response->header('Vary', 'Authorization, Cookie');
 
         return $response;
     }
@@ -1038,6 +1086,15 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $viewerId = get_current_user_id();
         $payload  = $compose($userId, $viewerId, $page, $perPage);
 
@@ -1068,11 +1125,28 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $payload = Plugin::instance()->shiftLogService()->getShiftLog($userId, $weeks);
 
         $response = ApiResponse::ok($payload);
-        // Per contract §4.4
-        $response->header('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+        // ⚠ PRIVATE, not public — viewer-dependent since §F-02 added the
+        // profile gate above. Same reasoning as endorsements(); the long
+        // 300s shared window made this the worst of the three to leave
+        // public, because a single cached 200 would have been replayed to
+        // refused viewers for five minutes.
+        //
+        // ⚠ This CHANGES a value the contract pins in §4.4, so the
+        // contract note must land with it.
+        $response->header('Cache-Control', 'private, max-age=300');
+        $response->header('Vary', 'Authorization, Cookie');
 
         return $response;
     }

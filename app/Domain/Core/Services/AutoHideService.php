@@ -21,7 +21,9 @@
  * Out of scope (V1):
  *   - Reporter trust-weighting (one report = one count regardless of tier)
  *   - Per-reason thresholds (spam might warrant 5, hate 1) — V1.5 work
- *   - Cool-down / reversal (admin must explicitly Restore)
+ *   - Reversal (admin must explicitly Restore). Since F-73 a Restore
+ *     closes every pending report on the target and starts a
+ *     REHIDE_COOLDOWN_SECONDS window in which auto-hide is withheld.
  *
  * §A4 single-source-of-trust: this service does NOT decide *what is bad
  * content*. It counts reports the community filed and applies the
@@ -48,6 +50,21 @@ final class AutoHideService
     public const DEFAULT_THRESHOLD = 3;
 
     public const REASON_AUTOHIDE_THRESHOLD = 'autohide_threshold';
+
+    /**
+     * F-73 re-hide cooldown (product decision 2026-11-10): after an admin
+     * RESTORE, the post is immune from AUTOMATIC hiding for this long.
+     * Reports still file and still queue for admins; only the automatic
+     * action is withheld. An admin can still Hide at any time.
+     */
+    public const REHIDE_COOLDOWN_SECONDS = 7 * 86400;
+
+    /**
+     * Post meta on the activity's backing wp_post holding the cooldown's
+     * expiry (unix seconds). PERSISTED, not a transient: an object-cache
+     * eviction must not silently end the cooldown. '0' = no cooldown.
+     */
+    public const META_REHIDE_COOLDOWN_UNTIL = '_bcc_autohide_cooldown_until';
 
     public function __construct(
         private readonly ContentReportRepository $reportRepo,
@@ -89,6 +106,20 @@ final class AutoHideService
 
         $count = $this->reportRepo->countPendingForTarget($targetKind, $targetId);
         if ($count < $threshold) {
+            return;
+        }
+
+        // F-73 — an admin restored this post recently: the community's
+        // reports keep queueing, but the automatic hide is withheld until
+        // the cooldown ends. Without it, one fresh report could re-hide a
+        // post an admin had just judged fine. Checked only once the
+        // threshold is crossed, so the extra lookup is rare.
+        if (self::inRehideCooldown($targetId)) {
+            Logger::info('[AutoHideService] auto-hide withheld: restore cooldown', [
+                'act_id'        => $targetId,
+                'pending_count' => $count,
+                'threshold'     => $threshold,
+            ]);
             return;
         }
 
@@ -151,6 +182,53 @@ final class AutoHideService
         // (writes one content_auto_hidden audit row). A notification
         // consumer for the post author is intentionally NOT wired in V1.
         do_action('bcc_content_auto_hidden', $targetId, $count, $threshold, $reportId);
+    }
+
+    /**
+     * Start the re-hide cooldown for an activity (called by the admin
+     * Restore). Returns false when the activity's backing post cannot be
+     * resolved — the restore still stands; only the cooldown is absent.
+     */
+    public static function startRehideCooldown(int $actId): bool
+    {
+        $postId = self::backingPostId($actId);
+        if ($postId <= 0) {
+            return false;
+        }
+        return update_post_meta(
+            $postId,
+            self::META_REHIDE_COOLDOWN_UNTIL,
+            (string) (time() + self::REHIDE_COOLDOWN_SECONDS)
+        ) !== false;
+    }
+
+    /** End the cooldown early (undo of a Restore). */
+    public static function clearRehideCooldown(int $actId): void
+    {
+        $postId = self::backingPostId($actId);
+        if ($postId > 0) {
+            update_post_meta($postId, self::META_REHIDE_COOLDOWN_UNTIL, '0');
+        }
+    }
+
+    public static function inRehideCooldown(int $actId): bool
+    {
+        $postId = self::backingPostId($actId);
+        if ($postId <= 0) {
+            return false;
+        }
+        $until = get_post_meta($postId, self::META_REHIDE_COOLDOWN_UNTIL, true);
+        return is_numeric($until) && (int) $until > time();
+    }
+
+    /** The activity's wp_post id (act_external_id), 0 when unresolvable. */
+    private static function backingPostId(int $actId): int
+    {
+        if ($actId <= 0) {
+            return 0;
+        }
+        $row = \BCC\Core\Repositories\PeepSoActivityRepository::getById($actId);
+        return $row !== null ? (int) ($row->act_external_id ?? 0) : 0;
     }
 
     /**

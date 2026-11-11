@@ -2,6 +2,8 @@
 
 namespace BCC\Trust\Onchain\Admin;
 
+use BCC\Trust\Core\Admin\AdminMenus;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -102,7 +104,7 @@ class NftDiscoveryPage
     public static function register_page(): void
     {
         add_submenu_page(
-            'bcc-system-health',
+            AdminMenus::ONCHAIN,
             'NFT Discovery',
             'NFT Discovery',
             'manage_options',
@@ -673,7 +675,7 @@ class NftDiscoveryPage
                 code already offers.
             </p>
 
-            <p style="max-width:900px;color:#646970;">
+            <p style="max-width:900px;color:var(--bcc-text-muted);">
                 <strong>Nothing on this page starts work.</strong> Granting product support does not
                 start a discovery. Granting the manual permission does not start a discovery — it
                 only allows an administrator to start one later. A driver override can narrow or
@@ -1009,7 +1011,7 @@ class NftDiscoveryPage
 
         <?php if ($chains === []): ?>
             <p><em>No chains of this family are registered.</em></p>
-            <p style="color:#646970;">
+            <p style="color:var(--bcc-text-muted);">
                 This says nothing about capability — it means the chains table returned no row with
                 this <code>chain_type</code>.
             </p>
@@ -1032,7 +1034,7 @@ class NftDiscoveryPage
             </tbody>
         </table>
 
-        <p style="color:#646970;margin-top:12px;">
+        <p style="color:var(--bcc-text-muted);margin-top:12px;">
             <strong>Ready</strong> means a registered driver for that operation is enabled and
             configured. It does not mean anything is running — nothing on this page runs on a
             schedule.
@@ -1058,21 +1060,21 @@ class NftDiscoveryPage
         $ops     = is_array($chain['operations'] ?? null) ? $chain['operations'] : [];
         $isOpen  = $selectedId !== null && $selectedId === $chainId;
         ?>
-        <tr<?php echo $isOpen ? ' style="outline:2px solid #2271b1;"' : ''; ?>>
+        <tr<?php echo $isOpen ? ' style="outline:2px solid var(--bcc-accent);"' : ''; ?>>
             <td>
                 <strong><?php echo esc_html($name); ?></strong><br>
                 <code><?php echo esc_html($slug); ?></code>
-                <span style="color:#646970;font-size:11px;">#<?php echo $chainId; ?></span>
+                <span style="color:var(--bcc-text-muted);font-size:11px;">#<?php echo $chainId; ?></span>
                 <?php if (($chain['is_active'] ?? true) !== true): ?>
-                    <div style="color:#dba617;font-size:11px;">deactivated</div>
+                    <div style="color:var(--bcc-warning);font-size:11px;">deactivated</div>
                 <?php endif; ?>
                 <?php if (($chain['is_testnet'] ?? false) === true): ?>
-                    <div style="color:#646970;font-size:11px;">testnet</div>
+                    <div style="color:var(--bcc-text-muted);font-size:11px;">testnet</div>
                 <?php endif; ?>
                 <?php if ($chainId > 0): ?>
                     <div style="margin-top:6px;">
                         <?php if ($isOpen): ?>
-                            <strong style="font-size:11px;color:#2271b1;">editing below</strong>
+                            <strong style="font-size:11px;color:var(--bcc-accent);">editing below</strong>
                         <?php else: ?>
                             <a style="font-size:11px;" href="<?php echo esc_url(add_query_arg(
                                 ['page' => self::PAGE_SLUG, 'family' => $family, 'chain' => $chainId],
@@ -1113,7 +1115,7 @@ class NftDiscoveryPage
             <span style="font-weight:600;color:<?php echo esc_attr(self::status_colour($status)); ?>;">
                 <?php echo esc_html(self::status_label($status)); ?>
             </span>
-            <div style="font-size:11px;color:#646970;margin-top:2px;">
+            <div style="font-size:11px;color:var(--bcc-text-muted);margin-top:2px;">
                 <?php echo esc_html(self::reason_sentence($status, $reason)); ?>
             </div>
 
@@ -1132,7 +1134,7 @@ class NftDiscoveryPage
             <?php endif; ?>
 
             <?php foreach ($refusals as $driver => $refusal): ?>
-                <div style="font-size:11px;color:#d63638;margin-top:4px;">
+                <div style="font-size:11px;color:var(--bcc-danger);margin-top:4px;">
                     <?php
                     // ⚠ `endpoint_display` is `scheme://host` — `endpointRefusal()`
                     // re-describes it on the way out and never exports the
@@ -1159,7 +1161,7 @@ class NftDiscoveryPage
                     <?php if ($message !== ''): ?>
                         <div><?php echo esc_html(AdminActionSupport::operatorSafeExcerpt($message)); ?></div>
                     <?php endif; ?>
-                    <div style="color:#646970;">
+                    <div style="color:var(--bcc-text-muted);">
                         Point this chain's RPC URL at a DAS-capable endpoint to clear it.
                     </div>
                 </div>
@@ -1311,16 +1313,16 @@ class NftDiscoveryPage
     private static function render_wallet_refresh_method(array $snapshot): void
     {
         ?>
-        <h2>Wallet-linked refresh <span style="font-weight:400;color:#646970;">— a separate method</span></h2>
+        <h2>Wallet-linked refresh <span style="font-weight:400;color:var(--bcc-text-muted);">— a separate method</span></h2>
 
-        <p style="color:#646970;max-width:900px;">
+        <p style="color:var(--bcc-text-muted);max-width:900px;">
             When a member links a wallet, the collections that wallet holds can be read back from the
             provider and recorded. That is <strong>not</strong> chain discovery: it finds only what a
             linked wallet happens to hold, so a collection nobody on this platform owns is invisible
             to it.
         </p>
 
-        <p style="color:#646970;max-width:900px;">
+        <p style="color:var(--bcc-text-muted);max-width:900px;">
             It runs on its own existing schedule and is not started from this page. Anything it
             records arrives <strong>unverified</strong>, and it verifies nothing and creates no
             community.
@@ -1471,7 +1473,7 @@ class NftDiscoveryPage
 
         ?>
         <h2 style="margin-top:32px;">Add a collection</h2>
-        <p style="color:#646970;max-width:60em;">
+        <p style="color:var(--bcc-text-muted);max-width:60em;">
             Manual intake is the only way a collection is added. The chain you
             pick is authoritative: the form is bound to it, and a submission whose
             chain does not belong to this family is refused.
@@ -1481,7 +1483,7 @@ class NftDiscoveryPage
         </p>
 
         <?php if ($allValidated): ?>
-            <p style="color:#646970;max-width:60em;">
+            <p style="color:var(--bcc-text-muted);max-width:60em;">
                 The submitted contract is <strong>checked against the chain</strong> before the
                 row is written — a CW-721 <code>contract_info</code> probe on Cosmos, an
                 ERC-165 <code>supportsInterface</code> call on EVM, or a verified
@@ -1490,7 +1492,7 @@ class NftDiscoveryPage
                 <em>not an NFT collection</em>, and nothing is written either way.
             </p>
         <?php elseif (!$noneValidated): ?>
-            <p style="max-width:60em;padding:8px 12px;background:#fcf9e8;border-left:4px solid #dba617;">
+            <p style="max-width:60em;padding:8px 12px;background:var(--bcc-warning-bg);border-left:4px solid var(--bcc-highlight);">
                 <strong>Validation differs by chain here.</strong>
                 <?php echo (int) $validatedCount; ?> of <?php echo count($eligible); ?>
                 chains below check the contract against the chain before writing the row;
@@ -1498,7 +1500,7 @@ class NftDiscoveryPage
                 launch chains are validated.
             </p>
         <?php else: ?>
-            <p style="max-width:60em;padding:8px 12px;background:#fcf9e8;border-left:4px solid #dba617;">
+            <p style="max-width:60em;padding:8px 12px;background:var(--bcc-warning-bg);border-left:4px solid var(--bcc-highlight);">
                 <strong>Not validated on the chains listed here.</strong> Nothing below proves the
                 address is an NFT contract — no chain in this list has a validation driver
                 BCC supports. The identifier is checked for shape and canonical form
@@ -1507,14 +1509,14 @@ class NftDiscoveryPage
         <?php endif; ?>
 
         <?php if ($eligible === []): ?>
-            <p style="max-width:60em;padding:8px 12px;background:#f6f7f7;border-left:4px solid #72aee6;">
+            <p style="max-width:60em;padding:8px 12px;background:var(--bcc-bg-raised);border-left:4px solid var(--bcc-info);">
                 No chain in this family can take a manual collection yet. A chain needs
                 <strong>product support</strong> and <strong>manual collection discovery</strong>
                 both enabled. Set them per chain in the capability editor on this page.
             </p>
         <?php else: ?>
             <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
-                  style="margin:8px 0 24px 0;padding:12px;background:#fff;border:1px solid #c3c4c7;border-radius:4px;display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;">
+                  style="margin:8px 0 24px 0;padding:12px;background:var(--bcc-bg-card);border:1px solid var(--bcc-border-strong);border-radius:4px;display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;">
                 <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_ADD_COLLECTION); ?>">
                 <input type="hidden" name="family" value="<?php echo esc_attr($family); ?>">
 

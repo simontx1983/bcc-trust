@@ -34,6 +34,7 @@ use BCC\Trust\Core\Repositories\PhotoRepository;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\PeepSoAlbumAccess;
 use BCC\Trust\Core\Support\PeepSoFriendGate;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\UserSlugResolver;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -74,6 +75,16 @@ final class UserAlbumsEndpoint
         $targetId = UserSlugResolver::resolve($slug);
         if ($targetId === 0) {
             return ApiResponse::error('bcc_not_found', 'User not found.', 404);
+        }
+
+        // §F-02 profile-wide gate, which STACKS WITH the per-album gate
+        // below rather than replacing it. The two answer different
+        // questions: this one is "may the viewer see this person at all",
+        // PeepSoAlbumAccess::canView is "may they see this album". A
+        // PUBLIC album belonging to an "only me" profile was reachable
+        // before precisely because only the second question was asked.
+        if (!ProfileAccess::canViewProfile($targetId)) {
+            return ProfileAccess::forbidden();
         }
 
         $viewerId = get_current_user_id();

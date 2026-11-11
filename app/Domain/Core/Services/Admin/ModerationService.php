@@ -6,7 +6,7 @@ use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Repositories\ScoreRepository;
 use BCC\Trust\Core\Repositories\SuspensionRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
-use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Services\Vote\VoteRemovalService;
 use BCC\Trust\Core\Services\TrustScoreService;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Security\AuditLogger;
@@ -30,17 +30,17 @@ final class ModerationService
 {
     private ScoreRepository $scoreRepository;
     private UserInfoRepository $userInfoRepository;
-    private VoteRepository $voteRepository;
+    private VoteRemovalService $voteRemovalService;
     private SuspensionRepository $suspensionRepository;
 
     public function __construct(
         ScoreRepository $scoreRepository,
         UserInfoRepository $userInfoRepository,
-        VoteRepository $voteRepository
+        VoteRemovalService $voteRemovalService
     ) {
         $this->scoreRepository      = $scoreRepository;
         $this->userInfoRepository   = $userInfoRepository;
-        $this->voteRepository       = $voteRepository;
+        $this->voteRemovalService   = $voteRemovalService;
         $this->suspensionRepository = \BCC\Trust\Core\Plugin::instance()->suspensionRepository();
     }
 
@@ -56,6 +56,7 @@ final class ModerationService
      */
     public function suspendUser(int $userId, string $reason = 'manual_suspension', string $notes = ''): array
     {
+        $this->ensureUserInfoRow($userId);
         $fraudScore = $this->userInfoRepository->getFraudScore($userId);
 
         // Atomic: the suspensions row and the user_info gate flag must land
@@ -77,6 +78,8 @@ final class ModerationService
             echo '<div class="notice notice-error"><p>Failed to suspend user: database error.</p></div>';
             return ['success' => false, 'message' => 'Failed to suspend user: database error.'];
         }
+
+        $this->revokeSessions($userId);
 
         $this->logAction('admin_suspend', $userId, [
             'reason' => $reason,
@@ -128,37 +131,38 @@ final class ModerationService
     // ──────────────────────────────────────────────────────────────
 
     /**
-     * Soft-delete all votes cast by a user and recalculate affected page scores.
+     * Remove all active votes cast by a user (moderation removal: restorable,
+     * re-vote blocked) and recalculate the affected pages.
+     *
+     * Delegates to VoteRemovalService, the single bulk-removal path, which
+     * leaves dispute-removed votes untouched and audits the removed vote ids.
      *
      * @param int $userId The voter whose votes to clear.
      * @return array{success: bool, message: string, pages_affected: int}
      */
     public function clearVotes(int $userId): array
     {
-        $affectedPages = $this->voteRepository->getActivePageIdsByVoter($userId);
-
-        $r1 = $this->voteRepository->softDeleteAllByVoter($userId);
-
-        if ($r1 === false) {
+        try {
+            $result = $this->voteRemovalService
+                ->removeVotesCastBy([$userId], 'admin_clear_votes', get_current_user_id());
+        } catch (\Throwable $e) {
             Logger::error('[bcc-trust] clear_votes_failed', [
                 'user_id' => $userId,
+                'error'   => $e->getMessage(),
             ]);
-            echo '<div class="notice notice-error"><p>Failed to clear votes: database error.</p></div>';
+            echo '<div class="notice notice-error"><p>Failed to clear votes: database error. Nothing was removed.</p></div>';
             return ['success' => false, 'message' => 'Failed to clear votes: database error.', 'pages_affected' => 0];
         }
 
-        $this->userInfoRepository->updateVotesCast($userId, 0);
-
-        foreach ($affectedPages as $pageId) {
-            do_action('bcc.trust.recalculate_score', (int) $pageId);
-        }
-
-        $this->logAction('admin_clear_votes', $userId, [
-            'pages_affected' => count($affectedPages),
-        ]);
-
-        echo '<div class="notice notice-success"><p>Votes cleared. ' . count($affectedPages) . ' page scores recalculated.</p></div>';
-        return ['success' => true, 'message' => 'Votes cleared.', 'pages_affected' => count($affectedPages)];
+        $message = sprintf(
+            'Votes cleared: %d removed across %d pages (%d recalculated now, %d queued for the recalculation cron).',
+            $result['removed'],
+            $result['pages'],
+            $result['recalculated'],
+            $result['queued']
+        );
+        echo '<div class="notice notice-success"><p>' . esc_html($message) . '</p></div>';
+        return ['success' => true, 'message' => $message, 'pages_affected' => $result['pages']];
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -345,35 +349,32 @@ final class ModerationService
         switch ($action) {
 
             case 'invalidate_votes':
-                // Soft-delete all votes cast by ring members
-                $affectedPages = $this->voteRepository->getActivePageIdsByVoterIds($userIds);
-                $this->voteRepository->softDeleteByVoterIds($userIds);
-
-                // Invalidate inbound votes (votes on pages owned by ring members).
-                // Single batched query instead of one per user.
-                $ownedPages = $this->scoreRepository->getPageIdsByOwners($userIds);
-
-                if (!empty($ownedPages)) {
-                    $this->voteRepository->softDeleteByPageIds($ownedPages);
-                    $affectedPages = array_unique(array_merge($affectedPages, $ownedPages));
+                // Remove every active vote cast BY ring members — including
+                // their votes on each other's pages, which is how a ring
+                // inflates scores. Third-party votes on ring-owned pages are
+                // deliberately NOT removed here (product decision, F-104):
+                // they come from people outside the ring. Moderation status,
+                // restorable, dispute-removed rows untouched, vote ids audited.
+                try {
+                    $result = $this->voteRemovalService
+                        ->removeVotesCastBy(array_values($userIds), 'admin_ring_invalidate_votes', $adminId);
+                    $msg = 'invalidated_' . $result['pages'];
+                } catch (\Throwable $e) {
+                    Logger::error('[bcc-trust] ring_invalidate_votes_failed', [
+                        'ring_users' => $userIds,
+                        'error'      => $e->getMessage(),
+                    ]);
+                    // Unrecognised by the Rings tab on purpose: it renders
+                    // the "check the application log" warning. Nothing was
+                    // removed (the removal is one transaction).
+                    $msg = 'invalidate_failed';
                 }
-
-                // Recalculate affected pages
-                foreach ($affectedPages as $pageId) {
-                    do_action('bcc.trust.recalculate_score', (int) $pageId);
-                }
-
-                $this->logAction('admin_ring_invalidate_votes', 0, [
-                    'ring_users'     => $userIds,
-                    'pages_affected' => count($affectedPages),
-                ]);
-
-                $msg = 'invalidated_' . count($affectedPages);
                 break;
 
             case 'suspend_all':
                 $suspended = 0;
                 foreach ($userIds as $uid) {
+                    $this->ensureUserInfoRow($uid);
                     $fraudScore = $this->userInfoRepository->getFraudScore($uid);
 
                     try {
@@ -381,6 +382,7 @@ final class ModerationService
                             $this->suspensionRepository->create($uid, $adminId, 'vote_ring', 'Suspended as part of vote ring action.', $fraudScore);
                             $this->userInfoRepository->suspendUser($uid, 'vote_ring');
                         });
+                        $this->revokeSessions($uid);
                         $suspended++;
                     } catch (\Throwable $e) {
                         // Skip this user but keep going; count only the ones
@@ -501,12 +503,14 @@ final class ModerationService
         foreach ($userIds as $uid) {
             switch ($action) {
                 case 'suspend':
+                    $this->ensureUserInfoRow($uid);
                     $score = $this->userInfoRepository->getFraudScore($uid);
                     try {
                         \BCC\Trust\Core\Security\TransactionManager::run(function () use ($uid, $adminId, $score) {
                             $this->suspensionRepository->create($uid, $adminId, 'manual_suspension', '', $score);
                             $this->userInfoRepository->suspendUser($uid, 'manual_suspension');
                         });
+                        $this->revokeSessions($uid);
                         $processed++;
                     } catch (\Throwable $e) {
                         // Log + skip; count only users who actually suspended,
@@ -535,8 +539,19 @@ final class ModerationService
                     break;
 
                 case 'clear_votes':
-                    $this->voteRepository->softDeleteAllByVoter($uid);
-                    $processed++;
+                    // Same single removal path as clearVotes(): recalc,
+                    // votes_cast reset, caches and an audit entry with the
+                    // vote ids — the bulk case used to do none of that (F-81).
+                    try {
+                        $this->voteRemovalService
+                            ->removeVotesCastBy([$uid], 'admin_clear_votes', $adminId);
+                        $processed++;
+                    } catch (\Throwable $e) {
+                        Logger::error('[bcc-trust] bulk_clear_votes_failed', [
+                            'user_id'  => $uid,
+                            'db_error' => $e->getMessage(),
+                        ]);
+                    }
                     break;
 
                 case 'reanalyze':
@@ -629,5 +644,35 @@ final class ModerationService
     public function isFingerprintWhitelisted(string $fp): bool
     {
         return isset($this->getFingerprintWhitelist()[$fp]);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // SUSPEND-PATH HELPERS (F-112 / F-119)
+    // ──────────────────────────────────────────────────────────────
+
+    /**
+     * Make sure the user has a user_info row before suspending (F-112).
+     * The gate every enforcement path reads (is_suspended) lives on that
+     * row, so a missing one used to make a suspension a silent no-op. Reuses
+     * UserSyncService, the one place that builds a row from the WP user.
+     * UserInfoRepository::suspendUser() still throws if the row is absent.
+     */
+    private function ensureUserInfoRow(int $userId): void
+    {
+        if ($userId <= 0 || $this->userInfoRepository->exists($userId)) {
+            return;
+        }
+        \BCC\Trust\Core\Plugin::instance()->userSyncService()->sync($userId);
+    }
+
+    /**
+     * Revoke every Bearer token the user holds (F-119), so a session minted
+     * before the suspension stops authenticating everywhere at once, not
+     * just at routes that check suspension. Called only after the suspension
+     * transaction committed. Same mechanism as a password change.
+     */
+    private function revokeSessions(int $userId): void
+    {
+        \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
     }
 }
