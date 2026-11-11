@@ -1520,11 +1520,21 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
 
     // ── Delegations (by delegator account) ─────────────────────────────────
 
+    /** Delegations requested per LCD page (the endpoint's own page cap). */
+    private const DELEGATIONS_PAGE_LIMIT = 500;
+
+    /**
+     * Most pages followed for one delegator. A set still carrying a
+     * `next_key` after this many pages is INCOMPLETE and reads as UNKNOWN,
+     * never as the truncated set (F-63).
+     */
+    private const DELEGATIONS_MAX_PAGES = 5;
+
     /**
      * Fetch the set of validators this account delegates to.
      *
-     * One paginated LCD call. Capped at 500 entries — well above any realistic
-     * delegator's validator count, and the LCD endpoint's own page cap.
+     * Paginated LCD walk: 500 entries a page, following `next_key` for at
+     * most {@see DELEGATIONS_MAX_PAGES} pages.
      *
      * Legacy shape: collapses transport failures to []. Callers that must
      * distinguish "no delegations" from "could not check" (the delegator-
@@ -1542,8 +1552,10 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * Nullable variant of {@see fetch_delegations}: preserves the
      * transport-failure signal instead of collapsing it to [].
      *
-     *   - null → LCD unreachable / non-200 / unparseable (UNKNOWN —
-     *            the caller must NOT read this as "no delegations").
+     *   - null → LCD unreachable / non-200 / unparseable, OR a 200 whose
+     *            body is not a readable delegations response, OR a set
+     *            that could not be read to its end (UNKNOWN — the caller
+     *            must NOT read this as "no delegations").
      *   - []   → the LCD answered and the account delegates to nothing.
      *   - rows → the account's live delegation set.
      *
@@ -1555,28 +1567,101 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      */
     public function fetch_delegations_result(string $delegatorAddress): ?array
     {
-        $response = $this->lcdGet("/cosmos/staking/v1beta1/delegations/{$delegatorAddress}", [
-            'pagination.limit' => 500,
-        ]);
+        // ⚠ F-63: EVERY ANSWER HERE IS EITHER COMPLETE OR null.
+        //
+        // The revoke sweep removes a member on INELIGIBLE, and "no row for
+        // this validator" is INELIGIBLE. So any response this cannot read
+        // to its end must come back as null (UNKNOWN), never as a partial
+        // or empty set: a 200 that is not a delegations response, an item
+        // that cannot be read, and a set cut off at a page boundary each
+        // used to read as "does not delegate" and evict the member — and,
+        // being non-null, was cached for 5 minutes and written through to
+        // the delegation index, wiping it.
+        $rows    = [];
+        $pageKey = null;
 
-        if ($response === null) {
-            // Transport failure — preserve UNKNOWN.
+        for ($page = 0; $page < self::DELEGATIONS_MAX_PAGES; $page++) {
+            $params = ['pagination.limit' => self::DELEGATIONS_PAGE_LIMIT];
+            if ($pageKey !== null) {
+                $params['pagination.key'] = $pageKey;
+            }
+
+            $response = $this->lcdGet("/cosmos/staking/v1beta1/delegations/{$delegatorAddress}", $params);
+
+            if ($response === null) {
+                // Transport failure — on ANY page — preserves UNKNOWN. Rows
+                // from earlier pages are not the whole set.
+                return null;
+            }
+
+            $pageRows = $this->parseDelegationsPage($response);
+            if ($pageRows === null) {
+                \BCC\Core\Log\Logger::warning('[Cosmos Fetcher] unreadable delegations response; treating as UNKNOWN', [
+                    'chain_id' => (int) ($this->chain->id ?? 0),
+                    'page'     => $page,
+                ]);
+                return null;
+            }
+            foreach ($pageRows as $row) {
+                $rows[] = $row;
+            }
+
+            $nextKey = $response['pagination']['next_key'] ?? null;
+            if (!is_string($nextKey) || $nextKey === '') {
+                // The LCD says this is the last page: the set is complete.
+                return $rows;
+            }
+            $pageKey = $nextKey;
+        }
+
+        // Still a next_key after the cap: the set is INCOMPLETE, and an
+        // incomplete set may be missing the one delegation that matters.
+        \BCC\Core\Log\Logger::warning('[Cosmos Fetcher] delegations exceed the page cap; treating as UNKNOWN', [
+            'chain_id'  => (int) ($this->chain->id ?? 0),
+            'max_pages' => self::DELEGATIONS_MAX_PAGES,
+        ]);
+        return null;
+    }
+
+    /**
+     * PURE-ish. Parse one `/cosmos/staking/v1beta1/delegations` page, or
+     * null when it is not a readable delegations response (F-63).
+     *
+     * Same strictness as {@see parseCw721TokensData()}: the list key must
+     * be present and a list, and an item that cannot be read voids the
+     * page rather than being dropped — dropping it would undercount the
+     * delegator, which the revoke sweep acts on.
+     *
+     * An unreadable `balance.amount` is NOT a void: the row is kept with a
+     * null amount, which the eligibility service already treats as UNKNOWN
+     * for that validator.
+     *
+     * @param array<string, mixed> $response
+     * @return list<array{validator_address: string, shares: string|null, amount: float|null}>|null
+     */
+    private function parseDelegationsPage(array $response): ?array
+    {
+        if (!array_key_exists('delegation_responses', $response)) {
+            return null;
+        }
+        $items = $response['delegation_responses'];
+        if (!is_array($items) || !array_is_list($items)) {
             return null;
         }
 
-        if (empty($response['delegation_responses'])) {
-            return [];
-        }
-
         $rows = [];
-        foreach ($response['delegation_responses'] as $item) {
+        foreach ($items as $item) {
+            if (!is_array($item) || !is_array($item['delegation'] ?? null)) {
+                return null;
+            }
             $validator = $item['delegation']['validator_address'] ?? null;
-            if (!$validator) {
-                continue;
+            if (!is_string($validator) || $validator === '') {
+                return null;
             }
 
             $shares    = $item['delegation']['shares'] ?? null;
-            $rawAmount = $item['balance']['amount'] ?? null;
+            $balance   = $item['balance'] ?? null;
+            $rawAmount = is_array($balance) ? ($balance['amount'] ?? null) : null;
 
             $rows[] = [
                 'validator_address' => $validator,
