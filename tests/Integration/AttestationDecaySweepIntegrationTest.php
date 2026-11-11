@@ -203,6 +203,54 @@ final class AttestationDecaySweepIntegrationTest extends TestCase
         self::assertSame('validator_card|52', get_option(AttestationScoreSynthesis::DECAY_CURSOR_OPTION));
     }
 
+    /**
+     * #481 review: wpdb::query() can fail WITHOUT setting last_error (the
+     * silent !ready path after a lost connection), and get_results($sql) then
+     * hands back the previous statement's last_result — here, empty. Taken at
+     * face value that is "no more targets", and the sweep would CLEAR its
+     * cursor. The read must report it as a failure (null), not as the end.
+     */
+    public function testASilentQueryFailureIsAFailureNotTheEnd(): void
+    {
+        $real = $GLOBALS['wpdb'];
+        $fake = new class {
+            public string $prefix     = 'wp_';
+            public string $last_error = '';
+            /** @var list<object> stale rows left by an earlier statement */
+            public array $last_result = [];
+
+            /** @param mixed ...$a */
+            public function prepare(string $q, ...$a): string
+            {
+                return vsprintf(str_replace(['%s', '%d'], ["'%s'", '%d'], $q), $a);
+            }
+
+            /** The keyset SELECT fails silently: false, and no last_error. */
+            public function query(string $sql)
+            {
+                return false;
+            }
+
+            /** What real wpdb does here: re-run via query(), then hand back last_result. */
+            public function get_results(?string $sql = null)
+            {
+                if ($sql !== null) {
+                    $this->query($sql);
+                }
+                return $this->last_result;
+            }
+        };
+
+        $GLOBALS['wpdb'] = $fake;
+        try {
+            $result = (new AttestationRepository())->listTargetsWithActiveAttestationsAfter('', 0, 50);
+        } finally {
+            $GLOBALS['wpdb'] = $real;
+        }
+
+        self::assertNull($result, 'a silent query failure is a failed read, never an empty last page');
+    }
+
     /** An overlapping run (another connection holds the lock) does nothing. */
     public function testAnOverlappingRunSkips(): void
     {
