@@ -297,6 +297,10 @@ final class NotificationViewService
             NotificationType::ATTESTATION_STAND_BEHIND_RECEIVED => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
             NotificationType::ATTESTATION_REVOKED              => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
             NotificationType::ATTESTATION_REAFFIRMED           => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
+            // F-73 auto-hide notice: deliberately NOT '/?focus=act' — the
+            // post is moderation-hidden, so every feed (the author's
+            // included) excludes it and a focus link would dead-end.
+            NotificationType::CONTENT_AUTO_HIDDEN => '/',
             default                       => '/',
         };
     }
