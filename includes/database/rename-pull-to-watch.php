@@ -58,6 +58,20 @@ if (!function_exists('bcc_trust_rename_pull_to_watch')) {
         return $found !== null;
     }
 
+    /** Log why a legacy column was kept rather than dropped (F-41). */
+    function bcc_trust_pw_log_refusal(string $table, string $column, string $reason): void
+    {
+        global $wpdb;
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] pull→watch: kept legacy column, data not proven moved', [
+                'table'    => $table,
+                'column'   => $column,
+                'reason'   => $reason,
+                'db_error' => $wpdb->last_error,
+            ]);
+        }
+    }
+
     /**
      * Move a column from $oldCol to $newCol, data-preserving, in either state:
      *   - old exists, new doesn't → plain CHANGE (rename keeps the data).
@@ -80,10 +94,28 @@ if (!function_exists('bcc_trust_rename_pull_to_watch')) {
             return true;
         }
         if ($hasOld && $hasNew) {
+            // F-41: the legacy column is only dropped once its data is PROVEN
+            // to be in the new one. The backfill's result used to be ignored
+            // and the DROP ran regardless, so a failed UPDATE destroyed the
+            // legacy values. Any failure here leaves both columns in place;
+            // this runs on every schema pass, so it simply retries.
             // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-            $wpdb->query("UPDATE `{$table}` SET `{$newCol}` = `{$oldCol}` WHERE `{$newCol}` IS NULL");
+            if ($wpdb->query("UPDATE `{$table}` SET `{$newCol}` = `{$oldCol}` WHERE `{$newCol}` IS NULL") === false) {
+                bcc_trust_pw_log_refusal($table, $oldCol, 'backfill failed');
+                return false;
+            }
+            // Proof, not trust: no row may still hold a value ONLY in the old column.
             // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-            $wpdb->query("ALTER TABLE `{$table}` DROP COLUMN `{$oldCol}`");
+            $unmoved = $wpdb->get_var("SELECT COUNT(*) FROM `{$table}` WHERE `{$newCol}` IS NULL AND `{$oldCol}` IS NOT NULL");
+            if ($unmoved === null || (int) $unmoved > 0) {
+                bcc_trust_pw_log_refusal($table, $oldCol, $unmoved === null ? 'verification failed' : "{$unmoved} rows not backfilled");
+                return false;
+            }
+            // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+            if ($wpdb->query("ALTER TABLE `{$table}` DROP COLUMN `{$oldCol}`") === false) {
+                bcc_trust_pw_log_refusal($table, $oldCol, 'drop failed');
+                return false;
+            }
             return true;
         }
         return false;
