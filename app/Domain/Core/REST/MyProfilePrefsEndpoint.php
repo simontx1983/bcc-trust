@@ -84,6 +84,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Trust\Core\Repositories\DbWriteCheck;
 use BCC\Trust\Core\Support\ApiResponse;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -294,8 +295,8 @@ final class MyProfilePrefsEndpoint
         }
 
         // ── Phase 2: every field validated; write them ───────────────────
-        // Each write is CHECKED (#449 review, M1): $wpdb->last_error is
-        // cleared before it and read after it. The return value cannot be
+        // Each write is CHECKED (#449 review, M1) through DbWriteCheck: the
+        // database's last error is cleared before it and read after it. The return value cannot be
         // used, because update_user_meta() also returns false when the value
         // is unchanged. The first failed write stops the sequence and the
         // request answers 500 with `data.saved`, the fields that DID persist,
@@ -441,37 +442,18 @@ final class MyProfilePrefsEndpoint
     ];
 
     /**
-     * Run one write and report whether the database accepted it.
+     * Run one write and report whether the database accepted it, via
+     * {@see DbWriteCheck} ($wpdb stays in the Repositories layer, §1).
      *
-     * The return value of the write is ignored: update_user_meta() answers
-     * false for an UNCHANGED value as well as for a failure, so "false" is
-     * not an error signal. $wpdb->last_error is: cleared before the write and
-     * non-empty after it only if a query in it failed.
+     * The write's return value is ignored: update_user_meta() answers false
+     * for an UNCHANGED value as well as for a failure, so "false" is not an
+     * error signal. ⚠ Last-resort check: a write lost on wpdb's `! ready`
+     * early return leaves last_error empty and counts as saved. See
+     * DbWriteCheck for why a write through a WordPress API cannot do better.
      */
     private static function checkedWrite(callable $write): bool
     {
-        self::clearLastError();
-        $write();
-
-        return self::lastError() === '';
-    }
-
-    // Separate helpers (HiddenActivityRepository::runRead()'s shape) so static
-    // analysis does not narrow last_error to '' across the write that mutates it.
-    private static function clearLastError(): void
-    {
-        /** @var \wpdb|null $wpdb */
-        global $wpdb;
-        if ($wpdb !== null) {
-            $wpdb->last_error = '';
-        }
-    }
-
-    private static function lastError(): string
-    {
-        /** @var \wpdb|null $wpdb */
-        global $wpdb;
-        return $wpdb !== null ? (string) $wpdb->last_error : '';
+        return DbWriteCheck::run($write);
     }
 
     /** @param list<string> $saved */
@@ -481,7 +463,7 @@ final class MyProfilePrefsEndpoint
             'user_id' => $userId,
             'field'   => $field,
             'saved'   => $saved,
-            'error'   => self::lastError(),
+            'error'   => DbWriteCheck::lastError(),
         ]);
 
         return ApiResponse::error(
