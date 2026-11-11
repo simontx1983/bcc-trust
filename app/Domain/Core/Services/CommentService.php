@@ -806,23 +806,17 @@ final class CommentService
     }
 
     /**
-     * Resolve a remote GIF URL into a gif media blob. Mirrors
-     * bcc-core PeepSoGifWriter's posture: the URL must be an http(s) URL
-     * that contains "giphy.com" (no file staging — the GIF stays on
-     * Giphy's CDN). Any other host is rejected.
+     * Resolve a remote GIF URL into a gif media blob (no file staging; the
+     * GIF stays on Giphy's CDN). The URL must pass the shared bcc-core rule
+     * {@see \BCC\Core\Security\GiphyUrl::isAllowed()}: https, host giphy.com
+     * or *.giphy.com, no userinfo, port 443 only. Same rule as post GIFs
+     * (PeepSoGifWriter), so the two paths cannot drift.
      *
      * @return array{ok: true, media: array<string, mixed>}|array{error: string, message: string}
      */
     private static function resolveGifMedia(string $url): array
     {
-        // Host-based check (NOT a substring): a substring test would accept
-        // https://evil.com/x?y=giphy.com and render it as an <img> in every
-        // viewer's browser. Require the host to be giphy.com or a subdomain.
-        $isUrl  = filter_var($url, FILTER_VALIDATE_URL) !== false;
-        $scheme = strtolower((string) wp_parse_url($url, PHP_URL_SCHEME));
-        $host   = strtolower((string) wp_parse_url($url, PHP_URL_HOST));
-        $isGiphyHost = $host === 'giphy.com' || str_ends_with($host, '.giphy.com');
-        if (!$isUrl || ($scheme !== 'https' && $scheme !== 'http') || !$isGiphyHost) {
+        if (!self::isAllowedGifUrl($url)) {
             return ['error' => 'bcc_invalid_request', 'message' => 'GIF must be a Giphy URL.'];
         }
 
@@ -833,6 +827,16 @@ final class CommentService
                 'url'  => $url,
             ],
         ];
+    }
+
+    /**
+     * Fails CLOSED when bcc-core's GiphyUrl is unavailable: no GIF URL is
+     * accepted or rendered without the shared rule.
+     */
+    private static function isAllowedGifUrl(string $url): bool
+    {
+        return class_exists(\BCC\Core\Security\GiphyUrl::class)
+            && \BCC\Core\Security\GiphyUrl::isAllowed($url);
     }
 
     /**
@@ -850,6 +854,13 @@ final class CommentService
         $kind = isset($media['kind']) && is_string($media['kind']) ? $media['kind'] : '';
         $url  = isset($media['url']) && is_string($media['url']) ? $media['url'] : '';
         if ($url === '' || !in_array($kind, ['photo', 'gif'], true)) {
+            return null;
+        }
+
+        // Read-time re-check for GIFs. Rows stored before the shared rule
+        // existed (the old check also allowed plain http) must not render
+        // a non-conforming URL as an <img>. Degrade to no-media.
+        if ($kind === 'gif' && !self::isAllowedGifUrl($url)) {
             return null;
         }
 

@@ -7,7 +7,9 @@
  * the §5.2 24-hour confirmation. The 5-minute sweep awards Apprentice
  * at due_at iff the six R1 conditions hold; pending reports and
  * report-volume auto-hide have ZERO effect on this clock — they never
- * pause, reset, or extend it. States: pending → confirmed | voided.
+ * pause, reset, or extend it. States: pending → confirmed | voided, and
+ * voided → pending when a NEW qualifying contribution re-arms the clock
+ * (RankPendingRepository::restartIfVoided; no schema change).
  *
  * `content_act_id` is stored alongside the wp_posts id because content
  * reports key feed items by activity id — the R1 predicate's
