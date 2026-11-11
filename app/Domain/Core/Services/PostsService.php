@@ -1358,8 +1358,10 @@ final class PostsService
         }
 
         // ── Ownership ────────────────────────────────────────────────
+        // ⚠ EXISTENCE ORACLE (F-47): someone else's post reads as NOT
+        // FOUND, byte-identical to a missing id (same as getBlogForEdit).
         if ((int) $post->post_author !== $authorId) {
-            return ['error' => 'bcc_forbidden', 'message' => 'You can only edit your own blog posts.'];
+            return ['error' => 'bcc_not_found', 'message' => 'Blog post not found.'];
         }
 
         // ── §D6 group target ─────────────────────────────────────────

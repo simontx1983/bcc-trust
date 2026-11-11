@@ -27,6 +27,39 @@ namespace BCC\Trust\Core\Services {
             \BCC\Trust\Tests\Stubs\CommentDeleteFakes::$actions[] = [$hook, $args];
         }
     }
+
+    // F-47: CommentService::gateForParent() reads the parent's group tag.
+    if (!function_exists(__NAMESPACE__ . '\\get_post_meta')) {
+        /** @return mixed */
+        function get_post_meta(int $postId, string $key = '', bool $single = false)
+        {
+            return \BCC\Trust\Tests\Stubs\CommentDeleteFakes::$postMeta[$postId][$key] ?? '';
+        }
+    }
+}
+
+namespace BCC\Core\Repositories {
+    // F-47: the parent activity a comment route resolves from its feed_id.
+    if (!class_exists(PeepSoActivityRepository::class, false)) {
+        final class PeepSoActivityRepository
+        {
+            public static function getById(int $actId): ?object
+            {
+                return \BCC\Trust\Tests\Stubs\CommentDeleteFakes::$activities[$actId] ?? null;
+            }
+        }
+    }
+
+    // F-47: gateForParent()'s membership read. No row → not a member.
+    if (!class_exists(PeepSoGroupRepository::class, false)) {
+        final class PeepSoGroupRepository
+        {
+            public static function getMembershipStatus(int $userId, int $groupId): ?string
+            {
+                return \BCC\Trust\Tests\Stubs\CommentDeleteFakes::$memberships[$userId][$groupId] ?? null;
+            }
+        }
+    }
 }
 
 namespace BCC\Trust\Tests\Stubs {
@@ -40,11 +73,23 @@ namespace BCC\Trust\Tests\Stubs {
 
         public static bool $writerResult = true;
 
+        /** @var array<int, object> act_id => PeepSoActivityRepository::getById() row */
+        public static array $activities = [];
+
+        /** @var array<int, array<string, mixed>> post_id => meta key => value */
+        public static array $postMeta = [];
+
+        /** @var array<int, array<int, string>> user_id => group_id => gm_user_status */
+        public static array $memberships = [];
+
         public static function reset(): void
         {
             self::$actions      = [];
             self::$writerCalls  = [];
             self::$writerResult = true;
+            self::$activities   = [];
+            self::$postMeta     = [];
+            self::$memberships  = [];
         }
     }
 }
@@ -66,6 +111,12 @@ namespace BCC\Trust\Core\Repositories {
     if (!class_exists(CommentRepository::class, false)) {
         class CommentRepository
         {
+            // Mirrors the real constants: CommentService::normalizeSort()
+            // reads them on every list call (F-47 drives listByFeedId).
+            public const SORT_NEW      = 'new';
+            public const SORT_TOP      = 'top';
+            public const SORT_RELEVANT = 'relevant';
+
             /** @var array<int, object> act_id => CommentMetaRow-shaped object */
             public array $metaByActId = [];
 

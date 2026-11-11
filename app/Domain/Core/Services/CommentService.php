@@ -103,8 +103,43 @@ final class CommentService
         private readonly AuthorBadgeResolver $authorBadgeResolver,
         private readonly AttestationService $attestationService,
         private readonly StokeRepository $stokeRepo,
-        private readonly UserMiniRepository $userMiniRepo
+        private readonly UserMiniRepository $userMiniRepo,
+        private ?FeedItemReportVisibility $visibility = null
     ) {
+    }
+
+    /**
+     * F-47: the "can this viewer see this post at all" rule, shared with
+     * content reports and the feeds ({@see FeedItemReportVisibility::canSee()}).
+     * Injected by tests; built lazily in production (no Plugin.php wiring
+     * change), exactly as ContentReportService does.
+     */
+    private function visibility(): FeedItemReportVisibility
+    {
+        return $this->visibility ??= new FeedItemReportVisibility(
+            \BCC\Trust\Core\Plugin::instance()->groupsService(),
+            \BCC\Trust\Core\Plugin::instance()->hiddenActivityRepository()
+        );
+    }
+
+    /**
+     * ⚠ EXISTENCE ORACLE (F-47). Called only once the membership gate has
+     * already refused. A post the viewer cannot see at all (a secret group,
+     * or a members-only post in a group they are not in) answers EXACTLY like
+     * a missing id, so the refusal never confirms the post exists. Only a
+     * post the viewer can see keeps the 403, whose hint ("join the group")
+     * reveals nothing they don't already know.
+     *
+     * @param  array{error: string, message: string} $forbidden
+     * @return array{error: string, message: string}
+     */
+    private function refuseParent(int $viewerId, object $parent, array $forbidden): array
+    {
+        if (!$this->visibility()->canSee($viewerId, $parent)) {
+            return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
+        }
+
+        return $forbidden;
     }
 
     /**
@@ -143,7 +178,11 @@ final class CommentService
 
         $gate = $this->gateForParent($viewerId, $parentPostId);
         if (!$gate['can_read']) {
-            return ['error' => 'bcc_forbidden', 'message' => 'You do not have access to this discussion.'];
+            return $this->refuseParent(
+                $viewerId,
+                $parent,
+                ['error' => 'bcc_forbidden', 'message' => 'You do not have access to this discussion.']
+            );
         }
 
         [$cursorKey, $cursorActId] = self::decodeCursor($cursor ?? '', $sort);
@@ -345,7 +384,11 @@ final class CommentService
 
         $gate = $this->gateForParent($authorId, $parentPostId);
         if (!$gate['can_create']) {
-            return ['error' => 'bcc_forbidden', 'message' => 'You do not have permission to comment here.'];
+            return $this->refuseParent(
+                $authorId,
+                $parent,
+                ['error' => 'bcc_forbidden', 'message' => 'You do not have permission to comment here.']
+            );
         }
 
         // Burst seatbelt — same rationale as PostsService::createStatus.
@@ -518,6 +561,16 @@ final class CommentService
         }
 
         if ((int) $meta->author_id !== $viewerId) {
+            // F-47: someone else's comment on a post this viewer cannot see
+            // (or under a feed_id that is not its parent) reads as
+            // NOT FOUND, so comment ids cannot be probed for existence.
+            $parent = PeepSoActivityRepository::getById($parentActId);
+            if ($parent === null
+                || (int) $parent->act_external_id !== (int) $meta->parent_post_id
+                || !$this->visibility()->canSee($viewerId, $parent)
+            ) {
+                return ['error' => 'bcc_not_found', 'message' => 'Comment not found.'];
+            }
             return ['error' => 'bcc_forbidden', 'message' => 'You can only delete your own comments.'];
         }
 
