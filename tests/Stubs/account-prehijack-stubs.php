@@ -24,12 +24,22 @@ namespace BCC\Core\Security {
     if (!class_exists(Throttle::class, false)) {
         final class Throttle
         {
-            public static function allow(string $key, int $limit, int $window): bool
+            public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null): bool
             {
-                // Records every bucket key; denies only when a test sets
-                // $GLOBALS['__bcc_ph']['throttle_deny'] (default: allow).
-                $GLOBALS['__bcc_ph']['throttle_keys'][] = $key;
-                return empty($GLOBALS['__bcc_ph']['throttle_deny']);
+                // Records every bucket (the explicit $key when given, else the
+                // action); denies when a test sets throttle_deny. With
+                // throttle_counting set it COUNTS per bucket like the real
+                // limiter (increment, then allow while count <= limit).
+                $bucket = $key ?? $action;
+                $GLOBALS['__bcc_ph']['throttle_keys'][] = $bucket;
+                if (!empty($GLOBALS['__bcc_ph']['throttle_deny'])) {
+                    return false;
+                }
+                if (!empty($GLOBALS['__bcc_ph']['throttle_counting'])) {
+                    $GLOBALS['__bcc_ph']['throttle_hits'][$bucket] = ($GLOBALS['__bcc_ph']['throttle_hits'][$bucket] ?? 0) + 1;
+                    return $GLOBALS['__bcc_ph']['throttle_hits'][$bucket] <= $limit;
+                }
+                return true;
             }
 
             /** @return null */
