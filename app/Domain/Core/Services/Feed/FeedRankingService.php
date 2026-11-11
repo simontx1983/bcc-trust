@@ -38,6 +38,7 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Services\GroupContextResolver;
+use BCC\Trust\Core\Support\RestrictedGroups;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -562,18 +563,13 @@ final class FeedRankingService
      */
     private static function resolveRestrictedGroupIds(int $viewerId): array
     {
-        $nonOpen = PeepSoGroupRepository::getNonOpenGroupIds();
-        if ($nonOpen === []) {
-            return [];
-        }
-        if ($viewerId <= 0) {
-            return $nonOpen;
-        }
-        $myGroups = PeepSoGroupRepository::getUserMemberGroupIds($viewerId, 1000);
-        if ($myGroups === []) {
-            return $nonOpen;
-        }
-        return array_values(array_diff($nonOpen, $myGroups));
+        // Extracted to Support\RestrictedGroups so the profile Blog tab can
+        // ask the same question (§11 — one definition of "restricted", not
+        // two). This method stays as the feed's call-site name; the five
+        // call sites above are untouched. forViewer() is the behaviour that
+        // used to live here, byte for byte, including passing the
+        // repository's default 500 bound explicitly.
+        return RestrictedGroups::forViewer($viewerId);
     }
 
     /**

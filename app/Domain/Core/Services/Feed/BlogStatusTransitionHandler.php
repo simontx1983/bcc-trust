@@ -53,6 +53,7 @@ namespace BCC\Trust\Core\Services\Feed;
 
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Repositories\PeepSoActivityWriter;
+use BCC\Trust\Core\Services\PostsService;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -141,6 +142,20 @@ final class BlogStatusTransitionHandler
         if (function_exists('wp_save_post_revision')) {
             wp_save_post_revision($postId);
         }
+
+        // §D6 group blogs — a draft PARKS its intended group in sidecar
+        // meta instead of attaching, because attachToGroup fires
+        // `peepso_groups_new_post` the moment it writes, and a draft must
+        // not summon a group to read something unpublished. This is the
+        // one place the attach happens for a draft→publish flip, and it
+        // runs BEFORE the activity-row event so every subscriber sees the
+        // post already carrying its group.
+        //
+        // The helper is idempotent: it re-gates the author's standing, it
+        // no-ops when `peepso_group_id` is already set, and it clears the
+        // sidecar — so an unpublish/republish cycle cannot notify the
+        // group a second time.
+        PostsService::attachParkedBlogGroup($postId, $authorId);
 
         do_action('bcc_blog_post_created', $authorId, $postId);
 
