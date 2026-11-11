@@ -71,10 +71,19 @@ class EdgeRepository {
     private string $votesTable;
     private string $scoresTable;
 
-    public function __construct() {
+    public function __construct(private ?VoteRepository $voteRepo = null) {
         $this->table       = \BCC\Trust\Core\Database\TableRegistry::edges();
         $this->votesTable  = \BCC\Trust\Core\Database\TableRegistry::votes();
         $this->scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
+    }
+
+    /**
+     * Source of the hidden-review predicate (F-55's hiddenReviewExclusion()).
+     * Injected by Plugin; resolved lazily otherwise so callers that never
+     * touch the vote-edge reads need no VoteRepository.
+     */
+    private function votes(): VoteRepository {
+        return $this->voteRepo ??= \BCC\Trust\Core\Plugin::instance()->voteRepository();
     }
 
     // =========================================================================
@@ -150,6 +159,12 @@ class EdgeRepository {
      * Sums all active vote weights cast by the source on pages owned by the
      * target, then upserts (or removes) the corresponding edge row.
      *
+     * - The scores join is pinned to the canonical `category_id = 0` row
+     *   (F-142): the scores PK is (page_id, category_id), so a page with
+     *   category rows joined once per row and multiplied the vote.
+     * - A moderation-hidden review confers no trust (decision: a hidden
+     *   review stops counting) — same predicate as the page score reads.
+     *
      * @param int $sourceUserId  The voter.
      * @param int $targetUserId  The page owner receiving the trust signal.
      */
@@ -162,9 +177,12 @@ class EdgeRepository {
                     COUNT(*)                        AS vote_count
                FROM {$this->votesTable} v
                JOIN {$this->scoresTable} s
-                    ON s.page_id = v.page_id AND s.page_owner_id = %d
+                    ON s.page_id = v.page_id
+                   AND s.category_id = 0
+                   AND s.page_owner_id = %d
               WHERE v.voter_user_id = %d
-                AND v.status = 1",
+                AND v.status = 1
+                AND " . $this->votes()->hiddenReviewExclusion('v'),
             $targetUserId,
             $sourceUserId
         ) );
@@ -323,8 +341,11 @@ class EdgeRepository {
                     SUM( v.weight )   AS total_weight,
                     COUNT(*)          AS vote_count
                FROM {$this->votesTable} v
-               JOIN {$this->scoresTable} s ON s.page_id = v.page_id
+               JOIN {$this->scoresTable} s
+                    ON s.page_id = v.page_id
+                   AND s.category_id = 0
               WHERE v.status = %d
+                AND " . $this->votes()->hiddenReviewExclusion('v') . "
            GROUP BY v.voter_user_id, s.page_owner_id",
             1
         ) ) ?: [];
