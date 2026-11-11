@@ -7,6 +7,8 @@
  *   - POST /auth/refresh           — silent-refresh an expired-OK JWT
  *   - GET  /auth/session           — validate the presented Bearer JWT and
  *                                     say whose session it is (no refresh grace)
+ *   - POST /auth/logout            — sign out the presented Bearer JWT only
+ *                                     (per-jti denylist); always 200
  *
  * Split out of AuthEndpoint (Phase 11 architecture split #3 of 4). Route
  * blocks + handler bodies are VERBATIM; shared helpers + constants moved
@@ -82,10 +84,70 @@ final class SessionController
                 'permission_callback' => '__return_true',
             ]
         );
+
+        // POST /auth/logout — sign out THIS token (F-120). Before it, "sign
+        // out" only cleared the browser's NextAuth cookie; a copied bearer
+        // stayed valid until expiry. Auth is the presented token itself.
+        register_rest_route(
+            AuthSupport::ROUTE_NAMESPACE,
+            '/auth/logout',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'logout'],
+                'permission_callback' => '__return_true',
+            ]
+        );
     }
 
     /** Per-TOKEN ceiling for GET /auth/session (calls arrive from one BFF IP). */
     public const SESSION_RATE_LIMIT = 60;
+
+    /** Per-TOKEN ceiling for POST /auth/logout. */
+    public const LOGOUT_RATE_LIMIT = 30;
+
+    /**
+     * POST /auth/logout — sign out the PRESENTED Bearer token, and only it.
+     *
+     * Decodes the token itself (never the cookie session) with
+     * decodeForRefresh(), so a token still inside its refresh-grace window —
+     * one /auth/refresh would accept — is signed out too. A valid token's jti
+     * is denylisted (JwtToken::logOut) until it could no longer be used:
+     * afterwards it fails every authenticated route, /auth/refresh and
+     * GET /auth/session with ERR_LOGGED_OUT. Other sessions of the same user
+     * are untouched (that is POST /auth/logout-everywhere).
+     *
+     * Always 200 `{ ok: true }`, idempotent: logging out must never fail
+     * visibly, and a missing, invalid or already-dead token has nothing left
+     * to sign out. Per-token throttle (429), no-store + Vary: Authorization.
+     */
+    public function logout(WP_REST_Request $request): WP_REST_Response
+    {
+        unset($request);
+
+        $token = BearerAuth::readBearerToken();
+        if ($token === null) {
+            return self::sessionHeaders(ApiResponse::ok(['ok' => true]));
+        }
+
+        if (!\BCC\Core\Security\Throttle::allow(
+            'auth_logout',
+            self::LOGOUT_RATE_LIMIT,
+            60,
+            'auth_logout:' . substr(hash('sha256', $token), 0, 32)
+        )) {
+            return self::sessionHeaders(ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429));
+        }
+
+        $decoded = JwtToken::decodeForRefresh($token);
+        if ($decoded['ok']) {
+            JwtToken::logOut($decoded['payload']);
+            Logger::audit('user_logout', [
+                'user_id' => (int) ($decoded['payload']['user_id'] ?? 0),
+            ]);
+        }
+
+        return self::sessionHeaders(ApiResponse::ok(['ok' => true]));
+    }
 
     /**
      * GET /auth/session — whose session is this Bearer token?
