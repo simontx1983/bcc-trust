@@ -1644,6 +1644,13 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
 // time PeepSo's UserSearch fires — before any REST or AJAX request.
 \BCC\Trust\Core\Support\PrivacySettings::registerSearchFilter();
 
+// §F-182: drop suspended members out of PeepSo-driven user listings, so
+// the member directory cannot list someone whose profile answers 403.
+// ⚠ Top-level for the same reason as the line above and the publication
+// guard further up: inside registerRoutes() this would hook only during a
+// REST request, and any non-REST listing would keep showing them.
+\BCC\Trust\Core\Support\ProfileAccess::registerListingFilter();
+
 /*
 |--------------------------------------------------------------------------
 | ROUTE REGISTRATION (consolidated via Plugin container)

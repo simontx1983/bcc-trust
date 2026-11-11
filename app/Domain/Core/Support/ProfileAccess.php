@@ -259,10 +259,31 @@ final class ProfileAccess
      */
     public static function canViewProfile(int $ownerId): bool
     {
+        // ⚠ Must stay FIRST. hiddenBySuspension() passes $ownerId to
+        // bcc-core, whose `$user_id = $user_id ?: get_current_user_id()`
+        // would silently turn a 0 target into a check of the VIEWER — a
+        // target read answering a question about the wrong person.
         if ($ownerId <= 0) {
             return false;
         }
+
         if (!class_exists('\\PeepSoUser')) {
+            return false;
+        }
+
+        // §F-182 — suspension hiding, STACKED WITH the privacy ladder
+        // below rather than folded into it. The two are different
+        // questions ("did this member choose to be private" vs "has this
+        // member been sanctioned"), and a member can be neither, either
+        // or both; a public profile belonging to a suspended account was
+        // readable before because only the first question was asked.
+        //
+        // ⚠ Deliberately AFTER the PeepSo guard, not before it. "PeepSo
+        // is not loaded" already denies every profile unconditionally, so
+        // asking about suspension first would only add work to a decision
+        // that is already made — and would make this gate consult bcc-core
+        // on a site that has no profiles to show.
+        if (self::hiddenBySuspension($ownerId)) {
             return false;
         }
 
@@ -290,6 +311,175 @@ final class ProfileAccess
             'This profile is private.',
             403,
             ['reason' => self::REASON_PRIVATE]
+        );
+    }
+
+    /**
+     * §F-182 — is $ownerId's profile withheld because that account is
+     * suspended?
+     *
+     * The decision: a suspended member's public profile is hidden from
+     * others; admins excepted. Two exemptions are therefore explicit
+     * here, because the suspension branch does NOT go through PeepSo and
+     * so inherits none of the ladder's own exemptions:
+     *
+     *   1. THE MEMBER THEMSELVES. A suspension restricts what someone may
+     *      DO; locking them out of reading their own profile would also
+     *      hide the standing notice that tells them they are suspended.
+     *   2. SITE ADMINS, who are the only people for whom a moderated
+     *      account must stay reviewable.
+     *
+     * ── Why `is_not_suspended()` and not a direct user_info read ───────
+     *
+     * It is bcc-core's canonical suspension answer (the same one
+     * OperatorProfileEndpoint, PostsService, CredibilityAtoms and the
+     * dispute paths ask), it caches per user for 60s — which a read path
+     * wants — and it is flushed on `bcc_user_suspension_changed`, which
+     * {@see \BCC\Trust\Core\Repositories\UserInfoRepository::suspendUser}
+     * fires. Reading `user_info.is_suspended` here would be a second
+     * opinion that could disagree with every gate above.
+     *
+     * ⚠ ADMIN BYPASS IS LEFT ON (the default), and that is about the
+     * SUBJECT, not the viewer. `is_not_suspended()`'s bypass tests
+     * whether the user being CHECKED is an admin, so with it on, a
+     * suspended admin's own profile stays visible. That matches "admins
+     * excepted" read in both directions, and it avoids the alternative's
+     * side effect: with `$allowAdminBypass = false`, bcc-core logs
+     * "Suspended admin blocked from dispute participation" every time
+     * anyone opens such a profile — the wrong message, on a read path,
+     * at read-path volume.
+     *
+     * ⚠ "Admin" here is `Permissions::is_admin()` = `manage_options`,
+     * which is NARROWER than the `PeepSo::is_admin()` used by the
+     * privacy ladder (manage_options OR the PeepSo role `admin`). A
+     * PeepSo-role admin without `manage_options` can therefore see a
+     * PRIVATE profile but not a SUSPENDED one. Deliberately not widened:
+     * it errs toward hiding, and `Permissions` is how the rest of this
+     * codebase decides who is exempt from a suspension gate.
+     *
+     * ⚠⚠ THIS GATE FAILS OPEN, BY DECISION. An unreadable suspension
+     * state counts as "not suspended", so the profile stays visible: it
+     * is a read path, and the alternative — treating unknown as
+     * suspended — blacks out every profile on the site the moment the
+     * state cannot be read. Two consequences worth knowing:
+     *   - `UserInfoRepository::getByUserId()` CACHES a null row as "no
+     *     row" for 5 minutes, so a transient read fault becomes a
+     *     5-minute "not suspended" (see bcc-core #84, which exists
+     *     because an unknown state must never be cached).
+     *   - when bcc-core #84 lands, this should become
+     *     `Permissions::suspensionState($ownerId)` with `null` mapped to
+     *     VISIBLE — i.e. `=== true` for hidden, never `!== false`.
+     */
+    private static function hiddenBySuspension(int $ownerId): bool
+    {
+        if (get_current_user_id() === $ownerId) {
+            return false;
+        }
+
+        if (!class_exists('\\BCC\\Core\\Permissions\\Permissions')) {
+            // bcc-core absent: no canonical answer, and per the fail-open
+            // decision an unknown state does not hide the profile.
+            return false;
+        }
+
+        if (\BCC\Core\Permissions\Permissions::is_admin()) {
+            return false;
+        }
+
+        return !\BCC\Core\Permissions\Permissions::is_not_suspended($ownerId);
+    }
+
+    /**
+     * §F-182 — hook the suspension exclusion into PeepSo-driven user
+     * listings. Called once at plugin boot.
+     *
+     * Without this, {@see canViewProfile} hides a suspended member's
+     * profile while the member DIRECTORY still lists them: a row the
+     * viewer can see but cannot open, which is the inconsistency F-02
+     * set out to remove rather than a smaller version of the fix.
+     *
+     * ⚠ Suspension does NOT reach PeepSo's own exclusions. PeepSo's
+     * listing SQL drops banned and unvalidated accounts by `usr_role`,
+     * and {@see \BCC\Trust\Core\Repositories\UserInfoRepository::suspendUser}
+     * writes only `user_info.is_suspended` — it never touches
+     * `usr_role`. So a suspended member is, to PeepSo, an ordinary one.
+     */
+    public static function registerListingFilter(): void
+    {
+        add_action('pre_user_query', [self::class, 'filterSuspendedFromListing'], 20, 1);
+    }
+
+    /**
+     * Add the suspension exclusion to a PeepSo user query.
+     *
+     * ── Why SQL and not an `exclude` id list ─────────────────────────
+     *
+     * An id list is the obvious alternative and it is the wrong tool
+     * twice over. `SuspensionRepository::getActiveSuspendedUserIds()` is
+     * BOUNDED (1000, hard-capped at 5000), so past that many suspensions
+     * the exclusion would silently become partial — a privacy filter that
+     * stops working as the site grows, with nothing failing to say so.
+     * And it reads a DIFFERENT SOURCE: the `suspensions` table's
+     * `unsuspended_at IS NULL`, where this gate and every other
+     * suspension gate read `user_info.is_suspended`. The two can
+     * disagree, and a listing that disagreed with the profile gate would
+     * reintroduce exactly the mismatch this change removes. Joining the
+     * same column the gate reads keeps one source of truth and has no
+     * cap.
+     *
+     * ── Scope ───────────────────────────────────────────────────────
+     *
+     * `pre_user_query` fires for EVERY `WP_User_Query`, so this narrows
+     * to queries PeepSo built: `PeepSoUserSearch` always injects
+     * `_peepso_user_id` into its args. wp-admin's Users screen and any
+     * other plain `WP_User_Query` are untouched, which is deliberate —
+     * an admin administering a suspended account must still find them.
+     *
+     * Exemptions mirror {@see hiddenBySuspension} so a row and its
+     * profile always agree: admins see everyone, and the viewer always
+     * sees themselves.
+     *
+     * ⚠ "Admin" is `Permissions::is_admin()` (`manage_options`), NOT
+     * `PeepSo::is_admin()` (which also admits the PeepSo role `admin`).
+     * That is the same narrower notion the profile gate uses, and the
+     * agreement is the point: using the broader one here would list rows
+     * whose profiles then answered 403.
+     *
+     * ⚠ The parameter is TYPED rather than guarded at runtime. An
+     * earlier version took `$query` untyped and defended with
+     * `is_object()` / `isset()`, which cost more than it bought:
+     * `WP_User_Query::$query_vars` is a non-nullable array, so the
+     * `isset()` arm was dead code, and narrowing the global `$wpdb` with
+     * `is_object()` discarded its `wpdb` type, leaving `prepare()` an
+     * undefined method on a bare `object`. WordPress core always passes
+     * a `WP_User_Query` here.
+     */
+    public static function filterSuspendedFromListing(\WP_User_Query $query): void
+    {
+        if (!array_key_exists('_peepso_user_id', $query->query_vars)) {
+            return;
+        }
+        if (class_exists('\\BCC\\Core\\Permissions\\Permissions')
+            && \BCC\Core\Permissions\Permissions::is_admin()) {
+            return;
+        }
+
+        global $wpdb;
+
+        $table  = \BCC\Trust\Core\Database\TableRegistry::userInfo();
+        $viewer = (int) get_current_user_id();
+
+        // A LEFT JOIN, so a member with no user_info row stays listed:
+        // "no row" is NOT suspended, the same reading
+        // TrustReadService::isSuspended() gives it, and the same
+        // fail-open direction the decision calls for.
+        $query->query_from .= " LEFT JOIN {$table} bcc_f182 ON bcc_f182.user_id = {$wpdb->users}.ID";
+
+        $query->query_where .= $wpdb->prepare(
+            " AND (bcc_f182.is_suspended IS NULL"
+            . " OR bcc_f182.is_suspended = 0"
+            . " OR {$wpdb->users}.ID = %d)",
+            $viewer
         );
     }
 }
