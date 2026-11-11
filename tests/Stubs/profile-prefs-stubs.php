@@ -17,6 +17,28 @@
 declare(strict_types=1);
 
 namespace {
+    /**
+     * Every recorded write goes through here (M1 fault injection). When
+     * $GLOBALS['__bcc_prefs_fail_on'] is N, the Nth write fails the way a
+     * real DB error does: $wpdb->last_error is set and nothing is persisted.
+     *
+     * @param array{0: string, 1: string, 2: mixed} $write
+     */
+    function bcc_prefs_write(array $write): void
+    {
+        $GLOBALS['__bcc_prefs_write_count'] = ($GLOBALS['__bcc_prefs_write_count'] ?? 0) + 1;
+        if ($GLOBALS['__bcc_prefs_write_count'] === ($GLOBALS['__bcc_prefs_fail_on'] ?? 0)) {
+            $GLOBALS['wpdb']->last_error = 'Deadlock found when trying to get lock (simulated)';
+            return;
+        }
+        $GLOBALS['__bcc_prefs_writes'][] = $write;
+    }
+
+    // The checked-write signal the endpoint reads (M1).
+    $GLOBALS['wpdb'] = new class {
+        public string $last_error = '';
+    };
+
     if (!class_exists('WP_REST_Request', false)) {
         class WP_REST_Request
         {
@@ -83,7 +105,15 @@ namespace BCC\Trust\Core\REST {
         /** @param mixed $value */
         function update_user_meta(int $userId, string $key, $value): bool
         {
-            $GLOBALS['__bcc_prefs_writes'][]          = ['meta', $key, $value];
+            // Like WordPress: an UNCHANGED value is not written and returns
+            // false, which is NOT an error (M1 must not read it as one).
+            if (($GLOBALS['__bcc_prefs_meta'][$userId][$key] ?? null) === $value) {
+                return false;
+            }
+            \bcc_prefs_write(['meta', $key, $value]);
+            if ($GLOBALS['wpdb']->last_error !== '') {
+                return false;
+            }
             $GLOBALS['__bcc_prefs_meta'][$userId][$key] = $value;
 
             return true;
@@ -100,6 +130,20 @@ namespace BCC\Trust\Core\Support {
         function get_option(string $key, $default = false)
         {
             return $default;
+        }
+    }
+}
+
+namespace BCC\Core\Log {
+    // M1: a failed write is logged; record it instead.
+    if (!class_exists(Logger::class, false)) {
+        final class Logger
+        {
+            /** @param array<string, mixed> $context */
+            public static function error(string $message, array $context = []): void
+            {
+                $GLOBALS['__bcc_prefs_logs'][] = [$message, $context];
+            }
         }
     }
 }

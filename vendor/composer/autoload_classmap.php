@@ -132,6 +132,7 @@ return array(
     'BCC\\Trust\\Core\\Repositories\\BlogChainTagRepository' => $baseDir . '/app/Domain/Core/Repositories/BlogChainTagRepository.php',
     'BCC\\Trust\\Core\\Repositories\\CommentRepository' => $baseDir . '/app/Domain/Core/Repositories/CommentRepository.php',
     'BCC\\Trust\\Core\\Repositories\\ContentReportRepository' => $baseDir . '/app/Domain/Core/Repositories/ContentReportRepository.php',
+    'BCC\\Trust\\Core\\Repositories\\DbWriteCheck' => $baseDir . '/app/Domain/Core/Repositories/DbWriteCheck.php',
     'BCC\\Trust\\Core\\Repositories\\DeviceFingerprintRepository' => $baseDir . '/app/Domain/Core/Repositories/DeviceFingerprintRepository.php',
     'BCC\\Trust\\Core\\Repositories\\EdgeRepository' => $baseDir . '/app/Domain/Core/Repositories/EdgeRepository.php',
     'BCC\\Trust\\Core\\Repositories\\FraudAnalysisRepository' => $baseDir . '/app/Domain/Core/Repositories/FraudAnalysisRepository.php',
