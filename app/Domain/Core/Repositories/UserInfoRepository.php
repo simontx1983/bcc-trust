@@ -1354,6 +1354,49 @@ class UserInfoRepository {
     }
 
     /**
+     * Which of $userIds are suspended, or NULL when that could not be READ.
+     *
+     * getSuspendedUserIds() above answers `[]` on a database error
+     * (`get_col()` never returns null), which reads as "nobody is suspended";
+     * its callers rely on that. This variant is for display paths that must
+     * not guess: the feed's reactor faces drop entirely on null (F-90).
+     * Same trust test as HiddenActivityRepository::runRead(): query() can fail
+     * without setting last_error, so both signals are checked, and the rows
+     * come from last_result via get_col(null), which (unlike get_row(null))
+     * does read it.
+     *
+     * Bounded by the caller's id list (the feed passes at most 150).
+     *
+     * @param list<int> $userIds
+     * @return list<int>|null
+     */
+    public function suspendedAmongOrUnknown(array $userIds): ?array
+    {
+        global $wpdb;
+
+        $ids = array_values(array_filter(array_map('intval', $userIds), static fn (int $id): bool => $id > 0));
+        if ($ids === []) {
+            return [];
+        }
+
+        $sql = "SELECT user_id FROM {$this->table}
+                 WHERE is_suspended = 1
+                   AND user_id IN (" . implode(',', $ids) . ')';
+
+        $this->clearLastError();
+        $ok = $wpdb->query($sql);
+        if ($ok === false || $this->lastReadFailed()) {
+            \BCC\Core\Log\Logger::error('[UserInfoRepository] suspended-ids read failed', [
+                'ids'   => count($ids),
+                'error' => (string) $wpdb->last_error,
+            ]);
+            return null;
+        }
+
+        return array_values(array_map('intval', $wpdb->get_col(null)));
+    }
+
+    /**
      * Update fraud-related fields for a user (admin reanalysis).
      */
     public function updateFraudFields(int $userId, int $fraudScore, string $riskLevel, int $behaviorScore): void

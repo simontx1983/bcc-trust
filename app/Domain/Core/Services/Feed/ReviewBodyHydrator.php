@@ -84,12 +84,20 @@ final class ReviewBodyHydrator
             : $this->userMiniRepo->getRowsByIds(array_keys($memberIds));
         $pages = [];
         if ($pageIds !== []) {
+            // ⚠ PUBLISHED PAGES ONLY (F-90). This used to resolve any post
+            // type in any status, so a review of a draft, private or trashed
+            // page rendered that page's title and slug to every reader. The
+            // rule is the one the page routes and the page read model use
+            // (PagesEndpoint, PageReadModelRepository::syncPageInternal): a
+            // `peepso-page` in `publish`. An unpublished target is simply not found here and
+            // renders like a missing one: empty name and handle, and the
+            // frontend suppresses the link.
             /** @var list<\WP_Post> $rows */
             $rows = get_posts([
-                'post_type'      => 'any',
+                'post_type'      => 'peepso-page',
                 'post__in'       => array_keys($pageIds),
                 'posts_per_page' => count($pageIds),
-                'post_status'    => 'any',
+                'post_status'    => 'publish',
                 // Suppress WP's default ordering so unstable orderings
                 // don't shuffle the FK lookup; we re-key by id below.
                 'orderby'        => 'post__in',

@@ -101,4 +101,40 @@ final class UserInfoReadFailureTest extends TestCase
         self::assertSame('1', $row?->is_suspended);
         self::assertEquals(self::suspendedRow(), $GLOBALS['__bcc_cache']['bcc_trust:user_info_' . self::USER] ?? null);
     }
+
+    // ── suspendedAmongOrUnknown (F-90: the feed's reactor faces) ─────────
+
+    public function testSuspendedAmongReturnsTheSuspendedIds(): void
+    {
+        global $wpdb;
+        $wpdb->script = [['rows' => [(object) ['user_id' => '22']]]];
+
+        self::assertSame([22], (new UserInfoRepository())->suspendedAmongOrUnknown([21, 22, 23]));
+    }
+
+    public function testSuspendedAmongIsNullNotEmptyWhenTheReadFails(): void
+    {
+        global $wpdb;
+        $wpdb->script = [['error' => 'Lost connection to MySQL server during query']];
+
+        self::assertNull((new UserInfoRepository())->suspendedAmongOrUnknown([21, 22, 23]));
+    }
+
+    public function testSuspendedAmongIsNullOnASilentFailureWithAStaleBuffer(): void
+    {
+        global $wpdb;
+        $wpdb->script = [['rows' => [(object) ['user_id' => '99']]], ['silent' => true]];
+        $repo = new UserInfoRepository();
+        $repo->suspendedAmongOrUnknown([99]);
+
+        self::assertNull($repo->suspendedAmongOrUnknown([21]), 'a stale previous row must not be returned');
+    }
+
+    public function testSuspendedAmongSkipsTheQueryForNoIds(): void
+    {
+        global $wpdb;
+
+        self::assertSame([], (new UserInfoRepository())->suspendedAmongOrUnknown([0, -3]));
+        self::assertSame(0, $wpdb->queries);
+    }
 }
