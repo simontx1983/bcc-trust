@@ -6,8 +6,8 @@ declare(strict_types=1);
 //
 // Guarded, because several other suites declare their own doubles for these
 // and PHPUnit shares one process. Whichever file loads first wins; the two
-// lock-specific tests below detect that and skip rather than assert against
-// somebody else's double.
+// lock-specific tests below therefore run in a separate process, where this
+// double is the only one (F-95 — they used to skip, depending on load order).
 namespace BCC\Core\DB {
 
     use BCC\Trust\Tests\Support\CronHealState;
@@ -70,6 +70,8 @@ namespace BCC\Trust\Tests\Unit {
     use BCC\Trust\Core\Services\CronService;
     use BCC\Trust\Tests\Support\CronHealState;
     use PHPUnit\Framework\Attributes\CoversClass;
+    use PHPUnit\Framework\Attributes\PreserveGlobalState;
+    use PHPUnit\Framework\Attributes\RunInSeparateProcess;
     use PHPUnit\Framework\TestCase;
 
     if (!defined('BCC_TRUST_VERSION')) {
@@ -132,8 +134,14 @@ namespace BCC\Trust\Tests\Unit {
         /**
          * Only our AdvisoryLock double answers to CronHealState::$lockGranted.
          * Several suites declare their own, all returning true unconditionally,
-         * and whichever file PHPUnit loads first wins the name. Assert against
-         * someone else's double and the result is meaningless, so check first.
+         * and in a shared process whichever file PHPUnit loads first wins the
+         * name.
+         *
+         * F-95: the two lock tests used to SKIP when another suite's double
+         * won, so whether they ran at all depended on file load order — and a
+         * skip is invisible in a green run. They now run in a SEPARATE PROCESS,
+         * where the bootstrap declares no AdvisoryLock and this file's double
+         * is the only one, so a foreign double here is a harness bug and FAILS.
          *
          * The load-bearing no-duplication guarantee does not depend on this:
          * testRepeatedInvocationsDoNotDuplicateEvents covers it through
@@ -146,11 +154,10 @@ namespace BCC\Trust\Tests\Unit {
             $honoursFlag                = \BCC\Core\DB\AdvisoryLock::acquire('bcc_probe', 0) === false;
             CronHealState::$lockGranted = $granted;
 
-            if (!$honoursFlag) {
-                self::markTestSkipped(
-                    'another suite\'s AdvisoryLock double won the class name; lock behaviour is not observable here'
-                );
-            }
+            self::assertTrue(
+                $honoursFlag,
+                'a foreign AdvisoryLock double is loaded in this separate process — the bootstrap must not declare one'
+            );
         }
 
         // ── 1. same version + missing hook → repaired ────────────────────
@@ -306,6 +313,8 @@ namespace BCC\Trust\Tests\Unit {
          * wp_next_scheduled() guards each individual event too, so a duplicate
          * is impossible either way — but the loser should do no work at all.
          */
+        #[RunInSeparateProcess]
+        #[PreserveGlobalState(false)]
         public function testALoserOfTheAdvisoryLockSchedulesNothing(): void
         {
             $this->requireOurAdvisoryLockDouble();
@@ -320,6 +329,8 @@ namespace BCC\Trust\Tests\Unit {
             self::assertArrayNotHasKey('bcc_trust_process_recalculations', CronHealState::$scheduled);
         }
 
+        #[RunInSeparateProcess]
+        #[PreserveGlobalState(false)]
         public function testTheLockIsReleasedAfterARepair(): void
         {
             $this->requireOurAdvisoryLockDouble();
