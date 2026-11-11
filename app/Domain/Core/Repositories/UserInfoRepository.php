@@ -88,15 +88,56 @@ class UserInfoRepository {
         }
 
         global $wpdb;
-        $result = $wpdb->get_row($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE user_id = %d",
             $userId
-        ));
+        );
+
+        // ⚠ A FAILED read is never cached. It used to be: get_row() returns
+        // null on a database error exactly as it does for "no row", and that
+        // null was cached as "no row" for BCC_TRUST_CACHE_USER (5 minutes).
+        // One blip therefore made the user read as NOT suspended (and with
+        // no trust data) for five minutes, everywhere suspension is checked.
+        // A failed read still returns null (the gates fail open on it,
+        // deliberately: failing closed would lock every user out on a DB
+        // blip), but the very next call retries. Same trust test as
+        // HiddenActivityRepository::runRead() / bcc-core runProbe(): query()
+        // can fail WITHOUT setting last_error, so both signals are checked.
+        $this->clearLastError();
+        $ok = $wpdb->query($sql);
+        if ($ok === false || $this->lastReadFailed()) {
+            \BCC\Core\Log\Logger::error('[UserInfoRepository] user_info read failed; not cached', [
+                'user_id' => $userId,
+                'error'   => (string) $wpdb->last_error,
+            ]);
+            return null;
+        }
+        // ⚠ NOT get_row(null): real wpdb::get_row() with no query returns
+        // null without reading anything. A successful query() leaves the
+        // rows in the public $last_result (the same buffer get_var()/
+        // get_col() read), so read the first one from there.
+        $first = $wpdb->last_result[0] ?? null;
+        /** @phpstan-var UserInfoRow|null $result */
+        $result = is_object($first) ? $first : null;
 
         // Cache for 5 minutes; store empty string for null to distinguish from cache miss
         wp_cache_set('user_info_' . $userId, $result ?: '', 'bcc_trust', BCC_TRUST_CACHE_USER);
 
         return $result;
+    }
+
+    // Separate helpers so static analysis does not narrow last_error to ''
+    // across the query() call that mutates it (bcc-core runProbe()'s shape).
+    private function clearLastError(): void
+    {
+        global $wpdb;
+        $wpdb->last_error = '';
+    }
+
+    private function lastReadFailed(): bool
+    {
+        global $wpdb;
+        return (string) $wpdb->last_error !== '';
     }
 
     /**
