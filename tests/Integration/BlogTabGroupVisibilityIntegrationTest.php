@@ -83,6 +83,26 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
 
         // The lookup is generation-cached; each case re-reads real rows.
         PeepSoGroupRepository::bustNonOpenGroupIdsCache();
+
+        // ⚠ HARNESS CONTROL — prove the shim in effect is the faithful one.
+        //
+        // Several tests/Stubs/ files also declare get_post / WP_Post /
+        // _prime_post_caches behind function_exists guards, and whichever
+        // loads FIRST wins. Today the rival in page-posts-stubs.php reads
+        // the real row too, so a collision would be harmless — but if a
+        // less faithful one ever won, get_post would hand back an empty or
+        // fabricated object, hydrateForPostId's `instanceof \WP_Post` guard
+        // would fall through to an empty body, and every assertion below
+        // would still pass while proving nothing. So establish it rather
+        // than assume it.
+        $probe = get_post($this->pNoGroup);
+        self::assertInstanceOf(\WP_Post::class, $probe, 'the get_post shim is not returning a WP_Post');
+        self::assertSame(
+            self::AUTHOR,
+            (int) $probe->post_author,
+            'get_post is not reading the real wp_posts row — a different stub won the race'
+        );
+        self::assertSame('peepso-post', $probe->post_type);
     }
 
     /**
