@@ -375,6 +375,62 @@ final class OnchainAdminIndexerActionsTest extends TestCase
         $this->assertNotSame([], \BccAdminTestState::$nonceChecks);
     }
 
+    public function testHeliusResyncPassesNoShrinkOverrideByDefault(): void
+    {
+        \BccAdminTestState::$validNonceAction = 'bcc_helius_resync';
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        unset($_POST['allow_shrink']);
+
+        try {
+            NftIndexerStatusView::handleHeliusResync();
+        } catch (\BccAdminRedirect) {
+            // expected
+        }
+
+        $this->assertSame([false], \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::$resyncArgs);
+    }
+
+    public function testHeliusResyncPassesTheOverrideOnlyForAnExplicitOne(): void
+    {
+        \BccAdminTestState::$validNonceAction = 'bcc_helius_resync';
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+
+        foreach (['1' => true, 'on' => false, 'true' => false, '0' => false, '' => false] as $posted => $expected) {
+            \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::reset();
+            $_POST['allow_shrink'] = (string) $posted;
+            try {
+                NftIndexerStatusView::handleHeliusResync();
+            } catch (\BccAdminRedirect) {
+                // expected
+            }
+            $this->assertSame([$expected], \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::$resyncArgs, 'posted ' . var_export($posted, true));
+        }
+        unset($_POST['allow_shrink']);
+    }
+
+    public function testARefusedShrinkRedirectsToItsOwnNoticeAndIsAudited(): void
+    {
+        \BccAdminTestState::$validNonceAction = 'bcc_helius_resync';
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::$resyncResult = [
+            'applied' => false, 'remote_count' => 40, 'local_count' => 3, 'refused' => 'shrink',
+        ];
+
+        $redirect = null;
+        try {
+            NftIndexerStatusView::handleHeliusResync();
+        } catch (\BccAdminRedirect $r) {
+            $redirect = $r;
+        }
+
+        $this->assertNotNull($redirect);
+        $this->assertSame('helius_resync_refused_shrink', $redirect->args['bcc_nft_result']);
+        // Redirect args travel as query-string values.
+        $this->assertSame(40, (int) $redirect->args['bcc_remote']);
+        $this->assertSame(3, (int) $redirect->args['bcc_local']);
+        $this->assertSame(['admin_helius_resync_refused_shrink'], \BCC\Trust\Core\Security\AuditLogger::actions(), 'a refusal is audited as a refusal, not as a resync or a no-op');
+    }
+
     public function testHeliusProvisionRequiresItsOwnNonce(): void
     {
         // A resync nonce must not authorize creating a new remote webhook.

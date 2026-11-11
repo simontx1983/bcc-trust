@@ -202,6 +202,13 @@ function bcc_trust_render_user_moderation( $user_id ) {
                     <button name="clear_fingerprints" class="button" onclick="return confirm('Clear device fingerprints?');">Clear Fingerprints</button>
                 </form>
 
+                <!-- Reset fraud score (current + peak) — F-103 -->
+                <form method="post">
+                    <?php wp_nonce_field( 'bcc_trust_moderation' ); ?>
+                    <input type="hidden" name="user_id" value="<?php echo intval( $user_id ); ?>">
+                    <button name="reset_fraud_score" class="button" onclick="return confirm('Reset this user\'s fraud score (current and peak) to 0? Their past votes will be re-weighted.');">Reset Fraud Score</button>
+                </form>
+
                 <!-- Reanalyze -->
                 <form method="post">
                     <?php wp_nonce_field( 'bcc_trust_moderation' ); ?>

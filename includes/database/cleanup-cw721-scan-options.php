@@ -102,7 +102,7 @@ if (!function_exists('bcc_trust_cleanup_cw721_scan_options')) {
                     'rows_deleted' => (int) $deleted,
                 ]);
 
-                return BCC_TRUST_MIGRATION_INCOMPLETE;
+                return BCC_TRUST_MIGRATION_MORE;
             }
         }
 

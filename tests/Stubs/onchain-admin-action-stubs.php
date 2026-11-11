@@ -520,10 +520,14 @@ namespace BCC\Trust\Onchain\Services {
                 return self::$provisionResult;
             }
 
-            /** @return array{applied: bool, remote_count: int, local_count: int}|null */
-            public static function resyncFromWalletLinks(): ?array
+            /** @var list<bool> the $allowShrink each resync was called with */
+            public static array $resyncArgs = [];
+
+            /** @return array{applied: bool, remote_count: int, local_count: int, refused?: string}|null */
+            public static function resyncFromWalletLinks(bool $allowShrink = false): ?array
             {
                 self::$resyncCalls++;
+                self::$resyncArgs[] = $allowShrink;
                 if (self::$resyncThrows !== null) {
                     throw self::$resyncThrows;
                 }
@@ -534,6 +538,7 @@ namespace BCC\Trust\Onchain\Services {
             {
                 self::$provisionCalls = 0;
                 self::$resyncCalls = 0;
+                self::$resyncArgs = [];
                 self::$provisionResult = 'wh_123';
                 self::$provisionThrows = null;
                 self::$resyncResult = ['applied' => true, 'remote_count' => 5, 'local_count' => 5];

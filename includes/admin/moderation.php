@@ -200,6 +200,9 @@ function bcc_trust_render_moderation(): void {
         'clear_fingerprints' => static function () use ( $mod ) {
             $mod->clearFingerprints( absint( $_POST['user_id'] ?? 0 ) );
         },
+        'reset_fraud_score'  => static function () use ( $mod ) {
+            $mod->resetFraudScore( absint( $_POST['user_id'] ?? 0 ) );
+        },
         'reanalyze_user'     => static function () use ( $mod ) {
             $mod->reanalyzeUser( absint( $_POST['user_id'] ?? 0 ) );
         },

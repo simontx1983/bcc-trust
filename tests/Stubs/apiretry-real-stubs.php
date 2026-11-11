@@ -185,13 +185,44 @@ namespace BCC\Trust\Onchain\Support {
      *
      * Records what the real backoff would have slept, so a test can assert
      * "this response was not retried" as `[]` rather than as elapsed time.
+     *
+     * ⚠ F-156: it now also ADVANCES THE VIRTUAL CLOCK below, so a deadline
+     * test can watch a budget be spent without the suite spending it. When
+     * no test has started the virtual clock this is a no-op, so every
+     * existing caller behaves exactly as before.
      */
     if (!function_exists(__NAMESPACE__ . '\\sleep')) {
         function sleep(int $seconds): int
         {
             \BccSleepSpy::$slept[] = $seconds;
+            \BccSleepSpy::advance($seconds);
 
             return 0;
+        }
+    }
+
+    /**
+     * Shadows `time()` for ApiRetry ONLY — same namespace-fallback mechanism
+     * as the `sleep()` shadow above: ApiRetry calls `time()` unqualified from
+     * `BCC\Trust\Onchain\Support`, so PHP resolves this first.
+     *
+     * ⚠⚠ INERT UNLESS A TEST STARTS THE CLOCK. With `BccSleepSpy::$now` at
+     * 0 it delegates to the real `\time()`, so the sibling suites that load
+     * this file (BreakerRetryAccountingTest, ApiRetryApplicationErrorTest)
+     * see real time and are untouched. A `function_exists`-guarded function
+     * definition is process-global and `setUp()` cannot undo it, which is
+     * why inert-by-default matters here and why the files that use this run
+     * `#[RunTestsInSeparateProcesses]`.
+     *
+     * ⚠ A FAKE CLOCK, NOT A FAST ONE. The deadline arithmetic is in whole
+     * seconds, so testing it against the wall clock would mean a test that
+     * really waits — and a test that really waits is a test that gets
+     * shortened later. This makes the budget exact instead.
+     */
+    if (!function_exists(__NAMESPACE__ . '\\time')) {
+        function time(): int
+        {
+            return \BccSleepSpy::$now > 0 ? \BccSleepSpy::$now : \time();
         }
     }
 
@@ -219,6 +250,8 @@ namespace BCC\Trust\Onchain\Support {
             public static array $failureChains = [];
             /** @var list<int> */
             public static array $probeReleases = [];
+            /** @var list<int> every isOpen() call, i.e. every probe claim. */
+            public static array $isOpenCalls = [];
 
             public static function reset(): void
             {
@@ -226,11 +259,20 @@ namespace BCC\Trust\Onchain\Support {
                 self::$successChains = [];
                 self::$failureChains = [];
                 self::$probeReleases = [];
+                self::$isOpenCalls   = [];
                 self::$failures      = [];
             }
 
+            /**
+             * Counted, not just answered. `isOpen()` is the MUTATING reader
+             * that CLAIMS the single HALF-OPEN probe slot, so "this path did
+             * not touch the probe" has to be observable rather than argued
+             * from where the call sits in the source (issue #265).
+             */
             public static function isOpen(int $chainId): bool
             {
+                self::$isOpenCalls[] = $chainId;
+
                 return self::$open;
             }
             /**
@@ -285,15 +327,41 @@ namespace BCC\Trust\Onchain\Support {
 }
 
 namespace {
-    /** Captures the shadowed sleep() calls. */
+    /** Captures the shadowed sleep() calls, and owns the virtual clock. */
     final class BccSleepSpy
     {
         /** @var list<int> */
         public static array $slept = [];
 
+        /**
+         * The virtual "now" the shadowed `time()` reports, or 0 for "use the
+         * real clock" — which is the default and keeps the shadow inert.
+         */
+        public static int $now = 0;
+
         public static function reset(): void
         {
             self::$slept = [];
+            self::$now   = 0;
+        }
+
+        /**
+         * Start the virtual clock at a fixed instant.
+         *
+         * A literal rather than `time()`: a test that pins arithmetic should
+         * not depend on when it ran.
+         */
+        public static function startClock(int $at = 1_700_000_000): void
+        {
+            self::$now = $at;
+        }
+
+        /** Move the virtual clock forward (what the shadowed sleep() does). */
+        public static function advance(int $seconds): void
+        {
+            if (self::$now > 0) {
+                self::$now += $seconds;
+            }
         }
     }
 }

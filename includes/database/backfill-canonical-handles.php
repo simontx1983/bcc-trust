@@ -134,7 +134,7 @@ if (!function_exists('bcc_trust_backfill_canonical_handles')) {
             \BCC\Core\Log\Logger::info('[bcc-trust] Canonical-handle backfill: batch cap reached, more remain — will resume', [
                 'assigned' => $assignedCount,
             ]);
-            return BCC_TRUST_MIGRATION_INCOMPLETE;
+            return BCC_TRUST_MIGRATION_MORE;
         }
 
         if ($skipped !== []) {

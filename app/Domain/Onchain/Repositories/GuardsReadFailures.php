@@ -128,6 +128,53 @@ trait GuardsReadFailures
         return true;
     }
 
+    /**
+     * Run a SELECT and return its rows ONLY if they are this query's.
+     *
+     * The list-read form of bcc-core's PeepSoBlockRepository::runProbe().
+     *
+     * ⚠⚠ WHY query() IS CALLED EXPLICITLY. `get_results($sql)` calls query()
+     * and DISCARDS its return value, and `wpdb::query()` has failure paths
+     * that return false WITHOUT setting `last_error` — the `! $this->ready`
+     * guard (a failed reconnect) and an empty result from the `query` filter.
+     * Both return BEFORE `flush()`, so `last_result` still holds the PREVIOUS
+     * query's rows: a `get_results()` + `last_error` check can hand a caller
+     * an unrelated query's rows as an answer. For a caller that PUTs its
+     * result as a whole external list (the Helius resync, F-64) that is a
+     * corrupted write, not merely a wrong read.
+     *
+     * ⚠ THE COMPARISON IS `=== false`, NOT FALSY. For a SELECT, query()
+     * returns the ROW COUNT, so a genuine empty result returns 0.
+     *
+     * @param  string $method usually `__FUNCTION__` at the call site
+     * @return list<object>
+     * @throws RepositoryReadFailure when $failClosed and the read did not run
+     */
+    private static function runRead(string $sql, string $method, bool $failClosed): array
+    {
+        global $wpdb;
+
+        $wpdb->last_error = '';
+        $ok    = $wpdb->query($sql);
+        $error = self::lastReadError();
+
+        if ($ok === false || $error !== '') {
+            $reason = $error !== '' ? $error : 'query() returned false with no error (wpdb early return)';
+            Logger::error('[' . static::class . '] read failed — empty result is NOT "no rows"', [
+                'method'   => $method,
+                'db_error' => $reason,
+            ]);
+            if ($failClosed) {
+                throw new RepositoryReadFailure(static::class, $method, $reason);
+            }
+            return [];
+        }
+
+        $rows = $wpdb->last_result;
+
+        return is_array($rows) ? array_values($rows) : [];
+    }
+
     /** The error string left behind by the most recent query, if any. */
     private static function lastReadError(): string
     {

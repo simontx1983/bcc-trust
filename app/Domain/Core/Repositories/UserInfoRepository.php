@@ -1332,6 +1332,45 @@ class UserInfoRepository {
     }
 
     /**
+     * Admin reset: set BOTH fraud_score and peak_fraud_score to 0.
+     *
+     * The peak is what normally keeps a score from decaying below half its
+     * high-water mark (the anti-oscillation floor); a manual reset must clear
+     * it too, or the daily decay would put the score straight back. Returns
+     * the values that were replaced (for the audit trail), or null when the
+     * user has no user_info row.
+     *
+     * @return array{fraud_score: int, peak_fraud_score: int}|null
+     * @throws RepositoryException on database failure
+     */
+    public function resetFraudScore(int $userId): ?array {
+        global $wpdb;
+
+        $before = $this->getByUserId($userId);
+        if ($before === null) {
+            return null;
+        }
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+                SET fraud_score = 0, peak_fraud_score = 0, updated_at = %s
+              WHERE user_id = %d",
+            current_time('mysql'),
+            $userId
+        ));
+        if ($result === false) {
+            throw new RepositoryException('UserInfoRepository::resetFraudScore failed for user ' . $userId . ': ' . $wpdb->last_error);
+        }
+
+        $this->invalidateCache($userId);
+
+        return [
+            'fraud_score'      => (int) $before->fraud_score,
+            'peak_fraud_score' => (int) ($before->peak_fraud_score ?? 0),
+        ];
+    }
+
+    /**
      * Apply daily fraud score decay for idle non-suspended users.
      *
      * Score can never decay below 50% of peak_fraud_score.
