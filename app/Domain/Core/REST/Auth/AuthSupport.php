@@ -134,6 +134,14 @@ final class AuthSupport
     public const TWO_FA_OTP_TTL = 300;
     /** 2FA challenge-token transient TTL: 10 minutes. */
     public const TWO_FA_CHALLENGE_TTL = 600;
+
+    /**
+     * Wrong 2FA codes allowed per (user, challenge) before the OTP and the
+     * challenge are burned and the user must sign in again (F-124). The
+     * per-IP TWO_FA_VERIFY_RATE_LIMIT alone did not bound an attacker who
+     * spreads guesses across addresses.
+     */
+    public const TWO_FA_MAX_FAILURES = 5;
     /** Anon-IP-keyed (per-minute) throttle for /auth/oauth. */
     public const OAUTH_LOGIN_RATE_LIMIT = 10;
     /** Anon-IP-keyed (per-minute) throttle for /auth/oauth-complete. */
@@ -619,15 +627,28 @@ final class AuthSupport
 
     // ── 2FA OTP / challenge-token helpers ─────────────────────────────
 
-    public static function store2faOtp(int $userId, string $otpCode): void
+    /**
+     * Transient-key fragment for a challenge token: a hash, so the raw token
+     * (a bearer secret for the 2FA step) never appears in an option name.
+     */
+    public static function twoFaChallengeKey(string $challengeToken): string
     {
-        $hash = hash_hmac('sha256', $otpCode, (string) wp_salt('auth'));
-        set_transient('bcc_2fa_otp_' . (string) $userId, $hash, self::TWO_FA_OTP_TTL);
+        return substr(hash('sha256', $challengeToken), 0, 40);
     }
 
-    public static function consume2faOtp(int $userId, string $code): bool
+    /**
+     * Store the OTP for ONE challenge (F-124). Bound to the challenge, not
+     * the user: a challenge can only ever guess — and burn — its own code.
+     */
+    public static function store2faOtp(string $challengeToken, string $otpCode): void
     {
-        $key    = 'bcc_2fa_otp_' . (string) $userId;
+        $hash = hash_hmac('sha256', $otpCode, (string) wp_salt('auth'));
+        set_transient('bcc_2fa_otp_' . self::twoFaChallengeKey($challengeToken), $hash, self::TWO_FA_OTP_TTL);
+    }
+
+    public static function consume2faOtp(string $challengeToken, string $code): bool
+    {
+        $key    = 'bcc_2fa_otp_' . self::twoFaChallengeKey($challengeToken);
         $stored = get_transient($key);
         if ($stored === false || !is_string($stored) || $stored === '') {
             return false;
@@ -640,12 +661,41 @@ final class AuthSupport
         return true;
     }
 
-    public static function store2faChallenge(string $token, int $userId): void
+    /**
+     * Destroy a challenge's pending 2FA OTP (attempt cap reached — the code
+     * can no longer be guessed; the user must sign in again for a new one).
+     */
+    public static function burn2faOtp(string $challengeToken): void
     {
-        set_transient('bcc_2fa_ct_' . $token, (string) $userId, self::TWO_FA_CHALLENGE_TTL);
+        delete_transient('bcc_2fa_otp_' . self::twoFaChallengeKey($challengeToken));
     }
 
-    /** Validate a challenge token without consuming it. Returns userId or null. */
+    /**
+     * Register $token as the user's ONE live 2FA challenge (F-124).
+     *
+     * A per-user pointer names the current challenge; peek2faChallenge()
+     * honours only that one, so a new login makes every earlier challenge
+     * for the user unusable (for verify AND resend) and its OTP is deleted.
+     * Without this, minting N challenges (each needs the password) would buy
+     * N × TWO_FA_MAX_FAILURES guesses at a valid code. Consequence: a second
+     * concurrent login (another device) cancels the first's pending 2FA.
+     */
+    public static function store2faChallenge(string $token, int $userId): void
+    {
+        $pointerKey = 'bcc_2fa_current_' . (string) $userId;
+        $previous   = get_transient($pointerKey);
+        if (is_string($previous) && $previous !== '') {
+            delete_transient('bcc_2fa_otp_' . $previous);
+        }
+        set_transient('bcc_2fa_ct_' . $token, (string) $userId, self::TWO_FA_CHALLENGE_TTL);
+        set_transient($pointerKey, self::twoFaChallengeKey($token), self::TWO_FA_CHALLENGE_TTL);
+    }
+
+    /**
+     * Validate a challenge token without consuming it. Returns userId, or null
+     * when the token is unknown/expired OR has been superseded by a newer
+     * login for the same user (only the current challenge is live).
+     */
     public static function peek2faChallenge(string $token): ?int
     {
         if ($token === '') {
@@ -656,7 +706,14 @@ final class AuthSupport
             return null;
         }
         $id = (int) $stored;
-        return $id > 0 ? $id : null;
+        if ($id <= 0) {
+            return null;
+        }
+        $current = get_transient('bcc_2fa_current_' . (string) $id);
+        if (!is_string($current) || !hash_equals($current, self::twoFaChallengeKey($token))) {
+            return null;
+        }
+        return $id;
     }
 
     /** Delete the challenge token transient (call after successful OTP verify). */
