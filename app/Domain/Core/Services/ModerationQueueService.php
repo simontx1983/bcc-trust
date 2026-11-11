@@ -255,16 +255,25 @@ final class ModerationQueueService
      */
     private static function resolveHandleToUserIds(string $handle): array
     {
-        // get_users with meta_compare=LIKE — the meta_value passed to
-        // get_users is treated as the LIKE pattern body (caller must
-        // include % wildcards if substring match is desired). We wrap it
-        // ourselves for partial-match semantics so admins can type any
-        // fragment of a handle.
-        $pattern = '%' . $handle . '%';
+        // Pass the RAW fragment. WP_Meta_Query's LIKE branch already does
+        // `'%' . $wpdb->esc_like($meta_value) . '%'` (wp-includes/
+        // class-wp-meta-query.php, case 'LIKE'), so it supplies the
+        // substring wildcards itself. Wrapping here as well made the
+        // pattern '%\%frag\%%': esc_like escaped OUR '%' into literal
+        // percent signs, so the filter only matched handles that
+        // contained a literal '%', which is never.
+        //
+        // A leading '@' is dropped because admins type handles the way
+        // the UI shows them ("@alice"), while bcc_handle stores the bare
+        // handle.
+        $fragment = ltrim($handle, '@');
+        if ($fragment === '') {
+            return [];
+        }
         $users = get_users([
             'meta_key'     => 'bcc_handle',
             'meta_compare' => 'LIKE',
-            'meta_value'   => $pattern,
+            'meta_value'   => $fragment,
             'fields'       => 'ID',
             'number'       => self::REPORTER_HANDLE_MAX_MATCHES,
         ]);

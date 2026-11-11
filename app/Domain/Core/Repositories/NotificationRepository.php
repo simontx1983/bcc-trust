@@ -261,9 +261,12 @@ final class NotificationRepository
      * caller passes the already-resolved meta key string so this repository
      * does not depend back on the NotificationPrefs Support class.
      *
+     * Keyset-paged: pass the last id of the previous page as $afterUserId.
+     * The digest used to read ONE page of 5000 and silently stop there.
+     *
      * @return list<int>
      */
-    public function findUserIdsByMetaFlag(string $metaKey, int $limit): array
+    public function findUserIdsByMetaFlag(string $metaKey, int $limit, int $afterUserId = 0): array
     {
         if ($metaKey === '' || $limit <= 0) {
             return [];
@@ -274,10 +277,12 @@ final class NotificationRepository
         /** @var list<numeric-string>|null $rows */
         $rows = $wpdb->get_col($wpdb->prepare(
             "SELECT user_id FROM {$wpdb->usermeta}
-              WHERE meta_key = %s AND meta_value = %s
+              WHERE meta_key = %s AND meta_value = %s AND user_id > %d
+              ORDER BY user_id ASC
               LIMIT %d",
             $metaKey,
             '1',
+            max(0, $afterUserId),
             $limit
         ));
 
@@ -292,5 +297,31 @@ final class NotificationRepository
             }
         }
         return $out;
+    }
+
+    /**
+     * How many users have $metaKey = '1'. Admin display only. Null when the
+     * read fails — a DB error must not display as "0 members".
+     */
+    public function countUsersByMetaFlag(string $metaKey): ?int
+    {
+        if ($metaKey === '') {
+            return 0;
+        }
+
+        global $wpdb;
+
+        $wpdb->last_error = '';
+        $n = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value = %s",
+            $metaKey,
+            '1'
+        ));
+
+        $lastError = (string) $wpdb->last_error;
+        if (strlen($lastError) > 0 || !is_numeric($n)) {
+            return null;
+        }
+        return (int) $n;
     }
 }

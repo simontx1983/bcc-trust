@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Security\Tests;
 
 use BCC\Trust\Core\Repositories\AuditLogRepository;
+use BCC\Trust\Core\Repositories\DeviceFingerprintRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\BehavioralAnalyzer;
 use BCC\Trust\Core\Security\DeviceFingerprinter;
 use BCC\Trust\Core\Security\DeviceSharingPenaltyLedger;
@@ -89,7 +91,7 @@ final class FraudInputFixesTest extends TestCase
 
         self::assertSame(
             BCC_TRUST_DEVICE_SHARING_MAX_POINTS - 10,
-            DeviceSharingPenaltyLedger::allowance(self::USER, 'server_fingerprint_sharing', 'srv_x', 30, $t),
+            DeviceSharingPenaltyLedger::allowance(self::USER, 'device_sharing', 'fpB', 30, $t),
             'a second device only gets what is left under the cap'
         );
     }
@@ -131,11 +133,11 @@ final class FraudInputFixesTest extends TestCase
         self::assertSame([[self::USER, 10, 'device_sharing']], self::$increments, 'once per window, not per vote');
     }
 
-    public function testTheCapHoldsAcrossBothSignals(): void
+    public function testTheCapHoldsAcrossDevices(): void
     {
         $fp = $this->fingerprinter();
         $this->penalise($fp, 'device_sharing', 'family-laptop', 20);
-        $applied = $this->penalise($fp, 'server_fingerprint_sharing', 'srv_household', 30);
+        $applied = $this->penalise($fp, 'device_sharing', 'household-tablet', 30);
 
         self::assertSame(0, $applied, 'the cap is already reached');
         self::assertSame([[self::USER, 20, 'device_sharing']], self::$increments);
@@ -153,8 +155,33 @@ final class FraudInputFixesTest extends TestCase
     {
         $GLOBALS['__fi_options']['bcc_trust_whitelist_ip'] = ['203.0.113.9' => ['note' => 'office NAT']];
 
-        self::assertSame(0, $this->penalise($this->fingerprinter(), 'server_fingerprint_sharing', 'srv_any', 30));
+        self::assertSame(0, $this->penalise($this->fingerprinter(), 'device_sharing', 'any-device', 20));
         self::assertSame([], self::$increments);
+    }
+
+    // ── F-108: a shared SERVER fingerprint is logged, not penalised ─────
+
+    public function testASharedServerFingerprintAddsNoFraudPoints(): void
+    {
+        if (!function_exists('BCC\Trust\Core\Security\wp_salt')) {
+            eval('namespace BCC\Trust\Core\Security; function wp_salt(string $s = "auth"): string { return "salt"; }');
+        }
+        // AuditLogger::log() returns early when its table is absent.
+        (new \ReflectionProperty(AuditLogger::class, 'tableExists'))->setValue(null, false);
+
+        $fp   = $this->fingerprinter();
+        $repo = new class extends DeviceFingerprintRepository {
+            public int $upserts = 0;
+            public function __construct() {}
+            public function getFingerprintUserCount(string $fingerprint): int { return 4; }
+            public function upsertServerFingerprint(int $userId, string $fingerprint, string $ipHash, string $userAgent): void { $this->upserts++; }
+        };
+        (new \ReflectionProperty(DeviceFingerprinter::class, 'fpRepo'))->setValue($fp, $repo);
+
+        (new \ReflectionMethod(DeviceFingerprinter::class, 'storeServerSideFingerprint'))->invoke($fp, self::USER);
+
+        self::assertSame([], self::$increments, 'four accounts on one server fingerprint: recorded, no points (F-108)');
+        self::assertSame(1, $repo->upserts, 'the fingerprint is still stored for review');
     }
 
     // ── F-128: night owl only with a known timezone ──────────────────────

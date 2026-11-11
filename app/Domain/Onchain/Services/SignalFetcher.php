@@ -24,6 +24,16 @@ class SignalFetcher
     const ETHERSCAN_BASE = 'https://api.etherscan.io/api';
     const HTTP_TIMEOUT   = 10;
 
+    /** Signatures per getSignaturesForAddress page (the RPC's maximum). */
+    private const SOLANA_SIGNATURE_PAGE = 1000;
+
+    /**
+     * Pages walked back per Solana wallet (5,000 signatures): at most this
+     * many RPC calls per wallet in the daily refresh. A wallet still paging
+     * here has its age reported as a flagged LOWER BOUND.
+     */
+    private const SOLANA_SIGNATURE_MAX_PAGES = 5;
+
     /**
      * Resolve Solana RPC URL. Uses BCC_SOLANA_RPC_URL constant if defined,
      * otherwise falls back to the public mainnet endpoint (rate-limited).
@@ -241,27 +251,60 @@ class SignalFetcher
     /** @return array<string, mixed>|null */
     private static function fetchSolana(string $address): ?array
     {
-        $signatures = self::solanaRpc('getSignaturesForAddress', [
-            $address,
-            ['limit' => 1000],
-        ]);
+        // ⚠ F-12: WALK BACK TO THE OLDEST SIGNATURE. getSignaturesForAddress
+        // returns signatures NEWEST FIRST, and this used to read one page of
+        // 1,000 — so for any wallet with more history, "the oldest" was only
+        // the 1,000th-most-recent transaction and the wallet age was badly
+        // understated for exactly the established wallets. Pages are followed
+        // with `before` until a short page ends the history, bounded at
+        // SOLANA_SIGNATURE_MAX_PAGES. A failed or malformed page returns null
+        // (the last good stored signals stay) rather than an age computed
+        // from a partial walk.
+        $tx_count  = 0;
+        $lastPage  = [];
+        $before    = null;
+        $exhausted = false;
 
-        if ($signatures === null) {
-            return null;
+        for ($page = 0; $page < self::SOLANA_SIGNATURE_MAX_PAGES; $page++) {
+            $opts = ['limit' => self::SOLANA_SIGNATURE_PAGE];
+            if ($before !== null) {
+                $opts['before'] = $before;
+            }
+
+            $signatures = self::solanaRpc('getSignaturesForAddress', [$address, $opts]);
+            if ($signatures === null || !self::isSignaturePage($signatures)) {
+                return null;
+            }
+
+            $tx_count += count($signatures);
+            if ($signatures !== []) {
+                $lastPage = $signatures;
+            }
+
+            if (count($signatures) < self::SOLANA_SIGNATURE_PAGE) {
+                $exhausted = true;
+                break;
+            }
+            // isSignaturePage() has already proved every item carries a
+            // non-empty string signature.
+            $last   = end($signatures);
+            $before = is_object($last) ? (string) (get_object_vars($last)['signature'] ?? '') : '';
         }
 
-        $tx_count        = count($signatures);
+        // The oldest signature with a timestamp — blockTime can be null.
         $first_tx_at     = null;
         $wallet_age_days = 0;
-
-        if ($tx_count > 0) {
-            $oldest = end($signatures);
-            if (isset($oldest->blockTime) && $oldest->blockTime) {
-                $ts              = (int) $oldest->blockTime;
-                $first_tx_at     = gmdate('Y-m-d H:i:s', $ts);
-                $wallet_age_days = (int) floor((time() - $ts) / DAY_IN_SECONDS);
+        for ($i = count($lastPage) - 1; $i >= 0; $i--) {
+            $bt = $lastPage[$i]->blockTime ?? null;
+            if (is_int($bt) && $bt > 0) {
+                $first_tx_at     = gmdate('Y-m-d H:i:s', $bt);
+                $wallet_age_days = (int) floor((time() - $bt) / DAY_IN_SECONDS);
+                break;
             }
         }
+
+        // Still paging at the cap: the true first transaction is older.
+        $ageIsLowerBound = !$exhausted;
 
         // Solana RPC does not expose a reliable program-deployment count.
         // Store 0 for the DB column (NOT NULL constraint), but flag as
@@ -277,10 +320,31 @@ class SignalFetcher
                 'source'                    => 'solana_rpc',
                 'wallet_age_days'           => $wallet_age_days,
                 'tx_count'                  => $tx_count,
-                'tx_count_capped'           => ($tx_count === 1000),
+                'tx_count_capped'           => $ageIsLowerBound,
+                'wallet_age_lower_bound'    => $ageIsLowerBound,
                 'contract_count_unsupported' => true,
             ],
         ];
+    }
+
+    /**
+     * F-12: every item of a getSignaturesForAddress page is an object with a
+     * non-empty string `signature` (the next page's `before` cursor).
+     *
+     * (No list check: solanaRpc() decodes JSON to objects, so a JSON map
+     * result is a stdClass and is already rejected there; any JSON array it
+     * passes on is a PHP list.)
+     *
+     * @param array<mixed> $page
+     */
+    private static function isSignaturePage(array $page): bool
+    {
+        foreach ($page as $item) {
+            if (!is_object($item) || !isset($item->signature) || !is_string($item->signature) || $item->signature === '') {
+                return false;
+            }
+        }
+        return true;
     }
 
     // ── HTTP helpers ──────────────────────────────────────────────────────────
