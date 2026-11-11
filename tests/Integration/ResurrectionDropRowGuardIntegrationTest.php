@@ -172,6 +172,65 @@ namespace BCC\Trust\Tests\Integration {
             self::assertNotFalse(\get_transient('bcc_trust_migration_backoff_onchain_role_boost_cols'), 'a failed probe must start the backoff');
         }
 
+        /**
+         * #418 review L1: wpdb::query() can fail WITHOUT setting last_error
+         * (`! ready` after a failed reconnect, or a `query` filter emptying
+         * the SQL), and get_var() then reads the PREVIOUS statement's
+         * last_result. Here that stale value is the table name a SHOW TABLES
+         * just returned — (int) of which is 0, so the old probe read a
+         * POPULATED retired table as "empty" and would have dropped it.
+         *
+         * The server-side fault injection always sets last_error, so this
+         * silent-failure path is modelled with a minimal stand-in wpdb.
+         */
+        public function testASilentQueryFailureIsUnknownNotEmpty(): void
+        {
+            $real  = $GLOBALS['wpdb'];
+            $table = $real->prefix . 'bcc_user_ranks';
+            $fake  = new class ($table) {
+                public string $prefix     = 'wp_';
+                public string $last_error = '';
+                /** @var list<string> */
+                public array $queries = [];
+                public function __construct(private string $table)
+                {
+                }
+                public function prepare(string $q, ...$a): string
+                {
+                    return vsprintf(str_replace(['%s', '%d'], ["'%s'", '%d'], $q), $a);
+                }
+                /**
+                 * Only the row COUNT fails, silently. The DROP would succeed —
+                 * so a probe that trusted the stale value really would drop
+                 * (the reviewer's point: today's code was safe only because
+                 * the DROP happened to fail the same way).
+                 */
+                public function query(string $sql)
+                {
+                    $this->queries[] = $sql;
+                    return str_starts_with($sql, 'SELECT COUNT') ? false : 1;
+                }
+                /** Whatever ran last, the stale last_result is the table name. */
+                public function get_var(?string $sql = null)
+                {
+                    return $this->table;
+                }
+            };
+
+            $GLOBALS['wpdb'] = $fake;
+            try {
+                $result = \bcc_trust_drop_retired_table_if_empty($table, 'user_ranks_table');
+            } finally {
+                $GLOBALS['wpdb'] = $real;
+            }
+
+            self::assertSame('failed', $result, 'a silent count failure is unknown, never "empty"');
+            self::assertFalse(
+                (bool) array_filter($fake->queries, static fn(string $q): bool => str_starts_with($q, 'DROP')),
+                'and nothing is dropped'
+            );
+        }
+
         // ── helpers ────────────────────────────────────────────────────────
 
         private function createTable(string $suffix): string

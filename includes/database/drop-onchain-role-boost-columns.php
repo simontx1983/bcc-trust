@@ -46,8 +46,11 @@ if (!function_exists('bcc_trust_drop_onchain_role_boost_columns')) {
 
         // Table may not exist yet on a brand-new install (schema-ensure runs
         // on activation); bail quietly and let the next init retry.
-        $tableExists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
-        if ($tableExists === null && $wpdb->last_error !== '') {
+        // Probes use the #69 runProbe shape (#418 review L1): a wpdb failure
+        // that sets no last_error must not read the previous statement's
+        // result as this one's.
+        [$ok, $tableExists] = bcc_trust_migration_probe($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+        if (!$ok) {
             // A failed probe is UNKNOWN, not "table absent" (#401 review L2).
             bcc_trust_migration_step_failed('onchain_role_boost_cols', 'probe table');
             return;
@@ -63,13 +66,13 @@ if (!function_exists('bcc_trust_drop_onchain_role_boost_columns')) {
         $present  = [];
         $withData = [];
         foreach (['trust_boost', 'fraud_reduction'] as $column) {
-            $hasColumn = $wpdb->get_var($wpdb->prepare(
+            [$ok, $hasColumn] = bcc_trust_migration_probe($wpdb->prepare(
                 "SELECT COUNT(*) FROM information_schema.COLUMNS
                  WHERE table_schema = DATABASE() AND table_name = %s AND column_name = %s",
                 $table,
                 $column
             ));
-            if ($hasColumn === null && $wpdb->last_error !== '') {
+            if (!$ok || $hasColumn === null) {
                 bcc_trust_migration_step_failed('onchain_role_boost_cols', "probe {$column}");
                 return;
             }
@@ -79,8 +82,8 @@ if (!function_exists('bcc_trust_drop_onchain_role_boost_columns')) {
             $present[] = $column;
             // Column name is a fixed literal from the list above.
             // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-            $populated = $wpdb->get_var("SELECT COUNT(*) FROM `{$table}` WHERE `{$column}` IS NOT NULL AND `{$column}` <> 0");
-            if ($populated === null) {
+            [$ok, $populated] = bcc_trust_migration_probe("SELECT COUNT(*) FROM `{$table}` WHERE `{$column}` IS NOT NULL AND `{$column}` <> 0");
+            if (!$ok || $populated === null) {
                 bcc_trust_migration_step_failed('onchain_role_boost_cols', "count {$column}");
                 return;
             }
@@ -102,12 +105,12 @@ if (!function_exists('bcc_trust_drop_onchain_role_boost_columns')) {
             // Drop the index first — it's defined on trust_boost, so the
             // column DROP would otherwise fail on some MySQL versions.
             if ($column === 'trust_boost') {
-                $hasIdx = $wpdb->get_var($wpdb->prepare(
+                [$ok, $hasIdx] = bcc_trust_migration_probe($wpdb->prepare(
                     "SELECT COUNT(*) FROM information_schema.STATISTICS
                      WHERE table_schema = DATABASE() AND table_name = %s AND index_name = 'idx_trust_boost'",
                     $table
                 ));
-                if ($hasIdx === null && $wpdb->last_error !== '') {
+                if (!$ok || $hasIdx === null) {
                     bcc_trust_migration_step_failed('onchain_role_boost_cols', 'probe idx_trust_boost');
                     return;
                 }
