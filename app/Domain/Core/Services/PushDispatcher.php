@@ -41,6 +41,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Cron\AsyncDispatcher;
 use BCC\Core\Http\SafeHttpClient;
 use BCC\Core\Log\Logger;
+use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Trust\Core\Repositories\PushSubscriptionRepository;
 use BCC\Trust\Core\Support\NotificationPrefs;
 use BCC\Trust\Core\Support\PushMetrics;
@@ -122,11 +123,17 @@ final class PushDispatcher
      * or per-event OFF) — the bell still wrote; we just skip the push
      * channel for this user.
      *
+     * F-74: a push never crosses a block. When the event has a person
+     * behind it ($actorId > 0), a block in EITHER direction drops this push,
+     * and so does a block table that cannot be read (fail closed, as F-99).
+     * The bell is unaffected: PeepSo applies blocks to it on its own path.
+     * System events (no actor) pass 0.
+     *
      * @param array<string, mixed> $payload Free-form metadata for body
      *   rendering. Keys consumed by PushPayload: actor_handle, page_id,
      *   page_name, dispute_id, outcome.
      */
-    public function enqueue(int $recipientId, string $eventType, array $payload): void
+    public function enqueue(int $recipientId, string $eventType, array $payload, int $actorId = 0): void
     {
         if ($recipientId <= 0) {
             return;
@@ -144,6 +151,19 @@ final class PushDispatcher
         }
         if (!NotificationPrefs::isPushEnabled($recipientId, $eventType)) {
             return;
+        }
+        if ($actorId > 0) {
+            $blocked = PeepSoBlockRepository::isMutuallyBlockedOrUnknown($recipientId, $actorId);
+            if ($blocked !== false) {
+                if ($blocked === null) {
+                    // Never silent: an unreadable block table drops pushes.
+                    Logger::warning('[PushDispatcher] enqueue dropped: block state unreadable', [
+                        'event_type'   => $eventType,
+                        'recipient_id' => $recipientId,
+                    ]);
+                }
+                return;
+            }
         }
 
         $key      = self::queueKey($recipientId, $eventType);
