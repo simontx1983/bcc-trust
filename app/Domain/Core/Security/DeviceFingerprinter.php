@@ -553,14 +553,30 @@ class DeviceFingerprinter {
             return 0;
         }
 
-        $points = DeviceSharingPenaltyLedger::allowance($userId, $reason, $deviceKey, $requested);
-        if ($points <= 0) {
+        // Allowance → increment → record must be atomic per account, or two
+        // concurrent votes could both see "not yet penalised" and both add
+        // the penalty. Non-blocking: a request that loses the race applies
+        // nothing now; a later vote applies it if it is still due.
+        $lockKey  = 'bcc_device_sharing_' . $userId;
+        $hasLocks = class_exists('\\BCC\\Core\\DB\\AdvisoryLock');
+        if ($hasLocks && !\BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0)) {
             return 0;
         }
 
-        $this->userInfoRepo->incrementFraudScore($userId, $points, $reason);
-        DeviceSharingPenaltyLedger::record($userId, $reason, $deviceKey, $points);
-        return $points;
+        try {
+            $points = DeviceSharingPenaltyLedger::allowance($userId, $reason, $deviceKey, $requested);
+            if ($points <= 0) {
+                return 0;
+            }
+
+            $this->userInfoRepo->incrementFraudScore($userId, $points, $reason);
+            DeviceSharingPenaltyLedger::record($userId, $reason, $deviceKey, $points);
+            return $points;
+        } finally {
+            if ($hasLocks) {
+                \BCC\Core\DB\AdvisoryLock::release($lockKey);
+            }
+        }
     }
 
     /**
