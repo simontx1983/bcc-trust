@@ -164,6 +164,8 @@ if (!defined('ABSPATH')) {
  */
 final class ValidatorRepository
 {
+    use GuardsReadFailures;
+
     /** @var string Explicit column list — must match schema-validators.php. */
     private const COLUMNS = 'id, wallet_link_id, operator_address, chain_id, moniker, status,
                  commission_rate, total_stake, self_stake, delegator_count, uptime_30d,
@@ -940,10 +942,21 @@ final class ValidatorRepository
         $wallets = WalletRepository::table();
         $chains  = ChainRepository::table();
 
-        $allowedOrder = ['total_stake', 'voting_power_rank', 'commission_rate', 'delegator_count', 'uptime_30d', 'chain_name'];
-        if (!in_array($orderBy, $allowedOrder, true)) {
+        // Sort key → SQL column. `chain_name` lives on the CHAINS table (c),
+        // not on validators: it used to render as `v.chain_name`, an unknown
+        // column, so that sort was an SQL error that came back as an empty page.
+        $orderColumns = [
+            'total_stake'       => 'v.total_stake',
+            'voting_power_rank' => 'v.voting_power_rank',
+            'commission_rate'   => 'v.commission_rate',
+            'delegator_count'   => 'v.delegator_count',
+            'uptime_30d'        => 'v.uptime_30d',
+            'chain_name'        => 'c.name',
+        ];
+        if (!isset($orderColumns[$orderBy])) {
             $orderBy = 'total_stake';
         }
+        $orderColumn = $orderColumns[$orderBy];
 
         $orderDir = ($orderBy === 'voting_power_rank' || $orderBy === 'commission_rate') ? 'ASC' : 'DESC';
         $offset   = ($page - 1) * $perPage;
@@ -967,7 +980,7 @@ final class ValidatorRepository
              JOIN {$wallets} w ON w.id = v.wallet_link_id
              JOIN {$chains} c ON c.id = v.chain_id
              WHERE w.post_id = %d
-             ORDER BY v.{$orderBy} {$orderDir}
+             ORDER BY {$orderColumn} {$orderDir}, v.id DESC
              LIMIT %d OFFSET %d",
             $postId, $perPage, $offset
         ));
@@ -1222,17 +1235,27 @@ final class ValidatorRepository
             return $cached;
         }
 
-        /** @var list<ValidatorCountByChain>|null $rows */
-        $rows = $wpdb->get_results(
-            "SELECT chain_id, COUNT(*) AS cnt,
-                    MAX(fetched_at) AS last_fetched
-             FROM {$table}
-             GROUP BY chain_id
-             LIMIT 100"
-        );
+        try {
+            /** @var list<ValidatorCountByChain> $rows */
+            $rows = self::runRead(
+                "SELECT chain_id, COUNT(*) AS cnt,
+                        MAX(fetched_at) AS last_fetched
+                 FROM {$table}
+                 GROUP BY chain_id
+                 LIMIT 100",
+                __FUNCTION__,
+                true
+            );
+        } catch (RepositoryReadFailure $e) {
+            // F-101 class: a failed read is NOT "no validators on any chain".
+            // Answer empty for this request (callers are display surfaces)
+            // but never CACHE it — the old code stored the empty map for an
+            // hour, so one blip blanked every chain's count until expiry.
+            return [];
+        }
 
         $map = [];
-        foreach ($rows ?: [] as $row) {
+        foreach ($rows as $row) {
             $map[(int) $row->chain_id] = $row;
         }
 

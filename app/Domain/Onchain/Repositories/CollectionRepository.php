@@ -1919,17 +1919,27 @@ final class CollectionRepository
         global $wpdb;
         $table = self::table();
 
-        /** @var list<CollectionCountByChain>|null $rows */
-        $rows = $wpdb->get_results(
-            "SELECT chain_id, COUNT(*) AS cnt,
-                    MAX(fetched_at) AS last_fetched
-             FROM {$table}
-             GROUP BY chain_id
-             LIMIT 100"
-        );
+        try {
+            /** @var list<CollectionCountByChain> $rows */
+            $rows = self::runRead(
+                "SELECT chain_id, COUNT(*) AS cnt,
+                        MAX(fetched_at) AS last_fetched
+                 FROM {$table}
+                 GROUP BY chain_id
+                 LIMIT 100",
+                __FUNCTION__,
+                true
+            );
+        } catch (RepositoryReadFailure $e) {
+            // F-101 class: a failed read is NOT "no collections on any chain".
+            // Answer empty for this request (callers are display surfaces)
+            // but never CACHE it — the old code stored the empty map for an
+            // hour, so one blip blanked every chain's count until expiry.
+            return [];
+        }
 
         $map = [];
-        foreach ($rows ?: [] as $row) {
+        foreach ($rows as $row) {
             $map[(int) $row->chain_id] = $row;
         }
 
