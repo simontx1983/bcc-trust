@@ -85,6 +85,16 @@ final class NftGroupRevokeService
     public static bool $systemRevokeInProgress = false;
 
     /**
+     * @param (\Closure(): ProviderRequestBudget)|null $budgetFactory Replaces the
+     *        per-tick provider budget, for TESTS ONLY — so the wall-clock stop
+     *        can be pinned deterministically. Production constructs this with
+     *        no arguments and always gets the SURFACE_REVOKE budget.
+     */
+    public function __construct(
+        private readonly ?\Closure $budgetFactory = null,
+    ) {}
+
+    /**
      * Run one bounded, rotated revoke tick.
      *
      * PR 7.14:
@@ -120,7 +130,9 @@ final class NftGroupRevokeService
             return $stats;
         }
 
-        $budget = HoldingsService::verificationBudget(HoldingsService::SURFACE_REVOKE);
+        $budget = $this->budgetFactory !== null
+            ? ($this->budgetFactory)()
+            : HoldingsService::verificationBudget(HoldingsService::SURFACE_REVOKE);
 
         // Resolve the rotation cursor → (groupIndex, memberOffset). The
         // cursor is a flat "global member offset" we walk forward; when it
