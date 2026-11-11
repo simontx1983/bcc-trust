@@ -51,6 +51,25 @@ namespace BCC\Core\Security {
     }
 }
 
+namespace BCC\Core\DB {
+    if (!class_exists(AdvisoryLock::class, false)) {
+        final class AdvisoryLock
+        {
+            /** Records 'acquire:<key>' / 'release:<key>'; lock_deny makes acquire fail. */
+            public static function acquire(string $key, int $timeout = 0): bool
+            {
+                $GLOBALS['__bcc_ph']['locks'][] = 'acquire:' . $key;
+                return empty($GLOBALS['__bcc_ph']['lock_deny']);
+            }
+
+            public static function release(string $key): void
+            {
+                $GLOBALS['__bcc_ph']['locks'][] = 'release:' . $key;
+            }
+        }
+    }
+}
+
 namespace BCC\Core\Log {
     if (!class_exists(Logger::class, false)) {
         final class Logger
@@ -73,6 +92,7 @@ namespace BCC\Core\Log {
             /** @param array<string, mixed> $context */
             public static function error(string $message, array $context = []): void
             {
+                $GLOBALS['__bcc_ph']['log_errors'][] = $message;
             }
         }
     }
@@ -283,7 +303,16 @@ namespace {
         /** @param mixed $value */
         function update_user_meta(int $userId, string $key, $value): bool
         {
-            $GLOBALS['__bcc_ph']['meta'][$userId][$key] = (string) $value;
+            $GLOBALS['__bcc_ph']['meta'][$userId][$key] = is_array($value) ? $value : (string) $value;
+            return true;
+        }
+    }
+
+    if (!function_exists('wp_cache_delete')) {
+        /** @param int|string $key */
+        function wp_cache_delete($key, string $group = ''): bool
+        {
+            $GLOBALS['__bcc_ph']['cache_deletes'][] = $group . ':' . $key;
             return true;
         }
     }

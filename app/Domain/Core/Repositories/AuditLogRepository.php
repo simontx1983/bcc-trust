@@ -210,15 +210,44 @@ class AuditLogRepository {
     // table via VoteRepository::countByVoterSince().
 
     /**
-     * Count distinct users sharing an IP address (excluding a given user) within a time window.
+     * Count distinct users on the same network as an IP (excluding a given
+     * user) within a time window.
      *
-     * @param string $ipBinary Binary IP address.
+     * "Same network" (F-108, user decision): IPv4 is the exact address;
+     * IPv6 is the /64 the address sits in. One IPv6 client rotates through
+     * its /64 (privacy extensions, RFC 8981), so an exact IPv6 match let a
+     * single person look like many networks AND split one household into
+     * strangers. The stored ip_address stays the full address; the /64 is
+     * applied here, at comparison time.
+     *
+     * The IPv6 match is a byte range over the first 8 bytes, so it still
+     * walks idx_ip_lookup (ip_address, created_at). Only 16-byte values can
+     * fall inside a range whose two bounds share an 8-byte prefix, so IPv4
+     * rows never match an IPv6 query.
+     *
+     * @param string $ipBinary Binary IP address (inet_pton: 4 or 16 bytes).
      * @param int    $excludeUserId
      * @param int    $days Lookback window in days.
      * @return int
      */
     public function countDistinctUsersForIp( string $ipBinary, int $excludeUserId, int $days ): int {
         global $wpdb;
+
+        if ( strlen( $ipBinary ) === 16 ) {
+            $prefix = substr( $ipBinary, 0, 8 );
+            return (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(DISTINCT user_id)
+                 FROM {$this->table}
+                 WHERE ip_address BETWEEN %s AND %s
+                 AND user_id != %d
+                 AND user_id IS NOT NULL
+                 AND created_at > (UTC_TIMESTAMP() - INTERVAL %d DAY)",
+                $prefix . str_repeat( "\x00", 8 ),
+                $prefix . str_repeat( "\xff", 8 ),
+                $excludeUserId,
+                $days
+            ) );
+        }
 
         return (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(DISTINCT user_id)

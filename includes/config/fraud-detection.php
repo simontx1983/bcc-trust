@@ -63,6 +63,12 @@ define('BCC_TRUST_UNIFORM_VOTE_THRESHOLD', 0.9);
 define('BCC_TRUST_UNIFORM_VOTE_MIN', 10);
 define('BCC_TRUST_VOTE_CHANGE_LIMIT', 5);
 
+// Fan-in pre-gate window (F-105, user decision): a young account (< 30 days)
+// is refused when the page has had the fan-in threshold (15, filterable via
+// bcc_trust_fan_in_pre_gate_threshold) distinct voters within this many
+// MINUTES — a burst, not ordinary popularity.
+define('BCC_TRUST_FAN_IN_PRE_GATE_WINDOW_MINUTES', 5);
+
 // ======================================================
 // SHARED-DEVICE PENALTY (F-103)
 // ======================================================
