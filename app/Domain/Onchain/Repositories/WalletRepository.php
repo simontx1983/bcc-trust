@@ -591,11 +591,56 @@ final class WalletRepository
              FROM {$table} w
              JOIN {$chainTable} c ON c.id = w.chain_id
              WHERE c.slug IN ({$slugPlaceholders})
+             ORDER BY w.user_id ASC
              LIMIT %d OFFSET %d",
             ...$args
         ));
 
         return array_map('intval', $ids);
+    }
+
+    /**
+     * Owners with a link on any of the given chain slugs, in ascending
+     * user_id AFTER `$afterUserId` — KEYSET paging. FAIL-CLOSED.
+     *
+     * ⚠ F-11. The daily signal refresh paged owners with OFFSET over an
+     * unordered DISTINCT, which neither engine keeps stable across ticks, so
+     * owners were skipped and repeated. A keyset on user_id is stable however
+     * the set changes between ticks, and its cursor is simply the last owner
+     * handled. A failed read throws rather than reading as "no more owners",
+     * which would have ended the cycle early.
+     *
+     * @param string[] $chainSlugs
+     * @return list<int>
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function getUserIdsWithChainSlugsAfter(array $chainSlugs, int $afterUserId, int $limit): array
+    {
+        if ($chainSlugs === [] || $limit <= 0) {
+            return [];
+        }
+
+        global $wpdb;
+        $table      = self::table();
+        $chainTable = ChainRepository::table();
+
+        $slugPlaceholders = implode(',', array_fill(0, count($chainSlugs), '%s'));
+        $args = array_merge(array_values($chainSlugs), [max(0, $afterUserId), $limit]);
+
+        $ids = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT w.user_id
+               FROM {$table} w
+               JOIN {$chainTable} c ON c.id = w.chain_id
+              WHERE c.slug IN ({$slugPlaceholders})
+                AND w.user_id > %d
+              ORDER BY w.user_id ASC
+              LIMIT %d",
+            ...$args
+        ));
+
+        self::guardReadOrThrow('getUserIdsWithChainSlugsAfter');
+
+        return array_values(array_map('intval', $ids));
     }
 
     /**
