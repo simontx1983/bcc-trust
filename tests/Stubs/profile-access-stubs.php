@@ -41,7 +41,7 @@
  *   calls            => list<array{acc: mixed, user_id: int}>  spy log
  *   viewer_id        => int              get_current_user_id()
  *   is_admin         => bool             Permissions::is_admin()
- *   suspended[<uid>] => bool             that user's suspension state
+ *   suspended[<uid>] => bool|'unknown'   suspension state; 'unknown' = null
  *   susp_calls       => list<array{user_id: int|null, bypass: bool}>
  *   hooks            => list<array{hook: string, priority: int, accepted: int, callback: string}>
  */
@@ -192,6 +192,25 @@ namespace BCC\Core\Permissions {
 
             public static function is_not_suspended(?int $user_id = null, bool $allowAdminBypass = true): bool
             {
+                // bcc-core #84 defines it exactly this way, so an unknown
+                // state answers FALSE here — a deny. Reproduced rather
+                // than simplified: that is the behaviour ProfileAccess
+                // must NOT inherit on a read path.
+                return self::suspensionState($user_id, $allowAdminBypass) === false;
+            }
+
+            /**
+             * Tri-state per bcc-core #84: true suspended, false not
+             * suspended, null UNREADABLE.
+             *
+             * The fixture's `suspended[<uid>]` may hold the string
+             * `'unknown'` to mean null. A separate fixture key would read
+             * more neatly but would let a test set a suspension state and
+             * an unknown state for the same user at once, which the real
+             * API cannot do.
+             */
+            public static function suspensionState(?int $user_id = null, bool $allowAdminBypass = true): ?bool
+            {
                 $GLOBALS['__bcc_profile_access']['susp_calls'][] = [
                     'user_id' => $user_id,
                     'bypass'  => $allowAdminBypass,
@@ -199,8 +218,13 @@ namespace BCC\Core\Permissions {
 
                 $fixture = \bcc_profile_access_fixture();
                 $id      = $user_id ?: $fixture['viewer_id'];
+                $raw     = $fixture['suspended'][$id] ?? false;
 
-                return empty($fixture['suspended'][$id]);
+                if ($raw === 'unknown') {
+                    return null;
+                }
+
+                return (bool) $raw;
             }
         }
     }

@@ -329,7 +329,7 @@ final class ProfileAccess
      *   2. SITE ADMINS, who are the only people for whom a moderated
      *      account must stay reviewable.
      *
-     * ── Why `is_not_suspended()` and not a direct user_info read ───────
+     * ── Why bcc-core and not a direct user_info read ──────────────────
      *
      * It is bcc-core's canonical suspension answer (the same one
      * OperatorProfileEndpoint, PostsService, CredibilityAtoms and the
@@ -338,6 +338,29 @@ final class ProfileAccess
      * {@see \BCC\Trust\Core\Repositories\UserInfoRepository::suspendUser}
      * fires. Reading `user_info.is_suspended` here would be a second
      * opinion that could disagree with every gate above.
+     *
+     * ── Why `suspensionState() === true` and NOT `is_not_suspended()` ──
+     *
+     * ⚠⚠ This distinction is the whole fail-open guarantee, not a style
+     * preference. bcc-core #84 made the state TRI-state: true suspended,
+     * false not suspended, **null UNREADABLE** (the trust engine threw
+     * `SuspensionUnknownException`), and an unknown answer is never
+     * cached. `is_not_suspended()` is now defined as
+     * `suspensionState(...) === false`, so it answers FALSE — a deny —
+     * for an unknown state. A deny here HIDES the profile, which is
+     * exactly the behaviour the decision rules out.
+     *
+     * So the comparison must be `=== true`: only a definite "suspended"
+     * hides anything, and both `false` and `null` leave the profile
+     * visible. ⛔ Never `!== false`, which would hide on unknown again.
+     *
+     * ⚠ DEPLOY ORDER: this requires bcc-core #84 in production, since
+     * `suspensionState()` does not exist before it. There is deliberately
+     * no `method_exists` fallback — bcc-trust already cannot run against
+     * a pre-#84 bcc-core, because the suspension-unknown path throws
+     * `\BCC\Core\Contracts\SuspensionUnknownException`, a bcc-core
+     * class. A fallback here would guard a window that is already closed
+     * while reading as though it were open.
      *
      * ⚠ ADMIN BYPASS IS LEFT ON (the default), and that is about the
      * SUBJECT, not the viewer. `is_not_suspended()`'s bypass tests
@@ -386,7 +409,8 @@ final class ProfileAccess
             return false;
         }
 
-        return !\BCC\Core\Permissions\Permissions::is_not_suspended($ownerId);
+        // `=== true` so that null (UNREADABLE) leaves the profile VISIBLE.
+        return \BCC\Core\Permissions\Permissions::suspensionState($ownerId) === true;
     }
 
     /**

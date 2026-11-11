@@ -322,6 +322,29 @@ final class ProfileAccessTest extends TestCase
     }
 
     /**
+     * ⚠⚠ THE FAIL-OPEN GUARANTEE. bcc-core #84 made the suspension state
+     * tri-state and `is_not_suspended()` is now
+     * `suspensionState(...) === false`, so an UNREADABLE state answers
+     * "deny" there. A deny in this gate HIDES a profile, so reading the
+     * state through `is_not_suspended()` — or comparing with `!== false`
+     * — would withdraw every profile on the site the moment the state
+     * could not be read. Only `=== true` keeps unknown visible.
+     *
+     * This test is the one that fails if someone "tidies" the comparison.
+     */
+    public function testAnUnreadableSuspensionStateLeavesTheProfileVisible(): void
+    {
+        $this->givenAPublicProfile();
+        $GLOBALS['__bcc_profile_access']['viewer_id'] = 7;
+        $GLOBALS['__bcc_profile_access']['suspended'] = [self::OWNER => 'unknown'];
+
+        self::assertTrue(
+            ProfileAccess::canViewProfile(self::OWNER),
+            'an unreadable suspension state must not hide the profile'
+        );
+    }
+
+    /**
      * Control: suspension must not become the only thing the gate looks
      * at. A private profile stays private even for a member in perfectly
      * good standing — otherwise F-182 would have quietly replaced F-02.
