@@ -58,6 +58,66 @@ final class HiddenActivityFailClosedTest extends TestCase
         self::assertContains('moderation_hidden_ids:served_last_good', DegradationMetrics::$recorded);
     }
 
+    /**
+     * wpdb::query()'s `! $this->ready` path returns false WITHOUT setting
+     * last_error and WITHOUT flushing last_result. A last_error-only check
+     * read that as "no hidden posts", cached it, and overwrote last-good
+     * with []. That's F-98 again (review L1 on #410).
+     */
+    public function testASilentQueryFailureIsAFailureNotAnEmptyList(): void
+    {
+        $repo = new HiddenActivityRepository();
+        self::assertSame([103, 102, 101], $repo->getAllHiddenIds());
+
+        $this->bust();
+        $this->db()->failSilentNext = 1;
+        self::assertSame([103, 102, 101], $repo->getAllHiddenIds(), 'last-good served, never []');
+        self::assertSame(
+            [103, 102, 101],
+            $GLOBALS['__hidden_options'][HiddenActivityRepository::LAST_GOOD_OPTION]['ids'],
+            'last-good NOT overwritten with []'
+        );
+        self::assertContains('moderation_hidden_ids:list_read_failed', DegradationMetrics::$recorded);
+
+        // And not cached: the next request reads the DB again.
+        $before = $this->db()->queries;
+        $repo->getAllHiddenIds();
+        self::assertGreaterThan($before, $this->db()->queries);
+    }
+
+    public function testASilentFailureCannotServeAStaleUnrelatedResult(): void
+    {
+        $repo = new HiddenActivityRepository();
+        $repo->getAllHiddenIds();
+        $repo->exists(555); // leaves last_result = [['0']]
+
+        $this->bust();
+        $this->db()->failSilentNext = 1; // the list query never runs; last_result is stale
+        self::assertSame([103, 102, 101], $repo->getAllHiddenIds());
+    }
+
+    public function testExistsFailsClosedOnASilentFailure(): void
+    {
+        $repo = new HiddenActivityRepository();
+        $repo->exists(101); // last_result = [['1']]… then a silent failure
+        $this->db()->failSilentNext = 1;
+        self::assertTrue($repo->exists(555), 'silent failure answers "hidden"');
+
+        $repo->exists(555); // a real "not hidden" read: last_result = [['0']]
+        $this->db()->failSilentNext = 1;
+        self::assertTrue($repo->exists(101), 'and never trusts the stale 0 either');
+        self::assertContains('moderation_hidden_ids:exists_read_failed', DegradationMetrics::$recorded);
+    }
+
+    public function testAGenuinelyEmptyTableIsAnEmptyListNotAFailure(): void
+    {
+        // `=== false`, not `!$ok`: a SELECT returning 0 rows is success.
+        $this->db()->hidden = [];
+        self::assertSame([], (new HiddenActivityRepository())->getAllHiddenIds());
+        self::assertSame([], DegradationMetrics::$recorded);
+        self::assertFalse((new HiddenActivityRepository())->exists(555));
+    }
+
     public function testServingLastGoodLogsItsAge(): void
     {
         $repo = new HiddenActivityRepository();

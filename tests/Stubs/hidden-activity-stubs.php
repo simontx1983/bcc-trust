@@ -5,11 +5,13 @@
  *
  * The $wpdb double models REAL WPDB failure semantics, the whole point of
  * F-98:
- *   - every query first resets `last_error` (wpdb::flush());
- *   - a failed get_col() returns [] AND sets last_error;
- *   - a failed get_var() returns NULL AND sets last_error.
- * A double that returned false (or threw) would let a fix that only checked
- * `=== false` pass while production still cached [].
+ *   - query() returns the row count, or false; get_col()/get_var() call it
+ *     and DISCARD that return, then read last_result;
+ *   - a normal failure resets then sets `last_error` (wpdb::flush());
+ *   - the SILENT failure (`! $this->ready`) returns false with last_error
+ *     '' and last_result still holding the PREVIOUS query's rows.
+ * A double that returned false (or threw) from get_col() would let a fix
+ * that only checked `=== false` pass while production still cached [].
  */
 
 declare(strict_types=1);
@@ -26,47 +28,81 @@ namespace BCC\Trust\Tests\Stubs {
         /** Fail only the Nth query from now (1-based), 0 = off. */
         public int $failOnQuery = 0;
         public int $queries = 0;
+        /**
+         * Number of upcoming queries that hit wpdb::query()'s SILENT failure
+         * path: `! $this->ready` after a failed reconnect. It returns false
+         * BEFORE flush(), so last_error stays '' and last_result keeps the
+         * PREVIOUS query's rows. A last_error-only check misses it.
+         */
+        public int $failSilentNext = 0;
+        /** @var list<array<int, string>> rows of the last query that ran (wpdb::$last_result) */
+        public array $lastResult = [];
         /** @var array<int, mixed> */
         private array $args = [];
 
         public function prepare(string $sql, mixed ...$args): string
         {
             $this->args = $args;
-            return $sql;
+            return $sql . '|' . json_encode($args);
         }
 
-        /** @return list<string> */
-        public function get_col(string $sql): array
-        {
-            if ($this->fails()) {
-                return [];
-            }
-            [$cursor, $limit] = [(int) $this->args[0], (int) $this->args[1]];
-            $ids = array_values(array_filter($this->hidden, static fn (int $i): bool => $i < $cursor));
-            rsort($ids);
-            return array_map('strval', array_slice($ids, 0, $limit));
-        }
-
-        public function get_var(string $sql): ?string
-        {
-            if ($this->fails()) {
-                return null;
-            }
-            return in_array((int) $this->args[0], $this->hidden, true) ? '1' : '0';
-        }
-
-        private function fails(): bool
+        /**
+         * wpdb::query(): returns the row count of a SELECT, or false.
+         * Populates lastResult only when it actually ran.
+         */
+        public function query(string $sql): int|false
         {
             $this->queries++;
-            $this->last_error = ''; // wpdb::flush() at the start of every query
+            if ($this->failSilentNext > 0) {
+                $this->failSilentNext--;
+                return false; // `! $this->ready`: no flush(), no last_error, stale lastResult
+            }
+            $this->last_error = ''; // wpdb::flush()
             $fail = $this->failNext > 0 || ($this->failOnQuery > 0 && $this->queries === $this->failOnQuery);
             if ($this->failNext > 0) {
                 $this->failNext--;
             }
             if ($fail) {
                 $this->last_error = 'MySQL server has gone away';
+                $this->lastResult = [];
+                return false;
             }
-            return $fail;
+            $this->lastResult = $this->execute($sql);
+            return count($this->lastResult);
+        }
+
+        /**
+         * get_col(): with a query it runs it (and DISCARDS query()'s return, as
+         * WPDB does); with null it reads the last result.
+         *
+         * @return list<string>
+         */
+        public function get_col(?string $sql = null): array
+        {
+            if ($sql !== null) {
+                $this->query($sql);
+            }
+            return array_values(array_map(static fn (array $r): string => (string) $r[0], $this->lastResult));
+        }
+
+        public function get_var(?string $sql = null): ?string
+        {
+            if ($sql !== null) {
+                $this->query($sql);
+            }
+            return isset($this->lastResult[0][0]) ? (string) $this->lastResult[0][0] : null;
+        }
+
+        /** @return list<array<int, string>> */
+        private function execute(string $sql): array
+        {
+            if (str_contains($sql, 'COUNT(*)')) {
+                return [[in_array((int) $this->args[0], $this->hidden, true) ? '1' : '0']];
+            }
+            [$cursor, $limit] = [(int) $this->args[0], (int) $this->args[1]];
+            $ids = array_values(array_filter($this->hidden, static fn (int $i): bool => $i < $cursor));
+            rsort($ids);
+            return array_map(static fn (int $i): array => [(string) $i], array_slice($ids, 0, $limit));
         }
     }
 }

@@ -116,16 +116,16 @@ final class HiddenActivityRepository
         global $wpdb;
         $table = TableRegistry::hiddenActivities();
 
-        $raw = $wpdb->get_var($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT COUNT(*) FROM {$table} WHERE act_id = %d LIMIT 1",
             $actId
-        ));
-        if ($raw === null && (string) $wpdb->last_error !== '') {
+        );
+        if (!self::runRead($sql)) {
             self::recordReadFailure('exists_read_failed', ['act_id' => $actId, 'db_error' => (string) $wpdb->last_error]);
             return true;
         }
 
-        return (int) $raw > 0;
+        return (int) $wpdb->get_var(null) > 0;
     }
 
     /**
@@ -200,15 +200,16 @@ final class HiddenActivityRepository
         $ids    = [];
         $cursor = PHP_INT_MAX;
         while (count($ids) < self::READ_CEILING) {
-            $rows = $wpdb->get_col($wpdb->prepare(
+            $sql = $wpdb->prepare(
                 "SELECT act_id FROM {$table} WHERE act_id < %d ORDER BY act_id DESC LIMIT %d",
                 $cursor,
                 self::READ_BATCH
-            ));
-            if ((string) $wpdb->last_error !== '') {
+            );
+            if (!self::runRead($sql)) {
                 self::recordReadFailure('list_read_failed', ['db_error' => (string) $wpdb->last_error]);
                 return null;
             }
+            $rows = $wpdb->get_col(null);
             $batch = 0;
             foreach ((array) $rows as $raw) {
                 $id = (int) $raw;
@@ -233,7 +234,9 @@ final class HiddenActivityRepository
 
     /**
      * Persist a successful read as the last-known-good list, only when it
-     * differs from what is stored.
+     * differs from what is stored. Called ONLY after every batch passed
+     * runRead(), so an empty list here is a genuinely empty table (every
+     * hide restored), never a failed read standing in for one.
      *
      * ⚠ Ordering: a read is stamped with the moment it STARTED, and a write
      * only lands when that stamp is NEWER than the stored one. Two concurrent
@@ -293,6 +296,32 @@ final class HiddenActivityRepository
             }
         }
         return $ids;
+    }
+
+    /**
+     * Run a SELECT and report whether its result can be TRUSTED; the rows
+     * are then read with get_col(null) / get_var(null). Same pattern as
+     * bcc-core PeepSoBlockRepository::runProbe() (#69).
+     *
+     * ⚠⚠ `last_error` alone is NOT an exhaustive failure signal. get_col()
+     * and get_var() call query() and DISCARD its return, and wpdb::query()
+     * has failure paths that return false WITHOUT setting last_error (the
+     * `! $this->ready` guard after a failed reconnect, and an empty result
+     * from the `query` filter). Both return before flush(), so last_result
+     * still holds the PREVIOUS query's rows. Trusting get_col() there
+     * would read "no hidden posts" (or a stale unrelated result), cache it,
+     * and overwrite the last-known-good list with it. That's F-98 again,
+     * failing open on the path meant to fix it.
+     *
+     * ⚠ `=== false`, never `!$ok`: a SELECT returns its ROW COUNT, and a
+     * legitimate zero-row result is 0.
+     */
+    private static function runRead(string $sql): bool
+    {
+        global $wpdb;
+        $wpdb->last_error = '';
+        $ok = $wpdb->query($sql);
+        return $ok !== false && (string) $wpdb->last_error === '';
     }
 
     /** @param array<string, mixed> $context */
