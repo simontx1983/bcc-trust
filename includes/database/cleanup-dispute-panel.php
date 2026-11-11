@@ -39,7 +39,6 @@ if (!function_exists('bcc_trust_cleanup_dispute_panel')) {
 
         $disputesTable = $wpdb->prefix . 'bcc_disputes';
         $panelTable    = $wpdb->prefix . 'bcc_dispute_panel';
-        $pollsTable    = $wpdb->prefix . 'bcc_trust_polls';
 
         // F-149: only PANEL-ERA open disputes are voided — the ones with no
         // poll behind them. A live dispute is ALSO status 'reviewing', but
@@ -48,11 +47,24 @@ if (!function_exists('bcc_trust_cleanup_dispute_panel')) {
         // predicate (`status = 'reviewing'` alone) would dismiss every live
         // open dispute on any environment where this migration had not yet
         // been stamped done (a restore, a clone, a fresh copy). Unresolvable
-        // poll constants fail closed rather than fall back to the wide
-        // predicate.
-        if (!class_exists('\\BCC\\Trust\\Disputes\\Services\\DisputeVoteService')) {
+        // poll constants or table name fail closed rather than fall back to
+        // the wide predicate.
+        //
+        // Concurrency note: the NOT EXISTS below cannot see a poll opened in
+        // a concurrent, not-yet-committed transaction. That window is
+        // negligible for a one-off migration (it would need a dispute filed
+        // in the same instant the cleanup runs on a never-stamped
+        // environment), so it is documented rather than locked against.
+        if (!class_exists('\\BCC\\Trust\\Disputes\\Services\\DisputeVoteService')
+            || !class_exists('\\BCC\\Trust\\Core\\Database\\TableRegistry')
+        ) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] dispute-panel cleanup deferred: poll engine classes unavailable', [
+                'dispute_vote_service' => class_exists('\\BCC\\Trust\\Disputes\\Services\\DisputeVoteService'),
+                'table_registry'       => class_exists('\\BCC\\Trust\\Core\\Database\\TableRegistry'),
+            ]);
             return BCC_TRUST_MIGRATION_INCOMPLETE;
         }
+        $pollsTable  = \BCC\Trust\Core\Database\TableRegistry::polls();
         $pollType    = \BCC\Trust\Disputes\Services\DisputeVoteService::POLL_TYPE;
         $subjectType = \BCC\Trust\Disputes\Services\DisputeVoteService::SUBJECT_TYPE;
         $panelEraPredicate = "d.status = %s
