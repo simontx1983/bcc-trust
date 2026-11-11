@@ -16,6 +16,9 @@ jobs:
   php:
     name: PHP — PHPStan L8 · PHPUnit · guardrails
     runs-on: ubuntu-latest
+    # Composer's script timeout is off (process-timeout 0), so cap the job
+    # here instead of GitHub's 360-minute default.
+    timeout-minutes: 30
     # Checked out INTO the WordPress plugins layout so arch-guardrails.sh
     # resolves its sibling-plugin paths (scripts/../../<plugin>).
     defaults:
@@ -226,6 +229,9 @@ jobs:
   integration:
     name: PHP integration (MySQL)
     runs-on: ubuntu-latest
+    # Composer's script timeout is off (process-timeout 0), so cap the job
+    # here instead of GitHub's 360-minute default.
+    timeout-minutes: 30
     services:
       mysql:
         image: mysql:8.0
@@ -280,6 +286,9 @@ jobs:
   integration-mariadb:
     name: PHP integration (MariaDB 11.8 — production engine)
     runs-on: ubuntu-latest
+    # Composer's script timeout is off (process-timeout 0), so cap the job
+    # here instead of GitHub's 360-minute default.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: app/public/wp-content/plugins/bcc-trust
