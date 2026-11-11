@@ -109,7 +109,46 @@ final class FeedRankingService
      *
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
-    public function getHotFeed(?string $cursor = null, int $limit = self::HOT_WARM_LIMIT): array
+    public function getHotFeed(
+        ?string $cursor = null,
+        int $limit = self::HOT_WARM_LIMIT,
+        int $viewerId = 0
+    ): array {
+        $payload = $this->hotFeedPayload($cursor, $limit);
+
+        // ⚠⚠ PER-VIEWER FILTER, APPLIED AFTER THE SHARED CACHE AND NEVER
+        // WRITTEN BACK INTO IT. The payload above is built with the
+        // ANONYMOUS posture (viewer 0) and cached for everyone, which is
+        // what makes /feed/hot cheap and publicly cacheable. §K1 mutual
+        // invisibility still has to hold for a signed-in reader, so the
+        // block filter runs here, on this request's own copy.
+        //
+        // ⚠ The cache write lives inside hotFeedPayload(), so it is
+        // STRUCTURALLY impossible for a filtered, viewer-specific payload to
+        // reach the shared cache — rather than merely being careful about
+        // the order of two statements. One viewer's filtered feed being
+        // served to everyone else would be a far worse bug than the one
+        // this fixes, and it is the reason the split exists.
+        //
+        // ⚠ `$viewerId` 0 (anonymous, and the cron warm path) short-circuits
+        // inside the filter, so logged-out behaviour is byte-identical.
+        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+
+        return $payload;
+    }
+
+    /**
+     * The shared, anonymous hot-feed payload — exactly the former
+     * getHotFeed body, cache and all.
+     *
+     * ⚠ VIEWER-INDEPENDENT BY CONSTRUCTION, and it must stay that way: its
+     * result is stored in a cache shared by every reader, including
+     * logged-out ones, and is warmed by cron under
+     * {@see warmHotFeed()}. Nothing viewer-specific may enter here.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    private function hotFeedPayload(?string $cursor, int $limit): array
     {
         if ($cursor !== null) {
             return $this->buildHotFeed($cursor, $limit);
@@ -124,6 +163,7 @@ final class FeedRankingService
 
         $payload = $this->buildHotFeed(null, $limit);
         wp_cache_set($key, $payload, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
+
         return $payload;
     }
 
@@ -755,8 +795,29 @@ final class FeedRankingService
     private static function authorIdOf(array $item): int
     {
         $author = is_array($item['author'] ?? null) ? $item['author'] : [];
+        $id     = $author['id'] ?? null;
 
-        return is_int($author['id'] ?? null) ? $author['id'] : 0;
+        // ⚠⚠ A NUMERIC STRING COUNTS, AND THIS IS A FAIL-OPEN GUARD RATHER
+        // THAN TOLERANCE FOR ITS OWN SAKE. An `is_int`-only test returns 0
+        // for `"42"`, every author id becomes 0, and the block filter then
+        // silently matches nobody — a viewer would see blocked authors with
+        // no error anywhere.
+        //
+        // ⚠ The hot-feed path makes that reachable: those items come back
+        // through `wp_cache_get()`, so their types survive whatever the
+        // object-cache backend does to them on the way out. Serialising
+        // backends preserve ints; a backend that round-trips through JSON or
+        // a text column does not, and this class is in no position to know
+        // which is installed.
+        //
+        // ⚠ `ctype_digit` rather than `is_numeric`: ids are unsigned
+        // integers, and `is_numeric` would also accept `"1e3"`, `" 7"` and
+        // `"-1"`. The cast must mean what the string says.
+        if (is_int($id)) {
+            return $id;
+        }
+
+        return is_string($id) && $id !== '' && ctype_digit($id) ? (int) $id : 0;
     }
 
     /**
