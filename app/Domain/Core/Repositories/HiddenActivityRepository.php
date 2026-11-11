@@ -319,9 +319,23 @@ final class HiddenActivityRepository
     private static function runRead(string $sql): bool
     {
         global $wpdb;
-        $wpdb->last_error = '';
+        self::clearLastError();
         $ok = $wpdb->query($sql);
-        return $ok !== false && (string) $wpdb->last_error === '';
+        return $ok !== false && !self::lastReadFailed();
+    }
+
+    // Separate helpers (bcc-core's shape) so static analysis does not narrow
+    // last_error to '' across the query() call that mutates it.
+    private static function clearLastError(): void
+    {
+        global $wpdb;
+        $wpdb->last_error = '';
+    }
+
+    private static function lastReadFailed(): bool
+    {
+        global $wpdb;
+        return (string) $wpdb->last_error !== '';
     }
 
     /** @param array<string, mixed> $context */
