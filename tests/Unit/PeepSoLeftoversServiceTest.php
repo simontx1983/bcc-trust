@@ -155,6 +155,9 @@ final class PeepSoLeftoversServiceTest extends TestCase
 
         (new PeepSoLeftoversService())->run('peepso_social_login', $this->auditor());
         self::assertArrayNotHasKey('social_login_open_google', $GLOBALS['__pl_usermeta']);
+        // #499 L1: PeepSo Social Login's own options live in this group.
+        self::assertArrayNotHasKey('social_login_option', $GLOBALS['__pl_options']);
+        self::assertArrayHasKey('nextend_social_login', $GLOBALS['__pl_options'], 'Nextend is a separate group');
         self::assertArrayHasKey('social_loginx_unrelated', $GLOBALS['__pl_usermeta']);
         self::assertSame(['wp_peepso_social_login_user_profile'], $GLOBALS['__pl_dropped']);
     }
@@ -175,6 +178,7 @@ final class PeepSoLeftoversServiceTest extends TestCase
 
         self::assertSame(['wp_social_users'], $GLOBALS['__pl_dropped']);
         self::assertArrayNotHasKey('nextend_social_login', $GLOBALS['__pl_options']);
+        self::assertArrayHasKey('social_login_option', $GLOBALS['__pl_options'], 'PeepSo Social Login owns it, not Nextend');
         self::assertArrayHasKey('wpseo_social', $GLOBALS['__pl_options']);
         self::assertArrayHasKey('_fluentmail_last_email_digest', $GLOBALS['__pl_options']);
     }
@@ -190,6 +194,19 @@ final class PeepSoLeftoversServiceTest extends TestCase
         self::assertSame([], $GLOBALS['__pl_dropped']);
         self::assertSame([], $this->audit);
         self::assertTrue((new PeepSoLeftoversService())->plan('nextend')['installed']);
+    }
+
+    public function testAGroupRefusesWhileItsPluginIsActiveEvenIfItsClassIsNotLoaded(): void
+    {
+        // #499 L2: active_plugins is the second signal (e.g. a plugin whose
+        // main class loads late, or under a name this list does not know).
+        $GLOBALS['__pl_options']['active_plugins'] = ['bcc-trust/bcc-trust.php', 'peepso-friends/peepsofriends.php'];
+
+        $r = (new PeepSoLeftoversService())->run('friends', $this->auditor());
+
+        self::assertSame('the add-on is still installed', $r['refused'] ?? null);
+        self::assertSame([], $GLOBALS['__pl_dropped']);
+        self::assertFalse((new PeepSoLeftoversService())->plan('email_digest')['installed'], 'other groups unaffected');
     }
 
     public function testASecondRunFindsNothingLeft(): void

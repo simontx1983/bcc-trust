@@ -22,8 +22,9 @@
  *     `__fls_social_auth_settings` (owner not confirmed);
  *   - table `peepso_api_rate_limit` (core).
  *
- * A group refuses to run while its plugin class is loaded — removing live
- * data out from under an installed add-on is never the intent.
+ * A group refuses to run while its plugin class is loaded OR a plugin from
+ * its directory is in `active_plugins` — removing live data out from under
+ * an installed add-on is never the intent.
  *
  * @package BCC\Trust\Core\Services
  */
@@ -46,6 +47,7 @@ final class PeepSoLeftoversService
      * @var array<string, array{
      *     label: string,
      *     guard_classes: list<string>,
+     *     plugin_dirs: list<string>,
      *     tables: list<string>,
      *     config_keys: list<string>,
      *     options: list<string>,
@@ -57,6 +59,7 @@ final class PeepSoLeftoversService
         'friends' => [
             'label'         => 'PeepSo Friends',
             'guard_classes' => ['PeepSoFriendsPlugin'],
+            'plugin_dirs'   => ['peepso-friends'],
             'tables'        => ['peepso_friend_requests', 'peepso_friends', 'peepso_friends_cache', 'peepso_user_autofriends'],
             'config_keys'   => [
                 'friends_request_expiry', 'friends_can_send_message_to', 'friends_max_amount',
@@ -76,6 +79,7 @@ final class PeepSoLeftoversService
         'email_digest' => [
             'label'         => 'PeepSo Email Digest',
             'guard_classes' => ['PeepSoEmailDigest'],
+            'plugin_dirs'   => ['peepso-extras-email-digest', 'peepso-email-digest'],
             'tables'        => ['peepso_email_digest_content', 'peepso_email_digest_log'],
             'config_keys'   => [
                 'email_digest_enable', 'email_digest_use_images', 'email_digest_schedule_weekly_day',
@@ -97,15 +101,22 @@ final class PeepSoLeftoversService
         'peepso_social_login' => [
             'label'             => 'PeepSo Social Login',
             'guard_classes'     => ['PeepSoSocialLoginPlugin', 'PeepSo_Social_Login', 'TwistPress_Social_Login'],
+            'plugin_dirs'       => ['peepso-integrations-social-login', 'peepso-social-login'],
             'tables'            => ['peepso_social_login_user_profile'],
             'config_keys'       => ['site_license_social-login'],
-            'options'           => [],
+            // #499 review L1: these four are PeepSo Social Login's, not
+            // Nextend's, so this group's guard protects them.
+            'options'           => [
+                'social_login_option', 'social_login_has_provider',
+                'widget_sociallogin', 'widget_sociallogininvitation',
+            ],
             'usermeta'          => ['social_login_profile_id'],
             'usermeta_prefixes' => ['social_login_open_'],
         ],
         'user_limits' => [
             'label'             => 'PeepSo User Limits',
             'guard_classes'     => ['peepsolimitusers'],
+            'plugin_dirs'       => ['peepso-userlimits', 'peepsolimitusers', 'peepso-limit-users'],
             'tables'            => [],
             'config_keys'       => ['site_license_limitusers'],
             'options'           => [],
@@ -115,12 +126,10 @@ final class PeepSoLeftoversService
         'nextend' => [
             'label'         => 'Nextend Social Login',
             'guard_classes' => ['NextendSocialLogin'],
+            'plugin_dirs'   => ['nextend-facebook-connect', 'nextend-social-login-pro'],
             'tables'        => ['social_users'],
             'config_keys'   => [],
-            'options'       => [
-                'nextend_social_login', 'widget_nextend_social_login', 'social_login_option',
-                'social_login_has_provider', 'widget_sociallogin', 'widget_sociallogininvitation',
-            ],
+            'options'       => ['nextend_social_login', 'widget_nextend_social_login'],
             'usermeta'          => [],
             'usermeta_prefixes' => [],
         ],
@@ -141,11 +150,23 @@ final class PeepSoLeftoversService
         return isset(self::GROUPS[$group]);
     }
 
-    /** The add-on's code is loaded, so its data is live. */
+    /**
+     * The add-on is live: its class is loaded, OR (#499 review L2) a plugin
+     * from its directory is in `active_plugins`. Either refuses a run.
+     */
     public static function isInstalled(string $group): bool
     {
         foreach (self::GROUPS[$group]['guard_classes'] ?? [] as $class) {
             if (class_exists($class, false)) {
+                return true;
+            }
+        }
+
+        $dirs   = self::GROUPS[$group]['plugin_dirs'] ?? [];
+        $active = get_option('active_plugins', []);
+        foreach (is_array($active) ? $active : [] as $plugin) {
+            $dir = strtolower(strtok((string) $plugin, '/') ?: '');
+            if ($dir !== '' && in_array($dir, $dirs, true)) {
                 return true;
             }
         }
