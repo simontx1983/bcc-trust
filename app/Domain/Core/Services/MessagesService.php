@@ -1110,21 +1110,49 @@ final class MessagesService
      * The recipient-side gate for a one-time first-claim backlog
      * delivery: under VALIDATOR_FIRST_CLAIM_RELEASE the operator's
      * chat_enabled and friends_only are bypassed, but a mutual block
-     * still shields. True when the message must be suppressed for a
-     * block.
+     * still shields.
      *
      * The delivery worker calls THIS rather than checking the block
      * itself, so what "the one-time bypass" enforces lives in exactly
      * one place (the policy evaluator) — the worker and the policy
-     * definition cannot drift on it.
+     * definition cannot drift on it. That property is preserved: the
+     * worker still routes through this method and never touches
+     * `PeepSoBlockRepository`.
+     *
+     * ⚠⚠ TRI-STATE, AND THE THIRD CASE IS THE WHOLE POINT (F-99):
+     *
+     *     true   suppress — a block really does shield this delivery
+     *     false  release  — definitely not blocked
+     *     null   DEFER    — the block table could not be read
+     *
+     * It used to return a plain bool, which collapsed null into
+     * "release": a transient DB fault during the sweep would DELIVER a
+     * queued first-claim message to an operator who had blocked the
+     * sender. Failing the other way is just as wrong, because the
+     * worker's suppression is TERMINAL ("never delivered, never
+     * retried") — so a blip would permanently destroy a legitimate
+     * message. Neither direction is acceptable, which is why the caller
+     * is told to DEFER instead of being handed a guess.
+     *
+     * @return bool|null null = could not determine; the caller must
+     *                   neither release nor suppress.
      */
-    public static function firstClaimReleaseBlocked(int $senderId, int $operatorId): bool
+    public static function firstClaimReleaseBlocked(int $senderId, int $operatorId): ?bool
     {
-        return self::evaluatePolicy(
+        $gate = self::evaluatePolicy(
             MessagingPolicy::VALIDATOR_FIRST_CLAIM_RELEASE,
             $senderId,
-            $operatorId
-        ) !== null;
+            $operatorId,
+            refuseOnUnknownBlock: true
+        );
+
+        if ($gate === null) {
+            return false;
+        }
+        if (($gate['error'] ?? '') === 'bcc_unavailable') {
+            return null;
+        }
+        return true;
     }
 
     /**
