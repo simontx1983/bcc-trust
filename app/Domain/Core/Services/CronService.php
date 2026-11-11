@@ -1008,9 +1008,14 @@ class CronService
      *
      * Three properties this has to hold:
      *
-     *  - **Cheap.** This runs on ordinary requests, not just cron. The
-     *    version comparison is one autoloaded option read; the drift scan is
-     *    behind a timestamp throttle so it runs at most hourly.
+     *  - **Cheap.** This runs on ordinary requests, not just cron. Both
+     *    options it reads are written AUTOLOADED (F-117), so on a site with
+     *    no persistent object cache they come from the one alloptions load
+     *    instead of costing a SELECT each on every request (they used to be
+     *    autoload=no: two extra queries per request). Existing rows flip on
+     *    their next write — the health stamp within the hour, the version
+     *    stamp at the next version bump. The drift scan is behind a
+     *    timestamp throttle so it runs at most hourly.
      *  - **Concurrency-safe.** Two simultaneous requests could both pass the
      *    throttle. The repair itself is taken under the same advisory lock
      *    the other cron paths use, and re-checks under that lock, so a loser
@@ -1025,7 +1030,7 @@ class CronService
     {
         if (get_option('bcc_trust_cron_version') !== BCC_TRUST_VERSION) {
             self::healSchedule();
-            update_option('bcc_trust_cron_version', BCC_TRUST_VERSION, false);
+            update_option('bcc_trust_cron_version', BCC_TRUST_VERSION, true);
             return;
         }
 
@@ -1048,7 +1053,7 @@ class CronService
 
         // Stamp BEFORE scanning so a burst of concurrent requests collapses to
         // one scan even before the advisory lock is reached.
-        update_option(self::HEALTH_CHECK_OPTION, $now, false);
+        update_option(self::HEALTH_CHECK_OPTION, $now, true);
 
         if (self::missingJobs() === []) {
             return;
