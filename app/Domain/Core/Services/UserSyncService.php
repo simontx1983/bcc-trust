@@ -107,7 +107,11 @@ class UserSyncService
             'user_id'            => $user->ID,
             'user_login'         => $user->user_login,
             'user_email'         => $user->user_email,
-            'display_name'       => \BCC\Trust\Core\Support\PublicIdentity::forUser($user)['display_name'],
+            'display_name'       => \BCC\Trust\Core\Support\PublicIdentity::displayName(
+                $user->display_name,
+                $user->user_login,
+                \BCC\Trust\Core\Support\PublicIdentity::handle((int) $user->ID, get_user_meta((int) $user->ID, 'bcc_handle', true))
+            ),
             'registered'         => $user->user_registered,
             'usr_last_activity'  => $peepso_user ? $peepso_user->usr_last_activity : null,
             'usr_views'          => $peepso_user ? (int) $peepso_user->usr_views : 0,
