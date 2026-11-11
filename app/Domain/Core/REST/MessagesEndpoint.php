@@ -120,6 +120,28 @@ final class MessagesEndpoint
             ]
         );
 
+        // #122 tap-to-reveal. The thread body is substituted for a
+        // blocked sender, so this is the one path that returns the real
+        // text, for ONE message, on an explicit request.
+        //
+        // ⚠ Registered AFTER the `/messages` routes above but the
+        // pattern cannot collide with them: `/messages` ends there, while
+        // this requires two further literal segments. Order is not
+        // load-bearing here, unlike a bare `(?P<id>\d+)` sibling.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/me/conversations/(?P<id>\d+)/messages/(?P<message_id>\d+)/reveal',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [$instance, 'revealMessage'],
+                'permission_callback' => '__return_true',
+                'args' => [
+                    'id'         => self::idArg(),
+                    'message_id' => self::idArg(),
+                ],
+            ]
+        );
+
         register_rest_route(
             self::ROUTE_NAMESPACE,
             '/me/conversations/(?P<id>\d+)/read',
@@ -175,6 +197,43 @@ final class MessagesEndpoint
             'items'      => $result['items'],
             'pagination' => $result['pagination'],
         ]);
+    }
+
+    /**
+     * `GET /me/conversations/{id}/messages/{message_id}/reveal` — the
+     * real body of one message (#122).
+     *
+     * ⚠ `Vary: Authorization, Cookie` is set here and NOT by `ok()`.
+     * The response is viewer-dependent in a way the sibling reads are
+     * not: the same message id returns a body to a participant and a 404
+     * to everybody else, so a shared cache keyed without the credential
+     * could hand one viewer another's answer. `ok()` already sets
+     * `Cache-Control: private, no-store`, which is the primary defence;
+     * `Vary` is the belt to that braces.
+     */
+    public function revealMessage(WP_REST_Request $request): WP_REST_Response
+    {
+        $viewerId = (int) get_current_user_id();
+        if ($viewerId <= 0) {
+            return self::unauth();
+        }
+
+        $rootMsgId = (int) $request->get_param('id');
+        $messageId = (int) $request->get_param('message_id');
+
+        $result = $this->service()->revealMessageBody($viewerId, $rootMsgId, $messageId);
+        if (isset($result['error'])) {
+            $resp = self::errorFromResult($result);
+            $resp->header('Vary', 'Authorization, Cookie');
+            return $resp;
+        }
+
+        $resp = self::ok([
+            'id'   => $result['id'],
+            'body' => $result['body'],
+        ]);
+        $resp->header('Vary', 'Authorization, Cookie');
+        return $resp;
     }
 
     public function listQueued(WP_REST_Request $request): WP_REST_Response
