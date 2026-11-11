@@ -787,23 +787,78 @@ HTML;
         $siteName = get_bloginfo('name') ?: 'BCC';
         $subject  = sprintf('[%s] Confirm your recovery email', $siteName);
 
+        $safeSiteName = htmlspecialchars($siteName, ENT_QUOTES, 'UTF-8');
+
         BccMailer::send(
             $to,
             $subject,
-            self::buildRecoveryOtpHtml($siteName, $otpCode),
+            self::buildCodeOnlyOtpHtml(
+                $siteName,
+                $otpCode,
+                'Confirm your recovery email',
+                "Enter this code in the app to set this address as your account-recovery\n"
+                . "                    email. It lets you regain access if you ever lose your wallet. The code is\n"
+                . '                    valid for&nbsp;15&nbsp;minutes.',
+                "If you didn&rsquo;t request a recovery email on your {$safeSiteName} account,\n"
+                . '                    you can ignore this message &mdash; nothing changes until the code is entered.'
+            ),
             self::VERIFY_EMAIL_FAILURE_EVENT
         );
     }
 
     /**
-     * Recovery-email OTP HTML.
+     * Send the OTP that confirms a NEW account email (PATCH /me/account/email).
+     *
+     * Goes to the NEW address — that is what proves it. The account keeps its
+     * old address until the code is entered (PendingEmailService), so the
+     * copy says so. Never throws; shares the verify-email health bucket.
+     *
+     * @param string $to      The new address being verified.
+     * @param string $otpCode 6-digit plain-text OTP (not the hash).
+     */
+    public static function sendEmailChangeOtp(string $to, string $otpCode): void
+    {
+        if ($to === '' || !is_email($to)) {
+            return;
+        }
+
+        $siteName     = get_bloginfo('name') ?: 'BCC';
+        $safeSiteName = htmlspecialchars($siteName, ENT_QUOTES, 'UTF-8');
+
+        BccMailer::send(
+            $to,
+            sprintf('[%s] Confirm your new email address', $siteName),
+            self::buildCodeOnlyOtpHtml(
+                $siteName,
+                $otpCode,
+                'Confirm your new email address',
+                "Enter this code in the app to make this the email address of your {$safeSiteName}\n"
+                . "                    account. Until you do, the account keeps its current address. The code is\n"
+                . '                    valid for&nbsp;15&nbsp;minutes.',
+                "<strong>If you didn&rsquo;t ask to change your {$safeSiteName} email to this address, ignore this email.</strong>\n"
+                . '                    Don&rsquo;t enter the code &mdash; nothing changes unless you do.'
+            ),
+            self::VERIFY_EMAIL_FAILURE_EVENT
+        );
+    }
+
+    /**
+     * Code-only OTP HTML (recovery email, email change).
      *
      * Same dark shell as the verify email, blue accent, single code box —
      * no auto-verify link (the user is already signed in and types the code
-     * in-app). Uses the shared logoUrl() / siteUrl() helpers.
+     * in-app). Uses the shared logoUrl() / siteUrl() helpers. $title is plain
+     * text (escaped here); $introHtml and $ignoreHtml are trusted, pre-escaped
+     * HTML built by the senders above.
      */
-    private static function buildRecoveryOtpHtml(string $siteName, string $otpCode): string
-    {
+    private static function buildCodeOnlyOtpHtml(
+        string $siteName,
+        string $otpCode,
+        string $title,
+        string $introHtml,
+        string $ignoreHtml
+    ): string {
+        $safeTitle    = htmlspecialchars($title, ENT_QUOTES, 'UTF-8');
         $safeSiteName = htmlspecialchars($siteName, ENT_QUOTES, 'UTF-8');
         $safeOtp      = htmlspecialchars($otpCode,  ENT_QUOTES, 'UTF-8');
         $logoUrl      = htmlspecialchars(self::logoUrl(),   ENT_QUOTES, 'UTF-8');
@@ -818,7 +873,7 @@ HTML;
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="x-apple-disable-message-reformatting">
-<title>Confirm your recovery email &mdash; {$safeSiteName}</title>
+<title>{$safeTitle} &mdash; {$safeSiteName}</title>
 </head>
 <body style="margin:0;padding:0;background-color:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0d1117">
@@ -845,12 +900,10 @@ HTML;
                 <td style="padding:36px 36px 28px;">
 
                   <h1 style="margin:0 0 8px;font-size:22px;font-weight:600;color:#f0f6fc;line-height:1.3;">
-                    Confirm your recovery email
+                    {$safeTitle}
                   </h1>
                   <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#8b949e;">
-                    Enter this code in the app to set this address as your account-recovery
-                    email. It lets you regain access if you ever lose your wallet. The code is
-                    valid for&nbsp;15&nbsp;minutes.
+                    {$introHtml}
                   </p>
 
                   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 28px;">
@@ -864,8 +917,7 @@ HTML;
                   </table>
 
                   <p style="margin:0;font-size:13px;line-height:1.6;color:#6e7681;">
-                    If you didn&rsquo;t request a recovery email on your {$safeSiteName} account,
-                    you can ignore this message &mdash; nothing changes until the code is entered.
+                    {$ignoreHtml}
                   </p>
 
                 </td>

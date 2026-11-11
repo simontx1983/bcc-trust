@@ -259,6 +259,7 @@ return array(
     'BCC\\Trust\\Core\\Services\\PageOwnerResolver' => $baseDir . '/app/Domain/Core/Services/PageOwnerResolver.php',
     'BCC\\Trust\\Core\\Services\\PageReadModelSync' => $baseDir . '/app/Domain/Core/Services/PageReadModelSync.php',
     'BCC\\Trust\\Core\\Services\\PeepSoPageResolver' => $baseDir . '/app/Domain/Core/Services/PeepSoPageResolver.php',
+    'BCC\\Trust\\Core\\Services\\PendingEmailService' => $baseDir . '/app/Domain/Core/Services/PendingEmailService.php',
     'BCC\\Trust\\Core\\Services\\PolarizationTransitionNotifier' => $baseDir . '/app/Domain/Core/Services/PolarizationTransitionNotifier.php',
     'BCC\\Trust\\Core\\Services\\PostsService' => $baseDir . '/app/Domain/Core/Services/PostsService.php',
     'BCC\\Trust\\Core\\Services\\PushDispatcher' => $baseDir . '/app/Domain/Core/Services/PushDispatcher.php',
