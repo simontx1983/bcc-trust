@@ -349,7 +349,7 @@ namespace BCC\Trust\Core\Repositories {
             }
 
             /** @return list<object> */
-            public function getMutualVotePairs(int $minSize, int $pageLimit = 500, int $offset = 0): array
+            public function getMutualVotePairs(int $minSize, int $pageLimit = 500, int $afterUserA = 0, int $afterUserB = 0): array
             {
                 return W::$mutualVotePairs;
             }

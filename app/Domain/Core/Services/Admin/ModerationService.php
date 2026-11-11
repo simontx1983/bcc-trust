@@ -673,6 +673,30 @@ final class ModerationService
         return ['success' => true, 'message' => 'Score override undone.', 'pages_restored' => $restored];
     }
 
+    /**
+     * What undoScoreOverride() would undo next, for the admin Undo button:
+     * the latest not-yet-undone override. Null when there is nothing to
+     * undo or the record cannot be read; the button is then hidden.
+     *
+     * @return array{new_score: int, at: string, reason: string}|null
+     */
+    public function latestUndoableOverride(int $userId): ?array
+    {
+        try {
+            $entry = $this->overrideLedger->latestUndoable($userId);
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] latest_undoable_override_failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return null;
+        }
+        if ($entry === null) {
+            return null;
+        }
+        return ['new_score' => $entry['new_score'], 'at' => $entry['at'], 'reason' => $entry['reason']];
+    }
+
     /** Re-evaluate a page's elite flag (it honours the pin). */
     private function recomputeElite(int $pageId): void
     {

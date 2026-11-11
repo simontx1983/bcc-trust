@@ -216,6 +216,9 @@ function bcc_trust_render_moderation(): void {
             $reason   = sanitize_textarea_field( $_POST['override_reason'] ?? '' );
             $mod->overrideScore( $userId, $newScore, $reason );
         },
+        'undo_score_override' => static function () use ( $mod ) {
+            $mod->undoScoreOverride( absint( $_POST['user_id'] ?? 0 ) );
+        },
         'add_whitelist'      => static function () use ( $mod ) {
             $type  = sanitize_text_field( $_POST['whitelist_type'] ?? '' );
             $value = sanitize_text_field( $_POST['whitelist_value'] ?? '' );
