@@ -199,6 +199,14 @@ final class AuthSupport
 
     /** OTP transient TTL: 15 minutes. */
     public const OTP_TTL = 900;
+
+    /**
+     * Wrong email-verification codes allowed per (user, current code) before
+     * that code is burned (F-48). A correct code signs the caller in, so the
+     * per-IP VERIFY_EMAIL_RATE_LIMIT alone did not bound an attacker who
+     * spreads guesses across addresses. Mirrors TWO_FA_MAX_FAILURES (F-124).
+     */
+    public const VERIFY_EMAIL_MAX_FAILURES = 5;
     /** Verify-token transient TTL: 24 hours. */
     public const TOKEN_TTL = 86400;
 
@@ -516,6 +524,26 @@ final class AuthSupport
             && $emailVerifiedClaim === true
             && $email !== ''
             && is_email($email) !== false;
+    }
+
+    /**
+     * Opaque identity of the user's CURRENT email-verification code, or null
+     * when none is pending. A hash of the stored HMAC — never the code — so a
+     * per-code counter keyed on it starts fresh whenever a new code is sent.
+     */
+    public static function emailOtpIdentity(int $userId): ?string
+    {
+        $stored = get_transient('bcc_otp_' . (string) $userId);
+        if ($stored === false || !is_string($stored) || $stored === '') {
+            return null;
+        }
+        return substr(hash('sha256', $stored), 0, 32);
+    }
+
+    /** Burn the user's pending email-verification code (the emailed link stays valid). */
+    public static function burnEmailOtp(int $userId): void
+    {
+        delete_transient('bcc_otp_' . (string) $userId);
     }
 
     /**

@@ -1967,6 +1967,25 @@ final class CardViewService
             'can_report'       => self::attestationPermToCardPerm($attestationPerms['can_report']),
         ];
 
+        // UNCLAIMED page (post_author 0 — nobody has claimed it yet): vouch,
+        // back and report are structurally unavailable, for EVERY viewer,
+        // anon included. The cast write refuses the same target
+        // (AttestationService::checkCastEligibility → resolveTargetOwnerUserId
+        // reads the same post_author → 404), so offering the action only
+        // produced a button whose write always failed. Hidden per §N7 (no
+        // hint); `unclaimed` tells the client WHY, so it can show Message
+        // in its place. Decided here, not in getViewerActionPermissions():
+        // that resolver treats target 0 as "viewer gates only" for the
+        // endorse gate (EndorsementService::resolveViewerVouchGate).
+        if ($pageOwnerUserId <= 0) {
+            $unclaimed = ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'unclaimed'];
+            $attestationFields = [
+                'can_vouch'        => $unclaimed,
+                'can_stand_behind' => $unclaimed,
+                'can_report'       => $unclaimed,
+            ];
+        }
+
         if ($viewerId <= 0) {
             // Legacy permissions stay in their existing locked shape;
             // attestation fields use the service's anon copy.
