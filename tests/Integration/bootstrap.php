@@ -371,8 +371,14 @@ require_once dirname(__DIR__, 2) . '/includes/config.php';
 // CU counter has rolled over. Returning a full datetime here made that
 // comparison NEVER match, so every increment looked like a new day.
 if (!function_exists('current_time')) {
-    /** @return string|int */
-    function current_time(string $type, int $gmt = 0)
+    /**
+     * `$gmt` is `int|bool` as in core WordPress: strict-typed callers
+     * (RankPendingRepository::resolve passes `true`) TypeError against an
+     * `int`-only stub.
+     *
+     * @return string|int
+     */
+    function current_time(string $type, int|bool $gmt = 0)
     {
         if ($type === 'timestamp' || $type === 'U') {
             return time();
@@ -649,6 +655,10 @@ bcc_trust_create_content_reports_table();
 
 require_once dirname(__DIR__, 2) . '/includes/database/schema-stokes.php';
 bcc_trust_create_stokes_table();
+
+// Apprentice confirmation clock — RankPendingRestartIntegrationTest (F-71).
+require_once dirname(__DIR__, 2) . '/includes/database/schema-rank-pending.php';
+bcc_trust_create_rank_pending_table();
 
 // WordPress core wp_options (the rate limiter is option-backed via $wpdb->options).
 $GLOBALS['wpdb']->query(

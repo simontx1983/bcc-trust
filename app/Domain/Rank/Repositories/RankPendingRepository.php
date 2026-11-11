@@ -4,7 +4,10 @@
  * 24-hour Apprentice confirmation clock (Rank Phase 5, R1).
  *
  * One row per New Member; INSERT IGNORE on PK(user_id) means the FIRST
- * qualifying contribution starts the clock and later ones are no-ops.
+ * qualifying contribution starts the clock and later ones are no-ops
+ * WHILE it is pending. A voided row is re-armed by the next qualifying
+ * contribution (restartIfVoided) — states: pending → confirmed | voided,
+ * voided → pending.
  * The 5-minute sweep resolves due rows via the R1 six-condition
  * predicate (ApprenticeReadinessService) — pending reports and
  * auto-hide never touch due_at.
@@ -71,6 +74,55 @@ class RankPendingRepository
         ));
 
         return $result !== false;
+    }
+
+    /**
+     * Re-arm a VOIDED confirmation with a new qualifying contribution.
+     *
+     * `start()` is INSERT IGNORE on PK(user_id), so once a row was voided
+     * every later contribution was a silent no-op and the member could
+     * never reach Apprentice (F-71). A void judges ONE contribution; a
+     * later contribution is new evidence and gets its own 24-hour clock.
+     *
+     * Guarded UPDATE, so it is a no-op unless the row is currently
+     * `voided`:
+     *   - `status = 'voided'` — a pending clock is never reset or
+     *     extended (R1: nothing moves due_at), and a confirmed row is
+     *     never reopened;
+     *   - `source_id <> %d` — the contribution that was voided cannot
+     *     re-arm itself (a re-fire for the same post stays voided).
+     * Concurrent re-fires settle on one winner: the second UPDATE finds
+     * the row already pending and matches nothing.
+     *
+     * @return bool True when a voided row was restarted.
+     */
+    public function restartIfVoided(int $userId, string $sourceType, int $sourceId, int $contentActId, int $dueInSeconds): bool
+    {
+        if ($userId <= 0 || $sourceId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+                SET status = 'pending',
+                    source_type = %s,
+                    source_id = %d,
+                    content_act_id = %d,
+                    due_at = %s,
+                    voided_reason = NULL,
+                    resolved_at = NULL
+              WHERE user_id = %d AND status = 'voided' AND source_id <> %d",
+            $sourceType,
+            $sourceId,
+            $contentActId,
+            gmdate('Y-m-d H:i:s', time() + max(0, $dueInSeconds)),
+            $userId,
+            $sourceId
+        ));
+
+        return $result !== false && (int) $result > 0;
     }
 
     /**
