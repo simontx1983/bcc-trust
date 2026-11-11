@@ -232,6 +232,37 @@ final class PollEngineTest extends TestCase
         );
     }
 
+    // ── F-39: only WEIGHTED ballots count toward the headcount ────────
+
+    public function testZeroWeightBallotsDoNotCountTowardTheVoterQuorum(): void
+    {
+        $pollId = $this->openPoll();
+        $this->castMany($pollId, $this->voterRange(1, 9), 'for', 1.0);  // 9 weighted, 9.0 ≥ 7.5
+        $this->castMany($pollId, $this->voterRange(10, 5), 'for', 0.0); // 5 weightless
+
+        $result = $this->service->closeDuePolls($this->at(self::SWEEP_AT));
+
+        self::assertSame(['closed' => 0, 'inconclusive' => 0], $result, 'weightless ballots must not lift 9 voters to the 10-voter floor');
+        self::assertSame('open', $this->polls->rows[$pollId]->status);
+    }
+
+    public function testZeroWeightBallotsAreLeftOutOfTheClosedTally(): void
+    {
+        $pollId = $this->openPoll();
+        $this->castMany($pollId, $this->voterRange(1, 10), 'for', 1.0);
+        $this->castMany($pollId, $this->voterRange(11, 3), 'against', 0.0);
+        $this->service->closeDuePolls($this->at(self::SWEEP_AT));
+
+        $state = $this->service->viewerState($pollId, 1, $this->at(self::SWEEP_AT));
+
+        self::assertSame('passed', $state['outcome']);
+        self::assertSame(
+            ['counted_voters' => 10, 'weight_for' => 10.0, 'weight_against' => 0.0],
+            $state['tally'],
+            'the shown headcount matches the one the decision used'
+        );
+    }
+
     // ── majority (invariant 23: ≥ 60.00% of counted weight) ──────────
 
     public function testExactlySixtyPercentMajorityPasses(): void
