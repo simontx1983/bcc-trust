@@ -1244,6 +1244,45 @@ class VoteService {
     }
 
     /**
+     * Recalculate a page's score now; on ANY failure, log it and hand the
+     * page back to the 5-minute recalculation cron. Never throws.
+     *
+     * The fire-and-forget entry point for paths that change a page's votes
+     * outside the vote writer (the `bcc.trust.recalculate_score` action,
+     * admin/moderation removals). F-110: that action used to catch only
+     * \Exception and log at info — a TypeError escaped and aborted the
+     * caller's per-page loop after its deletes had already run, and every
+     * failure was invisible. Callers that report "N pages recalculated"
+     * must count the `true` returns, not the pages they asked for.
+     *
+     * @return bool true when the recalculation completed; false when it
+     *              failed (logged at error, page re-flagged when possible).
+     */
+    public function recalculateScoreOrRequeue(int $pageId): bool {
+        try {
+            $this->recalculateScore($pageId);
+            return true;
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] Score recalculation failed', [
+                'page_id' => $pageId,
+                'type'    => get_class($e),
+                'error'   => $e->getMessage(),
+            ]);
+        }
+
+        try {
+            $this->scoreRepo->flagForRecalculation($pageId);
+        } catch (\Throwable $flagError) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] Score recalculation re-flag failed', [
+                'page_id' => $pageId,
+                'error'   => $flagError->getMessage(),
+            ]);
+        }
+
+        return false;
+    }
+
+    /**
      * Recalculate a page's score from its full vote history.
      *
      * Race-condition fix (Issue 8):
@@ -1310,13 +1349,22 @@ class VoteService {
             // formulas that the PHP loop used, producing identical results.
             $voteAggregates = $this->voteRepo->getVoteAggregatesForPage($pageId);
 
-            // Fast path: no active votes → ensure default row and return.
-            // Checked INSIDE the lock to prevent TOCTOU race where a
-            // concurrent first vote commits between an outside-lock COUNT
-            // check and the FOR UPDATE acquisition.
-            if ((int) $voteAggregates->vote_count === 0) {
-                $score = $this->scoreRepo->getByPageId($pageId)
-                    ?? $this->scoreRepo->createDefault($pageId, $ownerId);
+            // Fast path: no active votes AND no score row yet → create the
+            // default row and return. Checked INSIDE the lock to prevent the
+            // TOCTOU race where a concurrent first vote commits between an
+            // outside-lock COUNT check and the FOR UPDATE acquisition.
+            //
+            // ⚠ Only when NO row exists. A page whose last votes were
+            // soft-deleted still carries the score its old votes produced,
+            // and returning that row here (the previous behaviour) left a
+            // phantom score + tier in place forever while clearing the
+            // recalc flag (F-81). With a row present, fall through to the
+            // full recompute below: zero aggregates give positive/negative
+            // 0, vote_count 0 and confidence 0, the tier is re-derived, and
+            // recalculateFromVotes() carries every bonus column through
+            // exactly as on any other recalc — no second zeroing formula.
+            if ((int) $voteAggregates->vote_count === 0 && empty($lockedRows)) {
+                $score = $this->scoreRepo->createDefault($pageId, $ownerId);
                 // Only clear the flag when the page lock was actually held —
                 // a lock-less recalc leaves it set so the next tick re-processes.
                 if ($clearRecalcFlag && $lockAcquired) {

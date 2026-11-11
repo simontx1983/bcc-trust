@@ -84,12 +84,27 @@ final class GifRepository
         // get_post_meta() then hits the cache.
         update_meta_cache('post', $ids);
 
+        // Read-time re-check: a stored URL renders as an <img> for every
+        // viewer, so it must pass the shared rule (https, giphy.com /
+        // *.giphy.com host), not just exist. This catches rows written
+        // before bcc-core's GiphyUrl check, AND rows from PeepSo's own
+        // native GIF path, which still validates with a "giphy.com"
+        // substring test (peepso/classes/giphy.php:316). A non-conforming
+        // URL is omitted, exactly like a post with no GIF: the feed keeps
+        // it as a plain status post and moderation shows no GIF. Fails
+        // CLOSED if bcc-core's GiphyUrl is unavailable.
+        $canCheck = class_exists(\BCC\Core\Security\GiphyUrl::class);
+
         $out = [];
         foreach ($ids as $id) {
             $value = get_post_meta($id, self::POST_META_KEY, true);
-            if (is_string($value) && $value !== '') {
-                $out[$id] = $value;
+            if (!is_string($value) || $value === '') {
+                continue;
             }
+            if (!$canCheck || !\BCC\Core\Security\GiphyUrl::isAllowed($value)) {
+                continue;
+            }
+            $out[$id] = $value;
         }
         return $out;
     }

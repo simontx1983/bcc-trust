@@ -404,6 +404,44 @@ final class CosmwasmClassifier
     }
 
     /**
+     * The wasm module's suffix on an error the CONTRACT returned from a
+     * smart query (wasmd `ErrQueryFailed`). Measured 2026-11-10 against
+     * public LCDs for a nonexistent CW-721 token, both HTTP 500:
+     *   cosmoshub  `type: cw721::state::NftInfo<…>; key: […] not found: query wasm contract failed`
+     *   injective  `Cannot decode UTF8 bytes into string: invalid token_id: query wasm contract failed`
+     */
+    private const CONTRACT_REFUSAL_MARKER = 'query wasm contract failed';
+
+    /**
+     * PURE. TRUE when an LCD error message is positive evidence that the
+     * query REACHED a working contract and the contract refused it (e.g.
+     * "no such token", "invalid token_id"). Such a 5xx is an ANSWER: it
+     * must not be retried and must not charge the chain's circuit
+     * breaker. Otherwise an anonymous caller asking for bogus token ids
+     * could open the breaker for every Cosmos consumer.
+     *
+     * Requires the wasm refusal marker, AND that none of the
+     * NODE_ERROR_TOKENS appear. Those are checked first, exactly as in
+     * {@see errorKindFromMessage()}, because a VM fault (`Error calling the
+     * VM`, `out of gas`, …) is also wrapped in the same marker. Older SDKs
+     * wrap contract errors in `rpc error: …`, which therefore keeps the
+     * full retry and breaker treatment. That is the fail-safe direction.
+     */
+    public static function isContractRefusal(string $message): bool
+    {
+        $message = trim($message);
+        if ($message === '' || stripos($message, self::CONTRACT_REFUSAL_MARKER) === false) {
+            return false;
+        }
+        foreach (self::NODE_ERROR_TOKENS as $token) {
+            if (stripos($message, $token) !== false) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * PURE. TRUE when an error kind is DECISIVE evidence about the
      * CONTRACT (as opposed to the node or the wire).
      */
