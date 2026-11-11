@@ -627,7 +627,10 @@ final class WalletRepository
         $slugPlaceholders = implode(',', array_fill(0, count($chainSlugs), '%s'));
         $args = array_merge(array_values($chainSlugs), [max(0, $afterUserId), $limit]);
 
-        $ids = $wpdb->get_col($wpdb->prepare(
+        // runRead, not get_col: see GuardsReadFailures::runRead() for the
+        // stale-`last_result` path that get_col() cannot see.
+        /** @var list<object{user_id: int|numeric-string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
             "SELECT DISTINCT w.user_id
                FROM {$table} w
                JOIN {$chainTable} c ON c.id = w.chain_id
@@ -636,11 +639,13 @@ final class WalletRepository
               ORDER BY w.user_id ASC
               LIMIT %d",
             ...$args
-        ));
+        ), 'getUserIdsWithChainSlugsAfter', true);
 
-        self::guardReadOrThrow('getUserIdsWithChainSlugsAfter');
-
-        return array_values(array_map('intval', $ids));
+        $ids = [];
+        foreach ($rows as $row) {
+            $ids[] = (int) $row->user_id;
+        }
+        return $ids;
     }
 
     /**
