@@ -145,6 +145,7 @@ final class PushDispatcherDnsPinTest extends TestCase
         self::assertSame([CURLOPT_RESOLVE => ['updates.push.services.mozilla.com:443:34.1.2.3']], $this->clients[1]['options']['curl'] ?? null);
         foreach ($this->clients as $c) {
             self::assertFalse($c['options']['allow_redirects'], 'a redirect hop would not be pinned');
+            self::assertSame('', $c['options']['proxy'] ?? null, 'an inherited HTTP(S)_PROXY would resolve the host itself and bypass the pin');
         }
         self::assertEquals(['attempt' => 2, 'success' => 2], PushPinWorld::$metrics);
         self::assertSame([], PushPinWorld::$errors);

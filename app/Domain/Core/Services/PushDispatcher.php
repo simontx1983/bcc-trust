@@ -93,6 +93,10 @@ final class PushDispatcher
      *    http_errors middleware; a bare handler would report those as sent.
      *  - Redirects stay off (audit HIGH #3): each hop could target a private
      *    IP and would not be pinned.
+     *  - Proxy explicitly OFF. Unset, Guzzle adopts HTTP(S)_PROXY from the
+     *    environment, and a proxy resolves the hostname ITSELF, silently
+     *    bypassing the pin. An empty string is also cURL's documented way to
+     *    disable an environment proxy.
      *
      * @return array<string, mixed>
      */
@@ -100,6 +104,7 @@ final class PushDispatcher
     {
         $options = [
             'allow_redirects' => false,
+            'proxy'           => '',
             'handler'         => \GuzzleHttp\HandlerStack::create(new \GuzzleHttp\Handler\CurlMultiHandler()),
         ];
         if ($pin !== null) {
