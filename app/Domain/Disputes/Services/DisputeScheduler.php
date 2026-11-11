@@ -216,17 +216,71 @@ class DisputeScheduler
         // the poll-close hook have clearly had their chance; the sweep
         // only acts on missing/closed polls, so open polls are untouched
         // regardless of dispute age.
-        $cutoff     = gmdate('Y-m-d H:i:s', time() - HOUR_IN_SECONDS);
-        $candidates = DisputeRepository::listReviewingCreatedBefore($cutoff, 50);
+        $cutoff      = gmdate('Y-m-d H:i:s', time() - HOUR_IN_SECONDS);
+        $voteService = DisputesPlugin::instance()->disputeVoteService();
 
-        if (empty($candidates)) {
+        self::runBackstopBatch(
+            $cutoff,
+            self::BACKSTOP_BATCH_LIMIT,
+            static function (int $disputeId) use ($voteService): void {
+                $voteService->reconcileReviewingDispute($disputeId);
+            }
+        );
+    }
+
+    /** Backstop batch size — one daily run reconciles up to this many disputes. */
+    private const BACKSTOP_BATCH_LIMIT = 50;
+
+    /**
+     * wp_option holding the backstop's wrap-around cursor: the highest
+     * dispute id the previous run processed (0 = start from the beginning).
+     * Non-autoloaded — read once per daily run, under the auto-resolve lock.
+     */
+    public const BACKSTOP_CURSOR_OPTION = 'bcc_disputes_backstop_cursor';
+
+    /**
+     * One backstop batch with a wrap-around keyset cursor (F-38).
+     *
+     * A dispute whose poll is still OPEN is skipped by reconcile and stays
+     * 'reviewing'. Without a cursor, 50+ such disputes at the front of the
+     * set were re-selected every run, and every stuck missing/closed-poll
+     * dispute behind them was never reached. Each run now asks for the next
+     * $limit reviewing disputes with id above the persisted cursor and moves
+     * the cursor to the last id it processed; a short batch means the tail
+     * was consumed, so the cursor wraps to 0 and the next run starts over.
+     * Every reviewing dispute is therefore visited within
+     * ceil(reviewing / $limit) runs. Same model as
+     * StewardshipSweepService's cursor. Reconcile is idempotent, so
+     * re-visiting an open-poll dispute on a later pass is harmless.
+     *
+     * Public (not private) only so the integration test can drive the real
+     * query + cursor with a recording reconciler; production calls it from
+     * doAutoResolve() under the auto-resolve advisory lock.
+     *
+     * @param callable(int): void $reconcile
+     */
+    public static function runBackstopBatch(string $cutoff, int $limit, callable $reconcile): void
+    {
+        $afterId    = max(0, (int) get_option(self::BACKSTOP_CURSOR_OPTION, 0));
+        $candidates = DisputeRepository::listReviewingCreatedBefore($cutoff, $limit, $afterId);
+
+        if ($candidates === []) {
+            // End of the set reached from a non-zero cursor: wrap so the next
+            // run starts over. (Zero cursor + no rows = nothing to do.)
+            if ($afterId !== 0) {
+                update_option(self::BACKSTOP_CURSOR_OPTION, 0, false);
+            }
             return;
         }
 
-        $voteService = DisputesPlugin::instance()->disputeVoteService();
+        $lastId = $afterId;
         foreach ($candidates as $dispute) {
-            $voteService->reconcileReviewingDispute((int) $dispute->id);
+            $reconcile($dispute->id);
+            $lastId = $dispute->id; // ORDER BY id ASC — monotonic.
         }
+
+        $reachedEnd = count($candidates) < $limit;
+        update_option(self::BACKSTOP_CURSOR_OPTION, $reachedEnd ? 0 : $lastId, false);
     }
 
     /**
