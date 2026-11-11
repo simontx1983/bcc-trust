@@ -2145,7 +2145,11 @@ final class Plugin
             }
         }, 10, 2);
 
-        add_action('bcc_announcement_archived', function (int $announcementId): void {
+        // F-151: `bcc_announcement_withdrawn` (the row left `publish` by any
+        // other path — wp-admin trash/draft, wp_delete_post) withdraws the feed
+        // card exactly like archival. The handler is idempotent and treats a
+        // missing activity as nothing to do.
+        $withdrawAnnouncementCard = function (int $announcementId): void {
             try {
                 $this->activityStreamWriter()->handleAnnouncementArchived($announcementId);
             } catch (\Throwable $e) {
@@ -2154,7 +2158,9 @@ final class Plugin
                     'error'           => $e->getMessage(),
                 ]);
             }
-        }, 10, 1);
+        };
+        add_action('bcc_announcement_archived', $withdrawAnnouncementCard, 10, 1);
+        add_action('bcc_announcement_withdrawn', $withdrawAnnouncementCard, 10, 1);
 
         // §D6 PR-A — WP transition_post_status bridge for blog posts.
         //

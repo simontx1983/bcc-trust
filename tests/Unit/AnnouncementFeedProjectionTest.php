@@ -573,6 +573,8 @@ final class AnnouncementFeedProjectionTest extends TestCase
         return [
             'published' => ['bcc_announcement_published', 'handleAnnouncementPublished'],
             'archived'  => ['bcc_announcement_archived', 'handleAnnouncementArchived'],
+            // F-151: leaving `publish` by any other path withdraws the card too.
+            'withdrawn' => ['bcc_announcement_withdrawn', 'handleAnnouncementArchived'],
         ];
     }
 
