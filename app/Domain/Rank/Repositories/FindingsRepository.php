@@ -321,10 +321,24 @@ class FindingsRepository
 
         $params[] = $findingId;
 
+        // F-146: a REDUCTION also claims on the penalty itself. The service
+        // checks "new < current" against a penalty it read BEFORE this
+        // UPDATE, so two concurrent reductions of one active finding both
+        // passed it — and the later one could RAISE the penalty (10 → 8 by
+        // one admin, then → 9 by the other). Requiring the stored penalty to
+        // still be above the new value makes a reduction monotonic: it can
+        // only ever lower what is there now, or it loses the claim.
+        $penaltyGuard = '';
+        if ($newPenalty !== null) {
+            $penaltyGuard = ' AND score_penalty > %f';
+            $params[]     = $newPenalty;
+        }
+
         $result = $wpdb->query($wpdb->prepare(
             "UPDATE {$this->table} SET " . implode(', ', $sets)
                 . ' WHERE id = %d'
-                . ($mutating ? " AND status = 'active'" : ''),
+                . ($mutating ? " AND status = 'active'" : '')
+                . $penaltyGuard,
             ...$params
         ));
 
