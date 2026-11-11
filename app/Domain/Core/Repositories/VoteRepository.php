@@ -1277,17 +1277,19 @@ class VoteRepository {
     }
 
     /**
-     * The page whose score a REVIEW activity feeds, or null when the activity
-     * is not a review (or PeepSo's table is absent). The reverse of the
-     * hiddenReviewExclusion() join: activity → backing wp_post → review
-     * sidecar meta → votes row → page_id.
+     * The review vote behind a REVIEW activity — the page whose score it
+     * feeds and the voter whose trust-graph edge it feeds — or null when the
+     * activity is not a review (or PeepSo's table is absent). The reverse of
+     * the hiddenReviewExclusion() join: activity → backing wp_post → review
+     * sidecar meta → votes row.
      *
      * Status is deliberately not filtered: hiding or restoring a review whose
      * vote has since been removed still warrants a recalculation of its page.
      *
+     * @return array{page_id: int, voter_id: int}|null
      * @throws RepositoryException on database failure
      */
-    public function findReviewPageIdByActivity(int $actId): ?int
+    public function findReviewVoteByActivity(int $actId): ?array
     {
         if ($actId <= 0) {
             return null;
@@ -1299,7 +1301,7 @@ class VoteRepository {
         }
 
         $sql = $wpdb->prepare(
-            "SELECT v.page_id
+            "SELECT v.page_id, v.voter_user_id
                FROM {$activities} a
                INNER JOIN {$wpdb->postmeta} pm_mod
                        ON pm_mod.post_id = a.act_external_id
@@ -1315,14 +1317,18 @@ class VoteRepository {
             $actId
         );
         if (!is_string($sql) || $sql === '') {
-            throw new RepositoryException('VoteRepository::findReviewPageIdByActivity: wpdb::prepare() produced no statement');
+            throw new RepositoryException('VoteRepository::findReviewVoteByActivity: wpdb::prepare() produced no statement');
         }
 
-        $pageId = $wpdb->get_var($sql);
+        /** @var object{page_id: int|numeric-string, voter_user_id: int|numeric-string}|null $row */
+        $row = $wpdb->get_row($sql);
         if ($wpdb->last_error !== '') {
-            throw new RepositoryException('VoteRepository::findReviewPageIdByActivity failed: ' . $wpdb->last_error);
+            throw new RepositoryException('VoteRepository::findReviewVoteByActivity failed: ' . $wpdb->last_error);
         }
-        return $pageId === null ? null : (int) $pageId;
+        if (!is_object($row)) {
+            return null;
+        }
+        return ['page_id' => (int) $row->page_id, 'voter_id' => (int) $row->voter_user_id];
     }
 
     /**

@@ -102,7 +102,7 @@ final class Plugin
     private ?EdgeRepository $edgeRepository = null;
     public function edgeRepository(): EdgeRepository
     {
-        return $this->edgeRepository ??= new EdgeRepository();
+        return $this->edgeRepository ??= new EdgeRepository($this->voteRepository());
     }
 
     private ?Repositories\PageReadModelRepository $pageReadModelRepository = null;
@@ -1304,7 +1304,8 @@ final class Plugin
     {
         return $this->reviewVisibilityScoreSync ??= new Services\Vote\ReviewVisibilityScoreSync(
             $this->voteRepository(),
-            $this->voteService()
+            $this->voteService(),
+            $this->edgeRepository()
         );
     }
 

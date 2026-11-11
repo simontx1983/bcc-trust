@@ -97,6 +97,15 @@ if (!class_exists('PeepSo')) {
         public static function get_option(string $key, $default = null) { return $default; }
         /** @return mixed */
         public static function get_option_new(string $key) { return null; }
+        /**
+         * PeepSo's admin test — `user_can($userId, 'manage_options')`,
+         * falling back to the current user when $userId is null. This is
+         * the check `PeepSoUser::is_accessible_static()` uses for its
+         * admin exemption, so a caller re-applying that exemption for a
+         * batched read must use the SAME predicate rather than its own
+         * `current_user_can()`, or the two drift.
+         */
+        public static function is_admin(?int $user_id = null): bool { return false; }
     }
 }
 

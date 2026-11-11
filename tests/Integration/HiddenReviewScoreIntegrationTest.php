@@ -142,7 +142,7 @@ final class HiddenReviewScoreIntegrationTest extends TestCase
 
     private function sync(): ReviewVisibilityScoreSync
     {
-        return new ReviewVisibilityScoreSync($this->votes, $this->voteService());
+        return new ReviewVisibilityScoreSync($this->votes, $this->voteService(), new \BCC\Trust\Core\Repositories\EdgeRepository($this->votes));
     }
 
     /** @return array{vote_count: int, positive: float} */
@@ -220,7 +220,7 @@ final class HiddenReviewScoreIntegrationTest extends TestCase
         self::assertNotFalse($wpdb->insert($wpdb->postmeta, ['post_id' => $post, 'meta_key' => '_bcc_activity_sidecar_id', 'meta_value' => (string) $this->voteIds[0]]));
         self::assertNotFalse($wpdb->insert($wpdb->prefix . 'peepso_activities', ['act_id' => $act, 'act_module_id' => '200', 'act_external_id' => $post]));
 
-        self::assertNull($this->votes->findReviewPageIdByActivity($act));
+        self::assertNull($this->votes->findReviewVoteByActivity($act));
         self::assertFalse($this->sync()->onVisibilityChanged($act), 'not a review: no recalc');
     }
 

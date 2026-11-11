@@ -23,6 +23,7 @@
 
 namespace BCC\Trust\Core\Services\Vote;
 
+use BCC\Trust\Core\Repositories\EdgeRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\VoteService;
 use BCC\Trust\Core\Support\CacheManager;
@@ -36,6 +37,7 @@ final class ReviewVisibilityScoreSync
     public function __construct(
         private readonly VoteRepository $voteRepo,
         private readonly VoteService    $voteService,
+        private readonly EdgeRepository $edgeRepo,
     ) {}
 
     /**
@@ -45,7 +47,7 @@ final class ReviewVisibilityScoreSync
     public function onVisibilityChanged(int $actId): bool
     {
         try {
-            $pageId = $this->voteRepo->findReviewPageIdByActivity($actId);
+            $review = $this->voteRepo->findReviewVoteByActivity($actId);
         } catch (\Throwable $e) {
             \BCC\Core\Log\Logger::error('[bcc-trust] review visibility: page lookup failed', [
                 'act_id' => $actId,
@@ -54,9 +56,15 @@ final class ReviewVisibilityScoreSync
             return false;
         }
 
-        if ($pageId === null || $pageId <= 0) {
+        if ($review === null || $review['page_id'] <= 0) {
             return false; // not a review activity
         }
+        $pageId = $review['page_id'];
+
+        // Trust-graph edge voter → page owner: a hidden review confers no
+        // trust either (EdgeRepository applies the same predicate). Isolated:
+        // an edge failure must not block the score recalculation below.
+        $this->recalculateEdge($review['voter_id'], $pageId);
 
         CacheManager::invalidatePageCaches($pageId, null, 'review_visibility_changed');
 
@@ -67,5 +75,21 @@ final class ReviewVisibilityScoreSync
         // Same signal the recalculation cron fires — drives the read model.
         do_action('bcc_trust_score_recalculated', $pageId);
         return true;
+    }
+
+    private function recalculateEdge(int $voterId, int $pageId): void
+    {
+        try {
+            $ownerId = \BCC\Trust\Core\Services\PeepSoPageResolver::getOwnerId($pageId);
+            if ($ownerId > 0 && $ownerId !== $voterId) {
+                $this->edgeRepo->recalculateVoteEdge($voterId, $ownerId);
+            }
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] review visibility: edge recalc failed', [
+                'voter_id' => $voterId,
+                'page_id'  => $pageId,
+                'error'    => $e->getMessage(),
+            ]);
+        }
     }
 }
