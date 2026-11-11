@@ -163,6 +163,12 @@ final class MyProfileFieldsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // §M suspension gate (F-109): field VALUES are public profile
+        // content. patchVisibility stays open (hiding your own info).
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         $key = (string) $request->get_param('key');
         if ($key === '') {
             return ApiResponse::error('bcc_invalid_request', 'Field key is required.', 422);

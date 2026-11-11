@@ -71,6 +71,11 @@ namespace BCC\Trust\Tests\Integration {
 
         public static int $maxRequestsPerRead = 1;
 
+        /** Fake seconds; advanced by $secondsPerRead on every read. */
+        public static float $clock = 0.0;
+
+        public static float $secondsPerRead = 0.0;
+
         public function __construct(private object $chain)
         {
         }
@@ -80,11 +85,14 @@ namespace BCC\Trust\Tests\Integration {
             self::$answers            = [];
             self::$asked              = [];
             self::$maxRequestsPerRead = 1;
+            self::$clock              = 0.0;
+            self::$secondsPerRead     = 0.0;
         }
 
         public function count_holdings_evidence(string $wallet, string $contract): ?HoldingsCount
         {
             self::$asked[] = $wallet;
+            self::$clock  += self::$secondsPerRead;
             $n = self::$answers[$wallet] ?? null;
 
             return $n === null ? null : HoldingsCount::exact($n);
@@ -464,17 +472,27 @@ namespace BCC\Trust\Tests\Integration {
         public function testEveryMemberIsEvaluatedAndRemovedExactlyOnceAcrossPagesAndTicks(): void
         {
             // 250 complete zeros. Default tick cap 200, page size 100.
+            //
+            // ⚠ CLOCK-TOLERANT. The sweep's real budget is 20 s of WALL CLOCK
+            // (HoldingsService::SURFACE_REVOKE), and on a loaded machine tick 1
+            // can legitimately stop on that deadline before 200. Asserting "tick
+            // 1 checked exactly 200" made this test fail ~2 runs in 5 under load
+            // while the code was right. What must hold wherever a tick stops is
+            // asserted below; the deadline path itself is pinned
+            // deterministically, with a fake clock, in
+            // testATickThatRunsOutOfTimeResumesOnTheFirstUnevaluatedMember.
             $addresses = $this->seedGroup(250);
 
-            $first = (new NftGroupRevokeService())->sweep();
-            self::assertSame(200, $first['checked']);
-            self::assertSame(200, $first['revoked']);
-            self::assertSame(array_slice($addresses, 0, 200), RevocationScriptedFetcher::$asked, 'tick 1 took members in order with none skipped');
-            self::assertCount(50, $this->remainingMembers());
+            $ticks = $this->sweepUntilEmpty();
 
-            $second = (new NftGroupRevokeService())->sweep();
-            self::assertSame(50, $second['revoked']);
-            self::assertSame($addresses, RevocationScriptedFetcher::$asked, 'tick 2 resumed on the first unevaluated member');
+            if (!$ticks[0]['stopped_on_budget']) {
+                self::assertSame(200, $ticks[0]['checked'], 'a tick the clock did not stop runs to the 200 cap');
+            }
+            foreach ($ticks as $i => $tick) {
+                self::assertLessThanOrEqual(200, $tick['checked'], 'tick ' . ($i + 1) . ' stayed inside the cap');
+            }
+            self::assertSame($addresses, RevocationScriptedFetcher::$asked, 'every member asked about exactly once, in order, across however many ticks it took');
+            self::assertSame(250, array_sum(array_column($ticks, 'revoked')));
             self::assertSame([], $this->remainingMembers());
             self::assertSame(250, $this->revokeAuditRows());
 
@@ -498,12 +516,14 @@ namespace BCC\Trust\Tests\Integration {
                 }
             }
 
-            $first  = (new NftGroupRevokeService())->sweep();
-            $second = (new NftGroupRevokeService())->sweep();
+            // ⚠ CLOCK-TOLERANT, for the same reason as the 250-member test:
+            // tick until the rotation has covered the group, however many
+            // ticks the wall clock allows.
+            $ticks = $this->sweepUntilCovered(count($addresses));
 
-            self::assertSame(230, $first['checked'] + $second['checked']);
-            self::assertSame(77, $first['revoked'] + $second['revoked']);
-            self::assertSame(77, $first['skipped_unknown'] + $second['skipped_unknown']);
+            self::assertSame(230, array_sum(array_column($ticks, 'checked')));
+            self::assertSame(77, array_sum(array_column($ticks, 'revoked')));
+            self::assertSame(77, array_sum(array_column($ticks, 'skipped_unknown')));
             self::assertSame($addresses, RevocationScriptedFetcher::$asked, 'each member asked about exactly once, in order');
             self::assertSame($kept, $this->remainingMembers(), 'exactly the unverifiable members and the holders were kept');
         }
@@ -600,6 +620,107 @@ namespace BCC\Trust\Tests\Integration {
             self::assertSame(2, $second['revoked']);
             self::assertSame($addresses, RevocationScriptedFetcher::$asked);
             self::assertSame([], $this->remainingMembers());
+        }
+
+        public function testATickThatRunsOutOfTimeResumesOnTheFirstUnevaluatedMember(): void
+        {
+            // The WALL-CLOCK arm of the budget, pinned without depending on the
+            // machine: a fake clock advances 7 s per read against a 20 s
+            // deadline, so exactly three reads fit a tick (0→7→14→21) and the
+            // fourth member finds the clock spent. Requests are plentiful
+            // (300), so the clock and only the clock is what stops each tick.
+            RevocationScriptedFetcher::$secondsPerRead = 7.0;
+            $addresses = $this->seedGroup(7);
+            $service   = new NftGroupRevokeService(
+                static fn (): \BCC\Trust\Onchain\Support\ProviderRequestBudget => new \BCC\Trust\Onchain\Support\ProviderRequestBudget(
+                    300,
+                    20,
+                    static fn (): float => RevocationScriptedFetcher::$clock
+                )
+            );
+
+            $first = $service->sweep();
+            self::assertTrue($first['stopped_on_budget'], 'tick 1 stopped on the clock');
+            self::assertSame(3, $first['revoked']);
+            self::assertSame(array_slice($addresses, 0, 3), RevocationScriptedFetcher::$asked);
+
+            $second = $service->sweep();
+            self::assertTrue($second['stopped_on_budget']);
+            self::assertSame(3, $second['revoked']);
+            self::assertSame(array_slice($addresses, 0, 6), RevocationScriptedFetcher::$asked, 'tick 2 resumed on the first unevaluated member');
+
+            $third = $service->sweep();
+            self::assertSame(1, $third['revoked']);
+            self::assertSame($addresses, RevocationScriptedFetcher::$asked, 'every member exactly once, in order, across clock-stopped ticks');
+            self::assertSame([], $this->remainingMembers());
+            self::assertSame(7, $this->revokeAuditRows());
+        }
+
+        public function testATickStoppedByTheClockAmongKeptMembersNeitherRepeatsNorSkips(): void
+        {
+            // The removal-only case above cannot tell a correct resume from one
+            // that re-asks: removed rows shift up, so the cursor lands on 0
+            // either way. Here every member is a proven holder (kept), so the
+            // position really advances and an off-by-one in either direction
+            // shows up as a repeated or a missing address.
+            RevocationScriptedFetcher::$secondsPerRead = 7.0;
+            $addresses = $this->seedGroup(7);
+            foreach ($addresses as $address) {
+                RevocationScriptedFetcher::$answers[$address] = 1;
+            }
+            $service = new NftGroupRevokeService(
+                static fn (): \BCC\Trust\Onchain\Support\ProviderRequestBudget => new \BCC\Trust\Onchain\Support\ProviderRequestBudget(
+                    300,
+                    20,
+                    static fn (): float => RevocationScriptedFetcher::$clock
+                )
+            );
+
+            $first = $service->sweep();
+            self::assertTrue($first['stopped_on_budget']);
+            self::assertSame(array_slice($addresses, 0, 3), RevocationScriptedFetcher::$asked);
+
+            $service->sweep();
+            self::assertSame(array_slice($addresses, 0, 6), RevocationScriptedFetcher::$asked, 'tick 2 starts on member 4: no repeat, no skip');
+
+            $service->sweep();
+            self::assertSame($addresses, RevocationScriptedFetcher::$asked);
+            self::assertCount(7, $this->remainingMembers(), 'holders are kept');
+            self::assertSame(0, $this->revokeAuditRows());
+        }
+
+        /**
+         * Tick until the group has no removable members left, bounded.
+         *
+         * @return list<array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool}>
+         */
+        private function sweepUntilEmpty(int $maxTicks = 10): array
+        {
+            $ticks = [];
+            for ($i = 0; $i < $maxTicks; $i++) {
+                $ticks[] = (new NftGroupRevokeService())->sweep();
+                if ($this->remainingMembers() === []) {
+                    return $ticks;
+                }
+            }
+            self::fail('the sweep did not empty the group within ' . $maxTicks . ' ticks');
+        }
+
+        /**
+         * Tick until every one of $members has been asked about once, bounded.
+         *
+         * @return list<array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool}>
+         */
+        private function sweepUntilCovered(int $members, int $maxTicks = 10): array
+        {
+            $ticks = [];
+            for ($i = 0; $i < $maxTicks; $i++) {
+                $ticks[] = (new NftGroupRevokeService())->sweep();
+                if (count(RevocationScriptedFetcher::$asked) >= $members) {
+                    return $ticks;
+                }
+            }
+            self::fail('the sweep did not cover the group within ' . $maxTicks . ' ticks');
         }
     }
 }
