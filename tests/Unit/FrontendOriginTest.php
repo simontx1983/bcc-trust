@@ -52,17 +52,17 @@ final class FrontendOriginTest extends TestCase
 {
     private const PROD = 'https://bluecollarcrypto.io';
 
-    /** A preview host the allowlist is meant to accept. */
-    private const PREVIEW = 'https://bcc-frontend-abc-team.vercel.app';
+    /** A preview host the allowlist is meant to accept (9-char Vercel hash). */
+    private const PREVIEW = 'https://bcc-frontend-abc123xyz-team.vercel.app';
 
     /** The same host with an attacker-controlled suffix. */
-    private const LOOKALIKE = 'https://bcc-frontend-abc-team.vercel.app.evil.test';
+    private const LOOKALIKE = 'https://bcc-frontend-abc123xyz-team.vercel.app.evil.test';
 
     /** Pattern body as an operator might carelessly write it — no anchors. */
-    private const UNANCHORED = 'bcc-frontend-[a-z0-9]+-team\.vercel\.app';
+    private const UNANCHORED = 'bcc-frontend-[a-z0-9]{9}-team\.vercel\.app';
 
-    /** The same intent, written correctly. */
-    private const ANCHORED = '^https://bcc-frontend-[a-z0-9]+-team\.vercel\.app$';
+    /** The same intent, written correctly: the one shape F-121 accepts. */
+    private const ANCHORED = '^https://bcc-frontend-[a-z0-9]{9}-team\.vercel\.app$';
 
     /** Anchors present, but alternation escapes them. */
     private const ALTERNATION = '^https://a\.test|https://b\.test$';
@@ -167,13 +167,17 @@ final class FrontendOriginTest extends TestCase
     // ── alternation ───────────────────────────────────────────────────────
 
     /**
-     * The non-capturing group is load-bearing. Without it, `^…$` would
-     * anchor only the first branch of a top-level alternation.
+     * Since F-121 a top-level alternation is not the one accepted preview
+     * shape, so it is REFUSED outright and neither branch matches. That is
+     * stricter than the earlier behaviour this case pinned (both branches
+     * anchored by the non-capturing group, which is still applied as
+     * defence in depth).
      */
     public function testAlternationAnchorsBothBranches(): void
     {
-        self::assertSame('https://a.test', FrontendOrigin::match('https://a.test'));
-        self::assertSame('https://b.test', FrontendOrigin::match('https://b.test'));
+        self::assertNull(FrontendOrigin::match('https://a.test'));
+        self::assertNull(FrontendOrigin::match('https://b.test'));
+        self::assertSame(self::PROD, FrontendOrigin::match(self::PROD), 'the exact entry is unaffected');
     }
 
     public function testAlternationDoesNotLeakPastEitherBranch(): void
