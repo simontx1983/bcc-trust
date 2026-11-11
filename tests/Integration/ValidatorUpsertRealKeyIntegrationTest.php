@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Tests\Integration;
 
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
+use BCC\Trust\Onchain\Repositories\WalletRepository;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
@@ -18,6 +19,15 @@ use PHPUnit\Framework\TestCase;
  * $wpdb->insert_id from an unrelated earlier insert. WalletSeedService (the
  * only caller) discarded the result, so the validator was silently never
  * linked to the verified wallet.
+ *
+ * #430 review M1 — ownership is read THROUGH wallet_links. Disconnecting a
+ * wallet hard-deletes its wallet_links row but leaves
+ * onchain_validators.wallet_link_id pointing at it; a dangling owner must
+ * count as unlinked, or a re-claim after unlink is refused forever.
+ *
+ * Every link id below is a REAL wallet_links row: with the owner read through
+ * the JOIN, a made-up id would be a dangling owner and silently test the
+ * wrong branch.
  *
  * Runs the REAL repository against the REAL validators schema.
  */
@@ -44,42 +54,86 @@ final class ValidatorUpsertRealKeyIntegrationTest extends TestCase
     public function testABulkIndexedValidatorIsClaimedByTheVerifiedWallet(): void
     {
         $bulkId = $this->insertBulkIndexed('cosmosvaloper1aaa');
+        $link   = $this->link(41, 'cosmos1wallet41');
 
-        $id = ValidatorRepository::upsert($this->data('cosmosvaloper1aaa', 'Alpha'), 41);
+        $id = ValidatorRepository::upsert($this->data('cosmosvaloper1aaa', 'Alpha'), $link);
 
         self::assertSame($bulkId, $id, 'the existing bulk-indexed row is the one updated');
         $row = $this->row('cosmosvaloper1aaa');
-        self::assertSame(41, (int) $row->wallet_link_id, 'and it is now linked to the verified wallet');
+        self::assertSame($link, (int) $row->wallet_link_id, 'and it is now linked to the verified wallet');
         self::assertSame('Alpha', $row->moniker);
         self::assertSame(1, $this->countRows(), 'no duplicate row');
     }
 
     public function testARowAlreadyLinkedToTheSameWalletIsRefreshed(): void
     {
-        $first = ValidatorRepository::upsert($this->data('cosmosvaloper1bbb', 'Old'), 42);
-        $again = ValidatorRepository::upsert($this->data('cosmosvaloper1bbb', 'New'), 42);
+        $link  = $this->link(42, 'cosmos1wallet42');
+        $first = ValidatorRepository::upsert($this->data('cosmosvaloper1bbb', 'Old'), $link);
+        $again = ValidatorRepository::upsert($this->data('cosmosvaloper1bbb', 'New'), $link);
 
         self::assertIsInt($first);
         self::assertSame($first, $again);
         self::assertSame('New', $this->row('cosmosvaloper1bbb')->moniker);
     }
 
-    public function testARowLinkedToAnotherWalletIsNotReHomed(): void
+    public function testARowLinkedToAnotherLiveWalletIsNotReHomed(): void
     {
-        $owner = ValidatorRepository::upsert($this->data('cosmosvaloper1ccc', 'Owner'), 43);
+        $ownerLink    = $this->link(43, 'cosmos1wallet43');
+        $intruderLink = $this->link(44, 'cosmos1wallet44');
+        $owner = ValidatorRepository::upsert($this->data('cosmosvaloper1ccc', 'Owner'), $ownerLink);
         self::assertIsInt($owner);
 
-        $result = ValidatorRepository::upsert($this->data('cosmosvaloper1ccc', 'Intruder'), 44);
+        $result = ValidatorRepository::upsert($this->data('cosmosvaloper1ccc', 'Intruder'), $intruderLink);
 
-        self::assertFalse($result, 'another link\'s validator is refused, not taken over');
+        self::assertFalse($result, 'another live link\'s validator is refused, not taken over');
         $row = $this->row('cosmosvaloper1ccc');
-        self::assertSame(43, (int) $row->wallet_link_id);
+        self::assertSame($ownerLink, (int) $row->wallet_link_id);
         self::assertSame('Owner', $row->moniker);
+    }
+
+    /**
+     * #430 M1 — link → unlink → re-link the same address. The disconnect
+     * deletes the wallet_links row only; the validator keeps the dead id.
+     */
+    public function testAReClaimAfterUnlinkSucceeds(): void
+    {
+        $first = $this->link(47, 'cosmos1wallet47');
+        $id    = ValidatorRepository::upsert($this->data('cosmosvaloper1fff', 'Before'), $first);
+        self::assertIsInt($id);
+
+        self::assertTrue(WalletRepository::delete($first, 47), 'fixture: the wallet is disconnected');
+        self::assertSame($first, (int) $this->row('cosmosvaloper1fff')->wallet_link_id,
+            'precondition: the validator still names the deleted link');
+
+        $second = $this->link(47, 'cosmos1wallet47');
+        self::assertNotSame($first, $second);
+
+        $again = ValidatorRepository::upsert($this->data('cosmosvaloper1fff', 'After'), $second);
+
+        self::assertSame($id, $again, 'the same row is re-claimed, not refused');
+        $row = $this->row('cosmosvaloper1fff');
+        self::assertSame($second, (int) $row->wallet_link_id, 'and the dangling owner is healed');
+        self::assertSame('After', $row->moniker);
+        self::assertSame(1, $this->countRows());
+    }
+
+    /** A dangling owner is claimable by ANY live link, not only the old user's. */
+    public function testADanglingOwnerIsClaimableByAnotherUser(): void
+    {
+        $gone = $this->link(48, 'cosmos1wallet48');
+        ValidatorRepository::upsert($this->data('cosmosvaloper1ggg', 'Gone'), $gone);
+        WalletRepository::delete($gone, 48);
+
+        $other  = $this->link(49, 'cosmos1wallet49');
+        $result = ValidatorRepository::upsert($this->data('cosmosvaloper1ggg', 'New owner'), $other);
+
+        self::assertIsInt($result);
+        self::assertSame($other, (int) $this->row('cosmosvaloper1ggg')->wallet_link_id);
     }
 
     public function testANewValidatorIsInsertedAndItsOwnIdReturned(): void
     {
-        $id = ValidatorRepository::upsert($this->data('cosmosvaloper1ddd', 'Delta'), 45);
+        $id = ValidatorRepository::upsert($this->data('cosmosvaloper1ddd', 'Delta'), $this->link(45, 'cosmos1wallet45'));
 
         self::assertIsInt($id);
         self::assertSame($id, (int) $this->row('cosmosvaloper1ddd')->id);
@@ -92,15 +146,33 @@ final class ValidatorUpsertRealKeyIntegrationTest extends TestCase
     public function testAFailedInsertReturnsFalseNotAStaleId(): void
     {
         global $wpdb;
+        $link    = $this->link(46, 'cosmos1wallet46');
         $staleId = $this->insertBulkIndexed('cosmosvaloper1zzz'); // sets insert_id
 
         $wpdb->failQueriesMatching = '/^\s*INSERT INTO `?\S*onchain_validators/i';
-        $result = ValidatorRepository::upsert($this->data('cosmosvaloper1eee', 'Echo'), 46);
+        $result = ValidatorRepository::upsert($this->data('cosmosvaloper1eee', 'Echo'), $link);
         self::assertGreaterThan(0, $wpdb->injectedFailures, 'the fault must actually have fired');
         $wpdb->clearFaultInjection();
 
         self::assertFalse($result);
         self::assertNotSame($staleId, $result);
+    }
+
+    /** The ownership read failing is a failure, never "unowned, claim it". */
+    public function testAFailedOwnershipReadReturnsFalse(): void
+    {
+        global $wpdb;
+        $ownerLink = $this->link(50, 'cosmos1wallet50');
+        ValidatorRepository::upsert($this->data('cosmosvaloper1hhh', 'Owner'), $ownerLink);
+        $intruder = $this->link(51, 'cosmos1wallet51');
+
+        $wpdb->failQueriesMatching = '/LEFT JOIN `?\S*wallet_links/i';
+        $result = ValidatorRepository::upsert($this->data('cosmosvaloper1hhh', 'Intruder'), $intruder);
+        self::assertGreaterThan(0, $wpdb->injectedFailures, 'the fault must actually have fired');
+        $wpdb->clearFaultInjection();
+
+        self::assertFalse($result);
+        self::assertSame($ownerLink, (int) $this->row('cosmosvaloper1hhh')->wallet_link_id);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────
@@ -114,6 +186,24 @@ final class ValidatorUpsertRealKeyIntegrationTest extends TestCase
             'moniker'          => $moniker,
             'status'           => 'active',
         ];
+    }
+
+    /** A REAL wallet_links row on the test chain; returns its id. */
+    private function link(int $userId, string $address): int
+    {
+        global $wpdb;
+        $wpdb->insert(
+            WalletRepository::table(),
+            [
+                'user_id'        => $userId,
+                'post_id'        => 0,
+                'wallet_address' => $address,
+                'chain_id'       => self::CHAIN,
+            ],
+            ['%d', '%d', '%s', '%d']
+        );
+        self::assertSame('', $wpdb->last_error, 'fixture: wallet link');
+        return (int) $wpdb->insert_id;
     }
 
     private function insertBulkIndexed(string $operator): int
@@ -160,5 +250,7 @@ final class ValidatorUpsertRealKeyIntegrationTest extends TestCase
         global $wpdb;
         $table = $this->table();
         $wpdb->query($wpdb->prepare("DELETE FROM `{$table}` WHERE chain_id = %d", self::CHAIN));
+        $wallets = WalletRepository::table();
+        $wpdb->query($wpdb->prepare("DELETE FROM `{$wallets}` WHERE chain_id = %d", self::CHAIN));
     }
 }

@@ -551,10 +551,20 @@ final class ValidatorRepository
         // below then collided with the unique key, and the method returned a
         // STALE $wpdb->insert_id from an unrelated earlier insert — the
         // validator was never linked to the verified wallet, silently.
+        //
+        // The owner is read THROUGH wallet_links: disconnecting a wallet
+        // hard-deletes its wallet_links row without nulling
+        // onchain_validators.wallet_link_id, so a raw id here can point at a
+        // link that no longer exists. A dangling owner is treated as
+        // unlinked — otherwise a legitimate re-claim after unlink would be
+        // refused on every seed run, forever — and claiming it heals the row.
+        $wallets     = WalletRepository::table();
         $existingRow = $wpdb->get_row($wpdb->prepare(
-            "SELECT id, wallet_link_id FROM {$table}
-             WHERE chain_id = %d AND operator_address = %s
-             LIMIT 1",
+            "SELECT v.id, wl.id AS live_link_id
+               FROM {$table} v
+               LEFT JOIN {$wallets} wl ON wl.id = v.wallet_link_id
+              WHERE v.chain_id = %d AND v.operator_address = %s
+              LIMIT 1",
             (int) $data['chain_id'],
             $data['operator_address']
         ));
@@ -564,7 +574,7 @@ final class ValidatorRepository
 
         $existing = null;
         if ($existingRow !== null) {
-            $owner = $existingRow->wallet_link_id === null ? null : (int) $existingRow->wallet_link_id;
+            $owner = $existingRow->live_link_id === null ? null : (int) $existingRow->live_link_id;
             // A row already linked to a DIFFERENT wallet link is not taken
             // over here: this path seeds on verify and has no authority to
             // re-home another link's validator. Unlinked (bulk-indexed) rows
