@@ -15,6 +15,7 @@ use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\Support\MarketplaceLinkBuilder;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
+use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
 use stdClass;
 
 if (!defined('ABSPATH')) {
@@ -136,19 +137,24 @@ final class NftPieceViewModelBuilder
         }
         $normalizedContract = $identity->canonical();
 
-        // ── 3. Resolve collection (read-time fallback for Cosmos) ──
+        // ── 3. Resolve collection (required on every chain) ────────
         $collectionRow = CollectionRepository::findByChainContract($chainId, $normalizedContract);
         $isCosmos      = ($chainType === 'cosmos');
 
-        if ($collectionRow === null && !$isCosmos) {
+        // ⚠ EVERY chain, Cosmos included, requires an indexed collection
+        // row (F-154). Cosmos used to be exempt and fell back to read-time
+        // LCD queries for ANY contract. That let an anonymous caller drive
+        // smart queries at arbitrary contracts and token ids, and every
+        // refused query was retried and charged against the chain-wide
+        // circuit breaker, which also serves validator indexing, holdings
+        // and the delegation gate.
+        if ($collectionRow === null) {
             throw new PieceBuilderException(self::ERROR_NOT_FOUND, 'Collection not indexed.');
         }
 
-        // ── 3b. Cosmos cold-cache: read-time `contract_info` for the
-        //       collection.name embed when no indexed row exists. One
-        //       extra LCD call; cached for an hour inside the fetcher.
-        $cosmosFetcher  = null;
-        $cosmosColName  = null;
+        // ── 3b. Cosmos: the fetcher for the read-time token + owner
+        //       queries (indexed chains go through the pieces cache).
+        $cosmosFetcher = null;
         if ($isCosmos) {
             $maybeFetcher = FetcherFactory::make_for_chain($chain);
             if (!($maybeFetcher instanceof CosmosFetcher)) {
@@ -158,12 +164,6 @@ final class NftPieceViewModelBuilder
                 );
             }
             $cosmosFetcher = $maybeFetcher;
-            if ($collectionRow === null) {
-                $info = $cosmosFetcher->fetchContractInfo($normalizedContract);
-                if (is_array($info) && is_string($info['name'] ?? null) && $info['name'] !== '') {
-                    $cosmosColName = (string) $info['name'];
-                }
-            }
         }
 
         // ── 4. Per-token metadata (with cache provenance) ──────────
@@ -218,14 +218,21 @@ final class NftPieceViewModelBuilder
                 $collectionRow,
                 $chainSlug,
                 $normalizedContract,
-                $tokenStandard,
-                $cosmosColName
+                $tokenStandard
             ),
             'token_id'         => $tokenId,
             'name'             => $pieceMeta['name'],
             'description'      => $pieceMeta['description'],
-            'image_url'        => $pieceMeta['image_url'],
-            'image_url_thumb'  => $pieceMeta['image_url_thumb'],
+            // Token-level images are upstream-controlled (CW-721 extension,
+            // Alchemy, Helius) and rendered as <img> for every viewer, so
+            // they pass the same rule as collection images: https only.
+            // Applied here, at composition, so a FRESH cache row written
+            // before this rule cannot bypass it. ipfs:// is refused, not
+            // rewritten: browsers cannot load it, and there is no gateway
+            // rewrite anywhere today, so it degrades to the null
+            // placeholder instead of a broken image.
+            'image_url'        => CollectionMetadataRules::sanitizeImageUrl($pieceMeta['image_url']),
+            'image_url_thumb'  => CollectionMetadataRules::sanitizeImageUrl($pieceMeta['image_url_thumb']),
             'attributes'       => $pieceMeta['attributes'],
             'owner'            => $dominantOwner,
             'owners_count'     => $ownersCount,
@@ -698,9 +705,8 @@ final class NftPieceViewModelBuilder
     }
 
     /**
-     * Build the §3.7 `collection` embed. Uses the indexed row when
-     * available; falls back to a minimal embed sourced from the chain
-     * + caller inputs (Cosmos cold-cache).
+     * Build the §3.7 `collection` embed from the indexed row. Every chain
+     * requires one (build() 404s first), so there is no cold-cache branch.
      *
      * @return array{
      *     id: int|null,
@@ -713,27 +719,11 @@ final class NftPieceViewModelBuilder
      * }
      */
     private static function buildCollectionEmbed(
-        ?object $collectionRow,
+        object $collectionRow,
         string $chainSlug,
         string $contractAddress,
-        ?string $tokenStandard,
-        ?string $cosmosColdCacheName = null
+        ?string $tokenStandard
     ): array {
-        if ($collectionRow === null) {
-            return [
-                'id'               => null,
-                // Cosmos cold-cache: use the read-time `contract_info`
-                // name when available so the page header isn't blank.
-                // Indexed chains never reach this branch (a missing row
-                // throws ERROR_NOT_FOUND earlier in build()).
-                'name'             => $cosmosColdCacheName,
-                'creator_handle'   => null,
-                'chain_slug'       => $chainSlug,
-                'contract_address' => $contractAddress,
-                'token_standard'   => $tokenStandard,
-                'is_verified'      => false,
-            ];
-        }
 
         $isVerifiedRaw = $collectionRow->is_verified ?? null;
         $isVerified    = $isVerifiedRaw !== null && (int) $isVerifiedRaw === 1;

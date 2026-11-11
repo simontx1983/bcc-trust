@@ -917,17 +917,26 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * Returns the unwrapped `data` envelope on success, null on transport
      * / non-200 / unparseable JSON.
      *
+     * `$contractRefusalIsAnswer` (opt-in): a 5xx that is the CONTRACT
+     * refusing the query (CosmwasmClassifier::isContractRefusal) returns
+     * immediately as a failure, with NO retry and NO breaker charge. For
+     * token-level reads whose ids come from callers (the NFT-piece route),
+     * so bogus token ids cannot open the chain's breaker. Off by default;
+     * every other caller keeps the strict treatment.
+     *
      * @param array<string, mixed> $queryArr  e.g. ['tokens' => ['owner' => '...']]
      * @return array<string, mixed>|null
      */
-    private function wasmSmartQuery(string $contractAddress, array $queryArr): ?array
+    private function wasmSmartQuery(string $contractAddress, array $queryArr, bool $contractRefusalIsAnswer = false): ?array
     {
         $path = self::wasmSmartQueryPath($contractAddress, $queryArr);
         if ($path === null) {
             return null;
         }
 
-        $response = $this->lcdGet($path);
+        $response = $contractRefusalIsAnswer
+            ? $this->lcdGetResultData($path)
+            : $this->lcdGet($path);
         if (!is_array($response) || !isset($response['data']) || !is_array($response['data'])) {
             return null;
         }
@@ -1209,7 +1218,10 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             return $cached;
         }
 
-        $data = $this->wasmSmartQuery($contract, ['nft_info' => ['token_id' => $tokenId]]);
+        // Token ids reach here from the anonymous NFT-piece route, so a
+        // contract refusing an unknown/invalid id must not retry or charge
+        // the breaker (F-154).
+        $data = $this->wasmSmartQuery($contract, ['nft_info' => ['token_id' => $tokenId]], true);
         if ($data === null) {
             // Don't cache transport failures — a flaky LCD shouldn't poison
             // a 7-day cache window with empty results.
@@ -1469,9 +1481,11 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             return $cached;
         }
 
+        // Same as nft_info: caller-supplied token id, so a contract refusal
+        // is an answer, not a node fault (F-154).
         $data = $this->wasmSmartQuery($contract, [
             'owner_of' => ['token_id' => $tokenId],
-        ]);
+        ], true);
         if ($data === null) {
             // Don't cache transport failures.
             return null;
@@ -2015,6 +2029,19 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     }
 
     /**
+     * {@see lcdGet()} with contract refusals treated as answers (no retry,
+     * no breaker charge). Only {@see wasmSmartQuery()} opts in.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function lcdGetResultData(string $path): ?array
+    {
+        $result = $this->lcdGetResult($path, [], false, null, true);
+
+        return $result['ok'] ? $result['data'] : null;
+    }
+
+    /**
      * STRUCTURED LCD GET — the discrimination seam.
      *
      * WHY THIS EXISTS. {@see lcdGet()} folds every failure into `null`,
@@ -2047,7 +2074,8 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         string $path,
         array $params = [],
         bool $smartQuery = false,
-        ?ProviderOutcomeReceipt $outcome = null
+        ?ProviderOutcomeReceipt $outcome = null,
+        bool $contractRefusalIsAnswer = false
     ): array {
         $classifier = \BCC\Trust\Onchain\Services\CosmwasmClassifier::class;
         $chainId    = (int) ($this->chain->id ?? 0);
@@ -2094,6 +2122,14 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         if ($smartQuery) {
             $retryOptions['application_error'] = static fn(string $body, int $code): bool
                 => self::isSmartQueryApplicationError($body, $code);
+        } elseif ($contractRefusalIsAnswer) {
+            // Token-level reads driven by caller-supplied ids (the NFT-piece
+            // route): a contract refusing an unknown or invalid token_id is
+            // an answer, not a node fault. See CosmwasmClassifier::isContractRefusal.
+            $retryOptions['application_error'] = static fn(string $body, int $code): bool
+                => \BCC\Trust\Onchain\Services\CosmwasmClassifier::isContractRefusal(
+                    self::extractLcdErrorMessage($body)
+                );
         }
 
         $response = ApiRetry::get($url, [
