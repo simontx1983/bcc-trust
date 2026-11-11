@@ -31,16 +31,16 @@ final class PeepSoLeftoversServiceTest extends TestCase
         require_once __DIR__ . '/../Stubs/peepso-leftovers-stubs.php';
         $GLOBALS['wpdb'] = new \PeepSoLeftoversFakeWpdb();
 
-        // A prod-shaped site after the four add-ons were removed.
+        // A site after the add-ons were removed (illustrative counts).
         $GLOBALS['__pl_tables'] = [
-            'wp_peepso_friend_requests'           => 5,
-            'wp_peepso_friends'                   => 5,
-            'wp_peepso_friends_cache'             => 10,
+            'wp_peepso_friend_requests'           => 7,
+            'wp_peepso_friends'                   => 8,
+            'wp_peepso_friends_cache'             => 12,
             'wp_peepso_user_autofriends'          => 0,
-            'wp_peepso_email_digest_content'      => 1,
-            'wp_peepso_email_digest_log'          => 19,
-            'wp_peepso_social_login_user_profile' => 3,
-            'wp_social_users'                     => 4,
+            'wp_peepso_email_digest_content'      => 2,
+            'wp_peepso_email_digest_log'          => 30,
+            'wp_peepso_social_login_user_profile' => 6,
+            'wp_social_users'                     => 9,
             'wp_peepso_api_rate_limit'            => 12,   // core — must survive
             'wp_peepso_activities'                => 900,  // core — must survive
         ];
@@ -72,12 +72,12 @@ final class PeepSoLeftoversServiceTest extends TestCase
             'wpseo_social'                        => [],
         ];
         $GLOBALS['__pl_usermeta'] = [
-            'peepso_email_digest_sent'            => 10,
-            'social_login_profile_id'             => 3,
+            'peepso_email_digest_sent'            => 11,
+            'social_login_profile_id'             => 4,
             'social_login_open_google'            => 2,
             'social_login_open_x'                 => 1,
             // ⛔ keep
-            'peepso_email_digest_receive_enabled' => 51,
+            'peepso_email_digest_receive_enabled' => 40,
             'peepso_chat_friends_only'            => 1,
             'social_loginx_unrelated'             => 1,   // shares no full prefix
         ];
@@ -98,7 +98,7 @@ final class PeepSoLeftoversServiceTest extends TestCase
 
         self::assertSame([$GLOBALS['__pl_tables'], $GLOBALS['__pl_options'], $GLOBALS['__pl_usermeta']], $before, 'plan must not write');
         self::assertSame(
-            ['wp_peepso_friend_requests' => 5, 'wp_peepso_friends' => 5, 'wp_peepso_friends_cache' => 10, 'wp_peepso_user_autofriends' => 0],
+            ['wp_peepso_friend_requests' => 7, 'wp_peepso_friends' => 8, 'wp_peepso_friends_cache' => 12, 'wp_peepso_user_autofriends' => 0],
             $plan['tables']
         );
         self::assertSame(['friends_can_send_message_to', 'site_license_friendso'], $plan['config_keys']);
@@ -139,7 +139,7 @@ final class PeepSoLeftoversServiceTest extends TestCase
         }
 
         // ⛔ survivors
-        self::assertSame(51, $GLOBALS['__pl_usermeta']['peepso_email_digest_receive_enabled']);
+        self::assertSame(40, $GLOBALS['__pl_usermeta']['peepso_email_digest_receive_enabled']);
         self::assertSame('core tpl', $GLOBALS['__pl_options']['peepso_email_notification_digest']);
         self::assertSame(1, $GLOBALS['__pl_options']['_fluentmail_last_email_digest']);
         self::assertSame(5, $GLOBALS['__pl_options']['peepso_config']['notification_digest_limit_per_section']);
@@ -149,7 +149,7 @@ final class PeepSoLeftoversServiceTest extends TestCase
     {
         $plan = (new PeepSoLeftoversService())->plan('peepso_social_login');
         self::assertSame(
-            ['social_login_profile_id' => 3, 'social_login_open_google' => 2, 'social_login_open_x' => 1],
+            ['social_login_profile_id' => 4, 'social_login_open_google' => 2, 'social_login_open_x' => 1],
             $plan['usermeta']
         );
 
