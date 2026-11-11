@@ -165,6 +165,40 @@ final class DisputeBackstopCursorIntegrationTest extends TestCase
         self::assertSame(array_slice($ids, 50), $runs[1], 'the next run moves past it instead of re-selecting it first');
     }
 
+    public function testAFailedCandidateReadStopsTheSweepAndKeepsTheCursor(): void
+    {
+        global $wpdb;
+        for ($i = 0; $i < 60; $i++) {
+            $this->insertDispute(gmdate('Y-m-d H:i:s', 1748746800 + $i * 60));
+        }
+        $this->runOnce(); // cursor now mid-set
+        $cursorBefore = (int) get_option(DisputeScheduler::BACKSTOP_CURSOR_OPTION, 0);
+        self::assertGreaterThan(0, $cursorBefore);
+
+        $wpdb->failQueriesMatching = '/FROM `?' . preg_quote($this->disputes, '/') . '`?\s+WHERE status = \'reviewing\'/';
+        $reconciled = [];
+        try {
+            DisputeScheduler::runBackstopBatch(
+                self::CUTOFF,
+                self::LIMIT,
+                static function (int $id) use (&$reconciled): void {
+                    $reconciled[] = $id;
+                }
+            );
+            self::fail('a failed candidate read must not read as "no candidates"');
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            self::assertSame('listReviewingCreatedBefore', $e->repositoryMethod());
+        }
+
+        self::assertGreaterThan(0, $wpdb->injectedFailures, 'the fault must actually have hit the candidate read');
+        self::assertSame([], $reconciled);
+        self::assertSame(
+            $cursorBefore,
+            (int) get_option(DisputeScheduler::BACKSTOP_CURSOR_OPTION, 0),
+            'a DB error must not wrap or move the cursor'
+        );
+    }
+
     public function testAnEmptySetLeavesAZeroCursorUntouched(): void
     {
         self::assertSame([], $this->runOnce());

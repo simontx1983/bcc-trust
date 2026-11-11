@@ -1099,14 +1099,22 @@ class DisputeRepository
      * whose poll is still open (skipped by reconcile, still 'reviewing'),
      * every dispute behind them starved.
      *
+     * FAIL-CLOSED read (GuardsReadFailures::runRead): a failed query throws
+     * RepositoryReadFailure instead of returning []. For the cursor, [] is
+     * an ANSWER ("end of the set — wrap to 0"), so a DB error read as empty
+     * would reset the sweep's position and report a successful run. Throwing
+     * stops the batch before the cursor is written, and auto_resolve_expired()
+     * records the failure in its last_failure option.
+     *
      * @return list<DisputeResolutionCandidateDTO>
+     * @throws RepositoryReadFailure when the read did not run
      */
     public static function listReviewingCreatedBefore(string $cutoff, int $limit = 50, int $afterId = 0): array
     {
         global $wpdb;
         $table = self::disputes_table();
 
-        $rows = $wpdb->get_results($wpdb->prepare(
+        $rows = self::runRead((string) $wpdb->prepare(
             "SELECT id, vote_id, page_id, voter_id, reporter_id
              FROM {$table}
              WHERE status = 'reviewing'
@@ -1115,15 +1123,11 @@ class DisputeRepository
              ORDER BY id ASC
              LIMIT %d",
             $cutoff, max(0, $afterId), $limit
-        ), ARRAY_A);
-
-        if (!is_array($rows)) {
-            return [];
-        }
+        ), __FUNCTION__, true);
 
         $dtos = [];
         foreach ($rows as $row) {
-            $dtos[] = self::hydrateResolutionCandidate($row);
+            $dtos[] = self::hydrateResolutionCandidate((array) $row);
         }
         return $dtos;
     }
