@@ -270,9 +270,11 @@ ck('C4 the gate stops refusing', true, $reasonFor($cOn) !== 'comments_disabled')
 // was stale. The failure surfaced only on a manual run during closeout.
 $r = $reasonFor($cNone);
 ck('C5 ⚠⚠ an eligible member now reaches ALLOWED, not `suspended`', null, $r);
-ck('C5 ...and the standing producer supplies all four keys for that viewer', 4, count(
-    \BCC\Trust\Core\Announcements\AnnouncementViewerStanding::forViewer($st)
-));
+// By NAME, not by count: forViewer() also returns `user_id` (five keys).
+ck('C5 ...and the standing producer supplies all four standing keys for that viewer', [], array_values(array_diff(
+    ['authenticated', 'suspended', 'fraud_locked', 'good_standing'],
+    array_keys(\BCC\Trust\Core\Announcements\AnnouncementViewerStanding::forViewer($st))
+)));
 
 // C6 — ⚠⚠ THE CONTROL THAT MAKES SECTION C MEAN SOMETHING, and it is stronger
 // than the one first written here. An earlier version asserted that an
