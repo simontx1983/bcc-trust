@@ -250,6 +250,27 @@ function bcc_trust_render_user_moderation( $user_id ) {
                     <button name="override_score" class="button" style="background:var(--bcc-highlight);border-color:var(--bcc-highlight);color:#fff;">Apply Score Override</button>
                 </p>
             </form>
+
+            <!-- Undo the latest override (F-113). Shown only when there is one
+                 to undo; hidden when the undo record cannot be read. -->
+            <?php $bcc_undoable = \BCC\Trust\Core\Plugin::instance()->moderationService()->latestUndoableOverride( (int) $user_id ); ?>
+            <?php if ( $bcc_undoable !== null ) : ?>
+            <form method="post" onsubmit="return confirm('Undo the latest score override? Each page gets back exactly what that override changed, and any manual Elite it granted or removed is put back as it was.');">
+                <?php wp_nonce_field( 'bcc_trust_moderation' ); ?>
+                <input type="hidden" name="user_id" value="<?php echo intval( $user_id ); ?>">
+                <p>
+                    <button name="undo_score_override" class="button">Undo Last Override</button>
+                    <small style="margin-left:8px;color:var(--bcc-text-secondary);"><?php
+                        echo esc_html( sprintf(
+                            'Override to %d on %s UTC. Reason: %s',
+                            $bcc_undoable['new_score'],
+                            $bcc_undoable['at'],
+                            $bcc_undoable['reason']
+                        ) );
+                    ?></small>
+                </p>
+            </form>
+            <?php endif; ?>
         </div>
 
         <!-- ══ WHITELIST ════════════════════════════════════ -->
