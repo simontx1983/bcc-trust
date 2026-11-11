@@ -99,12 +99,12 @@ function bcc_trust_render_overview_tab() {
             ?>
                 <div>
                     <div style="font-size:32px;font-weight:bold;color:<?php echo esc_attr($s['color']); ?>;"><?php echo esc_html($s['value']); ?></div>
-                    <div style="font-size:12px;color:#666;"><?php echo esc_html( $s['label'] ); ?></div>
+                    <div style="font-size:12px;color:var(--bcc-text-secondary);"><?php echo esc_html( $s['label'] ); ?></div>
                 </div>
             <?php endforeach; ?>
         </div>
         <?php if ( ! $today_ok ): ?>
-            <p style="margin:12px 0 0 0;color:#646970;font-size:12px;">
+            <p style="margin:12px 0 0 0;color:var(--bcc-text-muted);font-size:12px;">
                 <?php esc_html_e( "Today's figures are unavailable because at least one of the five reads behind them did not run.", 'bcc-trust' ); ?>
             </p>
         <?php endif; ?>
@@ -132,7 +132,7 @@ function bcc_trust_render_overview_tab() {
             <div class="bcc-panel" style="text-align:center;padding:16px;">
                 <div style="font-size:28px;"><?php echo $h['icon']; ?></div>
                 <div style="font-size:26px;font-weight:bold;"><?php echo $h['value']; ?></div>
-                <div style="font-size:12px;color:#666;"><?php echo esc_html( $h['label'] ); ?></div>
+                <div style="font-size:12px;color:var(--bcc-text-secondary);"><?php echo esc_html( $h['label'] ); ?></div>
             </div>
         <?php endforeach; ?>
     </div>
@@ -174,7 +174,7 @@ function bcc_trust_render_overview_tab() {
                         <span style="font-size:13px;"><?php echo esc_html( $r['label'] ); ?></span>
                         <strong><?php echo esc_html($r['value']); ?></strong>
                     </div>
-                    <div style="height:8px;background:#eee;border-radius:4px;overflow:hidden;">
+                    <div style="height:8px;background:var(--bcc-bg-code);border-radius:4px;overflow:hidden;">
                         <div style="width:<?php echo esc_attr(intval($pct)); ?>%;height:100%;background:<?php echo esc_attr($r['color']); ?>;border-radius:4px;"></div>
                     </div>
                 </div>
@@ -210,7 +210,7 @@ function bcc_trust_render_overview_tab() {
                         <span style="font-size:13px;"><?php echo esc_html( $r['label'] ); ?></span>
                         <strong><?php echo esc_html($r['value']); ?></strong>
                     </div>
-                    <div style="height:8px;background:#eee;border-radius:4px;overflow:hidden;">
+                    <div style="height:8px;background:var(--bcc-bg-code);border-radius:4px;overflow:hidden;">
                         <div style="width:<?php echo esc_attr(intval($pct)); ?>%;height:100%;background:<?php echo esc_attr($r['color']); ?>;border-radius:4px;"></div>
                     </div>
                 </div>
@@ -254,12 +254,12 @@ function bcc_trust_render_overview_tab() {
                         <span style="font-size:13px;"><?php echo esc_html( $r['label'] ); ?></span>
                         <strong><?php echo esc_html($r['value']); ?></strong>
                     </div>
-                    <div style="height:10px;background:#eee;border-radius:5px;overflow:hidden;">
+                    <div style="height:10px;background:var(--bcc-bg-code);border-radius:5px;overflow:hidden;">
                         <div style="width:<?php echo esc_attr(intval($pct)); ?>%;height:100%;background:<?php echo esc_attr($r['color']); ?>;border-radius:5px;"></div>
                     </div>
                 </div>
             <?php endforeach; ?>
-            <p style="font-size:12px;color:#666;margin:0;">
+            <p style="font-size:12px;color:var(--bcc-text-secondary);margin:0;">
                 <?php if ( $overview_ok ): ?>
                     <?php echo number_format( $counts['total_devices'] ); ?> unique devices tracked.
                     <?php echo intval($counts['recent_fraud_analyses']); ?> fraud analyses in last 24h.
@@ -268,7 +268,7 @@ function bcc_trust_render_overview_tab() {
                 <?php endif; ?>
             </p>
             <?php if ( $device_normal_raw < 0 ): ?>
-                <p style="font-size:12px;color:#d63638;margin:6px 0 0 0;">
+                <p style="font-size:12px;color:var(--bcc-danger);margin:6px 0 0 0;">
                     <?php esc_html_e( 'These device buckets do not reconcile: the high-automation and suspicious counts together exceed the unique-device total, so at least one of the three reads is inconsistent. The Normal figure is clamped at zero and should not be relied on.', 'bcc-trust' ); ?>
                 </p>
             <?php endif; ?>

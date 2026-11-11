@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Admin;
 
+use BCC\Trust\Core\Admin\AdminUiCompat as AdminUi;
+use BCC\Trust\Core\Admin\AdminMenus;
+
 use BCC\Trust\Onchain\OnchainPlugin;
 use BCC\Trust\Onchain\Services\NftGroupGateService;
 
@@ -56,7 +59,7 @@ final class HolderGroupsPage
     public static function register_page(): void
     {
         add_submenu_page(
-            'bcc-system-health',
+            AdminMenus::ONCHAIN,
             'Holder Groups',
             'Holder Groups',
             'manage_options',
@@ -312,13 +315,13 @@ final class HolderGroupsPage
         printf(
             '<tr><th>Cron <code>bcc_gated_group_reconcile_sweep</code></th><td>%s</td></tr>',
             $nextRun === false
-                ? self::badge('NOT SCHEDULED', '#dc3232')
-                : '<code>' . esc_html(gmdate('Y-m-d H:i:s', (int) $nextRun)) . ' UTC</code> ' . self::badge(self::relative((int) $nextRun), '#46b450')
+                ? AdminUi::badge('NOT SCHEDULED', AdminUi::BAD)
+                : '<code>' . esc_html(gmdate('Y-m-d H:i:s', (int) $nextRun)) . ' UTC</code> ' . AdminUi::badge(AdminUi::relative((int) $nextRun), AdminUi::OK)
         );
 
         echo '</tbody></table>';
 
-        echo '<p style="color:#666;margin-top:8px;">'
+        echo '<p style="color:var(--bcc-text-secondary);margin-top:8px;">'
             . 'The cron runs <strong>twicedaily</strong>, processing up to ' . esc_html((string) self::SWEEP_BATCH_SIZE)
             . ' opt-in users per tick (ID-ASC ordering). Manual triggers below mirror that bounded behavior.</p>';
     }
@@ -326,7 +329,7 @@ final class HolderGroupsPage
     private static function renderRunSweep(): void
     {
         echo '<h2 style="margin-top:24px;">Run reconcile sweep now</h2>';
-        echo '<p style="color:#666;">Processes up to ' . esc_html((string) self::SWEEP_BATCH_SIZE)
+        echo '<p style="color:var(--bcc-text-secondary);">Processes up to ' . esc_html((string) self::SWEEP_BATCH_SIZE)
             . ' opt-in users in one batch (same logic as the cron tick). Safe to repeat — already-joined memberships are skipped.</p>';
 
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:8px;">';
@@ -341,7 +344,7 @@ final class HolderGroupsPage
     private static function renderReconcileUser(): void
     {
         echo '<h2 style="margin-top:32px;">Reconcile specific user</h2>';
-        echo '<p style="color:#666;">Useful when a user reports "I hold the NFT but I\'m not in the group." '
+        echo '<p style="color:var(--bcc-text-secondary);">Useful when a user reports "I hold the NFT but I\'m not in the group." '
             . 'Service self-enforces opt-in — for opted-out users the call is a no-op.</p>';
 
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:8px;">';
@@ -363,7 +366,7 @@ final class HolderGroupsPage
 
         echo '<hr style="margin:32px 0;">';
         echo '<h2>Delegator communities</h2>';
-        echo '<p style="color:#666;">A closed community a validator page\'s <strong>operator chooses to create</strong> '
+        echo '<p style="color:var(--bcc-text-secondary);">A closed community a validator page\'s <strong>operator chooses to create</strong> '
             . 'from that page, where they also set the minimum delegation. Nothing here or on a schedule creates '
             . 'one. Membership is gated on a <strong>live delegation check</strong>.</p>';
 
@@ -399,7 +402,7 @@ final class HolderGroupsPage
 
         echo '<hr style="margin:32px 0;">';
         echo '<h2>Halls</h2>';
-        echo '<p style="color:#666;">An <strong>open</strong> Hall connected to exactly one '
+        echo '<p style="color:var(--bcc-text-secondary);">An <strong>open</strong> Hall connected to exactly one '
             . 'chain (e.g. "Cosmos Hall"). Halls are never created automatically — an '
             . 'administrator creates each one explicitly, per chain. A Hall never adds '
             . 'members: joining is a member action gated by HallsService.</p>';
@@ -435,25 +438,5 @@ final class HolderGroupsPage
             'count_total' => true,
         ]);
         return (int) $query->get_total();
-    }
-
-    private static function relative(int $ts): string
-    {
-        $delta = $ts - time();
-        $abs   = abs($delta);
-        if ($abs < 60)    { $val = $abs . 's'; }
-        elseif ($abs < 3600) { $val = floor($abs / 60) . 'm'; }
-        elseif ($abs < 86400){ $val = floor($abs / 3600) . 'h'; }
-        else                 { $val = floor($abs / 86400) . 'd'; }
-        return $delta >= 0 ? 'in ' . $val : $val . ' ago';
-    }
-
-    private static function badge(string $text, string $color): string
-    {
-        return sprintf(
-            '<span style="display:inline-block;padding:2px 10px;background:%1$s;color:#fff;border-radius:3px;font-weight:bold;font-size:12px;letter-spacing:0.5px;">%2$s</span>',
-            esc_attr($color),
-            esc_html($text)
-        );
     }
 }

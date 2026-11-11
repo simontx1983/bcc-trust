@@ -54,6 +54,16 @@ final class AnnouncementCommentService
     public const ERR_NOT_FOUND   = 'bcc_not_found';
     public const ERR_CONFLICT    = 'bcc_conflict';
     public const ERR_UNAVAILABLE = 'bcc_unavailable';
+    public const ERR_RATE_LIMITED = 'bcc_rate_limited';
+
+    /**
+     * Per-commenter burst seatbelt (F-133). Announcement comments notify the
+     * page's audience, so an unthrottled writer was a spam and notification
+     * fan-out vector. The SAME budget as direct messages
+     * (MessagesService::RATE_LIMIT_*): 30 per 5 minutes, via bcc-core Throttle.
+     */
+    public const RATE_LIMIT_PER_WINDOW     = 30;
+    public const RATE_LIMIT_WINDOW_SECONDS = 300;
 
     /** §4.32.9 — the view-model id prefix for a comment. */
     public const ID_PREFIX = 'acmt_';
@@ -127,6 +137,7 @@ final class AnnouncementCommentService
      * Refusal order is fixed and load-bearing, because two conditions can hold
      * at once and the client renders distinct copy per reason:
      *
+     *   0. per-commenter throttle               -> 429 bcc_rate_limited (F-133)
      *   1. announcement not publicly readable   -> 404 (existence hidden)
      *   2. `parent_id` sent                     -> 400 replies_not_supported
      *   3. archived                             -> 403 announcement_archived
@@ -148,6 +159,13 @@ final class AnnouncementCommentService
         ?string $nowUtc = null
     ): array {
         $now = $nowUtc ?? gmdate('Y-m-d H:i:s');
+
+        // ⓪ Throttle FIRST (throttle-before-credentials rule, F-133), ahead
+        // of every lookup. A 429 says nothing about whether the announcement
+        // exists, so the existence-hiding 404 below is unaffected.
+        if (!\BCC\Core\Security\Throttle::allow('announcement_comment', self::RATE_LIMIT_PER_WINDOW, self::RATE_LIMIT_WINDOW_SECONDS)) {
+            return self::fail(self::ERR_RATE_LIMITED, 'Too many comments. Please wait.', 429);
+        }
 
         $row = $this->publicAnnouncementOrNull($announcementId);
         if ($row === null) {

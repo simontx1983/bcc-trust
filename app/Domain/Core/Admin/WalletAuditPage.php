@@ -40,8 +40,8 @@ final class WalletAuditPage
     public static function registerMenu(): void
     {
         add_submenu_page(
-            'bcc-system-health',
-            'Wallets',
+            AdminMenus::parentFor(self::PAGE_SLUG),
+            'Audit Log',
             'Wallets',
             'manage_options',
             self::PAGE_SLUG,
@@ -49,23 +49,25 @@ final class WalletAuditPage
         );
     }
 
+    /**
+     * Old slug, kept registered (hidden from the menu) so existing links
+     * land on the Wallets tab of the merged Audit Log page.
+     */
     public static function render(): void
     {
-        if (!current_user_can('manage_options')) {
-            wp_die(esc_html__('Sorry, you are not allowed to access this page.'));
-        }
+        SessionsPage::renderAuditLog(SessionsPage::TAB_WALLETS);
+    }
 
+    /** Wallets tab body of the Audit Log page (caller checks capability). */
+    public static function renderBody(): void
+    {
         $repo = Plugin::instance()->adminDashboardRepository();
 
-        echo '<div class="wrap">';
-        echo '<h1>BCC Wallets</h1>';
-        echo '<p style="color:#666;">Cross-user wallet-link audit. For per-user wallet forensics, use Trust Engine → Debug.</p>';
+        echo '<p style="color:var(--bcc-text-secondary);">Cross-user wallet-link audit. For per-user wallet forensics, use Moderation → user detail or BCC System → Trust Debug.</p>';
 
         self::renderCounters($repo->getWalletAuditCounts());
         self::renderByChain($repo->getWalletCountsByChain());
         self::renderRecentEvents($repo->getRecentActivityByPrefix('wallet_%', 30));
-
-        echo '</div>';
     }
 
     // ────────────────────────────────────────────────────────────
@@ -124,15 +126,15 @@ final class WalletAuditPage
             $uniqueUsers = (int)    ($row->unique_users ?? 0);
 
             $activeBadge = $isActive
-                ? '<span style="color:#46b450;">✓</span>'
-                : '<span style="color:#dba617;">no</span>';
+                ? '<span style="color:var(--bcc-success);">✓</span>'
+                : '<span style="color:var(--bcc-warning);">no</span>';
 
             $countStyle = $walletCount === 0
-                ? 'color:#888;'
-                : 'font-weight:bold;color:#2271b1;';
+                ? 'color:var(--bcc-text-muted);'
+                : 'font-weight:bold;color:var(--bcc-accent);';
 
             echo '<tr>';
-            printf('<td><strong>%s</strong> <code style="font-size:11px;color:#666;">%s</code></td>',
+            printf('<td><strong>%s</strong> <code style="font-size:11px;color:var(--bcc-text-secondary);">%s</code></td>',
                 esc_html($name), esc_html($slug));
             echo '<td><code>' . esc_html($chainType) . '</code></td>';
             echo '<td>' . $activeBadge . '</td>';
@@ -182,7 +184,7 @@ final class WalletAuditPage
                 esc_html($action)
             );
             printf(
-                '<td>%s <span style="color:#888;">#%d</span></td>',
+                '<td>%s <span style="color:var(--bcc-text-muted);">#%d</span></td>',
                 esc_html($userName !== '' ? $userName : '(user removed)'),
                 $userId
             );

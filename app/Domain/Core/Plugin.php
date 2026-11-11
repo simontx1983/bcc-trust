@@ -1106,7 +1106,8 @@ final class Plugin
     {
         return $this->autoHideService ??= new Services\AutoHideService(
             $this->contentReportRepository(),
-            $this->hiddenActivityRepository()
+            $this->hiddenActivityRepository(),
+            $this->rankCredibilityGate()
         );
     }
 
@@ -1297,13 +1298,25 @@ final class Plugin
         return $this->adminDashboardRepository ??= new Repositories\AdminDashboardRepository();
     }
 
+    private ?Services\Vote\VoteRemovalService $voteRemovalService = null;
+    /** The single bulk vote-removal path (moderation, ring invalidation, account deletion). */
+    public function voteRemovalService(): Services\Vote\VoteRemovalService
+    {
+        return $this->voteRemovalService ??= new Services\Vote\VoteRemovalService(
+            $this->voteRepository(),
+            $this->scoreRepository(),
+            $this->userInfoRepository(),
+            $this->voteService()
+        );
+    }
+
     private ?Services\Admin\ModerationService $moderationService = null;
     public function moderationService(): Services\Admin\ModerationService
     {
         return $this->moderationService ??= new Services\Admin\ModerationService(
             $this->scoreRepository(),
             $this->userInfoRepository(),
-            $this->voteRepository()
+            $this->voteRemovalService()
         );
     }
 
@@ -2297,6 +2310,21 @@ final class Plugin
                 }
             });
         }, 20, 3);
+
+        // Restore (F-111): the content was judged fine, so no report
+        // against it stands as upheld — reverse the report_upheld credit
+        // of the restored report and of every report the restore moved
+        // off status 1. Reversing a never-ingested id matches zero rows.
+        add_action('bcc_content_restored_by_admin', function ($targetId, $resolverUserId, $reportId, $unupheldIds = []) use ($rankIngest): void {
+            $ids = array_unique(array_merge([(int) $reportId], array_map('intval', (array) $unupheldIds)));
+            $rankIngest(function (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) use ($ids): void {
+                foreach ($ids as $id) {
+                    if ($id > 0) {
+                        $i->reverse('report_upheld', $id, 'content_restored');
+                    }
+                }
+            });
+        }, 20, 4);
 
         // Args: ($reportId, $adminUserId, $action). Reversal is
         // unconditional across undo kinds — reversing an event that was

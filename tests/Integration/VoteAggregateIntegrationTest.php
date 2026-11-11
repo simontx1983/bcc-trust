@@ -59,13 +59,18 @@ final class VoteAggregateIntegrationTest extends TestCase
      * A matching wp_users row is created because the aggregate LEFT JOINs it
      * for the voter-maturity term; `$registeredDaysAgo` controls whether the
      * voter counts toward mature_unique_voters.
+     *
+     * `$vestedWeight` defaults to `$weight`, matching what VoteWriter stores
+     * for an unclamped vote (the aggregate sums vested_weight). Pass a lower
+     * value to model a velocity-cap clamp written back by correctWeight().
      */
     private function insertVote(
         int $voterId,
         int $pageId,
         int $voteType,
         float $weight,
-        int $registeredDaysAgo = 365
+        int $registeredDaysAgo = 365,
+        ?float $vestedWeight = null
     ): void {
         $GLOBALS['wpdb']->query(sprintf(
             "INSERT IGNORE INTO `wp_users` (ID, user_login, user_registered)
@@ -80,11 +85,48 @@ final class VoteAggregateIntegrationTest extends TestCase
             'page_id'       => $pageId,
             'vote_type'     => $voteType,
             'weight'        => $weight,
+            'vested_weight' => $vestedWeight ?? $weight,
             'status'        => 1,
             'created_at'    => gmdate('Y-m-d H:i:s'),
         ]);
 
         self::assertNotFalse($ok, 'fixture insert failed: ' . $GLOBALS['wpdb']->last_error);
+    }
+
+    /**
+     * F-80: a vote the velocity cap FULLY blocked has vested_weight = 0 (set
+     * by VoteWriter → correctWeight). The aggregate used
+     * COALESCE(NULLIF(vested_weight, 0), weight), which read that 0 as
+     * "unset" and summed the raw weight instead, so the next recalc undid
+     * the cap. A blocked vote must contribute exactly nothing.
+     *
+     * The control vote on the same page proves the query ran (otherwise a
+     * zero positive_score would pass for the wrong reason).
+     */
+    public function testAVelocityBlockedVoteContributesNothing(): void
+    {
+        $this->insertVote(31, self::PAGE_ID, 1, 3.0, 365, 0.0); // fully blocked
+        $this->insertVote(32, self::PAGE_ID, -1, 1.0);          // control
+
+        $agg = (new VoteRepository())->getVoteAggregatesForPage(self::PAGE_ID);
+
+        self::assertSame(2, (int) $agg->vote_count, 'the blocked vote still counts as a vote');
+        self::assertEqualsWithDelta(0.0, (float) $agg->positive_score, 0.0001, 'a fully blocked upvote must not add its raw weight');
+        self::assertGreaterThan(0.0, (float) $agg->negative_score, 'control: the query ran and summed the other vote');
+    }
+
+    /** A partial clamp sums the clamped value, not the raw weight. */
+    public function testAPartiallyClampedVoteContributesItsClampedWeight(): void
+    {
+        $this->insertVote(41, self::PAGE_ID, 1, 3.0, 365, 1.25);
+        $this->insertVote(42, self::OTHER_ID, 1, 1.25); // same weight, unclamped, other page
+
+        $repo    = new VoteRepository();
+        $clamped = (float) $repo->getVoteAggregatesForPage(self::PAGE_ID)->positive_score;
+        $plain   = (float) $repo->getVoteAggregatesForPage(self::OTHER_ID)->positive_score;
+
+        self::assertGreaterThan(0.0, $clamped);
+        self::assertEqualsWithDelta($plain, $clamped, 0.0001, 'a vote clamped to 1.25 sums exactly like a 1.25 vote');
     }
 
     public function testAggregateQueryActuallyExecutesAndCountsRealVotes(): void

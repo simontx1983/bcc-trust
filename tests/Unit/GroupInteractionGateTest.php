@@ -49,10 +49,23 @@ final class GroupInteractionGateTest extends TestCase
     private const ORPHAN_COMMENT_POST = 2002;
     private const UNKNOWN_ACT        = 999;
 
+    // F-163 fixtures.
+    private const SECRET_GROUP        = 66;
+    private const SECRET_POST_ACT     = 102;  // post in SECRET_GROUP
+    private const SECRET_POST_ID      = 1002;
+    private const SECRET_COMMENT_ACT  = 203;  // comment under SECRET_POST_ID
+    private const SECRET_COMMENT_POST = 2003;
+    private const TRASH_POST_ID       = 1003; // a trashed parent post
+    private const TRASH_COMMENT_ACT   = 204;  // comment under TRASH_POST_ID
+    private const TRASH_COMMENT_POST  = 2004;
+    private const DM_ACT              = 300;  // PeepSo DM (module 6)
+    private const DM_POST_ID          = 3000;
+
     protected function setUp(): void
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/group-interaction-gate-stubs.php';
+        self::loadRealFeedAllowlist();
 
         $GLOBALS['__bcc_gig'] = [
             'acts' => [
@@ -61,10 +74,17 @@ final class GroupInteractionGateTest extends TestCase
                 self::GROUP_COMMENT_ACT  => ['external_id' => self::GROUP_COMMENT_POST],
                 self::PLAIN_COMMENT_ACT  => ['external_id' => self::PLAIN_COMMENT_POST],
                 self::ORPHAN_COMMENT_ACT => ['external_id' => self::ORPHAN_COMMENT_POST],
+                self::SECRET_POST_ACT    => ['external_id' => self::SECRET_POST_ID],
+                self::SECRET_COMMENT_ACT => ['external_id' => self::SECRET_COMMENT_POST],
+                self::TRASH_COMMENT_ACT  => ['external_id' => self::TRASH_COMMENT_POST],
+                // PeepSo's DM module. An act, but not a feed activity.
+                self::DM_ACT             => ['external_id' => self::DM_POST_ID, 'module' => 6],
             ],
             'comments' => [
-                self::GROUP_COMMENT_ACT => ['parent_post_id' => self::GROUP_POST_ID],
-                self::PLAIN_COMMENT_ACT => ['parent_post_id' => self::PLAIN_POST_ID],
+                self::GROUP_COMMENT_ACT  => ['parent_post_id' => self::GROUP_POST_ID],
+                self::PLAIN_COMMENT_ACT  => ['parent_post_id' => self::PLAIN_POST_ID],
+                self::SECRET_COMMENT_ACT => ['parent_post_id' => self::SECRET_POST_ID],
+                self::TRASH_COMMENT_ACT  => ['parent_post_id' => self::TRASH_POST_ID],
                 // ORPHAN_COMMENT_ACT deliberately absent (unpublished / no parent)
             ],
             'post_type' => [
@@ -73,14 +93,38 @@ final class GroupInteractionGateTest extends TestCase
                 self::GROUP_COMMENT_POST  => 'peepso-comment',
                 self::PLAIN_COMMENT_POST  => 'peepso-comment',
                 self::ORPHAN_COMMENT_POST => 'peepso-comment',
+                self::SECRET_POST_ID      => 'peepso-post',
+                self::SECRET_COMMENT_POST => 'peepso-comment',
+                self::TRASH_COMMENT_POST  => 'peepso-comment',
+                self::DM_POST_ID          => 'peepso-message',
+            ],
+            'post_status' => [
+                self::TRASH_POST_ID => 'trash',
             ],
             // Faithful to production: ONLY the parent post carries the group.
             'group_of' => [
-                self::GROUP_POST_ID => self::GROUP,
+                self::GROUP_POST_ID  => self::GROUP,
+                self::SECRET_POST_ID => self::SECRET_GROUP,
             ],
+            // SECRET_GROUP has no entry: like the real resolveGroupAccess(),
+            // a secret group + non-member resolves to NULL (existence hidden).
             'members'      => [],
             'access_calls' => [],
+            'allowlists'   => [],
         ];
+    }
+
+    /**
+     * The REAL bcc-core FeedItemNormalizer from the sibling checkout (CI has
+     * it at ../bcc-core), so the allowlist under test is the production one,
+     * not a copy. A missing checkout FAILS rather than skips.
+     */
+    private static function loadRealFeedAllowlist(): void
+    {
+        $src  = getenv('BCC_CORE_SRC') ?: dirname(__DIR__, 3) . '/bcc-core/src';
+        $file = rtrim((string) $src, '/\\') . '/Feed/FeedItemNormalizer.php';
+        self::assertFileExists($file, 'bcc-core checkout not found; set BCC_CORE_SRC. Refusing to skip.');
+        require_once $file;
     }
 
     private function setMember(bool $isMember): void
@@ -171,6 +215,92 @@ final class GroupInteractionGateTest extends TestCase
             self::statusAndCode((self::GATE)::check(self::USER, self::ORPHAN_COMMENT_ACT))
         );
         self::assertSame([], $GLOBALS['__bcc_gig']['access_calls']);
+    }
+
+    // ── F-163: only feed activities; no secret-group existence oracle ────
+
+    public function testADirectMessageActIsNotFound(): void
+    {
+        self::assertSame(
+            [404, 'bcc_not_found'],
+            self::statusAndCode((self::GATE)::check(self::USER, self::DM_ACT))
+        );
+        self::assertSame([], $GLOBALS['__bcc_gig']['access_calls']);
+    }
+
+    public function testTheLookupUsesTheCanonicalFeedAllowlist(): void
+    {
+        (self::GATE)::check(self::USER, self::PLAIN_POST_ACT);
+
+        $expected = \BCC\Core\Feed\FeedItemNormalizer::publicFeedModuleIds();
+        self::assertSame([$expected], $GLOBALS['__bcc_gig']['allowlists'], 'the PRODUCTION allowlist, passed to the lookup');
+        self::assertNotContains(6, $expected, 'control: DMs are not a feed module');
+        self::assertContains(1, $expected, 'control: status posts are');
+    }
+
+    public function testASecretGroupPostIsIndistinguishableFromAnUnknownAct(): void
+    {
+        $secret  = (self::GATE)::check(self::USER, self::SECRET_POST_ACT);
+        $unknown = (self::GATE)::check(self::USER, self::UNKNOWN_ACT);
+
+        self::assertNotNull($secret);
+        self::assertNotNull($unknown);
+        self::assertSame($unknown->get_status(), $secret->get_status());
+        self::assertSame($unknown->get_data(), $secret->get_data(), 'byte-identical body: no existence oracle');
+    }
+
+    public function testASecretGroupCommentIsIndistinguishableFromAnUnknownAct(): void
+    {
+        $secret  = (self::GATE)::check(self::USER, self::SECRET_COMMENT_ACT);
+        $unknown = (self::GATE)::check(self::USER, self::UNKNOWN_ACT);
+
+        self::assertSame($unknown->get_data(), $secret->get_data());
+    }
+
+    /**
+     * The comment routes call checkPost() with their own unknown-comment
+     * message, so their secret-group 404 matches THAT body, not "Post not found.".
+     */
+    public function testCheckPostUsesTheCallersNotFoundMessage(): void
+    {
+        $viaComment = (self::GATE)::checkPost(self::USER, self::SECRET_POST_ID, 'Comment not found.');
+        $expected   = \BCC\Trust\Core\Support\ApiResponse::error('bcc_not_found', 'Comment not found.', 404);
+
+        self::assertNotNull($viaComment);
+        self::assertSame($expected->get_status(), $viaComment->get_status());
+        self::assertSame($expected->get_data(), $viaComment->get_data());
+    }
+
+    public function testAClosedGroupNonMemberStillGetsTheJoin403(): void
+    {
+        // Existence of a closed/open group is public: the 403 is not an oracle.
+        $this->setMember(false);
+        self::assertSame(
+            [403, 'bcc_permission_denied'],
+            self::statusAndCode((self::GATE)::check(self::USER, self::GROUP_POST_ACT))
+        );
+    }
+
+    public function testACommentOnATrashedParentIsNotFound(): void
+    {
+        self::assertSame(
+            [404, 'bcc_not_found'],
+            self::statusAndCode((self::GATE)::check(self::USER, self::TRASH_COMMENT_ACT))
+        );
+        self::assertSame([], $GLOBALS['__bcc_gig']['access_calls']);
+    }
+
+    public function testCommentRoutesPassTheirOwnNotFoundMessage(): void
+    {
+        $rest = dirname(__DIR__, 2) . '/app/Domain/Core/REST/';
+        foreach (['CommentStokeEndpoint.php', 'HelpfulMarkEndpoint.php'] as $file) {
+            $src = (string) file_get_contents($rest . $file);
+            self::assertStringContainsString(
+                "GroupInteractionGate::checkPost(\$userId, (int) \$meta->parent_post_id, 'Comment not found.')",
+                $src,
+                "{$file}: the secret-group 404 must match its own unknown-comment 404"
+            );
+        }
     }
 
     // ── 4. Caller inventory: the act-id gate is the one the /feed routes use

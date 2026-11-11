@@ -203,8 +203,8 @@ class DisputeListTable extends WP_List_Table
                     return '—';
                 }
                 return $voteType > 0
-                    ? '<span style="color:#2e7d32;">&#9650; Upvote</span>'
-                    : '<span style="color:#c62828;">&#9660; Downvote</span>';
+                    ? '<span style="color:var(--bcc-success);">&#9650; Upvote</span>'
+                    : '<span style="color:var(--bcc-danger);">&#9660; Downvote</span>';
 
             case 'reason':
                 return esc_html(mb_strimwidth($item->reason, 0, 80, '…'));

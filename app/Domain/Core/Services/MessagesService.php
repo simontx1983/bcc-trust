@@ -230,7 +230,15 @@ final class MessagesService
         foreach ($rows as $r) {
             $lastAuthorIds[(int) $r['last_msg_author_id']] = true;
         }
-        $blockedSet = PeepSoBlockRepository::getBlockedSet($viewerId, array_keys($lastAuthorIds));
+        // ⚠ FAIL CLOSED. `null` means the block read FAILED, not that
+        // nobody is blocked. `[]` would show every sender's text, which
+        // is the exact disclosure this feature exists to prevent, so an
+        // unreadable block table withholds EVERY preview instead. Ugly
+        // on a DB error, safe, and self-correcting on the next request.
+        // `$lastAuthorIds` is already keyed `[authorId => true]`, so it IS the
+        // "everyone is blocked" set — minus the viewer; see the helper.
+        $blockedSet = PeepSoBlockRepository::getBlockedSetOrUnknown($viewerId, array_keys($lastAuthorIds))
+            ?? self::withholdAllExceptViewer($lastAuthorIds, $viewerId);
 
         $items = [];
         foreach ($rows as $r) {
@@ -421,7 +429,15 @@ final class MessagesService
         foreach ($rows as $r) {
             $pageAuthorIds[(int) $r['author_id']] = true;
         }
-        $blockedSet = PeepSoBlockRepository::getBlockedSet($viewerId, array_keys($pageAuthorIds));
+        // ⚠ FAIL CLOSED. `null` means the block read FAILED, not that
+        // nobody is blocked. `[]` would show every sender's text, which
+        // is the exact disclosure this feature exists to prevent, so an
+        // unreadable block table withholds EVERY preview instead. Ugly
+        // on a DB error, safe, and self-correcting on the next request.
+        // `$pageAuthorIds` is already keyed `[authorId => true]`, so it IS the
+        // "everyone is blocked" set — minus the viewer; see the helper.
+        $blockedSet = PeepSoBlockRepository::getBlockedSetOrUnknown($viewerId, array_keys($pageAuthorIds))
+            ?? self::withholdAllExceptViewer($pageAuthorIds, $viewerId);
 
         $peerId = self::resolvePeerId(
             $participants,
@@ -732,7 +748,10 @@ final class MessagesService
             MessagingPolicy::NORMAL_DM,
             $viewerId,
             $recipientId,
-            'Recipient not found.'
+            'Recipient not found.',
+            // ⚠ WRITE path: refuse with a retryable 503 if the block
+            // table cannot be read. See evaluatePolicy().
+            true
         );
         if ($gate !== null) {
             return ['error' => $gate['error'], 'message' => $gate['message']];
@@ -788,7 +807,10 @@ final class MessagesService
                 MessagingPolicy::NORMAL_DM,
                 $viewerId,
                 $peerId,
-                'Conversation not found.'
+                'Conversation not found.',
+                // ⚠ WRITE path: refuse with a retryable 503 if the block
+                // table cannot be read. See evaluatePolicy().
+                true
             );
             if ($gate !== null) {
                 return ['error' => $gate['error'], 'message' => $gate['message']];
@@ -961,6 +983,33 @@ final class MessagesService
         return PeepSoMessageRepository::getUnreadConversationCountForUser($viewerId);
     }
 
+    /**
+     * The "everyone is blocked" set used when the block read FAILS.
+     *
+     * ⚠⚠ THE VIEWER MUST BE REMOVED. The author-id maps are built from
+     * MESSAGE AUTHORS, and in any conversation the viewer has replied to
+     * they author some of those messages — so a naive "treat every
+     * author as blocked" fallback makes THE VIEWER'S OWN TEXT render as
+     * "Message from someone you have blocked", with
+     * `sender_blocked_by_viewer: true` against themselves. Withholding a
+     * blocked sender's words is the feature; withholding the viewer's
+     * own is just a bug.
+     *
+     * ⚠ It is also a set the real probe CANNOT RETURN:
+     * `getBlockedSetOrUnknown` filters `$id !== $blockerId`, so the
+     * viewer never appears in a successful result. A fallback including
+     * them would be strictly MORE inclusive than any real answer, which
+     * is the tell that it was wrong rather than merely untidy.
+     *
+     * @param array<int, true> $authorIds
+     * @return array<int, true>
+     */
+    private static function withholdAllExceptViewer(array $authorIds, int $viewerId): array
+    {
+        unset($authorIds[$viewerId]);
+        return $authorIds;
+    }
+
     // ── Read eligibility (card view-models) ─────────────────────────────
 
     /**
@@ -1003,7 +1052,25 @@ final class MessagesService
             return self::eligibilityDeny(null, 'messaging_unavailable');
         }
 
-        $gate = self::evaluatePolicy(MessagingPolicy::NORMAL_DM, $viewerId, $recipientId);
+        // ⚠ `refuseOnUnknownBlock: true` makes an UNREADABLE block table
+        // answer `reason_code: 'unavailable'` with `unlock_hint: null`
+        // instead of silently reporting "you may message this person"
+        // and then 503-ing on submit. The existing `eligibilityDeny`
+        // line already produces exactly that shape, so no mapping is
+        // added here.
+        //
+        // ⚠⚠ THIS MUST STAY IN STEP WITH `canMessageMany()` BELOW. They
+        // answer the same question on different surfaces (profile vs
+        // card lists), and a viewer seeing "unavailable" on one and a
+        // live Message button on the other is worse than either being
+        // wrong consistently. A test asserts the two payloads are
+        // IDENTICAL for the same pair.
+        $gate = self::evaluatePolicy(
+            MessagingPolicy::NORMAL_DM,
+            $viewerId,
+            $recipientId,
+            refuseOnUnknownBlock: true
+        );
         if ($gate !== null) {
             return self::eligibilityDeny($gate['unlock_hint'], $gate['reason_code']);
         }
@@ -1061,21 +1128,49 @@ final class MessagesService
      * The recipient-side gate for a one-time first-claim backlog
      * delivery: under VALIDATOR_FIRST_CLAIM_RELEASE the operator's
      * chat_enabled and friends_only are bypassed, but a mutual block
-     * still shields. True when the message must be suppressed for a
-     * block.
+     * still shields.
      *
      * The delivery worker calls THIS rather than checking the block
      * itself, so what "the one-time bypass" enforces lives in exactly
      * one place (the policy evaluator) — the worker and the policy
-     * definition cannot drift on it.
+     * definition cannot drift on it. That property is preserved: the
+     * worker still routes through this method and never touches
+     * `PeepSoBlockRepository`.
+     *
+     * ⚠⚠ TRI-STATE, AND THE THIRD CASE IS THE WHOLE POINT (F-99):
+     *
+     *     true   suppress — a block really does shield this delivery
+     *     false  release  — definitely not blocked
+     *     null   DEFER    — the block table could not be read
+     *
+     * It used to return a plain bool, which collapsed null into
+     * "release": a transient DB fault during the sweep would DELIVER a
+     * queued first-claim message to an operator who had blocked the
+     * sender. Failing the other way is just as wrong, because the
+     * worker's suppression is TERMINAL ("never delivered, never
+     * retried") — so a blip would permanently destroy a legitimate
+     * message. Neither direction is acceptable, which is why the caller
+     * is told to DEFER instead of being handed a guess.
+     *
+     * @return bool|null null = could not determine; the caller must
+     *                   neither release nor suppress.
      */
-    public static function firstClaimReleaseBlocked(int $senderId, int $operatorId): bool
+    public static function firstClaimReleaseBlocked(int $senderId, int $operatorId): ?bool
     {
-        return self::evaluatePolicy(
+        $gate = self::evaluatePolicy(
             MessagingPolicy::VALIDATOR_FIRST_CLAIM_RELEASE,
             $senderId,
-            $operatorId
-        ) !== null;
+            $operatorId,
+            refuseOnUnknownBlock: true
+        );
+
+        if ($gate === null) {
+            return false;
+        }
+        if (($gate['error'] ?? '') === 'bcc_unavailable') {
+            return null;
+        }
+        return true;
     }
 
     /**
@@ -1116,7 +1211,31 @@ final class MessagesService
         // Prime recipient usermeta so chatEnabled/chatFriendsOnly are
         // cache hits (same trick PageCardPrefetcher uses for owners).
         cache_users($ids);
-        $blocked = \BCC\Core\Repositories\PeepSoBlockRepository::getMutuallyBlockedSet($viewerId, $ids);
+        // ⚠ `null` means the block table could not be READ — not that
+        // nobody is blocked. `[]` would hand every candidate a live
+        // Message button that 503s on submit (the write gate refuses on
+        // the same unknown), so the whole batch answers "unavailable"
+        // instead.
+        //
+        // ⚠ A UNIFORM answer leaks nothing about any individual pair,
+        // which is why one payload for every id is safe here. It is also
+        // the existing house shape on this method — the anonymous and
+        // sender-gate branches above both `array_fill_keys` a single
+        // payload.
+        //
+        // ⚠⚠ `'unavailable'` is deliberately a DIFFERENT code from the
+        // `messaging_unavailable` that block / !userExists / !chatEnabled
+        // all share below (the §4.19 info-leak shield). That shield hides
+        // WHICH of those three applies; this code says "we could not
+        // tell", which is a fact about the request rather than about the
+        // pair, so it reveals nothing the shield protects.
+        $blocked = \BCC\Core\Repositories\PeepSoBlockRepository::getMutuallyBlockedSetOrUnknown(
+            $viewerId,
+            $ids
+        );
+        if ($blocked === null) {
+            return array_fill_keys($ids, self::eligibilityDeny(null, 'unavailable'));
+        }
 
         /** @var array<int, true>|null $friendIds lazily fetched */
         $friendIds = null;
@@ -1196,11 +1315,39 @@ final class MessagesService
         string $context,
         int $senderId,
         int $recipientId,
-        string $shieldMessage = 'Recipient not found.'
+        string $shieldMessage = 'Recipient not found.',
+        bool $refuseOnUnknownBlock = false
     ): ?array {
+        // ⚠ `isMutuallyBlockedOrUnknown` is the EITHER-DIRECTION probe
+        // despite the name — true when A blocked B *or* B blocked A.
+        $blockState = PeepSoBlockRepository::isMutuallyBlockedOrUnknown($senderId, $recipientId);
+
+        // ⚠⚠ UNKNOWN IS HANDLED PER CALLER, NOT HERE, AND THAT IS
+        // DELIBERATE. `$refuseOnUnknownBlock` is passed true by the two
+        // WRITE paths only, so an unreadable block table refuses a send
+        // with a RETRYABLE 503 rather than admitting it. The READ paths
+        // leave it false and so behave EXACTLY as before this change.
+        //
+        // Why the reads are not switched at the same time: `canMessage`
+        // comes through here, but `canMessageMany` checks blocks via its
+        // own batch `getMutuallyBlockedSet` and does NOT. Flipping only
+        // this one would make the single and batch reads of the same
+        // question disagree for the same viewer and recipient, which is
+        // worse than both being wrong consistently. They are changed
+        // together in the follow-up, in lockstep.
+        if ($blockState === null && $refuseOnUnknownBlock) {
+            return [
+                'error'       => 'bcc_unavailable',
+                'message'     => 'Messaging is temporarily unavailable. Please try again.',
+                'gate'        => 'block_read_failed',
+                'reason_code' => 'unavailable',
+                'unlock_hint' => null,
+            ];
+        }
+
         // Mutual-block shield — enforced in EVERY context (404, never
         // reveals the block).
-        if (PeepSoBlockRepository::isMutuallyBlocked($senderId, $recipientId)) {
+        if ($blockState === true) {
             return [
                 'error'       => 'bcc_not_found',
                 'message'     => $shieldMessage,
@@ -1476,7 +1623,19 @@ final class MessagesService
     {
         return static function ($mailRecipientId) use ($senderId) {
             $recipientId = (int) $mailRecipientId;
-            if ($recipientId > 0 && PeepSoBlockRepository::isBlocking($recipientId, $senderId)) {
+            // ⚠ FAIL CLOSED: `!== false` suppresses on true AND on null
+            // ("could not tell"). Suppressing one notification on a DB
+            // error costs a recipient one email/ping for one send;
+            // letting it through emails and pings someone who blocked
+            // this sender about a message PeepSo will not even deliver
+            // to them. The cheap direction is the safe one here.
+            // ⚠ THE GUARD MUST SHORT-CIRCUIT. Hoisting the probe above
+            // `$recipientId > 0` made it run for a non-user recipient
+            // (id 0) and cost a query the existing tests correctly
+            // forbid — they caught it, which is why the whole suite is
+            // run and not just the new file.
+            if ($recipientId > 0
+                && PeepSoBlockRepository::isBlockingOrUnknown($recipientId, $senderId) !== false) {
                 return false;
             }
             return $mailRecipientId;
@@ -1559,7 +1718,19 @@ final class MessagesService
             }
 
             $recipientId = (int) $objectId;
-            if ($recipientId > 0 && PeepSoBlockRepository::isBlocking($recipientId, $senderId)) {
+            // ⚠ FAIL CLOSED: `!== false` suppresses on true AND on null
+            // ("could not tell"). Suppressing one notification on a DB
+            // error costs a recipient one email/ping for one send;
+            // letting it through emails and pings someone who blocked
+            // this sender about a message PeepSo will not even deliver
+            // to them. The cheap direction is the safe one here.
+            // ⚠ THE GUARD MUST SHORT-CIRCUIT. Hoisting the probe above
+            // `$recipientId > 0` made it run for a non-user recipient
+            // (id 0) and cost a query the existing tests correctly
+            // forbid — they caught it, which is why the whole suite is
+            // run and not just the new file.
+            if ($recipientId > 0
+                && PeepSoBlockRepository::isBlockingOrUnknown($recipientId, $senderId) !== false) {
                 // Short-circuit: the write does not happen, so the
                 // blocker's client is never told to refetch.
                 return false;

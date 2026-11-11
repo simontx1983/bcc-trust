@@ -68,13 +68,10 @@ class UserLifecycleService
         // Listen for PeepSo's avatar event to re-evaluate the complete_profile quest.
         add_action('peepso_user_after_change_avatar', [$this, 'onPeepSoAvatarChange']);
 
-        // Admin actions
-        add_action('admin_action_bcc_trust_sync_all_users', [$this, 'handleSyncAllUsers']);
-
-        // AJAX handlers
-        add_action('wp_ajax_bcc_trust_sync_user', [$this, 'ajaxSyncUser']);
-        add_action('wp_ajax_bcc_trust_bulk_sync_users', [$this, 'ajaxBulkSyncUsers']);
-        add_action('wp_ajax_bcc_trust_init_page_score', [$this, 'ajaxInitPageScore']);
+        // Retired 2026-11-11: admin_action_bcc_trust_sync_all_users and the
+        // wp_ajax_bcc_trust_{sync_user,bulk_sync_users,init_page_score} handlers
+        // (no caller anywhere; admin-nonce + manage_options only). The Repair
+        // page keeps admin_post_bcc_trust_sync_users (RepairService).
 
         // NOTE: bcc_trust_archive_activity_event hook removed — retired cron, never scheduled.
         // NOTE: bcc_quest_complete_share_x and bcc_quest_disconnect AJAX handlers
@@ -159,8 +156,20 @@ class UserLifecycleService
         }
         $this->pendingDeleteHandles[$userId] = $handle;
 
-        // Soft-delete votes
-        $plugin->voteRepository()->softDeleteAllByVoter($userId);
+        // Remove the user's active votes through the single removal path, so
+        // the pages they voted on are recalculated (F-81: this path used to
+        // soft-delete with no recalc at all, leaving phantom scores) and the
+        // vote ids are audited. Dispute-removed votes keep their status.
+        // A failure must not block the WordPress account deletion itself:
+        // it is logged loudly instead.
+        try {
+            $plugin->voteRemovalService()->removeVotesCastBy([$userId], 'user_deleted_votes', get_current_user_id());
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] onUserDelete vote removal failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+        }
 
         // Endorsement parity: the legacy endorsements table is retired.
         // The user's vouch/stand_behind footprint is removed by the
@@ -331,98 +340,6 @@ class UserLifecycleService
         }
 
         $this->scoreRepo->initializeForPage($pageId, $ownerId);
-    }
-
-    public function handleSyncAllUsers(): void
-    {
-        if (!current_user_can('manage_options')) {
-            wp_die('Unauthorized');
-        }
-
-        check_admin_referer('bcc_trust_sync_all_users');
-        $count = $this->syncService->sync();
-
-        wp_safe_redirect(add_query_arg([
-            'page'       => 'bcc-trust-dashboard',
-            'synced'     => (int) $count,
-            'bcc_notice' => 'sync_complete',
-        ], admin_url('admin.php')));
-        exit;
-    }
-
-    public function ajaxSyncUser(): void
-    {
-        // Phase 1.7 dead-code observability (2026-05-09): no caller found
-        // in any JS / PHP / TS in the codebase. The admin Repair tab uses
-        // `admin_post_bcc_trust_sync_users` (PLURAL, different handler);
-        // this singular AJAX handler appears orphaned. 30-day zero-hit
-        // window → safe to retire per V-08 Phase D.
-        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'trust_sync_user');
-        check_ajax_referer('bcc_trust_admin_nonce', 'nonce');
-
-        if (!current_user_can('manage_options')) {
-            wp_send_json_error(['message' => 'Unauthorized']);
-        }
-
-        $userId = absint($_POST['user_id'] ?? 0);
-        if (!$userId) {
-            wp_send_json_error(['message' => 'Invalid user ID']);
-        }
-
-        $this->syncService->sync($userId);
-        wp_send_json_success(['message' => 'User synced', 'user_id' => $userId]);
-    }
-
-    public function ajaxBulkSyncUsers(): void
-    {
-        // Phase 1.7 dead-code observability (2026-05-09) — see ajaxSyncUser above.
-        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'trust_bulk_sync_users');
-        check_ajax_referer('bcc_trust_admin_nonce', 'nonce');
-
-        if (!current_user_can('manage_options')) {
-            wp_send_json_error(['message' => 'Unauthorized']);
-        }
-
-        $userIds = array_filter(array_map('absint', (array) ($_POST['user_ids'] ?? [])));
-        if (empty($userIds)) {
-            wp_send_json_error(['message' => 'No users specified']);
-        }
-
-        $synced = 0;
-        foreach ($userIds as $uid) {
-            $synced += $this->syncService->sync($uid);
-        }
-
-        wp_send_json_success(['message' => "Synced {$synced} users", 'count' => $synced]);
-    }
-
-    public function ajaxInitPageScore(): void
-    {
-        // Phase 1.7 dead-code observability (2026-05-09) — see ajaxSyncUser above.
-        \BCC\Core\Observability\DegradationMetrics::record('legacy_ajax', 'trust_init_page_score');
-        check_ajax_referer('bcc_trust_admin_nonce', 'nonce');
-
-        if (!current_user_can('manage_options')) {
-            wp_send_json_error(['message' => 'Unauthorized']);
-        }
-
-        $pageId = absint($_POST['page_id'] ?? 0);
-        if (!$pageId) {
-            wp_send_json_error(['message' => 'Invalid page ID']);
-        }
-
-        $ownerId = (int) \BCC\Trust\Core\Services\PeepSoPageResolver::getOwnerId($pageId);
-        if (!$ownerId) {
-            $post = get_post($pageId);
-            $ownerId = $post ? (int) $post->post_author : 0;
-        }
-
-        if (!$ownerId) {
-            wp_send_json_error(['message' => 'Could not determine page owner']);
-        }
-
-        $this->scoreRepo->initializeForPage($pageId, $ownerId);
-        wp_send_json_success(['message' => 'Page score initialized', 'page_id' => $pageId]);
     }
 
     /**

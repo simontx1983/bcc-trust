@@ -139,7 +139,7 @@ class FindingsListTable extends WP_List_Table
     public function single_row($item): void
     {
         $pending = isset($item->appeal_status) && (string) $item->appeal_status === 'requested';
-        echo $pending ? '<tr style="background:#fff8e5;">' : '<tr>';
+        echo $pending ? '<tr style="background:var(--bcc-warning-bg);">' : '<tr>';
         $this->single_row_columns($item);
         echo '</tr>';
     }
@@ -184,7 +184,7 @@ class FindingsListTable extends WP_List_Table
                     return '—';
                 }
                 if ($appeal === 'requested') {
-                    return '<strong style="color:#b26a00;">' . esc_html__('Requested', 'bcc-trust') . '</strong>';
+                    return '<strong style="color:var(--bcc-warning);">' . esc_html__('Requested', 'bcc-trust') . '</strong>';
                 }
                 return esc_html(ucfirst($appeal));
 
