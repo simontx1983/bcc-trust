@@ -154,8 +154,26 @@ namespace {
             /** Makes the residue check report the post as still present. */
             public static bool $postSurvivesCompensation = false;
 
+            /**
+             * F-160: PeepSo's membership ledger, "userId:groupId" => status.
+             * The fake create writes the CURRENT user as member_owner, as
+             * the real one does; member_leave() removes the row.
+             *
+             * @var array<string, string>
+             */
+            public static array $memberships = [];
+
+            /** @var list<int> the current user at each create */
+            public static array $creatorIds = [];
+
+            /** Makes a create return an id but write no owner row. */
+            public static bool $createSkipsOwnerRow = false;
+
             public static function reset(): void
             {
+                self::$memberships = [];
+                self::$creatorIds = [];
+                self::$createSkipsOwnerRow = false;
                 self::$created = 0;
                 self::$deleted = 0;
                 self::$memberLeaves = 0;
@@ -223,6 +241,33 @@ namespace {
     if (!function_exists('do_action')) {
         /** @param mixed ...$args */
         function do_action(string $hook, ...$args): void {}
+    }
+
+    if (!function_exists('wp_set_current_user')) {
+        /** Moves the identity get_current_user_id() reports, as WP does. */
+        function wp_set_current_user($id, string $name = ''): object
+        {
+            \BccAdminTestState::$userId = (int) $id;
+            return (object) ['ID' => (int) $id];
+        }
+    }
+}
+
+namespace BCC\Core\Repositories {
+
+    if (!class_exists(PeepSoGroupRepository::class, false)) {
+        /** Reads the fake PeepSo ledger, as the real one reads peepso_group_members. */
+        final class PeepSoGroupRepository
+        {
+            public static function getMembershipStatus(int $userId, int $groupId): ?string
+            {
+                if ($userId <= 0 || $groupId <= 0) {
+                    return null;
+                }
+
+                return \BccPeepSoSpy::$memberships[$userId . ':' . $groupId] ?? null;
+            }
+        }
     }
 }
 
