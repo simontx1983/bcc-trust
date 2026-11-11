@@ -9,7 +9,9 @@
  * comment — reviews can NOT qualify, §5.2: New Members are not
  * eligible for reputation-bearing actions). The FIRST qualifying
  * contribution starts the 24-hour confirmation clock (rank_pending,
- * INSERT IGNORE).
+ * INSERT IGNORE). A VOIDED clock is re-armed by the next qualifying
+ * contribution (RankPendingRepository::restartIfVoided) — a void never
+ * bars the member permanently.
  *
  * Confirmation (R1 — NO HELD state): pending reports and
  * report-volume auto-hide have ZERO effect on the clock. At due_at the
@@ -77,6 +79,19 @@ class ApprenticeReadinessService
         }
 
         $this->pending->start($userId, $sourceType, $sourceId, $actId, self::CONFIRMATION_SECONDS);
+
+        // F-71: a voided confirmation is not a permanent bar. A void
+        // judges ONE contribution; this one is new evidence, so it
+        // re-arms the clock (no-op unless the row is voided and for a
+        // different contribution). A CONTENT-based void
+        // (removed / unpublished / report upheld) waits out a 7-day
+        // cool-off first (RankPendingRepository::CONTENT_VOID_COOLOFF_SECONDS);
+        // a contribution inside the window is a no-op. Every other void
+        // restarts immediately — including `suspended`: confirmationBlocker() re-checks
+        // suspension at due_at, so a still-suspended member simply voids
+        // again and is never awarded, while refusing the restart would
+        // turn a time-bound suspension into a permanent rank ban.
+        $this->pending->restartIfVoided($userId, $sourceType, $sourceId, $actId, self::CONFIRMATION_SECONDS);
     }
 
     /**
@@ -168,19 +183,28 @@ class ApprenticeReadinessService
         return [
             'profile_setup'           => $this->profileReady($userId),
             'verified_identity'       => $this->identityVerified($userId),
-            'qualifying_contribution' => $pending !== null,
+            // A VOIDED row is not a standing qualifying contribution —
+            // the member needs a new one (which re-arms the clock), so it
+            // reads false rather than a dead "done, but no clock" state.
+            'qualifying_contribution' => $pending !== null && $pending->status !== 'voided',
             'confirmation_due_at'     => $pending !== null && $pending->status === 'pending'
                 ? (string) $pending->due_at
                 : null,
         ];
     }
 
-    private function profileReady(int $userId): bool
+    // ── readiness hooks ─────────────────────────────────────────────────
+    // Protected (not private) so the unit suite can exercise the real
+    // onQualifyingContribution() wiring on a subclass without
+    // QuestValidator / user-meta — the same collaborator-hook seam
+    // RankCredibilityGate uses.
+
+    protected function profileReady(int $userId): bool
     {
         return \BCC\Trust\Core\Services\Quest\QuestValidator::validate($userId, 'complete_profile');
     }
 
-    private function identityVerified(int $userId): bool
+    protected function identityVerified(int $userId): bool
     {
         $emailVerified = get_user_meta($userId, \BCC\Trust\Core\REST\Auth\AuthSupport::META_EMAIL_VERIFIED, true) === '1';
 
