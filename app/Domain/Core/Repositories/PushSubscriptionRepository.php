@@ -78,6 +78,23 @@ final class PushSubscriptionRepository
         $hash = self::hashEndpoint($endpoint);
         $now  = current_time('mysql', true);
 
+        // F-76: an endpoint is ONE browser profile, so it belongs to exactly
+        // one user, the one who just registered it. The UNIQUE key is per
+        // (user_id, endpoint_hash), so without this a browser that changed
+        // hands (the previous account's logout cleanup failed or never ran:
+        // an expired session, cleared cookies) kept the old account's row,
+        // and that account's pushes reached the new person's device. Hand
+        // the endpoint over: drop every OTHER user's row for it. A failed
+        // delete refuses the registration rather than leave the leak in place.
+        $handedOver = $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$this->table} WHERE endpoint_hash = %s AND user_id <> %d",
+            $hash,
+            $userId
+        ));
+        if ($handedOver === false) {
+            return 0;
+        }
+
         // Existing row check — UPDATE if present, INSERT if not.
         $existing = $this->findByUserAndHash($userId, $hash);
         if ($existing !== null) {
@@ -217,7 +234,13 @@ final class PushSubscriptionRepository
     /**
      * Bulk-delete every subscription for a user. Called when the user
      * flips the master push toggle from ON to OFF — server-side cleanup
-     * so we stop dispatching to dead endpoints.
+     * so we stop dispatching to dead endpoints — and on account deletion.
+     *
+     * F-76: also the call for every "kick everyone out" credential
+     * revocation (logout-everywhere and password change), so a revoked
+     * device stops receiving that account's pushes. NOT on a routine
+     * email-change verify. The frontend re-subscribes on the next opted-in
+     * login.
      *
      * Returns the number of rows deleted.
      */
