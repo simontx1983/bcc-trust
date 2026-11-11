@@ -450,24 +450,38 @@ final class MyProfilePrefsEndpoint
      */
     private static function checkedWrite(callable $write): bool
     {
-        global $wpdb;
-        if (is_object($wpdb)) {
-            $wpdb->last_error = '';
-        }
+        self::clearLastError();
         $write();
 
-        return !is_object($wpdb) || (string) $wpdb->last_error === '';
+        return self::lastError() === '';
+    }
+
+    // Separate helpers (HiddenActivityRepository::runRead()'s shape) so static
+    // analysis does not narrow last_error to '' across the write that mutates it.
+    private static function clearLastError(): void
+    {
+        /** @var \wpdb|null $wpdb */
+        global $wpdb;
+        if ($wpdb !== null) {
+            $wpdb->last_error = '';
+        }
+    }
+
+    private static function lastError(): string
+    {
+        /** @var \wpdb|null $wpdb */
+        global $wpdb;
+        return $wpdb !== null ? (string) $wpdb->last_error : '';
     }
 
     /** @param list<string> $saved */
     private static function writeFailed(int $userId, string $field, array $saved): WP_REST_Response
     {
-        global $wpdb;
         \BCC\Core\Log\Logger::error('[MyProfilePrefs] preference write failed; stopped', [
             'user_id' => $userId,
             'field'   => $field,
             'saved'   => $saved,
-            'error'   => is_object($wpdb) ? (string) $wpdb->last_error : '',
+            'error'   => self::lastError(),
         ]);
 
         return ApiResponse::error(
