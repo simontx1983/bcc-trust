@@ -217,9 +217,10 @@ final class MyProfilePrefsEndpoint
         // profile_visibility, which feeds search and feed gating, were
         // already saved: a "failed" request that had partly succeeded.
         //
-        // 📌 NOT a transaction: Phase 2 does not detect a WRITE that fails
-        // after validation passed (a DB error during update_user_meta or the
-        // PeepSo row update). That is a separate follow-up.
+        // 📌 NOT a transaction: a WRITE that fails after validation passed
+        // (a DB error in update_user_meta or the PeepSo row update) stops
+        // Phase 2 and answers 500 with `data.saved` listing what already
+        // persisted. Earlier writes are not rolled back.
 
         // ── Phase 1: validate, collecting the planned writes ─────────────
         $profileAcc = null; // ?int
@@ -293,17 +294,42 @@ final class MyProfilePrefsEndpoint
         }
 
         // ── Phase 2: every field validated; write them ───────────────────
+        // Each write is CHECKED (#449 review, M1): $wpdb->last_error is
+        // cleared before it and read after it. The return value cannot be
+        // used, because update_user_meta() also returns false when the value
+        // is unchanged. The first failed write stops the sequence and the
+        // request answers 500 with `data.saved`, the fields that DID persist,
+        // so the client never reports "saved" for a partial write.
+        /** @var list<string> $saved request field names already persisted */
+        $saved = [];
+
         if ($profileAcc !== null) {
-            $err = self::writeProfileAccessibility($userId, $profileAcc);
+            $err = null;
+            $ok  = self::checkedWrite(static function () use ($userId, $profileAcc, &$err): void {
+                $err = self::writeProfileAccessibility($userId, $profileAcc);
+            });
             if ($err instanceof WP_REST_Response) {
                 return $err;
             }
+            if (!$ok) {
+                return self::writeFailed($userId, 'profile_visibility', $saved);
+            }
+            $saved[] = 'profile_visibility';
         }
         foreach ($meta as $metaKey => $value) {
-            update_user_meta($userId, $metaKey, $value);
+            $field = self::META_FIELDS[$metaKey];
+            if (!self::checkedWrite(static fn () => update_user_meta($userId, $metaKey, $value))) {
+                return self::writeFailed($userId, $field, $saved);
+            }
+            $saved[] = $field;
         }
         if ($mentorValue !== null) {
-            \BCC\Trust\Core\Plugin::instance()->mentorListingService()->setOptIn($userId, $mentorValue);
+            $ok = self::checkedWrite(static function () use ($userId, $mentorValue): void {
+                \BCC\Trust\Core\Plugin::instance()->mentorListingService()->setOptIn($userId, $mentorValue);
+            });
+            if (!$ok) {
+                return self::writeFailed($userId, 'mentor_opt_in', $saved);
+            }
         }
 
         $resp = ApiResponse::ok(self::readAll($userId));
@@ -403,6 +429,53 @@ final class MyProfilePrefsEndpoint
         }
         $value = \PeepSoUser::get_instance($userId)->get_profile_post_accessibility();
         return is_numeric($value) ? (int) $value : 20;
+    }
+
+    /** user_meta key → the PATCH field that writes it (for `data.saved`). */
+    private const META_FIELDS = [
+        'peepso_profile_post_acc'                  => 'post_visibility',
+        'peepso_last_used_post_privacy'            => 'default_post_audience',
+        'peepso_hide_birthday_year'                => 'hide_birthday_year',
+        'peepso_hide_online_status'                => 'hide_online',
+        'peepso_is_hide_profile_from_user_listing' => 'hide_from_search',
+    ];
+
+    /**
+     * Run one write and report whether the database accepted it.
+     *
+     * The return value of the write is ignored: update_user_meta() answers
+     * false for an UNCHANGED value as well as for a failure, so "false" is
+     * not an error signal. $wpdb->last_error is: cleared before the write and
+     * non-empty after it only if a query in it failed.
+     */
+    private static function checkedWrite(callable $write): bool
+    {
+        global $wpdb;
+        if (is_object($wpdb)) {
+            $wpdb->last_error = '';
+        }
+        $write();
+
+        return !is_object($wpdb) || (string) $wpdb->last_error === '';
+    }
+
+    /** @param list<string> $saved */
+    private static function writeFailed(int $userId, string $field, array $saved): WP_REST_Response
+    {
+        global $wpdb;
+        \BCC\Core\Log\Logger::error('[MyProfilePrefs] preference write failed; stopped', [
+            'user_id' => $userId,
+            'field'   => $field,
+            'saved'   => $saved,
+            'error'   => is_object($wpdb) ? (string) $wpdb->last_error : '',
+        ]);
+
+        return ApiResponse::error(
+            'bcc_internal_error',
+            'Some of your preferences could not be saved. Please try again.',
+            500,
+            ['saved' => $saved, 'failed' => $field]
+        );
     }
 
     private static function peepsoUnavailable(): WP_REST_Response
