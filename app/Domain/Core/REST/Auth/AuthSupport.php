@@ -527,14 +527,6 @@ final class AuthSupport
     }
 
     /**
-     * Verify the submitted OTP code against the stored HMAC hash and,
-     * on match, delete the transient (single-use). Returns true on match,
-     * false on mismatch or expired/missing transient.
-     *
-     * Uses hash_equals() for timing-safe comparison — the HMAC prevents
-     * length-extension attacks; hash_equals() prevents timing oracles.
-     */
-    /**
      * Opaque identity of the user's CURRENT email-verification code, or null
      * when none is pending. A hash of the stored HMAC — never the code — so a
      * per-code counter keyed on it starts fresh whenever a new code is sent.
@@ -554,6 +546,14 @@ final class AuthSupport
         delete_transient('bcc_otp_' . (string) $userId);
     }
 
+    /**
+     * Verify the submitted OTP code against the stored HMAC hash and,
+     * on match, delete the transient (single-use). Returns true on match,
+     * false on mismatch or expired/missing transient.
+     *
+     * Uses hash_equals() for timing-safe comparison — the HMAC prevents
+     * length-extension attacks; hash_equals() prevents timing oracles.
+     */
     public static function consumeOtpForUser(int $userId, string $otpCode): bool
     {
         $key    = 'bcc_otp_' . (string) $userId;
