@@ -10,6 +10,7 @@ use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
+use BCC\Trust\Onchain\Support\StakeAmount;
 
 /**
  * NEAR Protocol Validator Fetcher
@@ -108,8 +109,9 @@ class NearFetcher implements FetcherInterface
         }
 
         // Sort by stake descending for rank.
-        usort($validators, function ($a, $b) {
-            return bccomp($b['stake'] ?? '0', $a['stake'] ?? '0');
+        // Never a raw provider value into bccomp(): see StakeAmount::sortable().
+        usort($validators, static function (array $a, array $b): int {
+            return StakeAmount::compareDesc($a, $b, 'stake');
         });
 
         $results = [];
@@ -161,7 +163,23 @@ class NearFetcher implements FetcherInterface
             return [];
         }
 
-        return $result['current_validators'];
+        // ⚠ F-66: COMPLETE OR EMPTY. A list that is not validator objects
+        // with an `account_id` is unreadable as a whole; reading it item by
+        // item threw a TypeError (mapValidator(array)) — an Error, which used
+        // to escape the index run's per-chain catch. `[]` is the run's
+        // partial signal.
+        $list = $result['current_validators'];
+        if (!is_array($list) || !array_is_list($list)) {
+            return [];
+        }
+        foreach ($list as $v) {
+            if (!is_array($v) || !is_string($v['account_id'] ?? null) || $v['account_id'] === '') {
+                \BCC\Core\Log\Logger::warning('[NEAR Fetcher] unreadable validators response; index treated as incomplete');
+                return [];
+            }
+        }
+
+        return $list;
     }
 
     /**
@@ -172,8 +190,8 @@ class NearFetcher implements FetcherInterface
      */
     private function mapValidator(array $v, int $rank): array
     {
-        $accountId = $v['account_id'] ?? '';
-        $stake     = $this->toDisplay($v['stake'] ?? '0');
+        $accountId = is_string($v['account_id'] ?? null) ? $v['account_id'] : '';
+        $stake     = $this->toDisplay(StakeAmount::sortable($v['stake'] ?? '0'));
 
         // Uptime: blocks produced / blocks expected.
         $produced = (int) ($v['num_produced_blocks'] ?? 0);

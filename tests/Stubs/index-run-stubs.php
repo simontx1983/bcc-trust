@@ -32,7 +32,7 @@ namespace {
         /** @var list<object> */
         public static array $chains = [];
 
-        /** @var array<int, list<array<string, mixed>>> chain id → what fetch_all_validators returns */
+        /** @var array<int, list<array<string, mixed>>|\Throwable> chain id → what fetch_all_validators returns, or throws */
         public static array $fetchResults = [];
 
         /** @var array<string, mixed> */
@@ -184,7 +184,13 @@ namespace BCC\Trust\Onchain\Factories {
                     public function fetch_all_validators(?object $outcome = null): array
                     {
                         \IndexRunRecorder::record('fetch_all_validators', $this->chainId);
-                        return \IndexRunRecorder::$fetchResults[$this->chainId] ?? [];
+                        $result = \IndexRunRecorder::$fetchResults[$this->chainId] ?? [];
+                        if ($result instanceof \Throwable) {
+                            // F-66: what a fetcher does on a malformed answer it
+                            // did not guard (TypeError, ValueError, …).
+                            throw $result;
+                        }
+                        return $result;
                     }
                 };
             }

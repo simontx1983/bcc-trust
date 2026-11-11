@@ -21,8 +21,10 @@ use PHPUnit\Framework\TestCase;
  * baseline, and fed the page-mint allowlist. The index run's count heuristics
  * cannot see a page-size cap.
  *
- * It now follows next_key (pagination.key) for up to 4 pages, parses each page
- * strictly, and returns [] when the set cannot be read to its end. That [] is
+ * It now follows next_key (pagination.key) until the set ends — at most 2,000
+ * validators (the cap is on VALIDATORS, so a gateway that clamps the page size
+ * still completes) in at most 40 requests — parses each page strictly, and
+ * returns [] when the set cannot be read to its end. That [] is
  * the index run's existing "empty → partial" signal; that the partial path
  * skips every destructive step is pinned in
  * IndexRunPartialSkipsDestructiveStepsTest.
@@ -137,7 +139,7 @@ final class CosmosFetcherBondedValidatorsTest extends TestCase
         self::assertStringContainsString('status=BOND_STATUS_BONDED', ApiRetry::$calls[1]['url']);
     }
 
-    public function testASetEndingOnTheLastAllowedPageIsComplete(): void
+    public function testAFourPageSetIsComplete(): void
     {
         for ($i = 0; $i < 3; $i++) {
             $this->queueJson(self::page([self::val('p' . $i, '100' . $i)], 'k' . ($i + 2)));
@@ -186,14 +188,71 @@ final class CosmosFetcherBondedValidatorsTest extends TestCase
 
     // ── Incomplete walks are EMPTY, never truncated ─────────────────────
 
-    public function testASetStillPagingAtTheCapIsEmptyNotTruncated(): void
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private static function vals(string $prefix, int $n): array
     {
+        $out = [];
+        for ($i = 0; $i < $n; $i++) {
+            $out[] = self::val($prefix . $i, (string) (1000 + $i));
+        }
+        return $out;
+    }
+
+    public function testAGatewayThatClampsPagesStillYieldsTheWholeSet(): void
+    {
+        // Review on #408: a page cap of 4 meant a gateway clamping
+        // pagination.limit to 100 left any chain over 400 validators partial
+        // for ever. The cap is on VALIDATORS now, so 6 clamped pages of 100
+        // are a complete set of 600.
         for ($i = 0; $i < 5; $i++) {
+            $this->queueJson(self::page(self::vals('p' . $i . 'x', 100), 'k' . ($i + 2)));
+        }
+        $this->queueJson(self::page(self::vals('last', 100)));
+
+        self::assertCount(600, $this->makeFetcher()->fetch_all_validators());
+        self::assertCount(6, ApiRetry::$calls);
+
+        $clampLogs = array_values(array_filter(
+            \BCC\Core\Log\Logger::$lines,
+            static fn (array $l): bool => str_contains($l['message'], 'clamps bonded-validator pages')
+        ));
+        self::assertCount(1, $clampLogs, 'logged once, on the first short page');
+        self::assertStringContainsString('asked for 500, got 100', $clampLogs[0]['message']);
+    }
+
+    public function testASetOfExactlyTheValidatorCapIsComplete(): void
+    {
+        for ($i = 0; $i < 3; $i++) {
+            $this->queueJson(self::page(self::vals('p' . $i . 'x', 500), 'k' . ($i + 2)));
+        }
+        $this->queueJson(self::page(self::vals('last', 500)));
+
+        self::assertCount(2000, $this->makeFetcher()->fetch_all_validators());
+    }
+
+    public function testASetPastTheValidatorCapIsEmptyNotTruncated(): void
+    {
+        for ($i = 0; $i < 4; $i++) {
+            $this->queueJson(self::page(self::vals('p' . $i . 'x', 500), 'k' . ($i + 2)));
+        }
+        $this->queueJson(self::page(self::vals('over', 1)));
+
+        self::assertSame([], $this->makeFetcher()->fetch_all_validators());
+        self::assertCount(5, ApiRetry::$calls, 'stops as soon as the cap is passed');
+    }
+
+    public function testAWalkStillPagingAtTheRequestCeilingIsEmptyNotTruncated(): void
+    {
+        // One validator a page for ever: the request ceiling, not the
+        // validator cap, is what ends it.
+        for ($i = 0; $i < 41; $i++) {
             $this->queueJson(self::page([self::val('p' . $i, '1000')], 'k' . ($i + 2)));
         }
 
         self::assertSame([], $this->makeFetcher()->fetch_all_validators());
-        self::assertCount(4, ApiRetry::$calls, 'the walk is bounded at the cap');
+        self::assertCount(40, ApiRetry::$calls, 'the walk is bounded by the request ceiling');
     }
 
     public function testAFailedLaterPageIsEmptyNotTheEarlierPages(): void

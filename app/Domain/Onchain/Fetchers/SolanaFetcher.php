@@ -11,6 +11,7 @@ use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\ProviderOutcomeReceipt;
+use BCC\Trust\Onchain\Support\StakeAmount;
 use BCC\Trust\Onchain\Support\EndpointDescriptor;
 use BCC\Trust\Onchain\Support\HeliusEndpoint;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
@@ -1124,9 +1125,10 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             return [];
         }
 
-        // Sort by activatedStake descending for rank.
-        usort($accounts, function ($a, $b) {
-            return bccomp($b['activatedStake'] ?? '0', $a['activatedStake'] ?? '0');
+        // Sort by activatedStake descending for rank. Never a raw provider
+        // value into bccomp(): see StakeAmount::sortable().
+        usort($accounts, static function (array $a, array $b): int {
+            return StakeAmount::compareDesc($a, $b, 'activatedStake');
         });
 
         $results = [];
@@ -1369,6 +1371,20 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         $current    = $result['current'] ?? [];
         $delinquent = $result['delinquent'] ?? [];
 
+        // ⚠ F-66: COMPLETE OR EMPTY. Both lists must be lists of vote-account
+        // objects that carry the node pubkey mapValidator() keys on. Anything
+        // else is unreadable as a whole: the marking loop below threw on a
+        // string item and array_merge() on a non-array — Errors, which used to
+        // escape the index run's per-chain catch and abort every later chain.
+        // `[]` is the run's partial signal. Cached for the process like any
+        // other failure here, so the enrichment calls that share this set do
+        // not re-fetch a failing provider.
+        if (!self::isVoteAccountList($current) || !self::isVoteAccountList($delinquent)) {
+            \BCC\Core\Log\Logger::warning('[Solana Fetcher] unreadable getVoteAccounts response; index treated as incomplete');
+            self::$voteAccountsCache[$cacheKey] = [];
+            return [];
+        }
+
         // Mark delinquent validators.
         foreach ($delinquent as &$v) {
             $v['_delinquent'] = true;
@@ -1380,6 +1396,24 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     }
 
     /**
+     * F-66: is this a list of vote-account objects, each with a non-empty
+     * string `nodePubkey` (the id mapValidator() keys on)? An empty list is
+     * a real answer (no delinquent validators).
+     */
+    private static function isVoteAccountList(mixed $list): bool
+    {
+        if (!is_array($list) || !array_is_list($list)) {
+            return false;
+        }
+        foreach ($list as $item) {
+            if (!is_array($item) || !is_string($item['nodePubkey'] ?? null) || $item['nodePubkey'] === '') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Map a Solana vote account to the standard validator schema.
      *
      * @param array<string, mixed> $v
@@ -1387,7 +1421,7 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      */
     private function mapValidator(array $v, int $rank): array
     {
-        $nodePubkey    = $v['nodePubkey'] ?? '';
+        $nodePubkey    = is_string($v['nodePubkey'] ?? null) ? $v['nodePubkey'] : '';
         $activatedStake = (float) ($v['activatedStake'] ?? 0) / 1e9; // lamports → SOL
         $commission    = (float) ($v['commission'] ?? 0);
         $isDelinquent  = !empty($v['_delinquent']);
