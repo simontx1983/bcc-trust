@@ -60,6 +60,11 @@ final class AutoHideService
      * RESTORE, the post is immune from AUTOMATIC hiding for this long.
      * Reports still file and still queue for admins; only the automatic
      * action is withheld. An admin can still Hide at any time.
+     *
+     * When the window ends NOTHING re-evaluates the post: no sweep runs.
+     * The next report after expiry counts every credible pending report,
+     * including all that queued during the cooldown, so a post can hide
+     * on that first post-cooldown report.
      */
     public const REHIDE_COOLDOWN_SECONDS = 7 * 86400;
 

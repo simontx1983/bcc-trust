@@ -25,6 +25,8 @@ require_once __DIR__ . '/FeedActivityFixture.php';
  */
 #[Group('integration')]
 #[Group('mariadb')]
+#[\PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses]
+#[\PHPUnit\Framework\Attributes\PreserveGlobalState(false)]
 #[CoversClass(AutoHideService::class)]
 final class CredibleReporterAutoHideIntegrationTest extends TestCase
 {
@@ -46,6 +48,8 @@ final class CredibleReporterAutoHideIntegrationTest extends TestCase
 
     protected function setUp(): void
     {
+        // Separate process: these stubs must never reach a sibling suite.
+        require_once dirname(__DIR__) . '/Stubs/moderation-integration-stubs.php';
         $this->seedFeedActivity(self::ACT_ID, self::POST_ID);
         self::$credibilityChecks = [];
         $this->reports  = new ContentReportRepository();

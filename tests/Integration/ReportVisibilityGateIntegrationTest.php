@@ -51,6 +51,7 @@ final class ReportVisibilityGateIntegrationTest extends TestCase
     protected function setUp(): void
     {
         require_once dirname(__DIR__) . '/Stubs/halls-gate-stubs.php';
+        require_once dirname(__DIR__) . '/Stubs/moderation-integration-stubs.php';
         $GLOBALS['__bcc_halls_gate_fixture'] = [];
         $GLOBALS['__bcc_test_actions']       = [];
 
@@ -58,7 +59,11 @@ final class ReportVisibilityGateIntegrationTest extends TestCase
         $members = $wpdb->prefix . 'peepso_group_members';
         if ((string) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $members)) !== $members) {
             self::assertNotFalse($wpdb->query(
-                "CREATE TABLE {$members} (
+                // PeepSo-owned table, not BCC schema: declared in the same
+                // `IF NOT EXISTS` + backticked-prefix form the other PeepSo
+                // fixtures use (DelegatorGroupIntegrationTest), which the
+                // schema-drift guard does not treat as a BCC declaration.
+                "CREATE TABLE IF NOT EXISTS `{$wpdb->prefix}peepso_group_members` (
                     gm_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                     gm_user_id BIGINT UNSIGNED NOT NULL,
                     gm_group_id BIGINT UNSIGNED NOT NULL,
