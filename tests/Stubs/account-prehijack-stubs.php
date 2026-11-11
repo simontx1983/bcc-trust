@@ -92,6 +92,7 @@ namespace BCC\Core\Log {
             /** @param array<string, mixed> $context */
             public static function error(string $message, array $context = []): void
             {
+                $GLOBALS['__bcc_ph']['log_errors'][] = $message;
             }
         }
     }
