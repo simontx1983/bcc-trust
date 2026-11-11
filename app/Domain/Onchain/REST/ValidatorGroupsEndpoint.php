@@ -176,6 +176,10 @@ final class ValidatorGroupsEndpoint
             }
 
             if ($optOuts->isOptOutActive($userId, $cfg->groupId)) {
+                // F-158: same field and values as the holder-groups listing.
+                $item['opt_out_kind'] = $optOuts->isPermanentOptOut($userId, $cfg->groupId)
+                    ? HolderGroupsEndpoint::OPT_OUT_KIND_REMOVED
+                    : HolderGroupsEndpoint::OPT_OUT_KIND_LEFT;
                 $optedOut[] = $item;
                 continue;
             }
