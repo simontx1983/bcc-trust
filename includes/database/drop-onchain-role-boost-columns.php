@@ -35,6 +35,10 @@ if (!function_exists('bcc_trust_drop_onchain_role_boost_columns')) {
         ) {
             return;
         }
+        // F-150: a failed step leaves this unstamped; retry at most hourly.
+        if (bcc_trust_migration_backoff_active('onchain_role_boost_cols')) {
+            return;
+        }
 
         global $wpdb;
 
@@ -47,6 +51,7 @@ if (!function_exists('bcc_trust_drop_onchain_role_boost_columns')) {
             return;
         }
 
+        $droppedColumns = [];
         foreach (['trust_boost', 'fraud_reduction'] as $column) {
             $hasColumn = $wpdb->get_var($wpdb->prepare(
                 "SELECT COUNT(*) FROM information_schema.COLUMNS
@@ -54,6 +59,10 @@ if (!function_exists('bcc_trust_drop_onchain_role_boost_columns')) {
                 $table,
                 $column
             ));
+            if ($hasColumn === null && $wpdb->last_error !== '') {
+                bcc_trust_migration_step_failed('onchain_role_boost_cols', "probe {$column}");
+                return;
+            }
             if ((int) $hasColumn > 0) {
                 // Drop the index first — it's defined on trust_boost, so the
                 // column DROP would otherwise fail on some MySQL versions.
@@ -63,20 +72,34 @@ if (!function_exists('bcc_trust_drop_onchain_role_boost_columns')) {
                          WHERE table_schema = DATABASE() AND table_name = %s AND index_name = 'idx_trust_boost'",
                         $table
                     ));
+                    if ($hasIdx === null && $wpdb->last_error !== '') {
+                        bcc_trust_migration_step_failed('onchain_role_boost_cols', 'probe idx_trust_boost');
+                        return;
+                    }
                     if ((int) $hasIdx > 0) {
                         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-                        $wpdb->query("ALTER TABLE `{$table}` DROP INDEX `idx_trust_boost`");
+                        if ($wpdb->query("ALTER TABLE `{$table}` DROP INDEX `idx_trust_boost`") === false) {
+                            bcc_trust_migration_step_failed('onchain_role_boost_cols', 'drop idx_trust_boost');
+                            return;
+                        }
                     }
                 }
                 // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-                $wpdb->query("ALTER TABLE `{$table}` DROP COLUMN `{$column}`");
+                if ($wpdb->query("ALTER TABLE `{$table}` DROP COLUMN `{$column}`") === false) {
+                    bcc_trust_migration_step_failed('onchain_role_boost_cols', "drop {$column}");
+                    return;
+                }
+                $droppedColumns[] = $column;
             }
         }
 
-        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+        // Log only a real drop. This runs on every hourly re-verify pass, and
+        // an unconditional "dropped" warning there was noise that would bury
+        // the one line that matters: a resurrected column actually removed.
+        if ($droppedColumns !== [] && class_exists('\\BCC\\Core\\Log\\Logger')) {
             \BCC\Core\Log\Logger::warning(
                 '[bcc-trust] dropped retired onchain role-boost columns',
-                ['table' => $table]
+                ['table' => $table, 'columns' => $droppedColumns]
             );
         }
 
