@@ -442,6 +442,39 @@ final class ProfileAccessTest extends TestCase
         self::assertSame('WHERE 1=1', $query->query_where);
     }
 
+    /**
+     * `pre_user_query` is not guaranteed to fire once per query —
+     * `WP_User_Query::prepare_query()` can run again on the same object.
+     * A second copy of the join is not a cosmetic duplicate: MySQL
+     * rejects the whole statement with "Not unique table/alias", so the
+     * listing fails hard rather than returning slightly wrong rows.
+     */
+    public function testFilteringTheSameQueryTwiceAppendsTheJoinOnlyOnce(): void
+    {
+        $GLOBALS['__bcc_profile_access']['viewer_id'] = 7;
+
+        $GLOBALS['wpdb'] = new \BCC_F182_Wpdb();
+        $query = new \WP_User_Query(['_peepso_user_id' => 7]);
+
+        ProfileAccess::filterSuspendedFromListing($query);
+        $afterFirst = [$query->query_from, $query->query_where];
+        ProfileAccess::filterSuspendedFromListing($query);
+
+        // ⚠ Count 'LEFT JOIN', not the alias: one append contains the
+        // alias TWICE (its declaration and the ON clause), so counting
+        // the alias reads 2 after a single, correct append.
+        self::assertSame(
+            1,
+            substr_count($query->query_from, 'LEFT JOIN'),
+            'a second firing must not add a second join'
+        );
+        self::assertSame(
+            $afterFirst,
+            [$query->query_from, $query->query_where],
+            'the second firing must be a complete no-op, WHERE arm included'
+        );
+    }
+
     public function testAnAdminSeesSuspendedMembersInListingsToo(): void
     {
         $GLOBALS['__bcc_profile_access']['viewer_id'] = 7;

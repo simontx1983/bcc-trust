@@ -412,7 +412,7 @@ final class ProfileAccess
     /**
      * Add the suspension exclusion to a PeepSo user query.
      *
-     * ── Why SQL and not an `exclude` id list ─────────────────────────
+     * ── Why a SQL clause and not an `exclude` id list ────────────────
      *
      * An id list is the obvious alternative and it is the wrong tool
      * twice over. `SuspensionRepository::getActiveSuspendedUserIds()` is
@@ -464,22 +464,24 @@ final class ProfileAccess
             return;
         }
 
-        global $wpdb;
+        // The SQL itself belongs to the repository that owns the
+        // column — see listingSuspensionClause(). This method only
+        // decides WHETHER to filter, and appends.
+        $clause = \BCC\Trust\Core\Plugin::instance()
+            ->userInfoRepository()
+            ->listingSuspensionClause((int) get_current_user_id());
 
-        $table  = \BCC\Trust\Core\Database\TableRegistry::userInfo();
-        $viewer = (int) get_current_user_id();
+        // ⚠ `pre_user_query` is not guaranteed to fire once per query:
+        // `WP_User_Query::prepare_query()` can run again on the same
+        // object, and a second copy of the join fails the entire listing
+        // with "Not unique table/alias" — a hard error, not a degraded
+        // result. Detecting the alias is cheaper and more honest than
+        // tracking state about queries we have already seen.
+        if (str_contains($query->query_from, $clause['alias'])) {
+            return;
+        }
 
-        // A LEFT JOIN, so a member with no user_info row stays listed:
-        // "no row" is NOT suspended, the same reading
-        // TrustReadService::isSuspended() gives it, and the same
-        // fail-open direction the decision calls for.
-        $query->query_from .= " LEFT JOIN {$table} bcc_f182 ON bcc_f182.user_id = {$wpdb->users}.ID";
-
-        $query->query_where .= $wpdb->prepare(
-            " AND (bcc_f182.is_suspended IS NULL"
-            . " OR bcc_f182.is_suspended = 0"
-            . " OR {$wpdb->users}.ID = %d)",
-            $viewer
-        );
+        $query->query_from  .= $clause['from'];
+        $query->query_where .= $clause['where'];
     }
 }
