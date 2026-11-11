@@ -257,7 +257,12 @@ class DisputeScheduler
      * query + cursor with a recording reconciler; production calls it from
      * doAutoResolve() under the auto-resolve advisory lock.
      *
+     * A failed candidate read throws (fail-closed) BEFORE the cursor is
+     * touched, so a DB error neither wraps the cursor nor reads as a
+     * successful empty run.
+     *
      * @param callable(int): void $reconcile
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure
      */
     public static function runBackstopBatch(string $cutoff, int $limit, callable $reconcile): void
     {
