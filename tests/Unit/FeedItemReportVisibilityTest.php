@@ -59,6 +59,9 @@ final class FeedItemReportVisibilityTest extends TestCase
             public array $members = [];
             /** @var list<int> */
             public array $hidden = [];
+            public string $last_error = '';
+            /** @var list<array<int, string>> wpdb::$last_result */
+            private array $lastResult = [];
             /** @var array<int, mixed> */
             private array $args = [];
 
@@ -68,7 +71,39 @@ final class FeedItemReportVisibilityTest extends TestCase
                 return $sql;
             }
 
-            public function get_var(string $sql): ?string
+            /**
+             * Real wpdb shape: query() runs the SELECT, returns its row count
+             * (or false), and fills last_result for get_var(null)/get_col(null).
+             * HiddenActivityRepository reads through query() + get_var(null)
+             * since #410 (runRead), and PeepSoGroupRepository through
+             * get_var($sql), which calls query() itself, as wpdb does.
+             */
+            public function query(string $sql): int|false
+            {
+                $this->last_error = '';
+                $value = $this->resolve($sql);
+                $this->lastResult = $value === null ? [] : [[$value]];
+                return count($this->lastResult);
+            }
+
+            public function get_var(?string $sql = null): ?string
+            {
+                if ($sql !== null) {
+                    $this->query($sql);
+                }
+                return $this->lastResult[0][0] ?? null;
+            }
+
+            /** @return list<string> */
+            public function get_col(?string $sql = null): array
+            {
+                if ($sql !== null) {
+                    $this->query($sql);
+                }
+                return array_map(static fn (array $r): string => $r[0], $this->lastResult);
+            }
+
+            private function resolve(string $sql): ?string
             {
                 if (str_contains($sql, 'peepso_group_members')) {
                     return $this->members[$this->args[0] . ':' . $this->args[1]] ?? null;
