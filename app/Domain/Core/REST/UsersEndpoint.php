@@ -768,9 +768,71 @@ final class UsersEndpoint
             $args['search_columns'] = ['user_login', 'display_name', 'user_nicename'];
         }
 
-        $query = new \WP_User_Query($args);
-        /** @var list<int|numeric-string> $rawIds */
-        $rawIds = $query->get_results();
+        // ⚠⚠ ROUTED THROUGH PeepSoUserSearch, NOT a bare WP_User_Query.
+        //
+        // The bare query bypassed PeepSo's privacy filter set entirely, so
+        // this directory — and its `q` search — listed members at
+        // `usr_profile_acc` 20, 30 and 40 to anyone. The single-profile
+        // routes were gated in v1.91 while the list that links to them was
+        // not, which made the gate a speed bump rather than a boundary.
+        //
+        // PeepSoUserSearch applies the SAME SQL PeepSo uses on its own
+        // surfaces, IN THE QUERY. That is the load-bearing part: a
+        // post-filter over the returned page would under-fill it (ask for
+        // 20, get 14) and leave `total` counting rows the viewer may not
+        // see. Filtering inside the query keeps both exact.
+        //
+        // It also honours three things this endpoint never implemented:
+        // banned and unvalidated accounts are excluded (`usr_role`), blocks
+        // are respected in both directions when `user_blocking_enable` is
+        // on, and `hide_from_search` finally works — the contract has
+        // promised since v1.64 that it "excludes the user from directory +
+        // member search", and nothing enforced it. ⚠ So member COUNTS can
+        // legitimately drop with this change; that is the setting starting
+        // to work, not data loss.
+        //
+        // ── Why the args keep working, verified rather than assumed ─────
+        //
+        // ORDER: `pre_user_query` overwrites `query_orderby` with a
+        // name-based CASE, but a block below it honours `orderby` + `order`
+        // and maps `'registered'` to `user_registered`. Both are passed
+        // above, so `registered DESC` survives.
+        //
+        // SEARCH: the third constructor argument is deliberately EMPTY and
+        // must stay so. PeepSo's own search clause is `if (!empty($search))`,
+        // so an empty string skips it and WP's `search` / `search_columns`
+        // above keep doing the work. ⛔ Do NOT pass `$q` here: PeepSo
+        // searches a first/last-name concat plus `user_login`, and
+        // optionally `user_email` behind the `members_email_searchable`
+        // option — which would widen this route to email fragments the
+        // contract deliberately excludes.
+        //
+        // TOTAL: `pre_user_query` smuggles a `GROUP BY` into
+        // `query_orderby`. That is not a typo of theirs to work around —
+        // WP builds the statement as
+        // `SELECT {fields} {from} {where} {orderby} {limit}` with
+        // `SQL_CALC_FOUND_ROWS` in `{fields}` and reads the count back via
+        // `SELECT FOUND_ROWS()`, so the GROUP BY is inside the counted
+        // statement and the total is of GROUPED rows. Exact.
+        //
+        // ⚠ Side effect, accepted knowingly: the constructor calls
+        // `remove_all_filters('pre_get_users')` for the rest of the
+        // request. Neither bcc-trust nor bcc-core registers anything on
+        // that hook, so nothing of ours breaks — but a future feature that
+        // did would silently lose it on this route.
+        if (class_exists('\\PeepSoUserSearch')) {
+            $search  = new \PeepSoUserSearch($args, $viewerId > 0 ? $viewerId : null, '');
+            /** @var list<int|numeric-string> $rawIds */
+            $rawIds = $search->results;
+            $total  = (int) $search->total;
+        } else {
+            // ⚠ Fail CLOSED. No PeepSo means no privacy filter, so there
+            // is no safe way to list members — an empty directory is
+            // recoverable, a leaked one is not. Same posture as
+            // ProfileAccess and MentionPolicy.
+            $rawIds = [];
+            $total  = 0;
+        }
         $userIds = array_map('intval', $rawIds);
 
         // Prefetch everything the member-card rows read — the eleven
@@ -803,7 +865,16 @@ final class UsersEndpoint
             }
         }
 
-        $total      = (int) $query->get_total();
+        // $total was set alongside the id query above — it comes from
+        // PeepSoUserSearch's own `total`, which is WP's FOUND_ROWS() over
+        // the privacy-filtered, GROUP BY'd statement. It therefore counts
+        // exactly the rows this viewer could page through, so `total` and
+        // `total_pages` agree with what the pages actually contain.
+        //
+        // ⚠ Do NOT reintroduce a second count here. Counting separately
+        // from the id query is how a filtered list ends up advertising
+        // more members than it will ever show.
+        //
         // $perPage is guaranteed >= 1 by the bounds-check above.
         $totalPages = (int) ceil($total / $perPage);
 
