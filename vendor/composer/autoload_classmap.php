@@ -288,6 +288,7 @@ return array(
     'BCC\\Trust\\Core\\Services\\Vote\\VoteEligibilityChecker' => $baseDir . '/app/Domain/Core/Services/Vote/VoteEligibilityChecker.php',
     'BCC\\Trust\\Core\\Services\\Vote\\VoteFraudAnalyzer' => $baseDir . '/app/Domain/Core/Services/Vote/VoteFraudAnalyzer.php',
     'BCC\\Trust\\Core\\Services\\Vote\\VoteJobDispatcher' => $baseDir . '/app/Domain/Core/Services/Vote/VoteJobDispatcher.php',
+    'BCC\\Trust\\Core\\Services\\Vote\\VoteRemovalService' => $baseDir . '/app/Domain/Core/Services/Vote/VoteRemovalService.php',
     'BCC\\Trust\\Core\\Services\\Vote\\VoteWeightCalculator' => $baseDir . '/app/Domain/Core/Services/Vote/VoteWeightCalculator.php',
     'BCC\\Trust\\Core\\Services\\Vote\\VoteWriter' => $baseDir . '/app/Domain/Core/Services/Vote/VoteWriter.php',
     'BCC\\Trust\\Core\\Services\\WalletAgeWeighter' => $baseDir . '/app/Domain/Core/Services/WalletAgeWeighter.php',

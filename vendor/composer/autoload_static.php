@@ -444,6 +444,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Services\\Vote\\VoteEligibilityChecker' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Vote/VoteEligibilityChecker.php',
         'BCC\\Trust\\Core\\Services\\Vote\\VoteFraudAnalyzer' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Vote/VoteFraudAnalyzer.php',
         'BCC\\Trust\\Core\\Services\\Vote\\VoteJobDispatcher' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Vote/VoteJobDispatcher.php',
+        'BCC\\Trust\\Core\\Services\\Vote\\VoteRemovalService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Vote/VoteRemovalService.php',
         'BCC\\Trust\\Core\\Services\\Vote\\VoteWeightCalculator' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Vote/VoteWeightCalculator.php',
         'BCC\\Trust\\Core\\Services\\Vote\\VoteWriter' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Vote/VoteWriter.php',
         'BCC\\Trust\\Core\\Services\\WalletAgeWeighter' => __DIR__ . '/../..' . '/app/Domain/Core/Services/WalletAgeWeighter.php',

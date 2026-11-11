@@ -1297,13 +1297,25 @@ final class Plugin
         return $this->adminDashboardRepository ??= new Repositories\AdminDashboardRepository();
     }
 
+    private ?Services\Vote\VoteRemovalService $voteRemovalService = null;
+    /** The single bulk vote-removal path (moderation, ring invalidation, account deletion). */
+    public function voteRemovalService(): Services\Vote\VoteRemovalService
+    {
+        return $this->voteRemovalService ??= new Services\Vote\VoteRemovalService(
+            $this->voteRepository(),
+            $this->scoreRepository(),
+            $this->userInfoRepository(),
+            $this->voteService()
+        );
+    }
+
     private ?Services\Admin\ModerationService $moderationService = null;
     public function moderationService(): Services\Admin\ModerationService
     {
         return $this->moderationService ??= new Services\Admin\ModerationService(
             $this->scoreRepository(),
             $this->userInfoRepository(),
-            $this->voteRepository()
+            $this->voteRemovalService()
         );
     }
 
