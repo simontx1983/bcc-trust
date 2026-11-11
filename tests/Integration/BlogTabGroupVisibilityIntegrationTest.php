@@ -411,6 +411,20 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
             'a refused publish must not notify the group'
         );
 
+        // ⚠⚠ AND NO PUBLISH EVENT FIRED. `bcc_blog_post_created` is what
+        // inserts the activity row, credits rank evidence and starts the
+        // Apprentice confirmation clock. For a post the gate just withheld,
+        // that row would be an ORPHAN (the nested revert's publish→draft
+        // branch already ran and found nothing to remove) and the clock
+        // would later be voided as `content_unpublished`, imposing the
+        // 7-day cool-off. A refusal that PENALISES the author is worse than
+        // the leak it prevents.
+        self::assertSame(
+            0,
+            $this->countAction('bcc_blog_post_created'),
+            'a refused publish must not fire the publish event'
+        );
+
         // Bounded recursion: publish→draft and nothing further. The revert
         // fires the same hook that triggered it, so without the re-entrancy
         // guard this would not terminate.
@@ -455,6 +469,15 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
             1,
             $this->countAction('peepso_groups_new_post'),
             'a permitted publish must notify the group exactly once'
+        );
+
+        // Control for the zero-case above: a PERMITTED publish still fires
+        // the publish event exactly once. Without this, the zero could mean
+        // the gate worked OR that the event is broken for everybody.
+        self::assertSame(
+            1,
+            $this->countAction('bcc_blog_post_created'),
+            'a permitted publish must still fire the publish event once'
         );
     }
 

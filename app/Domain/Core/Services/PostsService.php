@@ -81,19 +81,40 @@ final class PostsService
     public const BLOG_PENDING_VISIBILITY_META = '_bcc_blog_pending_visibility';
 
     /**
-     * True only while {@see attachParkedBlogGroup} is putting a refused
-     * post back to draft.
+     * Post ids currently being reverted to draft by
+     * {@see attachParkedBlogGroup}.
      *
      * That revert calls `wp_update_post`, which fires
      * `transition_post_status`, which re-enters the very method doing the
-     * reverting. The flag makes the second entry a no-op rather than a
-     * loop. Request-scoped and always cleared in a `finally`, so a throw
-     * inside the revert cannot leave the gate disabled for the rest of the
-     * request — a stuck `true` here would silently turn the publish-time
-     * re-gate off, which is exactly the failure this whole path exists to
-     * prevent.
+     * reverting. Membership here makes the second entry a no-op rather
+     * than a loop.
+     *
+     * ⚠ KEYED BY POST ID, not a single boolean. A global flag would
+     * suppress the gate for EVERY post while any one post was reverting —
+     * and a request that publishes several blogs, or any nested
+     * wp_update_post, would then skip the re-gate on the others. The
+     * entry is always removed in a `finally`, so a throw inside the revert
+     * cannot leave a post permanently ungated for the rest of the request.
+     *
+     * @var array<int, true>
      */
-    private static bool $revertingParkedBlog = false;
+    private static array $revertingParkedBlog = [];
+
+    /** {@see attachParkedBlogGroup} outcome: the group was attached. */
+    public const PARKED_ATTACHED = 'attached';
+
+    /** Outcome: nothing to do (no parked target, or already attached). */
+    public const PARKED_NOOP = 'noop';
+
+    /**
+     * Outcome: the gate REFUSED and the post was put back to draft.
+     *
+     * ⚠ A caller inside the publish hook MUST stop on this. Everything
+     * that normally follows a publish — the activity row, rank evidence,
+     * the Apprentice confirmation clock — would otherwise run for a post
+     * that is no longer published.
+     */
+    public const PARKED_REVERTED = 'reverted';
 
     /**
      * The visibility that syndicates a group post to the global /
@@ -2333,22 +2354,22 @@ final class PostsService
      * stays recoverable; the authoritative refusal lives in updateBlog,
      * which can keep the post a draft and answer the caller.
      */
-    public static function attachParkedBlogGroup(int $postId, int $authorId): void
+    public static function attachParkedBlogGroup(int $postId, int $authorId): string
     {
         // Re-entrancy guard. The refusal path below calls wp_update_post to
         // put the post back to draft, which fires transition_post_status
         // again and lands back here. Without this the two would ping-pong.
-        if (self::$revertingParkedBlog) {
-            return;
+        if (isset(self::$revertingParkedBlog[$postId])) {
+            return self::PARKED_NOOP;
         }
 
         if ($postId <= 0 || $authorId <= 0) {
-            return;
+            return self::PARKED_NOOP;
         }
 
         $parked = (int) get_post_meta($postId, self::BLOG_PENDING_GROUP_META, true);
         if ($parked <= 0) {
-            return;
+            return self::PARKED_NOOP;
         }
 
         // Already attached ⇒ this is a re-publish of something that was
@@ -2361,7 +2382,7 @@ final class PostsService
         if ($alreadyAttached > 0) {
             delete_post_meta($postId, self::BLOG_PENDING_GROUP_META);
             delete_post_meta($postId, self::BLOG_PENDING_VISIBILITY_META);
-            return;
+            return self::PARKED_NOOP;
         }
 
         $visibility = self::normalizeVisibility(
@@ -2406,17 +2427,17 @@ final class PostsService
             // recurse. Cleared in a `finally` so an exception inside
             // wp_update_post cannot wedge the flag ON and silently disable
             // the gate for the rest of the request.
-            self::$revertingParkedBlog = true;
+            self::$revertingParkedBlog[$postId] = true;
             try {
                 wp_update_post([
                     'ID'          => $postId,
                     'post_status' => 'draft',
                 ]);
             } finally {
-                self::$revertingParkedBlog = false;
+                unset(self::$revertingParkedBlog[$postId]);
             }
 
-            return;
+            return self::PARKED_REVERTED;
         }
 
         // The single attach: stamps `peepso_group_id` + `_bcc_post_visibility`
@@ -2425,6 +2446,8 @@ final class PostsService
 
         delete_post_meta($postId, self::BLOG_PENDING_GROUP_META);
         delete_post_meta($postId, self::BLOG_PENDING_VISIBILITY_META);
+
+        return self::PARKED_ATTACHED;
     }
 
     /**
