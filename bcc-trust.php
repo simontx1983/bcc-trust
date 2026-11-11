@@ -1157,44 +1157,13 @@ add_action('bcc_trust_divergence_state_sweep', static function (): void {
 // so a target's score drifts even with no new attestation events; this sweep
 // re-synthesizes every target that holds an active attestation. Paginated +
 // per-target isolated (a single failure → an `attestation_synthesis`
-// DegradationMetric, never aborts the sweep). The work-list (a GROUP BY over
-// active rows) is stable during the run because recomputeFor() touches only the
-// score table, never the attestation table — so OFFSET paging is safe.
+// DegradationMetric, never aborts the sweep). Keyset-paged and run under an
+// advisory lock (F-93) — see AttestationScoreSynthesis::runDecaySweep().
 add_action('bcc_trust_daily_attestation_decay', static function (): void {
     try {
-        $plugin     = \BCC\Trust\Core\Plugin::instance();
-        $repo       = $plugin->attestationRepository();
-        $synthesis  = $plugin->attestationScoreSynthesis();
-        $offset     = 0;
-        $batch      = 500;
-        $maxBatches = 200; // safety bound — up to 100k targets per run
-        $processed  = 0;
-        $failed     = 0;
+        $summary = \BCC\Trust\Core\Plugin::instance()->attestationScoreSynthesis()->runDecaySweep();
 
-        for ($i = 0; $i < $maxBatches; $i++) {
-            $targets = $repo->listTargetsWithActiveAttestations($offset, $batch);
-            if ($targets === []) {
-                break;
-            }
-            foreach ($targets as $t) {
-                try {
-                    $synthesis->recomputeFor($t->target_kind, (int) $t->target_id);
-                    $processed++;
-                } catch (\Throwable $e) {
-                    $failed++;
-                    \BCC\Core\Observability\DegradationMetrics::record('attestation_synthesis', 'decay_recompute_failed');
-                }
-            }
-            if (count($targets) < $batch) {
-                break;
-            }
-            $offset += $batch;
-        }
-
-        \BCC\Core\Log\Logger::info('[bcc-trust] Attestation decay sweep complete', [
-            'processed' => $processed,
-            'failed'    => $failed,
-        ]);
+        \BCC\Core\Log\Logger::info('[bcc-trust] Attestation decay sweep complete', $summary);
     } catch (\Throwable $e) {
         \BCC\Core\Log\Logger::warning('[bcc-trust] Attestation decay sweep callback failed', [
             'error' => $e->getMessage(),
