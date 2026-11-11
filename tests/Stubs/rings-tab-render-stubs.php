@@ -87,8 +87,12 @@ namespace BCC\Trust\Core {
         /** @var array<string, mixed> */
         public static array $data = [];
 
+        /** @var list<string> */
+        public static array $skips = [];
+
         public static function reset(): void
         {
+            self::$skips = [];
             self::$data = [
                 'available'   => true,
                 'rings'       => [],
@@ -155,6 +159,18 @@ namespace BCC\Trust\Core {
             public function adminDashboardRepository(): StubRingsRepository
             {
                 return new StubRingsRepository();
+            }
+
+            /** F-114: the skipped-member lines a ring suspend left for this page. */
+            public function moderationService(): object
+            {
+                return new class {
+                    /** @return list<string> */
+                    public function takeSuspendSkips(): array
+                    {
+                        return RingsRenderWorld::$skips;
+                    }
+                };
             }
         }
     }

@@ -81,7 +81,19 @@ final class FraudDiscountCalculator
             $penalties['fraud_score'] = ($fraudScore / 100) * BCC_TRUST_FRAUD_SCORE_WEIGHT;
         }
 
+        // ── Hard block is decided BEFORE any rank relief (F-82) ──
+        // User decision: a confirmed bot's hard block ALWAYS beats rank.
+        // The trust-rank boost used to be summed in first, so a confirmed
+        // bot (automation penalty 0.90 = the block threshold) with a high
+        // trust_rank landed at 0.75 and escaped the block — the boost is
+        // exactly what a bot that farmed reputation would have.
+        $penaltyBeforeRelief = max(0.0, array_sum($penalties));
+        $hardBlocked = ($signals['automation']['is_automated'] ?? false)
+            || $penaltyBeforeRelief >= BCC_TRUST_FRAUD_BLOCK_THRESHOLD;
+
         // ── Trust rank boost (good actors get a slight reduction in penalty) ──
+        // Relief only — it can soften a penalty below the block, never lift
+        // an account out of it.
         $trustRank = $signals['trust_rank'] ?? 0.0;
         if ($trustRank > BCC_TRUST_FRAUD_RANK_BOOST_THRESHOLD) {
             $penalties['trust_rank_boost'] = -min(BCC_TRUST_FRAUD_RANK_BOOST_CAP, ($trustRank - BCC_TRUST_FRAUD_RANK_BOOST_THRESHOLD) * 0.5);
@@ -90,9 +102,10 @@ final class FraudDiscountCalculator
         $rawPenalty = max(0.0, array_sum($penalties));
 
         // Severity tiers:
-        //   >= block threshold = malicious → hard block (discount = 0.00)
-        //   < block threshold  = suspicious → reduced influence (floor = $minWeight)
-        if ($rawPenalty >= BCC_TRUST_FRAUD_BLOCK_THRESHOLD) {
+        //   hard-blocked (confirmed bot, or the pre-relief penalty reaches the
+        //   block threshold) = malicious → discount 0.00, whatever the rank
+        //   otherwise = suspicious → reduced influence (floor = $minWeight)
+        if ($hardBlocked) {
             $discount = 0.0;
         } else {
             $cappedPenalty = min(1.0 - $minWeight, $rawPenalty);

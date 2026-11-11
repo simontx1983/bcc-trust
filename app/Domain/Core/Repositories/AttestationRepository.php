@@ -1565,9 +1565,15 @@ final class AttestationRepository
      * {@see getVouchEdges}: user_profile targets ARE the owner id;
      * card targets resolve through the score row.
      *
-     * Bounded: LIMIT/OFFSET caller-paginated (cron cursor walks 500 a
-     * page); GROUP BY collapses per ordered pair; the window + active
-     * filters bound the self-join.
+     * Bounded and KEYSET-paginated (F-143): rows come ordered by the pair
+     * (user_a, user_b) and the caller passes the last pair it saw. The old
+     * LIMIT/OFFSET walk had no ORDER BY over a GROUP BY, so MySQL could
+     * return the groups in a different order on every page and the cron
+     * skipped some pairs and saw others twice. GROUP BY collapses per
+     * ordered pair; the window + active filters bound the self-join. The
+     * card-target owner join reads the canonical category_id = 0 score row
+     * only — the scores PK is (page_id, category_id), so a page with
+     * category rows used to multiply mutual_count (the F-142 family).
      *
      * @return list<object{user_a: int, user_b: int, mutual_count: int, total_weight: float}>
      */
@@ -1575,12 +1581,14 @@ final class AttestationRepository
         int $windowDays = 14,
         int $minSize = 1,
         int $pageLimit = 500,
-        int $offset = 0
+        int $afterUserA = 0,
+        int $afterUserB = 0
     ): array {
         $windowDays = max(1, $windowDays);
         $minSize    = max(1, $minSize);
         $pageLimit  = max(1, min(5000, $pageLimit));
-        $offset     = max(0, $offset);
+        $afterUserA = max(0, $afterUserA);
+        $afterUserB = max(0, $afterUserB);
 
         /** @var wpdb $wpdb */
         global $wpdb;
@@ -1593,22 +1601,24 @@ final class AttestationRepository
             . ' COUNT(*) AS mutual_count,'
             . ' SUM(a1.weight_at_time + a2.weight_at_time) AS total_weight'
             . " FROM `{$table}` a1"
-            . " LEFT JOIN `{$scoresTable}` s1 ON a1.target_kind != 'user_profile' AND s1.page_id = a1.target_id"
+            . " LEFT JOIN `{$scoresTable}` s1 ON a1.target_kind != 'user_profile' AND s1.page_id = a1.target_id AND s1.category_id = 0"
             . " JOIN `{$table}` a2"
             . " ON a2.attestor_user_id = CASE WHEN a1.target_kind = 'user_profile' THEN a1.target_id ELSE s1.page_owner_id END"
-            . " LEFT JOIN `{$scoresTable}` s2 ON a2.target_kind != 'user_profile' AND s2.page_id = a2.target_id"
+            . " LEFT JOIN `{$scoresTable}` s2 ON a2.target_kind != 'user_profile' AND s2.page_id = a2.target_id AND s2.category_id = 0"
             . " WHERE a1.kind = 'vouch' AND a2.kind = 'vouch'"
             . ' AND a1.revoked_at IS NULL AND a2.revoked_at IS NULL'
             . " AND CASE WHEN a2.target_kind = 'user_profile' THEN a2.target_id ELSE s2.page_owner_id END = a1.attestor_user_id"
             . ' AND a1.attestor_user_id != a2.attestor_user_id'
             . ' AND a1.created_at > DATE_SUB(NOW(), INTERVAL %d DAY)'
             . ' AND a2.created_at > DATE_SUB(NOW(), INTERVAL %d DAY)'
+            . ' AND (a1.attestor_user_id > %d OR (a1.attestor_user_id = %d AND a2.attestor_user_id > %d))'
             . ' GROUP BY a1.attestor_user_id, a2.attestor_user_id'
             . ' HAVING mutual_count >= %d'
-            . ' LIMIT %d OFFSET %d';
+            . ' ORDER BY a1.attestor_user_id ASC, a2.attestor_user_id ASC'
+            . ' LIMIT %d';
 
         /** @phpstan-ignore-next-line argument.type */
-        $prepared = $wpdb->prepare($sql, $windowDays, $windowDays, $minSize, $pageLimit, $offset);
+        $prepared = $wpdb->prepare($sql, $windowDays, $windowDays, $afterUserA, $afterUserA, $afterUserB, $minSize, $pageLimit);
         if (!is_string($prepared)) {
             return [];
         }
@@ -1736,15 +1746,23 @@ final class AttestationRepository
      * Distinct (target_kind, target_id) pairs that currently hold at least one
      * active attestation — the daily decay-recompute sweep work-list (Slice E).
      * Decay is time-dependent, so a target's score drifts even with no new
-     * events; the cron re-synthesizes every active target. OFFSET-paginated
-     * (daily batch, not a hot path); deterministic order for stable paging.
+     * events; the cron re-synthesizes every active target.
      *
-     * @return list<object{target_kind: string, target_id: int}>
+     * KEYSET-paginated after (`$afterKind`, `$afterId`), in
+     * (target_kind, target_id) order; pass ('', 0) for the first page.
+     * F-93: this used to be OFFSET-paginated on the assumption that the
+     * work-list is stable during a run. It is not: members cast and revoke
+     * attestations while the sweep runs, and every such change shifts an
+     * OFFSET window over the GROUP BY result, so a target was skipped or
+     * processed twice. A keyset cursor resumes strictly after the last
+     * target seen, whatever changed before it.
+     *
+     * @return list<object{target_kind: string, target_id: int}>|null null when the read failed
      */
-    public function listTargetsWithActiveAttestations(int $offset, int $limit): array
+    public function listTargetsWithActiveAttestationsAfter(string $afterKind, int $afterId, int $limit): ?array
     {
-        $offset = max(0, $offset);
-        $limit  = max(1, min(5000, $limit));
+        $afterId = max(0, $afterId);
+        $limit   = max(1, min(5000, $limit));
 
         /** @var wpdb $wpdb */
         global $wpdb;
@@ -1753,19 +1771,22 @@ final class AttestationRepository
         $sql = "SELECT target_kind, target_id"
             . " FROM `{$table}`"
             . ' WHERE revoked_at IS NULL'
+            . ' AND (target_kind > %s OR (target_kind = %s AND target_id > %d))'
             . ' GROUP BY target_kind, target_id'
             . ' ORDER BY target_kind ASC, target_id ASC'
-            . ' LIMIT %d OFFSET %d';
+            . ' LIMIT %d';
 
         /** @phpstan-ignore-next-line argument.type */
-        $prepared = $wpdb->prepare($sql, $limit, $offset);
+        $prepared = $wpdb->prepare($sql, $afterKind, $afterKind, $afterId, $limit);
         if (!is_string($prepared)) {
-            return [];
+            return null;
         }
 
+        // A failed read is NULL, never [] — the sweep treats [] as "reached
+        // the end" and would otherwise restart its cursor on a DB error.
         $rows = $wpdb->get_results($prepared);
-        if (!is_array($rows)) {
-            return [];
+        if (!is_array($rows) || $wpdb->last_error !== '') {
+            return null;
         }
 
         $out = [];

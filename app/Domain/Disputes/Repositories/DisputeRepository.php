@@ -10,6 +10,8 @@ use BCC\Trust\Disputes\DTO\DisputeCoreDTO;
 use BCC\Trust\Disputes\DTO\DisputeDetailDTO;
 use BCC\Trust\Disputes\DTO\DisputeResolutionCandidateDTO;
 use BCC\Trust\Disputes\DTO\OrphanedDisputeDTO;
+use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -17,6 +19,8 @@ if (!defined('ABSPATH')) {
 
 class DisputeRepository
 {
+    use GuardsReadFailures;
+
     /** Cache group for all dispute-related keys. */
     private const CACHE_GROUP = DisputeRepositorySupport::CACHE_GROUP;
 
@@ -662,15 +666,40 @@ class DisputeRepository
         $table = self::disputes_table();
 
         $placeholders = implode(',', array_fill(0, count($uncached), '%d'));
-        $rows = $wpdb->get_col($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT DISTINCT vote_id
              FROM {$table}
              WHERE vote_id IN ({$placeholders})
                AND status IN ('reviewing','accepted')",
             ...$uncached
-        ));
+        );
 
-        $disputed = array_fill_keys(array_map('intval', $rows), true);
+        // F-100: get_col() returns [] on a failed query (never null), which
+        // used to read as "none of these votes are disputed" and was then
+        // cached as 0 for every vote in the batch for TTL_HOT. runRead()
+        // (GuardsReadFailures — the shared runProbe-pattern helper) clears
+        // last_error, calls query() itself and treats `=== false` OR a set
+        // last_error as failure, so neither the silent wpdb early return nor
+        // a stale last_result can pass as "no rows". It logs the failure.
+        //
+        // On failure: cache NOTHING and fail CLOSED — report every
+        // unresolved vote as disputed. The only caller (the page-owner vote
+        // list) uses this as the "already disputed" gate, so a transient DB
+        // error hides the dispute action for one request instead of
+        // pinning a wrong "not disputed" answer in the cache.
+        try {
+            $rows = self::runRead((string) $sql, __FUNCTION__, true);
+        } catch (RepositoryReadFailure $e) {
+            foreach ($uncached as $vid) {
+                $result[$vid] = true;
+            }
+            return $result;
+        }
+
+        $disputed = [];
+        foreach ($rows as $row) {
+            $disputed[(int) ($row->vote_id ?? 0)] = true;
+        }
 
         // Cache each vote ID individually (disputed=1, not disputed=0).
         foreach ($uncached as $vid) {
@@ -1062,30 +1091,43 @@ class DisputeRepository
      * DisputeVoteService::reconcileReviewingDispute resolves each
      * against its poll's state). Bounded, oldest first.
      *
+     * F-38 keyset: only rows with `id > $afterId`, ordered by id. The
+     * auto-increment id is the unique, monotonic order key (creation order),
+     * so the caller's persisted cursor pages the WHOLE reviewing set across
+     * runs. The old `ORDER BY created_at LIMIT` (no cursor, non-unique key)
+     * re-selected the same oldest rows every run; when those were disputes
+     * whose poll is still open (skipped by reconcile, still 'reviewing'),
+     * every dispute behind them starved.
+     *
+     * FAIL-CLOSED read (GuardsReadFailures::runRead): a failed query throws
+     * RepositoryReadFailure instead of returning []. For the cursor, [] is
+     * an ANSWER ("end of the set — wrap to 0"), so a DB error read as empty
+     * would reset the sweep's position and report a successful run. Throwing
+     * stops the batch before the cursor is written, and auto_resolve_expired()
+     * records the failure in its last_failure option.
+     *
      * @return list<DisputeResolutionCandidateDTO>
+     * @throws RepositoryReadFailure when the read did not run
      */
-    public static function listReviewingCreatedBefore(string $cutoff, int $limit = 50): array
+    public static function listReviewingCreatedBefore(string $cutoff, int $limit = 50, int $afterId = 0): array
     {
         global $wpdb;
         $table = self::disputes_table();
 
-        $rows = $wpdb->get_results($wpdb->prepare(
+        $rows = self::runRead((string) $wpdb->prepare(
             "SELECT id, vote_id, page_id, voter_id, reporter_id
              FROM {$table}
              WHERE status = 'reviewing'
                AND created_at <= %s
-             ORDER BY created_at ASC
+               AND id > %d
+             ORDER BY id ASC
              LIMIT %d",
-            $cutoff, $limit
-        ), ARRAY_A);
-
-        if (!is_array($rows)) {
-            return [];
-        }
+            $cutoff, max(0, $afterId), $limit
+        ), __FUNCTION__, true);
 
         $dtos = [];
         foreach ($rows as $row) {
-            $dtos[] = self::hydrateResolutionCandidate($row);
+            $dtos[] = self::hydrateResolutionCandidate((array) $row);
         }
         return $dtos;
     }

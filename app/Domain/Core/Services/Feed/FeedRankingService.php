@@ -72,6 +72,15 @@ final class FeedRankingService
      */
     public const HOT_WARM_LIMIT = 20;
 
+    /**
+     * Candidate-batch size for the exact mutual-block probe.
+     *
+     * Well under `getMutuallyBlockedSetOrUnknown()`'s own candidate cap, so
+     * that cap can never silently truncate this check — see
+     * {@see dropMutuallyBlockedAuthors()}.
+     */
+    private const BLOCK_PROBE_CHUNK = 100;
+
     public function __construct(
         private readonly ActivityFeedService $activityFeed,
         private readonly ReputationRepository $reputationRepo,
@@ -100,7 +109,46 @@ final class FeedRankingService
      *
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
-    public function getHotFeed(?string $cursor = null, int $limit = self::HOT_WARM_LIMIT): array
+    public function getHotFeed(
+        ?string $cursor = null,
+        int $limit = self::HOT_WARM_LIMIT,
+        int $viewerId = 0
+    ): array {
+        $payload = $this->hotFeedPayload($cursor, $limit);
+
+        // ⚠⚠ PER-VIEWER FILTER, APPLIED AFTER THE SHARED CACHE AND NEVER
+        // WRITTEN BACK INTO IT. The payload above is built with the
+        // ANONYMOUS posture (viewer 0) and cached for everyone, which is
+        // what makes /feed/hot cheap and publicly cacheable. §K1 mutual
+        // invisibility still has to hold for a signed-in reader, so the
+        // block filter runs here, on this request's own copy.
+        //
+        // ⚠ The cache write lives inside hotFeedPayload(), so it is
+        // STRUCTURALLY impossible for a filtered, viewer-specific payload to
+        // reach the shared cache — rather than merely being careful about
+        // the order of two statements. One viewer's filtered feed being
+        // served to everyone else would be a far worse bug than the one
+        // this fixes, and it is the reason the split exists.
+        //
+        // ⚠ `$viewerId` 0 (anonymous, and the cron warm path) short-circuits
+        // inside the filter, so logged-out behaviour is byte-identical.
+        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+
+        return $payload;
+    }
+
+    /**
+     * The shared, anonymous hot-feed payload — exactly the former
+     * getHotFeed body, cache and all.
+     *
+     * ⚠ VIEWER-INDEPENDENT BY CONSTRUCTION, and it must stay that way: its
+     * result is stored in a cache shared by every reader, including
+     * logged-out ones, and is warmed by cron under
+     * {@see warmHotFeed()}. Nothing viewer-specific may enter here.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    private function hotFeedPayload(?string $cursor, int $limit): array
     {
         if ($cursor !== null) {
             return $this->buildHotFeed($cursor, $limit);
@@ -115,6 +163,7 @@ final class FeedRankingService
 
         $payload = $this->buildHotFeed(null, $limit);
         wp_cache_set($key, $payload, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
+
         return $payload;
     }
 
@@ -262,6 +311,19 @@ final class FeedRankingService
             $hashtag
         );
 
+        // ⚠⚠ F-54: THIS SURFACE HAD NO BLOCK FILTERING AT ALL, which is a
+        // §K1 gap rather than a cap problem. The docblock above says the
+        // gates are "computed IDENTICALLY to getHotFeed" — and that is how
+        // it happened: the hot feed is ANONYMOUS (`viewerId` 0, globally
+        // cached), so it has no block list to apply, and the tag feed was
+        // modelled on it while taking a real `$viewerId`.
+        //
+        // ⇒ That parity is deliberately broken here, because the two
+        // methods do not have the same inputs. The reputation and hidden
+        // gates stay identical; the viewer-specific one cannot, and could
+        // never have been shared with a globally cached anonymous feed.
+        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
     }
@@ -307,6 +369,11 @@ final class FeedRankingService
             $excludedGroups === [] ? null : $excludedGroups
         );
 
+        // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
+        // `$excluded` list above is a cheap pre-filter and is NOT sufficient
+        // — see dropMutuallyBlockedAuthors().
+        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
     }
@@ -344,6 +411,13 @@ final class FeedRankingService
             $hidden === []   ? null : $hidden
         );
         if ($item === null) {
+            return null;
+        }
+
+        // ⚠ F-54: the same exact check, on a single row. This method's
+        // contract is already "404 rather than leak", so a blocked author
+        // here becomes a 404 exactly as an excluded one does.
+        if (self::dropMutuallyBlockedAuthors([$item], $viewerId) === []) {
             return null;
         }
 
@@ -391,6 +465,11 @@ final class FeedRankingService
             $hidden === []   ? null : $hidden,
             $excludedGroups === [] ? null : $excludedGroups
         );
+
+        // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
+        // `$excluded` list above is a cheap pre-filter and is NOT sufficient
+        // — see dropMutuallyBlockedAuthors().
+        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
@@ -440,6 +519,11 @@ final class FeedRankingService
             $excluded === [] ? null : $excluded,
             $hidden === []   ? null : $hidden
         );
+
+        // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
+        // `$excluded` list above is a cheap pre-filter and is NOT sufficient
+        // — see dropMutuallyBlockedAuthors().
+        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
@@ -541,6 +625,11 @@ final class FeedRankingService
             $hallFeed === 'ranked' ? 'ranked' : 'main'
         );
 
+        // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
+        // `$excluded` list above is a cheap pre-filter and is NOT sufficient
+        // — see dropMutuallyBlockedAuthors().
+        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
     }
@@ -598,6 +687,137 @@ final class FeedRankingService
         // used to live here, byte for byte, including passing the
         // repository's default 500 bound explicitly.
         return RestrictedGroups::forViewer($viewerId);
+    }
+
+    /**
+     * Drop items whose author is mutually blocked with the viewer — the
+     * EXACT check, over this page's authors only.
+     *
+     * ⚠⚠ WHY THE PRE-FILTER IS NOT ENOUGH (F-54). Every caller above
+     * merges `getBlockedIds()` and `getBlockerIds()` into an `$excluded`
+     * list that the SQL narrows on. Both are `LIMIT 500` with NO ordering
+     * and NO completeness signal, so a viewer who blocks more than 500
+     * people simply does not get the 501st excluded, and sees their posts.
+     * There is not even a way to tell "exactly 500" from "500 and more".
+     *
+     * ⚠ AND THEY FAIL OPEN ON A DB ERROR. `$wpdb->get_col()` never
+     * returns null; a failed query returns `[]`, which reads as "blocks
+     * nobody" — so an unreadable block table showed every blocked author.
+     *
+     * ⭐ THE CAP IS WHAT MOVES, AND THAT IS THE WHOLE FIX. Asking "which
+     * of THESE authors is blocked" bounds the question by PAGE SIZE (at most
+     * a few tens) instead of by how many people the viewer blocks
+     * (unbounded, and 500+ is an ordinary number for a heavy blocker). The
+     * pre-filter stays, as a cheap way to keep obvious noise out of the
+     * query; correctness now comes from here.
+     *
+     * ⚠ FAIL CLOSED. `null` means the block read FAILED, not that nobody
+     * is blocked, so the page is dropped rather than risk showing a blocked
+     * author. Same rule and same reasoning as
+     * {@see \BCC\Trust\Core\Services\MessagesService}'s inbox and thread
+     * previews, which withhold every preview on an unreadable block table.
+     * An empty feed on a DB fault is ugly, safe, and self-correcting on the
+     * next request — and in practice the feed query itself is unlikely to
+     * have survived whatever broke this one.
+     *
+     * ⚠ CHUNKED, deliberately. `getMutuallyBlockedSetOrUnknown()` caps its
+     * own candidate list, and the defect being fixed here IS a silent cap,
+     * so this must not depend on another one. A page cannot currently reach
+     * one chunk (REST clamps `limit` to 50), so the loop runs once; what it
+     * buys is that raising a page limit later cannot quietly re-open this.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private static function dropMutuallyBlockedAuthors(array $items, int $viewerId): array
+    {
+        if ($viewerId <= 0 || $items === []) {
+            return $items;
+        }
+
+        $authorIds = self::authorIdsOf($items);
+        if ($authorIds === []) {
+            return $items;
+        }
+
+        $blocked = [];
+        foreach (array_chunk($authorIds, self::BLOCK_PROBE_CHUNK) as $chunk) {
+            $set = PeepSoBlockRepository::getMutuallyBlockedSetOrUnknown($viewerId, $chunk);
+            if ($set === null) {
+                return [];
+            }
+            foreach ($set as $id => $_) {
+                $blocked[(int) $id] = true;
+            }
+        }
+
+        if ($blocked === []) {
+            return $items;
+        }
+
+        $kept = [];
+        foreach ($items as $item) {
+            $uid = self::authorIdOf($item);
+            if ($uid > 0 && isset($blocked[$uid])) {
+                continue;
+            }
+            $kept[] = $item;
+        }
+
+        return $kept;
+    }
+
+    /**
+     * Distinct author ids on a page.
+     *
+     * Same extraction as {@see FeedHydrationPipeline}'s batch resolvers,
+     * which is where the shape is established: the author block is
+     * pre-hydrated by bcc-core's `ActivityFeedService` (`'id' => (int)
+     * $u->ID`) and so is an int by the time it reaches either of us.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<int>
+     */
+    private static function authorIdsOf(array $items): array
+    {
+        $ids = [];
+        foreach ($items as $item) {
+            $uid = self::authorIdOf($item);
+            if ($uid > 0) {
+                $ids[$uid] = true;
+            }
+        }
+
+        return array_keys($ids);
+    }
+
+    /** @param array<string, mixed> $item */
+    private static function authorIdOf(array $item): int
+    {
+        $author = is_array($item['author'] ?? null) ? $item['author'] : [];
+        $id     = $author['id'] ?? null;
+
+        // ⚠⚠ A NUMERIC STRING COUNTS, AND THIS IS A FAIL-OPEN GUARD RATHER
+        // THAN TOLERANCE FOR ITS OWN SAKE. An `is_int`-only test returns 0
+        // for `"42"`, every author id becomes 0, and the block filter then
+        // silently matches nobody — a viewer would see blocked authors with
+        // no error anywhere.
+        //
+        // ⚠ The hot-feed path makes that reachable: those items come back
+        // through `wp_cache_get()`, so their types survive whatever the
+        // object-cache backend does to them on the way out. Serialising
+        // backends preserve ints; a backend that round-trips through JSON or
+        // a text column does not, and this class is in no position to know
+        // which is installed.
+        //
+        // ⚠ `ctype_digit` rather than `is_numeric`: ids are unsigned
+        // integers, and `is_numeric` would also accept `"1e3"`, `" 7"` and
+        // `"-1"`. The cast must mean what the string says.
+        if (is_int($id)) {
+            return $id;
+        }
+
+        return is_string($id) && $id !== '' && ctype_digit($id) ? (int) $id : 0;
     }
 
     /**

@@ -684,6 +684,9 @@ class UserInfoRepository {
      * are added to the existing JSON (the same read-merge as unsuspendUser),
      * so earlier fraud evidence on the row is kept.
      *
+     * Inside TransactionManager::run() the caches are NOT flushed here; the
+     * caller calls notifySuspensionChanged() after the commit (F-114).
+     *
      * @throws RepositoryException on database failure or a missing row
      */
     public function suspendUser(int $userId, string $reason): void {
@@ -721,14 +724,7 @@ class UserInfoRepository {
             throw new RepositoryException('UserInfoRepository::suspendUser failed for user ' . $userId . ': ' . $wpdb->last_error);
         }
 
-        $this->invalidateCache($userId);
-        // Flush the cross-plugin suspension cache (bcc-core Permissions)
-        // immediately — its listener keys on this action. Without it,
-        // Permissions::is_not_suspended() serves a stale answer for up to
-        // its 60s TTL after a status change. invalidateCache() above only
-        // clears the user_info row cache, not the Permissions cache.
-        do_action('bcc_user_suspension_changed', $userId);
-        $this->dispatchSuspensionFanout($userId);
+        $this->notifyUnlessInTransaction($userId);
     }
     
     /**
@@ -758,12 +754,39 @@ class UserInfoRepository {
             throw new RepositoryException('UserInfoRepository::unsuspendUser failed for user ' . $userId . ': ' . $wpdb->last_error);
         }
 
+        $this->notifyUnlessInTransaction($userId);
+    }
+
+    /**
+     * Everything that must follow a COMMITTED suspension change:
+     *  - the user_info row cache (and the rate limiter's copy);
+     *  - the cross-plugin suspension cache in bcc-core Permissions, through
+     *    `bcc_user_suspension_changed` (its listener). Without it,
+     *    Permissions::is_not_suspended() serves a stale answer for up to its
+     *    60s TTL;
+     *  - the async re-score fanout.
+     *
+     * ⚠ AFTER COMMIT ONLY (F-114). Fired inside the transaction, a read in
+     * the window before COMMIT re-caches the OLD state, so a suspension goes
+     * unenforced (or a lift does not take effect) for up to the cache TTL,
+     * and a rolled-back change still fans out. Callers that write inside
+     * TransactionManager::run() call this after it returns.
+     */
+    public function notifySuspensionChanged(int $userId): void {
         $this->invalidateCache($userId);
-        // Mirror suspendUser(): flush the cross-plugin Permissions
-        // suspension cache immediately so a lifted suspension takes effect
-        // without waiting out the 60s TTL. See Permissions::registerHooks.
         do_action('bcc_user_suspension_changed', $userId);
         $this->dispatchSuspensionFanout($userId);
+    }
+
+    /**
+     * Outside a run() transaction the write is already committed, so notify
+     * now; inside one, the caller must call notifySuspensionChanged() after
+     * the commit.
+     */
+    private function notifyUnlessInTransaction(int $userId): void {
+        if (!\BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()) {
+            $this->notifySuspensionChanged($userId);
+        }
     }
 
     /**

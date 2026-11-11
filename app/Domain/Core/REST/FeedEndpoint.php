@@ -162,14 +162,54 @@ final class FeedEndpoint
     {
         [$cursor, $limit] = $this->paginationArgs($request);
 
-        $payload = Plugin::instance()->feedRankingService()->getHotFeed($cursor, $limit);
+        // §K1 mutual invisibility applies to a signed-in reader here too,
+        // so the viewer is passed through; 0 keeps the anonymous posture.
+        $viewerId = get_current_user_id();
+
+        $payload = Plugin::instance()->feedRankingService()->getHotFeed($cursor, $limit, $viewerId);
 
         $response = ApiResponse::ok($payload);
-        // §F2 hot feed is anonymous-cacheable; volatile but tolerable to
-        // serve slightly stale to anonymous viewers.
-        $response->header('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+        foreach (self::hotCacheHeaders($viewerId) as $header => $value) {
+            $response->header($header, $value);
+        }
 
         return $response;
+    }
+
+    /**
+     * The cache posture for /feed/hot, which now depends on the viewer.
+     *
+     * ⚠⚠ THIS IS A SECURITY HEADER, NOT BOOKKEEPING. The route used to
+     * send `public, max-age=60, stale-while-revalidate=120` with NO `Vary`,
+     * which was correct while every reader got the identical payload. Now
+     * that a signed-in reader's feed is filtered for §K1, serving it under
+     * that header would let a shared cache — a CDN or reverse proxy — store
+     * ONE viewer's filtered feed and hand it to everyone else, including
+     * logged-out visitors, for up to three minutes. That leaks who that
+     * viewer blocks, by absence, and is strictly worse than the unfiltered
+     * feed it replaced.
+     *
+     * ⭐ `Vary` IS SENT ON BOTH RESPONSES, not only the signed-in one. A
+     * shared cache that does not know the response varies on credentials
+     * could otherwise hand the cached ANONYMOUS copy to a signed-in request
+     * — which leaks nothing, but silently defeats the filter.
+     *
+     * The anonymous posture is otherwise unchanged, so the public, SEO
+     * -relevant caching this route exists for is preserved exactly.
+     *
+     * ⚠ 15s for the signed-in case matches `tagFeed()` below, which solved
+     * the same problem for the same reason; one number, not two.
+     *
+     * @return array<string, string>
+     */
+    private static function hotCacheHeaders(int $viewerId): array
+    {
+        return [
+            'Cache-Control' => $viewerId > 0
+                ? 'private, max-age=15'
+                : 'public, max-age=60, stale-while-revalidate=120',
+            'Vary'          => 'Authorization, Cookie',
+        ];
     }
 
     public function tagFeed(WP_REST_Request $request): WP_REST_Response

@@ -26,6 +26,8 @@ if (!defined('ABSPATH')) {
 
 class TierDaysRepository
 {
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+
     private const SNAPSHOT_LOCK = 'bcc_rank_tier_snapshot';
 
     private string $table;
@@ -146,13 +148,22 @@ class TierDaysRepository
     {
         global $wpdb;
 
-        $ids = $wpdb->get_col($wpdb->prepare(
-            "SELECT ID FROM {$wpdb->users} WHERE ID > %d ORDER BY ID ASC LIMIT %d",
+        // ⚠ F-13: FAIL-CLOSED. get_col() returned [] on a DB error, which the
+        // daily snapshot read as "no more users" and ended its pass. runRead
+        // (the runProbe shape) throws instead, and cannot return a stale
+        // last_result either.
+        /** @var list<object{id: int|numeric-string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT ID AS id FROM {$wpdb->users} WHERE ID > %d ORDER BY ID ASC LIMIT %d",
             max(0, $cursor),
             max(1, $limit)
-        ));
+        ), 'listUserIdsAfter', true);
 
-        return array_values(array_map('intval', $ids ?: []));
+        $ids = [];
+        foreach ($rows as $row) {
+            $ids[] = (int) $row->id;
+        }
+        return $ids;
     }
 
     /**

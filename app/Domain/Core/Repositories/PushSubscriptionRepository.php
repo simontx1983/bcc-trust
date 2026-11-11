@@ -61,7 +61,15 @@ final class PushSubscriptionRepository
      * `pushsubscriptionchange` browser event where a stale subscription
      * is rotated to a new key set under the same endpoint.
      *
-     * Returns 0 on DB error.
+     * Returns 0 on DB error, and when another registration of the same
+     * endpoint holds its lock past LOCK_WAIT_SECONDS.
+     *
+     * F-76 HANDOVER: an endpoint is ONE browser profile, so it belongs to
+     * exactly one user, the one who registered it last; every other user's
+     * row for it is dropped. That lets whoever registers an endpoint evict
+     * its previous holder. Acceptable: a push endpoint is an unguessable
+     * capability URL issued by the browser's push service, so only someone
+     * holding that browser's subscription can present it.
      */
     public function upsert(
         int $userId,
@@ -74,17 +82,55 @@ final class PushSubscriptionRepository
             return 0;
         }
 
-        global $wpdb;
         $hash = self::hashEndpoint($endpoint);
-        $now  = current_time('mysql', true);
 
-        // F-76: an endpoint is ONE browser profile, so it belongs to exactly
-        // one user, the one who just registered it. The UNIQUE key is per
+        // Serialise registrations of the SAME endpoint. Unlocked, two
+        // accounts registering it at the same instant each deleted the
+        // other's (not yet written) row, then each inserted its own: two
+        // owners, the leak the handover exists to close. A lock that cannot
+        // be had refuses the registration, the same fail-closed rule as a
+        // failed handover delete; the client retries on its next load.
+        $lock = self::lockKey($hash);
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($lock, self::LOCK_WAIT_SECONDS)) {
+            return 0;
+        }
+        try {
+            return $this->upsertLocked($userId, $endpoint, $hash, $p256dhKey, $authKey, $userAgent);
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
+        }
+    }
+
+    /** Seconds a registration waits for another registration of the same endpoint. */
+    private const LOCK_WAIT_SECONDS = 5;
+
+    /**
+     * The per-endpoint lock name. GET_LOCK names are capped at 64 characters,
+     * so it uses a 40-hex prefix of the endpoint hash; a prefix collision
+     * only serialises two registrations, it never merges them.
+     */
+    public static function lockKey(string $endpointHash): string
+    {
+        return 'bcc_push_ep_' . substr($endpointHash, 0, 40);
+    }
+
+    /** upsert() body; the caller holds the endpoint's lock. */
+    private function upsertLocked(
+        int $userId,
+        string $endpoint,
+        string $hash,
+        string $p256dhKey,
+        string $authKey,
+        ?string $userAgent
+    ): int {
+        global $wpdb;
+        $now = current_time('mysql', true);
+
+        // F-76: hand the endpoint over (see upsert()). The UNIQUE key is per
         // (user_id, endpoint_hash), so without this a browser that changed
         // hands (the previous account's logout cleanup failed or never ran:
         // an expired session, cleared cookies) kept the old account's row,
-        // and that account's pushes reached the new person's device. Hand
-        // the endpoint over: drop every OTHER user's row for it. A failed
+        // and that account's pushes reached the new person's device. A failed
         // delete refuses the registration rather than leave the leak in place.
         $handedOver = $wpdb->query($wpdb->prepare(
             "DELETE FROM {$this->table} WHERE endpoint_hash = %s AND user_id <> %d",
@@ -242,7 +288,9 @@ final class PushSubscriptionRepository
      * email-change verify. The frontend re-subscribes on the next opted-in
      * login.
      *
-     * Returns the number of rows deleted.
+     * Returns the number of rows deleted; 0 also on a DB error, which is
+     * logged — callers cutting off revoked devices would otherwise read a
+     * failure as "nothing to delete" and keep pushing to them.
      */
     public function deleteAllForUser(int $userId): int
     {
@@ -252,7 +300,14 @@ final class PushSubscriptionRepository
 
         global $wpdb;
         $deleted = $wpdb->delete($this->table, ['user_id' => $userId], ['%d']);
-        return is_int($deleted) ? $deleted : 0;
+        if (!is_int($deleted)) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] push subscriptions not deleted', [
+                'user_id' => $userId,
+                'error'   => (string) ($wpdb->last_error ?? ''),
+            ]);
+            return 0;
+        }
+        return $deleted;
     }
 
     /**

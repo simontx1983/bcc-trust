@@ -660,6 +660,11 @@ bcc_trust_create_stokes_table();
 require_once dirname(__DIR__, 2) . '/includes/database/schema-rank-pending.php';
 bcc_trust_create_rank_pending_table();
 
+// Rank state — RankSweepKeysetIntegrationTest (F-13): the daily evaluate
+// sweep's keyset read.
+require_once dirname(__DIR__, 2) . '/includes/database/schema-rank-state.php';
+bcc_trust_create_rank_state_table();
+
 // WordPress core wp_options (the rate limiter is option-backed via $wpdb->options).
 $GLOBALS['wpdb']->query(
     "CREATE TABLE `wp_options` (

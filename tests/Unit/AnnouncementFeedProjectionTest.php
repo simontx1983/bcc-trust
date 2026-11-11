@@ -116,11 +116,8 @@ final class AnnouncementFeedProjectionTest extends TestCase
         string $pattern,
         string $why
     ): void {
-        $core = dirname(__DIR__, 3) . '/bcc-core/src/' . $relPath;
-
-        if (!is_file($core)) {
-            self::markTestSkipped('bcc-core sibling not checked out — CI provides it at this path');
-        }
+        // F-94: fails in CI when missing (was a skip, which a green run hides).
+        $core = \BCC\Trust\Tests\Support\CoreSibling::require('src/' . $relPath);
 
         $src = (string) file_get_contents($core);
         self::assertGreaterThan(500, strlen($src), $relPath . ' is implausibly short — wrong path?');

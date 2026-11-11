@@ -12,6 +12,7 @@ use BCC\Trust\Core\Announcements\AnnouncementTransition as Verb;
 use BCC\Trust\Core\Announcements\AnnouncementVisibility as Vis;
 use BCC\Trust\Core\Exceptions\RepositoryException;
 use BCC\Trust\Core\Repositories\AnnouncementRepository;
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority as Authority;
 
 /**
@@ -76,6 +77,13 @@ final class AnnouncementWriteService
     public const ERR_NOT_FOUND   = 'bcc_not_found';
     public const ERR_CONFLICT    = 'bcc_conflict';
     public const ERR_UNAVAILABLE = 'bcc_unavailable';
+
+    /**
+     * F-147: audit action for an archive of a row the actor did not author —
+     * the page's CURRENT operator archiving a predecessor's notice, or a site
+     * administrator archiving any notice.
+     */
+    public const AUDIT_ARCHIVED_NOT_AUTHOR = 'announcement_archived_not_author';
 
     /**
      * §4.32.9 defines `summary_required` as a 400 client error, while the
@@ -437,21 +445,52 @@ final class AnnouncementWriteService
     /**
      * Archive — one-way, keeps the permalink (§4.32.6). Not a deletion.
      *
+     * ── F-147: WHO MAY ARCHIVE ──────────────────────────────────────────
+     * Archive is the one write that is NOT restricted to the row's author:
+     *   - the page's CURRENT resolved operator may archive any PUBLISHED
+     *     notice on that page, including one a previous operator wrote.
+     *     Before this, a claim hand-over left the predecessor's notices on
+     *     the page with nobody able to take them down (the new operator got
+     *     404 from the author-bound lookup; admins had no write at all).
+     *   - a site administrator (`manage_options`, decided by the route) may
+     *     archive any published notice.
+     * Edit, publish and pin stay author-only. Archive is one-way and keeps
+     * the permalink and public readability (§4.32.6), so the record of what
+     * the predecessor said survives — it only leaves the page and the feed.
+     *
+     * Lookup order: the actor's OWN row first (unchanged behaviour, so the
+     * operator's own draft still answers 409 "not published"), then the
+     * page's public row. `findPublic()` is bound to post_type + page + id +
+     * the §4.32.1 public predicate, so it can only reach a published,
+     * authorised notice on THIS page — never a draft, never another page's.
+     *
      * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision
+     * @param bool $administrator the route's `manage_options` check; never derived here
+     * @param int  $actorId       for the audit row only
      * @return array<string,mixed>
      */
-    public function archive(int $pageId, int $announcementId, array $decision, ?string $nowUtc = null): array
-    {
+    public function archive(
+        int $pageId,
+        int $announcementId,
+        array $decision,
+        ?string $nowUtc = null,
+        bool $administrator = false,
+        int $actorId = 0
+    ): array {
         $now = $nowUtc ?? gmdate('Y-m-d H:i:s');
 
-        if (!$this->isOperator($decision)) {
+        $isOperator = $this->isOperator($decision);
+        if (!$isOperator && !$administrator) {
             return self::deny();
         }
         // ⚠ The row is now BOUND, not merely null-checked: the state gate below
-        // reads `post_status` off it. Same call, same 404 on absence — this is
-        // the identical ownership resolution every other write on this service
-        // performs, so the gate cannot be reached by a non-owner.
-        $row = $this->ownRowOrNull($pageId, $decision, $announcementId);
+        // reads `post_status` off it.
+        $row = $isOperator ? $this->ownRowOrNull($pageId, $decision, $announcementId) : null;
+        $notAuthor = false;
+        if ($row === null) {
+            $row       = $this->publicRowOrNull($pageId, $announcementId);
+            $notAuthor = $row !== null;
+        }
         if ($row === null) {
             return self::fail(self::ERR_NOT_FOUND, 'Not found.', 404);
         }
@@ -522,6 +561,16 @@ final class AnnouncementWriteService
         // Fired only after archival is CONFIRMED stored, so a failed archive
         // cannot withdraw a card that is still live.
         do_action('bcc_announcement_archived', $announcementId);
+
+        if ($notAuthor) {
+            AuditLogger::log(
+                self::AUDIT_ARCHIVED_NOT_AUTHOR,
+                $announcementId,
+                ['page_id' => $pageId, 'as' => $isOperator ? 'operator' : 'administrator'],
+                'announcement',
+                $actorId > 0 ? $actorId : null
+            );
+        }
 
         return ['ok' => true, 'id' => $announcementId, 'state' => 'archived'];
     }
@@ -742,6 +791,19 @@ final class AnnouncementWriteService
     }
 
     /**
+     * F-147: the page's published row, whoever wrote it. A read failure is a
+     * 404 here exactly as in {@see self::ownRowOrNull()}.
+     */
+    private function publicRowOrNull(int $pageId, int $announcementId): ?\stdClass
+    {
+        try {
+            return $this->repo->findPublic($pageId, $announcementId);
+        } catch (RepositoryException $e) {
+            return null;
+        }
+    }
+
+    /**
      * ⚠⚠ ASKS THE REPOSITORY. Its first version ran the query here, and
      * `arch-guardrails` rejected it with five `WPDB_OUTSIDE_REPO` violations —
      * correctly: §1 puts raw `$wpdb` in a repository and nowhere else. The
@@ -824,6 +886,16 @@ final class AnnouncementWriteService
      * (known Low: kses mangles Markdown autolinks `<https://…>` and code
      * samples containing `<…>`).
      *
+     * ⚠ The window is THIS post's column sanitisation only. kses is put back
+     * on the first `wp_insert_post_data`, which wp_insert_post() fires after
+     * sanitize_post() and before the row is written and before ANY action
+     * (pre_post_update, transition_post_status, save_post, wp_insert_post,
+     * wp_after_insert_post). So a listener that writes another post on
+     * publish — bcc_announcement_published → feed/activity rows — gets core
+     * kses as normal. Previously the filters stayed off for the whole call,
+     * nested writes included. The `finally` is the fallback for a write that
+     * returns before that filter (e.g. an empty-content refusal).
+     *
      * @template T
      * @param callable(): T $write
      * @return T
@@ -838,12 +910,31 @@ final class AnnouncementWriteService
                 $removed[$hook] = (int) $priority;
             }
         }
-        try {
+        if ($removed === []) {
             return $write();
-        } finally {
+        }
+
+        $restored = false;
+        $restore  = static function () use (&$restored, $removed): void {
+            if ($restored) {
+                return;
+            }
+            $restored = true;
             foreach ($removed as $hook => $priority) {
                 add_filter($hook, 'wp_filter_kses', $priority);
             }
+        };
+        $onData = static function ($data) use ($restore) {
+            $restore();
+            return $data;
+        };
+
+        add_filter('wp_insert_post_data', $onData, PHP_INT_MIN);
+        try {
+            return $write();
+        } finally {
+            remove_filter('wp_insert_post_data', $onData, PHP_INT_MIN);
+            $restore();
         }
     }
 
