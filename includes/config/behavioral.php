@@ -11,8 +11,8 @@ define('BCC_TRUST_BEHAVIOR_RAPID_INTERVAL', 2);
 define('BCC_TRUST_BEHAVIOR_BURST_THRESHOLD', 5);
 define('BCC_TRUST_BEHAVIOR_BURST_MAX', 3);
 define('BCC_TRUST_BEHAVIOR_SLEEP_RATIO', 0.3);
-define('BCC_TRUST_BEHAVIOR_BLIND_VOTE_HIGH', 0.7);
-define('BCC_TRUST_BEHAVIOR_BLIND_VOTE_MEDIUM', 0.3);
 define('BCC_TRUST_BEHAVIOR_ACTION_RATE_MAX', 30);
 define('BCC_TRUST_BEHAVIOR_WEEKLY_VARIANCE', 5);
-define('BCC_TRUST_BEHAVIOR_VOTER_ONLY_MIN', 20);
+// Removed (F-128, user decision): BLIND_VOTE_HIGH / BLIND_VOTE_MEDIUM (blind-
+// voting read audit actions nothing writes) and VOTER_ONLY_MIN (voting without
+// posting is the core action, not a fraud signal).

@@ -116,9 +116,15 @@ class BehavioralAnalyzer {
             if ($stale !== false) {
                 return $stale;
             }
+            // F-128: no cached result to reuse. Fall back to the LAST STORED
+            // behaviour score, not 0 — a throttled call used to read as
+            // "clean" (score 0, minimal risk), so a bot burst that kept
+            // missing the cache was scored as harmless during its burst.
+            $info        = $this->userInfoRepo->getByUserId($userId);
+            $storedScore = $info !== null ? (int) ($info->behavior_score ?? 0) : 0;
             return [
-                'behavior_score' => 0,
-                'risk_level'     => 'minimal',
+                'behavior_score' => $storedScore,
+                'risk_level'     => $this->getRiskLevel($storedScore),
                 'flags'          => [],
                 'details'        => [],
                 'analyzed_at'    => time(),
@@ -131,8 +137,6 @@ class BehavioralAnalyzer {
             'temporal_pattern' => $this->analyzeTemporalPattern($userId),
             'engagement_pattern' => $this->analyzeEngagementPattern($userId),
             'social_pattern' => $this->analyzeSocialPattern($userId),
-            'browsing_pattern' => $this->analyzeBrowsingPattern($userId),
-            'content_pattern' => $this->analyzeContentPattern($userId),
             'consistency_pattern' => $this->analyzeConsistencyPattern($userId)
         ];
 
@@ -370,28 +374,31 @@ class BehavioralAnalyzer {
         $total = array_sum($hourlyDistribution);
         $metrics['hourly_distribution'] = $hourlyDistribution;
 
-        // Get user's timezone from meta (still use meta for timezone)
+        // Night-owl check (F-128, user decision): ONLY when the member's
+        // timezone is actually known. `bcc_timezone` is read but nothing
+        // writes it, and the old UTC fallback judged US-evening and
+        // Asia-daytime members as "active while asleep" (+25). Unknown
+        // timezone → no judgement (today: always, so the check is dormant
+        // until a timezone is collected).
         $userTimezone = get_user_meta($userId, 'bcc_timezone', true);
-        if (!$userTimezone) {
-            $userTimezone = 'UTC';
-        }
+        if (is_string($userTimezone) && $userTimezone !== '') {
+            // Calculate sleeping hours (12 AM - 6 AM in user's timezone)
+            $sleepingHours = $this->getSleepingHours($userTimezone);
+            $sleepActivity = 0;
 
-        // Calculate sleeping hours (12 AM - 6 AM in user's timezone)
-        $sleepingHours = $this->getSleepingHours($userTimezone);
-        $sleepActivity = 0;
+            foreach ($sleepingHours as $hour) {
+                $sleepActivity += $hourlyDistribution[$hour] ?? 0;
+            }
 
-        foreach ($sleepingHours as $hour) {
-            $sleepActivity += $hourlyDistribution[$hour] ?? 0;
-        }
+            $sleepRatio = $sleepActivity / max(1, $total);
+            $metrics['sleep_ratio'] = $sleepRatio;
 
-        $sleepRatio = $sleepActivity / max(1, $total);
-        $metrics['sleep_ratio'] = $sleepRatio;
-
-        // High activity during sleeping hours is suspicious
-        if ($sleepRatio > BCC_TRUST_BEHAVIOR_SLEEP_RATIO) {
-            $suspicious = true;
-            $weight += 25;
-            $reasons[] = 'night_owl_activity';
+            // High activity during sleeping hours is suspicious
+            if ($sleepRatio > BCC_TRUST_BEHAVIOR_SLEEP_RATIO) {
+                $suspicious = true;
+                $weight += 25;
+                $reasons[] = 'night_owl_activity';
+            }
         }
 
         // ======================================================
@@ -414,37 +421,9 @@ class BehavioralAnalyzer {
             }
         }
 
-        // ======================================================
-        // 3. Check weekend vs weekday ratio
-        // ======================================================
-        $weekdayCount = 0;
-        $weekendCount = 0;
-
-        foreach ($activities as $act) {
-            if ($act->day_of_week == 1 || $act->day_of_week == 7) { // 1=Sunday, 7=Saturday
-                $weekendCount += $act->count;
-            } else {
-                $weekdayCount += $act->count;
-            }
-        }
-
-        $totalWeekend = $weekendCount;
-        $totalWeekday = $weekdayCount;
-
-        // Expected ratio: weekend = 2/7 of total (~28.6%)
-        $expectedWeekendRatio = 2/7;
-        $actualWeekendRatio = $totalWeekend / max(1, $totalWeekend + $totalWeekday);
-
-        $metrics['weekend_ratio'] = $actualWeekendRatio;
-        $metrics['expected_weekend_ratio'] = $expectedWeekendRatio;
-
-        // If activity is exactly the same every day (bots)
-        $weekendDeviation = abs($actualWeekendRatio - $expectedWeekendRatio);
-        if ($weekendDeviation < 0.05) { // Within 5% of expected - too perfect
-            $suspicious = true;
-            $weight += 15;
-            $reasons[] = 'perfect_weekly_pattern';
-        }
+        // (Former check 3, "perfect weekly pattern" (+15), removed — F-128,
+        // user decision: a weekend share within 5% of 2/7 is what an
+        // ordinary human week looks like, so it flagged normal members.)
 
         // ======================================================
         // 4. Check for consistent daily activity (same time every day)
@@ -721,154 +700,13 @@ class BehavioralAnalyzer {
         ];
     }
 
-    /**
-     * Analyze browsing pattern (page views before voting)
-     *
-     * @param int $userId
-     * @return array<string, mixed>
-     */
-    private function analyzeBrowsingPattern(int $userId): array {
-        // Get page views and votes sequence via repository
-        $actions = $this->auditLogRepo->getBrowsingAndVotingActions($userId, 30, 200);
+    // analyzeBrowsingPattern() removed (F-128, user decision): its blind-voting
+    // and fast-vote rules read 'page_view' / 'page_visit' / 'vote_up' audit rows
+    // that nothing writes, so they never fired. Rebuild only on real tracking.
 
-        if (count($actions) < 10) {
-            return [
-                'suspicious' => false,
-                'weight' => 0,
-                'reasons' => [],
-                'data_points' => count($actions)
-            ];
-        }
-
-        $suspicious = false;
-        $weight = 0;
-        $reasons = [];
-        $metrics = [];
-
-        // Check if votes happen without preceding page views
-        $votesWithoutViews = 0;
-        $totalVotes = 0;
-
-        for ($i = 0; $i < count($actions); $i++) {
-            if (strpos($actions[$i]->action, 'vote') === 0) {
-                $totalVotes++;
-                $foundView = false;
-
-                // Look for page view of same page in previous 5 minutes
-                for ($j = $i + 1; $j < min($i + 20, count($actions)); $j++) {
-                    if (($actions[$j]->action === 'page_view' || $actions[$j]->action === 'page_visit') &&
-                        $actions[$j]->target_id == $actions[$i]->target_id) {
-                        $timeDiff = strtotime($actions[$i]->created_at) - strtotime($actions[$j]->created_at);
-                        if ($timeDiff < 300) { // Within 5 minutes
-                            $foundView = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (!$foundView) {
-                    $votesWithoutViews++;
-                }
-            }
-        }
-
-        $metrics['total_votes'] = $totalVotes;
-        $metrics['votes_without_views'] = $votesWithoutViews;
-
-        if ($totalVotes > 0) {
-            $voteWithoutViewRatio = $votesWithoutViews / $totalVotes;
-            $metrics['vote_without_view_ratio'] = $voteWithoutViewRatio;
-
-            if ($voteWithoutViewRatio > BCC_TRUST_BEHAVIOR_BLIND_VOTE_HIGH) {
-                $suspicious = true;
-                $weight += 40;
-                $reasons[] = 'blind_voting';
-            } elseif ($voteWithoutViewRatio > BCC_TRUST_BEHAVIOR_BLIND_VOTE_MEDIUM) {
-                $weight += 15;
-                $reasons[] = 'frequent_blind_voting';
-            }
-        }
-
-        // Check for extremely fast voting after page view
-        $fastVotes = 0;
-        for ($i = 0; $i < count($actions); $i++) {
-            if ($actions[$i]->action === 'page_view' || $actions[$i]->action === 'page_visit') {
-                for ($j = $i - 1; $j >= max(0, $i - 5); $j--) {
-                    if (strpos($actions[$j]->action, 'vote') === 0 &&
-                        $actions[$j]->target_id == $actions[$i]->target_id) {
-                        $timeDiff = strtotime($actions[$j]->created_at) - strtotime($actions[$i]->created_at);
-                        if ($timeDiff < 2) { // Less than 2 seconds to vote after viewing
-                            $fastVotes++;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
-        $metrics['fast_votes'] = $fastVotes;
-
-        if ($fastVotes > 5) {
-            $suspicious = true;
-            $weight += 25;
-            $reasons[] = 'instant_voting';
-        }
-
-        return [
-            'suspicious' => $suspicious,
-            'weight' => $weight,
-            'reasons' => $reasons,
-            'metrics' => $metrics
-        ];
-    }
-
-    /**
-     * Analyze content creation pattern using user_info table
-     *
-     * @param int $userId
-     * @return array<string, mixed>
-     */
-    private function analyzeContentPattern(int $userId): array {
-        // Get user info from user_info table
-        $userInfo = $this->userInfoRepo->getByUserId($userId);
-
-        if (!$userInfo) {
-            return [
-                'suspicious' => false,
-                'weight' => 0,
-                'reasons' => []
-            ];
-        }
-
-        $hasPages = $userInfo->pages_owned > 0;
-        $hasPosts = $userInfo->posts_created > 0;
-        $hasComments = $userInfo->comments_made > 0;
-
-        $suspicious = false;
-        $weight = 0;
-        $reasons = [];
-
-        // Users who only vote but never create content are suspicious
-        $voteCount = $userInfo->votes_cast;
-
-        if ($voteCount > BCC_TRUST_BEHAVIOR_VOTER_ONLY_MIN && !$hasPages && !$hasPosts && !$hasComments) {
-            $suspicious = true;
-            $weight += 30;
-            $reasons[] = 'voter_only_no_content';
-        }
-
-        return [
-            'suspicious' => $suspicious,
-            'weight' => $weight,
-            'reasons' => $reasons,
-            'metrics' => [
-                'has_pages' => $hasPages,
-                'has_posts' => $hasPosts,
-                'has_comments' => $hasComments,
-                'vote_count' => $voteCount
-            ]
-        ];
-    }
+    // analyzeContentPattern() removed (F-128, user decision): its only rule,
+    // voter_only_no_content (+30), penalised members who vote without posting —
+    // voting is the core action.
 
     /**
      * Analyze consistency of behavior over time
