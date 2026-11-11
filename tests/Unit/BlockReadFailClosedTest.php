@@ -203,6 +203,40 @@ final class BlockReadFailClosedTest extends TestCase
     }
 
     /**
+     * ⚠⚠ THE VIEWER IS NOT BLOCKED BY THEMSELVES. The fallback set is
+     * built from MESSAGE AUTHORS, and the viewer authors their own
+     * replies — so withholding "every author" would replace the
+     * viewer's OWN text with "Message from someone you have blocked"
+     * and flag `sender_blocked_by_viewer: true` against themselves.
+     *
+     * ⚠ It is also a set the real probe cannot produce:
+     * `getBlockedSetOrUnknown` filters `$id !== $blockerId`, so the
+     * viewer never appears in a successful result. The fallback must not
+     * be MORE inclusive than any real answer.
+     */
+    public function testTheFallbackSetExcludesTheViewersOwnId(): void
+    {
+        $authors = [self::VIEWER => true, self::SENDER => true, 11 => true];
+
+        /** @var array<int, true> $out */
+        $out = self::callPrivate('withholdAllExceptViewer', [$authors, self::VIEWER]);
+
+        $this->assertArrayNotHasKey(self::VIEWER, $out, "the viewer's own messages must not be withheld");
+        $this->assertSame([self::SENDER => true, 11 => true], $out, 'everyone else is still withheld');
+    }
+
+    /** A viewer who authored nothing in the set changes nothing. */
+    public function testTheFallbackIsUnchangedWhenTheViewerAuthoredNothing(): void
+    {
+        $authors = [self::SENDER => true, 11 => true];
+
+        $this->assertSame(
+            $authors,
+            self::callPrivate('withholdAllExceptViewer', [$authors, self::VIEWER])
+        );
+    }
+
+    /**
      * ⚠⚠ THE TWO WITHHOLD SITES, pinned at the SOURCE rather than
      * behaviourally, and I would rather say that plainly than imply
      * stronger coverage than exists: exercising `listInbox`/`getThread`
@@ -223,8 +257,13 @@ final class BlockReadFailClosedTest extends TestCase
             (string) (new ReflectionClass(MessagesService::class))->getFileName()
         );
 
-        $this->assertStringContainsString('?? $lastAuthorIds', $src, 'inbox preview must withhold ALL');
-        $this->assertStringContainsString('?? $pageAuthorIds', $src, 'thread body must withhold ALL');
+        $this->assertSame(
+            2,
+            substr_count($src, '?? self::withholdAllExceptViewer('),
+            'both withhold sites must fall back through the viewer-excluding helper'
+        );
+        $this->assertSame(0, substr_count($src, '?? $lastAuthorIds'), 'the raw map would include the viewer');
+        $this->assertSame(0, substr_count($src, '?? $pageAuthorIds'), 'the raw map would include the viewer');
         $this->assertSame(
             2,
             substr_count($src, 'getBlockedSetOrUnknown('),

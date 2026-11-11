@@ -236,9 +236,9 @@ final class MessagesService
         // unreadable block table withholds EVERY preview instead. Ugly
         // on a DB error, safe, and self-correcting on the next request.
         // `$lastAuthorIds` is already keyed `[authorId => true]`, so it IS the
-        // "everyone is blocked" set.
+        // "everyone is blocked" set — minus the viewer; see the helper.
         $blockedSet = PeepSoBlockRepository::getBlockedSetOrUnknown($viewerId, array_keys($lastAuthorIds))
-            ?? $lastAuthorIds;
+            ?? self::withholdAllExceptViewer($lastAuthorIds, $viewerId);
 
         $items = [];
         foreach ($rows as $r) {
@@ -435,9 +435,9 @@ final class MessagesService
         // unreadable block table withholds EVERY preview instead. Ugly
         // on a DB error, safe, and self-correcting on the next request.
         // `$pageAuthorIds` is already keyed `[authorId => true]`, so it IS the
-        // "everyone is blocked" set.
+        // "everyone is blocked" set — minus the viewer; see the helper.
         $blockedSet = PeepSoBlockRepository::getBlockedSetOrUnknown($viewerId, array_keys($pageAuthorIds))
-            ?? $pageAuthorIds;
+            ?? self::withholdAllExceptViewer($pageAuthorIds, $viewerId);
 
         $peerId = self::resolvePeerId(
             $participants,
@@ -981,6 +981,33 @@ final class MessagesService
             return 0;
         }
         return PeepSoMessageRepository::getUnreadConversationCountForUser($viewerId);
+    }
+
+    /**
+     * The "everyone is blocked" set used when the block read FAILS.
+     *
+     * ⚠⚠ THE VIEWER MUST BE REMOVED. The author-id maps are built from
+     * MESSAGE AUTHORS, and in any conversation the viewer has replied to
+     * they author some of those messages — so a naive "treat every
+     * author as blocked" fallback makes THE VIEWER'S OWN TEXT render as
+     * "Message from someone you have blocked", with
+     * `sender_blocked_by_viewer: true` against themselves. Withholding a
+     * blocked sender's words is the feature; withholding the viewer's
+     * own is just a bug.
+     *
+     * ⚠ It is also a set the real probe CANNOT RETURN:
+     * `getBlockedSetOrUnknown` filters `$id !== $blockerId`, so the
+     * viewer never appears in a successful result. A fallback including
+     * them would be strictly MORE inclusive than any real answer, which
+     * is the tell that it was wrong rather than merely untidy.
+     *
+     * @param array<int, true> $authorIds
+     * @return array<int, true>
+     */
+    private static function withholdAllExceptViewer(array $authorIds, int $viewerId): array
+    {
+        unset($authorIds[$viewerId]);
+        return $authorIds;
     }
 
     // ── Read eligibility (card view-models) ─────────────────────────────
