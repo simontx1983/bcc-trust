@@ -1558,15 +1558,10 @@ add_action('init', function () {
 |--------------------------------------------------------------------------
 */
 
-add_action('bcc.trust.recalculate_score', function (int $pageId) {
-    try {
-        \BCC\Trust\Core\Plugin::instance()->voteService()->recalculateScore($pageId);
-    } catch (\Exception $e) {
-        \BCC\Core\Log\Logger::info('[bcc-trust] Score recalculation failed', [
-            'page_id' => $pageId,
-            'error'   => $e->getMessage(),
-        ]);
-    }
+add_action('bcc.trust.recalculate_score', function (int $pageId): void {
+    // Never throws: VoteService::recalculateScoreOrRequeue() catches
+    // \Throwable, logs at error and re-flags the page for the cron (F-110).
+    \BCC\Trust\Core\Plugin::instance()->voteService()->recalculateScoreOrRequeue($pageId);
 });
 
 // Admin report penalty — fired by the disputes admin panel.
