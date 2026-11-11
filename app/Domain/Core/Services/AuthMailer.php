@@ -276,9 +276,13 @@ final class AuthMailer
                   <p style="margin:0 0 14px;font-size:16px;font-weight:500;color:#c9d1d9;line-height:1.5;">
                     Hello, {$safeDisplayName}
                   </p>
-                  <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#8b949e;">
+                  <p style="margin:0 0 14px;font-size:15px;line-height:1.65;color:#8b949e;">
                     Enter this code in the app to confirm your email and finish setting up your account.
                     The code is valid for&nbsp;15&nbsp;minutes.
+                  </p>
+                  <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#c9d1d9;">
+                    <strong>If you didn&rsquo;t create this account, ignore this email.</strong>
+                    Don&rsquo;t enter the code or click the button &mdash; the address stays unverified unless you do.
                   </p>
 
                   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 28px;border-collapse:separate;">
@@ -314,7 +318,7 @@ final class AuthMailer
 
                   <p style="margin:0;font-size:13px;line-height:1.6;color:#6e7681;">
                     The button link expires in 24&nbsp;hours. If you didn&rsquo;t create a {$safeSiteName} account,
-                    you can safely ignore this email &mdash; your address will not be used.
+                    ignore this email &mdash; nothing is verified until the code is entered or the button is clicked.
                   </p>
 
                 </td>

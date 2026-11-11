@@ -253,20 +253,29 @@ final class OAuthController
             $wpUser = get_user_by('email', $email);
             if ($wpUser instanceof \WP_User) {
                 $candidateId = (int) $wpUser->ID;
-                // Anti-pre-registration gate: never link into an account whose
-                // email is pending verification ('0'). Such an email is
-                // user-typed (email signup, or X signup via oauth-complete) —
-                // its owner hasn't proven inbox control, so an email match
-                // proves nothing about identity. Without this gate, an
-                // attacker could sign up via X with a victim's address and the
-                // victim's first Google sign-in would land inside the
-                // attacker's account. '' (legacy) and '1' allow, matching the
-                // login() convention.
+                // Anti-pre-registration gate: link by email ONLY into an account
+                // whose email ownership was proven ('1'). Fail closed on '0'
+                // (pending: email signup, X signup, wallet signup), '' (legacy,
+                // never verified) and anything else — an email match against an
+                // unproven address proves nothing about identity. Without this,
+                // an attacker could sign up (wallet or X) with a victim's
+                // address and the victim's first Google sign-in would land
+                // inside the attacker's account. A '' account can verify via
+                // /auth/resend-verification and link afterwards.
                 $emailVerified = (string) get_user_meta($candidateId, AuthSupport::META_EMAIL_VERIFIED, true);
-                if ($emailVerified !== '0') {
+                if (AuthSupport::mayLinkOauthByEmail($emailVerified)) {
                     $userId = $candidateId;
                     // Store the OAuth link so the next sign-in skips the email lookup.
                     update_user_meta($userId, AuthSupport::META_OAUTH_PREFIX . $provider, $providerId);
+                    // A new identity was just attached to this account. Revoke
+                    // every Bearer token minted before the link, so a session
+                    // that predates it (e.g. one held by whoever created the
+                    // account before the email was proven) cannot outlive it.
+                    // Revoke FIRST; the token minted below carries the bumped
+                    // version and survives. Provider-id sign-ins (the lookup
+                    // above) do not reach this branch, so only the first link
+                    // revokes.
+                    JwtToken::revokeAllForUser($userId);
                 }
             }
         }
@@ -478,18 +487,7 @@ final class OAuthController
             // /auth/resend-verification works for this account because the
             // flag is '0'. Best-effort — a mail failure does not roll back
             // the signup, and the JWT below is issued regardless.
-            $otpCode     = AuthSupport::generateOtp();
-            $verifyToken = AuthSupport::generateVerifyToken();
-            AuthSupport::storeOtpForUser($userIdInt, $otpCode);
-            AuthSupport::storeVerifyToken($verifyToken, $userIdInt);
-
-            $verifyPath = '/verify-email?email=' . rawurlencode($email) . '&token=' . rawurlencode($verifyToken);
-            AuthMailer::sendVerificationEmail(
-                $userIdInt,
-                $email,
-                $otpCode,
-                FrontendRedirect::defaultReturn($verifyPath)
-            );
+            AuthSupport::beginEmailVerification($userIdInt, $email);
         }
 
         $response = ApiResponse::ok([
