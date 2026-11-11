@@ -32,9 +32,94 @@ if (!defined('ABSPATH')) {
 
 if (!function_exists('bcc_trust_retire_stargaze_chain')) {
 
+    /** Log a failed retirement step and back off for an hour (F-41). */
+    function bcc_trust_stargaze_retire_failed(string $step): void
+    {
+        global $wpdb;
+        set_transient('bcc_trust_stargaze_retire_backoff', 1, HOUR_IN_SECONDS);
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] stargaze retirement step failed; not marking retired, retrying in 1h', [
+                'step'     => $step,
+                'db_error' => $wpdb->last_error,
+            ]);
+        }
+    }
+
+    /**
+     * Rows OUTSIDE the retirement's own delete set that still reference the
+     * stargaze chain (F-127), as [label => count] for every non-zero count.
+     * Tables that do not exist are skipped. Returns null if any probe or
+     * count failed — unknown must not be read as "none".
+     *
+     * @return array<string, int>|null
+     */
+    function bcc_trust_stargaze_retire_dependents(int $chainId): ?array
+    {
+        global $wpdb;
+        $found = [];
+
+        foreach ([
+            'bcc_nft_holdings',
+            'bcc_onchain_delegations',
+            'bcc_onchain_validators',
+            'bcc_onchain_claims',
+            'bcc_collection_signals',
+            'bcc_chain_checkpoints',
+            'bcc_chain_nft_capabilities',
+            'bcc_blog_chain_tags',
+            'bcc_nft_spam_contracts',
+        ] as $suffix) {
+            $table  = $wpdb->prefix . $suffix;
+            $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+            if ($exists === null && $wpdb->last_error !== '') {
+                return null;
+            }
+            if ($exists !== $table) {
+                continue;
+            }
+            // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+            $count = $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM `{$table}` WHERE chain_id = %d", $chainId));
+            if ($count === null) {
+                return null;
+            }
+            if ((int) $count > 0) {
+                $found[$suffix] = (int) $count;
+            }
+        }
+
+        // Gated groups (any non-trashed status — a draft or private group can
+        // be published later) whose gate points at a stargaze collection.
+        $collections = $wpdb->prefix . 'bcc_onchain_collections';
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $groups = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(DISTINCT pm.post_id)
+               FROM {$wpdb->postmeta} pm
+               JOIN {$wpdb->posts} p ON p.ID = pm.post_id AND p.post_status <> 'trash'
+               JOIN `{$collections}` c ON c.id = CAST(pm.meta_value AS UNSIGNED)
+              WHERE pm.meta_key = '_bcc_gate_collection_id'
+                AND c.chain_id = %d",
+            $chainId
+        ));
+        if ($groups === null) {
+            return null;
+        }
+        if ((int) $groups > 0) {
+            $found['gated_groups'] = (int) $groups;
+        }
+
+        return $found;
+    }
+
     function bcc_trust_retire_stargaze_chain(): void
     {
         if (get_option('bcc_trust_stargaze_chain_retired')) {
+            return;
+        }
+
+        // F-41 / F-127: a failed step or a refusal leaves this unstamped and
+        // re-checks at most hourly (a transient, so a permanently failing
+        // environment is not re-scanned on every request).
+        if (get_transient('bcc_trust_stargaze_retire_backoff')) {
             return;
         }
 
@@ -52,21 +137,65 @@ if (!function_exists('bcc_trust_retire_stargaze_chain')) {
         // the chain row, so it runs before the missing-row short-circuit.
         $collections = $wpdb->prefix . 'bcc_onchain_collections';
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $deleted['source_renamed'] = (int) $wpdb->query(
+        $renamed = $wpdb->query(
             "UPDATE `{$collections}` SET source = 'toplist' WHERE source = 'stargaze'"
         );
+        if ($renamed === false) {
+            bcc_trust_stargaze_retire_failed('rename stargaze source');
+            return;
+        }
+        $deleted['source_renamed'] = (int) $renamed;
 
         // Resolve by slug — ids differ per install, never hardcode.
         $chainId = $wpdb->get_var($wpdb->prepare(
             "SELECT id FROM `{$chains}` WHERE slug = %s",
             'stargaze'
         ));
+        if ($chainId === null && $wpdb->last_error !== '') {
+            // A failed lookup is UNKNOWN, not "no stargaze chain".
+            bcc_trust_stargaze_retire_failed('resolve stargaze chain id');
+            return;
+        }
 
         if ($chainId === null) {
             update_option('bcc_trust_stargaze_chain_retired', time(), false);
             return;
         }
         $chainId = (int) $chainId;
+
+        // ── F-127: never orphan what this does not delete ──────────────
+        // The deletes below remove selections, wallet links, pieces,
+        // collections and the chain row. Rows elsewhere keyed by this chain
+        // (holdings, delegations, validators, claims, signals, checkpoints,
+        // capabilities, blog tags, spam rules) and gated groups pointing at
+        // a stargaze collection would be left dangling: a gated group whose
+        // collection id no longer exists can never be joined. Rather than
+        // guess which of those are safe to delete, the retirement REFUSES
+        // when any exist, logs the inventory, and leaves everything intact
+        // for an operator.
+        $dependents = bcc_trust_stargaze_retire_dependents($chainId);
+        if ($dependents === null) {
+            bcc_trust_stargaze_retire_failed('inventory dependents');
+            return;
+        }
+        if ($dependents !== []) {
+            set_transient('bcc_trust_stargaze_retire_backoff', 1, HOUR_IN_SECONDS);
+            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::error(
+                    '[bcc-trust] stargaze retirement refused: rows elsewhere still reference the chain; nothing deleted',
+                    ['chain_id' => $chainId, 'dependents' => $dependents]
+                );
+            }
+            return;
+        }
+
+        // All-or-nothing: a failure part-way used to leave collections whose
+        // chain row was already gone (unreachable through the admin, which
+        // INNER JOINs chains), with the retired flag stamped regardless.
+        if ($wpdb->query('START TRANSACTION') === false) {
+            bcc_trust_stargaze_retire_failed('start transaction');
+            return;
+        }
         foreach ([
             'bcc_user_nft_selections',
             'bcc_wallet_links',
@@ -75,17 +204,35 @@ if (!function_exists('bcc_trust_retire_stargaze_chain')) {
         ] as $suffix) {
             $table = $wpdb->prefix . $suffix;
             // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-            $deleted[$suffix] = (int) $wpdb->query($wpdb->prepare(
+            $result = $wpdb->query($wpdb->prepare(
                 "DELETE FROM `{$table}` WHERE chain_id = %d",
                 $chainId
             ));
+            if ($result === false) {
+                $wpdb->query('ROLLBACK');
+                bcc_trust_stargaze_retire_failed("delete {$suffix}");
+                return;
+            }
+            $deleted[$suffix] = (int) $result;
         }
 
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $deleted['bcc_chains'] = (int) $wpdb->query($wpdb->prepare(
+        $result = $wpdb->query($wpdb->prepare(
             "DELETE FROM `{$chains}` WHERE id = %d",
             $chainId
         ));
+        if ($result === false) {
+            $wpdb->query('ROLLBACK');
+            bcc_trust_stargaze_retire_failed('delete chain row');
+            return;
+        }
+        $deleted['bcc_chains'] = (int) $result;
+
+        if ($wpdb->query('COMMIT') === false) {
+            $wpdb->query('ROLLBACK');
+            bcc_trust_stargaze_retire_failed('commit');
+            return;
+        }
 
         if (class_exists('\\BCC\\Trust\\Onchain\\Repositories\\ChainRepository')) {
             \BCC\Trust\Onchain\Repositories\ChainRepository::clearCache();
