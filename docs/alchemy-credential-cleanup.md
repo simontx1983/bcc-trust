@@ -316,7 +316,16 @@ normally is not.
       it will stop working, because it is not in the network map. Decide that
       deliberately before including it in the chain list.
 - [ ] `grep` the environment's `error_log` for the removed key: **zero** matches,
-      reported as a count only.
+      reported as a count only. ⚠ Never put the key on the command line — an
+      argument is visible in `ps` and lands in shell history. Read it without echo
+      and pass it on stdin, or from a `0600` file you delete afterwards:
+
+      ```sh
+      read -rs K; grep -cFf - error_log <<<"$K"; unset K
+      ```
+
+      (bash; `-F` fixed string, `-c` count only, `-f -` the pattern from stdin —
+      the here-string feeds it without the key ever becoming an argument.)
 - [ ] One bounded live call per launch chain succeeds (an existing read path — do
       **not** create a collection or call `addManual()`).
 - [ ] The superseded key no longer authenticates. If the rotation was performed with

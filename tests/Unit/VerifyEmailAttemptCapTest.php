@@ -148,6 +148,29 @@ final class VerifyEmailAttemptCapTest extends TestCase
         self::assertSame(200, self::verify(self::CODE));
     }
 
+    /**
+     * L2: every attempt is counted BEFORE the compare — even the RIGHT code
+     * is refused, uncompared, once MAX attempts have been counted (the state
+     * concurrent guesses leave behind), and the code is burned.
+     */
+    public function testAttemptsBeyondTheCapAreRefusedBeforeAnyCompare(): void
+    {
+        $GLOBALS['__bcc_ph']['throttle_hits']['verify_email_attempt:' . self::USER . ':' . AuthSupport::emailOtpIdentity(self::USER)] = AuthSupport::VERIFY_EMAIL_MAX_FAILURES;
+
+        self::assertSame(400, self::verify(self::CODE));
+        self::assertNull(AuthSupport::emailOtpIdentity(self::USER), 'burned');
+        self::assertSame('0', $GLOBALS['__bcc_ph']['meta'][self::USER][AuthSupport::META_EMAIL_VERIFIED], 'not verified');
+    }
+
+    public function testEveryAttemptIsCountedIncludingTheRightOne(): void
+    {
+        $key = 'verify_email_attempt:' . self::USER . ':' . AuthSupport::emailOtpIdentity(self::USER);
+
+        self::verify(self::CODE);
+
+        self::assertSame(1, $GLOBALS['__bcc_ph']['throttle_hits'][$key] ?? 0);
+    }
+
     public function testTheBucketKeyIsExplicitAndNeverTheCode(): void
     {
         self::verify('000000');

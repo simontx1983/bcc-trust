@@ -528,7 +528,9 @@ final class AnnouncementViewServiceTest extends TestCase
 
         $expected = Caps::forRow(
             self::operator(),
-            ['status' => Caps::STATUS_DRAFT, 'is_archived' => false, 'comments_enabled' => true],
+            // The fixture row's post_author (7) — the service passes it in,
+            // and since F-147 it decides the author-only edit/pin/publish.
+            ['author_user_id' => '7', 'status' => Caps::STATUS_DRAFT, 'is_archived' => false, 'comments_enabled' => true],
             $viewer,
             true
         );

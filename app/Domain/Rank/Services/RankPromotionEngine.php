@@ -66,6 +66,14 @@ class RankPromotionEngine
     /** Seconds before a budget-cut sweep's continuation runs. */
     private const CONTINUATION_DELAY = 60;
 
+    /**
+     * F-13 follow-up: the single-flight lock (DB::table() prefix applied).
+     * The daily event and a same-day continuation could otherwise overlap,
+     * read the same cursor, and evaluate the same members twice — which
+     * can send a decay warning twice.
+     */
+    private const EVALUATE_LOCK = 'rank_daily_evaluate';
+
     /** Recovery-reminder marks: fire when exactly this many whole days remain. */
     private const REMINDER_DAYS = [30, 7];
 
@@ -447,6 +455,21 @@ class RankPromotionEngine
      */
     public function runDailyEvaluate(): void
     {
+        if (!$this->acquireEvaluateLock()) {
+            \BCC\Core\Log\Logger::info('[bcc-trust] rank daily evaluate already running; skipping this tick');
+            return;
+        }
+
+        try {
+            $this->sweepDailyEvaluate();
+        } finally {
+            $this->releaseEvaluateLock();
+        }
+    }
+
+    /** The daily evaluate sweep body; runs only under the single-flight lock. */
+    private function sweepDailyEvaluate(): void
+    {
         $deadline = $this->now() + self::TIME_BUDGET_SECONDS;
         $cursor   = $this->readEvaluateCursor();
 
@@ -515,5 +538,25 @@ class RankPromotionEngine
         if (!wp_next_scheduled(RankScheduler::EVENT_DAILY_EVALUATE_CONTINUE)) {
             wp_schedule_single_event(time() + self::CONTINUATION_DELAY, RankScheduler::EVENT_DAILY_EVALUATE_CONTINUE);
         }
+    }
+
+    /** Zero wait, like the tier snapshot: a held lock means skip this tick. */
+    protected function acquireEvaluateLock(): bool
+    {
+        return \BCC\Core\DB\AdvisoryLock::acquire(self::evaluateLockName(), 0);
+    }
+
+    protected function releaseEvaluateLock(): void
+    {
+        \BCC\Core\DB\AdvisoryLock::release(self::evaluateLockName());
+    }
+
+    /**
+     * `{prefix}bcc_rank_daily_evaluate`. GET_LOCK names are server-wide, so
+     * the table prefix scopes the lock to this site.
+     */
+    public static function evaluateLockName(): string
+    {
+        return substr(\BCC\Core\DB\DB::table(self::EVALUATE_LOCK), 0, 64);
     }
 }
