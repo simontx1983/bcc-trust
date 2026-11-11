@@ -833,6 +833,13 @@ bcc_onchain_create_operator_profiles_table();
 require_once dirname(__DIR__, 2) . '/includes/database/schema-nft-holdings.php';
 bcc_onchain_create_nft_holdings_table();
 
+// NFT piece cache + showcase selections — NftImageWriteRulesIntegrationTest
+// (F-165): the image write paths.
+require_once dirname(__DIR__, 2) . '/includes/database/schema-collection-pieces.php';
+bcc_onchain_create_collection_pieces_table();
+require_once dirname(__DIR__, 2) . '/includes/database/schema-nft-selections.php';
+bcc_onchain_create_user_nft_selections_table();
+
 // CosmWasm CW-721 discovery. These four are what
 // CosmwasmRepositoryIntegrationTest runs its REAL SQL against — the unit
 // suite's `$wpdb` double returns queued fixtures regardless of the query

@@ -550,6 +550,7 @@ return array(
     'BCC\\Trust\\Onchain\\ValueObjects\\GatedGroupConfig' => $baseDir . '/app/Domain/Onchain/ValueObjects/GatedGroupConfig.php',
     'BCC\\Trust\\Onchain\\ValueObjects\\HoldingsCount' => $baseDir . '/app/Domain/Onchain/ValueObjects/HoldingsCount.php',
     'BCC\\Trust\\Onchain\\ValueObjects\\IntakeMetadata' => $baseDir . '/app/Domain/Onchain/ValueObjects/IntakeMetadata.php',
+    'BCC\\Trust\\Onchain\\ValueObjects\\IpfsImageUrl' => $baseDir . '/app/Domain/Onchain/ValueObjects/IpfsImageUrl.php',
     'BCC\\Trust\\Onchain\\ValueObjects\\JoinResult' => $baseDir . '/app/Domain/Onchain/ValueObjects/JoinResult.php',
     'BCC\\Trust\\Onchain\\ValueObjects\\MarketplaceResearchUrl' => $baseDir . '/app/Domain/Onchain/ValueObjects/MarketplaceResearchUrl.php',
     'BCC\\Trust\\Onchain\\ValueObjects\\ProviderFailureKind' => $baseDir . '/app/Domain/Onchain/ValueObjects/ProviderFailureKind.php',
