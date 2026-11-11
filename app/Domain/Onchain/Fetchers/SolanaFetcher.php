@@ -631,7 +631,7 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *     attributes: list<array{trait_type: string, value: string|int|float|bool, rarity_pct?: float}>
      * }|null
      */
-    public function fetchMetadataForMint(string $mint): ?array
+    public function fetchMetadataForMint(string $mint, ?int $deadlineAt = null): ?array
     {
         if ($mint === '') {
             return null;
@@ -663,6 +663,10 @@ class SolanaFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         ], [
             'label'    => 'Helius getAsset',
             'chain_id' => (int) $this->chain->id,
+            // F-156: see the matching note in EvmFetcher. Solana's 30s
+            // timeout makes this the path where an uncapped attempt would
+            // overshoot a 35s budget by the most.
+            'deadline_at' => $deadlineAt,
         ]);
 
         if (is_wp_error($response)) {

@@ -551,7 +551,7 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *     attributes: list<array{trait_type: string, value: string|int|float|bool, rarity_pct?: float}>
      * }|null
      */
-    public function fetchMetadataForToken(string $contract, string $tokenId): ?array
+    public function fetchMetadataForToken(string $contract, string $tokenId, ?int $deadlineAt = null): ?array
     {
         // ⚠ `jsonRpcUrl()` for the same reason as the transfers walk: the old code
         // accepted any non-template endpoint here and POSTed to it. Narrowing to
@@ -590,6 +590,10 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         ], [
             'label'    => 'EVM alchemy_getNFTMetadata',
             'chain_id' => (int) $this->chain->id,
+            // F-156: the NFT-piece route's shared budget when it is the
+            // caller; null for background enrichment, which shares this
+            // method and keeps its own (unbounded) budget.
+            'deadline_at' => $deadlineAt,
         ]);
 
         if (is_wp_error($response)) {

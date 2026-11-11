@@ -67,7 +67,9 @@ final class HeliusSubscriptionManagerTest extends TestCase
         self::assertTrue(HeliusSubscriptionManager::addAddress(10, self::NEW));
         self::assertSame([[self::A, self::B, self::NEW]], \HeliusWorld::$puts);
         self::assertSame([[10, true]], \HeliusWorld::$marked);
-        self::assertSame(['acquire:bcc_helius_address_list:10:ok', 'release:bcc_helius_address_list'], \HeliusWorld::$lockLog);
+        // L2: the lock name carries this site's table prefix, so staging and
+        // production sharing one MySQL server do not serialise each other.
+        self::assertSame(['acquire:wpsa6_bcc_helius_address_list:10:ok', 'release:wpsa6_bcc_helius_address_list'], \HeliusWorld::$lockLog);
         self::assertLockBalanced();
     }
 
@@ -242,17 +244,105 @@ final class HeliusSubscriptionManagerTest extends TestCase
         self::assertSame([], \HeliusWorld::$puts);
     }
 
-    public function testAGenuinelyEmptyLocalSetStillConvergesTheRemoteToEmpty(): void
+    public function testShrinkingANonEmptyRemoteListToEmptyIsRefusedWithoutTheOverride(): void
     {
-        // A SUCCESSFUL read of no Solana wallets is a real answer: the stale
-        // remote addresses go. Only an unknown read is refused.
+        // F-64 review shrink floor. A local set that reads as empty while the
+        // remote holds addresses is far more likely a bad read than a world
+        // where every Solana wallet unlinked at once — and the PUT would
+        // unsubscribe everyone. Refused, flags untouched, lock released.
         \HeliusWorld::remoteList([self::A, self::B]);
 
         $stats = HeliusSubscriptionManager::resyncFromWalletLinks();
 
+        self::assertSame([], \HeliusWorld::$puts);
+        self::assertSame(['remote_count' => 2, 'local_count' => 0, 'applied' => false, 'refused' => 'shrink'], $stats);
+        self::assertSame([], \HeliusWorld::$marked);
+        self::assertLockBalanced();
+    }
+
+    public function testTheOperatorOverrideLetsAGenuineMassUnlinkConverge(): void
+    {
+        \HeliusWorld::remoteList([self::A, self::B]);
+
+        $stats = HeliusSubscriptionManager::resyncFromWalletLinks(true);
+
         self::assertSame([[]], \HeliusWorld::$puts);
         self::assertSame(['remote_count' => 2, 'local_count' => 0, 'applied' => true], $stats);
         self::assertLockBalanced();
+    }
+
+    /** @return list<string> */
+    private static function addresses(string $prefix, int $n): array
+    {
+        $out = [];
+        for ($i = 0; $i < $n; $i++) {
+            $out[] = $prefix . str_pad((string) $i, 40, '0', STR_PAD_LEFT);
+        }
+        return $out;
+    }
+
+    /** @param list<string> $addresses */
+    private static function localUnmanaged(array $addresses): void
+    {
+        $rows = [];
+        foreach ($addresses as $i => $a) {
+            $rows[] = ['id' => 1000 + $i, 'wallet_address' => $a];
+        }
+        \HeliusWorld::$links[0] = $rows;
+    }
+
+    public function testShrinkingALargeListToUnderHalfIsRefused(): void
+    {
+        $remote = self::addresses('R', 20);
+        \HeliusWorld::remoteList($remote);
+        self::localUnmanaged(array_slice($remote, 0, 9));    // 9 of 20: under half
+
+        $stats = HeliusSubscriptionManager::resyncFromWalletLinks();
+
+        self::assertSame('shrink', $stats['refused'] ?? null);
+        self::assertSame([], \HeliusWorld::$puts);
+    }
+
+    public function testShrinkingALargeListToExactlyHalfIsApplied(): void
+    {
+        $remote = self::addresses('R', 20);
+        \HeliusWorld::remoteList($remote);
+        self::localUnmanaged(array_slice($remote, 0, 10));   // 10 of 20: not under half
+
+        $stats = HeliusSubscriptionManager::resyncFromWalletLinks();
+
+        self::assertTrue($stats['applied'] ?? false);
+        self::assertArrayNotHasKey('refused', (array) $stats);
+        self::assertCount(1, \HeliusWorld::$puts);
+    }
+
+    public function testASmallListIsExemptFromTheRatio(): void
+    {
+        // 3 → 1 is two-thirds gone, but below the 10-address minimum an
+        // ordinary unlink must still converge without an operator.
+        $remote = self::addresses('R', 3);
+        \HeliusWorld::remoteList($remote);
+        self::localUnmanaged([$remote[0]]);
+
+        $stats = HeliusSubscriptionManager::resyncFromWalletLinks();
+
+        self::assertTrue($stats['applied'] ?? false);
+        self::assertSame([[$remote[0]]], \HeliusWorld::$puts);
+    }
+
+    public function testTheListPutGoesThroughTheHardenedClientNotARawRequest(): void
+    {
+        // SafeHttpClient's SSRF hardening is applied by ApiRetry::post (via
+        // SafeHttpClient::prepareArgs). The PUT used to bypass it with a bare
+        // wp_remote_request().
+        \HeliusWorld::remoteList([self::A]);
+
+        self::assertTrue(HeliusSubscriptionManager::addAddress(10, self::NEW));
+
+        self::assertSame(0, \HeliusWorld::$rawRequests, 'no bare wp_remote_request');
+        self::assertCount(1, \HeliusWorld::$postArgs);
+        self::assertSame('PUT', \HeliusWorld::$postArgs[0]['method'] ?? null);
+        self::assertSame([[self::A, self::NEW]], \HeliusWorld::$puts);
     }
 
     public function testResyncMarksEveryListedRowManaged(): void

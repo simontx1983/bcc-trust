@@ -66,8 +66,17 @@ namespace {
 
         public static bool $throwInsideLock = false;
 
+        /** Calls that bypassed ApiRetry/SafeHttpClient via a bare wp_remote_request(). */
+        public static int $rawRequests = 0;
+
+        /** @var list<array<string, mixed>> the args of every ApiRetry::post call */
+        public static array $postArgs = [];
+
         public static function reset(): void
         {
+            self::$rawRequests   = 0;
+            self::$postArgs      = [];
+            $GLOBALS['wpdb']     = (object) ['prefix' => 'wpsa6_'];
             self::$options       = ['bcc_helius_shared_webhook_id' => 'wh-1'];
             self::$gets          = [];
             self::$putCodes      = [];
@@ -99,6 +108,18 @@ namespace {
 }
 
 namespace BCC\Core\DB {
+    if (!class_exists(__NAMESPACE__ . '\\DB', false)) {
+        // Same convention as the real bcc-core DB::table(): {prefix}bcc_{name}.
+        final class DB
+        {
+            public static function table(string $name): string
+            {
+                $prefix = isset($GLOBALS['wpdb']->prefix) ? (string) $GLOBALS['wpdb']->prefix : '';
+                return $prefix . 'bcc_' . $name;
+            }
+        }
+    }
+
     if (!class_exists(__NAMESPACE__ . '\\AdvisoryLock', false)) {
         class AdvisoryLock
         {
@@ -174,6 +195,26 @@ namespace BCC\Trust\Onchain\Support {
             public static function request(callable $fn, array $options = [])
             {
                 return $fn();
+            }
+
+            /**
+             * The PUT now arrives here (SafeHttpClient-hardened path), with
+             * `method => PUT` in the args.
+             *
+             * @param array<string, mixed> $args
+             * @param array<string, mixed> $options
+             * @return array{code: int, body: string}|\WP_Error
+             */
+            public static function post(string $url, array $args = [], array $options = [])
+            {
+                \HeliusWorld::$postArgs[] = $args;
+                if (($args['method'] ?? 'POST') !== 'PUT') {
+                    return new \WP_Error('unexpected', 'only the address-list PUT is modelled');
+                }
+                $decoded = json_decode((string) ($args['body'] ?? ''), true);
+                \HeliusWorld::$puts[] = is_array($decoded) ? array_values((array) ($decoded['accountAddresses'] ?? [])) : [];
+                $code = \HeliusWorld::$putCodes === [] ? 200 : array_shift(\HeliusWorld::$putCodes);
+                return ['code' => $code, 'body' => '{}'];
             }
         }
     }
@@ -269,6 +310,7 @@ namespace BCC\Trust\Onchain\Services {
          */
         function wp_remote_request(string $url, array $args = []): array
         {
+            \HeliusWorld::$rawRequests++;
             $decoded = json_decode((string) ($args['body'] ?? ''), true);
             \HeliusWorld::$puts[] = is_array($decoded) ? array_values((array) ($decoded['accountAddresses'] ?? [])) : [];
             $code = \HeliusWorld::$putCodes === [] ? 200 : array_shift(\HeliusWorld::$putCodes);
