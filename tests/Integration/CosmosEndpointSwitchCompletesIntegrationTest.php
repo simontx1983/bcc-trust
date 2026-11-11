@@ -37,10 +37,10 @@ require_once __DIR__ . '/endpoint-switch-integration-stubs.php';
  *      cache is seeded with a sentinel address from TEST-NET-3.
  *
  * ⚠ AND THE STUBBED RESOLVER IS PROVED, NOT ASSUMED.
- * `prepareArgs()` records what it pinned in `SafeHttpClient::$pinnedResolves`,
- * so {@see testTheProofIsMadeWithoutResolvingTheHost} reads the sentinel back
- * out. If the resolver had been consulted the pinned address would be a real
- * one, and that test would fail.
+ * `prepareArgs()` puts what it pinned into the request's OWN args, so
+ * {@see testTheProofIsMadeWithoutResolvingTheHost} reads the sentinel back out
+ * of the args the transport was handed. If the resolver had been consulted the
+ * pinned address would be a real one, and that test would fail.
  *
  * So the REAL `CosmosEndpointVerifier` runs, against the REAL
  * `CosmosEndpointPolicy`, and its answer is decided by a scripted body — while
@@ -378,16 +378,21 @@ final class CosmosEndpointSwitchCompletesIntegrationTest extends TestCase
         return $out;
     }
     /**
-     * ⚠ NO NAME WAS RESOLVED. The sentinel address is read back out of
-     * `SafeHttpClient::$pinnedResolves`, so the address came from the seeded
+     * ⚠ NO NAME WAS RESOLVED. The sentinel address is read back out of the
+     * args the transport was handed, so the address came from the seeded
      * resolver cache and not from the OS resolver. A real lookup would have
      * pinned a real IP and this would fail.
      *
-     * ⚠⚠ CAPTURED DURING THE REQUEST, NOT AFTER IT. `SafeHttpClient::get()`
-     * clears the pin in a `finally`, so that a later exception or retry cannot
-     * leak a stale IP binding into an unrelated call on the same worker. Reading
-     * it afterwards therefore finds nothing — the only moment it exists is
-     * while the transport is being called, which is exactly when this hook runs.
+     * ⚠⚠ THE SECOND HALF OF THIS TEST CHANGED WITH bcc-core #81, and the
+     * property it checks is now a stronger one. It used to assert that the pin
+     * "does not outlive the request", because `SafeHttpClient::get()` cleared
+     * a shared static in a `finally`. That static is gone: it leaked validated
+     * pins into later requests, and bounding it with a TTL failed OPEN (an
+     * expired pin was dropped and the request went out with no
+     * `CURLOPT_RESOLVE` at all). The pin now lives in the request's OWN args,
+     * so there is no shared place for it to outlive — and what is asserted
+     * instead is that those args cannot pin any OTHER host, which is the
+     * invariant the `finally` was only approximating.
      */
     public function testTheProofIsMadeWithoutResolvingTheHost(): void
     {
@@ -417,11 +422,19 @@ final class CosmosEndpointSwitchCompletesIntegrationTest extends TestCase
             'and the proof asked the destination for its node_info'
         );
 
-        // And the pin does not outlive the request.
-        self::assertArrayNotHasKey(
-            self::TARGET_HOST,
-            \BccEndpointTransportSpy::pinnedResolves(),
-            'the pin is released once the call returns'
+        // ⚠ And the pin is SCOPED TO ITS OWN REQUEST: these very args
+        // cannot pin a different host, which is what makes a leak into an
+        // unrelated call impossible rather than merely cleaned up after.
+        $sentArgs = \BccEndpointTransportSpy::$calls[0]['args'];
+
+        self::assertSame(
+            self::TARGET_HOST . ':443:' . self::SENTINEL_IP,
+            \BCC\Core\Http\SafeHttpClient::resolveEntryFor($sentArgs, self::TARGET . '/x'),
+            'the args pin their own host'
+        );
+        self::assertNull(
+            \BCC\Core\Http\SafeHttpClient::resolveEntryFor($sentArgs, 'https://unrelated.invalid/x'),
+            'and they pin nothing for anyone else'
         );
     }
     /**

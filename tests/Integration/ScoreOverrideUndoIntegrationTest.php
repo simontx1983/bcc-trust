@@ -173,6 +173,38 @@ final class ScoreOverrideUndoIntegrationTest extends TestCase
         self::assertSame(0, $this->eliteFlag(), 'a failed pin read fails CLOSED to not pinned');
     }
 
+    /** The admin Undo button shows exactly what the next undo will undo. */
+    public function testTheUndoButtonTracksTheStack(): void
+    {
+        self::assertNull($this->mod->latestUndoableOverride(self::OWNER), 'nothing to undo: no button');
+
+        $this->quiet(fn () => $this->mod->overrideScore(self::OWNER, 70, 'one'));
+        $this->quiet(fn () => $this->mod->overrideScore(self::OWNER, 60, 'two'));
+        $next = $this->mod->latestUndoableOverride(self::OWNER);
+        self::assertNotNull($next);
+        self::assertSame([60, 'two'], [$next['new_score'], $next['reason']]);
+        self::assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', $next['at']);
+
+        $this->quiet(fn () => $this->mod->undoScoreOverride(self::OWNER));
+        $next = $this->mod->latestUndoableOverride(self::OWNER);
+        self::assertNotNull($next);
+        self::assertSame([70, 'one'], [$next['new_score'], $next['reason']]);
+
+        $this->quiet(fn () => $this->mod->undoScoreOverride(self::OWNER));
+        self::assertNull($this->mod->latestUndoableOverride(self::OWNER), 'stack empty: the button goes away');
+    }
+
+    public function testAnUnreadableUndoRecordHidesTheButtonInsteadOfBreakingThePage(): void
+    {
+        $broken = new class extends ScoreOverrideLedger {
+            protected function readMeta(int $userId): mixed { throw new \RuntimeException('meta read failed'); }
+        };
+        $p   = Plugin::instance();
+        $mod = new ModerationService($this->scores, $p->userInfoRepository(), $p->voteRemovalService(), $this->pin, $broken);
+
+        self::assertNull($mod->latestUndoableOverride(self::OWNER));
+    }
+
     private function eliteFlag(): int
     {
         global $wpdb;
