@@ -818,11 +818,12 @@ final class AnnouncementCapabilityResolverTest extends TestCase
 
     // ── 6. Administrator scope (d), and the missing public producer ───────
 
-    public function testAdministratorRightsAreReadOnlyRecoveryOnly(): void
+    public function testAdministratorRightsAreRecoveryPlusArchiveOnly(): void
     {
+        // F-147: archive was added (user decision 2026-11-11); nothing else.
         $caps = Caps::forAdministrator(true, true);
         self::assertSame(
-            ['can_inspect_drafts', 'can_inspect_removed', 'can_restore_comment'],
+            ['can_inspect_drafts', 'can_inspect_removed', 'can_restore_comment', 'can_archive_any'],
             array_keys($caps)
         );
         foreach (array_keys($caps) as $key) {

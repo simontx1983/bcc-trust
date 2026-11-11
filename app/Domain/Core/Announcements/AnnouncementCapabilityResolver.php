@@ -433,9 +433,10 @@ final class AnnouncementCapabilityResolver
     // ── (d) Administrator — a separate object, never merged ──────────────
 
     /**
-     * Administrator recovery rights (§4.32.2): READ-ONLY inspection plus
-     * comment restoration. An administrator may not create, edit,
-     * schedule, publish, pin or archive, and may not act as the operator.
+     * Administrator rights (§4.32.2): inspection, comment restoration and —
+     * F-147, user decision 2026-11-11 — archiving any published notice
+     * (`can_archive_any`). An administrator may not create, edit, schedule,
+     * publish or pin, and may not act as the operator.
      *
      * ⚠ This is a THIRD object, never merged into the owner or row scopes.
      * An administrator who is independently the resolved operator gets
@@ -447,7 +448,7 @@ final class AnnouncementCapabilityResolver
      *
      * @return array{
      *     can_inspect_drafts: Entry, can_inspect_removed: Entry,
-     *     can_restore_comment: Entry
+     *     can_restore_comment: Entry, can_archive_any: Entry
      * }
      */
     public static function forAdministrator(bool $isAdministrator, bool $featureEnabled): array
@@ -459,6 +460,7 @@ final class AnnouncementCapabilityResolver
                 'can_inspect_drafts'  => $denied,
                 'can_inspect_removed' => $denied,
                 'can_restore_comment' => $denied,
+                'can_archive_any'     => $denied,
             ];
         }
 
@@ -466,6 +468,7 @@ final class AnnouncementCapabilityResolver
             'can_inspect_drafts'  => Permission::allow(),
             'can_inspect_removed' => Permission::allow(),
             'can_restore_comment' => Permission::allow(),
+            'can_archive_any'     => Permission::allow(),
         ];
     }
 
