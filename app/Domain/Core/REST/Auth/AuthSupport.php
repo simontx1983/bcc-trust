@@ -30,6 +30,7 @@ use BCC\Trust\Core\Services\UserViewService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\FrontendRedirect;
 use BCC\Trust\Core\Support\JwtToken;
+use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Response;
 
 if (!defined('ABSPATH')) {
@@ -298,10 +299,37 @@ final class AuthSupport
             'expires_in'       => self::JWT_TTL_SECONDS,
             'token_type'       => 'Bearer',
             'in_good_standing' => self::resolveInGoodStanding($userId),
+            // How many wallets are linked to the account the caller just
+            // proved the email of. > 0 tells the frontend to show "this
+            // account has a wallet linked — is it yours?" (it lists them via
+            // the owner-only GET /wallets with the fresh token above, and
+            // removes one via DELETE /wallets/{id}). A count only — no wallet
+            // detail rides an auth response (wallet-privacy policy).
+            'linked_wallet_count' => self::linkedWalletCount($userId),
         ]);
         $response->header('Cache-Control', 'no-store');
 
         return $response;
+    }
+
+    /**
+     * Number of wallet links on the account, for the post-verification
+     * "is this wallet yours?" prompt. Reads through the fail-CLOSED
+     * repository path; if the read does not run, logs and returns 0 so the
+     * verification itself still completes (the prompt is advisory — the
+     * owner can always review wallets in Settings).
+     */
+    private static function linkedWalletCount(int $userId): int
+    {
+        try {
+            return count(WalletRepository::getForUserOrThrow($userId));
+        } catch (\Throwable $e) {
+            Logger::warning('[bcc-trust] verify-email: linked wallet count unavailable', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return 0;
+        }
     }
 
     /**
