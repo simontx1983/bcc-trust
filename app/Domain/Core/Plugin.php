@@ -1298,6 +1298,16 @@ final class Plugin
         return $this->adminDashboardRepository ??= new Repositories\AdminDashboardRepository();
     }
 
+    private ?Services\Vote\ReviewVisibilityScoreSync $reviewVisibilityScoreSync = null;
+    /** Recalculates a review's page when moderation hides / restores the review. */
+    public function reviewVisibilityScoreSync(): Services\Vote\ReviewVisibilityScoreSync
+    {
+        return $this->reviewVisibilityScoreSync ??= new Services\Vote\ReviewVisibilityScoreSync(
+            $this->voteRepository(),
+            $this->voteService()
+        );
+    }
+
     private ?Services\Vote\VoteRemovalService $voteRemovalService = null;
     /** The single bulk vote-removal path (moderation, ring invalidation, account deletion). */
     public function voteRemovalService(): Services\Vote\VoteRemovalService
@@ -2622,6 +2632,13 @@ final class Plugin
         add_action('bcc_content_auto_hidden', function (int $actId): void {
             $this->notificationDispatcher()->onContentAutoHidden($actId);
         }, 30, 1);
+
+        // A moderation-hidden review stops counting toward its page's score
+        // and tallies; restoring it counts again (user decision). Fired by
+        // HiddenActivityRepository on every real hide/unhide.
+        add_action('bcc_trust_activity_visibility_changed', function (int $actId): void {
+            $this->reviewVisibilityScoreSync()->onVisibilityChanged($actId);
+        }, 20, 1);
 
         add_action('bcc_rank_finding_issued', function (int $userId, int $findingId, string $severity): void {
             unset($severity); // copy is severity-neutral by design (no shaming)

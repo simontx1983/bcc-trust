@@ -442,6 +442,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Services\\UserSyncService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/UserSyncService.php',
         'BCC\\Trust\\Core\\Services\\UserViewService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/UserViewService.php',
         'BCC\\Trust\\Core\\Services\\VoteService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/VoteService.php',
+        'BCC\\Trust\\Core\\Services\\Vote\\ReviewVisibilityScoreSync' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Vote/ReviewVisibilityScoreSync.php',
         'BCC\\Trust\\Core\\Services\\Vote\\VoteEligibilityChecker' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Vote/VoteEligibilityChecker.php',
         'BCC\\Trust\\Core\\Services\\Vote\\VoteFraudAnalyzer' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Vote/VoteFraudAnalyzer.php',
         'BCC\\Trust\\Core\\Services\\Vote\\VoteJobDispatcher' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Vote/VoteJobDispatcher.php',
