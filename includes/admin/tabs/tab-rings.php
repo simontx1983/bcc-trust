@@ -78,7 +78,7 @@ function bcc_trust_render_rings_tab(): void {
         </div>
     <?php endif; ?>
 
-    <div class="bcc-panel" style="border-left:5px solid #f44336;">
+    <div class="bcc-panel" style="border-left:5px solid var(--bcc-danger);">
         <h2 style="margin-top:0;">Vote Ring Detection</h2>
         <p>
             Rings are clusters of users suspected of coordinated voting.
@@ -102,7 +102,7 @@ function bcc_trust_render_rings_tab(): void {
               // not run, which is not the same fact. Deliberately NOT styled
               // as an error — on a fresh install this is the correct state. ?>
         <div class="bcc-panel">
-            <p style="color:#646970;text-align:center;padding:20px;">
+            <p style="color:var(--bcc-text-muted);text-align:center;padding:20px;">
                 <strong><?php esc_html_e( 'No ring-detection snapshot yet.', 'bcc-trust' ); ?></strong><br>
                 <span style="font-size:12px;">
                     <?php esc_html_e( 'Ring detection runs hourly and stores its result for this page to read. Until it has run there is nothing to show — which is not the same as finding no rings.', 'bcc-trust' ); ?>
@@ -111,7 +111,7 @@ function bcc_trust_render_rings_tab(): void {
         </div>
     <?php elseif ( empty( $rings ) ): ?>
         <div class="bcc-panel">
-            <p style="color:#4caf50;text-align:center;padding:20px;">
+            <p style="color:var(--bcc-success);text-align:center;padding:20px;">
                 <strong>✓ No vote rings detected.</strong>
             </p>
         </div>
@@ -136,7 +136,7 @@ function bcc_trust_render_rings_tab(): void {
                 ? __( 'Endorsement ring', 'bcc-trust' )
                 : __( 'Vote ring', 'bcc-trust' );
         ?>
-        <div class="bcc-panel" style="border-left:5px solid #ff9800;margin-bottom:20px;">
+        <div class="bcc-panel" style="border-left:5px solid var(--bcc-highlight);margin-bottom:20px;">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;">
                 <div>
                     <h3 style="margin:0 0 5px;">
@@ -146,12 +146,12 @@ function bcc_trust_render_rings_tab(): void {
                               // reading "Invalidate Ring Votes". Naming the
                               // kind is the smallest honest fix. ?>
                         <?php echo esc_html( $ring_kind ); ?> #<?php echo $ring_index + 1; ?>
-                        <span style="font-size:13px;font-weight:normal;color:#666;">
+                        <span style="font-size:13px;font-weight:normal;color:var(--bcc-text-secondary);">
                             — <?php echo $member_count; ?> members
                         </span>
                     </h3>
                     <?php if ( ! empty( $ring['detected_at'] ) ): ?>
-                        <small style="color:#666;">Detected: <?php echo esc_html( $ring['detected_at'] ); ?></small>
+                        <small style="color:var(--bcc-text-secondary);">Detected: <?php echo esc_html( $ring['detected_at'] ); ?></small>
                     <?php endif; ?>
 
                 </div>
@@ -165,7 +165,7 @@ function bcc_trust_render_rings_tab(): void {
                         <input type="hidden" name="action"      value="bcc_trust_ring_action">
                         <input type="hidden" name="ring_action" value="invalidate_votes">
                         <input type="hidden" name="ring_fingerprint" value="<?php echo esc_attr( $ring_fp ); ?>">
-                        <button type="submit" class="button" style="background:#ff9800;color:#fff;border-color:#e68900;">
+                        <button type="submit" class="button" style="background:var(--bcc-highlight);color:#fff;border-color:var(--bcc-highlight);">
                             🚫 Invalidate Ring Votes
                         </button>
                     </form>
@@ -177,7 +177,7 @@ function bcc_trust_render_rings_tab(): void {
                         <input type="hidden" name="ring_action" value="suspend_all">
                         <input type="hidden" name="ring_fingerprint" value="<?php echo esc_attr( $ring_fp ); ?>">
                         <input type="text"   name="reason"      placeholder="Suspension reason…" style="width:160px;" required>
-                        <button type="submit" class="button" style="background:#f44336;color:#fff;border-color:#c62828;">
+                        <button type="submit" class="button" style="background:var(--bcc-danger);color:#fff;border-color:var(--bcc-danger);">
                             🔴 Suspend All Members
                         </button>
                     </form>
@@ -222,9 +222,9 @@ function bcc_trust_render_rings_tab(): void {
                     <?php foreach ( $members as $member_id ): ?>
                         <tr>
                             <td><strong>User #<?php echo intval( $member_id ); ?></strong></td>
-                            <td><em style="color:#646970;"><?php esc_html_e( 'not loaded', 'bcc-trust' ); ?></em></td>
-                            <td><em style="color:#646970;"><?php esc_html_e( 'not loaded', 'bcc-trust' ); ?></em></td>
-                            <td><em style="color:#646970;"><?php esc_html_e( 'not loaded', 'bcc-trust' ); ?></em></td>
+                            <td><em style="color:var(--bcc-text-muted);"><?php esc_html_e( 'not loaded', 'bcc-trust' ); ?></em></td>
+                            <td><em style="color:var(--bcc-text-muted);"><?php esc_html_e( 'not loaded', 'bcc-trust' ); ?></em></td>
+                            <td><em style="color:var(--bcc-text-muted);"><?php esc_html_e( 'not loaded', 'bcc-trust' ); ?></em></td>
                             <td>
                                 <a href="<?php echo esc_url( admin_url( 'admin.php?page=bcc-trust-moderation&user_id=' . intval( $member_id ) ) ); ?>" class="button button-small"><?php esc_html_e( 'Manage', 'bcc-trust' ); ?></a>
                             </td>
@@ -232,7 +232,7 @@ function bcc_trust_render_rings_tab(): void {
                     <?php endforeach; ?>
                 </tbody>
             </table>
-            <p style="margin:6px 0 0;color:#646970;font-size:12px;">
+            <p style="margin:6px 0 0;color:var(--bcc-text-muted);font-size:12px;">
                 <?php esc_html_e( 'Ring detection records membership only, so fraud score, risk level and suspension state are not loaded on this page — "not loaded" is not a score of zero and not a risk assessment. Open a member to see their real values.', 'bcc-trust' ); ?>
             </p>
             <?php endif; ?>

@@ -16,8 +16,10 @@ if (!defined('ABSPATH')) {
 add_action('admin_enqueue_scripts', 'bcc_trust_enqueue_admin');
 
 function bcc_trust_enqueue_admin($hook) {
-    // Only load on our admin pages
-    $trust_pages = ['bcc-trust-dashboard', 'bcc-trust-moderation', 'bcc-trust-settings', 'bcc-trust-logs'];
+    // Pages built on the Forge component classes (.bcc-admin-wrap). The
+    // palette itself comes from bcc-core's shared bcc-admin.css, which
+    // loads on every ?page=bcc-* screen.
+    $trust_pages = ['bcc-trust-dashboard', 'bcc-trust-moderation', 'bcc-trust-debug'];
     $current_page = isset($_GET['page']) ? sanitize_key($_GET['page']) : '';
 
     if (!in_array($current_page, $trust_pages)) {

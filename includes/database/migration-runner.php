@@ -67,6 +67,112 @@ if (!defined('BCC_TRUST_MIGRATION_INCOMPLETE')) {
     define('BCC_TRUST_MIGRATION_INCOMPLETE', 'incomplete');
 }
 
+if (!function_exists('bcc_trust_migration_backoff_active')) {
+    /**
+     * Retry backoff for the standalone `init`-hooked migrations (F-150).
+     *
+     * Those migrations stamp a done-option of their own instead of going
+     * through the runner, and they used to stamp it even when a statement
+     * had failed — so a failed FK drop, DROP or ALTER was never retried.
+     * They now leave the option unstamped on failure. This backoff keeps a
+     * statement that fails PERMANENTLY from being re-run (and re-logged) on
+     * every request: one attempt per hour per migration.
+     */
+    function bcc_trust_migration_backoff_active(string $migrationId): bool
+    {
+        return (bool) get_transient('bcc_trust_migration_backoff_' . $migrationId);
+    }
+
+    /**
+     * Record a failed migration step: log the server error and start the
+     * one-hour retry backoff. The caller then returns WITHOUT stamping its
+     * done-option, so the next attempt re-runs the whole idempotent body.
+     */
+    function bcc_trust_migration_step_failed(string $migrationId, string $step): void
+    {
+        global $wpdb;
+        set_transient('bcc_trust_migration_backoff_' . $migrationId, 1, HOUR_IN_SECONDS);
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] migration step failed; not marking done, retrying in 1h', [
+                'migration' => $migrationId,
+                'step'      => $step,
+                'db_error'  => $wpdb->last_error,
+            ]);
+        }
+    }
+
+    /**
+     * Refuse to destroy data (F-149): start the retry backoff and log WHAT
+     * was spared, so an operator can decide. Distinct from a failed step —
+     * nothing errored; the migration declined to delete rows.
+     *
+     * @param array<string, mixed> $context
+     */
+    function bcc_trust_migration_refuse_destructive(string $migrationId, string $reason, array $context): void
+    {
+        set_transient('bcc_trust_migration_backoff_' . $migrationId, 1, HOUR_IN_SECONDS);
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] migration refused to destroy data; not marking done, re-checking in 1h', [
+                'migration' => $migrationId,
+                'reason'    => $reason,
+            ] + $context);
+        }
+    }
+
+    /**
+     * Drop a RETIRED table only when it is empty (F-149).
+     *
+     * The resurrection-proof drops re-probe hourly and remove any retired
+     * table that reappears. A table that reappears WITH ROWS is not drift to
+     * be silently cleaned: it is what a tarball rollback to older code
+     * produces, and rolling forward again must not delete that data. So:
+     *
+     *   'absent'  — the table is not there; nothing to do.
+     *   'dropped' — it was there and empty; it is gone now.
+     *   'refused' — it holds rows; left in place, logged with the count,
+     *               backoff started. The caller must not stamp done.
+     *   'failed'  — a probe, the count or the DROP errored; backoff
+     *               started. The caller must not stamp done.
+     *
+     * @return 'absent'|'dropped'|'refused'|'failed'
+     */
+    function bcc_trust_drop_retired_table_if_empty(string $table, string $migrationId): string
+    {
+        global $wpdb;
+
+        $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+        if ($exists === null && $wpdb->last_error !== '') {
+            bcc_trust_migration_step_failed($migrationId, "probe {$table}");
+            return 'failed';
+        }
+        if ($exists !== $table) {
+            return 'absent';
+        }
+
+        // Table name is $wpdb->prefix + a hard-coded suffix — no user input.
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $rows = $wpdb->get_var("SELECT COUNT(*) FROM `{$table}`");
+        if ($rows === null) {
+            bcc_trust_migration_step_failed($migrationId, "count {$table}");
+            return 'failed';
+        }
+        if ((int) $rows > 0) {
+            bcc_trust_migration_refuse_destructive($migrationId, 'retired table reappeared with rows', [
+                'table' => $table,
+                'rows'  => (int) $rows,
+            ]);
+            return 'refused';
+        }
+
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        if ($wpdb->query("DROP TABLE IF EXISTS `{$table}`") === false) {
+            bcc_trust_migration_step_failed($migrationId, "drop {$table}");
+            return 'failed';
+        }
+        return 'dropped';
+    }
+}
+
 if (!function_exists('bcc_trust_pending_migrations')) {
 
     /**

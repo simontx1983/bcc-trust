@@ -813,7 +813,13 @@ class ChainRefreshService
                         }
                         \BCC\Core\Log\Logger::warning('[Onchain] Validator index returned empty for ' . $chain->name);
                     }
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
+                    // ⚠ F-66: THROWABLE, NOT Exception. A TypeError or
+                    // ValueError from one chain's malformed provider answer (a
+                    // non-array item, bccomp() on a non-numeric amount) is an
+                    // Error, not an Exception. It used to escape this catch and
+                    // the loop with it, so every chain after it went unindexed.
+                    // It is now this chain's partial fetch, like any other.
                     $hasPartialFetch = true;
 
                     // ⚠ THIS CATCH SPANS MORE THAN ONE PROVIDER REQUEST — the
@@ -1132,7 +1138,10 @@ class ChainRefreshService
                         // loop on wallets with deleted collections or failing chain APIs.
                         CollectionRepository::backoffRow((int) $row->id);
                     }
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
+                    // ⚠ F-66: Throwable, so one row's Error (TypeError /
+                    // ValueError) backs off THAT row instead of aborting the
+                    // rest of the batch.
                     OnchainCircuitBreaker::recordFailure((int) $row->chain_id);
                     \BCC\Core\Log\Logger::error('[Onchain] Collection ' . $row->contract_address . ' refresh failed: ' . $e->getMessage());
                     CollectionRepository::backoffRow((int) $row->id);

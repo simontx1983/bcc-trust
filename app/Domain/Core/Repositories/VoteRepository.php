@@ -868,11 +868,15 @@ class VoteRepository {
      * NOW(), so the comparison carries no timezone drift.
      *
      * ── vesting-aware weight ──
-     * Uses vested_weight when populated (the graduation cron keeps it current
-     * with the voter's vesting stage) and falls back to weight on legacy rows
-     * where vested_weight was never written. Without the fallback, a stage-0
-     * voter's 10-percent vote was summed at full effective weight, nullifying
-     * the documented Sybil-mitigation vesting.
+     * Sums vested_weight — the value VoteWriter applied to the score,
+     * including any velocity-cap clamp written back by correctWeight().
+     * There is deliberately NO fallback to the raw `weight` column: the old
+     * COALESCE(NULLIF(vested_weight, 0), weight) treated 0 as "unset", so a
+     * vote the velocity cap had FULLY blocked (vested_weight = 0) re-entered
+     * every recalc at its raw, unvested weight and undid the cap (F-80).
+     * Every vote row is written through VoteWriter, which always sets
+     * vested_weight; production had zero legacy rows relying on the fallback
+     * when it was removed (measured 2026-11-10).
      *
      * ── retroactive fraud discount ──
      * SAFETY CONTRACT: the SQL implements a simplified fraud_score-only model.
@@ -925,7 +929,7 @@ class VoteRepository {
                           THEN 1
                         ELSE 0
                     END AS is_mature,
-                    COALESCE(NULLIF(v.vested_weight, 0), v.weight)
+                    v.vested_weight
                     * CASE
                         WHEN COALESCE(ui.fraud_score, 0) <= %d
                           THEN 1.0

@@ -122,8 +122,13 @@ final class BearerAuth
     /**
      * Extract the JWT from the Authorization header, or null when
      * absent / malformed. Case-insensitive on the "Bearer " prefix.
+     *
+     * Public so an endpoint that must validate the PRESENTED token itself
+     * (GET /auth/session) reads it through the same LiteSpeed/HTTP-2-safe
+     * header path as authentication does — never a second reader that
+     * could disagree with this one.
      */
-    private static function readBearerToken(): ?string
+    public static function readBearerToken(): ?string
     {
         $header = self::readAuthorizationHeader();
         if ($header === '') {

@@ -167,18 +167,18 @@ function bcc_trust_render_user_list() {
 
                             <td>
                                 <?php if ( $u->is_suspended || $u->active_suspensions > 0 ): ?>
-                                    <span style="background:#f44336;color:#fff;padding:3px 8px;border-radius:3px;">Suspended</span>
+                                    <span style="background:var(--bcc-danger);color:#fff;padding:3px 8px;border-radius:3px;">Suspended</span>
                                 <?php else: ?>
-                                    <span style="background:#4caf50;color:#fff;padding:3px 8px;border-radius:3px;">Active</span>
+                                    <span style="background:var(--bcc-success);color:#fff;padding:3px 8px;border-radius:3px;">Active</span>
                                 <?php endif; ?>
                                 <?php if ( $u->is_verified ): ?>
-                                    <br><small style="color:#4caf50;">✓ Verified</small>
+                                    <br><small style="color:var(--bcc-success);">✓ Verified</small>
                                 <?php endif; ?>
                             </td>
 
                             <td>
                                 <div style="display:flex;align-items:center;gap:6px;">
-                                    <div style="width:60px;height:8px;background:#eee;border-radius:4px;overflow:hidden;">
+                                    <div style="width:60px;height:8px;background:var(--bcc-bg-code);border-radius:4px;overflow:hidden;">
                                         <div style="width:<?php echo esc_attr(intval($u->fraud_score)); ?>%;height:100%;background:<?php echo esc_attr( \BCC\Trust\Core\Support\Formatting::scoreColor( $u->fraud_score ) ); ?>;"></div>
                                     </div>
                                     <?php echo intval($u->fraud_score); ?>

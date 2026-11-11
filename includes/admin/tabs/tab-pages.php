@@ -41,7 +41,7 @@ function bcc_trust_render_pages_tab() {
     ?>
     <div class="bcc-panel">
         <h2>Top Pages by Trust Score</h2>
-        <p style="color:#666;">Showing top <?php echo intval($data['limit']); ?> pages by total score.</p>
+        <p style="color:var(--bcc-text-secondary);">Showing top <?php echo intval($data['limit']); ?> pages by total score.</p>
 
         <?php if ( ! $pages_ok ) : ?>
             <?php // ⚠ NOT the empty-state sentence below: that asserts a fact
@@ -93,14 +93,14 @@ function bcc_trust_render_pages_tab() {
                         <td>
                             <?php if ( $cpt ) : ?>
                                 <a href="<?php echo esc_url( get_edit_post_link( $cpt['cpt_id'] ) ); ?>"><?php echo $cpt['cpt_id']; ?></a>
-                                <br><small style="color:#888;"><?php echo esc_html( $cpt['cpt_type'] ); ?></small>
+                                <br><small style="color:var(--bcc-text-muted);"><?php echo esc_html( $cpt['cpt_type'] ); ?></small>
                             <?php else : ?>
-                                <span style="color:#999;">&mdash;</span>
+                                <span style="color:var(--bcc-text-muted);">&mdash;</span>
                             <?php endif; ?>
                         </td>
                         <td>
                             <div style="display:flex;align-items:center;gap:8px;">
-                                <div style="width:80px;height:8px;background:#eee;border-radius:4px;overflow:hidden;">
+                                <div style="width:80px;height:8px;background:var(--bcc-bg-code);border-radius:4px;overflow:hidden;">
                                     <div style="width:<?php echo esc_attr( min( 100, $page->total_score ?? 0 ) ); ?>%;height:100%;background:<?php echo esc_attr($tier_info['color']); ?>;border-radius:4px;"></div>
                                 </div>
                                 <strong><?php echo round( $page->total_score ?? 0, 1 ); ?></strong>
@@ -134,7 +134,7 @@ function bcc_trust_render_all_pages_tab() {
     ?>
     <div class="bcc-panel">
         <h2>All Pages (<?php echo number_format( $data['total'] ); ?>)</h2>
-        <p style="color:#666;">All peepso-page posts. Showing up to <?php echo intval($data['limit']); ?>.</p>
+        <p style="color:var(--bcc-text-secondary);">All peepso-page posts. Showing up to <?php echo intval($data['limit']); ?>.</p>
 
         <?php if ( ! $pages_ok ) : ?>
             <?php // ⚠ NOT the empty-state sentence below: that asserts a fact
@@ -177,9 +177,9 @@ function bcc_trust_render_all_pages_tab() {
                         <td>
                             <?php if ( $cpt ) : ?>
                                 <a href="<?php echo esc_url( get_edit_post_link( $cpt['cpt_id'] ) ); ?>"><?php echo $cpt['cpt_id']; ?></a>
-                                <br><small style="color:#888;"><?php echo esc_html( $cpt['cpt_type'] ); ?></small>
+                                <br><small style="color:var(--bcc-text-muted);"><?php echo esc_html( $cpt['cpt_type'] ); ?></small>
                             <?php else : ?>
-                                <span style="color:#999;">&mdash;</span>
+                                <span style="color:var(--bcc-text-muted);">&mdash;</span>
                             <?php endif; ?>
                         </td>
                         <td>
@@ -190,13 +190,13 @@ function bcc_trust_render_all_pages_tab() {
                         <td>
                             <?php if ( $score !== null ) : ?>
                                 <div style="display:flex;align-items:center;gap:6px;">
-                                    <div style="width:60px;height:6px;background:#eee;border-radius:3px;overflow:hidden;">
+                                    <div style="width:60px;height:6px;background:var(--bcc-bg-code);border-radius:3px;overflow:hidden;">
                                         <div style="width:<?php echo esc_attr( min( 100, $score ) ); ?>%;height:100%;background:<?php echo esc_attr($tier_info['color']); ?>;border-radius:3px;"></div>
                                     </div>
                                     <?php echo round( $score, 1 ); ?>
                                 </div>
                             <?php else : ?>
-                                <span style="color:#999;">&mdash;</span>
+                                <span style="color:var(--bcc-text-muted);">&mdash;</span>
                             <?php endif; ?>
                         </td>
                         <td>

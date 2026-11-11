@@ -350,7 +350,10 @@ class RateLimiter {
      */
     public static function enforce(string $action, ?int $limit = null, ?int $window = null): void {
         if (!self::allow($action, $limit, $window)) {
-            $resetIn = self::resetIn($action);
+            // Pass the caller's window through: an ad-hoc action such as
+            // `downvote_daily` (24h) is not in getLimits(), and resetIn()'s
+            // fallback DEFAULT_WINDOW (60s) indexes the wrong bucket (F-153).
+            $resetIn = self::resetIn($action, $window);
             throw new \Exception(
                 sprintf('Too many requests. Please wait %d seconds.', $resetIn),
                 429
@@ -367,18 +370,24 @@ class RateLimiter {
      * returned 0. That silently broke every Retry-After / "wait N seconds"
      * message and hid the `count > adjustedLimit * 2` abuse-detection branch
      * in allow() which reads the same bucketed key.
+     *
+     * @param int|null $window The window the caller passed to allow()/enforce().
+     *                         Null resolves it from getLimits() (DEFAULT_WINDOW
+     *                         for unknown actions), mirroring allow()'s lookup.
      */
-    public static function resetIn(string $action): int {
+    public static function resetIn(string $action, ?int $window = null): int {
         $userId = get_current_user_id();
 
         // Resolve the action's window so the bucket index aligns with the
-        // writer. Fall back to DEFAULT_WINDOW for unknown actions, mirroring
-        // allow()'s lookup.
-        $config = self::getLimits()[$action] ?? [
-            'limit'  => self::DEFAULT_LIMIT,
-            'window' => self::DEFAULT_WINDOW,
-        ];
-        $window = max(1, (int) $config['window']);
+        // writer.
+        if ($window === null) {
+            $config = self::getLimits()[$action] ?? [
+                'limit'  => self::DEFAULT_LIMIT,
+                'window' => self::DEFAULT_WINDOW,
+            ];
+            $window = (int) $config['window'];
+        }
+        $window = max(1, $window);
 
         // Build the same sliding key allow() passes to slidingWindowCheck.
         // Authenticated users check the per-user bucket (the IP bucket is

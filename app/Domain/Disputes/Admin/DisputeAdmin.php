@@ -2,6 +2,8 @@
 
 namespace BCC\Trust\Disputes\Admin;
 
+use BCC\Trust\Core\Admin\AdminMenus;
+
 use BCC\Trust\Disputes\Services\DisputeNotificationService;
 use BCC\Trust\Disputes\Repositories\DisputeAdminRepository;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
@@ -23,18 +25,18 @@ class DisputeAdmin
     public static function register_menu(): void
     {
         add_submenu_page(
-            'bcc-trust-dashboard',
-            __('Disputes', 'bcc-disputes'),
-            __('Disputes', 'bcc-disputes'),
+            AdminMenus::MODERATION,
+            __('Disputes', 'bcc-trust'),
+            __('Disputes', 'bcc-trust'),
             'manage_options',
             'bcc-disputes',
             [self::class, 'render_page']
         );
 
         add_submenu_page(
-            'bcc-trust-dashboard',
-            __('User Reports', 'bcc-disputes'),
-            __('User Reports', 'bcc-disputes'),
+            AdminMenus::MODERATION,
+            __('User Reports', 'bcc-trust'),
+            __('User Reports', 'bcc-trust'),
             'manage_options',
             'bcc-reports',
             [self::class, 'render_reports_page']
@@ -165,7 +167,7 @@ class DisputeAdmin
         echo '<h2>' . esc_html__('Disputed Vote', 'bcc-disputes') . '</h2>';
 
         if (!$vote && $dispute->vote_id) {
-            echo '<p class="description" style="color:#b71c1c;">'
+            echo '<p class="description" style="color:var(--bcc-danger);">'
                . esc_html__('Vote data unavailable — trust engine may be inactive.', 'bcc-disputes')
                . '</p>';
         }
