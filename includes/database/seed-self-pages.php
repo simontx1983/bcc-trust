@@ -61,14 +61,32 @@ if (!function_exists('bcc_trust_seed_self_pages')) {
                 $chunk
             ));
 
-            foreach ($rows ?: [] as $row) {
+            // A failed read is NOT "no more rows". Real wpdb returns null
+            // (the integration shim returns []) and sets last_error either
+            // way. Treating it as the end of the table would stamp the seed
+            // complete with members unrelocated, and the stamp is the ONLY
+            // interlock drop-legacy-reputation.php waits on before it drops
+            // the source table (F-148). Fail closed: no stamp, retry next
+            // request.
+            if (!is_array($rows) || $wpdb->last_error !== '') {
+                if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] self-page cutover seed: legacy read failed; not marking complete', [
+                        'after_user_id' => $after,
+                        'seeded_so_far' => $seeded,
+                        'db_error'      => $wpdb->last_error,
+                    ]);
+                }
+                return;
+            }
+
+            foreach ($rows as $row) {
                 $uid = (int) $row->user_id;
                 if ($uid > 0 && $scoreRepo->seedSelfPageFromReputation($uid, (float) $row->reputation_score)) {
                     $seeded++;
                 }
                 $after = $uid;
             }
-        } while (!empty($rows) && count($rows) === $chunk);
+        } while (count($rows) === $chunk);
 
         update_option('bcc_trust_self_pages_seeded', time(), false);
 
