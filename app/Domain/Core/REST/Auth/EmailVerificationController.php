@@ -158,6 +158,25 @@ final class EmailVerificationController
         }
 
         if (!AuthSupport::consumeOtpForUser($userId, $code)) {
+            // Attempt cap (F-48), per (user, current code): a correct code
+            // signs the caller in, so guesses spread across IPs must be
+            // bounded per account. A Throttle bucket with an EXPLICIT key
+            // (never split by client IP) counts wrong codes over the code's
+            // lifetime; the MAX-th burns the code. Keyed on the code's
+            // identity, so a resend starts a fresh count. The emailed link
+            // (a separate, unguessable token) and resend keep working, and
+            // the answer stays the generic one — no new enumeration signal.
+            // A degraded limiter fails closed (burns).
+            $otpId = AuthSupport::emailOtpIdentity($userId);
+            if ($otpId !== null && !\BCC\Core\Security\Throttle::allow(
+                'verify_email_fail',
+                AuthSupport::VERIFY_EMAIL_MAX_FAILURES - 1,
+                AuthSupport::OTP_TTL,
+                'verify_email_fail:' . $userId . ':' . $otpId
+            )) {
+                AuthSupport::burnEmailOtp($userId);
+                \BCC\Core\Log\Logger::audit('verify_email_attempts_exhausted', ['user_id' => $userId]);
+            }
             return ApiResponse::error('bcc_invalid_otp', 'Invalid or expired code.', 400);
         }
 
