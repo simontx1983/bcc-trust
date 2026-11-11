@@ -1106,7 +1106,8 @@ final class Plugin
     {
         return $this->autoHideService ??= new Services\AutoHideService(
             $this->contentReportRepository(),
-            $this->hiddenActivityRepository()
+            $this->hiddenActivityRepository(),
+            $this->rankCredibilityGate()
         );
     }
 
@@ -1297,13 +1298,25 @@ final class Plugin
         return $this->adminDashboardRepository ??= new Repositories\AdminDashboardRepository();
     }
 
+    private ?Services\Vote\VoteRemovalService $voteRemovalService = null;
+    /** The single bulk vote-removal path (moderation, ring invalidation, account deletion). */
+    public function voteRemovalService(): Services\Vote\VoteRemovalService
+    {
+        return $this->voteRemovalService ??= new Services\Vote\VoteRemovalService(
+            $this->voteRepository(),
+            $this->scoreRepository(),
+            $this->userInfoRepository(),
+            $this->voteService()
+        );
+    }
+
     private ?Services\Admin\ModerationService $moderationService = null;
     public function moderationService(): Services\Admin\ModerationService
     {
         return $this->moderationService ??= new Services\Admin\ModerationService(
             $this->scoreRepository(),
             $this->userInfoRepository(),
-            $this->voteRepository()
+            $this->voteRemovalService()
         );
     }
 
@@ -2602,6 +2615,12 @@ final class Plugin
 
         add_action('bcc_rank_decay_warning', function (int $userId): void {
             $this->notificationDispatcher()->onRankDecayWarning($userId);
+        }, 30, 1);
+
+        // F-73 — tell the author their post was auto-hidden (bell only;
+        // the dispatcher method self-isolates with try/catch).
+        add_action('bcc_content_auto_hidden', function (int $actId): void {
+            $this->notificationDispatcher()->onContentAutoHidden($actId);
         }, 30, 1);
 
         add_action('bcc_rank_finding_issued', function (int $userId, int $findingId, string $severity): void {

@@ -23,11 +23,11 @@ use PHPUnit\Framework\TestCase;
  */
 final class NotificationTypeRegistrationTest extends TestCase
 {
-    /** @return array<string, string> constant name => slug (ALL excluded) */
+    /** @return array<string, string> constant name => slug (the ALL / BELL_ONLY lists excluded) */
     private function typeConstants(): array
     {
         $constants = (new \ReflectionClass(NotificationType::class))->getConstants();
-        unset($constants['ALL']);
+        unset($constants['ALL'], $constants['BELL_ONLY']);
 
         $out = [];
         foreach ($constants as $name => $value) {
@@ -53,6 +53,20 @@ final class NotificationTypeRegistrationTest extends TestCase
         // And nothing phantom: ALL contains exactly the constants, once.
         self::assertSame(count($constants), count(NotificationType::ALL));
         self::assertSame(count(array_unique(NotificationType::ALL)), count(NotificationType::ALL));
+    }
+
+    /**
+     * BELL_ONLY is a subset of real types — a stale or mistyped slug there
+     * would silently stop excluding the type it meant from the email digest.
+     * The F-73 auto-hide notice and the delegator removal are both in it.
+     */
+    public function testBellOnlyTypesAreRealTypes(): void
+    {
+        foreach (NotificationType::BELL_ONLY as $slug) {
+            self::assertContains($slug, NotificationType::ALL, "BELL_ONLY lists an unknown type {$slug}");
+        }
+        self::assertContains(NotificationType::CONTENT_AUTO_HIDDEN, NotificationType::BELL_ONLY);
+        self::assertContains(NotificationType::DELEGATOR_GROUP_REMOVED, NotificationType::BELL_ONLY);
     }
 
     public function testBellTypesCoverEveryType(): void

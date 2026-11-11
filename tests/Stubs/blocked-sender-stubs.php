@@ -64,11 +64,95 @@ namespace BCC\Core\Repositories {
              */
             public static array $getBlockedSetCalls = [];
 
+            /**
+             * When true, every *OrUnknown* probe answers NULL — "the
+             * block table could not be read".
+             *
+             * ⚠ It drives ONLY the OrUnknown twins. The legacy
+             * `isBlocking`/`getBlockedSet` keep their fail-open contract
+             * even while this is set, which is what lets a test assert
+             * that the READ paths (which still use... nothing: they go
+             * through evaluatePolicy) are unaffected.
+             */
+            public static bool $readFails = false;
+
             public static function reset(): void
             {
                 self::$blocking           = [];
                 self::$isBlockingCalls    = [];
                 self::$getBlockedSetCalls = [];
+                self::$readFails          = false;
+            }
+
+            public static function isBlockingOrUnknown(int $blockerId, int $blockedId): ?bool
+            {
+                if (self::$readFails) {
+                    self::$isBlockingCalls[] = [$blockerId, $blockedId];
+                    return null;
+                }
+                return self::isBlocking($blockerId, $blockedId);
+            }
+
+            /**
+             * Either-direction BATCH probe (bcc-core #72).
+             *
+             * ⚠ Added for F-99 2b: this double never had the batch
+             * method at all, so `canMessageMany()` could not be unit
+             * tested through it before now.
+             *
+             * @param list<int> $otherIds
+             * @return array<int, true>|null
+             */
+            public static function getMutuallyBlockedSetOrUnknown(int $userId, array $otherIds): ?array
+            {
+                if (self::$readFails) {
+                    return null;
+                }
+                $out = [];
+                foreach ($otherIds as $raw) {
+                    $id = (int) $raw;
+                    if ($id <= 0 || $id === $userId) {
+                        continue;
+                    }
+                    foreach (self::$blocking as [$a, $b]) {
+                        if (($a === $userId && $b === $id) || ($a === $id && $b === $userId)) {
+                            $out[$id] = true;
+                        }
+                    }
+                }
+                return $out;
+            }
+
+            public static function isMutuallyBlockedOrUnknown(int $userA, int $userB): ?bool
+            {
+                if (self::$readFails) {
+                    return null;
+                }
+                // ⚠ EITHER direction, matching the real probe's semantics
+                // rather than its name. Implemented here rather than
+                // delegating, because this stub has no isMutuallyBlocked()
+                // to delegate to — the real class does, the double never
+                // needed it before, and a delegation would have fatalled
+                // on every non-failing call.
+                foreach (self::$blocking as [$a, $b]) {
+                    if (($a === $userA && $b === $userB) || ($a === $userB && $b === $userA)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            /**
+             * @param list<int> $candidateIds
+             * @return array<int, true>|null
+             */
+            public static function getBlockedSetOrUnknown(int $blockerId, array $candidateIds): ?array
+            {
+                if (self::$readFails) {
+                    self::$getBlockedSetCalls[] = [$blockerId, array_map('intval', $candidateIds)];
+                    return null;
+                }
+                return self::getBlockedSet($blockerId, $candidateIds);
             }
 
             public static function isBlocking(int $blockerId, int $blockedId): bool

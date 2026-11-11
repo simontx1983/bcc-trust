@@ -84,8 +84,15 @@ final class ContentReportService
      */
     public const TARGET_KINDS = [self::KIND_FEED_ITEM, self::KIND_ANNOUNCEMENT];
 
+    /**
+     * @param FeedItemReportVisibility|null $visibility Injected by tests; in
+     *        production it is built lazily from the plugin's own
+     *        GroupsService + HiddenActivityRepository on the first feed_item
+     *        report (no Plugin.php wiring change).
+     */
     public function __construct(
-        private readonly ContentReportRepository $repo
+        private readonly ContentReportRepository $repo,
+        private ?FeedItemReportVisibility $visibility = null
     ) {
     }
 
@@ -144,6 +151,24 @@ final class ContentReportService
             ];
         }
 
+        // Throttle — reuse the FLAG limits (same posture: 5 per 5 min).
+        // Per-reporter, not per (reporter, target), so spinning up many
+        // small reports against different targets still hits the gate.
+        //
+        // ⚠ Runs BEFORE target resolution (F-73 review L1): the resolve step
+        // answers "visible / not found", so throttling only after it would
+        // let a reporter probe ids for closed or secret posts for free.
+        $burstKey = "content_report:{$reporterUserId}:burst";
+        if (!Throttle::allow($burstKey, BCC_TRUST_RATE_LIMIT_FLAG, BCC_TRUST_RATE_WINDOW_FLAG)) {
+            Logger::info('[ContentReportService] report burst seatbelt fired', [
+                'user_id' => $reporterUserId,
+            ]);
+            return [
+                'error'   => 'bcc_rate_limited',
+                'message' => 'Too many reports. Wait a moment before filing another.',
+            ];
+        }
+
         // §K1 self-report rejection, dispatched per kind — the extension this
         // method's own comment asked for ("when more target kinds land …
         // extend this dispatch with their resolvers").
@@ -160,27 +185,19 @@ final class ContentReportService
             }
             $authorId = (int) $resolved['author_id'];
         } else {
-            $authorId = self::resolveFeedItemAuthor($targetId);
+            // F-73 — the feed arm now decides reportability too: a member
+            // can report exactly what they can see (FeedItemReportVisibility).
+            $resolved = $this->resolveFeedItemTarget($reporterUserId, $targetId);
+            if (isset($resolved['error'])) {
+                return $resolved;
+            }
+            $authorId = (int) $resolved['author_id'];
         }
 
         if ($authorId > 0 && $authorId === $reporterUserId) {
             return [
                 'error'   => 'bcc_invalid_request',
                 'message' => "You can't report your own post.",
-            ];
-        }
-
-        // Throttle — reuse the FLAG limits (same posture: 5 per 5 min).
-        // Per-reporter, not per (reporter, target), so spinning up many
-        // small reports against different targets still hits the gate.
-        $burstKey = "content_report:{$reporterUserId}:burst";
-        if (!Throttle::allow($burstKey, BCC_TRUST_RATE_LIMIT_FLAG, BCC_TRUST_RATE_WINDOW_FLAG)) {
-            Logger::info('[ContentReportService] report burst seatbelt fired', [
-                'user_id' => $reporterUserId,
-            ]);
-            return [
-                'error'   => 'bcc_rate_limited',
-                'message' => 'Too many reports. Wait a moment before filing another.',
             ];
         }
 
@@ -236,21 +253,34 @@ final class ContentReportService
     }
 
     /**
-     * Resolve the act_user_id for a peepso_activities row. Returns 0
-     * when the act_id is gone or invalid — caller treats as "no
-     * self-report check possible" and continues.
+     * Resolve a feed_item report target: is it reportable BY THIS
+     * REPORTER, and whose is it.
+     *
+     * ⚠ REPORTABILITY IS VISIBILITY (F-73): an activity is reportable
+     * exactly when the reporter can see it in a feed —
+     * {@see FeedItemReportVisibility::canSee()}. A missing id, an
+     * unpublished or moderation-hidden post, and a closed/secret group post
+     * the reporter cannot see ALL answer the same `bcc_not_found` "Not
+     * found." envelope, so a refusal never confirms that a post exists.
+     * (Before, any act_id was accepted — a missing one with author 0.)
+     *
+     * @return array{author_id: int}|array{error: string, message: string}
      */
-    private static function resolveFeedItemAuthor(int $actId): int
+    private function resolveFeedItemTarget(int $reporterUserId, int $actId): array
     {
-        if ($actId <= 0) {
-            return 0;
+        $row = $actId > 0 ? PeepSoActivityRepository::getById($actId) : null;
+        if ($row === null || !$this->visibility()->canSee($reporterUserId, $row)) {
+            return ['error' => 'bcc_not_found', 'message' => 'Not found.'];
         }
-        $row = PeepSoActivityRepository::getById($actId);
-        if ($row === null) {
-            return 0;
-        }
-        $authorRaw = $row->act_user_id ?? 0;
-        return (int) $authorRaw;
+        return ['author_id' => (int) ($row->act_user_id ?? 0)];
+    }
+
+    private function visibility(): FeedItemReportVisibility
+    {
+        return $this->visibility ??= new FeedItemReportVisibility(
+            \BCC\Trust\Core\Plugin::instance()->groupsService(),
+            \BCC\Trust\Core\Plugin::instance()->hiddenActivityRepository()
+        );
     }
 
     /**

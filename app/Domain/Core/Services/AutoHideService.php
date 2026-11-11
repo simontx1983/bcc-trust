@@ -14,12 +14,16 @@
  * short-circuits — no double events, no double DB writes.
  *
  * Threshold:
- *   - Default: 3 (three distinct reporters).
+ *   - Default: 3 (three distinct CREDIBLE reporters — see below).
  *   - Override: `wp_options['bcc_autohide_threshold']` (positive int).
  *   - Disable: set to 0 (still allows admin Hide; just won't auto).
  *
+ * Reporter gating (F-73): only reporters passing
+ * RankCredibilityGate::isCredible() count toward the threshold; every
+ * report still files and queues.
+ *
  * Out of scope (V1):
- *   - Reporter trust-weighting (one report = one count regardless of tier)
+ *   - Reporter trust-WEIGHTING (a credible report = one count, any tier)
  *   - Per-reason thresholds (spam might warrant 5, hate 1) — V1.5 work
  *   - Reversal (admin must explicitly Restore). Since F-73 a Restore
  *     closes every pending report on the target and starts a
@@ -56,6 +60,11 @@ final class AutoHideService
      * RESTORE, the post is immune from AUTOMATIC hiding for this long.
      * Reports still file and still queue for admins; only the automatic
      * action is withheld. An admin can still Hide at any time.
+     *
+     * When the window ends NOTHING re-evaluates the post: no sweep runs.
+     * The next report after expiry counts every credible pending report,
+     * including all that queued during the cooldown, so a post can hide
+     * on that first post-cooldown report.
      */
     public const REHIDE_COOLDOWN_SECONDS = 7 * 86400;
 
@@ -68,7 +77,8 @@ final class AutoHideService
 
     public function __construct(
         private readonly ContentReportRepository $reportRepo,
-        private readonly HiddenActivityRepository $hiddenRepo
+        private readonly HiddenActivityRepository $hiddenRepo,
+        private readonly \BCC\Trust\Rank\Services\RankCredibilityGate $credibility
     ) {
     }
 
@@ -104,8 +114,36 @@ final class AutoHideService
             return;
         }
 
-        $count = $this->reportRepo->countPendingForTarget($targetKind, $targetId);
+        // Cheap pre-filter: credible reporters are a subset of all pending
+        // reporters, so below-threshold totals can never hide.
+        $pending = $this->reportRepo->countPendingForTarget($targetKind, $targetId);
+        if ($pending < $threshold) {
+            return;
+        }
+
+        // F-73 — only CREDIBLE reporters count toward the threshold: the
+        // same RankCredibilityGate::isCredible() rule that decides who
+        // counts as Rank evidence (Apprentice+, Trust tier Neutral+, not
+        // suspended, fraud-clear). Anyone may still FILE a report — it
+        // queues for admins — but brand-new / throwaway accounts can no
+        // longer hide a post on their own. Stops counting once the
+        // threshold is reached.
+        $count = 0;
+        foreach ($this->reportRepo->listPendingReporterIdsForTarget($targetKind, $targetId) as $reporterId) {
+            if ($this->credibility->isCredible($reporterId)) {
+                $count++;
+                if ($count >= $threshold) {
+                    break;
+                }
+            }
+        }
         if ($count < $threshold) {
+            Logger::info('[AutoHideService] auto-hide withheld: credible reporters below threshold', [
+                'act_id'          => $targetId,
+                'pending_count'   => $pending,
+                'credible_count'  => $count,
+                'threshold'       => $threshold,
+            ]);
             return;
         }
 
@@ -195,11 +233,16 @@ final class AutoHideService
         if ($postId <= 0) {
             return false;
         }
-        return update_post_meta(
+        update_post_meta(
             $postId,
             self::META_REHIDE_COOLDOWN_UNTIL,
             (string) (time() + self::REHIDE_COOLDOWN_SECONDS)
-        ) !== false;
+        );
+        // update_post_meta() also returns false when the value is UNCHANGED
+        // (a repeat within the same second), so its return would make the
+        // audit's rehide_cooldown_started read false while the cooldown IS
+        // active. Report the stored state instead.
+        return self::inRehideCooldown($actId);
     }
 
     /** End the cooldown early (undo of a Restore). */

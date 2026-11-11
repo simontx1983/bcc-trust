@@ -153,6 +153,26 @@ class VoteRepository {
     private const CACHE_GROUP = 'bcc_votes';
     private const CACHE_TTL   = 60; // seconds
 
+    // ── votes.status values ──────────────────────────────────────────────
+    /** Retracted by the voter (re-casting restores the row). */
+    public const STATUS_REMOVED            = 0;
+    /** Live vote — the only status any score/feed reader counts. */
+    public const STATUS_ACTIVE             = 1;
+    /** Removed by accepted dispute adjudication — re-vote blocked. */
+    public const STATUS_DISPUTE_REMOVED    = 2;
+    /**
+     * Removed by moderation (admin clear, ring invalidation, account
+     * deletion) — re-vote blocked, restorable for
+     * MODERATION_RESTORE_WINDOW_DAYS, then purged (F-104).
+     */
+    public const STATUS_MODERATION_REMOVED = 3;
+
+    /** How long a moderation-removed vote stays restorable before purge. */
+    public const MODERATION_RESTORE_WINDOW_DAYS = 90;
+
+    /** Max ids per IN (…) list in the bulk status helpers. */
+    private const BULK_CHUNK = 500;
+
     private string $table;
 
     /**
@@ -1402,10 +1422,15 @@ class VoteRepository {
             $affected = $wpdb->query(
                 $wpdb->prepare(
                     "DELETE FROM {$this->table}
-                     WHERE status     = 0
-                       AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY)
+                     WHERE (status = %d AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY))
+                        OR (status = %d AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY))
                      LIMIT %d",
+                    self::STATUS_REMOVED,
                     $this->cleanupDays,
+                    // Moderation removals stay restorable for the full
+                    // window, independent of the retraction retention.
+                    self::STATUS_MODERATION_REMOVED,
+                    self::MODERATION_RESTORE_WINDOW_DAYS,
                     $batchSize
                 )
             );
@@ -1515,6 +1540,18 @@ class VoteRepository {
         if ( $existing && (int) $existing->status === 2 ) {
             throw new \BCC\Trust\Core\Exceptions\VoteEligibilityException(
                 'Your previous vote on this page was removed by dispute adjudication and cannot be recast.'
+            );
+        }
+
+        // ── Case B2: Moderation-removed row (status = 3) ─────────────────────
+        // Removed by an admin action (clear votes, ring invalidation). The
+        // voter must not be able to undo a moderation decision by simply
+        // voting again; an admin restore is the only way back (F-104).
+        // Without this branch the row also fell through to Case C and the
+        // INSERT collided with uq_voter_page_cat.
+        if ( $existing && (int) $existing->status === self::STATUS_MODERATION_REMOVED ) {
+            throw new \BCC\Trust\Core\Exceptions\VoteEligibilityException(
+                'Your previous vote on this page was removed by moderation and cannot be recast.'
             );
         }
 
@@ -1972,106 +2009,150 @@ class VoteRepository {
     // Admin / moderation bulk operations
     // -------------------------------------------------------------------------
 
-    /**
-     * Soft-delete all active votes by a voter.
-     *
-     * @return int|false Number of rows updated, or false on failure.
-     */
-    public function softDeleteAllByVoter(int $voterId)
-    {
-        global $wpdb;
-
-        return $wpdb->update(
-            $this->table,
-            ['status' => 0, 'updated_at' => current_time('mysql')],
-            ['voter_user_id' => $voterId],
-            ['%d', '%s'],
-            ['%d']
-        );
-    }
+    // The unscoped bulk soft-deletes (softDeleteAllByVoter / softDeleteByVoterIds /
+    // softDeleteByPageIds) were removed (F-122/F-104): they set status = 0 with
+    // no `status = 1` filter, which turned dispute-removed rows (2) back into
+    // ordinary retractions — re-enabling the voter (upsert Case B) and making
+    // the rows eligible for cleanupOldDeleted() — and made admin removals
+    // indistinguishable from user retractions. All bulk removal now goes
+    // through VoteRemovalService, which uses the two helpers below.
 
     /**
-     * Get distinct active page IDs voted on by a voter.
+     * Active votes (status = 1) cast by any of the given voters, as minimal
+     * refs, keyset-paginated by id. Read inside the removal transaction so
+     * the ids that are flipped are exactly the ones that are audited.
      *
-     * @return int[]
+     * @param list<int> $voterIds
+     * @return list<object{id: int, voter_user_id: int, page_id: int}>
+     * @throws RepositoryException on database failure (wpdb returns [] on
+     *         error, so the error is detected via last_error, not the result)
      */
-    public function getActivePageIdsByVoter(int $voterId): array
+    public function getActiveVoteRefsByVoters(array $voterIds, int $afterId, int $limit): array
     {
-        global $wpdb;
-
-        return array_map('intval', $wpdb->get_col($wpdb->prepare(
-            "SELECT DISTINCT page_id FROM {$this->table} WHERE voter_user_id = %d AND status = 1",
-            $voterId
-        )));
-    }
-
-    /**
-     * Soft-delete all active votes by voters in a set of user IDs.
-     *
-     * @param int[] $voterIds
-     * @return int|false Number of rows updated, or false on failure.
-     */
-    public function softDeleteByVoterIds(array $voterIds)
-    {
-        global $wpdb;
-
-        if (empty($voterIds)) {
-            return 0;
-        }
-
-        $placeholders = implode(',', array_fill(0, count($voterIds), '%d'));
-
-        return $wpdb->query($wpdb->prepare(
-            "UPDATE {$this->table} SET status = 0, updated_at = %s
-             WHERE voter_user_id IN ({$placeholders})",
-            current_time('mysql'), ...$voterIds
-        ));
-    }
-
-    /**
-     * Get distinct active page IDs voted on by any of the given voter IDs.
-     *
-     * @param int[] $voterIds
-     * @return int[]
-     */
-    public function getActivePageIdsByVoterIds(array $voterIds): array
-    {
-        global $wpdb;
-
-        if (empty($voterIds)) {
+        $voterIds = array_values(array_unique(array_filter(array_map('intval', $voterIds), static fn (int $v): bool => $v > 0)));
+        if ($voterIds === []) {
             return [];
         }
 
+        global $wpdb;
         $placeholders = implode(',', array_fill(0, count($voterIds), '%d'));
 
-        return array_map('intval', $wpdb->get_col($wpdb->prepare(
-            "SELECT DISTINCT page_id FROM {$this->table}
-             WHERE voter_user_id IN ({$placeholders}) AND status = 1",
-            ...$voterIds
-        )));
+        // wpdb resets last_error at the start of every query, so a non-empty
+        // value here belongs to THIS read.
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, voter_user_id, page_id FROM {$this->table}
+              WHERE voter_user_id IN ({$placeholders})
+                AND status = %d
+                AND id > %d
+              ORDER BY id ASC
+              LIMIT %d",
+            ...array_merge($voterIds, [self::STATUS_ACTIVE, $afterId, max(1, $limit)])
+        ));
+        if ($wpdb->last_error !== '') {
+            throw new RepositoryException('VoteRepository::getActiveVoteRefsByVoters failed: ' . $wpdb->last_error);
+        }
+
+        $out = [];
+        foreach ((array) $rows as $row) {
+            $out[] = (object) [
+                'id'            => (int) $row->id,
+                'voter_user_id' => (int) $row->voter_user_id,
+                'page_id'       => (int) $row->page_id,
+            ];
+        }
+        return $out;
     }
 
     /**
-     * Soft-delete all active votes on the given page IDs.
+     * Votes with the given ids that are currently in `$status`, as minimal refs.
      *
-     * @param int[] $pageIds
-     * @return int|false
+     * @param list<int> $voteIds
+     * @return list<object{id: int, voter_user_id: int, page_id: int}>
+     * @throws RepositoryException on database failure
      */
-    public function softDeleteByPageIds(array $pageIds)
+    public function getVoteRefsByIdsAndStatus(array $voteIds, int $status): array
     {
         global $wpdb;
+        $out = [];
 
-        if (empty($pageIds)) {
-            return 0;
+        foreach (array_chunk(self::positiveIds($voteIds), self::BULK_CHUNK) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '%d'));
+
+            $rows = $wpdb->get_results($wpdb->prepare(
+                "SELECT id, voter_user_id, page_id FROM {$this->table}
+                  WHERE id IN ({$placeholders}) AND status = %d
+                  ORDER BY id ASC",
+                ...array_merge($chunk, [$status])
+            ));
+            if ($wpdb->last_error !== '') {
+                throw new RepositoryException('VoteRepository::getVoteRefsByIdsAndStatus failed: ' . $wpdb->last_error);
+            }
+
+            foreach ((array) $rows as $row) {
+                $out[] = (object) [
+                    'id'            => (int) $row->id,
+                    'voter_user_id' => (int) $row->voter_user_id,
+                    'page_id'       => (int) $row->page_id,
+                ];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Move the given votes from `$fromStatus` to `$toStatus`, chunked.
+     *
+     * The `status = $fromStatus` predicate is load-bearing: a row that is no
+     * longer in the expected state (e.g. dispute-removed, or already
+     * restored) is never touched.
+     *
+     * @param list<int> $voteIds
+     * @return int Rows changed.
+     * @throws RepositoryException on database failure
+     */
+    public function transitionStatus(array $voteIds, int $fromStatus, int $toStatus): int
+    {
+        global $wpdb;
+        $ids     = self::positiveIds($voteIds);
+        $changed = 0;
+        $now     = current_time('mysql');
+
+        foreach (array_chunk($ids, self::BULK_CHUNK) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '%d'));
+
+            $result = $wpdb->query($wpdb->prepare(
+                "UPDATE {$this->table}
+                    SET status = %d, updated_at = %s
+                  WHERE id IN ({$placeholders}) AND status = %d",
+                ...array_merge([$toStatus, $now], $chunk, [$fromStatus])
+            ));
+            if ($result === false) {
+                throw new RepositoryException('VoteRepository::transitionStatus failed: ' . $wpdb->last_error);
+            }
+            $changed += (int) $result;
         }
 
-        $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
+        foreach ($ids as $id) {
+            $this->bustVoteCache($id);
+        }
 
-        return $wpdb->query($wpdb->prepare(
-            "UPDATE {$this->table} SET status = 0, updated_at = %s
-             WHERE page_id IN ({$placeholders})",
-            current_time('mysql'), ...$pageIds
-        ));
+        return $changed;
+    }
+
+    /**
+     * @param array<mixed> $ids
+     * @return list<int>
+     */
+    private static function positiveIds(array $ids): array
+    {
+        $out = [];
+        foreach ($ids as $id) {
+            $i = (int) $id;
+            if ($i > 0) {
+                $out[$i] = $i;
+            }
+        }
+        return array_values($out);
     }
 
     /**

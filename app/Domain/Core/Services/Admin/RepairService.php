@@ -57,6 +57,17 @@ final class RepairService
             $self()->syncUsers();
         });
 
+        // Repair-page buttons (2026-11-11). Both handlers already ran
+        // securityCheck() — BCC_REPAIR_ENABLED, manage_options, nonce —
+        // and wrote a log line; they simply had no route until now.
+        add_action('admin_post_bcc_trust_db_check', function () use ($self) {
+            $self()->runDbCheck();
+        });
+
+        add_action('admin_post_bcc_trust_cleanup_fraud', function () use ($self) {
+            $self()->cleanupFraud();
+        });
+
     }
 
     // ── Security ────────────────────────────────────────────────────────
@@ -173,10 +184,15 @@ final class RepairService
 
         $results['details'][] = "Found {$total_found} total PeepSo pages";
 
-        // Clean up orphaned score entries
-        $orphaned = $scoreRepo->deleteOrphaned();
-        if ($orphaned > 0) {
-            $results['details'][] = "Removed {$orphaned} orphaned score entries";
+        // Clean up orphaned PAGE score entries (member self-page rows are
+        // excluded by deleteOrphaned()).
+        try {
+            $orphaned = $scoreRepo->deleteOrphaned();
+            if ($orphaned > 0) {
+                $results['details'][] = "Removed {$orphaned} orphaned score entries";
+            }
+        } catch (\BCC\Trust\Core\Exceptions\RepositoryException $e) {
+            $results['details'][] = 'FAILED to remove orphaned score entries: ' . $e->getMessage();
         }
 
         set_transient('bcc_trust_repair_results', $results, 60);
@@ -375,12 +391,21 @@ final class RepairService
             if (!$exists) {
                 $results['issues_found'][] = "Table {$name} is missing";
             } else {
+                // issues_fixed counts rows the DELETE actually removed (its
+                // own return), never the pre-count; a failed DELETE is
+                // reported as a failure, not as fixed.
                 if ($name === 'scores') {
                     $orphaned = $scoreRepo->countOrphaned();
                     if ($orphaned > 0) {
-                        $results['issues_found'][] = "Found {$orphaned} orphaned score records";
-                        $scoreRepo->deleteOrphaned();
-                        $results['issues_fixed'] += $orphaned;
+                        $results['issues_found'][] = "Found {$orphaned} orphaned page score records";
+                        try {
+                            $deleted = $scoreRepo->deleteOrphaned();
+                            $results['issues_fixed'] += $deleted;
+                            $results['issues_found'][] = "Deleted {$deleted} orphaned page score records";
+                        } catch (\BCC\Trust\Core\Exceptions\RepositoryException $e) {
+                            $results['issues_failed'] = ($results['issues_failed'] ?? 0) + 1;
+                            $results['issues_found'][] = 'FAILED to delete orphaned score records: ' . $e->getMessage();
+                        }
                     }
                 }
 
@@ -388,8 +413,14 @@ final class RepairService
                     $orphaned = $userInfoRepo->countOrphaned();
                     if ($orphaned > 0) {
                         $results['issues_found'][] = "Found {$orphaned} orphaned user records";
-                        $userInfoRepo->deleteOrphaned();
-                        $results['issues_fixed'] += $orphaned;
+                        try {
+                            $deleted = $userInfoRepo->deleteOrphaned();
+                            $results['issues_fixed'] += $deleted;
+                            $results['issues_found'][] = "Deleted {$deleted} orphaned user records";
+                        } catch (\BCC\Trust\Core\Exceptions\RepositoryException $e) {
+                            $results['issues_failed'] = ($results['issues_failed'] ?? 0) + 1;
+                            $results['issues_found'][] = 'FAILED to delete orphaned user records: ' . $e->getMessage();
+                        }
                     }
                 }
 
@@ -410,10 +441,29 @@ final class RepairService
             }
         }
 
-        set_transient('bcc_trust_repair_results', $results, 60);
+        $details = [];
+        foreach ($results['tables_checked'] as $name => $status) {
+            $details[] = "table {$name}: {$status}";
+        }
+        foreach ($results['issues_found'] as $issue) {
+            $details[] = $issue;
+        }
+        $report = [
+            'action'       => $results['action'],
+            'tables'       => count($results['tables_checked']),
+            'issues_found' => count($results['issues_found']),
+            'issues_fixed' => $results['issues_fixed'],
+            'issues_failed' => $results['issues_failed'] ?? 0,
+            'details'      => $details,
+        ];
+
+        set_transient('bcc_trust_repair_results', $report, 60);
         Logger::info('[bcc-trust] Repair action complete', [
-            'action'   => $results['action'],
-            'operator' => get_current_user_id(),
+            'action'       => $results['action'],
+            'operator'     => get_current_user_id(),
+            'issues_found' => count($results['issues_found']),
+            'issues_fixed' => $results['issues_fixed'],
+            'issues_failed' => $results['issues_failed'] ?? 0,
         ]);
         wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
         exit;
@@ -442,8 +492,10 @@ final class RepairService
 
         set_transient('bcc_trust_repair_results', $results, 60);
         Logger::info('[bcc-trust] Repair action complete', [
-            'action'   => $results['action'],
-            'operator' => get_current_user_id(),
+            'action'                 => $results['action'],
+            'operator'               => get_current_user_id(),
+            'fraud_analyses_removed' => $results['fraud_analyses_removed'],
+            'suspensions_archived'   => $results['suspensions_archived'],
         ]);
         wp_safe_redirect(admin_url('admin.php?page=bcc-system-repair'));
         exit;
