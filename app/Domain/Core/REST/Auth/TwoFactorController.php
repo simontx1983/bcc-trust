@@ -77,8 +77,10 @@ final class TwoFactorController
      * /auth/login response (same JWT payload shape).
      *
      * On wrong code: challenge token is preserved so the user can retry
-     * without restarting the login flow. Rate limiter is the brute-force
-     * fence; the challenge TTL (10 min) is the outer bound.
+     * without restarting the login flow — up to TWO_FA_MAX_FAILURES wrong
+     * codes per (user, challenge); the last one burns the OTP + challenge
+     * (401 bcc_invalid_2fa_token, "sign in again"). The per-IP rate limiter
+     * is a second fence; the challenge TTL (10 min) is the outer bound.
      */
     public function twoFaVerify(WP_REST_Request $request): WP_REST_Response
     {
@@ -98,7 +100,32 @@ final class TwoFactorController
             return ApiResponse::error('bcc_invalid_2fa_token', 'This session has expired. Please sign in again.', 401);
         }
 
-        if (!AuthSupport::consume2faOtp($userId, $code)) {
+        if (!AuthSupport::consume2faOtp($challengeToken, $code)) {
+            // Attempt cap (F-124), per (user, challenge): a bounded Throttle
+            // bucket with an EXPLICIT key (so it is not split by client IP)
+            // counts wrong codes over the challenge's lifetime. Failures 1..
+            // MAX-1 answer "incorrect"; the MAX-th burns the OTP and the
+            // challenge, so the code can no longer be guessed and the user
+            // must sign in again (the existing bcc_invalid_2fa_token answer,
+            // which the frontend already routes back to sign-in). Keyed on
+            // the challenge too, so a stale challenge's failures can never
+            // burn a fresh login. A degraded limiter fails closed (burns).
+            $failKey = '2fa_fail:' . $userId . ':' . substr(hash('sha256', $challengeToken), 0, 32);
+            if (!\BCC\Core\Security\Throttle::allow(
+                '2fa_fail',
+                AuthSupport::TWO_FA_MAX_FAILURES - 1,
+                AuthSupport::TWO_FA_CHALLENGE_TTL,
+                $failKey
+            )) {
+                AuthSupport::burn2faOtp($challengeToken);
+                AuthSupport::consume2faChallenge($challengeToken);
+                Logger::audit('2fa_attempts_exhausted', ['user_id' => $userId]);
+                return ApiResponse::error(
+                    'bcc_invalid_2fa_token',
+                    'Too many incorrect codes. Please sign in again.',
+                    401
+                );
+            }
             return ApiResponse::error('bcc_invalid_2fa_code', 'Incorrect or expired code.', 401);
         }
 
@@ -161,7 +188,10 @@ final class TwoFactorController
             $user = get_userdata($userId);
             if ($user instanceof \WP_User) {
                 $otpCode = AuthSupport::generateOtp();
-                AuthSupport::store2faOtp($userId, $otpCode);
+                // Re-binds a fresh code to the SAME (still-current) challenge.
+                // The attempt counter is per challenge, so a resend does not
+                // grant extra guesses.
+                AuthSupport::store2faOtp($challengeToken, $otpCode);
                 AuthMailer::send2faCode($userId, (string) $user->user_email, $otpCode);
             }
         }

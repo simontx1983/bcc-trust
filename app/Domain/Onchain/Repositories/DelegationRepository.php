@@ -71,14 +71,30 @@ final class DelegationRepository
             if ($wpdb->query('START TRANSACTION') === false) {
                 throw new \RuntimeException('START TRANSACTION failed');
             }
-            $wpdb->delete($table, ['wallet_link_id' => $walletLinkId], ['%d']);
+            // F-145: every write is checked. A failure used to be counted as
+            // a success, and the transaction COMMITTED after the DELETE —
+            // losing the previous delegation set behind a "success" count.
+            // Throwing lands in the catch below, which ROLLS BACK, so the
+            // previous set survives intact.
+            if ($wpdb->delete($table, ['wallet_link_id' => $walletLinkId], ['%d']) === false) {
+                throw new \RuntimeException('delete of the previous delegation set failed: ' . $wpdb->last_error);
+            }
 
             $inserted = 0;
+            $seen     = [];
             foreach ($delegations as $d) {
                 $validator = $d['validator_address'] ?? '';
                 if ($validator === '') {
                     continue;
                 }
+                // uq_wallet_validator (wallet_link_id, validator_address):
+                // a provider list naming the same validator twice must not
+                // turn into a unique-key failure that rolls back a good set.
+                // First occurrence wins.
+                if (isset($seen[$validator])) {
+                    continue;
+                }
+                $seen[$validator] = true;
 
                 $shares = isset($d['shares']) ? (string) $d['shares'] : null;
                 $amount = isset($d['amount']) ? (float) $d['amount'] : null;
@@ -101,11 +117,15 @@ final class DelegationRepository
                     $format[]      = '%f';
                 }
 
-                $wpdb->insert($table, $row, $format);
+                if ($wpdb->insert($table, $row, $format) === false) {
+                    throw new \RuntimeException('delegation insert failed: ' . $wpdb->last_error);
+                }
                 $inserted++;
             }
 
-            $wpdb->query('COMMIT');
+            if ($wpdb->query('COMMIT') === false) {
+                throw new \RuntimeException('COMMIT failed: ' . $wpdb->last_error);
+            }
             return $inserted;
         } catch (\Throwable $e) {
             $wpdb->query('ROLLBACK');

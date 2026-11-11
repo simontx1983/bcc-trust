@@ -512,6 +512,84 @@ final class NftRevocationFailSafeTest extends TestCase
         self::assertSame([self::GROUP . ':' . self::USER], \BccRevokeWorld::$joins);
     }
 
+    // ── F-158: an explicit Join overrides a VOLUNTARY opt-out only ───────
+
+    public function testAVoluntaryOptOutNoLongerBlocksAnExplicitJoinAndIsCleared(): void
+    {
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $this->linkCosmos();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 1);
+        $svc = new NftGroupGateService();
+        $svc->recordOptOut(self::USER, self::GROUP); // the user left
+        self::assertTrue($svc->isOptOutActive(self::USER, self::GROUP), 'control: the opt-out is live');
+
+        $result = $svc->joinIfEligible(self::USER, self::GROUP);
+
+        self::assertSame(JoinResult::CODE_OK, $result->code);
+        self::assertSame([self::GROUP . ':' . self::USER], \BccRevokeWorld::$joins);
+        self::assertFalse((new NftGroupGateService())->isOptOutActive(self::USER, self::GROUP), 'success clears the opt-out');
+    }
+
+    public function testAVoluntaryOptOutStillRequiresEligibilityAndIsKeptOnRefusal(): void
+    {
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $this->linkCosmos();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 0);
+        $svc = new NftGroupGateService();
+        $svc->recordOptOut(self::USER, self::GROUP);
+
+        self::assertSame(JoinResult::CODE_NOT_ELIGIBLE, $svc->joinIfEligible(self::USER, self::GROUP)->code);
+        self::assertSame([], \BccRevokeWorld::$joins);
+        self::assertTrue((new NftGroupGateService())->isOptOutActive(self::USER, self::GROUP), 'a refused join keeps the opt-out');
+    }
+
+    /** ⚠ Confirmed by the user: a moderator's removal still blocks rejoining. */
+    public function testAModEvictedHolderIsStillRefusedOnExplicitJoin(): void
+    {
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $this->linkCosmos();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 5);
+        $svc = new NftGroupGateService();
+        $svc->recordPermanentOptOut(self::USER, self::GROUP);
+
+        self::assertSame(JoinResult::CODE_OPT_OUT_ACTIVE, $svc->joinIfEligible(self::USER, self::GROUP)->code);
+        self::assertSame([], \BccRevokeWorld::$joins, 'an evicted holder is never written back in');
+        self::assertTrue($svc->isPermanentOptOut(self::USER, self::GROUP));
+    }
+
+    public function testAVoluntaryOptOutStillSuppressesAutoAdd(): void
+    {
+        // Auto-add (reconcile → findEligibleGroups) must keep honouring
+        // EVERY opt-out; only the explicit Join changed.
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $this->linkCosmos();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 1);
+        $svc = new NftGroupGateService();
+        $svc->recordOptOut(self::USER, self::GROUP);
+
+        $eligible = $svc->findEligibleGroups(self::USER);
+
+        self::assertSame([], array_values(array_filter(
+            $eligible,
+            static fn ($cfg): bool => (int) $cfg->groupId === self::GROUP
+        )), 'an opted-out group is never offered for auto-add');
+    }
+
+    /** Control for the test above: without the opt-out the group IS offered. */
+    public function testWithoutAnOptOutTheGroupIsOfferedForAutoAdd(): void
+    {
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $this->linkCosmos();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 1);
+
+        $eligible = (new NftGroupGateService())->findEligibleGroups(self::USER);
+
+        self::assertCount(1, array_filter(
+            $eligible,
+            static fn ($cfg): bool => (int) $cfg->groupId === self::GROUP
+        ), 'control: an eligible, non-opted-out group is offered');
+    }
+
     // ════════════════════════════════════════════════════════════════════
     // 4. Revoke sweep
     // ════════════════════════════════════════════════════════════════════

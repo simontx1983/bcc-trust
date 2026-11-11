@@ -637,14 +637,34 @@ final class NftHoldingsRepository
                      confirmed_at, indexed_at)
                  VALUES " . implode(', ', $placeholders) . "
                  ON DUPLICATE KEY UPDATE
-                    balance = VALUES(balance),
+                    balance = IF(
+                        VALUES(last_seen_block) >= last_seen_block,
+                        VALUES(balance),
+                        balance
+                    ),
                     metadata_status = CASE
-                        WHEN metadata_status = %d THEN VALUES(metadata_status)
+                        WHEN VALUES(last_seen_block) >= last_seen_block AND metadata_status = %d
+                            THEN VALUES(metadata_status)
                         ELSE metadata_status
                     END,
                     last_seen_block = GREATEST(last_seen_block, VALUES(last_seen_block)),
                     confirmed_at = GREATEST(confirmed_at, VALUES(confirmed_at)),
                     indexed_at = VALUES(indexed_at)";
+            // ⚠ F-65: EVENT-ORDER GUARD.
+            //
+            // Batches can arrive out of order (Helius delivers different
+            // Solana txs out of order; signature dedupe only stops exact
+            // replays). A STALE transfer-in must not overwrite a row a newer
+            // event wrote, so balance and status change only when the incoming
+            // block is not older than the stored one.
+            //
+            // On assignment order: MySQL and MariaDB evaluate ON DUPLICATE KEY
+            // UPDATE assignments left to right, and a later one reads the
+            // column as already updated. For THIS guard (>=) that is harmless —
+            // last_seen_block only ever becomes GREATEST(old, new), and
+            // `new >= GREATEST(old, new)` holds exactly when `new >= old` — but
+            // a STRICT guard (>) placed after the GREATEST would never pass. The
+            // guarded assignments are kept first so either form stays correct.
 
             $result = $wpdb->query($wpdb->prepare($sql, ...$args));
             if ($result !== false) {
@@ -660,29 +680,42 @@ final class NftHoldingsRepository
      * returns true if a row was deleted, false if no match. Caller
      * (ingestBatch) is responsible for bumping the generation counter
      * AFTER its transaction commits; see upsertMany for why.
+     *
+     * ⚠ F-65: EVENT-ORDER GUARD. `$atBlock` is the block (Solana: slot) of
+     * the transfer-out. Only a row this OUT is NOT OLDER than is deleted: a
+     * stale OUT delivered after a newer IN leaves the newer holding alone. An
+     * equal block deletes — within one block/slot the last arrival wins, as
+     * before. A missing block (<= 0) refuses rather than delete unguarded.
      */
-    public static function deleteByWalletAndToken(int $walletLinkId, string $contract, string $tokenId): bool
+    public static function deleteByWalletAndToken(int $walletLinkId, string $contract, string $tokenId, int $atBlock): bool
     {
         if ($walletLinkId <= 0 || $contract === '' || $tokenId === '') {
+            return false;
+        }
+        if ($atBlock <= 0) {
+            \BCC\Core\Log\Logger::warning('[NftHoldingsRepository] transfer-out without a block refused', [
+                'wallet_link_id' => $walletLinkId,
+            ]);
             return false;
         }
 
         global $wpdb;
         $table = self::table();
 
-        $deleted = $wpdb->delete(
-            $table,
-            [
-                'wallet_link_id'   => $walletLinkId,
-                // ⚠ NOT folded. `contract_address`'s collation is
-                // case-INSENSITIVE, so this still matches a legacy row that
-                // was stored folded — the delete works on both old and new
-                // rows without rewriting either.
-                'contract_address' => $contract,
-                'token_id'         => $tokenId,
-            ],
-            ['%d', '%s', '%s']
-        );
+        // ⚠ NOT folded. `contract_address`'s collation is case-INSENSITIVE,
+        // so this still matches a legacy row that was stored folded — the
+        // delete works on both old and new rows without rewriting either.
+        $deleted = $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$table}
+              WHERE wallet_link_id = %d
+                AND contract_address = %s
+                AND token_id = %s
+                AND last_seen_block <= %d",
+            $walletLinkId,
+            $contract,
+            $tokenId,
+            $atBlock
+        ));
 
         return is_int($deleted) && $deleted > 0;
     }
@@ -745,7 +778,7 @@ final class NftHoldingsRepository
      * upsert+delete on the same wallet only invalidates once.
      *
      * @param list<array<string, mixed>>                                $upserts
-     * @param list<array{wallet_link_id: int, contract: string, token_id: string}> $deletes
+     * @param list<array{wallet_link_id: int, contract: string, token_id: string, block: int}> $deletes
      * @param list<array<string, mixed>>                                $deltas   ERC-1155 signed balance deltas.
      * @return array{inserts: int, deletes: int}
      * @throws \RuntimeException when the batch fails to commit
@@ -791,7 +824,7 @@ final class NftHoldingsRepository
                 if ($linkId <= 0 || $contract === '' || $tokenId === '') {
                     continue;
                 }
-                if (self::deleteByWalletAndToken($linkId, $contract, $tokenId)) {
+                if (self::deleteByWalletAndToken($linkId, $contract, $tokenId, (int) ($d['block'] ?? 0))) {
                     $result['deletes']++;
                     $touchedWallets[$linkId] = true;
                 }

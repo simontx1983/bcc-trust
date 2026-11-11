@@ -116,6 +116,35 @@ final class NftVerificationSurfaceBudgetTest extends TestCase
         self::assertSame(4, \BccRevokeWorld::providerCalls());
     }
 
+    /**
+     * F-158: each opted_out item says WHICH kind of opt-out it is, so the
+     * client offers Join only where it can succeed. "left" = self-leave
+     * (TTL'd; an explicit Join overrides it), "removed" = moderator eviction
+     * (permanent; Join is refused).
+     */
+    public function testOptedOutItemsCarryTheirOptOutKind(): void
+    {
+        $this->gates(3);
+        \BccRevokeWorld::$userMeta[self::USER]['bcc_gated_groups_optout'] = (string) json_encode([
+            (string) (self::FIRST_GROUP + 0) => 0,       // moderator eviction (permanent)
+            (string) (self::FIRST_GROUP + 1) => time(),  // the member left just now
+        ]);
+
+        $data = $this->listing();
+
+        $kinds = [];
+        foreach ($data['opted_out'] as $item) {
+            $kinds[(int) $item['group_id']] = $item['opt_out_kind'] ?? null;
+        }
+        self::assertSame(
+            [self::FIRST_GROUP + 0 => 'removed', self::FIRST_GROUP + 1 => 'left'],
+            $kinds
+        );
+        foreach (array_merge($data['joined'], $data['eligible_to_join']) as $item) {
+            self::assertArrayNotHasKey('opt_out_kind', $item, 'the field rides on opted_out items only');
+        }
+    }
+
     public function testTheListingIsBoundedByItsBudget(): void
     {
         $this->gates(60);

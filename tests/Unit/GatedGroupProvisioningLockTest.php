@@ -105,6 +105,32 @@ final class GatedGroupProvisioningLockTest extends TestCase
     /**
      * The whole point: a peer holding the lock means nothing is created.
      */
+    /**
+     * F-161 — THE LOCK LOSER. provisionOne() reads the row BEFORE the lock;
+     * a run that waited out the lock arrives holding that stale `requested`
+     * row while the winner has already created the community and moved the
+     * row to provisioned. The loser must report `exists` (as the class
+     * docblock promises), not `unconfirmed` from a requested → provisioned
+     * compare-and-swap that can no longer match.
+     */
+    public function testTheLockLoserReportsExistsNotAFalseFailure(): void
+    {
+        $this->seed();
+        $winnersGroup = 555;
+        AdvisoryLock::$onAcquire = static function () use ($winnersGroup): void {
+            // The winner finished while this run waited for the lock.
+            \BCC\Trust\Onchain\Repositories\CollectionRepository::$provisioning[self::CID]['state'] = ProvisioningState::PROVISIONED;
+            \BCC\Trust\Onchain\Repositories\GatedGroupRepository::$groups['4|' . self::ADDRESS] = $winnersGroup;
+        };
+
+        $result = $this->service->provisionOne(self::CID);
+
+        self::assertSame('exists', $result['status'], 'the loser must not report a failure for a correctly provisioned collection');
+        self::assertSame($winnersGroup, $result['group_id']);
+        self::assertFalse($result['failure_recorded']);
+        self::assertSame(0, \BccPeepSoSpy::$created, 'and it creates nothing');
+    }
+
     public function testAHeldLockCreatesNothing(): void
     {
         $this->seed();

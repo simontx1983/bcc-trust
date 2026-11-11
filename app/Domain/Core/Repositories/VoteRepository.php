@@ -304,9 +304,13 @@ class VoteRepository {
     }
 
     /**
-     * Bulk-fetch vote rows by primary key. Used by FeedRankingService
-     * to hydrate review post bodies for an entire feed page in one
-     * round trip (vs N+1).
+     * Bulk-fetch ACTIVE (status = 1) vote rows by primary key. Used by
+     * ReviewBodyHydrator to hydrate review post bodies for an entire feed
+     * page in one round trip (vs N+1).
+     *
+     * Active only (F-88): a review whose vote was retracted (0), removed by
+     * dispute (2) or removed by moderation (3) must not render in any feed.
+     * A missing row here is how the feed learns to drop the item.
      *
      * Cache is intentionally bypassed — feed-page hydration is rare
      * enough that the per-vote cache (60s TTL) doesn't help, and the
@@ -314,9 +318,9 @@ class VoteRepository {
      * feed page cap (50 items at a time).
      *
      * @param list<int> $voteIds
-     * @return array<int, object> vote_id → row
+     * @return array<int, object> vote_id → row (active votes only)
      */
-    public function findManyByIds(array $voteIds): array
+    public function findManyActiveByIds(array $voteIds): array
     {
         if ($voteIds === []) {
             return [];
@@ -340,7 +344,8 @@ class VoteRepository {
         /** @var list<object>|null $rows */
         $rows = $wpdb->get_results(
             "SELECT " . self::COLUMNS . " FROM {$this->table}
-              WHERE id IN ({$idList})"
+              WHERE id IN ({$idList})
+                AND status = 1"
         );
 
         $out = [];
@@ -1075,6 +1080,7 @@ class VoteRepository {
                  LEFT JOIN {$wpdb->posts} p ON v.page_id = p.ID
                  WHERE v.voter_user_id = %d
                    AND v.status        = 1
+                   AND " . $this->hiddenReviewExclusion('v') . "
                  ORDER BY v.created_at DESC
                  LIMIT %d OFFSET %d",
                 $voterId,
@@ -1136,10 +1142,11 @@ class VoteRepository {
                         explanation,
                         reason,
                         created_at
-                 FROM {$this->table}
-                 WHERE page_id = %d
-                   AND status  = 1
-                 ORDER BY created_at DESC
+                 FROM {$this->table} v
+                 WHERE v.page_id = %d
+                   AND v.status  = 1
+                   AND " . $this->hiddenReviewExclusion('v') . "
+                 ORDER BY v.created_at DESC
                  LIMIT %d OFFSET %d",
                 $pageId,
                 $limit,
@@ -1170,11 +1177,91 @@ class VoteRepository {
         }
         global $wpdb;
         return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$this->table}
-             WHERE page_id = %d
-               AND status  = 1",
+            "SELECT COUNT(*) FROM {$this->table} v
+             WHERE v.page_id = %d
+               AND v.status  = 1
+               AND " . $this->hiddenReviewExclusion('v'),
             $pageId
         ));
+    }
+
+    /**
+     * Count of the reviews a member wrote that their profile's Reviews
+     * list SHOWS: active, and not moderation-hidden (F-55). The paired
+     * count for {@see findByVoterPaginated()}.
+     *
+     * ⚠ Deliberately NOT a change to {@see countByVoter()}: that count
+     * feeds vote weight, quests and profile stats, where whether a hidden
+     * review should still count is an open product question (scoring is
+     * out of F-55's scope).
+     */
+    public function countReviewsByVoter(int $voterId): int
+    {
+        if ($voterId <= 0) {
+            return 0;
+        }
+        global $wpdb;
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->table} v
+             WHERE v.voter_user_id = %d
+               AND v.status        = 1
+               AND " . $this->hiddenReviewExclusion('v'),
+            $voterId
+        ));
+    }
+
+    /**
+     * F-55 — SQL predicate excluding reviews whose FEED ACTIVITY is
+     * moderation-hidden, for the review LIST reads only.
+     *
+     * A review is a votes row. Its feed activity (ActivityStreamWriter::
+     * handleReviewPublished) points act_external_id at a backing wp_post
+     * whose meta is `_bcc_activity_module = 'review'` and
+     * `_bcc_activity_sidecar_id = <vote id>`. Moderation (admin hide,
+     * auto-hide, undo-of-restore: every writer of bcc_hidden_activities)
+     * hides that ACTIVITY, so a list that reads the votes table directly
+     * kept showing the hidden review. Excluding in SQL keeps COUNT and
+     * LIMIT/OFFSET consistent; a PHP post-filter would not.
+     *
+     * - Driven from the (small) hidden table; every join is on an indexed
+     *   key (act_id, post_id).
+     * - The sidecar id is compared NUMERICALLY: a string compare of the
+     *   LONGTEXT meta_value against CAST(id AS CHAR) can raise an
+     *   illegal-mix-of-collations error on MySQL 8.
+     * - Without PeepSo's activities table there are no review activities
+     *   to hide, and the join would error, so the predicate is a no-op.
+     *
+     * PUBLIC so the scoring follow-up (a moderation-hidden review stops
+     * counting toward scores and tallies while hidden; user decision) can
+     * reuse exactly this predicate instead of growing a parallel one (§11).
+     * It is single-purpose: give it the votes-table alias, AND it into a
+     * WHERE clause.
+     *
+     * @param string $alias the votes-table alias in the calling query
+     */
+    public function hiddenReviewExclusion(string $alias): string
+    {
+        global $wpdb;
+        $activities = $wpdb->prefix . 'peepso_activities';
+        $hidden     = \BCC\Trust\Core\Database\TableRegistry::hiddenActivities();
+        if (!\BCC\Trust\Core\Database\TableRegistry::exists($activities)
+            || !\BCC\Trust\Core\Database\TableRegistry::exists($hidden)) {
+            return '1 = 1';
+        }
+
+        return "NOT EXISTS (
+                    SELECT 1
+                      FROM {$hidden} h
+                      INNER JOIN {$activities} a ON a.act_id = h.act_id
+                      INNER JOIN {$wpdb->postmeta} pm_mod
+                              ON pm_mod.post_id = a.act_external_id
+                             AND pm_mod.meta_key = '_bcc_activity_module'
+                             AND pm_mod.meta_value = 'review'
+                      INNER JOIN {$wpdb->postmeta} pm_sc
+                              ON pm_sc.post_id = a.act_external_id
+                             AND pm_sc.meta_key = '_bcc_activity_sidecar_id'
+                     WHERE CAST(pm_sc.meta_value AS UNSIGNED) = {$alias}.id
+                )";
     }
 
     /**

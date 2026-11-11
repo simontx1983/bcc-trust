@@ -153,6 +153,9 @@ final class OperatorProfileEndpoint
         if ($userId <= 0) {
             return self::unauthorized();
         }
+        if (($suspended = self::refuseIfSuspended($userId)) !== null) {
+            return $suspended;
+        }
 
         $parsed = self::parsePatch($request, false);
         if (isset($parsed['response'])) {
@@ -190,6 +193,9 @@ final class OperatorProfileEndpoint
         if ($userId <= 0) {
             return self::unauthorized();
         }
+        if (($suspended = self::refuseIfSuspended($userId)) !== null) {
+            return $suspended;
+        }
 
         $pageId = (int) $request->get_param('page_id');
         $gate   = self::requireVerifiedOperator($pageId, $userId);
@@ -226,6 +232,9 @@ final class OperatorProfileEndpoint
         if ($userId <= 0) {
             return self::unauthorized();
         }
+        if (($suspended = self::refuseIfSuspended($userId)) !== null) {
+            return $suspended;
+        }
 
         $pageId = (int) $request->get_param('page_id');
         $gate   = self::requireVerifiedOperator($pageId, $userId);
@@ -251,6 +260,9 @@ final class OperatorProfileEndpoint
         $userId = get_current_user_id();
         if ($userId <= 0) {
             return self::unauthorized();
+        }
+        if (($suspended = self::refuseIfSuspended($userId)) !== null) {
+            return $suspended;
         }
         if (ClaimRepository::listVerifiedValidatorPagesForUser($userId, 1) === []) {
             return self::privateError('bcc_forbidden', 'A verified validator operator claim is required to manage this profile.', 403);
@@ -310,6 +322,9 @@ final class OperatorProfileEndpoint
         $userId = get_current_user_id();
         if ($userId <= 0) {
             return self::unauthorized();
+        }
+        if (($suspended = self::refuseIfSuspended($userId)) !== null) {
+            return $suspended;
         }
         if (ClaimRepository::listVerifiedValidatorPagesForUser($userId, 1) === []) {
             return self::privateError('bcc_forbidden', 'A verified validator operator claim is required to manage this profile.', 403);
@@ -562,6 +577,21 @@ final class OperatorProfileEndpoint
     private static function unauthorized(): WP_REST_Response
     {
         return self::privateError('bcc_unauthorized', 'Sign in to manage your operator profile.', 401);
+    }
+
+    /**
+     * §M suspension gate (F-109 review M1): a suspended operator cannot
+     * change the public operator profile, overrides or logo. Admin bypass
+     * OFF, the same gate as PageDelegatorGroupEndpoint and the page claim
+     * route. Uses this endpoint's private, no-store envelope.
+     */
+    private static function refuseIfSuspended(int $userId): ?WP_REST_Response
+    {
+        if (\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return null;
+        }
+
+        return self::privateError('bcc_forbidden', 'Your account is suspended.', 403);
     }
 
     /** @param array<string, mixed>|null $data */

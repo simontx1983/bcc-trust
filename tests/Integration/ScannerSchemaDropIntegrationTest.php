@@ -278,6 +278,9 @@ final class ScannerSchemaDropIntegrationTest extends TestCase
         // (F-149). Every case runs ARMED unless it clears the option itself;
         // the unarmed refusal is section 1b below.
         \update_option('bcc_trust_allow_drop_scanner_schema', '1');
+        // An unarmed refusal starts a one-hour skip-backoff; never let one
+        // case's backoff leak into the next.
+        \delete_transient('bcc_trust_scanner_drop_unarmed_backoff');
 
         $this->buildPreDropShape();
     }
@@ -404,6 +407,26 @@ final class ScannerSchemaDropIntegrationTest extends TestCase
         self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_drop_scanner_schema()); // armed: clears it
 
         \delete_option('bcc_trust_allow_drop_scanner_schema');
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_drop_scanner_schema());
+    }
+
+    /**
+     * #418 review L2: once an unarmed run has refused, the runner's
+     * per-request retry must not re-run the information_schema inventory
+     * for the next hour — the second unarmed call issues NO queries.
+     */
+    public function testAnUnarmedRefusalSkipsTheInventoryForAnHour(): void
+    {
+        $wpdb = $GLOBALS['wpdb'];
+        \delete_option('bcc_trust_allow_drop_scanner_schema');
+        self::assertSame(BCC_TRUST_MIGRATION_INCOMPLETE, bcc_trust_drop_scanner_schema());
+
+        $wpdb->resetQueryCount();
+        self::assertSame(BCC_TRUST_MIGRATION_INCOMPLETE, bcc_trust_drop_scanner_schema());
+        self::assertSame(0, $wpdb->queryCount, 'the backed-off unarmed run must not touch the database');
+
+        // Anti-vacuity: arming takes effect immediately, backoff or not.
+        \update_option('bcc_trust_allow_drop_scanner_schema', '1');
         self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_drop_scanner_schema());
     }
 

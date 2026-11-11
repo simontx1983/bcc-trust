@@ -96,3 +96,52 @@ namespace BCC\Core\Security {
         }
     }
 }
+
+namespace BCC\Core\Permissions {
+    // F-109: PagesEndpoint::claim() now calls the REAL
+    // Permissions::is_not_suspended(), which calls user_can() unqualified.
+    // The integration bootstrap has no user_can(). This is namespace-scoped,
+    // so it binds ONLY for Permissions, and it lives here (loaded only by this
+    // separate-process suite), never in the bootstrap. The fixture user is
+    // not an administrator. Suspension itself is still read for real (no
+    // user_info row → not suspended).
+    if (!function_exists(__NAMESPACE__ . '\\user_can')) {
+        /** @param int|\WP_User $user */
+        function user_can($user, string $capability, ...$args): bool
+        {
+            return false;
+        }
+    }
+}
+
+namespace BCC\Core {
+    // F-109: resolve the REAL TrustReadService, as bcc-trust.php does in
+    // production with `add_filter('bcc.resolve.trust_read_service', …)`.
+    // The bootstrap's apply_filters() is a pass-through, so ServiceLocator
+    // received null and fell back to NullTrustReadService, whose
+    // isSuspended() is fail-closed TRUE. Every fixture user therefore read as
+    // SUSPENDED and every claim got a 403. With this shim, suspension is read
+    // from the real user_info table: no row → not suspended (as in prod), and
+    // is_suspended = 1 → suspended.
+    //
+    // Namespace-scoped, so it binds ONLY for unqualified calls in BCC\Core,
+    // where ServiceLocator is the only caller. Every other hook is delegated
+    // to the global function unchanged.
+    if (!function_exists(__NAMESPACE__ . '\\apply_filters')) {
+        /**
+         * @param  mixed $value
+         * @param  mixed ...$args
+         * @return mixed
+         */
+        function apply_filters(string $hook, $value, ...$args)
+        {
+            if ($hook === 'bcc.resolve.trust_read_service') {
+                return new \BCC\Trust\Core\Application\TrustReadService(
+                    new \BCC\Trust\Core\Repositories\VoteRepository()
+                );
+            }
+
+            return \apply_filters($hook, $value, ...$args);
+        }
+    }
+}

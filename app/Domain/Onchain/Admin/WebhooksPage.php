@@ -57,6 +57,7 @@ final class WebhooksPage
         if (!current_user_can('manage_options')) {
             wp_die(esc_html__('Unauthorized.'));
         }
+        AdminActionSupport::requirePost();   // F-91: destructive — form POST only
         check_admin_referer(self::NONCE_KEY);
 
         HeliusDeliveryLog::clear();

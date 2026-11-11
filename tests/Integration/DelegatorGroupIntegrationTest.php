@@ -964,12 +964,64 @@ final class DelegatorGroupIntegrationTest extends TestCase
         self::assertCount(1, $GLOBALS['__bcc_lcd_calls'], 'the LCD was asked once, so only the minimum moved');
     }
 
-    /** Same status and code as a shortfall; only the reason tells them apart. */
-    public function testAnOptOutCooldownRefusalReadsDifferentlyFromAShortfall(): void
+    /**
+     * F-158: a VOLUNTARY opt-out (the member left) no longer refuses an
+     * explicit Join on the real route. An eligible delegator gets back in,
+     * and the opt-out is cleared.
+     */
+    public function testAVoluntaryOptOutNoLongerBlocksAnExplicitJoin(): void
     {
         $groupId = $this->createdGroup('1');
         $this->giveWalletDelegating(701, 5.0);
         (new NftGroupGateService())->recordOptOut(701, $groupId);
+        $GLOBALS['__bcc_current_user'] = 701;
+
+        self::assertSame(200, $this->join($groupId)->get_status());
+        self::assertSame('member', $this->memberStatus(701, $groupId));
+        self::assertFalse((new NftGroupGateService())->isOptOutActive(701, $groupId), 'success clears the opt-out');
+    }
+
+    /**
+     * F-158: the delegator listing marks each opted_out item with the SAME
+     * `opt_out_kind` field and values as the holder-groups listing, so the
+     * client offers Join only on a self-left community.
+     */
+    public function testTheListingSaysWhichKindOfOptOutEachIs(): void
+    {
+        $groupId = $this->createdGroup('1');
+        $this->giveWalletDelegating(701, 5.0);
+        $gate = new NftGroupGateService();
+        $GLOBALS['__bcc_current_user'] = 701;
+
+        $gate->recordOptOut(701, $groupId);
+        self::assertSame('left', $this->optOutKindInListing($groupId), 'a self-leave is offered Join');
+
+        $gate->recordPermanentOptOut(701, $groupId);
+        self::assertSame('removed', $this->optOutKindInListing($groupId), 'a moderator eviction is not');
+    }
+
+    private function optOutKindInListing(int $groupId): ?string
+    {
+        $data = (new ValidatorGroupsEndpoint())->getList(new \WP_REST_Request())->get_data();
+        $data = $data['data'] ?? $data;
+        foreach ($data['opted_out'] ?? [] as $item) {
+            if ((int) ($item['group_id'] ?? 0) === $groupId) {
+                return $item['opt_out_kind'] ?? null;
+            }
+        }
+        self::fail('the opted-out community must be listed under opted_out');
+    }
+
+    /**
+     * Same status and code as a shortfall; only the reason tells them apart.
+     * Since F-158 opt_out_active means a MODERATOR EVICTION (a permanent
+     * opt-out), which still refuses an explicit Join.
+     */
+    public function testAModEvictionRefusalReadsDifferentlyFromAShortfall(): void
+    {
+        $groupId = $this->createdGroup('1');
+        $this->giveWalletDelegating(701, 5.0);
+        (new NftGroupGateService())->recordPermanentOptOut(701, $groupId);
         $GLOBALS['__bcc_current_user'] = 701;
 
         $response = $this->join($groupId);
@@ -977,6 +1029,7 @@ final class DelegatorGroupIntegrationTest extends TestCase
         self::assertSame(403, $response->get_status());
         self::assertSame('bcc_permission_denied', $response->get_data()['error']['code']);
         self::assertSame('opt_out_active', $response->get_data()['error']['data']['reason_code']);
+        self::assertSame('A moderator removed you from this community, so you cannot rejoin it.', $response->get_data()['error']['message']);
         self::assertNull($this->memberStatus(701, $groupId));
 
         $GLOBALS['__bcc_current_user'] = 702;

@@ -76,7 +76,8 @@ if (!defined('ABSPATH')) {
  * @phpstan-type DeleteRow array{
  *     wallet_link_id: int,
  *     contract: string,
- *     token_id: string
+ *     token_id: string,
+ *     block: int
  * }
  * @phpstan-type DeltaRow array{
  *     wallet_link_id: int,
@@ -353,6 +354,9 @@ final class NftHoldingsIndexer
                             'wallet_link_id' => $fromLinkId,
                             'contract'       => $contract,
                             'token_id'       => $tokenId,
+                            // F-65: the repository only deletes a row this
+                            // OUT is not older than, across batches.
+                            'block'          => $blkNum,
                         ],
                     ];
                 }

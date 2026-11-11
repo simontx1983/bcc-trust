@@ -102,6 +102,34 @@ if (!function_exists('bcc_trust_migration_backoff_active')) {
     }
 
     /**
+     * Run a single-value SELECT and return its value ONLY when the result can
+     * be trusted (#69 runProbe shape; #418 review L1). Returns [false, null]
+     * on any failure.
+     *
+     * last_error alone is not an exhaustive failure signal: wpdb::query() can
+     * return false WITHOUT setting it (the `! $this->ready` guard after a
+     * failed reconnect, or a `query` filter emptying the SQL), and get_var()
+     * discards query()'s return — so on those paths get_var() would read the
+     * PREVIOUS statement's last_result (e.g. the table name a SHOW TABLES
+     * just returned) and (int) it to a plausible 0, which reads a populated
+     * retired table as "empty". Run the statement through query(), check
+     * BOTH the return and last_error, then read the value with get_var(null).
+     *
+     * @return array{0: bool, 1: string|null}
+     */
+    function bcc_trust_migration_probe(string $sql): array
+    {
+        global $wpdb;
+        $wpdb->last_error = '';
+        $ok = $wpdb->query($sql);
+        if ($ok === false || (string) $wpdb->last_error !== '') {
+            return [false, null];
+        }
+        $value = $wpdb->get_var(null);
+        return [true, $value === null ? null : (string) $value];
+    }
+
+    /**
      * Refuse to destroy data (F-149): start the retry backoff and log WHAT
      * was spared, so an operator can decide. Distinct from a failed step —
      * nothing errored; the migration declined to delete rows.
@@ -140,8 +168,8 @@ if (!function_exists('bcc_trust_migration_backoff_active')) {
     {
         global $wpdb;
 
-        $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
-        if ($exists === null && $wpdb->last_error !== '') {
+        [$ok, $exists] = bcc_trust_migration_probe($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+        if (!$ok) {
             bcc_trust_migration_step_failed($migrationId, "probe {$table}");
             return 'failed';
         }
@@ -151,8 +179,8 @@ if (!function_exists('bcc_trust_migration_backoff_active')) {
 
         // Table name is $wpdb->prefix + a hard-coded suffix — no user input.
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $rows = $wpdb->get_var("SELECT COUNT(*) FROM `{$table}`");
-        if ($rows === null) {
+        [$ok, $rows] = bcc_trust_migration_probe("SELECT COUNT(*) FROM `{$table}`");
+        if (!$ok || $rows === null) {
             bcc_trust_migration_step_failed($migrationId, "count {$table}");
             return 'failed';
         }
