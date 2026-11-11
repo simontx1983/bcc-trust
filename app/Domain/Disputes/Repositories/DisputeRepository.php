@@ -1091,9 +1091,17 @@ class DisputeRepository
      * DisputeVoteService::reconcileReviewingDispute resolves each
      * against its poll's state). Bounded, oldest first.
      *
+     * F-38 keyset: only rows with `id > $afterId`, ordered by id. The
+     * auto-increment id is the unique, monotonic order key (creation order),
+     * so the caller's persisted cursor pages the WHOLE reviewing set across
+     * runs. The old `ORDER BY created_at LIMIT` (no cursor, non-unique key)
+     * re-selected the same oldest rows every run; when those were disputes
+     * whose poll is still open (skipped by reconcile, still 'reviewing'),
+     * every dispute behind them starved.
+     *
      * @return list<DisputeResolutionCandidateDTO>
      */
-    public static function listReviewingCreatedBefore(string $cutoff, int $limit = 50): array
+    public static function listReviewingCreatedBefore(string $cutoff, int $limit = 50, int $afterId = 0): array
     {
         global $wpdb;
         $table = self::disputes_table();
@@ -1103,9 +1111,10 @@ class DisputeRepository
              FROM {$table}
              WHERE status = 'reviewing'
                AND created_at <= %s
-             ORDER BY created_at ASC
+               AND id > %d
+             ORDER BY id ASC
              LIMIT %d",
-            $cutoff, $limit
+            $cutoff, max(0, $afterId), $limit
         ), ARRAY_A);
 
         if (!is_array($rows)) {
