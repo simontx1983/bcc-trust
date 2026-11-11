@@ -795,8 +795,29 @@ final class FeedRankingService
     private static function authorIdOf(array $item): int
     {
         $author = is_array($item['author'] ?? null) ? $item['author'] : [];
+        $id     = $author['id'] ?? null;
 
-        return is_int($author['id'] ?? null) ? $author['id'] : 0;
+        // ⚠⚠ A NUMERIC STRING COUNTS, AND THIS IS A FAIL-OPEN GUARD RATHER
+        // THAN TOLERANCE FOR ITS OWN SAKE. An `is_int`-only test returns 0
+        // for `"42"`, every author id becomes 0, and the block filter then
+        // silently matches nobody — a viewer would see blocked authors with
+        // no error anywhere.
+        //
+        // ⚠ The hot-feed path makes that reachable: those items come back
+        // through `wp_cache_get()`, so their types survive whatever the
+        // object-cache backend does to them on the way out. Serialising
+        // backends preserve ints; a backend that round-trips through JSON or
+        // a text column does not, and this class is in no position to know
+        // which is installed.
+        //
+        // ⚠ `ctype_digit` rather than `is_numeric`: ids are unsigned
+        // integers, and `is_numeric` would also accept `"1e3"`, `" 7"` and
+        // `"-1"`. The cast must mean what the string says.
+        if (is_int($id)) {
+            return $id;
+        }
+
+        return is_string($id) && $id !== '' && ctype_digit($id) ? (int) $id : 0;
     }
 
     /**

@@ -169,6 +169,69 @@ final class FeedBlockExactFilterTest extends TestCase
         self::assertSame([], self::authorIdsOf($kept));
     }
 
+    // ── how an author id is read ────────────────────────
+
+    /**
+     * ⚠⚠ A STRINGIFIED ID IS STILL AN ID, AND READING IT STRICTLY FAILS
+     * OPEN. An `is_int`-only test answers 0 for `"42"`, every author id
+     * becomes 0, and the filter then silently matches nobody — a viewer
+     * would see blocked authors with no error anywhere.
+     *
+     * ⚠ Reachable on the hot-feed path, which is why this was raised in
+     * review of that change: those items come back through
+     * `wp_cache_get()`, so their types survive whatever the object-cache
+     * backend does to them. Serialising backends preserve ints; one that
+     * round-trips through JSON or a text column need not, and this class
+     * cannot know which is installed.
+     */
+    public function testAStringifiedAuthorIdIsStillDropped(): void
+    {
+        PeepSoBlockRepository::$blocking = [[self::VIEWER, 42]];
+
+        $kept = self::filter([
+            ['id' => 'feed_42', 'author' => ['id' => '42']],
+            ['id' => 'feed_43', 'author' => ['id' => '43']],
+        ]);
+
+        self::assertCount(1, $kept);
+        self::assertSame('43', $kept[0]['author']['id']);
+    }
+
+    /**
+     * ⚠ But only a plain digit string. `is_numeric` would also accept
+     * `"1e3"`, `" 7"` and `"-1"`; an id is an unsigned integer, and a cast
+     * must mean what the string says rather than what PHP can coerce it to.
+     * Each of these is unattributable, so the item is KEPT — the same
+     * answer as an item with no author at all.
+     */
+    public function testOnlyAPlainDigitStringCountsAsAnId(): void
+    {
+        PeepSoBlockRepository::$blocking = [[self::VIEWER, 42]];
+
+        foreach (['4e1', ' 42', '42 ', '-42', '0x2a', '', 'forty-two'] as $weird) {
+            $kept = self::filter([['id' => 'x', 'author' => ['id' => $weird]]]);
+
+            self::assertCount(
+                1,
+                $kept,
+                'unattributable, so kept rather than guessed at: ' . var_export($weird, true)
+            );
+        }
+    }
+
+    /**
+     * ⚠ ANTI-VACUITY for the pair above: the loose reading must not make
+     * EVERYTHING match. `"0"` is a digit string but not a valid user id, and
+     * must not become a wildcard that drops items.
+     */
+    public function testAZeroIdIsNotTreatedAsAMatch(): void
+    {
+        PeepSoBlockRepository::$blocking = [[self::VIEWER, 42]];
+
+        self::assertCount(1, self::filter([['id' => 'x', 'author' => ['id' => '0']]]));
+        self::assertCount(1, self::filter([['id' => 'x', 'author' => ['id' => 0]]]));
+    }
+
     // ── the chunking ────────────────────────────────────────────────
 
     /**
