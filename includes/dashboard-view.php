@@ -81,7 +81,7 @@ $clusters = [
             'fraud'   => [ 'label' => 'Fraud Detection', 'render' => 'bcc_trust_render_fraud_tab' ],
             'devices' => [ 'label' => 'Devices',         'render' => 'bcc_trust_render_devices_tab' ],
             'rings'   => [ 'label' => 'Vote Rings',      'render' => 'bcc_trust_render_rings_tab' ],
-            'ml'      => [ 'label' => 'ML Insights',     'render' => 'bcc_trust_render_ml_tab' ],
+            'ml'      => [ 'label' => 'Suspicious Activity', 'render' => 'bcc_trust_render_ml_tab' ],
         ],
     ],
     'activity' => [
@@ -166,7 +166,7 @@ $build_url = static function ( string $cluster, string $sub = '' ) use ( $cluste
 $current_cluster_subs = $clusters[ $current_cluster ]['subs'] ?? null;
 if ( is_array( $current_cluster_subs ) && count( $current_cluster_subs ) > 1 ):
 ?>
-    <div class="bcc-subnav" style="margin:8px 0 0 0;padding:4px 0;border-bottom:1px solid #c3c4c7;">
+    <div class="bcc-subnav" style="margin:8px 0 0 0;padding:4px 0;border-bottom:1px solid var(--bcc-border-strong);">
         <?php foreach ( $current_cluster_subs as $sub_slug => $sub ):
             $is_active = $current_sub === $sub_slug;
             $highlight = $sub['highlight'] ?? null;

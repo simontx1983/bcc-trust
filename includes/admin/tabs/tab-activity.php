@@ -33,14 +33,14 @@ function bcc_trust_render_activity_tab() {
             <div>
                 <?php if ( $filter_admin ): ?>
                     <a href="<?php echo esc_url( $base_url ); ?>" class="button">Show All</a>
-                    <strong style="margin-left:8px;color:#9c27b0;">Showing admin actions only</strong>
+                    <strong style="margin-left:8px;color:var(--bcc-tier-elite);">Showing admin actions only</strong>
                 <?php else: ?>
                     <a href="<?php echo esc_url( add_query_arg( 'admin_only', '1', $base_url ) ); ?>" class="button">Admin Actions Only</a>
                 <?php endif; ?>
             </div>
         </div>
 
-        <p style="color:#666;">Last <?php echo intval($data['limit']); ?> entries. <?php echo intval( count( $activity ) ); ?> shown.</p>
+        <p style="color:var(--bcc-text-secondary);">Last <?php echo intval($data['limit']); ?> entries. <?php echo intval( count( $activity ) ); ?> shown.</p>
 
         <?php if ( ! $activity_ok ) : ?>
             <?php // ⚠ NOT the empty-state sentence below: that asserts a fact
@@ -70,13 +70,13 @@ function bcc_trust_render_activity_tab() {
             <tbody>
                 <?php foreach ( $activity as $a ):
                     $is_admin_action = str_starts_with( $a->action, 'admin_' );
-                    $row_style       = $is_admin_action ? 'background:#f3e5f5;' : '';
+                    $row_style       = $is_admin_action ? 'background:var(--bcc-bg-raised);' : '';
                 ?>
                     <tr style="<?php echo esc_attr($row_style); ?>">
                         <td style="font-size:12px;"><?php echo esc_html( $a->created_at ); ?></td>
                         <td>
                             <?php if ( $is_admin_action ): ?>
-                                <span style="background:#9c27b0;color:#fff;font-size:11px;padding:1px 5px;border-radius:3px;margin-right:4px;">ADMIN</span>
+                                <span style="background:var(--bcc-tier-elite);color:#fff;font-size:11px;padding:1px 5px;border-radius:3px;margin-right:4px;">ADMIN</span>
                             <?php endif; ?>
                             <?php echo esc_html( $a->action ); ?>
                         </td>
@@ -104,7 +104,7 @@ function bcc_trust_render_activity_tab() {
                                 <a href="<?php echo esc_url( admin_url( 'admin.php?page=bcc-trust-moderation&ip=' . urlencode( $ip ) ) ); ?>"><?php echo esc_html( $ip ); ?></a>
                             <?php endif; endif; ?>
                         </td>
-                        <td style="font-size:11px;color:#666;"><?php echo esc_html( $a->details ?? '' ); ?></td>
+                        <td style="font-size:11px;color:var(--bcc-text-secondary);"><?php echo esc_html( $a->details ?? '' ); ?></td>
                     </tr>
                 <?php endforeach; ?>
             </tbody>
