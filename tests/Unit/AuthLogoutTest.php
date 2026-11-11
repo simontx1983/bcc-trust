@@ -108,6 +108,19 @@ final class AuthLogoutTest extends TestCase
         self::assertSame(401, self::sessionStatus($token));
     }
 
+    public function testEveryMintedTokenCarriesAUniqueJti(): void
+    {
+        // logOut() is a no-op for a payload without a jti, so a token minted
+        // without one could never be signed out — pin that encode() always
+        // sets it, and that it differs per token (the denylist is per jti).
+        $a = JwtToken::decode(JwtToken::encode(self::USER, 'handle80'))['payload']['jti'] ?? null;
+        $b = JwtToken::decode(JwtToken::encode(self::USER, 'handle80'))['payload']['jti'] ?? null;
+
+        self::assertIsString($a);
+        self::assertNotSame('', $a);
+        self::assertNotSame($a, $b);
+    }
+
     public function testOtherTokensOfTheSameUserKeepWorking(): void
     {
         $signedOut = JwtToken::encode(self::USER, 'handle80');
