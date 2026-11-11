@@ -1052,7 +1052,25 @@ final class MessagesService
             return self::eligibilityDeny(null, 'messaging_unavailable');
         }
 
-        $gate = self::evaluatePolicy(MessagingPolicy::NORMAL_DM, $viewerId, $recipientId);
+        // ⚠ `refuseOnUnknownBlock: true` makes an UNREADABLE block table
+        // answer `reason_code: 'unavailable'` with `unlock_hint: null`
+        // instead of silently reporting "you may message this person"
+        // and then 503-ing on submit. The existing `eligibilityDeny`
+        // line already produces exactly that shape, so no mapping is
+        // added here.
+        //
+        // ⚠⚠ THIS MUST STAY IN STEP WITH `canMessageMany()` BELOW. They
+        // answer the same question on different surfaces (profile vs
+        // card lists), and a viewer seeing "unavailable" on one and a
+        // live Message button on the other is worse than either being
+        // wrong consistently. A test asserts the two payloads are
+        // IDENTICAL for the same pair.
+        $gate = self::evaluatePolicy(
+            MessagingPolicy::NORMAL_DM,
+            $viewerId,
+            $recipientId,
+            refuseOnUnknownBlock: true
+        );
         if ($gate !== null) {
             return self::eligibilityDeny($gate['unlock_hint'], $gate['reason_code']);
         }
@@ -1193,7 +1211,31 @@ final class MessagesService
         // Prime recipient usermeta so chatEnabled/chatFriendsOnly are
         // cache hits (same trick PageCardPrefetcher uses for owners).
         cache_users($ids);
-        $blocked = \BCC\Core\Repositories\PeepSoBlockRepository::getMutuallyBlockedSet($viewerId, $ids);
+        // ⚠ `null` means the block table could not be READ — not that
+        // nobody is blocked. `[]` would hand every candidate a live
+        // Message button that 503s on submit (the write gate refuses on
+        // the same unknown), so the whole batch answers "unavailable"
+        // instead.
+        //
+        // ⚠ A UNIFORM answer leaks nothing about any individual pair,
+        // which is why one payload for every id is safe here. It is also
+        // the existing house shape on this method — the anonymous and
+        // sender-gate branches above both `array_fill_keys` a single
+        // payload.
+        //
+        // ⚠⚠ `'unavailable'` is deliberately a DIFFERENT code from the
+        // `messaging_unavailable` that block / !userExists / !chatEnabled
+        // all share below (the §4.19 info-leak shield). That shield hides
+        // WHICH of those three applies; this code says "we could not
+        // tell", which is a fact about the request rather than about the
+        // pair, so it reveals nothing the shield protects.
+        $blocked = \BCC\Core\Repositories\PeepSoBlockRepository::getMutuallyBlockedSetOrUnknown(
+            $viewerId,
+            $ids
+        );
+        if ($blocked === null) {
+            return array_fill_keys($ids, self::eligibilityDeny(null, 'unavailable'));
+        }
 
         /** @var array<int, true>|null $friendIds lazily fetched */
         $friendIds = null;

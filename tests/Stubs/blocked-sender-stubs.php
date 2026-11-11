@@ -93,6 +93,36 @@ namespace BCC\Core\Repositories {
                 return self::isBlocking($blockerId, $blockedId);
             }
 
+            /**
+             * Either-direction BATCH probe (bcc-core #72).
+             *
+             * ⚠ Added for F-99 2b: this double never had the batch
+             * method at all, so `canMessageMany()` could not be unit
+             * tested through it before now.
+             *
+             * @param list<int> $otherIds
+             * @return array<int, true>|null
+             */
+            public static function getMutuallyBlockedSetOrUnknown(int $userId, array $otherIds): ?array
+            {
+                if (self::$readFails) {
+                    return null;
+                }
+                $out = [];
+                foreach ($otherIds as $raw) {
+                    $id = (int) $raw;
+                    if ($id <= 0 || $id === $userId) {
+                        continue;
+                    }
+                    foreach (self::$blocking as [$a, $b]) {
+                        if (($a === $userId && $b === $id) || ($a === $id && $b === $userId)) {
+                            $out[$id] = true;
+                        }
+                    }
+                }
+                return $out;
+            }
+
             public static function isMutuallyBlockedOrUnknown(int $userA, int $userB): ?bool
             {
                 if (self::$readFails) {
