@@ -343,13 +343,21 @@ final class NotificationPrefs
      *   the weekly digest cron to enumerate recipients without scanning
      *   the full users table.
      */
-    public static function findEmailDigestOptIns(int $limit = 5000): array
+    public static function findEmailDigestOptIns(int $limit = 5000, int $afterUserId = 0): array
     {
         $key = self::META_PREFIX . 'email_digest';
 
         return \BCC\Trust\Core\Plugin::instance()
             ->notificationRepository()
-            ->findUserIdsByMetaFlag($key, $limit);
+            ->findUserIdsByMetaFlag($key, $limit, $afterUserId);
+    }
+
+    /** Opted-in member count, for the admin Email Digest page. */
+    public static function countEmailDigestOptIns(): int
+    {
+        return \BCC\Trust\Core\Plugin::instance()
+            ->notificationRepository()
+            ->countUsersByMetaFlag(self::META_PREFIX . 'email_digest');
     }
 
     /**

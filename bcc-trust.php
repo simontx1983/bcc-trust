@@ -699,8 +699,12 @@ add_action('bcc_trust_feed_hot_warm', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->warmHotFeed();
 });
 add_action('bcc_trust_weekly_digest', function () {
-    \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest();
+    \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest(
+        \BCC\Trust\Core\Services\DigestService::TRIGGER_CRON
+    );
 });
+// Admin-chosen digest weekday/hour + on/off (Email Digest page).
+\BCC\Trust\Core\Services\DigestScheduler::register();
 // Scale-hardening Phase 3 (2026-05-13): weekly slow-ring endorsement
 // scan. Catches paced reciprocity patterns the burst gates miss.
 add_action('bcc_trust_weekly_slow_ring_scan', function () {
@@ -2619,4 +2623,5 @@ if (is_admin()) {
     // remain on the per-user Moderation page.
     \BCC\Trust\Core\Admin\WalletAuditPage::register();
     \BCC\Trust\Core\Admin\SessionsPage::register();
+    \BCC\Trust\Core\Admin\EmailDigestPage::register();
 }

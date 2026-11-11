@@ -54,7 +54,11 @@ final class DigestUnsubscribeEndpoint
             self::ROUTE_NAMESPACE,
             '/digest/unsubscribe',
             [
-                'methods'             => WP_REST_Server::READABLE,
+                // GET: the link in the email body. POST: RFC 8058 one-click
+                // from the mail client (`List-Unsubscribe-Post`), which
+                // POSTs `List-Unsubscribe=One-Click` to the same signed URL.
+                // Same token check either way; the body is ignored.
+                'methods'             => [WP_REST_Server::READABLE, WP_REST_Server::CREATABLE],
                 'callback'            => [$instance, 'handle'],
                 // Public: token is the auth.
                 'permission_callback' => '__return_true',
