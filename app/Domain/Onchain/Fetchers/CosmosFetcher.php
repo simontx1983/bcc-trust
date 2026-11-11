@@ -485,9 +485,14 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     /**
      * Fetch ALL active validators from the chain's bonded set.
      *
-     * Uses the paginated LCD staking endpoint to get up to 500 validators
-     * in a single call. Returns lightweight rows (no per-validator uptime
-     * or governance calls — those are expensive and done on refresh).
+     * Walks the paginated LCD staking endpoint ({@see getBondedValidators()}).
+     * Returns lightweight rows (no per-validator uptime or governance calls —
+     * those are expensive and done on refresh).
+     *
+     * ⚠ F-62: `[]` also means "the bonded set could not be read to its end".
+     * ChainRefreshService already treats an empty index as a partial run (no
+     * upsert, no baseline, no mint), which is the only safe reading of a set
+     * that may be missing validators.
      *
      * @return array<int, array<string, mixed>> Array of validator data arrays ready for bulkUpsert.
      */
@@ -2738,9 +2743,39 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         return Bech32::decodeToBytes($bech32);
     }
 
+    /** Bonded validators requested per LCD page. */
+    private const BONDED_PAGE_LIMIT = 500;
+
+    /**
+     * Most bonded-set pages followed (2,000 validators — far above any
+     * chain's max_validators). A set still paging after this is INCOMPLETE.
+     */
+    private const BONDED_MAX_PAGES = 4;
+
     /**
      * Get the bonded validator set for this chain, sorted by tokens desc.
      * Cached per chain ID — fetched once per PHP process.
+     *
+     * ⚠ F-62: COMPLETE OR EMPTY — NEVER A TRUNCATED SET.
+     *
+     * This used to make one request at pagination.limit=500 and never read
+     * `next_key`, so a larger set came back as its first page and reached the
+     * index run as an ordinary, clean fetch — upserted, eligible to become the
+     * baseline, and fed to the page-mint allowlist. The index run's count
+     * heuristics cannot see a page-size cap (two truncated fetches agree with
+     * each other).
+     *
+     * Now the walk follows `next_key` for at most {@see BONDED_MAX_PAGES}
+     * pages. A transport failure on any page, an unreadable page, or a set
+     * still paging at the cap returns `[]`: the index run reads an empty
+     * index as PARTIAL (no upsert, no baseline, no mint, no dead-marking).
+     *
+     * ⚠ `[]` IS STILL CACHED FOR THE PROCESS, on purpose. Every later caller in
+     * the same process reads it safely — {@see findInBondedCache()} falls back
+     * to the single-validator LCD call and {@see fetchVotingPowerRank()} gives
+     * an unknown (null) rank — whereas NOT caching it would make each of those
+     * calls re-walk up to {@see BONDED_MAX_PAGES} pages against a provider that
+     * is already failing. The next process (the next cron run) retries.
      *
      * @return array<int, array<string, mixed>>
      */
@@ -2752,23 +2787,98 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             return self::$validatorListCache[$chainId];
         }
 
-        $response = $this->lcdGet('/cosmos/staking/v1beta1/validators', [
-            'status'           => 'BOND_STATUS_BONDED',
-            'pagination.limit' => 500,
-        ], $outcome);
+        $vals    = [];
+        $pageKey = null;
 
-        if (!$response || empty($response['validators'])) {
-            self::$validatorListCache[$chainId] = [];
-            return [];
+        for ($page = 0; $page < self::BONDED_MAX_PAGES; $page++) {
+            $params = [
+                'status'           => 'BOND_STATUS_BONDED',
+                'pagination.limit' => self::BONDED_PAGE_LIMIT,
+            ];
+            if ($pageKey !== null) {
+                $params['pagination.key'] = $pageKey;
+            }
+
+            $response = $this->lcdGet('/cosmos/staking/v1beta1/validators', $params, $outcome);
+            if ($response === null) {
+                // Transport failure on ANY page: earlier pages are not the set.
+                self::$validatorListCache[$chainId] = [];
+                return [];
+            }
+
+            $pageVals = self::parseBondedValidatorsPage($response);
+            if ($pageVals === null) {
+                \BCC\Core\Log\Logger::warning('[Cosmos Fetcher] unreadable bonded-validators response; set treated as incomplete', [
+                    'chain_id' => $chainId,
+                    'page'     => $page,
+                ]);
+                self::$validatorListCache[$chainId] = [];
+                return [];
+            }
+            foreach ($pageVals as $v) {
+                $vals[] = $v;
+            }
+
+            $nextKey = $response['pagination']['next_key'] ?? null;
+            if (!is_string($nextKey) || $nextKey === '') {
+                // Last page: the set is complete.
+                // ⚠ bccomp() THROWS a ValueError on a non-numeric operand, and
+                // the index run's catch is \Exception, which an Error is not —
+                // so one malformed `tokens` would abort the whole run. An
+                // unreadable amount sorts as 0 instead.
+                $tokensOf = static function (array $v): string {
+                    $t = $v['tokens'] ?? null;
+                    return (is_string($t) && is_numeric($t) && ctype_digit($t)) ? $t : '0';
+                };
+                usort($vals, static function (array $a, array $b) use ($tokensOf): int {
+                    return bccomp($tokensOf($b), $tokensOf($a));
+                });
+
+                self::$validatorListCache[$chainId] = $vals;
+                return $vals;
+            }
+            $pageKey = $nextKey;
         }
 
-        $vals = $response['validators'];
-        usort($vals, function ($a, $b) {
-            return bccomp($b['tokens'] ?? '0', $a['tokens'] ?? '0');
-        });
+        \BCC\Core\Log\Logger::warning('[Cosmos Fetcher] bonded set exceeds the page cap; set treated as incomplete', [
+            'chain_id'  => $chainId,
+            'max_pages' => self::BONDED_MAX_PAGES,
+        ]);
+        self::$validatorListCache[$chainId] = [];
+        return [];
+    }
 
-        self::$validatorListCache[$chainId] = $vals;
-        return $vals;
+    /**
+     * PURE. One `/cosmos/staking/v1beta1/validators` page, or null when it is
+     * not a readable bonded-validators response (F-62). An item that cannot
+     * be read voids the page: dropping it would silently shrink the set.
+     *
+     * @param array<string, mixed> $response
+     * @return list<array<string, mixed>>|null
+     */
+    private static function parseBondedValidatorsPage(array $response): ?array
+    {
+        if (!array_key_exists('validators', $response)) {
+            return null;
+        }
+        $items = $response['validators'];
+        if (!is_array($items) || !array_is_list($items)) {
+            return null;
+        }
+
+        $out = [];
+        foreach ($items as $item) {
+            if (!is_array($item)) {
+                return null;
+            }
+            $operator = $item['operator_address'] ?? null;
+            if (!is_string($operator) || $operator === '') {
+                return null;
+            }
+            $out[] = $item;
+        }
+
+        return $out;
     }
 
     private function fetchVotingPowerRank(string $valoper): ?int
