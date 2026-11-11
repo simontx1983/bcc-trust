@@ -30,6 +30,14 @@ final class RankScheduler
     public const EVENT_POLL_CLOSE_SWEEP     = 'bcc_rank_poll_close_sweep';
     public const EVENT_STEWARDSHIP_SWEEP    = 'bcc_rank_stewardship_sweep';
 
+    /**
+     * F-13: single-event continuations of a budget-cut daily sweep, so the
+     * whole population is covered the same day. Each runs the same handler
+     * as its daily event; the sweep resumes from its persisted cursor.
+     */
+    public const EVENT_DAILY_EVALUATE_CONTINUE      = 'bcc_rank_daily_evaluate_continue';
+    public const EVENT_DAILY_TIER_SNAPSHOT_CONTINUE = 'bcc_rank_daily_tier_snapshot_continue';
+
     public static function schedule(): void
     {
         if (!wp_next_scheduled(self::EVENT_DAILY_TIER_SNAPSHOT)) {
@@ -56,6 +64,8 @@ final class RankScheduler
         wp_clear_scheduled_hook(self::EVENT_DAILY_EVALUATE);
         wp_clear_scheduled_hook(self::EVENT_POLL_CLOSE_SWEEP);
         wp_clear_scheduled_hook(self::EVENT_STEWARDSHIP_SWEEP);
+        wp_clear_scheduled_hook(self::EVENT_DAILY_EVALUATE_CONTINUE);
+        wp_clear_scheduled_hook(self::EVENT_DAILY_TIER_SNAPSHOT_CONTINUE);
     }
 
     public static function boot(): void
@@ -65,6 +75,8 @@ final class RankScheduler
         add_action(self::EVENT_DAILY_EVALUATE, [__CLASS__, 'runDailyEvaluate']);
         add_action(self::EVENT_POLL_CLOSE_SWEEP, [__CLASS__, 'runPollCloseSweep']);
         add_action(self::EVENT_STEWARDSHIP_SWEEP, [__CLASS__, 'runStewardshipSweep']);
+        add_action(self::EVENT_DAILY_EVALUATE_CONTINUE, [__CLASS__, 'runDailyEvaluate']);
+        add_action(self::EVENT_DAILY_TIER_SNAPSHOT_CONTINUE, [__CLASS__, 'runDailyTierSnapshot']);
 
         // Self-healing: recreate the scheduled events if deleted or
         // never registered. schedule() is idempotent via wp_next_scheduled

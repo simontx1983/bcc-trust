@@ -57,6 +57,15 @@ class RankPromotionEngine
     /** Wall-clock budget for one daily sweep, seconds. */
     private const TIME_BUDGET_SECONDS = 30;
 
+    /**
+     * F-13: the daily evaluate sweep's cursor — the last user evaluated. A
+     * pending cursor means a cycle is in progress (see runDailyEvaluate()).
+     */
+    private const EVALUATE_CURSOR_OPTION = 'bcc_rank_daily_evaluate_cursor';
+
+    /** Seconds before a budget-cut sweep's continuation runs. */
+    private const CONTINUATION_DELAY = 60;
+
     /** Recovery-reminder marks: fire when exactly this many whole days remain. */
     private const REMINDER_DAYS = [30, 7];
 
@@ -418,20 +427,36 @@ class RankPromotionEngine
     }
 
     /**
-     * The daily evaluate sweep — every ranked member, cursor-paged
-     * within a time budget (missed members caught next day).
+     * The daily evaluate sweep — every ranked member, cursor-paged within a
+     * time budget, RESUMED rather than restarted.
+     *
+     * ⚠ F-13. This used to start every run at cursor 0, so on a population
+     * larger than one budget's worth the same leading members were evaluated
+     * every day and everyone past them NEVER was. Now (the
+     * StewardshipSweepService pattern, F-40):
+     *   - the cursor is persisted and is the last user EVALUATED — it
+     *     advances after each user, so a budget cut resumes on the next one;
+     *   - a budget-cut run schedules ONE same-day continuation, so the whole
+     *     population is still evaluated daily rather than over many days;
+     *   - reaching the end clears the cursor (the cycle is complete); the
+     *     next daily run starts a fresh cycle;
+     *   - a user whose evaluate() throws is logged and moved past, so one
+     *     bad member cannot stall the sweep on itself;
+     *   - a failed read throws (RankStateRepository::listUserIdsAfter is
+     *     fail-closed) and leaves the cursor where it was.
      */
     public function runDailyEvaluate(): void
     {
-        $deadline = time() + self::TIME_BUDGET_SECONDS;
-        $cursor   = 0;
+        $deadline = $this->now() + self::TIME_BUDGET_SECONDS;
+        $cursor   = $this->readEvaluateCursor();
 
-        while (time() < $deadline) {
+        while (true) {
             $userIds = $this->rankState->listUserIdsAfter($cursor, self::BATCH_SIZE);
             if ($userIds === []) {
+                $this->clearEvaluateCursor();
+                \BCC\Core\Log\Logger::info('[bcc-trust] rank daily evaluate complete', ['cursor' => $cursor]);
                 return;
             }
-            $cursor = max($userIds);
 
             foreach ($userIds as $userId) {
                 try {
@@ -442,14 +467,53 @@ class RankPromotionEngine
                         'error'   => $e->getMessage(),
                     ]);
                 }
-                if (time() >= $deadline) {
-                    break;
+                // Evaluated (or failed and logged): the cursor moves past it.
+                $cursor = $userId;
+
+                if ($this->now() >= $deadline) {
+                    $this->writeEvaluateCursor($cursor);
+                    $this->scheduleEvaluateContinuation();
+                    \BCC\Core\Log\Logger::warning('[bcc-trust] rank daily evaluate: time budget hit, continuing shortly', [
+                        'cursor' => $cursor,
+                    ]);
+                    return;
                 }
             }
-        }
 
-        \BCC\Core\Log\Logger::warning('[bcc-trust] rank daily evaluate: time budget hit, partial pass', [
-            'cursor' => $cursor,
-        ]);
+            if (count($userIds) < self::BATCH_SIZE) {
+                $this->clearEvaluateCursor();
+                \BCC\Core\Log\Logger::info('[bcc-trust] rank daily evaluate complete', ['cursor' => $cursor]);
+                return;
+            }
+        }
+    }
+
+    // ── F-13 sweep collaborators (overridden by RankSweepCursorTest) ──
+
+    protected function now(): int
+    {
+        return time();
+    }
+
+    protected function readEvaluateCursor(): int
+    {
+        return (int) get_option(self::EVALUATE_CURSOR_OPTION, 0);
+    }
+
+    protected function writeEvaluateCursor(int $userId): void
+    {
+        update_option(self::EVALUATE_CURSOR_OPTION, $userId, false);
+    }
+
+    protected function clearEvaluateCursor(): void
+    {
+        delete_option(self::EVALUATE_CURSOR_OPTION);
+    }
+
+    protected function scheduleEvaluateContinuation(): void
+    {
+        if (!wp_next_scheduled(RankScheduler::EVENT_DAILY_EVALUATE_CONTINUE)) {
+            wp_schedule_single_event(time() + self::CONTINUATION_DELAY, RankScheduler::EVENT_DAILY_EVALUATE_CONTINUE);
+        }
     }
 }
