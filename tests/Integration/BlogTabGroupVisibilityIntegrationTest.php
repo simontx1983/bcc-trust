@@ -596,10 +596,51 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
             PRIMARY KEY (gm_id)
         ) DEFAULT CHARSET=utf8mb4";
 
+        // ⚠⚠ THE MODERATION-HIDE TABLE IS NOT OPTIONAL ANY MORE.
+        //
+        // Every Blog-tab read goes through BlogService → the feed →
+        // HiddenActivityRepository::getAllHiddenIds(). That read used to
+        // degrade quietly to an empty list when the table was missing, so
+        // this fixture never created it and nothing noticed.
+        //
+        // bcc-trust #410 made it FAIL CLOSED: a failed read now serves a
+        // last-known-good list, and THROWS `RepositoryException` when none
+        // exists. With no table and no stored option, that is every test in
+        // this file — nine errors, all of them
+        // "Hidden-activity list unreadable and no last-known-good list
+        // exists" rather than anything about group blogs.
+        //
+        // ⭐ CREATING THE TABLE, NOT SEEDING `bcc_hidden_ids_last_good`.
+        // Seeding the option would also go green, and would be the wrong
+        // fix: it satisfies the FAILURE path, so these tests would quietly
+        // run against the degraded branch for ever and still pass with a
+        // genuinely broken read. An empty real table makes the read
+        // actually succeed, which is what production looks like.
+        //
+        // Columns mirror includes/database/schema-hidden-activities.php.
+        // Built here with plain SQL rather than that file's
+        // `bcc_trust_create_hidden_activities_table()`, because that
+        // function needs `dbDelta` and `wp-admin/includes/upgrade.php`,
+        // which the integration bootstrap does not load.
+        $statements[] = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}bcc_hidden_activities (
+            act_id BIGINT UNSIGNED NOT NULL,
+            hidden_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            hidden_by_user_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+            reason_code VARCHAR(40) NOT NULL,
+            related_report_id BIGINT UNSIGNED DEFAULT NULL,
+            PRIMARY KEY (act_id),
+            KEY idx_hidden_at (hidden_at),
+            KEY idx_reason (reason_code)
+        ) DEFAULT CHARSET=utf8mb4";
+
         foreach ($statements as $sql) {
             self::assertNotFalse($wpdb->query($sql), 'fixture: ' . $wpdb->last_error);
         }
 
+        // ⚠ Loaded for its constants only — this does NOT create the table.
+        // It defines `bcc_trust_create_hidden_activities_table()` and never
+        // calls it, which is exactly why the table was absent until the
+        // statement above was added.
         require_once dirname(__DIR__, 2) . '/includes/database/schema-hidden-activities.php';
     }
 
