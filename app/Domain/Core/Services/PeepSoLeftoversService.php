@@ -116,7 +116,7 @@ final class PeepSoLeftoversService
         'user_limits' => [
             'label'             => 'PeepSo User Limits',
             'guard_classes'     => ['peepsolimitusers'],
-            'plugin_dirs'       => ['peepso-userlimits', 'peepsolimitusers', 'peepso-limit-users'],
+            'plugin_dirs'       => ['peepso-extras-userlimits', 'peepso-userlimits', 'peepsolimitusers', 'peepso-limit-users'],
             'tables'            => [],
             'config_keys'       => ['site_license_limitusers'],
             'options'           => [],
