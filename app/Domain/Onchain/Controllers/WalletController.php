@@ -257,7 +257,10 @@ class WalletController
     public static function rest_list_chains(\WP_REST_Request $req): \WP_REST_Response
     {
         if (!\BCC\Core\Security\Throttle::allow('list_chains', 30, 60)) {
-            return new \WP_REST_Response(['message' => 'Too many requests.'], 429);
+            // Canonical error shape (contract §4 GET /chains: bcc_rate_limited 429).
+            // A bare { message } body has no `code`, so Envelope used to wrap it
+            // as a SUCCESS envelope carrying HTTP 429.
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         $chains = ChainRepository::getActive();

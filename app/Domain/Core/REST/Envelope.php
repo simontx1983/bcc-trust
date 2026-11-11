@@ -2,6 +2,8 @@
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Trust\Core\Support\ApiResponse;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -13,7 +15,12 @@ if (!defined('ABSPATH')) {
  * /wp-json/bcc/v1/ and /wp-json/bcc-trust/v1/ MUST be enveloped:
  *
  *   Success: { data: <payload>, _meta: { ... } }
- *   Error:   { error: { code, message, status, data? } }
+ *   Error:   { error: { code, message, status, data? }, _meta: { ... } }
+ *
+ * The `_meta` this class builds (buildMeta) is { version, request_id }, on
+ * the success wrap AND on a re-shaped WP-style error. Envelopes a handler
+ * already built (ApiResponse::ok/error, legacy { success }) pass through
+ * byte-identical — this class never adds keys to someone else's `_meta`.
  *
  * The frontend's bccFetch wrapper (bcc-frontend/src/lib/api/client.ts)
  * relies on this shape for envelope-vs-error discrimination. Without
@@ -64,7 +71,8 @@ final class Envelope
 
         // Phase 4c: surface the request-correlation id as a response header on
         // EVERY BCC response — success, error, and already-enveloped — so a
-        // client/proxy can log it even on an error shape that carries no _meta.
+        // client/proxy can log it even on a shape whose _meta has no request_id
+        // (ApiResponse::ok/error) or that has no _meta at all (legacy { success }).
         if (class_exists(\BCC\Core\Http\RequestContext::class)) {
             $response->header('X-Request-Id', \BCC\Core\Http\RequestContext::requestId());
         }
@@ -142,6 +150,7 @@ final class Envelope
                     'status'  => $status,
                     'data'    => $data['data'] ?? null,
                 ],
+                '_meta' => self::buildMeta(),
             ]);
             return $response;
         }
@@ -253,16 +262,28 @@ final class Envelope
     }
 
     /**
-     * @return array<string, mixed>
+     * `_meta` for envelopes this class builds: { version, request_id }.
+     * `version` is ApiResponse::VERSION, so it can never drift from what
+     * ApiResponse-built envelopes carry (contract §1.4).
+     *
+     * @return array{version: string, request_id: string}
      */
     private static function buildMeta(): array
+    {
+        return [
+            'version'    => ApiResponse::VERSION,
+            'request_id' => self::requestId(),
+        ];
+    }
+
+    private static function requestId(): string
     {
         // The correlation id was bound at the REST boundary by bcc-core's
         // rest_pre_dispatch (from a client X-BCC-Request-Id or minted), so
         // _meta.request_id matches the X-Request-Id header and the server logs.
         // The `request_id` key is contract-stable — only its source changed.
         if (class_exists(\BCC\Core\Http\RequestContext::class)) {
-            return ['request_id' => \BCC\Core\Http\RequestContext::requestId()];
+            return \BCC\Core\Http\RequestContext::requestId();
         }
 
         // Defensive fallback only (bcc-core is a hard dependency, so this is
@@ -273,6 +294,6 @@ final class Envelope
             $requestId = (string) hexdec(uniqid());
         }
 
-        return ['request_id' => $requestId];
+        return $requestId;
     }
 }
