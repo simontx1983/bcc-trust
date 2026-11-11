@@ -2624,4 +2624,6 @@ if (is_admin()) {
     \BCC\Trust\Core\Admin\WalletAuditPage::register();
     \BCC\Trust\Core\Admin\SessionsPage::register();
     \BCC\Trust\Core\Admin\EmailDigestPage::register();
+    // One-off cleanup of removed add-ons' data (hidden page, dry run first).
+    \BCC\Trust\Core\Admin\PeepSoLeftoversPage::register();
 }

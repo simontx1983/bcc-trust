@@ -132,6 +132,8 @@ final class AdminMenus
     {
         $slugs   = is_array($slugs) ? array_values(array_map('strval', $slugs)) : [];
         $slugs[] = WalletAuditPage::PAGE_SLUG;
+        // One-off tool: reachable by URL, kept out of the menu.
+        $slugs[] = PeepSoLeftoversPage::PAGE_SLUG;
         return $slugs;
     }
 
