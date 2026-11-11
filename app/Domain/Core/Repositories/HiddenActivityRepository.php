@@ -93,6 +93,21 @@ final class HiddenActivityRepository
         return true;
     }
 
+    /**
+     * Is this activity moderation-hidden?
+     *
+     * ⚠ F-98 — FAILS CLOSED. `$wpdb->get_var()` answers a failed query
+     * with NULL, which `(int)` turned into 0, i.e. "not hidden", so a DB
+     * error re-exposed the post. The failure is detected the way WPDB
+     * reports it (`last_error`, the bcc-core AdvisoryLock pattern) and the
+     * answer is TRUE. Per caller:
+     *   - AutoHideService           → skips the hide (harmless; no write);
+     *   - FeedItemReportVisibility  → refuses the report as not visible;
+     *   - ModerationQueueService    → shows "hidden" for that row, and the
+     *                                 undo stale-state guard refuses (both
+     *                                 fail-closed moderation postures);
+     *   - add()'s idempotency check → reports the insert as satisfied.
+     */
     public function exists(int $actId): bool
     {
         if ($actId <= 0) {
@@ -101,20 +116,41 @@ final class HiddenActivityRepository
         global $wpdb;
         $table = TableRegistry::hiddenActivities();
 
-        return (int) $wpdb->get_var($wpdb->prepare(
+        $raw = $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM {$table} WHERE act_id = %d LIMIT 1",
             $actId
-        )) > 0;
+        ));
+        if ($raw === null && (string) $wpdb->last_error !== '') {
+            self::recordReadFailure('exists_read_failed', ['act_id' => $actId, 'db_error' => (string) $wpdb->last_error]);
+            return true;
+        }
+
+        return (int) $raw > 0;
     }
 
     /**
      * Full list of hidden act_ids — what the feed pipeline merges into
      * its exclusion set. Cache-backed because every feed page fans into
-     * this. Bounded LIMIT keeps the worst case bounded; if we ever
-     * cross 5000 hidden rows the right move is a per-author or per-
-     * recent-time scoping, not a higher LIMIT.
+     * this (5 min TTL, generation-busted on every add/remove).
+     *
+     * ⚠ F-98 — a failed read is NEVER cached and NEVER answered with []:
+     * get_col() returns [] on a DB error, and caching that for 5 minutes
+     * re-exposed every moderation-hidden post in every feed. On a failed
+     * read the LAST-KNOWN-GOOD list (persisted, see LAST_GOOD_OPTION) is
+     * served and the next request retries. If no last-good list exists
+     * (the very first read ever failed) a RepositoryException is thrown
+     * rather than silently showing hidden content.
+     *
+     * ⚠ F-77 — the old single `LIMIT 5000` dropped the OLDEST decisions
+     * once more than 5000 rows existed: those posts reappeared. The list is
+     * now read in keyset batches of READ_BATCH, newest act_id first, up to
+     * READ_CEILING. Reaching the ceiling is recorded loudly
+     * (`ceiling_reached`). The real fix, excluding hidden rows in feed SQL
+     * with NOT EXISTS instead of an id list, is queued for the feed owners.
      *
      * @return list<int>
+     * @throws \BCC\Trust\Core\Exceptions\RepositoryException when the read
+     *         fails and no last-known-good list exists.
      */
     public function getAllHiddenIds(): array
     {
@@ -125,21 +161,145 @@ final class HiddenActivityRepository
             return $cached;
         }
 
-        global $wpdb;
-        $table = TableRegistry::hiddenActivities();
-
-        $rows = $wpdb->get_col("SELECT act_id FROM {$table} ORDER BY hidden_at DESC LIMIT 5000");
-
-        $ids = [];
-        foreach ($rows as $raw) {
-            $id = (int) $raw;
-            if ($id > 0) {
-                $ids[] = $id;
-            }
+        $readStartedAt = microtime(true);
+        $ids = $this->readAllHiddenIds();
+        if ($ids === null) {
+            return self::serveLastGood();
         }
 
         wp_cache_set($genKey, $ids, self::CACHE_GROUP, self::CACHE_TTL);
+        self::rememberLastGood($ids, $readStartedAt);
         return $ids;
+    }
+
+    /** Keyset batch size for the full hidden-id read (F-77). */
+    public const READ_BATCH = 5000;
+
+    /** Hard ceiling on the hidden-id list (F-77, 10x the old LIMIT). */
+    public const READ_CEILING = 50000;
+
+    /**
+     * Non-autoload option holding the last successfully read list:
+     * {ids: list<int>, read_at: float (unix, when that read STARTED), hash}.
+     */
+    public const LAST_GOOD_OPTION = 'bcc_hidden_ids_last_good';
+
+    /**
+     * Read every hidden act_id, newest act_id first, in keyset batches.
+     * Returns null when ANY batch fails (detected via last_error — get_col
+     * answers a failed query with []), so a partial list can never pass as
+     * a complete one.
+     *
+     * @return list<int>|null
+     */
+    private function readAllHiddenIds(): ?array
+    {
+        global $wpdb;
+        $table = TableRegistry::hiddenActivities();
+
+        $ids    = [];
+        $cursor = PHP_INT_MAX;
+        while (count($ids) < self::READ_CEILING) {
+            $rows = $wpdb->get_col($wpdb->prepare(
+                "SELECT act_id FROM {$table} WHERE act_id < %d ORDER BY act_id DESC LIMIT %d",
+                $cursor,
+                self::READ_BATCH
+            ));
+            if ((string) $wpdb->last_error !== '') {
+                self::recordReadFailure('list_read_failed', ['db_error' => (string) $wpdb->last_error]);
+                return null;
+            }
+            $batch = 0;
+            foreach ((array) $rows as $raw) {
+                $id = (int) $raw;
+                if ($id > 0) {
+                    $ids[]  = $id;
+                    $cursor = $id;
+                    $batch++;
+                }
+            }
+            if ($batch < self::READ_BATCH) {
+                return $ids; // last page
+            }
+        }
+
+        // At the ceiling: the OLDEST ids beyond it are not excluded.
+        \BCC\Core\Observability\DegradationMetrics::record('moderation_hidden_ids', 'ceiling_reached');
+        \BCC\Core\Log\Logger::error('[HiddenActivityRepository] hidden-id ceiling reached; oldest hidden posts are not excluded', [
+            'ceiling' => self::READ_CEILING,
+        ]);
+        return array_slice($ids, 0, self::READ_CEILING);
+    }
+
+    /**
+     * Persist a successful read as the last-known-good list, only when it
+     * differs from what is stored.
+     *
+     * ⚠ Ordering: a read is stamped with the moment it STARTED, and a write
+     * only lands when that stamp is NEWER than the stored one. Two concurrent
+     * requests therefore cannot put an older list over a newer one, except
+     * inside the non-atomic read-then-write window (microseconds). Even
+     * then the very next successful read supersedes it, and the list is
+     * only ever consulted after a failure.
+     *
+     * @param list<int> $ids
+     */
+    private static function rememberLastGood(array $ids, float $readStartedAt): void
+    {
+        $hash   = md5(implode(',', $ids));
+        $stored = get_option(self::LAST_GOOD_OPTION, null);
+        if (is_array($stored)) {
+            if (($stored['hash'] ?? '') === $hash) {
+                return; // unchanged — no write
+            }
+            if ((float) ($stored['read_at'] ?? 0) >= $readStartedAt) {
+                return; // a newer read already landed
+            }
+        }
+        update_option(
+            self::LAST_GOOD_OPTION,
+            ['ids' => $ids, 'read_at' => $readStartedAt, 'hash' => $hash],
+            false
+        );
+    }
+
+    /**
+     * Failed read: serve the last-known-good list (uncached, so the next
+     * request retries), or throw when there is none.
+     *
+     * @return list<int>
+     */
+    private static function serveLastGood(): array
+    {
+        $stored = get_option(self::LAST_GOOD_OPTION, null);
+        if (!is_array($stored) || !isset($stored['ids']) || !is_array($stored['ids'])) {
+            \BCC\Core\Observability\DegradationMetrics::record('moderation_hidden_ids', 'no_last_good');
+            throw new \BCC\Trust\Core\Exceptions\RepositoryException(
+                'Hidden-activity list unreadable and no last-known-good list exists.'
+            );
+        }
+
+        $ageSeconds = max(0, (int) round(microtime(true) - (float) ($stored['read_at'] ?? 0)));
+        \BCC\Core\Observability\DegradationMetrics::record('moderation_hidden_ids', 'served_last_good');
+        \BCC\Core\Log\Logger::error('[HiddenActivityRepository] hidden-id read failed; served last-known-good list', [
+            'last_good_age_seconds' => $ageSeconds,
+            'last_good_count'       => count($stored['ids']),
+        ]);
+
+        $ids = [];
+        foreach ($stored['ids'] as $raw) {
+            if (is_numeric($raw) && (int) $raw > 0) {
+                $ids[] = (int) $raw;
+            }
+        }
+        return $ids;
+    }
+
+    /** @param array<string, mixed> $context */
+    private static function recordReadFailure(string $event, array $context): void
+    {
+        \BCC\Core\Observability\DegradationMetrics::record('moderation_hidden_ids', $event);
+        \BCC\Core\Log\Logger::error('[HiddenActivityRepository] read failed: ' . $event, $context);
     }
 
     /**
