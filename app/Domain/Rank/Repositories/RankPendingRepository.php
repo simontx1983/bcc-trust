@@ -43,6 +43,22 @@ class RankPendingRepository
     /** Due rows resolved per sweep tick. */
     private const SWEEP_BATCH = 100;
 
+    /**
+     * Cool-off before a CONTENT-based void may be re-armed (product
+     * decision 2026-11-10): a confirmation voided because the content was
+     * removed, unpublished or had a report upheld waits this long after
+     * the void before a new contribution restarts the clock. Measured from
+     * `resolved_at`, which resolve() stamps (UTC) at the moment of voiding.
+     */
+    public const CONTENT_VOID_COOLOFF_SECONDS = 7 * 86400;
+
+    /**
+     * Void reasons subject to the cool-off. Everything else — notably
+     * `suspended` — restarts immediately: the sweep re-checks suspension
+     * at due_at, so a still-suspended member just voids again.
+     */
+    public const COOLOFF_VOID_REASONS = ['content_removed', 'content_unpublished', 'report_upheld'];
+
     private string $table;
 
     public function __construct()
@@ -90,7 +106,14 @@ class RankPendingRepository
      *     extended (R1: nothing moves due_at), and a confirmed row is
      *     never reopened;
      *   - `source_id <> %d` — the contribution that was voided cannot
-     *     re-arm itself (a re-fire for the same post stays voided).
+     *     re-arm itself (a re-fire for the same post stays voided);
+     *   - cool-off — a CONTENT-based void (COOLOFF_VOID_REASONS) re-arms
+     *     only once CONTENT_VOID_COOLOFF_SECONDS have passed since the
+     *     void (`resolved_at`). A contribution inside the window is a
+     *     no-op; a later one after it re-arms. Other reasons (suspended)
+     *     restart immediately. A NULL `resolved_at` (not written by
+     *     resolve(), so never expected) counts as past the window rather
+     *     than locking the member out forever.
      * Concurrent re-fires settle on one winner: the second UPDATE finds
      * the row already pending and matches nothing.
      *
@@ -104,6 +127,8 @@ class RankPendingRepository
 
         global $wpdb;
 
+        $reasonPlaceholders = implode(',', array_fill(0, count(self::COOLOFF_VOID_REASONS), '%s'));
+
         $result = $wpdb->query($wpdb->prepare(
             "UPDATE {$this->table}
                 SET status = 'pending',
@@ -113,13 +138,18 @@ class RankPendingRepository
                     due_at = %s,
                     voided_reason = NULL,
                     resolved_at = NULL
-              WHERE user_id = %d AND status = 'voided' AND source_id <> %d",
+              WHERE user_id = %d AND status = 'voided' AND source_id <> %d
+                AND (voided_reason IS NULL
+                     OR voided_reason NOT IN ({$reasonPlaceholders})
+                     OR resolved_at IS NULL
+                     OR resolved_at <= %s)",
             $sourceType,
             $sourceId,
             $contentActId,
             gmdate('Y-m-d H:i:s', time() + max(0, $dueInSeconds)),
             $userId,
-            $sourceId
+            $sourceId,
+            ...[...self::COOLOFF_VOID_REASONS, gmdate('Y-m-d H:i:s', time() - self::CONTENT_VOID_COOLOFF_SECONDS)]
         ));
 
         return $result !== false && (int) $result > 0;

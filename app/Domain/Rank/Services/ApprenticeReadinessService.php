@@ -83,8 +83,11 @@ class ApprenticeReadinessService
         // F-71: a voided confirmation is not a permanent bar. A void
         // judges ONE contribution; this one is new evidence, so it
         // re-arms the clock (no-op unless the row is voided and for a
-        // different contribution). Every void reason restarts —
-        // including `suspended`: confirmationBlocker() re-checks
+        // different contribution). A CONTENT-based void
+        // (removed / unpublished / report upheld) waits out a 7-day
+        // cool-off first (RankPendingRepository::CONTENT_VOID_COOLOFF_SECONDS);
+        // a contribution inside the window is a no-op. Every other void
+        // restarts immediately — including `suspended`: confirmationBlocker() re-checks
         // suspension at due_at, so a still-suspended member simply voids
         // again and is never awarded, while refusing the restart would
         // turn a time-bound suspension into a permanent rank ban.

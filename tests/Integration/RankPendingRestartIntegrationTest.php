@@ -6,6 +6,7 @@ namespace BCC\Trust\Tests\Integration;
 
 use BCC\Trust\Rank\Repositories\RankPendingRepository;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
@@ -18,13 +19,19 @@ use PHPUnit\Framework\TestCase;
  * silent no-op: the member could never reach Apprentice. These cases pin the
  * guarded UPDATE's whole truth table:
  *
- *   voided  + NEW contribution  → pending, new source, fresh due_at, reason cleared
- *   voided  + SAME contribution → unchanged (a voided post cannot re-arm itself)
- *   pending + new contribution  → unchanged (R1: nothing moves a live clock)
- *   confirmed + new contribution → unchanged (never reopened)
+ *   voided (content reason) + NEW contribution, past the 7-day cool-off
+ *                                       → pending, new source, fresh due_at
+ *   voided (content reason) inside the cool-off → unchanged
+ *   voided (suspended) + NEW contribution, immediately → pending
+ *   voided  + SAME contribution          → unchanged (cannot re-arm itself)
+ *   pending + new contribution           → unchanged (R1: nothing moves a live clock)
+ *   confirmed + new contribution         → unchanged (never reopened)
+ *
+ * The cool-off clock is `resolved_at` (UTC, stamped by resolve()); tests age
+ * a void by rewriting that column on THEIR OWN row only.
  *
  * The suite owns its table (created by the integration bootstrap in the
- * throwaway test database) and deletes only the user ids it used.
+ * throwaway test database) and deletes only the user id it used.
  */
 #[Group('integration')]
 #[Group('mariadb')]
@@ -46,7 +53,7 @@ final class RankPendingRestartIntegrationTest extends TestCase
         $this->deleteOurRow();
     }
 
-    public function testVoidedRowRestartsOnANewContribution(): void
+    public function testAContentVoidRestartsOnceTheCoolOffHasPassed(): void
     {
         self::assertTrue($this->repo->start(self::USER, 'post', 101, 555, 86400));
         self::assertTrue($this->repo->resolve(self::USER, 'voided', 'report_upheld'));
@@ -54,6 +61,8 @@ final class RankPendingRestartIntegrationTest extends TestCase
         // The pre-fix path: start() is a no-op on the voided row.
         $this->repo->start(self::USER, 'post', 202, 666, 86400);
         self::assertSame('voided', $this->row()['status'], 'INSERT IGNORE alone never re-arms');
+
+        $this->ageVoidBy(RankPendingRepository::CONTENT_VOID_COOLOFF_SECONDS + 60);
 
         $before = time();
         self::assertTrue($this->repo->restartIfVoided(self::USER, 'comment', 202, 666, 86400));
@@ -74,10 +83,53 @@ final class RankPendingRestartIntegrationTest extends TestCase
         self::assertSame('confirmed', $this->row()['status']);
     }
 
+    /** @return array<string, array{0: string}> */
+    public static function contentVoidReasons(): array
+    {
+        return [
+            'content_removed'     => ['content_removed'],
+            'content_unpublished' => ['content_unpublished'],
+            'report_upheld'       => ['report_upheld'],
+        ];
+    }
+
+    #[DataProvider('contentVoidReasons')]
+    public function testAContentVoidInsideTheCoolOffDoesNotRestart(string $reason): void
+    {
+        $this->repo->start(self::USER, 'post', 101, 555, 86400);
+        $this->repo->resolve(self::USER, 'voided', $reason);
+
+        // Immediately, and one minute short of the window: no-op.
+        self::assertFalse($this->repo->restartIfVoided(self::USER, 'post', 202, 666, 86400));
+        $this->ageVoidBy(RankPendingRepository::CONTENT_VOID_COOLOFF_SECONDS - 60);
+        self::assertFalse($this->repo->restartIfVoided(self::USER, 'post', 202, 666, 86400));
+
+        $row = $this->row();
+        self::assertSame('voided', $row['status']);
+        self::assertSame($reason, $row['voided_reason']);
+        self::assertSame('101', (string) $row['source_id']);
+
+        // A later contribution after the window re-arms.
+        $this->ageVoidBy(RankPendingRepository::CONTENT_VOID_COOLOFF_SECONDS + 60);
+        self::assertTrue($this->repo->restartIfVoided(self::USER, 'post', 303, 777, 86400));
+        self::assertSame('pending', $this->row()['status']);
+    }
+
+    public function testASuspendedVoidRestartsImmediately(): void
+    {
+        $this->repo->start(self::USER, 'post', 101, 555, 86400);
+        $this->repo->resolve(self::USER, 'voided', 'suspended');
+
+        self::assertTrue($this->repo->restartIfVoided(self::USER, 'post', 202, 666, 86400));
+        self::assertSame('pending', $this->row()['status']);
+    }
+
     public function testTheVoidedContributionCannotReArmItself(): void
     {
         $this->repo->start(self::USER, 'post', 101, 555, 86400);
         $this->repo->resolve(self::USER, 'voided', 'content_unpublished');
+        // Past the cool-off, so only the source guard can refuse.
+        $this->ageVoidBy(RankPendingRepository::CONTENT_VOID_COOLOFF_SECONDS + 60);
 
         self::assertFalse($this->repo->restartIfVoided(self::USER, 'post', 101, 555, 86400));
         self::assertSame('voided', $this->row()['status']);
@@ -102,6 +154,17 @@ final class RankPendingRestartIntegrationTest extends TestCase
 
         self::assertFalse($this->repo->restartIfVoided(self::USER, 'post', 202, 666, 86400));
         self::assertSame('confirmed', $this->row()['status']);
+    }
+
+    /** Move OUR row's void time `$seconds` into the past (UTC, like resolve()). */
+    private function ageVoidBy(int $seconds): void
+    {
+        global $wpdb;
+        $wpdb->query($wpdb->prepare(
+            'UPDATE ' . $wpdb->prefix . 'bcc_trust_rank_pending SET resolved_at = %s WHERE user_id = %d',
+            gmdate('Y-m-d H:i:s', time() - $seconds),
+            self::USER
+        ));
     }
 
     /** @return array<string, mixed> */
