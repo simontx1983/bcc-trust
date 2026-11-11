@@ -467,6 +467,90 @@ final class ContentReportRepository
     }
 
     /**
+     * Ids of the reports against one target that sit at `$status`.
+     * Bounded — a target with more reports than this is a moderation
+     * incident, not a queue row; the cap keeps the IN-list below finite.
+     *
+     * @return list<int>
+     */
+    public function listIdsForTargetByStatus(string $targetKind, int $targetId, int $status, int $limit = 500): array
+    {
+        if ($targetId <= 0) {
+            return [];
+        }
+        global $wpdb;
+        $table = TableRegistry::contentReports();
+
+        $rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT id FROM {$table}
+              WHERE target_kind = %s AND target_id = %d AND status = %d
+              ORDER BY id ASC
+              LIMIT %d",
+            $targetKind,
+            $targetId,
+            $status,
+            max(1, min(500, $limit))
+        ));
+
+        $ids = [];
+        foreach ((array) $rows as $raw) {
+            if (is_numeric($raw) && (int) $raw > 0) {
+                $ids[] = (int) $raw;
+            }
+        }
+        return $ids;
+    }
+
+    /**
+     * Move a set of reports from one status to another, GUARDED on the
+     * expected current status so a row another moderator has since acted
+     * on is left alone. Moving to PENDING clears the resolution columns
+     * (same rule as setPending()); any other target stamps the resolver.
+     *
+     * @param list<int> $ids
+     * @return int Rows moved (0 for an empty list), or -1 on DB error.
+     */
+    public function transitionStatus(array $ids, int $fromStatus, int $toStatus, int $resolvedByUserId): int
+    {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', $ids),
+            static fn (int $id): bool => $id > 0
+        )));
+        if ($ids === []) {
+            return 0;
+        }
+        $ids = array_slice($ids, 0, 500);
+
+        global $wpdb;
+        $table        = TableRegistry::contentReports();
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+
+        if ($toStatus === 0) {
+            $sql = $wpdb->prepare(
+                "UPDATE {$table}
+                    SET status = 0, resolved_by = NULL, resolved_at = NULL
+                  WHERE status = %d AND id IN ({$placeholders})",
+                $fromStatus,
+                ...$ids
+            );
+        } else {
+            $sql = $wpdb->prepare(
+                "UPDATE {$table}
+                    SET status = %d, resolved_by = %d, resolved_at = %s
+                  WHERE status = %d AND id IN ({$placeholders})",
+                $toStatus,
+                max(0, $resolvedByUserId),
+                current_time('mysql'),
+                $fromStatus,
+                ...$ids
+            );
+        }
+
+        $result = $wpdb->query($sql);
+        return $result === false ? -1 : (int) $result;
+    }
+
+    /**
      * Flip a report back to PENDING and clear the resolution columns.
      *
      * The bounded recovery path (§K1 admin-queue undo affordance —

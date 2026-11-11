@@ -871,6 +871,26 @@ if (!function_exists('get_transient')) {
     }
 }
 
+// Recording do_action — the moderation integration suite asserts which
+// events a resolve/undo emits (and with what payload). Nothing else in the
+// harness defines it; listeners are not run (none are registered here).
+if (!function_exists('do_action')) {
+    function do_action(string $hook, mixed ...$args): void
+    {
+        $GLOBALS['__bcc_test_actions'][] = [$hook, $args];
+    }
+}
+if (!function_exists('get_current_user_id')) {
+    function get_current_user_id(): int
+    {
+        return 0;
+    }
+}
+
+// Moderation sidecar — ModerationRestoreIntegrationTest (F-72 / F-111).
+require_once dirname(__DIR__, 2) . '/includes/database/schema-hidden-activities.php';
+bcc_trust_create_hidden_activities_table();
+
 // ── validator-message queue + activation tables ─────────────────────────────
 require_once dirname(__DIR__, 2) . '/includes/database/schema-validator-msg-queue.php';
 bcc_create_validator_msg_queue_table();
