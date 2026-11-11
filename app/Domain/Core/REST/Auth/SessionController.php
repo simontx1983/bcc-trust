@@ -19,6 +19,7 @@
 namespace BCC\Trust\Core\REST\Auth;
 
 use BCC\Core\Log\Logger;
+use BCC\Trust\Core\Repositories\PushSubscriptionRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Services\HandleService;
@@ -220,6 +221,13 @@ final class SessionController
         // for this user fails ERR_REVOKED on next use, including the
         // bearer that authenticated THIS request.
         JwtToken::revokeAllForUser($userId);
+
+        // Revoking every token must also stop pushes to every device: a
+        // push subscription outlives the session that registered it, so
+        // without this a "sign out everywhere" kept notifying (and leaking
+        // notification text to) the very devices it was meant to cut off.
+        // Each device re-registers on its next sign-in. [F-76]
+        (new PushSubscriptionRepository())->deleteAllForUser($userId);
 
         $response = ApiResponse::ok(['ok' => true]);
         $response->header('Cache-Control', 'no-store');

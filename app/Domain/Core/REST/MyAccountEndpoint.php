@@ -338,6 +338,11 @@ final class MyAccountEndpoint
         $handle    = (string) get_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE, true);
         $freshToken = \BCC\Trust\Core\Support\JwtToken::encode($userId, $handle);
 
+        // A rotation cuts off every other token, so it must also cut off
+        // every device's push subscription — including the caller's own,
+        // which its client re-registers. [F-76]
+        (new \BCC\Trust\Core\Repositories\PushSubscriptionRepository())->deleteAllForUser($userId);
+
         // Credential rotation — log without the password value (obviously).
         AuditLogger::log('account_password_changed', $userId, [], 'user', $userId);
 
