@@ -326,18 +326,23 @@ class FraudDetector {
             ];
         }
 
-        // Check for multiple accounts on same device (uses pre-fetched data).
+        // Multiple accounts on the same device: OBSERVATION, not a fraud
+        // signal (F-184, user decision). A household or office sharing one
+        // computer is ordinary, and the "device" is a hash of IP + request
+        // headers, so two people on one router with the same browser build
+        // collide. It used to add min(30, accounts × 5). Trigger and
+        // `details` are RETAINED as the durable record admins see, and
+        // because `details` feeds `confidence`.
         if ($deviceData['shared_device']) {
-            $userCount    = $deviceData['shared_device']['user_count'];
-            $devicePoints = min(30, $userCount * 5);
+            $userCount = $deviceData['shared_device']['user_count'];
             $results['triggers'][] = 'shared_device_' . $userCount . '_users';
-            $results['score'] += $devicePoints;
             $results['details']['shared_device_count'] = $userCount;
             $results['signals'][] = [
                 'type'        => 'shared_device',
-                'points'      => $devicePoints,
+                'points'      => 0,
+                'punitive'    => false,
                 'description' => sprintf(
-                    'Device fingerprint shared by %d different accounts',
+                    'Device fingerprint shared by %d different accounts (observation only — adds no fraud points)',
                     $userCount
                 ),
             ];

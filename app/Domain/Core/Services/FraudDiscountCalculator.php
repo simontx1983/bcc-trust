@@ -33,8 +33,6 @@ final class FraudDiscountCalculator
      *
      * @param array<string, mixed> $signals    Fraud signals array with keys:
      *   - automation: ['is_automated' => bool, 'confidence' => int]
-     *   - multi_account_risk: bool
-     *   - device_fraud_probability: float (0.0–1.0)
      *   - behavior_score: int (0–100)
      *   - trust_rank: float (0.0–1.0)
      * @param int   $fraudScore  User's fraud_score (0–100).
@@ -57,16 +55,11 @@ final class FraudDiscountCalculator
             $penalties['automation_suspected'] = ($signals['automation']['confidence'] / 200);
         }
 
-        // ── Multi-account: shared device fingerprint ──
-        if ($signals['multi_account_risk'] ?? false) {
-            $penalties['multi_account'] = BCC_TRUST_FRAUD_PENALTY_MULTI_ACCOUNT;
-        }
-
-        // ── Device fraud probability (0.0–1.0, only penalize above threshold) ──
-        $deviceFraud = $signals['device_fraud_probability'] ?? 0.0;
-        if ($deviceFraud > BCC_TRUST_FRAUD_DEVICE_THRESHOLD) {
-            $penalties['device_fraud'] = $deviceFraud * BCC_TRUST_FRAUD_DEVICE_WEIGHT;
-        }
+        // Shared-device signals (multi-account on one fingerprint, device
+        // fraud probability) no longer reduce vote weight (F-184, user
+        // decision): a household or office sharing one computer votes at
+        // full weight. They are still recorded for admins by
+        // DeviceFingerprinter and FraudDetector.
 
         // ── Behavior score (0-100, only penalize above MEDIUM threshold) ──
         // Comparator is >= to match FraudDetector::getRiskLevel and every
@@ -167,43 +160,4 @@ final class FraudDiscountCalculator
         return $currentFactor / $originalFactor;
     }
 
-    /**
-     * Normalize disparate fraud signal formats into the standard shape
-     * expected by compute().
-     *
-     * EndorsementService passes fraud data as separate arrays; this bridges
-     * to the unified format without changing the caller's interface.
-     *
-     * @param array<string, mixed> $fraudAnalysis   ['score' => int, ...]
-     * @param array<string, mixed> $automationData  ['is_automated' => bool, 'confidence' => int]
-     * @param bool                 $multiAccountRisk
-     * @param array<string, mixed> $behavior        ['behavior_score' => int, ...]
-     * @param float                $trustRank       0.0–1.0
-     * @return array<string, mixed>  Normalized signals array.
-     */
-    public static function normalizeSignals(
-        array $fraudAnalysis,
-        array $automationData,
-        bool $multiAccountRisk,
-        array $behavior,
-        float $trustRank
-    ): array {
-        // Validate automation shape — if malformed, treat as no automation data
-        // rather than silently defaulting to "not automated" with high confidence.
-        if (!isset($automationData['is_automated']) || !isset($automationData['confidence'])) {
-            $automationData = ['is_automated' => false, 'confidence' => 0];
-        }
-
-        // Clamp trust_rank to valid range — out-of-range values would produce
-        // incorrect boost/penalty in compute().
-        $trustRank = max(0.0, min(1.0, $trustRank));
-
-        return [
-            'automation'               => $automationData,
-            'multi_account_risk'       => $multiAccountRisk,
-            'device_fraud_probability' => (float) ($fraudAnalysis['device_fraud_probability'] ?? 0.0),
-            'behavior_score'           => (int) ($behavior['behavior_score'] ?? 0),
-            'trust_rank'               => $trustRank,
-        ];
-    }
 }

@@ -24,14 +24,12 @@ use PHPUnit\Framework\TestCase;
 final class FraudHardBlockBeatsRankTest extends TestCase
 {
     /** @return array<string, mixed> */
-    private static function signals(bool $automated, float $trustRank, bool $multiAccount = false, float $deviceFraud = 0.0): array
+    private static function signals(bool $automated, float $trustRank, float $behavior = 0.0): array
     {
         return [
-            'automation'               => ['is_automated' => $automated, 'confidence' => $automated ? 100 : 0],
-            'multi_account_risk'       => $multiAccount,
-            'device_fraud_probability' => $deviceFraud,
-            'behavior_score'           => 0.0,
-            'trust_rank'               => $trustRank,
+            'automation'     => ['is_automated' => $automated, 'confidence' => $automated ? 100 : 0],
+            'behavior_score' => $behavior,
+            'trust_rank'     => $trustRank,
         ];
     }
 
@@ -45,9 +43,9 @@ final class FraudHardBlockBeatsRankTest extends TestCase
 
     public function testAPreReliefPenaltyAtTheThresholdIsBlockedWhateverTheRank(): void
     {
-        // Not flagged as a bot, but multi-account + heavy device fraud reach
-        // the block threshold before any relief.
-        $r = FraudDiscountCalculator::compute(self::signals(false, 1.0, true, 1.0), 0);
+        // Not flagged as a bot, but worst-case behaviour (0.50) + a maxed
+        // fraud score on record (0.50) reach the block before any relief.
+        $r = FraudDiscountCalculator::compute(self::signals(false, 1.0, 100.0), 100);
 
         self::assertGreaterThanOrEqual(
             BCC_TRUST_FRAUD_BLOCK_THRESHOLD,
@@ -59,10 +57,23 @@ final class FraudHardBlockBeatsRankTest extends TestCase
 
     public function testRankReliefStillSoftensAPenaltyBelowTheBlock(): void
     {
-        $noRank   = FraudDiscountCalculator::compute(self::signals(false, 0.0, true), 0);
-        $withRank = FraudDiscountCalculator::compute(self::signals(false, 1.0, true), 0);
+        $noRank   = FraudDiscountCalculator::compute(self::signals(false, 0.0, 60.0), 0);
+        $withRank = FraudDiscountCalculator::compute(self::signals(false, 1.0, 60.0), 0);
 
         self::assertGreaterThan(0.0, $noRank['discount'], 'control: a suspicious member is not blocked');
         self::assertGreaterThan($noRank['discount'], $withRank['discount'], 'a good rank still earns relief below the block');
+    }
+
+    public function testSharedDeviceSignalsNoLongerReduceVoteWeight(): void
+    {
+        // F-184 (user decision): a household sharing one computer votes at
+        // full weight. Old callers' keys are ignored, not penalised.
+        $r = FraudDiscountCalculator::compute(self::signals(false, 0.0) + [
+            'multi_account_risk'       => true,
+            'device_fraud_probability' => 1.0,
+        ], 0);
+
+        self::assertSame(1.0, $r['discount']);
+        self::assertSame([], array_filter($r['penalties'], static fn (float $p): bool => $p > 0));
     }
 }
