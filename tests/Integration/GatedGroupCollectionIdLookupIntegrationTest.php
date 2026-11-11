@@ -166,13 +166,50 @@ final class GatedGroupCollectionIdLookupIntegrationTest extends TestCase
 
         $this->assertNull(
             GatedGroupRepository::findPublishedGroupIdForCollectionId($cid),
-            "A '{$status}' group must not block a delete."
+            "A '{$status}' group is not a live community (the delete gate is the any-status read below)."
         );
         $this->assertSame(
             0,
             $this->hasCommunityPerClassifier($cid),
             "The listing predicate must agree that a '{$status}' group is not a community."
         );
+    }
+
+    // ── F-130: the delete gate's any-status read ─────────────────────
+
+    #[DataProvider('unpublishedStatuses')]
+    public function testTheDeleteGateSeesAnUnpublishedGroup(string $status): void
+    {
+        $cid     = $this->seedCollection('0x' . str_repeat('f', 40), '0x' . str_repeat('f', 40));
+        $groupId = $this->seedGroup($cid, $status);
+
+        $this->assertSame(
+            ['id' => $groupId, 'status' => $status],
+            GatedGroupRepository::findHolderGroupForCollectionIdAnyStatus($cid),
+            "A '{$status}' holder group must block a delete — restored or published later, it would point at a missing row."
+        );
+    }
+
+    public function testTheDeleteGatePrefersThePublishedGroup(): void
+    {
+        $cid       = $this->seedCollection('0x' . str_repeat('9', 40), '0x' . str_repeat('9', 40));
+        $this->seedGroup($cid, 'trash');
+        $published = $this->seedGroup($cid, 'publish');
+
+        $this->assertSame(
+            ['id' => $published, 'status' => 'publish'],
+            GatedGroupRepository::findHolderGroupForCollectionIdAnyStatus($cid)
+        );
+    }
+
+    public function testTheDeleteGateIgnoresOtherKindsAndEmptyCollections(): void
+    {
+        $empty = $this->seedCollection('0x' . str_repeat('8', 40), '0x' . str_repeat('8', 40));
+        $this->assertNull(GatedGroupRepository::findHolderGroupForCollectionIdAnyStatus($empty));
+
+        $other = $this->seedCollection('0x' . str_repeat('7', 40), '0x' . str_repeat('7', 40));
+        $this->seedGroup($other, 'publish', 'interest');
+        $this->assertNull(GatedGroupRepository::findHolderGroupForCollectionIdAnyStatus($other));
     }
 
     public function testAGroupOfAnotherKindIsIgnored(): void

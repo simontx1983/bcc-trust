@@ -341,6 +341,55 @@ final class GatedGroupRepository {
      *
      * @throws RepositoryReadFailure when the read did not run
      */
+    /**
+     * F-130: the holder group pointing at this collection IN ANY STATUS —
+     * published, draft, pending, private or trashed. The delete gate's
+     * question, which is NOT the listing's: a trashed or draft community is
+     * not a live one ({@see self::findPublishedGroupIdForCollectionId()}),
+     * but deleting the collection under it leaves a group that, once
+     * restored or published, points at a row that no longer exists.
+     *
+     * Only a permanently deleted post (gone from wp_posts) does not block. A
+     * published group is preferred in the answer, so the operator is told
+     * about the live one first. Same fail-closed read guard.
+     *
+     * @return array{id: int, status: string}|null
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function findHolderGroupForCollectionIdAnyStatus(int $collectionId): ?array {
+        if ($collectionId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT p.ID AS id, p.post_status AS status
+               FROM {$wpdb->postmeta} pm_coll
+          INNER JOIN {$wpdb->postmeta} pm_kind ON pm_kind.post_id = pm_coll.post_id
+          INNER JOIN {$wpdb->posts}    p       ON p.ID            = pm_coll.post_id
+              WHERE pm_coll.meta_key   = %s
+                AND pm_coll.meta_value = %d
+                AND pm_kind.meta_key   = %s
+                AND pm_kind.meta_value = %s
+                AND p.post_type        = %s
+              ORDER BY (p.post_status = 'publish') DESC, p.ID ASC
+              LIMIT 1",
+            self::META_COLLECTION,
+            $collectionId,
+            self::META_KIND,
+            self::KIND_HOLDERS,
+            'peepso-group'
+        ));
+
+        self::guardReadOrThrow(__FUNCTION__);
+
+        if (!is_object($row) || !isset($row->id)) {
+            return null;
+        }
+        return ['id' => (int) $row->id, 'status' => (string) ($row->status ?? '')];
+    }
+
     public static function findPublishedGroupIdForCollectionId(int $collectionId): ?int {
         if ($collectionId <= 0) {
             // A bad id is a substantive answer, not a fault: no row can
