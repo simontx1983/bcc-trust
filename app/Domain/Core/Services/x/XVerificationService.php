@@ -101,7 +101,18 @@ class XVerificationService {
             ? (int) $refreshed['expires_in']
             : null;
 
-        $this->repository->updateTokens($userId, $newAccess, $newRefresh, $expiresIn);
+        // The refreshed token is valid for this call even if it cannot be
+        // stored (F-146: updateTokens fails closed when encryption is
+        // unavailable). Log it and hand the token back rather than throw out
+        // of a read path; the next call simply refreshes again.
+        try {
+            $this->repository->updateTokens($userId, $newAccess, $newRefresh, $expiresIn);
+        } catch (\RuntimeException $e) {
+            \BCC\Core\Log\Logger::error('x_token_refresh_not_stored', [
+                'user_id' => $userId,
+                'message' => $e->getMessage(),
+            ]);
+        }
 
         return $newAccess;
     }

@@ -30,13 +30,25 @@ class XRepository {
     |--------------------------------------------------------------------------
     */
 
+    /**
+     * Encrypt an X OAuth token for storage, or THROW (F-146).
+     *
+     * This used to fall back to wp_hash($token) when encryption was
+     * unavailable. That is a one-way value: Encryption::decrypt() can never
+     * turn it back into a token, so the connection was saved looking
+     * "connected" while every later X call silently got a null token. It now
+     * fails closed like GitHubRepository::encryptToken(): nothing is written,
+     * and the caller reports the failure (the OAuth callback redirects with
+     * x_verified=error). A stored 32-hex value would indicate a past fallback.
+     */
     private function encryptToken(string $token): string {
         $encrypted = \BCC\Trust\Core\Support\Encryption::encrypt($token);
         if ($encrypted !== '') {
             return $encrypted;
         }
 
-        return wp_hash($token);
+        \BCC\Core\Log\Logger::error('[bcc-trust] X token not stored: encryption unavailable');
+        throw new \RuntimeException('Encryption failed — BCC_ENCRYPTION_KEY may be missing.');
     }
 
     private function decryptToken(string $data): ?string {
