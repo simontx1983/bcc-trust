@@ -9,7 +9,7 @@
  *
  * Body shape (PATCH) — every field optional:
  *   {
- *     "profile_visibility":     "public" | "members" | "private",
+ *     "profile_visibility":     "public" | "members" | "friends" | "private",
  *     "post_visibility":        "members" | "private",
  *     "hide_birthday_year":     bool,
  *     "hide_online":            bool,
@@ -26,6 +26,14 @@
  *                               This is the column PeepSo's own user-search
  *                               joins against, so writing through here keeps
  *                               search and feed gating coherent.
+ *                               ⚠ "friends" is 30, which is
+ *                               `PeepSoFriendsPlugin::ACCESS_FRIENDS` —
+ *                               defined and enforced by the peepso-friends
+ *                               plugin, not by PeepSo core. The value is
+ *                               ENFORCED on BCC's own read surfaces by
+ *                               {@see \BCC\Trust\Core\Support\ProfileAccess},
+ *                               which delegates to
+ *                               `PeepSoUser::is_accessible_static()`.
  *   - post_visibility        → `peepso_profile_post_acc` user_meta. Read via
  *                               `PeepSoUser::get_profile_post_accessibility()`,
  *                               write directly with `update_user_meta`. PeepSo
@@ -76,6 +84,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Trust\Core\Repositories\DbWriteCheck;
 use BCC\Trust\Core\Support\ApiResponse;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -92,9 +101,46 @@ final class MyProfilePrefsEndpoint
     /** PeepSo access constants — duplicated as ints to keep the file phpstan-clean
      *  even when PeepSo isn't loaded. Verified against peepso.php:70-72.
      *
+     * ⚠ `friends` (30) does NOT come from peepso.php. It is
+     * `PeepSoFriendsPlugin::ACCESS_FRIENDS`, defined in the peepso-friends
+     * plugin, which is also what ENFORCES it — both through PeepSo's
+     * `peepso_user_is_accessible` filter and through a raw clause its
+     * `pre_user_query` appends to user search. Writing 30 here is
+     * therefore only meaningful while that plugin is active; when it is
+     * absent, `is_accessible_static` leaves 30 at deny, which is the
+     * fail-closed direction. See {@see \BCC\Trust\Core\Support\ProfileAccess}.
+     *
+     * The level was previously unreachable through this API: a member
+     * could not set "friends" at all, only through PeepSo's own profile
+     * UI, even though every other surface already understood it.
+     *
      * @var array<string, int>
      */
     private const PROFILE_VISIBILITY_TOKENS = [
+        'public'  => 10,
+        'members' => 20,
+        'friends' => 30,
+        'private' => 40,
+    ];
+
+    /**
+     * `default_post_audience` (`peepso_last_used_post_privacy`) keeps the
+     * THREE-token set it has always accepted.
+     *
+     * ⚠ Deliberately a separate map, not a reuse of the one above. The
+     * two shared a constant until `friends` was added for the profile
+     * field; continuing to share it would have silently widened a SECOND
+     * public enum in the same change, without that being asked for or
+     * reviewed.
+     *
+     * Extending this one to `friends` is defensible on its own merits —
+     * `act_access = 30` is a real PeepSo post level that peepso-friends
+     * gates — but it is a separate contract change and belongs in its own
+     * PR.
+     *
+     * @var array<string, int>
+     */
+    private const POST_AUDIENCE_TOKENS = [
         'public'  => 10,
         'members' => 20,
         'private' => 40,
@@ -163,26 +209,40 @@ final class MyProfilePrefsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        $touched = false;
+        // ⚠ ALL VALIDATION BEFORE ANY WRITE (F-97). Phase 1 validates EVERY
+        // present field and the one precondition a write can fail on
+        // (PeepSo, for profile_visibility) before anything is written, so a
+        // 422 or 503 writes nothing. This used to validate-and-write field by
+        // field, so a 422 on a later field (e.g. a bad default_post_audience)
+        // returned an error while earlier fields, including
+        // profile_visibility, which feeds search and feed gating, were
+        // already saved: a "failed" request that had partly succeeded.
+        //
+        // 📌 NOT a transaction: a WRITE that fails after validation passed
+        // (a DB error in update_user_meta or the PeepSo row update) stops
+        // Phase 2 and answers 500 with `data.saved` listing what already
+        // persisted. Earlier writes are not rolled back.
 
-        // profile_visibility → peepso_users.usr_profile_acc
+        // ── Phase 1: validate, collecting the planned writes ─────────────
+        $profileAcc = null; // ?int
         $profileVis = $request->get_param('profile_visibility');
         if ($profileVis !== null) {
             if (!is_string($profileVis) || !isset(self::PROFILE_VISIBILITY_TOKENS[$profileVis])) {
                 return ApiResponse::error(
                     'bcc_invalid_request',
-                    '`profile_visibility` must be one of: public, members, private.',
+                    '`profile_visibility` must be one of: public, members, friends, private.',
                     422
                 );
             }
-            $err = self::writeProfileAccessibility($userId, self::PROFILE_VISIBILITY_TOKENS[$profileVis]);
-            if ($err instanceof WP_REST_Response) {
-                return $err;
+            if (!class_exists('\\PeepSoUser')) {
+                return self::peepsoUnavailable();
             }
-            $touched = true;
+            $profileAcc = self::PROFILE_VISIBILITY_TOKENS[$profileVis];
         }
 
-        // post_visibility → peepso_profile_post_acc user_meta
+        /** @var array<string, string> $meta user_meta key => value to write */
+        $meta = [];
+
         $postVis = $request->get_param('post_visibility');
         if ($postVis !== null) {
             if (!is_string($postVis) || !isset(self::POST_VISIBILITY_TOKENS[$postVis])) {
@@ -192,76 +252,85 @@ final class MyProfilePrefsEndpoint
                     422
                 );
             }
-            update_user_meta(
-                $userId,
-                'peepso_profile_post_acc',
-                (string) self::POST_VISIBILITY_TOKENS[$postVis]
-            );
-            $touched = true;
+            $meta['peepso_profile_post_acc'] = (string) self::POST_VISIBILITY_TOKENS[$postVis];
         }
 
-        // hide_birthday_year → peepso_hide_birthday_year user_meta
-        $hideBday = $request->get_param('hide_birthday_year');
-        if ($hideBday !== null) {
-            $value = filter_var($hideBday, FILTER_VALIDATE_BOOLEAN);
-            update_user_meta($userId, 'peepso_hide_birthday_year', $value ? '1' : '0');
-            $touched = true;
-        }
-
-        // hide_online → peepso_hide_online_status user_meta
-        $hideOnline = $request->get_param('hide_online');
-        if ($hideOnline !== null) {
-            $value = filter_var($hideOnline, FILTER_VALIDATE_BOOLEAN);
-            update_user_meta($userId, 'peepso_hide_online_status', $value ? '1' : '0');
-            $touched = true;
-        }
-
-        // hide_from_search → peepso_is_hide_profile_from_user_listing user_meta
-        $hideFromSearch = $request->get_param('hide_from_search');
-        if ($hideFromSearch !== null) {
-            $value = filter_var($hideFromSearch, FILTER_VALIDATE_BOOLEAN);
-            update_user_meta(
-                $userId,
-                'peepso_is_hide_profile_from_user_listing',
-                $value ? '1' : '0'
-            );
-            $touched = true;
-        }
-
-        // default_post_audience → peepso_last_used_post_privacy user_meta
         $defaultAudience = $request->get_param('default_post_audience');
         if ($defaultAudience !== null) {
-            if (!is_string($defaultAudience) || !isset(self::PROFILE_VISIBILITY_TOKENS[$defaultAudience])) {
+            if (!is_string($defaultAudience) || !isset(self::POST_AUDIENCE_TOKENS[$defaultAudience])) {
                 return ApiResponse::error(
                     'bcc_invalid_request',
                     '`default_post_audience` must be one of: public, members, private.',
                     422
                 );
             }
-            update_user_meta(
-                $userId,
-                'peepso_last_used_post_privacy',
-                (string) self::PROFILE_VISIBILITY_TOKENS[$defaultAudience]
-            );
-            $touched = true;
+            $meta['peepso_last_used_post_privacy'] = (string) self::POST_AUDIENCE_TOKENS[$defaultAudience];
         }
 
-        // mentor_opt_in → bcc_mentor_opt_in user_meta (Rank Phase 7
-        // §21.4). No eligibility check on the WRITE — listing composes
-        // opt-in AND the live capability at read time.
+        // Boolean flags: any value is accepted (FILTER_VALIDATE_BOOLEAN), so
+        // they cannot fail validation.
+        foreach ([
+            'hide_birthday_year' => 'peepso_hide_birthday_year',
+            'hide_online'        => 'peepso_hide_online_status',
+            'hide_from_search'   => 'peepso_is_hide_profile_from_user_listing',
+        ] as $param => $metaKey) {
+            $raw = $request->get_param($param);
+            if ($raw !== null) {
+                $meta[$metaKey] = filter_var($raw, FILTER_VALIDATE_BOOLEAN) ? '1' : '0';
+            }
+        }
+
+        // mentor_opt_in → bcc_mentor_opt_in (Rank Phase 7 §21.4). No
+        // eligibility check on the WRITE: listing composes opt-in AND the
+        // live capability at read time.
         $mentorOptIn = $request->get_param('mentor_opt_in');
-        if ($mentorOptIn !== null) {
-            $value = filter_var($mentorOptIn, FILTER_VALIDATE_BOOLEAN);
-            \BCC\Trust\Core\Plugin::instance()->mentorListingService()->setOptIn($userId, $value);
-            $touched = true;
-        }
+        $mentorValue = $mentorOptIn !== null ? filter_var($mentorOptIn, FILTER_VALIDATE_BOOLEAN) : null;
 
-        if (!$touched) {
+        if ($profileAcc === null && $meta === [] && $mentorValue === null) {
             return ApiResponse::error(
                 'bcc_invalid_request',
                 'No profile preferences provided.',
                 422
             );
+        }
+
+        // ── Phase 2: every field validated; write them ───────────────────
+        // Each write is CHECKED (#449 review, M1) through DbWriteCheck: the
+        // database's last error is cleared before it and read after it. The return value cannot be
+        // used, because update_user_meta() also returns false when the value
+        // is unchanged. The first failed write stops the sequence and the
+        // request answers 500 with `data.saved`, the fields that DID persist,
+        // so the client never reports "saved" for a partial write.
+        /** @var list<string> $saved request field names already persisted */
+        $saved = [];
+
+        if ($profileAcc !== null) {
+            $err = null;
+            $ok  = self::checkedWrite(static function () use ($userId, $profileAcc, &$err): void {
+                $err = self::writeProfileAccessibility($userId, $profileAcc);
+            });
+            if ($err instanceof WP_REST_Response) {
+                return $err;
+            }
+            if (!$ok) {
+                return self::writeFailed($userId, 'profile_visibility', $saved);
+            }
+            $saved[] = 'profile_visibility';
+        }
+        foreach ($meta as $metaKey => $value) {
+            $field = self::META_FIELDS[$metaKey];
+            if (!self::checkedWrite(static fn () => update_user_meta($userId, $metaKey, $value))) {
+                return self::writeFailed($userId, $field, $saved);
+            }
+            $saved[] = $field;
+        }
+        if ($mentorValue !== null) {
+            $ok = self::checkedWrite(static function () use ($userId, $mentorValue): void {
+                \BCC\Trust\Core\Plugin::instance()->mentorListingService()->setOptIn($userId, $mentorValue);
+            });
+            if (!$ok) {
+                return self::writeFailed($userId, 'mentor_opt_in', $saved);
+            }
         }
 
         $resp = ApiResponse::ok(self::readAll($userId));
@@ -307,9 +376,22 @@ final class MyProfilePrefsEndpoint
             'hide_birthday_year'    => self::flag($userId, 'peepso_hide_birthday_year', false),
             'hide_online'           => self::flag($userId, 'peepso_hide_online_status', false),
             'hide_from_search'      => self::flag($userId, 'peepso_is_hide_profile_from_user_listing', false),
+            // ⚠ POST_AUDIENCE_TOKENS, matching this field's WRITE path.
+            // Both maps hold the same three entries, so this read is
+            // byte-identical to before; the point is that read and write
+            // stay pinned to the SAME map now that the profile field's map
+            // has a fourth token. Had this kept reading the profile map, a
+            // client could GET 'friends' here and then be refused on PUT.
+            //
+            // 📌 PRE-EXISTING, not introduced here: a user whose stored
+            // `peepso_last_used_post_privacy` is 30 (settable in PeepSo's
+            // own UI) is reported as 'members', and a client round-trip
+            // would then write 20 back — LOOSENING friends to members.
+            // That is true on main today and is logged as a follow-up
+            // rather than silently changed under cover of this PR.
             'default_post_audience' => self::tokenForAcc(
                 self::readLastUsedPostPrivacy($userId),
-                self::PROFILE_VISIBILITY_TOKENS,
+                self::POST_AUDIENCE_TOKENS,
                 'members' // PeepSo's safest default for posts
             ),
             'mentor_opt_in'             => $mentor['opted_in'],
@@ -350,14 +432,61 @@ final class MyProfilePrefsEndpoint
         return is_numeric($value) ? (int) $value : 20;
     }
 
+    /** user_meta key → the PATCH field that writes it (for `data.saved`). */
+    private const META_FIELDS = [
+        'peepso_profile_post_acc'                  => 'post_visibility',
+        'peepso_last_used_post_privacy'            => 'default_post_audience',
+        'peepso_hide_birthday_year'                => 'hide_birthday_year',
+        'peepso_hide_online_status'                => 'hide_online',
+        'peepso_is_hide_profile_from_user_listing' => 'hide_from_search',
+    ];
+
+    /**
+     * Run one write and report whether the database accepted it, via
+     * {@see DbWriteCheck} ($wpdb stays in the Repositories layer, §1).
+     *
+     * The write's return value is ignored: update_user_meta() answers false
+     * for an UNCHANGED value as well as for a failure, so "false" is not an
+     * error signal. ⚠ Last-resort check: a write lost on wpdb's `! ready`
+     * early return leaves last_error empty and counts as saved. See
+     * DbWriteCheck for why a write through a WordPress API cannot do better.
+     */
+    private static function checkedWrite(callable $write): bool
+    {
+        return DbWriteCheck::run($write);
+    }
+
+    /** @param list<string> $saved */
+    private static function writeFailed(int $userId, string $field, array $saved): WP_REST_Response
+    {
+        \BCC\Core\Log\Logger::error('[MyProfilePrefs] preference write failed; stopped', [
+            'user_id' => $userId,
+            'field'   => $field,
+            'saved'   => $saved,
+            'error'   => DbWriteCheck::lastError(),
+        ]);
+
+        return ApiResponse::error(
+            'bcc_internal_error',
+            'Some of your preferences could not be saved. Please try again.',
+            500,
+            ['saved' => $saved, 'failed' => $field]
+        );
+    }
+
+    private static function peepsoUnavailable(): WP_REST_Response
+    {
+        return ApiResponse::error(
+            'bcc_peepso_unavailable',
+            'Profile preferences require PeepSo. The administrator should activate the PeepSo plugin.',
+            503
+        );
+    }
+
     private static function writeProfileAccessibility(int $userId, int $accInt): ?WP_REST_Response
     {
         if (!class_exists('\\PeepSoUser')) {
-            return ApiResponse::error(
-                'bcc_peepso_unavailable',
-                'Profile preferences require PeepSo. The administrator should activate the PeepSo plugin.',
-                503
-            );
+            return self::peepsoUnavailable();
         }
         $user = \PeepSoUser::get_instance($userId);
         $row = $user->get_peepso_user();

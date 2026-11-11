@@ -20,8 +20,11 @@
  *  - User-level checks (downvote gate + activity gate) are cached in
  *    the WordPress object cache for 120 seconds per user.
  *  - Page-specific checks (self-vote, duplicate) always run live.
- *  - Cache is invalidated via the bcc_trust_vote_cast and
- *    bcc_trust_vote_removed action hooks.
+ *  - Counters ALWAYS run live, never from the cache: the daily downvote
+ *    cap and the general vote rate limit. A cached "eligible" verdict
+ *    must never skip a counter (F-152: it did, for 120s at a time).
+ *  - Entries expire after CACHE_TTL; the only explicit invalidation is
+ *    invalidateForUser(), called by the daily cron.
  *  - Any cache read/write failure falls back silently to live checks.
  *
  * No database writes to vote tables. Returns the existing vote row (or null)
@@ -47,6 +50,9 @@ if (!defined('ABSPATH')) {
 class VoteEligibilityChecker {
 
     private const DOWNVOTE_TIERS = ['trusted', 'elite'];
+
+    /** Downvotes allowed per voter per 24h (anti-vote-bombing). */
+    public const DOWNVOTE_DAILY_CAP = 3;
 
     /** Cache TTL in seconds. */
     private const CACHE_TTL = 120;
@@ -80,6 +86,24 @@ class VoteEligibilityChecker {
         $this->assertNotSelfVote($voterId, $pageId);
         $this->assertNotRetaliatoryDownvote($voterId, $pageId, $voteType);
 
+        return $this->assertVoterGates($voterId, $pageId, $voteType);
+    }
+
+    /**
+     * Voter-level gates, in order: cached user-level eligibility, then the
+     * live duplicate check and the live counters.
+     *
+     * The counters (daily downvote cap, general vote rate limit) run on
+     * EVERY call, after the duplicate check so an idempotent retry does not
+     * burn budget. They must never sit behind the eligibility cache: F-152
+     * — the 3-per-day downvote cap lived inside the cache-miss branch, so
+     * a cached "eligible" verdict skipped it for the 120s TTL and the cap
+     * could be blown through in one burst.
+     *
+     * @return object|null Existing vote row, or null for a first-time vote.
+     * @throws VoteEligibilityException
+     */
+    private function assertVoterGates(int $voterId, int $pageId, int $voteType): ?object {
         // --- User-level checks: served from cache when available ---
         $this->assertUserLevelEligibility($voterId, $voteType);
 
@@ -87,6 +111,10 @@ class VoteEligibilityChecker {
         $existing = $this->voteRepo->get($voterId, $pageId);
         $this->assertNotDuplicate($existing, $voteType);
 
+        // --- Counters: always live, never cached ---
+        if ($voteType === -1) {
+            $this->enforceDownvoteCap();
+        }
         $this->enforceRateLimit();
 
         return $existing;
@@ -195,7 +223,8 @@ class VoteEligibilityChecker {
     /**
      * Invalidate cached eligibility for a user (both vote types).
      *
-     * Called from VoteService::invalidateAfterVoteChange() via action hooks.
+     * Called from the daily cron (CronService). Vote casts do NOT call it —
+     * which is why no counter may be evaluated inside the cached branch.
      */
     public static function invalidateForUser(int $userId): void {
         wp_cache_delete("eligibility_{$userId}_1", self::CACHE_GROUP);
@@ -334,13 +363,13 @@ class VoteEligibilityChecker {
     /**
      * Downvote eligibility — multi-layered defence against weaponization.
      *
-     * Requirements (all must pass):
+     * Requirements (all must pass; the result is cached per user):
      *  1. Trusted or elite reputation tier
      *  2. At least one identity verification (GitHub OR wallet)
-     *  3. Daily downvote rate limit (max 3 per day)
      *
      * Identity verification makes bot farms significantly harder to scale.
-     * The daily rate limit prevents targeted vote-bombing campaigns.
+     * The daily downvote cap is deliberately NOT here: this method only
+     * runs on an eligibility-cache miss. See enforceDownvoteCap().
      */
     private function assertDownvoteEligibility(int $voterId): void {
         $reputation = $this->reputationRepo->getByUserId($voterId);
@@ -362,20 +391,26 @@ class VoteEligibilityChecker {
                 'Identity verification required for downvoting.'
             );
         }
-
-        // Daily downvote rate limit: max 3 downvotes per 24 hours.
-        $this->assertDownvoteRateLimit($voterId);
     }
 
     /**
-     * Enforce a daily downvote cap (3 per 24h).
+     * Daily downvote cap: DOWNVOTE_DAILY_CAP per 24h, enforced on every
+     * downvote attempt (never from the eligibility cache — F-152).
      *
      * Uses the trust-engine's atomic RateLimiter (wp_options CONCAT/CAST
-     * pattern) which is safe under concurrent requests.
+     * pattern) which is safe under concurrent requests. Trust boosts never
+     * raise the cap: getAdjustedLimit() takes min(risk, trust) and risk is
+     * at most 1.0, so a risk penalty can only LOWER it (pinned by
+     * DownvoteDailyCapIntegrationTest for an elite, verified voter).
      */
-    private function assertDownvoteRateLimit(int $voterId): void {
+    private function enforceDownvoteCap(): void {
+        // Parity with the other user-level gates: only test mode bypasses.
+        if (defined('BCC_TRUST_TEST_MODE') && \BCC_TRUST_TEST_MODE) {
+            return;
+        }
+
         try {
-            RateLimiter::enforce('downvote_daily', 3, DAY_IN_SECONDS);
+            RateLimiter::enforce('downvote_daily', self::DOWNVOTE_DAILY_CAP, DAY_IN_SECONDS);
         } catch (\Exception $e) {
             if ($e->getCode() === 429) {
                 throw new VoteEligibilityException(

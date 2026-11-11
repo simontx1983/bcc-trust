@@ -87,6 +87,9 @@ final class ChainSweepActions
     public static function handle(): void
     {
         AdminActionSupport::requireCapability();
+        // F-91: a sweep makes billable provider calls — a crafted GET link
+        // carrying a leaked nonce must not be able to start one.
+        AdminActionSupport::requirePost();
 
         $operation = self::resolveOperationFromCurrentAction();
         if ($operation === null) {

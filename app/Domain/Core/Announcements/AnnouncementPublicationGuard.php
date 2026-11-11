@@ -183,6 +183,13 @@ final class AnnouncementPublicationGuard
             delete_post_meta((int) $post->ID, AnnouncementVisibility::META_AUTHORIZED_AT);
             delete_post_meta((int) $post->ID, AnnouncementVisibility::META_AUTHORIZED_USER_ID);
 
+            // F-151: leaving `publish` by ANY path (wp-admin trash or draft,
+            // wp_delete_post's trash step) also withdraws the feed card. Only
+            // archive() fired the withdrawal before, so the activity row stayed
+            // orphaned — hidden by the read-side post_status join, but brought
+            // back at its old feed position on re-publish.
+            do_action('bcc_announcement_withdrawn', (int) $post->ID);
+
             return;
         }
 

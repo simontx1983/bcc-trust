@@ -274,6 +274,14 @@ final class ScannerSchemaDropIntegrationTest extends TestCase
         // leave a fault armed for a sibling suite.
         $GLOBALS['wpdb']->clearFaultInjection();
 
+        // The drop is gated behind an explicit operator arming option
+        // (F-149). Every case runs ARMED unless it clears the option itself;
+        // the unarmed refusal is section 1b below.
+        \update_option('bcc_trust_allow_drop_scanner_schema', '1');
+        // An unarmed refusal starts a one-hour skip-backoff; never let one
+        // case's backoff leak into the next.
+        \delete_transient('bcc_trust_scanner_drop_unarmed_backoff');
+
         $this->buildPreDropShape();
     }
 
@@ -283,6 +291,7 @@ final class ScannerSchemaDropIntegrationTest extends TestCase
         $p    = $this->prefix();
 
         $wpdb->clearFaultInjection();
+        \delete_option('bcc_trust_allow_drop_scanner_schema');
 
         foreach (self::DROPPED_TABLES as $bare) {
             $wpdb->query("DROP TABLE IF EXISTS `{$p}{$bare}`");
@@ -353,6 +362,72 @@ final class ScannerSchemaDropIntegrationTest extends TestCase
         }
         self::assertNotContains(self::CK_INDEX, $this->indexes('bcc_chain_checkpoints'));
         self::assertNotContains(self::CHAIN_COLUMN, $this->columns('bcc_chains'));
+    }
+
+    // ══ 1b. The arming gate (F-149) ═════════════════════════════════════
+
+    /**
+     * UNARMED, a populated scanner schema is left exactly as it is and the
+     * migration reports INCOMPLETE (no stamp) — a restored or cloned
+     * database cannot lose the three tables on its first web request.
+     */
+    public function testAnUnarmedDropChangesNothingAndIsIncomplete(): void
+    {
+        \delete_option('bcc_trust_allow_drop_scanner_schema');
+
+        self::assertSame(BCC_TRUST_MIGRATION_INCOMPLETE, bcc_trust_drop_scanner_schema());
+
+        foreach (self::DROPPED_TABLES as $bare) {
+            self::assertTrue($this->tableExists($bare), "{$bare} must survive an unarmed run");
+        }
+        $ck = $this->columns('bcc_chain_checkpoints');
+        foreach (self::CK_COLUMNS as $c) {
+            self::assertContains($c, $ck, "{$c} must survive an unarmed run");
+        }
+        self::assertContains(self::CK_INDEX, $this->indexes('bcc_chain_checkpoints'));
+        self::assertContains(self::CHAIN_COLUMN, $this->columns('bcc_chains'));
+    }
+
+    /** Arming it afterwards is all it takes — the INCOMPLETE run retries. */
+    public function testArmingAfterAnUnarmedRunCompletesTheDrop(): void
+    {
+        \delete_option('bcc_trust_allow_drop_scanner_schema');
+        self::assertSame(BCC_TRUST_MIGRATION_INCOMPLETE, bcc_trust_drop_scanner_schema());
+
+        \update_option('bcc_trust_allow_drop_scanner_schema', '1');
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_drop_scanner_schema());
+        foreach (self::DROPPED_TABLES as $bare) {
+            self::assertFalse($this->tableExists($bare), "{$bare} must be gone once armed");
+        }
+    }
+
+    /** The gate guards destruction, not bookkeeping: nothing to drop completes unarmed. */
+    public function testNothingLeftToDropCompletesWithoutArming(): void
+    {
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_drop_scanner_schema()); // armed: clears it
+
+        \delete_option('bcc_trust_allow_drop_scanner_schema');
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_drop_scanner_schema());
+    }
+
+    /**
+     * #418 review L2: once an unarmed run has refused, the runner's
+     * per-request retry must not re-run the information_schema inventory
+     * for the next hour — the second unarmed call issues NO queries.
+     */
+    public function testAnUnarmedRefusalSkipsTheInventoryForAnHour(): void
+    {
+        $wpdb = $GLOBALS['wpdb'];
+        \delete_option('bcc_trust_allow_drop_scanner_schema');
+        self::assertSame(BCC_TRUST_MIGRATION_INCOMPLETE, bcc_trust_drop_scanner_schema());
+
+        $wpdb->resetQueryCount();
+        self::assertSame(BCC_TRUST_MIGRATION_INCOMPLETE, bcc_trust_drop_scanner_schema());
+        self::assertSame(0, $wpdb->queryCount, 'the backed-off unarmed run must not touch the database');
+
+        // Anti-vacuity: arming takes effect immediately, backoff or not.
+        \update_option('bcc_trust_allow_drop_scanner_schema', '1');
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_drop_scanner_schema());
     }
 
     // ══ 2. The index, explicitly ════════════════════════════════════════

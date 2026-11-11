@@ -1,6 +1,6 @@
 <?php
 /**
- * Admin Dashboard — ML Insights Tab
+ * Admin Dashboard — Suspicious Activity tab (rule-based fraud/ring flags; tab id 'ml' kept for old links)
  *
  * @package BCC\Trust\Core
  */
@@ -22,9 +22,9 @@ function bcc_trust_render_ml_tab() {
         <h2>Pattern Summary (Last 30 Days)</h2>
         <div style="display:flex;flex-wrap:wrap;gap:12px;">
             <?php foreach ( $pattern_counts as $pc ): ?>
-                <div style="background:#f5f5f5;border-radius:6px;padding:12px 20px;text-align:center;">
-                    <div style="font-size:24px;font-weight:bold;color:#2196f3;"><?php echo intval($pc->count); ?></div>
-                    <div style="font-size:12px;color:#666;"><?php echo esc_html( $pc->pattern_type ); ?></div>
+                <div style="background:var(--bcc-bg-raised);border-radius:6px;padding:12px 20px;text-align:center;">
+                    <div style="font-size:24px;font-weight:bold;color:var(--bcc-accent);"><?php echo intval($pc->count); ?></div>
+                    <div style="font-size:12px;color:var(--bcc-text-secondary);"><?php echo esc_html( $pc->pattern_type ); ?></div>
                 </div>
             <?php endforeach; ?>
         </div>
@@ -33,8 +33,8 @@ function bcc_trust_render_ml_tab() {
 
     <!-- ── Recent pattern detections ─────────────────────────────── -->
     <div class="bcc-panel">
-        <h2>Recent ML Pattern Detections</h2>
-        <p style="color:#666;">Last <?php echo intval($data['limit']); ?> detections.</p>
+        <h2>Recent Suspicious-Activity Flags</h2>
+        <p style="color:var(--bcc-text-secondary);">Last <?php echo intval($data['limit']); ?> detections.</p>
 
         <?php if ( ! $ml_ok ): ?>
             <div class="notice notice-error inline" style="margin:0;">
@@ -83,8 +83,8 @@ function bcc_trust_render_ml_tab() {
                         <td>
                             <?php if ( $confidence !== null ): ?>
                                 <div style="display:flex;align-items:center;gap:6px;">
-                                    <div style="width:50px;height:6px;background:#eee;border-radius:3px;overflow:hidden;">
-                                        <div style="width:<?php echo esc_attr(intval($confidence)); ?>%;height:100%;background:#2196f3;border-radius:3px;"></div>
+                                    <div style="width:50px;height:6px;background:var(--bcc-bg-code);border-radius:3px;overflow:hidden;">
+                                        <div style="width:<?php echo esc_attr(intval($confidence)); ?>%;height:100%;background:var(--bcc-accent);border-radius:3px;"></div>
                                     </div>
                                     <?php echo intval($confidence); ?>%
                                 </div>
@@ -95,7 +95,7 @@ function bcc_trust_render_ml_tab() {
                                 <?php echo esc_html( ucfirst( $severity ) ); ?>
                             </span>
                         </td>
-                        <td style="font-size:11px;color:#666;max-width:200px;white-space:normal;">
+                        <td style="font-size:11px;color:var(--bcc-text-secondary);max-width:200px;white-space:normal;">
                             <?php echo esc_html( $p->details ?? '' ); ?>
                         </td>
                         <td>

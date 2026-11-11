@@ -28,14 +28,8 @@ define('BCC_TRUST_FRAUD_BLOCK_THRESHOLD', 0.90);
 // Penalty assigned when automation is confirmed.
 define('BCC_TRUST_FRAUD_PENALTY_AUTOMATION', 0.90);
 
-// Penalty assigned for shared device fingerprint (multi-account).
-define('BCC_TRUST_FRAUD_PENALTY_MULTI_ACCOUNT', 0.50);
-
-// Device fraud probability must exceed this to trigger a penalty.
-define('BCC_TRUST_FRAUD_DEVICE_THRESHOLD', 0.7);
-
-// Weight applied to device fraud probability when penalizing.
-define('BCC_TRUST_FRAUD_DEVICE_WEIGHT', 0.50);
+// (No multi-account / device-fraud weight penalties: shared devices are
+// recorded, never penalised — F-184, user decision.)
 
 // Weight applied to fraud_score on record when penalizing.
 define('BCC_TRUST_FRAUD_SCORE_WEIGHT', 0.50);
@@ -62,6 +56,12 @@ define('BCC_TRUST_MULTI_ACCOUNT_WINDOW', 1);
 define('BCC_TRUST_UNIFORM_VOTE_THRESHOLD', 0.9);
 define('BCC_TRUST_UNIFORM_VOTE_MIN', 10);
 define('BCC_TRUST_VOTE_CHANGE_LIMIT', 5);
+
+// Fan-in pre-gate window (F-105, user decision): a young account (< 30 days)
+// is refused when the page has had the fan-in threshold (15, filterable via
+// bcc_trust_fan_in_pre_gate_threshold) distinct voters within this many
+// MINUTES — a burst, not ordinary popularity.
+define('BCC_TRUST_FAN_IN_PRE_GATE_WINDOW_MINUTES', 5);
 
 // ======================================================
 // VOTE RING DETECTION

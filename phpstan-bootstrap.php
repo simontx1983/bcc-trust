@@ -97,6 +97,15 @@ if (!class_exists('PeepSo')) {
         public static function get_option(string $key, $default = null) { return $default; }
         /** @return mixed */
         public static function get_option_new(string $key) { return null; }
+        /**
+         * PeepSo's admin test — `user_can($userId, 'manage_options')`,
+         * falling back to the current user when $userId is null. This is
+         * the check `PeepSoUser::is_accessible_static()` uses for its
+         * admin exemption, so a caller re-applying that exemption for a
+         * batched read must use the SAME predicate rather than its own
+         * `current_user_can()`, or the two drift.
+         */
+        public static function is_admin(?int $user_id = null): bool { return false; }
     }
 }
 
@@ -194,6 +203,23 @@ if (!class_exists('PeepSoUser')) {
         public function get_profile_accessibility() { return 10; }
         /** @return int|string */
         public function get_profile_post_accessibility() { return 20; }
+        /**
+         * The profile-visibility ladder — owner exempt, admin exempt,
+         * 0/10 public, 20 signed-in, 40 deny — ending in
+         * `apply_filters('peepso_user_is_accessible', ...)`, which is
+         * where peepso-friends grants level 30.
+         *
+         * ⚠ `mixed`, not `bool`, and that is faithful rather than lazy:
+         * the real method RETURNS THE FILTER RESULT, so any plugin on
+         * that hook decides the type. peepso-friends itself hands back
+         * `are_friends()`, which is an `fnd_id` INT on success rather
+         * than true. Callers must cast — see
+         * {@see \BCC\Trust\Core\Support\ProfileAccess::canViewProfile()}.
+         *
+         * @param int|string $acc
+         * @return mixed
+         */
+        public static function is_accessible_static($acc, int $user_id) { return false; }
         /** @return array<string, mixed> */
         public function get_peepso_user(): array { return []; }
         /** @param array<string, mixed> $data */

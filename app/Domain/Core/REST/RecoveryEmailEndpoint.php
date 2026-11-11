@@ -40,6 +40,7 @@ use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\AccountRecoveryService;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Services\AuthMailer;
+use BCC\Trust\Core\Services\PendingEmailService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Request;
@@ -54,12 +55,8 @@ final class RecoveryEmailEndpoint
 {
     private const ROUTE_NAMESPACE = 'bcc/v1';
 
-    /** Pending-email transient prefix + TTL (15 min; mirrors AuthEndpoint::OTP_TTL). */
-    private const PENDING_PREFIX = 'bcc_recovery_email_';
-    private const PENDING_TTL    = 900;
-
-    /** Email-verified usermeta key. Mirrors AuthEndpoint::META_EMAIL_VERIFIED (private there). */
-    private const META_EMAIL_VERIFIED = '_bcc_email_verified';
+    // Pending-email staging, OTP hashing and promotion live in
+    // PendingEmailService (shared with PATCH /me/account/email).
 
     /** Request is signature-gated (mirrors patchEmail's 5/60); verify mirrors verify_email (10/3600). */
     private const REQUEST_RATE_LIMIT = 5;
@@ -174,21 +171,15 @@ final class RecoveryEmailEndpoint
 
         // Stage the pending email + OTP hash in a single transient. user_email
         // is NOT touched until the OTP is confirmed (verify-before-promote).
-        $otp     = sprintf('%06d', random_int(0, 999999));
-        $otpHash = hash_hmac('sha256', $otp, (string) wp_salt('auth'));
-        set_transient(
-            self::PENDING_PREFIX . $userId,
-            ['email' => $email, 'otp_hash' => $otpHash],
-            self::PENDING_TTL
-        );
+        $otp = PendingEmailService::stage($userId, $email, PendingEmailService::PURPOSE_RECOVERY);
 
         AuthMailer::sendRecoveryEmailOtp($email, $otp);
         AuditLogger::log('recovery_email_requested', $userId, ['chain' => (string) $chain->slug], 'user', $userId);
 
         $resp = ApiResponse::ok([
             'ok'           => true,
-            'email_masked' => self::maskEmail($email),
-            'expires_in'   => self::PENDING_TTL,
+            'email_masked' => PendingEmailService::maskEmail($email),
+            'expires_in'   => PendingEmailService::PENDING_TTL,
         ]);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
@@ -216,39 +207,25 @@ final class RecoveryEmailEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Verification code is required.', 422);
         }
 
-        $pending = get_transient(self::PENDING_PREFIX . $userId);
-        if (!is_array($pending) || !isset($pending['email'], $pending['otp_hash'])) {
-            return ApiResponse::error('bcc_invalid_request', 'No pending recovery email. Please start again.', 400);
+        // Verify-before-promote (PendingEmailService): a wrong code leaves the
+        // pending entry for a retry within the TTL + verify throttle (a 6-digit
+        // OTP under 10/hour + 15-min TTL is not brute-forceable); a correct
+        // one promotes the address and marks it verified.
+        $confirmed = PendingEmailService::confirm($userId, $code, PendingEmailService::PURPOSE_RECOVERY);
+        if (!$confirmed['ok']) {
+            switch ($confirmed['error']) {
+                case PendingEmailService::ERR_NONE:
+                    return ApiResponse::error('bcc_invalid_request', 'No pending recovery email. Please start again.', 400);
+                case PendingEmailService::ERR_BAD_CODE:
+                    return ApiResponse::error('bcc_invalid_request', 'Incorrect or expired code.', 422);
+                case PendingEmailService::ERR_CONFLICT:
+                    return ApiResponse::error('bcc_conflict', 'That email is already in use.', 409);
+                default:
+                    return ApiResponse::error('bcc_internal_error', 'Could not save recovery email. Please try again.', 500);
+            }
         }
-        $pendingEmail = (string) $pending['email'];
-        $storedHash   = (string) $pending['otp_hash'];
-
-        // Timing-safe compare. On mismatch the transient is LEFT in place so
-        // the user can retry within the TTL + verify throttle (a 6-digit OTP
-        // under 10/hour + 15-min TTL is not brute-forceable).
-        $expected = hash_hmac('sha256', $code, (string) wp_salt('auth'));
-        if (!hash_equals($storedHash, $expected)) {
-            return ApiResponse::error('bcc_invalid_request', 'Incorrect or expired code.', 422);
-        }
-
-        // Re-check the conflict that was clear at request time (race window).
-        $existingId = email_exists($pendingEmail);
-        if ($existingId !== false && (int) $existingId !== $userId) {
-            delete_transient(self::PENDING_PREFIX . $userId);
-            return ApiResponse::error('bcc_conflict', 'That email is already in use.', 409);
-        }
-
-        $user     = get_userdata($userId);
-        $oldEmail = $user instanceof \WP_User ? (string) $user->user_email : '';
-
-        $result = wp_update_user(['ID' => $userId, 'user_email' => $pendingEmail]);
-        if (is_wp_error($result)) {
-            return ApiResponse::error('bcc_internal_error', 'Could not save recovery email. Please try again.', 500);
-        }
-
-        // The address is now proven, so the email is genuinely verified.
-        update_user_meta($userId, self::META_EMAIL_VERIFIED, '1');
-        delete_transient(self::PENDING_PREFIX . $userId);
+        $pendingEmail = $confirmed['email'];
+        $oldEmail     = $confirmed['old_email'];
 
         AuditLogger::log('recovery_email_confirmed', $userId, [], 'user', $userId);
 
@@ -264,19 +241,5 @@ final class RecoveryEmailEndpoint
         $resp = ApiResponse::ok(['ok' => true, 'email' => $pendingEmail]);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
-    }
-
-    /**
-     * Mask an email for a safe echo back to the client: first char + stars
-     * + domain (e.g. `a****@example.com`). Not security-critical — the
-     * caller already supplied the address — just avoids echoing it verbatim.
-     */
-    private static function maskEmail(string $email): string
-    {
-        $at = strpos($email, '@');
-        if ($at < 1) {
-            return '***';
-        }
-        return substr($email, 0, 1) . str_repeat('*', max(1, $at - 1)) . substr($email, $at);
     }
 }

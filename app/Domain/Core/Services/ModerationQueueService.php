@@ -255,16 +255,25 @@ final class ModerationQueueService
      */
     private static function resolveHandleToUserIds(string $handle): array
     {
-        // get_users with meta_compare=LIKE — the meta_value passed to
-        // get_users is treated as the LIKE pattern body (caller must
-        // include % wildcards if substring match is desired). We wrap it
-        // ourselves for partial-match semantics so admins can type any
-        // fragment of a handle.
-        $pattern = '%' . $handle . '%';
+        // Pass the RAW fragment. WP_Meta_Query's LIKE branch already does
+        // `'%' . $wpdb->esc_like($meta_value) . '%'` (wp-includes/
+        // class-wp-meta-query.php, case 'LIKE'), so it supplies the
+        // substring wildcards itself. Wrapping here as well made the
+        // pattern '%\%frag\%%': esc_like escaped OUR '%' into literal
+        // percent signs, so the filter only matched handles that
+        // contained a literal '%', which is never.
+        //
+        // A leading '@' is dropped because admins type handles the way
+        // the UI shows them ("@alice"), while bcc_handle stores the bare
+        // handle.
+        $fragment = ltrim($handle, '@');
+        if ($fragment === '') {
+            return [];
+        }
         $users = get_users([
             'meta_key'     => 'bcc_handle',
             'meta_compare' => 'LIKE',
-            'meta_value'   => $pattern,
+            'meta_value'   => $fragment,
             'fields'       => 'ID',
             'number'       => self::REPORTER_HANDLE_MAX_MATCHES,
         ]);
@@ -310,8 +319,12 @@ final class ModerationQueueService
      * Action effects:
      *   - 'hide'    → hide the target activity + mark report status=resolved
      *   - 'dismiss' → leave activity alone + mark report status=dismissed
-     *   - 'restore' → un-hide the target activity + mark report status=resolved
-     *                 (used when a previously auto-hidden post is restored)
+     *   - 'restore' → un-hide the target activity + mark report status=DISMISSED,
+     *                 and move every other UPHELD (status 1) report on the
+     *                 target to dismissed. A restore is the verdict "this
+     *                 content is fine", so it must never read as upheld
+     *                 (F-72: status 1 voided the author's Apprentice
+     *                 confirmation and credited the reporter).
      *
      * @return array{
      *   ok: true,
@@ -410,31 +423,80 @@ final class ModerationQueueService
         if ($action === self::ACTION_RESTORE) {
             // Capture the prior hidden row BEFORE remove() deletes it.
             // The undo path uses these to re-hide with the original
-            // hider's identity + reason, not the undoing admin's.
+            // hider's identity + reason + related report, not the undoing
+            // admin's (F-111) — an auto-hide stays an auto-hide.
             $prior = $this->hiddenRepo->findByActId($targetId);
-            $priorHiderUserId = $prior !== null && isset($prior->hidden_by_user_id) ? (int) $prior->hidden_by_user_id : null;
-            $priorReasonCode  = $prior !== null && isset($prior->reason_code)       ? (string) $prior->reason_code : null;
+            $priorHiderUserId     = $prior !== null && isset($prior->hidden_by_user_id) ? (int) $prior->hidden_by_user_id : null;
+            $priorReasonCode      = $prior !== null && isset($prior->reason_code)       ? (string) $prior->reason_code : null;
+            $priorRelatedReportId = $prior !== null && isset($prior->related_report_id) ? (int) $prior->related_report_id : null;
 
+            // F-72 / F-111 — a restore is the verdict "this content is
+            // fine". It is therefore NOT an upheld report:
+            //   - every OTHER report on this target that was upheld
+            //     (status 1 — e.g. the one an earlier admin Hide resolved)
+            //     becomes dismissed, so hasUpheldForTarget() stops voiding
+            //     the author's Apprentice confirmation and
+            //     countUpheldByReporterSince() stops crediting reporters;
+            //   - the clicked report is DISMISSED, never RESOLVED (status 1
+            //     was read as "upheld" by both of those consumers).
+            // The reporters' report_upheld Rank evidence is reversed by the
+            // bcc_content_restored_by_admin listener (Plugin.php), which
+            // receives the un-upheld ids below.
+            $unupheldIds = array_values(array_filter(
+                $this->reportRepo->listIdsForTargetByStatus($targetKind, $targetId, self::STATUS_RESOLVED),
+                static fn (int $id): bool => $id !== $reportId
+            ));
+            $this->reportRepo->transitionStatus($unupheldIds, self::STATUS_RESOLVED, self::STATUS_DISMISSED, $resolverUserId);
+
+            // F-73 — the verdict covers the whole target, so EVERY pending
+            // report on it closes too. Before, only the clicked report
+            // closed: the other pending ones still counted toward the
+            // auto-hide threshold, and a single new report re-hid the post.
+            // Plus a re-hide cooldown: auto-hide is withheld for
+            // AutoHideService::REHIDE_COOLDOWN_SECONDS (reports still queue).
+            $closedPendingIds = array_values(array_filter(
+                $this->reportRepo->listIdsForTargetByStatus($targetKind, $targetId, self::STATUS_PENDING),
+                static fn (int $id): bool => $id !== $reportId
+            ));
+            $this->reportRepo->transitionStatus($closedPendingIds, self::STATUS_PENDING, self::STATUS_DISMISSED, $resolverUserId);
+
+            // The cooldown starts BEFORE the hide is removed: a report that
+            // lands in between must not find the post visible AND
+            // cooldown-free, or it could auto-hide it again in the gap.
+            $cooldownStarted = AutoHideService::startRehideCooldown($targetId);
             $this->hiddenRepo->remove($targetId);
-            $this->reportRepo->updateStatus($reportId, self::STATUS_RESOLVED, $resolverUserId);
+            $this->reportRepo->updateStatus($reportId, self::STATUS_DISMISSED, $resolverUserId);
+            // listIdsForTargetByStatus() is bounded at 500; anything still
+            // pending after the bulk close means the target had more. Say so
+            // in the audit rather than letting the cap pass silently.
+            $stillPending = $this->reportRepo->countPendingForTarget($targetKind, $targetId);
             AuditLogger::log(
                 'admin_restore_report',
                 $reportId,
-                ['target_id' => $targetId],
+                [
+                    'target_id'                 => $targetId,
+                    'unupheld_report_ids'       => $unupheldIds,
+                    'closed_pending_report_ids' => $closedPendingIds,
+                    'closed_pending_has_more'   => $stillPending > 0,
+                    'rehide_cooldown_started'   => $cooldownStarted,
+                ],
                 'content_report',
                 $resolverUserId
             );
-            do_action('bcc_content_restored_by_admin', $targetId, $resolverUserId, $reportId);
+            do_action('bcc_content_restored_by_admin', $targetId, $resolverUserId, $reportId, $unupheldIds);
 
             $undo = $this->issueUndoToken(
                 $reportId,
                 $resolverUserId,
                 self::ACTION_RESTORE,
-                self::STATUS_RESOLVED,
+                self::STATUS_DISMISSED,
                 false,
                 $targetId,
                 $priorHiderUserId,
-                $priorReasonCode
+                $priorReasonCode,
+                $priorRelatedReportId,
+                $unupheldIds,
+                $closedPendingIds
             );
 
             return [
@@ -603,31 +665,59 @@ final class ModerationQueueService
         }
 
         if ($action === self::ACTION_RESTORE) {
-            // Inverse: re-hide the activity AND return the report to
-            // PENDING. Re-attribute the hidden row to the undoing
-            // admin with reason_code='admin_undo_restore'; the prior
-            // hider's identity is not preserved (this is recovery,
-            // not historical reconstruction — see pattern-registry
-            // "Moderation recovery affordances"). The transient
-            // captured the prior values only as forensic metadata;
-            // they are logged but not re-stamped onto the row.
-            $priorHider  = isset($undo['prior_hider_user_id']) ? (int) $undo['prior_hider_user_id'] : 0;
-            $priorReason = isset($undo['prior_reason_code'])   ? (string) $undo['prior_reason_code'] : '';
+            // Inverse: put back the hide the restore removed AND return
+            // the moderation state to where it was.
+            //
+            // F-111 — the hidden row is re-stamped with the ORIGINAL
+            // hider, reason and related report the forward action
+            // captured. Before this, it was re-attributed to the undoing
+            // admin with reason 'admin_undo_restore', so undoing a
+            // misclicked restore turned an AUTO-hide into an ADMIN hide.
+            // This is still recovery, not reconstruction (pattern-registry
+            // "Moderation recovery affordances"): three values the token
+            // already carried, no snapshot. If nothing was hidden when the
+            // restore ran, nothing is re-hidden — undo cannot hide a post
+            // the forward action never un-hid.
+            //
+            // The un-upheld sibling reports return to status 1. The
+            // reporters' report_upheld Rank evidence the restore reversed
+            // is NOT re-credited: the ledger is append-only (INSERT IGNORE
+            // on event_uid), so a reversed event is final — the
+            // pattern-registry rule that effects downstream systems have
+            // consumed are outside undo.
+            $priorReason  = isset($undo['prior_reason_code']) && $undo['prior_reason_code'] !== ''
+                ? (string) $undo['prior_reason_code']
+                : null;
+            $priorHider   = isset($undo['prior_hider_user_id']) ? (int) $undo['prior_hider_user_id'] : 0;
+            $priorRelated = isset($undo['prior_related_report_id']) ? (int) $undo['prior_related_report_id'] : 0;
+            $unupheldIds      = self::idList($undo['unupheld_report_ids'] ?? []);
+            $closedPendingIds = self::idList($undo['closed_pending_report_ids'] ?? []);
 
-            $this->hiddenRepo->add(
-                $targetId,
-                $adminUserId,
-                'admin_undo_restore',
-                $reportId
-            );
+            $rehidden = false;
+            if ($priorReason !== null) {
+                $rehidden = $this->hiddenRepo->add(
+                    $targetId,
+                    $priorHider,
+                    $priorReason,
+                    $priorRelated > 0 ? $priorRelated : null
+                );
+            }
+            $this->reportRepo->transitionStatus($unupheldIds, self::STATUS_DISMISSED, self::STATUS_RESOLVED, $adminUserId);
+            // F-73 — reopen the pending reports the restore closed, and end
+            // the re-hide cooldown it started.
+            $this->reportRepo->transitionStatus($closedPendingIds, self::STATUS_DISMISSED, self::STATUS_PENDING, $adminUserId);
+            AutoHideService::clearRehideCooldown($targetId);
             $this->reportRepo->setPending($reportId);
             AuditLogger::log(
                 'admin_undo_restore',
                 $reportId,
                 [
-                    'target_id'           => $targetId,
-                    'prior_hider_user_id' => $priorHider,
-                    'prior_reason_code'   => $priorReason,
+                    'target_id'               => $targetId,
+                    'prior_hider_user_id'     => $priorHider,
+                    'prior_reason_code'       => $priorReason ?? '',
+                    'prior_related_report_id' => $priorRelated,
+                    'reupheld_report_ids'     => $unupheldIds,
+                    'reopened_report_ids'     => $closedPendingIds,
                 ],
                 'content_report',
                 $adminUserId
@@ -638,7 +728,7 @@ final class ModerationQueueService
                 'ok'               => true,
                 'report_id'        => $reportId,
                 'undone_action'    => self::ACTION_RESTORE,
-                'currently_hidden' => true,
+                'currently_hidden' => $rehidden,
             ];
         }
 
@@ -657,6 +747,10 @@ final class ModerationQueueService
      * when the transient write fails (forward action still committed —
      * the affordance just doesn't render).
      *
+     * @param list<int> $unupheldReportIds restore only — sibling reports the
+     *        restore moved from status 1 to 2, returned to 1 on undo
+     * @param list<int> $closedPendingReportIds restore only — sibling reports
+     *        the restore moved from status 0 to 2, returned to 0 on undo
      * @return array{token: string, expires_at: string, ttl_seconds: int}|null
      */
     private function issueUndoToken(
@@ -667,7 +761,10 @@ final class ModerationQueueService
         bool $expectedCurrentlyHidden,
         int $targetActId,
         ?int $priorHiderUserId,
-        ?string $priorReasonCode
+        ?string $priorReasonCode,
+        ?int $priorRelatedReportId = null,
+        array $unupheldReportIds = [],
+        array $closedPendingReportIds = []
     ): ?array {
         // 32 hex chars = 128 bits of randomness. wp_generate_password
         // with special_chars=false yields [A-Za-z0-9]; bin2hex(random_bytes(16))
@@ -693,6 +790,9 @@ final class ModerationQueueService
             'target_act_id'             => $targetActId,
             'prior_hider_user_id'       => $priorHiderUserId,
             'prior_reason_code'         => $priorReasonCode,
+            'prior_related_report_id'   => $priorRelatedReportId,
+            'unupheld_report_ids'       => $unupheldReportIds,
+            'closed_pending_report_ids' => $closedPendingReportIds,
             'issued_at'                 => $now,
         ];
 
@@ -1002,6 +1102,23 @@ final class ModerationQueueService
             'display_name' => '(deleted user)',
             'profile_url'  => '',
         ];
+    }
+
+    /**
+     * Positive int ids from an undo-payload list (transient data — never
+     * trusted to be well-typed).
+     *
+     * @return list<int>
+     */
+    private static function idList(mixed $raw): array
+    {
+        $ids = [];
+        foreach ((array) $raw as $v) {
+            if (is_numeric($v) && (int) $v > 0) {
+                $ids[] = (int) $v;
+            }
+        }
+        return $ids;
     }
 
     private static function statusLabel(int $status): string

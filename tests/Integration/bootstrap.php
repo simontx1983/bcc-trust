@@ -371,8 +371,14 @@ require_once dirname(__DIR__, 2) . '/includes/config.php';
 // CU counter has rolled over. Returning a full datetime here made that
 // comparison NEVER match, so every increment looked like a new day.
 if (!function_exists('current_time')) {
-    /** @return string|int */
-    function current_time(string $type, int $gmt = 0)
+    /**
+     * `$gmt` is `int|bool` as in core WordPress: strict-typed callers
+     * (RankPendingRepository::resolve passes `true`) TypeError against an
+     * `int`-only stub.
+     *
+     * @return string|int
+     */
+    function current_time(string $type, int|bool $gmt = 0)
     {
         if ($type === 'timestamp' || $type === 'U') {
             return time();
@@ -383,6 +389,14 @@ if (!function_exists('current_time')) {
         return $gmt ? gmdate('Y-m-d H:i:s') : date('Y-m-d H:i:s');
     }
 }
+
+// F-181: CollectionRepository's controllable clock (namespaced time() /
+// current_time(); a pass-through until a test sets __bcc_collection_clock).
+// ⚠ It MUST be declared here, before any test runs: PHP binds an unqualified
+// call site to the namespaced or the global function ONCE per process, on its
+// first execution. Required from a test's setUp(), it is silently ignored
+// whenever an earlier test in the same process already ran upsert().
+require_once __DIR__ . '/collection-clock-stubs.php';
 
 // Used by ChainCheckpointRepository when it re-encodes the bounded block
 // progression history.
@@ -650,6 +664,15 @@ bcc_trust_create_content_reports_table();
 require_once dirname(__DIR__, 2) . '/includes/database/schema-stokes.php';
 bcc_trust_create_stokes_table();
 
+// Apprentice confirmation clock — RankPendingRestartIntegrationTest (F-71).
+require_once dirname(__DIR__, 2) . '/includes/database/schema-rank-pending.php';
+bcc_trust_create_rank_pending_table();
+
+// Rank state — RankSweepKeysetIntegrationTest (F-13): the daily evaluate
+// sweep's keyset read.
+require_once dirname(__DIR__, 2) . '/includes/database/schema-rank-state.php';
+bcc_trust_create_rank_state_table();
+
 // WordPress core wp_options (the rate limiter is option-backed via $wpdb->options).
 $GLOBALS['wpdb']->query(
     "CREATE TABLE `wp_options` (
@@ -709,6 +732,7 @@ $created = $GLOBALS['wpdb']->query(
         ID BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         post_title VARCHAR(255) NOT NULL DEFAULT '',
         post_name VARCHAR(200) NOT NULL DEFAULT '',
+        post_content LONGTEXT NULL,
         post_type VARCHAR(20) NOT NULL DEFAULT 'post',
         post_status VARCHAR(20) NOT NULL DEFAULT 'publish',
         PRIMARY KEY (ID),
@@ -789,6 +813,22 @@ require_once dirname(__DIR__, 2) . '/includes/database/schema-completion.php';
 
 require_once dirname(__DIR__, 2) . '/includes/database/schema-wallets.php';
 bcc_onchain_create_wallet_links_table();
+
+// Shared operator branding plus optional per-validator-page overrides.
+//
+// Required here rather than fixtured per-test so the REAL installer builds
+// the REAL schema: `bio TEXT NOT NULL` carries no default (MySQL forbids one
+// on TEXT), so a hand-rolled fixture table with a nullable bio would accept
+// writes that production rejects under STRICT_TRANS_TABLES and the suite
+// would prove the opposite of what it claims.
+//
+// Load order matters: TableRegistry::exists() MEMOIZES its answer per
+// process, so a `false` recorded before these tables exist would make every
+// repository call in the run take the table-missing branch and return
+// empty — silently, with no failure. Creating them during bootstrap means
+// no test can observe the pre-creation state.
+require_once dirname(__DIR__, 2) . '/includes/database/schema-operator-profiles.php';
+bcc_onchain_create_operator_profiles_table();
 
 require_once dirname(__DIR__, 2) . '/includes/database/schema-nft-holdings.php';
 bcc_onchain_create_nft_holdings_table();

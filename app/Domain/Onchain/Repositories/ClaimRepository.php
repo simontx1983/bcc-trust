@@ -587,6 +587,76 @@ class ClaimRepository {
             $byPage[(int) $row->page_id][(int) $row->user_id] = true;
         }
 
+        // ── ⚠⚠ SECOND LEG: the post_meta page<->validator binding ──────────
+        // The query above maps validator -> page through
+        // `wallet_links.post_id`, which is NOT the only binding this codebase
+        // recognises. `ValidatorPageMinter` writes the page's validator id to
+        // `_bcc_onchain_validator_id` post_meta, and FIVE other read paths
+        // already treat that as a first-class binding:
+        // `ValidatorRepository::findFirstByPageId` / `findAllByPageId` /
+        // `findCardRowsByPageIds` / `findCommunityStatsByIds`, plus
+        // `PageDiscoveryRepository` and `CardsListEndpoint`.
+        //
+        // Resolving only the wallet-link leg here made this method disagree
+        // with `findFirstByPageId`, and the two are consulted BY THE SAME
+        // CALLER one after the other: `ValidatorPageOperatorAuthority::decide()`
+        // proves the page is a validator page with `findFirstByPageId` (two
+        // legs) and then asks who the operator is with this method (one leg).
+        // A page bound only through post_meta therefore passed the first gate
+        // and always answered OPERATOR_UNCLAIMED, so `decide()` denied the
+        // page's REAL operator with `claim_absent` — on their own page.
+        //
+        // ⚠ That is reachable without any data repair, because nothing writes
+        // a non-zero `wallet_links.post_id`: `WalletRepository::insertOrFind`
+        // is the only write path into that table, its `ON DUPLICATE KEY
+        // UPDATE` clause deliberately touches only `id`, and its one caller
+        // (`WalletAuthController`, wallet signup) passes `0`. So for any page
+        // minted after that became true, post_meta is the only binding there
+        // is.
+        //
+        // Fallback ONLY for pages the first leg missed, which is the semantics
+        // every other two-leg reader in this codebase uses (wallet-link page
+        // wins; see `WalletRepository::resolveEntitiesForPages` for the same
+        // $missing shape). Deliberately NOT a union: a page that resolves to
+        // one operator today through the wallet link must keep resolving to
+        // that operator, and merging a second validator's claimants into its
+        // set would turn a working page AMBIGUOUS.
+        $missing = [];
+        foreach ($ids as $id) {
+            if (!isset($byPage[$id])) {
+                $missing[] = $id;
+            }
+        }
+
+        if ($missing !== []) {
+            $phMissing = implode(',', array_fill(0, count($missing), '%d'));
+
+            // ⚠ NO `LIMIT`, matching the first leg in this same method, and
+            // that is load-bearing rather than an omission. The unit of
+            // correctness here is the COMPLETE claimant set per page: the
+            // count decides RESOLVED vs AMBIGUOUS. A truncating LIMIT could
+            // drop a contested page's second claimant and silently convert
+            // AMBIGUOUS into RESOLVED, handing one of two rival claimants
+            // sole authority. Bounded by the 100-id IN-list above instead.
+            // CAST per the collation note on findMissingPlaceholderPage.
+            /** @var list<object{page_id: string, user_id: string}>|null $metaRows */
+            $metaRows = $wpdb->get_results($wpdb->prepare(
+                "SELECT pm.post_id AS page_id, cl.user_id
+                 FROM {$wpdb->postmeta} pm
+                 JOIN {$validators} v ON v.id = CAST(pm.meta_value AS UNSIGNED)
+                 JOIN {$table} cl ON cl.entity_id = v.id AND cl.entity_type = 'validator'
+                 WHERE pm.meta_key = '_bcc_onchain_validator_id'
+                   AND pm.post_id IN ({$phMissing})
+                   AND cl.status = 'verified' AND cl.claim_role = 'operator'
+                 ORDER BY pm.post_id, cl.user_id",
+                ...$missing
+            ));
+
+            foreach ($metaRows ?: [] as $row) {
+                $byPage[(int) $row->page_id][(int) $row->user_id] = true;
+            }
+        }
+
         $out = [];
         foreach ($byPage as $pageId => $userSet) {
             if (count($userSet) === 1) {
@@ -705,7 +775,10 @@ class ClaimRepository {
         // Advisory lock scoped to this specific entity+role.
         $lockKey = "bcc_claim:{$entityType}:{$entityId}:{$role}";
         if (!AdvisoryLock::acquire($lockKey, 5)) {
-            return ['success' => false, 'message' => 'Could not acquire claim lock. Please try again.'];
+            // 'transient' so the route answers 503 (retryable) rather than
+            // the default 403 'your wallet does not match' — a lock timeout
+            // is a busy server, not a wrong wallet.
+            return ['success' => false, 'error' => 'transient', 'message' => 'Could not acquire claim lock. Please try again.'];
         }
 
         try {
@@ -733,7 +806,7 @@ class ClaimRepository {
             $upsertResult = self::upsert($userId, $entityType, $entityId, $walletAddress, $chainId, $role, 'verified');
 
             if (!$upsertResult) {
-                return ['success' => false, 'message' => 'Failed to save claim.'];
+                return ['success' => false, 'error' => 'transient', 'message' => 'Failed to save claim.'];
             }
 
             return ['success' => true, 'claim_id' => $upsertResult['id']];
@@ -749,6 +822,7 @@ class ClaimRepository {
             }
             return [
                 'success' => false,
+                'error'   => 'transient',
                 'message' => 'Temporary database error — please try again in a moment.',
             ];
         } finally {
@@ -846,48 +920,6 @@ class ClaimRepository {
     }
 
     /**
-     * Bounded list of VERIFIED validator-operator claims, oldest first.
-     *
-     * Drives the validator-community provisioning backfill
-     * (ValidatorGroupProvisioningService::provisionAll): each row is a
-     * (user_id, entity_id=validator_id) pair whose community should
-     * exist. The INNER JOIN restricts to claims whose validator row
-     * still exists — a stale claim on a deleted validator can't mint a
-     * group.
-     *
-     * Bounded (§4): LIMIT %d (capped at 500); explicit columns only.
-     *
-     * @return list<object{id: string, user_id: string, entity_id: string, chain_id: string}>
-     */
-    public static function listVerifiedValidatorOperatorClaims(int $limit = 200): array {
-        if ($limit <= 0) {
-            return [];
-        }
-        if ($limit > 500) {
-            $limit = 500;
-        }
-
-        global $wpdb;
-        $table      = self::table();
-        $validators = \BCC\Core\DB\DB::table('onchain_validators');
-
-        /** @var list<object{id: string, user_id: string, entity_id: string, chain_id: string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT cl.id, cl.user_id, cl.entity_id, cl.chain_id
-               FROM {$table} cl
-              INNER JOIN {$validators} v ON v.id = cl.entity_id
-              WHERE cl.entity_type = 'validator'
-                AND cl.claim_role  = 'operator'
-                AND cl.status      = 'verified'
-              ORDER BY cl.id ASC
-              LIMIT %d",
-            $limit
-        ));
-
-        return $rows ?: [];
-    }
-
-    /**
      * Compute the total claim bonus for a user's own page.
      *
      * Sums the bonus for every VERIFIED claim the user personally holds,
@@ -943,4 +975,91 @@ class ClaimRepository {
         ));
     }
 
+
+    /**
+     * Every validator page this user has a VERIFIED operator claim on,
+     * across every chain — the operator dashboard's only data source.
+     *
+     * ⭐ MULTI-CHAIN BY CONSTRUCTION, NOT BY A FLAG. The claims table's
+     * only uniqueness is `uq_user_entity (user_id, entity_type, entity_id)`
+     * and the exclusivity lock in createExclusiveClaim() is keyed
+     * `bcc_claim:{entityType}:{entityId}:{role}`. Neither is scoped to a
+     * user or a chain, so one account holds as many operator claims as it
+     * can prove and a claim on one chain cannot block a claim on another.
+     * This read must never introduce a narrower rule than the table does.
+     *
+     * The page join casts postmeta's LONGTEXT meta_value to UNSIGNED
+     * rather than casting v.id to CHAR — the other direction trips a
+     * collation mismatch on this MySQL build (see
+     * ValidatorRepository::findMissingPlaceholderPage()).
+     *
+     * ⚠ A claim whose page has been deleted yields page_id NULL rather
+     * than dropping the row: the operator still holds the claim, and the
+     * dashboard must be able to say so instead of silently losing it.
+     *
+     * @return list<object{
+     *     claim_id: numeric-string,
+     *     claim_role: string,
+     *     claim_status: string,
+     *     validator_id: numeric-string,
+     *     chain_id: numeric-string,
+     *     chain_slug: string|null,
+     *     chain_name: string|null,
+     *     chain_type: string|null,
+     *     moniker: string|null,
+     *     operator_address: string,
+     *     validator_status: string,
+     *     page_id: numeric-string|null,
+     *     page_slug: string|null
+     * }>
+     */
+    public static function listVerifiedValidatorPagesForUser(int $userId, int $limit = 100): array {
+        if ($userId <= 0 || $limit <= 0) {
+            return [];
+        }
+        if ($limit > 200) {
+            $limit = 200;
+        }
+
+        global $wpdb;
+        $table      = self::table();
+        $validators = \BCC\Core\DB\DB::table('onchain_validators');
+        $chains     = \BCC\Core\DB\DB::table('chains');
+
+        /** @var list<object{claim_id: numeric-string, claim_role: string, claim_status: string, validator_id: numeric-string, chain_id: numeric-string, chain_slug: string|null, chain_name: string|null, chain_type: string|null, moniker: string|null, operator_address: string, validator_status: string, page_id: numeric-string|null, page_slug: string|null}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT cl.id            AS claim_id,
+                    cl.claim_role    AS claim_role,
+                    cl.status        AS claim_status,
+                    v.id             AS validator_id,
+                    v.chain_id       AS chain_id,
+                    c.slug           AS chain_slug,
+                    c.name           AS chain_name,
+                    c.chain_type     AS chain_type,
+                    v.moniker        AS moniker,
+                    v.operator_address AS operator_address,
+                    v.status         AS validator_status,
+                    p.ID             AS page_id,
+                    p.post_name      AS page_slug
+               FROM {$table} cl
+              INNER JOIN {$validators} v ON v.id = cl.entity_id
+               LEFT JOIN {$chains} c ON c.id = v.chain_id
+               LEFT JOIN {$wpdb->postmeta} pm
+                      ON pm.meta_key = '_bcc_onchain_validator_id'
+                     AND CAST(pm.meta_value AS UNSIGNED) = v.id
+               LEFT JOIN {$wpdb->posts} p
+                      ON p.ID = pm.post_id
+                     AND p.post_type = 'peepso-page'
+              WHERE cl.user_id     = %d
+                AND cl.entity_type = 'validator'
+                AND cl.claim_role  = 'operator'
+                AND cl.status      = 'verified'
+              ORDER BY c.name ASC, v.id ASC
+              LIMIT %d",
+            $userId,
+            $limit
+        ));
+
+        return $rows ?: [];
+    }
 }

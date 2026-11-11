@@ -312,7 +312,54 @@ final class ValidatorMsgQueueWorker
         // reason-code only — never the body) rather than a
         // DegradationMetrics event (which would false-alarm whenever
         // anyone is legitimately blocked).
-        $suppressReason = self::resolveSuppression($senderId, $operatorId, (string) $row->body);
+        $attempts = (int) $row->attempt_count;
+
+        // ⚠ An UNKNOWN sender suspension (null: it could not be read) DEFERS,
+        // exactly like an unreadable block table below (F-99): suppression is
+        // TERMINAL, so a DB blip must never turn into `sender_suspended`.
+        // Bounded backoff, then a loud failed_terminal at the attempt cap.
+        // A known answer is cached for this run by Permissions, so
+        // resolveSenderSuppression() below reads the same state.
+        if (\BCC\Core\Permissions\Permissions::suspensionState($senderId, false) === null) {
+            self::handleFailure($rowId, $leaseToken, $attempts, 'suspension_read_failed');
+            return;
+        }
+
+        $suppressReason = self::resolveSenderSuppression($senderId, $operatorId);
+
+        // ⚠⚠ THE RECIPIENT-SIDE GATE IS TRI-STATE, AND NEITHER FALLBACK
+        // IS SAFE (F-99). `firstClaimReleaseBlocked` used to return a
+        // plain bool, collapsing "could not read the block table" into
+        // RELEASE — so a transient DB fault during the sweep would
+        // deliver a queued message to an operator who had blocked the
+        // sender. Treating unknown as BLOCKED is no better: suppression
+        // here is TERMINAL, so a blip would permanently destroy a
+        // legitimate message.
+        //
+        // So unknown DEFERS through the ordinary transient-failure path:
+        // bounded exponential backoff, and at the attempt cap a LOUD
+        // `failed_terminal` carrying a metric, an audit row and
+        // `wp bcc-trust vmq status` visibility. Neither released nor
+        // dropped, and never silent.
+        //
+        // ⚠ It still goes through MessagesService, never
+        // PeepSoBlockRepository, so the "one-time bypass lives in one
+        // place" property that method documents is preserved.
+        if ($suppressReason === null) {
+            $blockState = MessagesService::firstClaimReleaseBlocked($senderId, $operatorId);
+            if ($blockState === null) {
+                self::handleFailure($rowId, $leaseToken, $attempts, 'block_read_failed');
+                return;
+            }
+            if ($blockState === true) {
+                $suppressReason = 'mutual_block';
+            }
+        }
+
+        if ($suppressReason === null) {
+            $suppressReason = self::resolveBodySuppression((string) $row->body);
+        }
+
         if ($suppressReason !== null) {
             if (ValidatorMsgQueueRepository::markSuppressed($rowId, $leaseToken, $suppressReason)) {
                 AuditLogger::log(
@@ -325,8 +372,6 @@ final class ValidatorMsgQueueWorker
             }
             return;
         }
-
-        $attempts = (int) $row->attempt_count;
 
         try {
             // Suppress PeepSo's per-message email for the backlog
@@ -376,7 +421,12 @@ final class ValidatorMsgQueueWorker
                 remove_filter('peepso_mailqueue_allowed', $veto, 99);
             }
         } catch (\Throwable $e) {
-            self::handleFailure($rowId, $leaseToken, $attempts, $e);
+            self::handleFailure(
+                $rowId,
+                $leaseToken,
+                $attempts,
+                $e->getMessage() === 'writer_failed' ? 'writer_failed' : 'delivery_error'
+            );
             return;
         }
 
@@ -398,7 +448,18 @@ final class ValidatorMsgQueueWorker
      * (they have no recipient-context equivalent in the DM send gates)
      * and are checked here.
      */
-    private static function resolveSuppression(int $senderId, int $operatorId, string $body): ?string
+    /**
+     * The SENDER-side terminal reasons.
+     *
+     * ⚠ Split out of the old single `resolveSuppression()` so the
+     * recipient-side block check can sit BETWEEN these and the body
+     * check as a TRI-STATE (see deliverRow). The split exists to
+     * PRESERVE THE ORDER OF REASONS exactly: a row that is both from a
+     * deleted sender and blocked still records `sender_deleted`, as it
+     * did before. Hoisting the block check above these would silently
+     * change which reason wins in the audit trail for such a row.
+     */
+    private static function resolveSenderSuppression(int $senderId, int $operatorId): ?string
     {
         if ($senderId <= 0 || get_userdata($senderId) === false) {
             return 'sender_deleted';
@@ -412,12 +473,12 @@ final class ValidatorMsgQueueWorker
         if (class_exists('PeepSoUser') && \PeepSoUser::get_instance($senderId)->get_user_role() === 'ban') {
             return 'sender_banned';
         }
-        // Recipient-side gate under the one-time release: chat_enabled +
-        // friends_only bypassed, mutual block still shields. Single-
-        // sourced through the policy evaluator (VALIDATOR_FIRST_CLAIM_RELEASE).
-        if (MessagesService::firstClaimReleaseBlocked($senderId, $operatorId)) {
-            return 'mutual_block';
-        }
+        return null;
+    }
+
+    /** The BODY-side terminal reason — evaluated LAST, as before. */
+    private static function resolveBodySuppression(string $body): ?string
+    {
         $trimmed = trim($body);
         if ($trimmed === '' || mb_strlen($trimmed) > MessagesService::MESSAGE_BODY_MAX_LENGTH) {
             return 'body_invalid';
@@ -430,11 +491,30 @@ final class ValidatorMsgQueueWorker
      * attempt budget is spent → failed_terminal, which is an explicit
      * operational state (metric + audit + `wp bcc-trust vmq status`),
      * never a silent drop. No message body in any of it.
+     *
+     * ⚠ It takes the REASON rather than the exception: F-99's
+     * `block_read_failed` is a transient failure with no exception
+     * behind it, and fabricating a `\Throwable` purely to smuggle a
+     * reason code through this signature would be the hacky version of
+     * the same call. The catch block maps its own exception.
+     *
+     * ⚠⚠ `block_read_failed` BURNS THE SAME BUDGET as a delivery
+     * failure, and the consequence is worth stating rather than
+     * discovering: with MAX_ATTEMPTS = 8 and a 300s base, the retries
+     * run at 300 + 600 + 1200 + 2400 + 4800 + 9600 + 19200 seconds =
+     * 38,100s ≈ **10.6 hours**. A block table unreadable for longer
+     * than that turns a LEGITIMATE queued message into
+     * `failed_terminal`. That is accepted because it is loud — metric,
+     * audit row, CLI status — and because the alternatives are
+     * delivering to a blocker or suppressing a good message outright.
+     *
+     * ⚠ Note BACKOFF_MAX_SECONDS (21600) NEVER BINDS at 8 attempts:
+     * the largest delay used is 300 * 2**6 = 19200. It would only start
+     * applying if MAX_ATTEMPTS rose to 9+. Pre-existing; recorded so
+     * "there is a 6-hour ceiling" is not relied on as a live bound.
      */
-    private static function handleFailure(int $rowId, string $leaseToken, int $attempts, \Throwable $e): void
+    private static function handleFailure(int $rowId, string $leaseToken, int $attempts, string $reason): void
     {
-        $reason = $e->getMessage() === 'writer_failed' ? 'writer_failed' : 'delivery_error';
-
         if (($attempts + 1) >= self::MAX_ATTEMPTS) {
             ValidatorMsgQueueRepository::markFailedTerminal($rowId, $leaseToken, $reason);
             DegradationMetrics::record('validator_messaging', 'delivery_failed_terminal');

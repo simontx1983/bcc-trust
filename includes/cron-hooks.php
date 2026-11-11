@@ -49,7 +49,7 @@ return [
         // Onchain domain
         'bcc_onchain_daily_refresh'             => ['interval' => 'daily',                        'description' => 'onchain holdings refresh sweep'],
         'bcc_onchain_retry_bonus'               => ['interval' => 'hourly',                       'description' => 'onchain bonus-application retry'],
-        'bcc_gated_group_provision'             => ['interval' => 'daily',                        'description' => 'holder-group + delegator-community provisioning (PeepSo write surface)'],
+        'bcc_gated_group_provision'             => ['interval' => 'daily',                        'description' => 'holder-group provisioning from the requested queue (PeepSo write surface)'],
         // ⚠ `bcc_hall_provision` was here until Halls became
         // administrator-created. It swept the active chain registry daily and
         // created a public open group for every chain that lacked one, so
@@ -92,6 +92,11 @@ return [
         // Fire-once bootstrap jobs.
         'bcc_trust_initial_user_sync',
         'bcc_trust_initial_read_model_sync',
+        // F-13: same-day continuations of a budget-cut daily rank sweep
+        // (RankScheduler). Fire-once; cleared here so a deactivate between
+        // a sweep and its continuation leaves nothing queued.
+        'bcc_rank_daily_evaluate_continue',
+        'bcc_rank_daily_tier_snapshot_continue',
         // Retired automatic NFT collection discovery. These five ran
         // unattended chain-wide sweeps: `bcc_index_collections` walked
         // every active EVM/Solana/Cosmos chain for "top collections", and

@@ -5,12 +5,14 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Log\Logger;
+use BCC\Trust\Core\Announcements\AnnouncementCapabilityResolver as Caps;
 use BCC\Trust\Core\Announcements\AnnouncementPostType;
 use BCC\Trust\Core\Announcements\AnnouncementPublicationGuard as PublicationGuard;
 use BCC\Trust\Core\Announcements\AnnouncementTransition as Verb;
 use BCC\Trust\Core\Announcements\AnnouncementVisibility as Vis;
 use BCC\Trust\Core\Exceptions\RepositoryException;
 use BCC\Trust\Core\Repositories\AnnouncementRepository;
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority as Authority;
 
 /**
@@ -77,6 +79,13 @@ final class AnnouncementWriteService
     public const ERR_UNAVAILABLE = 'bcc_unavailable';
 
     /**
+     * F-147: audit action for an archive of a row the actor did not author —
+     * the page's CURRENT operator archiving a predecessor's notice, or a site
+     * administrator archiving any notice.
+     */
+    public const AUDIT_ARCHIVED_NOT_AUTHOR = 'announcement_archived_not_author';
+
+    /**
      * §4.32.9 defines `summary_required` as a 400 client error, while the
      * route's own documented error line for this case is `bcc_invalid_request`.
      * Both are satisfied rather than one being chosen: the envelope code stays
@@ -128,7 +137,7 @@ final class AnnouncementWriteService
             );
         }
 
-        $title = self::text((string) ($input['title'] ?? ''), self::MAX_TITLE_LEN);
+        $title = self::plainText((string) ($input['title'] ?? ''), self::MAX_TITLE_LEN);
         if ($title === null) {
             return self::fail(
                 self::ERR_INVALID,
@@ -152,7 +161,7 @@ final class AnnouncementWriteService
         //     inferred from the body"; a blank one would render an empty
         //     one-liner on every list, rotator and feed card.
         //   - present but oversized -> the ordinary length 400, like title.
-        // `self::text()` collapses both to null, so the blank case is tested
+        // `self::plainText()` collapses both to null, so the blank case is tested
         // FIRST on the raw input.
         $summaryRaw = trim((string) ($input['summary'] ?? ''));
         if ($summaryRaw === '') {
@@ -163,7 +172,7 @@ final class AnnouncementWriteService
                 self::REASON_SUMMARY_REQUIRED
             );
         }
-        $summary = self::text($summaryRaw, self::MAX_SUMMARY_LEN);
+        $summary = self::plainText($summaryRaw, self::MAX_SUMMARY_LEN);
         if ($summary === null) {
             return self::fail(
                 self::ERR_INVALID,
@@ -204,7 +213,12 @@ final class AnnouncementWriteService
         // ⚠ post_password is never set: §4.32.1 records that
         // post_password_required() short-circuits to edit_post BEFORE
         // check_read_permission(), so a password is a REST bypass surface.
-        $postId = wp_insert_post([
+        // F-151: wp_slash() because wp_insert_post() unslashes its input (a
+        // literal backslash in Markdown or a title was silently lost), and
+        // withPlainTextColumns() because core's title/excerpt kses would turn
+        // the plain-text "Q&A" back into "Q&amp;A". post_content keeps core
+        // kses on purpose (other consumers render it).
+        $postId = self::withPlainTextColumns(static fn () => wp_insert_post(wp_slash([
             'post_type'     => AnnouncementPostType::POST_TYPE,
             'post_status'   => Verb::statusFor($verb),
             'post_title'    => $title,
@@ -219,7 +233,7 @@ final class AnnouncementWriteService
             'post_date'     => $date,
             'post_parent'   => $pageId,
             'post_password' => '',
-        ], true);
+        ]), true));
 
         if (is_wp_error($postId) || !is_int($postId) || $postId <= 0) {
             return self::fail(self::ERR_UNAVAILABLE, 'The announcement could not be stored.', 503);
@@ -270,7 +284,7 @@ final class AnnouncementWriteService
         $update = ['ID' => $announcementId];
 
         if (array_key_exists('title', $input)) {
-            $title = self::text((string) $input['title'], self::MAX_TITLE_LEN);
+            $title = self::plainText((string) $input['title'], self::MAX_TITLE_LEN);
             if ($title === null) {
                 return self::fail(
                     self::ERR_INVALID,
@@ -311,7 +325,7 @@ final class AnnouncementWriteService
                     self::REASON_SUMMARY_REQUIRED
                 );
             }
-            $summary = self::text($summaryRaw, self::MAX_SUMMARY_LEN);
+            $summary = self::plainText($summaryRaw, self::MAX_SUMMARY_LEN);
             if ($summary === null) {
                 return self::fail(
                     self::ERR_INVALID,
@@ -362,7 +376,8 @@ final class AnnouncementWriteService
             $this->storeCommentsEnabled($announcementId, (bool) $input['comments_enabled']);
         }
 
-        $res = wp_update_post($update, true);
+        // F-151: same slashing / plain-text-column handling as create().
+        $res = self::withPlainTextColumns(static fn () => wp_update_post(wp_slash($update), true));
         if (is_wp_error($res)) {
             return self::fail(self::ERR_UNAVAILABLE, 'The announcement could not be updated.', 503);
         }
@@ -430,23 +445,104 @@ final class AnnouncementWriteService
     /**
      * Archive — one-way, keeps the permalink (§4.32.6). Not a deletion.
      *
+     * ── F-147: WHO MAY ARCHIVE ──────────────────────────────────────────
+     * Archive is the one write that is NOT restricted to the row's author:
+     *   - the page's CURRENT resolved operator may archive any PUBLISHED
+     *     notice on that page, including one a previous operator wrote.
+     *     Before this, a claim hand-over left the predecessor's notices on
+     *     the page with nobody able to take them down (the new operator got
+     *     404 from the author-bound lookup; admins had no write at all).
+     *   - a site administrator (`manage_options`, decided by the route) may
+     *     archive any published notice.
+     * Edit, publish and pin stay author-only. Archive is one-way and keeps
+     * the permalink and public readability (§4.32.6), so the record of what
+     * the predecessor said survives — it only leaves the page and the feed.
+     *
+     * Lookup order: the actor's OWN row first (unchanged behaviour, so the
+     * operator's own draft still answers 409 "not published"), then the
+     * page's public row. `findPublic()` is bound to post_type + page + id +
+     * the §4.32.1 public predicate, so it can only reach a published,
+     * authorised notice on THIS page — never a draft, never another page's.
+     *
      * @param array{decision: string, reason: string|null, operator_user_id: int|null} $decision
+     * @param bool $administrator the route's `manage_options` check; never derived here
+     * @param int  $actorId       for the audit row only
      * @return array<string,mixed>
      */
-    public function archive(int $pageId, int $announcementId, array $decision, ?string $nowUtc = null): array
-    {
+    public function archive(
+        int $pageId,
+        int $announcementId,
+        array $decision,
+        ?string $nowUtc = null,
+        bool $administrator = false,
+        int $actorId = 0
+    ): array {
         $now = $nowUtc ?? gmdate('Y-m-d H:i:s');
 
-        if (!$this->isOperator($decision)) {
+        $isOperator = $this->isOperator($decision);
+        if (!$isOperator && !$administrator) {
             return self::deny();
         }
-        if ($this->ownRowOrNull($pageId, $decision, $announcementId) === null) {
+        // ⚠ The row is now BOUND, not merely null-checked: the state gate below
+        // reads `post_status` off it.
+        $row = $isOperator ? $this->ownRowOrNull($pageId, $decision, $announcementId) : null;
+        $notAuthor = false;
+        if ($row === null) {
+            $row       = $this->publicRowOrNull($pageId, $announcementId);
+            $notAuthor = $row !== null;
+        }
+        if ($row === null) {
             return self::fail(self::ERR_NOT_FOUND, 'Not found.', 404);
         }
         if (self::isArchived($announcementId)) {
             // ⚠ Refuse rather than re-stamp: archival is one-way, and moving the
             // timestamp would change a value a reader may already hold.
+            //
+            // ⚠⚠ DELIBERATELY STILL FIRST, ahead of the state gate below. This
+            // is the one existing refusal on this route and its wording is
+            // unchanged, so a row that is already archived answers exactly what
+            // it answered before — including the legacy case of a draft archived
+            // before the state gate existed, which keeps reporting
+            // `Already archived.` rather than switching to the new message.
             return self::fail(self::ERR_CONFLICT, 'Already archived.', 409);
+        }
+
+        // ── ⚠⚠ ARCHIVE IS A TRANSITION ON A *PUBLISHED* NOTICE ───────────────
+        //
+        // §4.32.6 defines archival as one-way, not a deletion, and says the row
+        // "keeps its permalink and stays publicly readable, so it remains
+        // challengeable". Every one of those properties presupposes a published
+        // row. Applied to a draft, scheduled or blocked notice it delivers the
+        // opposite of what it promises: the row was never publicly readable, so
+        // nothing is retained — and because `listForOwner()` always applies
+        // `notArchivedSql()`, the row also leaves the owner list. Measured on a
+        // real backend before this guard existed: an archived draft appeared on
+        // NO list surface — not `?status=draft`, not any other owner status, not
+        // the public archived list (the visibility predicate excludes it) —
+        // while `GET …/announcements/:id` still answered 200. The row survived,
+        // readable only by an id its own operator had no remaining way to
+        // obtain, with no route back because archival is one-way.
+        //
+        // That is content stranding reached through a second door: the same
+        // outcome as saving a draft that no surface lists. So this refuses
+        // instead, and refuses BEFORE any write — the row's state, its archived
+        // marker and its visibility are all left exactly as they were.
+        //
+        // ⚠ `announcement_not_published` is REUSED rather than minted. §4.32.9's
+        // reason inventory is closed and a client meeting an unrecognised reason
+        // takes its own refusal path, so a new code would land as a disabled
+        // control with no copy. This is the same code `can_pin` already returns
+        // for the same condition, so a client that renders one renders the other.
+        //
+        // ⚠ Not a new restriction on the published workflow: a published,
+        // unarchived row reaches the write below unchanged.
+        if ((string) ($row->post_status ?? '') !== Verb::STATUS_PUBLIC) {
+            return self::fail(
+                self::ERR_CONFLICT,
+                'Only a published announcement can be archived.',
+                409,
+                Caps::REASON_NOT_PUBLISHED
+            );
         }
 
         if (update_post_meta($announcementId, Vis::META_ARCHIVED_AT, $now) === false) {
@@ -456,10 +552,25 @@ final class AnnouncementWriteService
             return self::fail(self::ERR_UNAVAILABLE, 'Archival could not be confirmed.', 503);
         }
 
+        // F-151 — §4.32.13: archival is one-way AND unpins. Previously the pin
+        // survived, the archived row kept reporting is_pinned, and pin(false)
+        // refused it (archived), so the operator could not clear it.
+        delete_post_meta($announcementId, AnnouncementRepository::META_PINNED_AT);
+
         // §4.32.8 / §4.32.13 — "archival withdraws the feed activity".
         // Fired only after archival is CONFIRMED stored, so a failed archive
         // cannot withdraw a card that is still live.
         do_action('bcc_announcement_archived', $announcementId);
+
+        if ($notAuthor) {
+            AuditLogger::log(
+                self::AUDIT_ARCHIVED_NOT_AUTHOR,
+                $announcementId,
+                ['page_id' => $pageId, 'as' => $isOperator ? 'operator' : 'administrator'],
+                'announcement',
+                $actorId > 0 ? $actorId : null
+            );
+        }
 
         return ['ok' => true, 'id' => $announcementId, 'state' => 'archived'];
     }
@@ -487,19 +598,22 @@ final class AnnouncementWriteService
         if ($row === null) {
             return self::fail(self::ERR_NOT_FOUND, 'Not found.', 404);
         }
+        // F-151: UNPIN is always allowed, archived or not — it runs before the
+        // archived refusal so a row archived while pinned (before archive()
+        // unpinned) can still be cleared.
+        if (!$pinned) {
+            delete_post_meta($announcementId, AnnouncementRepository::META_PINNED_AT);
+
+            return ['ok' => true, 'id' => $announcementId, 'state' => 'unpinned'];
+        }
+
         // §4.32.11 already reports can_pin false on an archived or unpublished
         // row; the writer enforces it rather than trusting the client read it.
         if (self::isArchived($announcementId)) {
             return self::fail(self::ERR_CONFLICT, 'An archived announcement cannot be pinned.', 409);
         }
-        if ($pinned && (string) ($row->post_status ?? '') !== Verb::STATUS_PUBLIC) {
+        if ((string) ($row->post_status ?? '') !== Verb::STATUS_PUBLIC) {
             return self::fail(self::ERR_CONFLICT, 'Only a published announcement can be pinned.', 409);
-        }
-
-        if (!$pinned) {
-            delete_post_meta($announcementId, AnnouncementRepository::META_PINNED_AT);
-
-            return ['ok' => true, 'id' => $announcementId, 'state' => 'unpinned'];
         }
 
         // ⚠⚠ THE CRITICAL SECTION IS LOCKED, AND IT HAD TO BE. Read-then-write
@@ -677,6 +791,19 @@ final class AnnouncementWriteService
     }
 
     /**
+     * F-147: the page's published row, whoever wrote it. A read failure is a
+     * 404 here exactly as in {@see self::ownRowOrNull()}.
+     */
+    private function publicRowOrNull(int $pageId, int $announcementId): ?\stdClass
+    {
+        try {
+            return $this->repo->findPublic($pageId, $announcementId);
+        } catch (RepositoryException $e) {
+            return null;
+        }
+    }
+
+    /**
      * ⚠⚠ ASKS THE REPOSITORY. Its first version ran the query here, and
      * `arch-guardrails` rejected it with five `WPDB_OUTSIDE_REPO` violations —
      * correctly: §1 puts raw `$wpdb` in a repository and nowhere else. The
@@ -728,6 +855,92 @@ final class AnnouncementWriteService
      * request-bounds work in this codebase established the rule: a sanitizer
      * that rewrites invalid input into valid input hides the defect instead of
      * reporting it.
+     */
+    /**
+     * F-151: title and summary are PLAIN TEXT (contract §4.32: "plain text,
+     * 1–200 / 1–300 chars"). wp_kses_post() was wrong for them: it stored
+     * "Q&A" as "Q&amp;A" (shown literally, and counted against the limit) yet
+     * still let tags like <b> through into a field the frontend renders as
+     * text. sanitize_text_field() strips every tag and leaves entities alone;
+     * the length is checked AFTER sanitizing.
+     */
+    private static function plainText(string $raw, int $max, bool $allowEmpty = false): ?string
+    {
+        $clean = trim(sanitize_text_field($raw));
+        if ($clean === '' && !$allowEmpty) {
+            return null;
+        }
+        if (mb_strlen($clean) > $max) {
+            return null;
+        }
+
+        return $clean;
+    }
+
+    /**
+     * Run a post write with core's kses removed from post_title and
+     * post_excerpt ONLY (restored afterwards, whatever happens). Safe because
+     * both were already reduced to tag-free plain text by plainText().
+     * post_content keeps core kses — the body is Markdown that WP feeds,
+     * PeepSo, digests and the REST raw field may render, so it stays filtered
+     * (known Low: kses mangles Markdown autolinks `<https://…>` and code
+     * samples containing `<…>`).
+     *
+     * ⚠ The window is THIS post's column sanitisation only. kses is put back
+     * on the first `wp_insert_post_data`, which wp_insert_post() fires after
+     * sanitize_post() and before the row is written and before ANY action
+     * (pre_post_update, transition_post_status, save_post, wp_insert_post,
+     * wp_after_insert_post). So a listener that writes another post on
+     * publish — bcc_announcement_published → feed/activity rows — gets core
+     * kses as normal. Previously the filters stayed off for the whole call,
+     * nested writes included. The `finally` is the fallback for a write that
+     * returns before that filter (e.g. an empty-content refusal).
+     *
+     * @template T
+     * @param callable(): T $write
+     * @return T
+     */
+    private static function withPlainTextColumns(callable $write): mixed
+    {
+        $removed = [];
+        foreach (['title_save_pre', 'excerpt_save_pre'] as $hook) {
+            $priority = has_filter($hook, 'wp_filter_kses');
+            if ($priority !== false) {
+                remove_filter($hook, 'wp_filter_kses', (int) $priority);
+                $removed[$hook] = (int) $priority;
+            }
+        }
+        if ($removed === []) {
+            return $write();
+        }
+
+        $restored = false;
+        $restore  = static function () use (&$restored, $removed): void {
+            if ($restored) {
+                return;
+            }
+            $restored = true;
+            foreach ($removed as $hook => $priority) {
+                add_filter($hook, 'wp_filter_kses', $priority);
+            }
+        };
+        $onData = static function ($data) use ($restore) {
+            $restore();
+            return $data;
+        };
+
+        add_filter('wp_insert_post_data', $onData, PHP_INT_MIN);
+        try {
+            return $write();
+        } finally {
+            remove_filter('wp_insert_post_data', $onData, PHP_INT_MIN);
+            $restore();
+        }
+    }
+
+    /**
+     * Announcement BODY (Markdown source). Keeps wp_kses_post — see
+     * withPlainTextColumns() for why the body stays HTML-filtered.
      */
     private static function text(string $raw, int $max, bool $allowEmpty = false): ?string
     {

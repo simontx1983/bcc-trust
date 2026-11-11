@@ -227,10 +227,8 @@ final class NotificationDispatcher
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * Notify the followee when someone watches their card. The
-     * followee is always a user id (watchlist is a projection of
-     * PeepSo follows — see §C2). Self-watches are not possible from
-     * the watchlist UI; we still guard.
+     * Notify the owner when someone watches their card. Self-watches
+     * are not possible from the watchlist UI; we still guard.
      *
      * Note: watches run through §C3's batch aggregator on the feed
      * side (one feed item per 10-min window). The notification side
@@ -241,17 +239,27 @@ final class NotificationDispatcher
      */
     public function onCardWatched(int $viewerId, int $followId, string $targetKind, int $targetId): void
     {
-        unset($followId, $targetKind);
-        if ($viewerId <= 0 || $targetId <= 0 || $viewerId === $targetId) {
+        unset($followId);
+        if ($viewerId <= 0 || $targetId <= 0) {
             return;
         }
         try {
+            $recipientId = self::resolveWatchRecipient(
+                $viewerId,
+                $targetKind,
+                $targetId,
+                fn (int $pageId): int => $this->pageOwnerResolver->getPageOwner($pageId)
+            );
+            if ($recipientId <= 0) {
+                return;
+            }
+
             $actorHandle = self::resolveHandle($viewerId);
             $message     = sprintf('@%s watched your card.', $actorHandle);
 
             $this->dispatch(
                 $viewerId,
-                $targetId,
+                $recipientId,
                 $message,
                 NotificationType::CARD_WATCHED,
                 $viewerId, // external_id → actor profile (where the followee likely wants to land)
@@ -264,6 +272,27 @@ final class NotificationDispatcher
                 'error'     => $e->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Who hears about a watch: 0 means nobody.
+     *
+     * ⚠ `$targetId` is a USER id only for 'member'. For every page kind it
+     * is a POST id, so it must never be used as a recipient directly — that
+     * would notify whichever unrelated user shares the number. An unclaimed
+     * placeholder page has no owner and resolves to 0.
+     *
+     * @param callable(int): int $pageOwnerOf Page id → owner user id, 0 if none.
+     */
+    public static function resolveWatchRecipient(
+        int $viewerId,
+        string $targetKind,
+        int $targetId,
+        callable $pageOwnerOf
+    ): int {
+        $recipientId = $targetKind === 'member' ? $targetId : $pageOwnerOf($targetId);
+
+        return $recipientId === $viewerId ? 0 : $recipientId;
     }
 
     // NOTE: the bcc_trust_endorsement_added bell/push subscriber was
@@ -1153,14 +1182,16 @@ final class NotificationDispatcher
                 ? 'attestation_vouch_received'
                 : 'attestation_stand_behind_received';
 
-            $this->dispatch(
-                $attestorId,
-                $targetOwnerId,
-                $message,
-                $type,
-                $attestationId, // external_id → attestation row id
-                0               // no associated activity row
-            );
+            if ($this->attestationBellOpen('created', $attestorId, $targetOwnerId, $kind)) {
+                $this->dispatch(
+                    $attestorId,
+                    $targetOwnerId,
+                    $message,
+                    $type,
+                    $attestationId, // external_id → attestation row id
+                    0               // no associated activity row
+                );
+            }
 
             // Parallel push enqueue — debounced to one push per
             // (recipient, eventType) per 5 min, count-aggregated.
@@ -1181,6 +1212,33 @@ final class NotificationDispatcher
                 'error'          => $e->getMessage(),
             ]);
         }
+    }
+
+    /** F-78: one bell per (event, attestor, recipient, kind) per window. */
+    private const ATTESTATION_BELL_WINDOW_SECS = 86400;
+
+    /**
+     * F-78 — bell coalescing for attestation toggles. Every cast is a NEW
+     * row, so vouch → unvouch → vouch used to write a fresh bell row each
+     * time ("vouched for you", "revoked their vouch", "vouched for you", …).
+     * Push already self-debounces (PushDispatcher, 5 min); the bell did not.
+     *
+     * Same shape as the hall-post and comment-received bell gates: a
+     * transient set BEFORE the write, so a concurrent toggle sees it. Keyed
+     * per EVENT, so a storm leaves at most one "vouched" and one "revoked"
+     * bell per attestor→recipient pair and kind per day, while a genuine
+     * first vouch and a genuine revoke still each notify. The profile, not
+     * the bell, is the source of truth for the current state.
+     */
+    private function attestationBellOpen(string $event, int $attestorId, int $recipientId, string $kind): bool
+    {
+        $key = sprintf('bcc_attest_bell_%s_%s_%d_%d', $event, $kind, $attestorId, $recipientId);
+        if (get_transient($key) !== false) {
+            return false;
+        }
+        set_transient($key, 1, self::ATTESTATION_BELL_WINDOW_SECS);
+
+        return true;
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1216,14 +1274,16 @@ final class NotificationDispatcher
                 ? sprintf('@%s is no longer backing you.', $actorHandle)
                 : sprintf('@%s revoked their vouch.', $actorHandle);
 
-            $this->dispatch(
-                $attestorId,
-                $targetOwnerId,
-                $message,
-                NotificationType::ATTESTATION_REVOKED,
-                $attestationId,
-                0
-            );
+            if ($this->attestationBellOpen('revoked', $attestorId, $targetOwnerId, $kind)) {
+                $this->dispatch(
+                    $attestorId,
+                    $targetOwnerId,
+                    $message,
+                    NotificationType::ATTESTATION_REVOKED,
+                    $attestationId,
+                    0
+                );
+            }
 
             $this->pushDispatcher->enqueue($targetOwnerId, 'attestation_revoked', [
                 'actor_handle'    => $actorHandle,
@@ -1523,6 +1583,92 @@ final class NotificationDispatcher
             ]);
         }
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Delegator community — the revoke sweep removed this member
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Tell a member the sweep removed them. Self-notification like the rank
+     * notices: no human took this action, so there is no actor to name, and
+     * naming the group's owner would read as the operator having removed them.
+     *
+     * Bell only, by requirement: no push enqueue here, and the type is excluded
+     * from the digest email in NotificationRepository::findUnreadSince().
+     *
+     * ⚠ The message written here is only the fallback for a group that no longer
+     * resolves. See DelegatorGroupView::removalNotices() for why the notice
+     * itself is rendered at read time.
+     */
+    public function onDelegatorGroupMemberRemoved(int $userId, int $groupId): void
+    {
+        if ($userId <= 0 || $groupId <= 0) {
+            return;
+        }
+        try {
+            $group = PeepSoGroupRepository::findManyByIds([$groupId])[$groupId] ?? null;
+            $title = $group !== null ? mb_strimwidth((string) $group->post_title, 0, 80, '…', 'UTF-8') : 'a delegator group';
+
+            $this->dispatch(
+                $userId,
+                $userId,
+                sprintf(
+                    "You're no longer in %s. It requires a minimum delegation we couldn't confirm. You can rejoin once you meet it.",
+                    $title
+                ),
+                NotificationType::DELEGATOR_GROUP_REMOVED,
+                $groupId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] delegator-group removal bell failed', [
+                'user_id'  => $userId,
+                'group_id' => $groupId,
+                'error'    => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * F-73 — the author's post was hidden AUTOMATICALLY (credible-report
+     * threshold). Subscriber for `bcc_content_auto_hidden`
+     * ($actId, $count, $threshold, $reportId); only the act id is used.
+     *
+     * Self-notification (from = to = the author): the copy names no
+     * reporter, count or threshold, and states what happens next.
+     * Bell only (NotificationType::BELL_ONLY keeps it out of the email
+     * digest; no push is enqueued). Copy approved 2026-11-10.
+     */
+    public function onContentAutoHidden(int $actId): void
+    {
+        if ($actId <= 0) {
+            return;
+        }
+        try {
+            $authorId = PeepSoActivityRepository::getAuthorId($actId);
+            if ($authorId <= 0) {
+                return; // activity gone — nobody to tell
+            }
+            $this->dispatch(
+                $authorId,
+                $authorId,
+                self::CONTENT_AUTO_HIDDEN_MESSAGE,
+                NotificationType::CONTENT_AUTO_HIDDEN,
+                $actId,
+                $actId
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] auto-hide notice dispatch failed', [
+                'act_id' => $actId,
+                'error'  => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /** The approved F-73 author notice — exact text (product sign-off 2026-11-10). */
+    public const CONTENT_AUTO_HIDDEN_MESSAGE =
+        'One of your posts was hidden automatically after several members reported it. '
+        . 'A moderator will review it, and if it breaks no rule it will be restored.';
 
     // ──────────────────────────────────────────────────────────────────
     // Shared write path

@@ -120,8 +120,11 @@ final class PostsEndpoint
                         // of its canonical write path). Sanitizing twice
                         // would double-encode user input.
                     ],
-                    // Review-only fields. The handler validates per-kind
-                    // so these stay optional at the route level.
+                    // Review fields, plus `target_page_id` on a status post
+                    // (the validator page it is written for; the service
+                    // gates on current operator status). The handler
+                    // validates per-kind so these stay optional at the route
+                    // level.
                     'target_page_id' => [
                         'required'          => false,
                         'type'              => 'integer',
@@ -401,6 +404,21 @@ final class PostsEndpoint
                         'required' => false,
                         'type'     => 'string',
                     ],
+                    // §D6 group blogs. Declared with NO default for the
+                    // same reason as the fields above: absent must stay
+                    // distinguishable from an explicit 0, which means
+                    // "take this draft out of its group". The service
+                    // refuses any CHANGE once the post is published.
+                    'group_id' => [
+                        'required'          => false,
+                        'type'              => 'integer',
+                        'sanitize_callback' => 'absint',
+                    ],
+                    'visibility' => [
+                        'required' => false,
+                        'type'     => 'string',
+                        'enum'     => ['members_only', 'public_group', 'public_all'],
+                    ],
                     'content' => [
                         'required' => false,
                         'type'     => 'string',
@@ -528,9 +546,10 @@ final class PostsEndpoint
 
         $content = (string) $request->get_param('content');
         $groupId = (int) ($request->get_param('group_id') ?? 0);
-        // Per-post visibility — only threaded for kind=status (reviews are
-        // page-scoped, blogs are own-wall in V1). Only matters when
-        // group_id > 0; the service validates the value set.
+        // Per-post visibility — threaded for kind=status AND kind=blog
+        // (reviews stay page-scoped). Only matters when group_id > 0; the
+        // service validates the value set and owns the public_all policy
+        // gate, so both kinds get the identical rule.
         $visibility = (string) ($request->get_param('visibility') ?? 'members_only');
         // §21.3 Hall feed-channel — status kind only; the service
         // normalizes (anything but 'ranked' collapses to 'main').
@@ -538,7 +557,8 @@ final class PostsEndpoint
         $service = Plugin::instance()->postsService();
 
         if ($kind === 'status') {
-            $result = $service->createStatus($viewerId, $content, $groupId, $visibility, $hallFeed);
+            $targetPageId = (int) ($request->get_param('target_page_id') ?? 0);
+            $result       = $service->createStatus($viewerId, $content, $groupId, $visibility, $hallFeed, $targetPageId);
         } elseif ($kind === 'review') {
             // Reviews are page-scoped, not wall-scoped — group_id is
             // ignored here on purpose. Surfacing it would create a
@@ -572,17 +592,17 @@ final class PostsEndpoint
         } elseif ($kind === 'blog') {
             // §D6 — `content` carries the full_text; `excerpt` is the
             // Floor-context teaser. Service enforces length bounds.
-            // Blog group_id support is V2 — V1 blogs always land on the
-            // author's own wall. Surface a clear error if a caller
-            // passes group_id with kind=blog so the contract stays
-            // honest about the scope mismatch.
-            if ($groupId > 0) {
-                return ApiResponse::error(
-                    'bcc_invalid_request',
-                    'Blog posts cannot target a group wall in V1.',
-                    400
-                );
-            }
+            //
+            // `group_id` is now accepted (§D6 group blogs). The fence that
+            // used to stand here — "Blog posts cannot target a group wall
+            // in V1" — was a deliberate scope decision from d44e6a1
+            // (2026-05-09), never a technical limit; it is gone, and the
+            // service runs the SAME `gateGroupPost` a status post does, so
+            // membership, closed/secret rules, posting permission and the
+            // public_all policy are identical across kinds. `visibility`
+            // is threaded for the same reason. A ranked Hall channel is
+            // still refused for a blog — the service owns that error, so
+            // it cannot differ between this route and a direct call.
             $excerpt = (string) ($request->get_param('excerpt') ?? '');
 
             // ── PR-A: crypto-blog composer fields ───────────────────
@@ -711,7 +731,10 @@ final class PostsEndpoint
                 $disclosure,
                 $coverImageId,
                 $status,
-                $sources
+                $sources,
+                $groupId,
+                $visibility,
+                $hallFeed
             );
         } else {
             // Disputes / post-as-entity are explicit V1.5/V2 work —
@@ -1061,7 +1084,14 @@ final class PostsEndpoint
             $disclosure,
             $coverImageId,
             $status,
-            $sources
+            $sources,
+            // §D6 group blogs — null means "field absent, leave the target
+            // alone", which is NOT the same as 0 ("take it out of its
+            // group"). has_param distinguishes the two; a plain get_param
+            // would collapse an explicit 0 into "absent" and silently
+            // ignore a caller asking to un-group a draft.
+            $request->has_param('group_id') ? (int) $request->get_param('group_id') : null,
+            $request->has_param('visibility') ? (string) $request->get_param('visibility') : null
         );
 
         if (isset($result['error'])) {

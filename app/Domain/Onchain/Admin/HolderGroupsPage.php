@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Admin;
 
+use BCC\Trust\Core\Admin\AdminUiCompat as AdminUi;
+use BCC\Trust\Core\Admin\AdminMenus;
+
 use BCC\Trust\Onchain\OnchainPlugin;
 use BCC\Trust\Onchain\Services\NftGroupGateService;
 
@@ -52,12 +55,11 @@ final class HolderGroupsPage
     private const SWEEP_BATCH_SIZE = 20;
     private const NONCE_SWEEP      = 'bcc_holder_groups_run_sweep';
     private const NONCE_USER       = 'bcc_holder_groups_reconcile_user';
-    private const NONCE_VALIDATOR  = 'bcc_validator_groups_provision';
 
     public static function register_page(): void
     {
         add_submenu_page(
-            'bcc-system-health',
+            AdminMenus::ONCHAIN,
             'Holder Groups',
             'Holder Groups',
             'manage_options',
@@ -70,7 +72,6 @@ final class HolderGroupsPage
     {
         add_action('admin_post_bcc_holder_groups_run_sweep',       [self::class, 'handle_run_sweep']);
         add_action('admin_post_bcc_holder_groups_reconcile_user',  [self::class, 'handle_reconcile_user']);
-        add_action('admin_post_bcc_validator_groups_provision',    [self::class, 'handle_provision_validator_groups']);
         // `admin_post_bcc_hall_groups_provision` is deliberately GONE. It ran
         // provisionAll() across every active chain, and it had no POST gate —
         // admin-post.php dispatches from $_REQUEST, so a GET carrying a valid
@@ -187,48 +188,6 @@ final class HolderGroupsPage
         exit;
     }
 
-    /**
-     * Run the delegator-community provisioning backfill now — the manual
-     * twin of the daily `bcc_gated_group_provision` tick.
-     *
-     * PeepSo write-surface posture: this introduces NO new
-     * PeepSoGroupWriter::join call site. Provisioning CREATES groups
-     * (PeepSoGroup constructor, which assigns the operator as
-     * member_owner); it never lands a third party as a member, and
-     * every membership still has to pass ValidatorGroupGateService.
-     */
-    public static function handle_provision_validator_groups(): void
-    {
-        if (!current_user_can('manage_options')) {
-            wp_die(esc_html__('Unauthorized.'));
-        }
-        // admin-post.php dispatches admin_post_{action} from $_REQUEST, and
-        // check_admin_referer() reads it from there too — so without this a
-        // GET carrying a valid nonce reached the mutation.
-        AdminActionSupport::requirePost();
-        check_admin_referer(self::NONCE_VALIDATOR);
-
-        $result = OnchainPlugin::instance()
-            ->validatorGroupProvisioningService()
-            ->provisionAll();
-
-        \BCC\Core\Log\Logger::info('[bcc-trust] Delegator-community provisioning (manual)', [
-            'created'  => $result['created'],
-            'skipped'  => $result['skipped'],
-            'errors'   => count($result['errors']),
-            'operator' => get_current_user_id(),
-        ]);
-
-        wp_safe_redirect(add_query_arg([
-            'page'    => self::PAGE_SLUG,
-            'op'      => 'validator',
-            'created' => (int) $result['created'],
-            'skipped' => (int) $result['skipped'],
-            'errors'  => count($result['errors']),
-        ], admin_url('admin.php')));
-        exit;
-    }
-
     // ────────────────────────────────────────────────────────────
     // Render
     // ────────────────────────────────────────────────────────────
@@ -271,24 +230,6 @@ final class HolderGroupsPage
                 (int) $considered,
                 (int) $touched,
                 (int) $joined
-            );
-            return;
-        }
-
-        if ($op === 'validator') {
-            $created = isset($_GET['created']) ? (int) $_GET['created'] : 0;
-            $skipped = isset($_GET['skipped']) ? (int) $_GET['skipped'] : 0;
-            $errors  = isset($_GET['errors'])  ? (int) $_GET['errors']  : 0;
-
-            printf(
-                '<div class="notice notice-%1$s is-dismissible"><p>'
-                . '<strong>Delegator-community provisioning complete.</strong> '
-                . 'Created %2$d, skipped %3$d, %4$d error(s).%5$s</p></div>',
-                $errors > 0 ? 'warning' : 'success',
-                $created,
-                $skipped,
-                $errors,
-                $errors > 0 ? ' See the bcc-trust log for details.' : ''
             );
             return;
         }
@@ -374,13 +315,13 @@ final class HolderGroupsPage
         printf(
             '<tr><th>Cron <code>bcc_gated_group_reconcile_sweep</code></th><td>%s</td></tr>',
             $nextRun === false
-                ? self::badge('NOT SCHEDULED', '#dc3232')
-                : '<code>' . esc_html(gmdate('Y-m-d H:i:s', (int) $nextRun)) . ' UTC</code> ' . self::badge(self::relative((int) $nextRun), '#46b450')
+                ? AdminUi::badge('NOT SCHEDULED', AdminUi::BAD)
+                : '<code>' . esc_html(gmdate('Y-m-d H:i:s', (int) $nextRun)) . ' UTC</code> ' . AdminUi::badge(AdminUi::relative((int) $nextRun), AdminUi::OK)
         );
 
         echo '</tbody></table>';
 
-        echo '<p style="color:#666;margin-top:8px;">'
+        echo '<p style="color:var(--bcc-text-secondary);margin-top:8px;">'
             . 'The cron runs <strong>twicedaily</strong>, processing up to ' . esc_html((string) self::SWEEP_BATCH_SIZE)
             . ' opt-in users per tick (ID-ASC ordering). Manual triggers below mirror that bounded behavior.</p>';
     }
@@ -388,7 +329,7 @@ final class HolderGroupsPage
     private static function renderRunSweep(): void
     {
         echo '<h2 style="margin-top:24px;">Run reconcile sweep now</h2>';
-        echo '<p style="color:#666;">Processes up to ' . esc_html((string) self::SWEEP_BATCH_SIZE)
+        echo '<p style="color:var(--bcc-text-secondary);">Processes up to ' . esc_html((string) self::SWEEP_BATCH_SIZE)
             . ' opt-in users in one batch (same logic as the cron tick). Safe to repeat — already-joined memberships are skipped.</p>';
 
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:8px;">';
@@ -403,7 +344,7 @@ final class HolderGroupsPage
     private static function renderReconcileUser(): void
     {
         echo '<h2 style="margin-top:32px;">Reconcile specific user</h2>';
-        echo '<p style="color:#666;">Useful when a user reports "I hold the NFT but I\'m not in the group." '
+        echo '<p style="color:var(--bcc-text-secondary);">Useful when a user reports "I hold the NFT but I\'m not in the group." '
             . 'Service self-enforces opt-in — for opted-out users the call is a no-op.</p>';
 
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:8px;">';
@@ -425,24 +366,17 @@ final class HolderGroupsPage
 
         echo '<hr style="margin:32px 0;">';
         echo '<h2>Delegator communities</h2>';
-        echo '<p style="color:#666;">One closed community per <strong>claimed validator</strong>, owned by the '
-            . 'claiming operator. Provisioning normally happens on the <code>bcc_page_claimed</code> event; the '
-            . 'daily <code>bcc_gated_group_provision</code> tick backfills anything missed. Membership is gated on '
-            . 'a <strong>live delegation check</strong> — this button never adds members, it only creates missing '
-            . 'communities.</p>';
+        echo '<p style="color:var(--bcc-text-secondary);">A closed community a validator page\'s <strong>operator chooses to create</strong> '
+            . 'from that page, where they also set the minimum delegation. Nothing here or on a schedule creates '
+            . 'one. Membership is gated on a <strong>live delegation check</strong>.</p>';
 
         echo '<table class="widefat striped" style="max-width:560px;"><tbody>';
         printf(
-            '<tr><th style="width:280px;">Delegator communities provisioned</th><td>%s</td></tr>',
+            '<tr><th style="width:280px;">Delegator communities</th><td>%s</td></tr>',
             esc_html(number_format($groupCount))
         );
         echo '</tbody></table>';
 
-        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:12px;">';
-        echo '<input type="hidden" name="action" value="bcc_validator_groups_provision">';
-        wp_nonce_field(self::NONCE_VALIDATOR);
-        echo '<button type="submit" class="button">Provision now</button>';
-        echo '</form>';
     }
 
     /**
@@ -468,7 +402,7 @@ final class HolderGroupsPage
 
         echo '<hr style="margin:32px 0;">';
         echo '<h2>Halls</h2>';
-        echo '<p style="color:#666;">An <strong>open</strong> Hall connected to exactly one '
+        echo '<p style="color:var(--bcc-text-secondary);">An <strong>open</strong> Hall connected to exactly one '
             . 'chain (e.g. "Cosmos Hall"). Halls are never created automatically — an '
             . 'administrator creates each one explicitly, per chain. A Hall never adds '
             . 'members: joining is a member action gated by HallsService.</p>';
@@ -504,25 +438,5 @@ final class HolderGroupsPage
             'count_total' => true,
         ]);
         return (int) $query->get_total();
-    }
-
-    private static function relative(int $ts): string
-    {
-        $delta = $ts - time();
-        $abs   = abs($delta);
-        if ($abs < 60)    { $val = $abs . 's'; }
-        elseif ($abs < 3600) { $val = floor($abs / 60) . 'm'; }
-        elseif ($abs < 86400){ $val = floor($abs / 3600) . 'h'; }
-        else                 { $val = floor($abs / 86400) . 'd'; }
-        return $delta >= 0 ? 'in ' . $val : $val . ' ago';
-    }
-
-    private static function badge(string $text, string $color): string
-    {
-        return sprintf(
-            '<span style="display:inline-block;padding:2px 10px;background:%1$s;color:#fff;border-radius:3px;font-weight:bold;font-size:12px;letter-spacing:0.5px;">%2$s</span>',
-            esc_attr($color),
-            esc_html($text)
-        );
     }
 }

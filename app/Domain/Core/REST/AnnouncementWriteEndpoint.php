@@ -275,9 +275,20 @@ final class AnnouncementWriteEndpoint
         }
 
         $pageId = (int) $request['pageId'];
-        [$decision] = self::authorize($pageId);
+        [$decision, $actorId] = self::authorize($pageId);
 
-        $result = self::service()->archive($pageId, (int) $request['id'], $decision);
+        // F-147: a site administrator may archive any published notice
+        // (user decision 2026-11-11). Decided HERE, from the request's user,
+        // and passed as its own argument — never folded into the operator
+        // decision, which stays the single ownership authority.
+        $result = self::service()->archive(
+            $pageId,
+            (int) $request['id'],
+            $decision,
+            null,
+            current_user_can('manage_options'),
+            $actorId
+        );
 
         return self::render($result, $decision);
     }

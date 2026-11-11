@@ -47,6 +47,15 @@ class TierSnapshotService
     /** Rows per retention-purge batch. */
     private const PURGE_BATCH = 1000;
 
+    /**
+     * F-13: the day-scoped snapshot cursor, {day, after, complete}. See
+     * runDailySnapshot().
+     */
+    private const CURSOR_OPTION = 'bcc_rank_tier_snapshot_cursor';
+
+    /** Seconds before a budget-cut snapshot's continuation runs. */
+    private const CONTINUATION_DELAY = 60;
+
     /** @var array<int, true> Request-scoped ensureTodayRow memo. */
     private static array $todayMemo = [];
 
@@ -58,10 +67,25 @@ class TierSnapshotService
     }
 
     /**
-     * The daily sweep body. Partial coverage is logged, not fatal — a
-     * user the budget missed simply has a non-qualifying day (fail-safe
-     * strict), and tomorrow's run covers them again. Throws propagate to
-     * RankScheduler, which records `rank_scoring.tier_snapshot_failed`.
+     * The daily sweep body: TODAY's tier row for every user.
+     *
+     * ⚠ F-13. This used to start every run at cursor 0 under a 20-second
+     * budget, and a user with no row for a day has a NON-QUALIFYING day
+     * (fail-safe strict). So on a population larger than one budget's
+     * worth, the users past it never got a row and could never qualify —
+     * and resuming tomorrow would not help, because each row is for one day.
+     * Now:
+     *   - the cursor is DAY-SCOPED ({day, after, complete}) and persisted;
+     *   - a budget-cut pass schedules ONE same-day continuation, so every
+     *     user gets TODAY's row today;
+     *   - a cursor left from an earlier day is abandoned (logged) and today
+     *     starts at 0 — a past day's tail cannot be backfilled honestly;
+     *   - a completed day is recorded, so a second trigger the same day is
+     *     a no-op, and the retention purge runs once, at completion;
+     *   - the cursor advances only after recordDays() succeeds; a write
+     *     failure or a failed read (listUserIdsAfter is fail-closed) throws
+     *     to RankScheduler, which records `rank_scoring.tier_snapshot_failed`,
+     *     and the cursor stays for the retry.
      */
     public function runDailySnapshot(): void
     {
@@ -70,18 +94,30 @@ class TierSnapshotService
         }
 
         try {
-            $day      = gmdate('Y-m-d');
-            $deadline = time() + self::TIME_BUDGET_SECONDS;
-            $cursor   = 0;
-            $written  = 0;
-            $partial  = false;
+            $day      = $this->today();
+            $deadline = $this->now() + self::TIME_BUDGET_SECONDS;
+            $state    = $this->readSnapshotCursor();
 
+            if ($state !== null && $state['day'] === $day && $state['complete']) {
+                return; // Today's snapshot is already complete.
+            }
+
+            $cursor = 0;
+            if ($state !== null && $state['day'] === $day) {
+                $cursor = $state['after'];
+            } elseif ($state !== null && !$state['complete']) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] rank tier snapshot: an earlier day was left unfinished; starting today from the beginning', [
+                    'stale_day' => $state['day'],
+                    'after'     => $state['after'],
+                ]);
+            }
+
+            $written = 0;
             while (true) {
                 $userIds = $this->tierDays->listUserIdsAfter($cursor, self::BATCH_SIZE);
                 if ($userIds === []) {
                     break;
                 }
-                $cursor = max($userIds);
 
                 $tiers = $this->reputation->getTiersForUsers($userIds);
 
@@ -96,27 +132,70 @@ class TierSnapshotService
                     throw new \RuntimeException('tier_days batch write failed');
                 }
                 $written += count($batch);
+                $cursor   = max($userIds);
 
-                if (time() >= $deadline) {
-                    $partial = true;
-                    break;
+                if (count($userIds) < self::BATCH_SIZE) {
+                    break; // A short batch is the last batch.
+                }
+
+                if ($this->now() >= $deadline) {
+                    $this->writeSnapshotCursor(['day' => $day, 'after' => $cursor, 'complete' => false]);
+                    $this->scheduleSnapshotContinuation();
+                    \BCC\Core\Log\Logger::warning('[bcc-trust] rank tier snapshot: time budget hit, continuing shortly', [
+                        'written' => $written,
+                        'cursor'  => $cursor,
+                    ]);
+                    return;
                 }
             }
 
-            if ($partial) {
-                \BCC\Core\Log\Logger::warning('[bcc-trust] rank tier snapshot: time budget hit, partial pass', [
-                    'written' => $written,
-                    'cursor'  => $cursor,
-                ]);
-            } else {
-                \BCC\Core\Log\Logger::info('[bcc-trust] rank tier snapshot complete', [
-                    'written' => $written,
-                ]);
-            }
+            $this->writeSnapshotCursor(['day' => $day, 'after' => $cursor, 'complete' => true]);
+            \BCC\Core\Log\Logger::info('[bcc-trust] rank tier snapshot complete', [
+                'written' => $written,
+            ]);
 
             $this->purgeExpired($deadline);
         } finally {
             $this->tierDays->releaseSnapshotLock();
+        }
+    }
+
+    // ── F-13 sweep collaborators (overridden by RankSweepCursorTest) ──
+
+    protected function now(): int
+    {
+        return time();
+    }
+
+    protected function today(): string
+    {
+        return gmdate('Y-m-d');
+    }
+
+    /** @return array{day: string, after: int, complete: bool}|null */
+    protected function readSnapshotCursor(): ?array
+    {
+        $raw = get_option(self::CURSOR_OPTION, null);
+        if (!is_array($raw) || !isset($raw['day']) || !is_string($raw['day'])) {
+            return null;
+        }
+        return [
+            'day'      => $raw['day'],
+            'after'    => (int) ($raw['after'] ?? 0),
+            'complete' => (bool) ($raw['complete'] ?? false),
+        ];
+    }
+
+    /** @param array{day: string, after: int, complete: bool} $state */
+    protected function writeSnapshotCursor(array $state): void
+    {
+        update_option(self::CURSOR_OPTION, $state, false);
+    }
+
+    protected function scheduleSnapshotContinuation(): void
+    {
+        if (!wp_next_scheduled(RankScheduler::EVENT_DAILY_TIER_SNAPSHOT_CONTINUE)) {
+            wp_schedule_single_event(time() + self::CONTINUATION_DELAY, RankScheduler::EVENT_DAILY_TIER_SNAPSHOT_CONTINUE);
         }
     }
 

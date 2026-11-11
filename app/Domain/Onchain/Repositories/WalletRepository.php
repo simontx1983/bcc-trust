@@ -591,11 +591,61 @@ final class WalletRepository
              FROM {$table} w
              JOIN {$chainTable} c ON c.id = w.chain_id
              WHERE c.slug IN ({$slugPlaceholders})
+             ORDER BY w.user_id ASC
              LIMIT %d OFFSET %d",
             ...$args
         ));
 
         return array_map('intval', $ids);
+    }
+
+    /**
+     * Owners with a link on any of the given chain slugs, in ascending
+     * user_id AFTER `$afterUserId` — KEYSET paging. FAIL-CLOSED.
+     *
+     * ⚠ F-11. The daily signal refresh paged owners with OFFSET over an
+     * unordered DISTINCT, which neither engine keeps stable across ticks, so
+     * owners were skipped and repeated. A keyset on user_id is stable however
+     * the set changes between ticks, and its cursor is simply the last owner
+     * handled. A failed read throws rather than reading as "no more owners",
+     * which would have ended the cycle early.
+     *
+     * @param string[] $chainSlugs
+     * @return list<int>
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function getUserIdsWithChainSlugsAfter(array $chainSlugs, int $afterUserId, int $limit): array
+    {
+        if ($chainSlugs === [] || $limit <= 0) {
+            return [];
+        }
+
+        global $wpdb;
+        $table      = self::table();
+        $chainTable = ChainRepository::table();
+
+        $slugPlaceholders = implode(',', array_fill(0, count($chainSlugs), '%s'));
+        $args = array_merge(array_values($chainSlugs), [max(0, $afterUserId), $limit]);
+
+        // runRead, not get_col: see GuardsReadFailures::runRead() for the
+        // stale-`last_result` path that get_col() cannot see.
+        /** @var list<object{user_id: int|numeric-string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT DISTINCT w.user_id
+               FROM {$table} w
+               JOIN {$chainTable} c ON c.id = w.chain_id
+              WHERE c.slug IN ({$slugPlaceholders})
+                AND w.user_id > %d
+              ORDER BY w.user_id ASC
+              LIMIT %d",
+            ...$args
+        ), 'getUserIdsWithChainSlugsAfter', true);
+
+        $ids = [];
+        foreach ($rows as $row) {
+            $ids[] = (int) $row->user_id;
+        }
+        return $ids;
     }
 
     /**
@@ -850,9 +900,80 @@ final class WalletRepository
     }
 
     /**
+     * FAIL-SAFE: a failed read logs and returns []. Fine for a status count;
+     * NEVER for building the Helius address list — see the OrThrow variant.
+     *
      * @return list<array{id: int, wallet_address: string}>
      */
     public static function listForChainBySolanaSync(int $chainId, bool $heliusManaged): array
+    {
+        return self::readSolanaSync($chainId, $heliusManaged, false);
+    }
+
+    /** Row ceiling for one Solana-sync read (the Helius list holds at most 100 000). */
+    private const SOLANA_SYNC_READ_LIMIT = 100000;
+
+    /**
+     * FAIL-CLOSED variant for HeliusSubscriptionManager::resyncFromWalletLinks().
+     *
+     * ⚠ F-64: the resync PUTs whatever this returns as the WHOLE shared
+     * webhook address list. `$wpdb->get_results()` returns [] (never null)
+     * when the query fails, so a DB fault read as "no Solana wallets" and the
+     * twice-daily reconcile wiped every subscription. A read that did not run
+     * must throw instead.
+     *
+     * @return list<array{id: int, wallet_address: string}>
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function listForChainBySolanaSyncOrThrow(int $chainId, bool $heliusManaged): array
+    {
+        return self::readSolanaSync($chainId, $heliusManaged, true);
+    }
+
+    /**
+     * How many wallet_links rows OTHER than `$excludeId` hold this exact
+     * address on this chain. FAIL-CLOSED.
+     *
+     * Used before taking an address off the shared Helius webhook (F-64): two
+     * users can link the same Solana address, and removing it for one would
+     * stop events for the other.
+     *
+     * ⚠ EXACT MATCH, NOT LOWERCASED. Solana base58 addresses are
+     * case-sensitive, so this cannot reuse findIdsByChainAddresses(), which
+     * folds case.
+     *
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function countOtherLinksForChainAddress(int $chainId, string $walletAddress, int $excludeId): int
+    {
+        if ($chainId <= 0 || $walletAddress === '') {
+            return 0;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        // runRead, not get_var: see GuardsReadFailures::runRead() for the
+        // stale-`last_result` path that get_var() cannot see.
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT COUNT(*) AS n
+               FROM {$table}
+              WHERE chain_id = %d
+                AND BINARY wallet_address = %s
+                AND id <> %d",
+            $chainId,
+            $walletAddress,
+            max(0, $excludeId)
+        ), 'countOtherLinksForChainAddress', true);
+
+        return isset($rows[0]->n) ? (int) $rows[0]->n : 0;
+    }
+
+    /**
+     * @return list<array{id: int, wallet_address: string}>
+     * @throws RepositoryReadFailure when $failClosed and the read did not run
+     */
+    private static function readSolanaSync(int $chainId, bool $heliusManaged, bool $failClosed): array
     {
         if ($chainId <= 0) {
             return [];
@@ -861,20 +982,29 @@ final class WalletRepository
         global $wpdb;
         $table = self::table();
 
-        /** @var list<object{id: string, wallet_address: string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        // ⚠ runRead, not get_results: the resync PUTs this as the WHOLE
+        // webhook address list, so a stale `last_result` from wpdb's silent
+        // early-return path must never pass for this query's rows. See
+        // GuardsReadFailures::runRead().
+        /** @var list<object{id: string, wallet_address: string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
             "SELECT id, wallet_address
                FROM {$table}
               WHERE chain_id = %d
                 AND helius_managed = %d
               ORDER BY id ASC
-              LIMIT 100000",
+              LIMIT %d",
             $chainId,
-            $heliusManaged ? 1 : 0
-        ));
+            $heliusManaged ? 1 : 0,
+            self::SOLANA_SYNC_READ_LIMIT
+        ), $failClosed ? 'listForChainBySolanaSyncOrThrow' : 'listForChainBySolanaSync', $failClosed);
 
-        if ($rows === null) {
-            return [];
+        if (count($rows) >= self::SOLANA_SYNC_READ_LIMIT) {
+            // A full page means the set may be larger than one read returns.
+            \BCC\Core\Log\Logger::warning('[WalletRepository] Solana sync read hit its row limit; the set may be truncated', [
+                'limit'          => self::SOLANA_SYNC_READ_LIMIT,
+                'helius_managed' => $heliusManaged,
+            ]);
         }
 
         $out = [];

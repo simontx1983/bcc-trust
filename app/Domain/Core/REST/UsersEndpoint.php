@@ -34,6 +34,7 @@ use BCC\Trust\Core\Services\Mentions\MentionSearchService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\BoundedIntParam;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\UserSlugResolver;
 use BCC\Trust\Infrastructure\EdgeCache;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
@@ -431,6 +432,15 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $viewerId = get_current_user_id();
         // Rich shape per the §3.1 extension — wraps the canonical User
         // view-model with the profile-page additions (card, standing,
@@ -478,6 +488,15 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $cursorParam = $request->get_param('cursor');
         $cursor      = is_string($cursorParam) && $cursorParam !== '' ? $cursorParam : null;
 
@@ -507,6 +526,15 @@ final class UsersEndpoint
         $userId = UserSlugResolver::resolve($handle);
         if ($userId === 0) {
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
+        }
+
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
         }
 
         $cursorParam = $request->get_param('cursor');
@@ -556,6 +584,15 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $service      = Plugin::instance()->endorsementService();
         $endorsements = $service->getUserEndorsements($userId, $limit);
         $items        = $service->hydrateEndorsementItems($endorsements);
@@ -564,11 +601,22 @@ final class UsersEndpoint
             'items' => $items,
             'total' => count($items),
         ]);
-        // Public read with per-page snapshot — short shared cache absorbs
-        // tab-strip toggles. Vary on Authorization so an auth flip
-        // (sign-in / sign-out) doesn't serve a cached anon response.
-        $response->header('Cache-Control', 'public, max-age=15');
-        $response->header('Vary', 'Authorization');
+        // ⚠ PRIVATE, not public — this answer is now VIEWER-DEPENDENT.
+        //
+        // §F-02 added the profile gate above, so whether this route
+        // returns a payload or a 403 depends on who is asking (owner,
+        // admin, friend, signed-in member, stranger). A shared cache
+        // holding one viewer's 200 would serve it to a viewer the gate
+        // refused — which is a worse leak than the ungated read the gate
+        // was added to close. `Vary: Authorization` alone is NOT enough:
+        // the owner/admin/friend distinctions turn on the SESSION, and
+        // two different signed-in viewers can send byte-identical
+        // Authorization headers from a shared-cache point of view.
+        //
+        // The gate and this header MUST move together. Flipping the gate
+        // on while leaving `public` here would have been a regression.
+        $response->header('Cache-Control', 'private, max-age=15');
+        $response->header('Vary', 'Authorization, Cookie');
 
         return $response;
     }
@@ -694,10 +742,13 @@ final class UsersEndpoint
             $typeRestrictedIds = $intersected;
         }
 
-        // WP_User_Query handles offset pagination + search across
-        // user_login + display_name + user_nicename. Email is excluded
-        // via search_columns to avoid leaking address fragments back
-        // through search hits.
+        // ⚠ `q` matches DISPLAY NAMES and @HANDLES (the bcc_handle meta)
+        // ONLY (F-175, a product decision), for every caller, signed in or
+        // not. It used to match user_login, which on this anonymous route
+        // made it a login-name existence oracle: guess a login, and a hit
+        // confirms an account to attack. user_nicename is not matched
+        // either, because WordPress derives it from the login. Email never
+        // was.
         $args = [
             'number'  => $perPage,
             'offset'  => ($page - 1) * $perPage,
@@ -710,19 +761,86 @@ final class UsersEndpoint
             $args['include'] = $typeRestrictedIds;
         }
         if ($q !== '') {
-            // Bound the query string to a sane length so a deliberately
-            // pathological search doesn't blow up the LIKE planner.
-            // WP_User_Query::prepare_query() already applies esc_like() +
-            // $wpdb->prepare() to the `search` arg, so escaping here would
-            // double-escape and silently break inputs like "O'Brien".
-            $needle = mb_substr($q, 0, 64);
-            $args['search']         = '*' . $needle . '*';
-            $args['search_columns'] = ['user_login', 'display_name', 'user_nicename'];
+            // WP_User_Query ANDs `search` with `meta_query`, so "display
+            // name OR handle" cannot be one query. The two matches are
+            // resolved as a bounded candidate set and passed as `include`.
+            // PeepSoUserSearch below still applies privacy, order and the
+            // exact total INSIDE its query, over that set.
+            $candidates = self::searchCandidateIds(mb_substr($q, 0, 64));
+            if ($typeRestrictedIds !== null) {
+                $candidates = array_values(array_intersect($candidates, $typeRestrictedIds));
+            }
+            if ($candidates === []) {
+                return self::membersEmptyResponse($page, $perPage, $typeCounts);
+            }
+            $args['include'] = $candidates;
         }
 
-        $query = new \WP_User_Query($args);
-        /** @var list<int|numeric-string> $rawIds */
-        $rawIds = $query->get_results();
+        // ⚠⚠ ROUTED THROUGH PeepSoUserSearch, NOT a bare WP_User_Query.
+        //
+        // The bare query bypassed PeepSo's privacy filter set entirely, so
+        // this directory — and its `q` search — listed members at
+        // `usr_profile_acc` 20, 30 and 40 to anyone. The single-profile
+        // routes were gated in v1.91 while the list that links to them was
+        // not, which made the gate a speed bump rather than a boundary.
+        //
+        // PeepSoUserSearch applies the SAME SQL PeepSo uses on its own
+        // surfaces, IN THE QUERY. That is the load-bearing part: a
+        // post-filter over the returned page would under-fill it (ask for
+        // 20, get 14) and leave `total` counting rows the viewer may not
+        // see. Filtering inside the query keeps both exact.
+        //
+        // It also honours three things this endpoint never implemented:
+        // banned and unvalidated accounts are excluded (`usr_role`), blocks
+        // are respected in both directions when `user_blocking_enable` is
+        // on, and `hide_from_search` finally works — the contract has
+        // promised since v1.64 that it "excludes the user from directory +
+        // member search", and nothing enforced it. ⚠ So member COUNTS can
+        // legitimately drop with this change; that is the setting starting
+        // to work, not data loss.
+        //
+        // ── Why the args keep working, verified rather than assumed ─────
+        //
+        // ORDER: `pre_user_query` overwrites `query_orderby` with a
+        // name-based CASE, but a block below it honours `orderby` + `order`
+        // and maps `'registered'` to `user_registered`. Both are passed
+        // above, so `registered DESC` survives.
+        //
+        // SEARCH: the third constructor argument is deliberately EMPTY and
+        // must stay so. PeepSo's own search clause is `if (!empty($search))`,
+        // so an empty string skips it and the `include` candidate set above
+        // (searchCandidateIds) does the matching. ⛔ Do NOT pass `$q` here:
+        // PeepSo searches a first/last-name concat plus `user_login` (the
+        // F-175 oracle), and optionally `user_email` behind the
+        // `members_email_searchable` option, which would widen this route to
+        // email fragments the contract deliberately excludes.
+        //
+        // TOTAL: `pre_user_query` smuggles a `GROUP BY` into
+        // `query_orderby`. That is not a typo of theirs to work around —
+        // WP builds the statement as
+        // `SELECT {fields} {from} {where} {orderby} {limit}` with
+        // `SQL_CALC_FOUND_ROWS` in `{fields}` and reads the count back via
+        // `SELECT FOUND_ROWS()`, so the GROUP BY is inside the counted
+        // statement and the total is of GROUPED rows. Exact.
+        //
+        // ⚠ Side effect, accepted knowingly: the constructor calls
+        // `remove_all_filters('pre_get_users')` for the rest of the
+        // request. Neither bcc-trust nor bcc-core registers anything on
+        // that hook, so nothing of ours breaks — but a future feature that
+        // did would silently lose it on this route.
+        if (class_exists('\\PeepSoUserSearch')) {
+            $search  = new \PeepSoUserSearch($args, $viewerId > 0 ? $viewerId : null, '');
+            /** @var list<int|numeric-string> $rawIds */
+            $rawIds = $search->results;
+            $total  = (int) $search->total;
+        } else {
+            // ⚠ Fail CLOSED. No PeepSo means no privacy filter, so there
+            // is no safe way to list members — an empty directory is
+            // recoverable, a leaked one is not. Same posture as
+            // ProfileAccess and MentionPolicy.
+            $rawIds = [];
+            $total  = 0;
+        }
         $userIds = array_map('intval', $rawIds);
 
         // Prefetch everything the member-card rows read — the eleven
@@ -755,7 +873,16 @@ final class UsersEndpoint
             }
         }
 
-        $total      = (int) $query->get_total();
+        // $total was set alongside the id query above — it comes from
+        // PeepSoUserSearch's own `total`, which is WP's FOUND_ROWS() over
+        // the privacy-filtered, GROUP BY'd statement. It therefore counts
+        // exactly the rows this viewer could page through, so `total` and
+        // `total_pages` agree with what the pages actually contain.
+        //
+        // ⚠ Do NOT reintroduce a second count here. Counting separately
+        // from the id query is how a filtered list ends up advertising
+        // more members than it will ever show.
+        //
         // $perPage is guaranteed >= 1 by the bounds-check above.
         $totalPages = (int) ceil($total / $perPage);
 
@@ -798,6 +925,55 @@ final class UsersEndpoint
         }
 
         return $response;
+    }
+
+    /**
+     * Upper bound on each half of the `q` candidate set (§3: no unbounded
+     * reads). Far above the directory's size today; a broader query is still
+     * served, but its `total` stops counting past this many matches per half.
+     */
+    private const MEMBER_SEARCH_MAX_CANDIDATES = 1000;
+
+    /**
+     * `q` → user ids whose DISPLAY NAME or @HANDLE (bcc_handle meta)
+     * contains it (F-175). Never user_login, user_nicename (derived from the
+     * login) or email. A leading "@" is ignored, so "@alice" finds handle
+     * "alice". These are candidate ids only: privacy is applied afterwards by
+     * PeepSoUserSearch, in its query.
+     *
+     * Both lookups go through WP_User_Query, which escapes `search` and adds
+     * the LIKE wildcards itself, so the needle is passed raw. Pre-escaping or
+     * adding "%" here would match a literal percent sign.
+     *
+     * @return list<int>
+     */
+    private static function searchCandidateIds(string $needle): array
+    {
+        $needle = trim($needle);
+        $handle = ltrim($needle, '@');
+
+        $byName = get_users([
+            'search'         => '*' . $needle . '*',
+            'search_columns' => ['display_name'],
+            'fields'         => 'ID',
+            'number'         => self::MEMBER_SEARCH_MAX_CANDIDATES,
+        ]);
+        $byHandle = $handle === '' ? [] : get_users([
+            'meta_key'     => 'bcc_handle',
+            'meta_value'   => $handle,
+            'meta_compare' => 'LIKE',
+            'fields'       => 'ID',
+            'number'       => self::MEMBER_SEARCH_MAX_CANDIDATES,
+        ]);
+
+        $ids = [];
+        foreach (array_merge($byName, $byHandle) as $id) {
+            if (is_numeric($id) && (int) $id > 0) {
+                $ids[(int) $id] = true;
+            }
+        }
+
+        return array_keys($ids);
     }
 
     /**
@@ -1038,6 +1214,15 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $viewerId = get_current_user_id();
         $payload  = $compose($userId, $viewerId, $page, $perPage);
 
@@ -1068,11 +1253,28 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $payload = Plugin::instance()->shiftLogService()->getShiftLog($userId, $weeks);
 
         $response = ApiResponse::ok($payload);
-        // Per contract §4.4
-        $response->header('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+        // ⚠ PRIVATE, not public — viewer-dependent since §F-02 added the
+        // profile gate above. Same reasoning as endorsements(); the long
+        // 300s shared window made this the worst of the three to leave
+        // public, because a single cached 200 would have been replayed to
+        // refused viewers for five minutes.
+        //
+        // ⚠ This CHANGES a value the contract pins in §4.4, so the
+        // contract note must land with it.
+        $response->header('Cache-Control', 'private, max-age=300');
+        $response->header('Vary', 'Authorization, Cookie');
 
         return $response;
     }

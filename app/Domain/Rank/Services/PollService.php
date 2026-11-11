@@ -607,6 +607,19 @@ class PollService
             }
         }
 
+        // F-39 (user decision): only WEIGHTED ballots count toward quorum.
+        // A ballot whose counted weight is 0 — a zero-weight voter, or a
+        // suspected-cluster ballot the cap scaled to nothing — used to add
+        // to the quorum HEADCOUNT while adding no weight, so a crowd of
+        // weightless accounts could satisfy the voter floor. It is marked
+        // not counted here, so the headcount, the persisted closure audit
+        // and the closed tally all agree.
+        foreach ($evaluated as $i => $entry) {
+            if ($entry['counted'] && $entry['counted_weight'] <= 0.0) {
+                $evaluated[$i]['counted'] = false;
+            }
+        }
+
         $countedVoters = 0;
         $weightFor     = 0.0;
         $weightAgainst = 0.0;

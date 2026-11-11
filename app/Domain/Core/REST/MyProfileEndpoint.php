@@ -184,6 +184,11 @@ final class MyProfileEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // §M suspension gate (F-109): bio and display name are public content.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         // Text-only profile fields: `bio` and — since the display-name
         // hygiene slice (owner-directed 2026-08-06) — `display_name`.
         // At least one must be present.
@@ -272,6 +277,19 @@ final class MyProfileEndpoint
         $userId = get_current_user_id();
         if ($userId <= 0) {
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        // F-58 throttle FIRST (the throttle-before-credentials rule, as on
+        // the page-claim and watch routes).
+        $throttled = self::throttleImageUpload($userId);
+        if ($throttled !== null) {
+            return $throttled;
+        }
+
+        // §M suspension gate (F-109): uploading is gated; deleting your own
+        // avatar stays open (removing content).
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
         }
 
         $peepso = self::peepsoUserOrError($userId);
@@ -364,6 +382,18 @@ final class MyProfileEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // F-58 throttle FIRST (the throttle-before-credentials rule).
+        $throttled = self::throttleImageUpload($userId);
+        if ($throttled !== null) {
+            return $throttled;
+        }
+
+        // §M suspension gate (F-109): uploading is gated; deleting your own
+        // cover stays open (removing content).
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         $peepso = self::peepsoUserOrError($userId);
         if ($peepso instanceof WP_REST_Response) {
             return $peepso;
@@ -441,6 +471,11 @@ final class MyProfileEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // §M suspension gate (F-109): part of the public profile presentation.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         $xRaw = $request->get_param('x');
         $yRaw = $request->get_param('y');
 
@@ -487,6 +522,31 @@ final class MyProfileEndpoint
         $resp = ApiResponse::ok($user);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
+    }
+
+    /**
+     * F-58: avatar + cover uploads share one per-user budget, checked BEFORE
+     * the file is read, resized or written. Both were unthrottled, so a
+     * script could fill the uploads directory. A burst limit (matching the
+     * blog-cover writer) plus an hourly ceiling; see includes/config/limits.php.
+     * The burst check runs first, so a refused burst does not spend the
+     * hourly budget.
+     */
+    private static function throttleImageUpload(int $userId): ?WP_REST_Response
+    {
+        $allowed = \BCC\Core\Security\Throttle::allow(
+            'profile_image:' . $userId . ':burst',
+            BCC_TRUST_RATE_LIMIT_PROFILE_IMAGE_UPLOAD,
+            BCC_TRUST_RATE_WINDOW_PROFILE_IMAGE_UPLOAD
+        ) && \BCC\Core\Security\Throttle::allow(
+            'profile_image:' . $userId . ':hourly',
+            BCC_TRUST_RATE_LIMIT_PROFILE_IMAGE_UPLOAD_HOURLY,
+            BCC_TRUST_RATE_WINDOW_PROFILE_IMAGE_UPLOAD_HOURLY
+        );
+
+        return $allowed
+            ? null
+            : ApiResponse::error('bcc_rate_limited', 'Too many image uploads. Try again in a few minutes.', 429);
     }
 
     /**

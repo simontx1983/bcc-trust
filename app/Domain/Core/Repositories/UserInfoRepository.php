@@ -77,26 +77,85 @@ class UserInfoRepository {
     }
     
     /**
-     * Get user info by user ID.
+     * Get user info by user ID. FAIL-OPEN: a read failure returns null, the
+     * same as "no row" (not cached; see below). For callers where an unknown
+     * answer must not read as "no row", use getByUserIdOrThrow().
      *
      * @phpstan-return UserInfoRow|null
      */
     public function getByUserId(int $userId): ?object {
+        try {
+            return $this->getByUserIdOrThrow($userId);
+        } catch (RepositoryException) {
+            return null; // logged and not cached by getByUserIdOrThrow()
+        }
+    }
+
+    /**
+     * Get user info by user ID, telling "no row" (null) apart from "could not
+     * read" (exception). Used by the suspension check, which must fail CLOSED
+     * on a read it cannot trust.
+     *
+     * @phpstan-return UserInfoRow|null
+     * @throws RepositoryException when the read failed; nothing is cached
+     */
+    public function getByUserIdOrThrow(int $userId): ?object {
         $cached = wp_cache_get('user_info_' . $userId, 'bcc_trust');
         if ($cached !== false) {
             return $cached ?: null;
         }
 
         global $wpdb;
-        $result = $wpdb->get_row($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE user_id = %d",
             $userId
-        ));
+        );
+
+        // ⚠ A FAILED read is never cached. It used to be: get_row() returns
+        // null on a database error exactly as it does for "no row", and that
+        // null was cached as "no row" for BCC_TRUST_CACHE_USER (5 minutes).
+        // One blip therefore made the user read as NOT suspended (and with
+        // no trust data) for five minutes, everywhere suspension is checked.
+        // A failed read now THROWS and is not cached, so the very next call
+        // retries. Same trust test as HiddenActivityRepository::runRead() /
+        // bcc-core runProbe(): query() can fail WITHOUT setting last_error,
+        // so both signals are checked.
+        $this->clearLastError();
+        $ok = $wpdb->query($sql);
+        if ($ok === false || $this->lastReadFailed()) {
+            $error = (string) $wpdb->last_error;
+            \BCC\Core\Log\Logger::error('[UserInfoRepository] user_info read failed; not cached', [
+                'user_id' => $userId,
+                'error'   => $error,
+            ]);
+            throw new RepositoryException('user_info read failed for user ' . $userId . ($error !== '' ? ': ' . $error : ''));
+        }
+        // ⚠ NOT get_row(null): real wpdb::get_row() with no query returns
+        // null without reading anything. A successful query() leaves the
+        // rows in the public $last_result (the same buffer get_var()/
+        // get_col() read), so read the first one from there.
+        $first = $wpdb->last_result[0] ?? null;
+        /** @phpstan-var UserInfoRow|null $result */
+        $result = is_object($first) ? $first : null;
 
         // Cache for 5 minutes; store empty string for null to distinguish from cache miss
         wp_cache_set('user_info_' . $userId, $result ?: '', 'bcc_trust', BCC_TRUST_CACHE_USER);
 
         return $result;
+    }
+
+    // Separate helpers so static analysis does not narrow last_error to ''
+    // across the query() call that mutates it (bcc-core runProbe()'s shape).
+    private function clearLastError(): void
+    {
+        global $wpdb;
+        $wpdb->last_error = '';
+    }
+
+    private function lastReadFailed(): bool
+    {
+        global $wpdb;
+        return (string) $wpdb->last_error !== '';
     }
 
     /**
@@ -613,16 +672,48 @@ class UserInfoRepository {
     /**
      * Suspend user.
      *
-     * @throws RepositoryException on database failure
+     * ⚠ FAILS LOUDLY ON A MISSING ROW (F-112). `$wpdb->update()` matching zero
+     * rows is not an error, so a user with no user_info row used to "suspend"
+     * silently: the flag every enforcement path reads (is_suspended) never
+     * landed, yet the caller reported success. Callers ensure the row exists
+     * first (ModerationService syncs it via UserSyncService). If it is still
+     * absent here, this throws, so the caller's transaction rolls back the
+     * suspensions row too.
+     *
+     * fraud_triggers is MERGED, not overwritten: the reason and timestamp
+     * are added to the existing JSON (the same read-merge as unsuspendUser),
+     * so earlier fraud evidence on the row is kept.
+     *
+     * Inside TransactionManager::run() the caches are NOT flushed here; the
+     * caller calls notifySuspensionChanged() after the commit (F-114).
+     *
+     * @throws RepositoryException on database failure or a missing row
      */
     public function suspendUser(int $userId, string $reason): void {
         global $wpdb;
 
+        // Read the CURRENT triggers straight from the table, not the 5-min
+        // row cache, so the merge cannot drop a key written since.
+        $currentRaw = $wpdb->get_var($wpdb->prepare(
+            "SELECT fraud_triggers FROM {$this->table} WHERE user_id = %d",
+            $userId
+        ));
+        if ($currentRaw === null && !$this->exists($userId)) {
+            throw new RepositoryException('UserInfoRepository::suspendUser: no user_info row for user ' . $userId);
+        }
+
+        $triggers = is_string($currentRaw) && $currentRaw !== '' ? json_decode($currentRaw, true) : [];
+        if (!is_array($triggers)) {
+            $triggers = [];
+        }
+        $triggers['suspension_reason'] = $reason;
+        $triggers['suspended_at']      = current_time('mysql');
+
         $result = $wpdb->update(
             $this->table,
             [
-                'is_suspended' => 1,
-                'fraud_triggers' => json_encode(['suspension_reason' => $reason, 'suspended_at' => current_time('mysql')])
+                'is_suspended'   => 1,
+                'fraud_triggers' => json_encode($triggers),
             ],
             ['user_id' => $userId],
             ['%d', '%s'],
@@ -633,14 +724,7 @@ class UserInfoRepository {
             throw new RepositoryException('UserInfoRepository::suspendUser failed for user ' . $userId . ': ' . $wpdb->last_error);
         }
 
-        $this->invalidateCache($userId);
-        // Flush the cross-plugin suspension cache (bcc-core Permissions)
-        // immediately — its listener keys on this action. Without it,
-        // Permissions::is_not_suspended() serves a stale answer for up to
-        // its 60s TTL after a status change. invalidateCache() above only
-        // clears the user_info row cache, not the Permissions cache.
-        do_action('bcc_user_suspension_changed', $userId);
-        $this->dispatchSuspensionFanout($userId);
+        $this->notifyUnlessInTransaction($userId);
     }
     
     /**
@@ -670,12 +754,39 @@ class UserInfoRepository {
             throw new RepositoryException('UserInfoRepository::unsuspendUser failed for user ' . $userId . ': ' . $wpdb->last_error);
         }
 
+        $this->notifyUnlessInTransaction($userId);
+    }
+
+    /**
+     * Everything that must follow a COMMITTED suspension change:
+     *  - the user_info row cache (and the rate limiter's copy);
+     *  - the cross-plugin suspension cache in bcc-core Permissions, through
+     *    `bcc_user_suspension_changed` (its listener). Without it,
+     *    Permissions::is_not_suspended() serves a stale answer for up to its
+     *    60s TTL;
+     *  - the async re-score fanout.
+     *
+     * ⚠ AFTER COMMIT ONLY (F-114). Fired inside the transaction, a read in
+     * the window before COMMIT re-caches the OLD state, so a suspension goes
+     * unenforced (or a lift does not take effect) for up to the cache TTL,
+     * and a rolled-back change still fans out. Callers that write inside
+     * TransactionManager::run() call this after it returns.
+     */
+    public function notifySuspensionChanged(int $userId): void {
         $this->invalidateCache($userId);
-        // Mirror suspendUser(): flush the cross-plugin Permissions
-        // suspension cache immediately so a lifted suspension takes effect
-        // without waiting out the 60s TTL. See Permissions::registerHooks.
         do_action('bcc_user_suspension_changed', $userId);
         $this->dispatchSuspensionFanout($userId);
+    }
+
+    /**
+     * Outside a run() transaction the write is already committed, so notify
+     * now; inside one, the caller must call notifySuspensionChanged() after
+     * the commit.
+     */
+    private function notifyUnlessInTransaction(int $userId): void {
+        if (!\BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()) {
+            $this->notifySuspensionChanged($userId);
+        }
     }
 
     /**
@@ -787,31 +898,19 @@ class UserInfoRepository {
         global $wpdb;
 
         if ($pageId) {
-            $userInfo = $this->getByUserId($userId);
-            $pageIds = $userInfo && $userInfo->page_ids_owned ? json_decode($userInfo->page_ids_owned, true) : [];
-            if (!is_array($pageIds)) $pageIds = [];
-            $pageIds[] = $pageId;
-
-            $result = $wpdb->update(
-                $this->table,
-                [
-                    'pages_owned' => ($userInfo ? $userInfo->pages_owned : 0) + 1,
-                    'page_ids_owned' => json_encode(array_unique($pageIds))
-                ],
-                ['user_id' => $userId],
-                ['%d', '%s'],
-                ['%d']
-            );
-        } else {
-            $result = $wpdb->query($wpdb->prepare(
-                "UPDATE {$this->table} SET pages_owned = pages_owned + 1 WHERE user_id = %d",
-                $userId
-            ));
+            $this->mutateOwnedPages($userId, (int) $pageId, true);
+            return;
         }
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table} SET pages_owned = pages_owned + 1 WHERE user_id = %d",
+            $userId
+        ));
 
         if ($result === false) {
             throw new RepositoryException('UserInfoRepository::incrementPageCount failed for user ' . $userId . ': ' . $wpdb->last_error);
         }
+        $this->invalidateCache($userId);
     }
     
     /**
@@ -823,30 +922,112 @@ class UserInfoRepository {
         global $wpdb;
 
         if ($pageId) {
-            $userInfo = $this->getByUserId($userId);
-            $pageIds = $userInfo && $userInfo->page_ids_owned ? json_decode($userInfo->page_ids_owned, true) : [];
-            if (!is_array($pageIds)) $pageIds = [];
-            $pageIds = array_values(array_diff($pageIds, [$pageId]));
+            $this->mutateOwnedPages($userId, (int) $pageId, false);
+            return;
+        }
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table} SET pages_owned = GREATEST(pages_owned - 1, 0) WHERE user_id = %d",
+            $userId
+        ));
+
+        if ($result === false) {
+            throw new RepositoryException('UserInfoRepository::decrementPageCount failed for user ' . $userId . ': ' . $wpdb->last_error);
+        }
+        $this->invalidateCache($userId);
+    }
+
+    /**
+     * F-146 — add or remove one page on a user's owned-pages list and count,
+     * without losing a concurrent or recent change.
+     *
+     * This used to read the row through getByUserId() — a 5-minute OBJECT
+     * CACHE the write never invalidated — then write back count+1 and the
+     * re-encoded JSON list. Two page creations inside that window (or two
+     * concurrent ones) wrote over each other: a page id vanished from
+     * page_ids_owned and pages_owned drifted. Adding the same page twice
+     * de-duplicated the list but still bumped the count.
+     *
+     * Now, under a per-user advisory lock: re-read the row UNCACHED, apply
+     * the change idempotently (adding a listed page or removing an unlisted
+     * one changes nothing), write, invalidate the cache.
+     *
+     * Legacy rows that carry a count but no list (written by the pageId-less
+     * path) keep decrementing on a remove, as before; a row WITH a list only
+     * decrements for a page that is actually on it.
+     *
+     * @throws RepositoryException on database failure or lock contention
+     */
+    private function mutateOwnedPages(int $userId, int $pageId, bool $add): void
+    {
+        global $wpdb;
+
+        $lock = 'bcc_user_pages_' . $userId;
+        if (!class_exists('\\BCC\\Core\\DB\\AdvisoryLock') || !\BCC\Core\DB\AdvisoryLock::acquire($lock, 5)) {
+            throw new RepositoryException('UserInfoRepository: owned-pages lock unavailable for user ' . $userId);
+        }
+
+        try {
+            // runRead shape: query() can fail WITHOUT setting last_error (the
+            // silent !ready path), and get_row($sql) would then hand back the
+            // previous statement's row. Check the return AND last_error, then
+            // read the row this query left in last_result. ⚠ NOT get_row(null):
+            // real wpdb returns null for that without reading last_result, so
+            // every add/remove would see "no row" and silently do nothing.
+            $sql = $wpdb->prepare(
+                "SELECT pages_owned, page_ids_owned FROM {$this->table} WHERE user_id = %d LIMIT 1",
+                $userId
+            );
+            if (!is_string($sql) || $wpdb->query($sql) === false || $wpdb->last_error !== '') {
+                throw new RepositoryException('UserInfoRepository: owned-pages read failed for user ' . $userId . ': ' . $wpdb->last_error);
+            }
+            $row = $wpdb->last_result[0] ?? null;
+            if ($row === null) {
+                return; // no user_info row: the UPDATE always matched nothing here
+            }
+
+            $decoded = is_string($row->page_ids_owned) && $row->page_ids_owned !== ''
+                ? json_decode($row->page_ids_owned, true)
+                : [];
+            $pageIds = is_array($decoded) ? array_values(array_unique(array_map('intval', $decoded))) : [];
+            $count   = (int) $row->pages_owned;
+            $listed  = in_array($pageId, $pageIds, true);
+
+            if ($add) {
+                if ($listed) {
+                    return; // idempotent: already counted
+                }
+                $pageIds[] = $pageId;
+                $count++;
+            } else {
+                if ($listed) {
+                    $pageIds = array_values(array_diff($pageIds, [$pageId]));
+                    $count   = max(0, $count - 1);
+                } elseif ($pageIds === []) {
+                    $count = max(0, $count - 1); // legacy row: count without a list
+                } else {
+                    return; // not on a real list: nothing to remove
+                }
+            }
 
             $result = $wpdb->update(
                 $this->table,
                 [
-                    'pages_owned' => max(0, ($userInfo ? $userInfo->pages_owned : 0) - 1),
-                    'page_ids_owned' => !empty($pageIds) ? json_encode($pageIds) : null
+                    'pages_owned'    => $count,
+                    'page_ids_owned' => $pageIds !== [] ? (string) json_encode($pageIds) : null,
                 ],
                 ['user_id' => $userId],
                 ['%d', '%s'],
                 ['%d']
             );
-        } else {
-            $result = $wpdb->query($wpdb->prepare(
-                "UPDATE {$this->table} SET pages_owned = GREATEST(pages_owned - 1, 0) WHERE user_id = %d",
-                $userId
-            ));
-        }
-
-        if ($result === false) {
-            throw new RepositoryException('UserInfoRepository::decrementPageCount failed for user ' . $userId . ': ' . $wpdb->last_error);
+            if ($result === false) {
+                throw new RepositoryException(
+                    'UserInfoRepository: owned-pages write failed for user ' . $userId . ': ' . $wpdb->last_error
+                );
+            }
+            $this->invalidateCache($userId);
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
         }
     }
     
@@ -1172,18 +1353,25 @@ class UserInfoRepository {
     /**
      * Delete orphaned user_info records.
      *
-     * @return int Number of rows deleted.
+     * @return int Rows actually deleted.
+     * @throws RepositoryException when the DELETE fails.
      */
     public function deleteOrphaned(): int
     {
         global $wpdb;
 
-        return (int) $wpdb->query($wpdb->prepare(
+        $result = $wpdb->query($wpdb->prepare(
             "DELETE u FROM {$this->table} u
              LEFT JOIN {$wpdb->users} w ON u.user_id = w.ID
              WHERE w.ID IS NULL AND %d",
             1
         ));
+
+        if ($result === false) {
+            throw new RepositoryException('UserInfoRepository::deleteOrphaned failed: ' . $wpdb->last_error);
+        }
+
+        return (int) $result;
     }
 
     /**
@@ -1293,6 +1481,45 @@ class UserInfoRepository {
         );
 
         $this->invalidateCache($userId);
+    }
+
+    /**
+     * Admin reset: set BOTH fraud_score and peak_fraud_score to 0.
+     *
+     * The peak is what normally keeps a score from decaying below half its
+     * high-water mark (the anti-oscillation floor); a manual reset must clear
+     * it too, or the daily decay would put the score straight back. Returns
+     * the values that were replaced (for the audit trail), or null when the
+     * user has no user_info row.
+     *
+     * @return array{fraud_score: int, peak_fraud_score: int}|null
+     * @throws RepositoryException on database failure
+     */
+    public function resetFraudScore(int $userId): ?array {
+        global $wpdb;
+
+        $before = $this->getByUserId($userId);
+        if ($before === null) {
+            return null;
+        }
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+                SET fraud_score = 0, peak_fraud_score = 0, updated_at = %s
+              WHERE user_id = %d",
+            current_time('mysql'),
+            $userId
+        ));
+        if ($result === false) {
+            throw new RepositoryException('UserInfoRepository::resetFraudScore failed for user ' . $userId . ': ' . $wpdb->last_error);
+        }
+
+        $this->invalidateCache($userId);
+
+        return [
+            'fraud_score'      => (int) $before->fraud_score,
+            'peak_fraud_score' => (int) ($before->peak_fraud_score ?? 0),
+        ];
     }
 
     /**

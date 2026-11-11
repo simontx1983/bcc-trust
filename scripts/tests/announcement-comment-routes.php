@@ -524,7 +524,18 @@ ck('H7 ...and the same on can_report', 'auth_required',
 // NOT supply: its absence means "not yet reported" and ALLOWS, so it is the
 // reporting slice's dedupe convenience rather than a standing fact.
 $standing = STANDING::forViewer($member);
-ck('H8 the producer supplies exactly four keys', 4, count($standing));
+// ⚠⚠ FIVE, not four, since the self-report rung landed. The fifth key is
+// `user_id`, and it is NOT a standing flag — it is the resolver's only channel
+// for viewer identity, which `can_report` needs to compare against the row's
+// author. Its absence does not DENY (0 matches no author); it silently
+// DISABLES the rung, which is why the producer must supply it even though the
+// deny-on-absence rule below would not require it.
+// ⚠ This assertion said FOUR for one commit after the change, because the
+// matching UNIT suite was updated and this committed probe was not. A count
+// pinned in two places needs updating in two places.
+ck('H8 the producer supplies exactly five keys', 5, count($standing));
+ck('H8 and the fifth is the identity key', true, array_key_exists('user_id', $standing));
+ck('H8 identity is an int, not a flag', true, is_int($standing['user_id'] ?? null));
 ck('H8 and already_reported is not one of them', false,
     array_key_exists('already_reported', $standing));
 

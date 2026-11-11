@@ -297,6 +297,13 @@ final class AnnouncementViewService
                 'status'           => $status,
                 'is_archived'      => $model['is_archived'],
                 'comments_enabled' => $model['comments_enabled'],
+                // ⚠⚠ A CAPABILITY INPUT, NOT A FIELD. It is read straight off
+                // the repository row and handed to the resolver's self-report
+                // rung; it is deliberately NOT written into `$model`, because
+                // §4.32.2 forbids `post_author` on an announcement payload.
+                // The resolver returns a reason, never an id, so the author
+                // stays server-side on both the way in and the way out.
+                'author_user_id'   => self::str($row, 'post_author'),
             ],
             $viewer,
             $featureEnabled

@@ -26,8 +26,9 @@
  *  - Each migration has its own durable completion option; completions are
  *    independent — one migration failing never marks another complete.
  *  - A migration is marked complete ONLY when it reports every eligible row
- *    processed successfully. Any failure (or a batch-cap hit with rows still
- *    remaining) leaves it INCOMPLETE and retryable on the next request.
+ *    processed successfully. A batch-cap hit with rows still remaining
+ *    (MORE) resumes on the next request; any failure (INCOMPLETE) leaves it
+ *    retryable after a one-hour backoff (F-151), never on every request.
  *  - A crash-safe, session-scoped advisory lock per migration
  *    ({@see \BCC\Core\DB\AdvisoryLock}, GET_LOCK) stops two concurrent
  *    requests from processing the same migration. MySQL releases the lock
@@ -59,12 +60,162 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-/** A migration reports one of these from its callback. */
+/**
+ * A migration reports one of these from its callback.
+ *
+ *  - COMPLETE   — every eligible row done; the done-option is stamped.
+ *  - MORE       — the per-request batch cap was hit and rows remain. NOT a
+ *                 failure: progress is persisted and the next request
+ *                 resumes, with no backoff.
+ *  - INCOMPLETE — anything else that is not done: a failed statement, an
+ *                 unreadable probe, a missing dependency, an unarmed gate.
+ *                 F-151: the runner backs the migration off for an hour
+ *                 (bcc_trust_migration_step_failed), so a migration that
+ *                 fails PERMANENTLY is retried hourly, not on every request.
+ *                 An unknown return value is treated the same way.
+ */
 if (!defined('BCC_TRUST_MIGRATION_COMPLETE')) {
     define('BCC_TRUST_MIGRATION_COMPLETE', 'complete');
 }
 if (!defined('BCC_TRUST_MIGRATION_INCOMPLETE')) {
     define('BCC_TRUST_MIGRATION_INCOMPLETE', 'incomplete');
+}
+if (!defined('BCC_TRUST_MIGRATION_MORE')) {
+    define('BCC_TRUST_MIGRATION_MORE', 'more');
+}
+
+if (!function_exists('bcc_trust_migration_backoff_active')) {
+    /**
+     * Retry backoff for the standalone `init`-hooked migrations (F-150).
+     *
+     * Those migrations stamp a done-option of their own instead of going
+     * through the runner, and they used to stamp it even when a statement
+     * had failed — so a failed FK drop, DROP or ALTER was never retried.
+     * They now leave the option unstamped on failure. This backoff keeps a
+     * statement that fails PERMANENTLY from being re-run (and re-logged) on
+     * every request: one attempt per hour per migration.
+     */
+    function bcc_trust_migration_backoff_active(string $migrationId): bool
+    {
+        return (bool) get_transient('bcc_trust_migration_backoff_' . $migrationId);
+    }
+
+    /**
+     * Record a failed migration step: log the server error and start the
+     * one-hour retry backoff. The caller then returns WITHOUT stamping its
+     * done-option, so the next attempt re-runs the whole idempotent body.
+     */
+    function bcc_trust_migration_step_failed(string $migrationId, string $step): void
+    {
+        global $wpdb;
+        set_transient('bcc_trust_migration_backoff_' . $migrationId, 1, HOUR_IN_SECONDS);
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] migration step failed; not marking done, retrying in 1h', [
+                'migration' => $migrationId,
+                'step'      => $step,
+                'db_error'  => $wpdb->last_error,
+            ]);
+        }
+    }
+
+    /**
+     * Run a single-value SELECT and return its value ONLY when the result can
+     * be trusted (#69 runProbe shape; #418 review L1). Returns [false, null]
+     * on any failure.
+     *
+     * last_error alone is not an exhaustive failure signal: wpdb::query() can
+     * return false WITHOUT setting it (the `! $this->ready` guard after a
+     * failed reconnect, or a `query` filter emptying the SQL), and get_var()
+     * discards query()'s return — so on those paths get_var() would read the
+     * PREVIOUS statement's last_result (e.g. the table name a SHOW TABLES
+     * just returned) and (int) it to a plausible 0, which reads a populated
+     * retired table as "empty". Run the statement through query(), check
+     * BOTH the return and last_error, then read the value with get_var(null).
+     *
+     * @return array{0: bool, 1: string|null}
+     */
+    function bcc_trust_migration_probe(string $sql): array
+    {
+        global $wpdb;
+        $wpdb->last_error = '';
+        $ok = $wpdb->query($sql);
+        if ($ok === false || (string) $wpdb->last_error !== '') {
+            return [false, null];
+        }
+        $value = $wpdb->get_var(null);
+        return [true, $value === null ? null : (string) $value];
+    }
+
+    /**
+     * Refuse to destroy data (F-149): start the retry backoff and log WHAT
+     * was spared, so an operator can decide. Distinct from a failed step —
+     * nothing errored; the migration declined to delete rows.
+     *
+     * @param array<string, mixed> $context
+     */
+    function bcc_trust_migration_refuse_destructive(string $migrationId, string $reason, array $context): void
+    {
+        set_transient('bcc_trust_migration_backoff_' . $migrationId, 1, HOUR_IN_SECONDS);
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] migration refused to destroy data; not marking done, re-checking in 1h', [
+                'migration' => $migrationId,
+                'reason'    => $reason,
+            ] + $context);
+        }
+    }
+
+    /**
+     * Drop a RETIRED table only when it is empty (F-149).
+     *
+     * The resurrection-proof drops re-probe hourly and remove any retired
+     * table that reappears. A table that reappears WITH ROWS is not drift to
+     * be silently cleaned: it is what a tarball rollback to older code
+     * produces, and rolling forward again must not delete that data. So:
+     *
+     *   'absent'  — the table is not there; nothing to do.
+     *   'dropped' — it was there and empty; it is gone now.
+     *   'refused' — it holds rows; left in place, logged with the count,
+     *               backoff started. The caller must not stamp done.
+     *   'failed'  — a probe, the count or the DROP errored; backoff
+     *               started. The caller must not stamp done.
+     *
+     * @return 'absent'|'dropped'|'refused'|'failed'
+     */
+    function bcc_trust_drop_retired_table_if_empty(string $table, string $migrationId): string
+    {
+        global $wpdb;
+
+        [$ok, $exists] = bcc_trust_migration_probe($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+        if (!$ok) {
+            bcc_trust_migration_step_failed($migrationId, "probe {$table}");
+            return 'failed';
+        }
+        if ($exists !== $table) {
+            return 'absent';
+        }
+
+        // Table name is $wpdb->prefix + a hard-coded suffix — no user input.
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        [$ok, $rows] = bcc_trust_migration_probe("SELECT COUNT(*) FROM `{$table}`");
+        if (!$ok || $rows === null) {
+            bcc_trust_migration_step_failed($migrationId, "count {$table}");
+            return 'failed';
+        }
+        if ((int) $rows > 0) {
+            bcc_trust_migration_refuse_destructive($migrationId, 'retired table reappeared with rows', [
+                'table' => $table,
+                'rows'  => (int) $rows,
+            ]);
+            return 'refused';
+        }
+
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        if ($wpdb->query("DROP TABLE IF EXISTS `{$table}`") === false) {
+            bcc_trust_migration_step_failed($migrationId, "drop {$table}");
+            return 'failed';
+        }
+        return 'dropped';
+    }
 }
 
 if (!function_exists('bcc_trust_pending_migrations')) {
@@ -326,6 +477,14 @@ if (!function_exists('bcc_trust_pending_migrations')) {
             return;
         }
 
+        // 2b. F-151: a migration that reported a failure (INCOMPLETE) within
+        //     the last hour is skipped. Checked before the lock so a backed-off
+        //     migration costs one transient read per request, nothing more.
+        $migrationId = (string) $migration['id'];
+        if (bcc_trust_migration_backoff_active($migrationId)) {
+            return;
+        }
+
         // 3. Crash-safe, session-scoped, non-blocking lock. If another
         //    request holds it, that request is processing this migration —
         //    skip this pass rather than double-process.
@@ -349,6 +508,10 @@ if (!function_exists('bcc_trust_pending_migrations')) {
             //    keeps future no-op checks free.
             if ($status === BCC_TRUST_MIGRATION_COMPLETE) {
                 update_option($doneOption, time(), true);
+            } elseif ($status !== BCC_TRUST_MIGRATION_MORE) {
+                // 7. F-151: not done and not mere batch progress — back off
+                //    for an hour instead of re-running on every request.
+                bcc_trust_migration_step_failed($migrationId, 'returned ' . $status);
             }
         } finally {
             // Always release — including on a thrown error — so a caught

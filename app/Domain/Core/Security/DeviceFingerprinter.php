@@ -356,7 +356,16 @@ class DeviceFingerprinter {
             return false;
         }
 
-        // Check if this fingerprint exists for other users
+        // Other accounts seen on this fingerprint. Recorded (audit log +
+        // risk_level 'medium' when shared by BCC_TRUST_RING_MIN_SIZE or more)
+        // so admins can see shared devices; it adds NO fraud points and no
+        // vote-weight discount (F-184, user decision).
+        //
+        // ⚠ The two callers key this differently, so one physical device can
+        // appear under two fingerprints: VoteService passes
+        // generateFingerprint() (the raw server-side header hash), while
+        // UserStatusController passes sha256(that hash | wp_salt('auth')).
+        // Neither is a client-side fingerprint: both are IP + request headers.
         $existingUsers = $this->fpRepo->getOtherUsersForFingerprint($fingerprint, $userId);
 
         $multipleAccounts = !empty($existingUsers);
@@ -414,17 +423,15 @@ class DeviceFingerprinter {
                 $this->getFormatSpecifiers($data)
             );
 
-            // If multiple accounts detected, update user_info
+            // Shared device: recorded for admin review only (F-184).
             if ($multipleAccounts) {
-                $fraudIncrement = min(20, $sharedCount * 5);
-                $this->userInfoRepo->incrementFraudScore($userId, $fraudIncrement, 'device_sharing');
-
                 AuditLogger::log('device_sharing_detected', $userId, [
                     'fingerprint' => $fingerprint,
                     'shared_count' => $sharedCount,
                     'other_users' => wp_list_pluck($existingUsers, 'user_id'),
                     'automation_score' => $automationData['confidence'] ?? 0,
-                    'risk_level' => $riskLevel
+                    'risk_level' => $riskLevel,
+                    'points_applied' => 0, // F-184: recorded, never penalised
                 ], 'user');
             }
 
@@ -445,17 +452,15 @@ class DeviceFingerprinter {
                 return false;
             }
 
-            // If multiple accounts detected, update user_info
+            // Shared device: recorded for admin review only (F-184).
             if ($multipleAccounts) {
-                $fraudIncrement = min(20, $sharedCount * 5);
-                $this->userInfoRepo->incrementFraudScore($userId, $fraudIncrement, 'device_sharing');
-
                 AuditLogger::log('device_sharing_detected', $userId, [
                     'fingerprint' => $fingerprint,
                     'shared_count' => $sharedCount,
                     'other_users' => wp_list_pluck($existingUsers, 'user_id'),
                     'automation_score' => $automationData['confidence'] ?? 0,
-                    'risk_level' => $riskLevel
+                    'risk_level' => $riskLevel,
+                    'points_applied' => 0, // F-184: recorded, never penalised
                 ], 'user');
             }
 
@@ -538,7 +543,7 @@ class DeviceFingerprinter {
         
         return $formats;
     }
-    
+
     /**
      * Store fingerprint for user, also recording the server-side fingerprint.
      *
@@ -552,13 +557,16 @@ class DeviceFingerprinter {
         // Reuse getFingerprintUserCount to check shared server fingerprints
         $serverSharedCount = $this->getFingerprintUserCount($serverFp);
         if ($serverSharedCount > 1) {
-            // Different accounts, same server-side fingerprint -> strong signal
-            $fraudIncrement = min(30, $serverSharedCount * 8);
-            $this->userInfoRepo->incrementFraudScore($userId, $fraudIncrement, 'server_fingerprint_sharing');
-
+            // Recorded for admin review, NO fraud points (F-108, user
+            // decision). Every input to this hash except the IP is a header
+            // the client chooses, and two people behind one router on the
+            // same browser build produce the same value: a weak signal, and
+            // it double-counted the device_sharing penalty, which keys on a
+            // hash of the same headers.
             AuditLogger::log('server_fingerprint_shared', $userId, [
                 'server_fingerprint' => substr($serverFp, 0, 20) . '...',
                 'shared_count'       => $serverSharedCount,
+                'points_applied'     => 0,
             ], 'user');
         }
 
@@ -624,7 +632,7 @@ class DeviceFingerprinter {
         $fpHashes   = array_map(fn($fp) => $fp->fingerprint, $fingerprints);
         $userCounts = $this->getFingerprintUserCounts($fpHashes);
 
-        $fraudProbability = $this->calculateDeviceFraudProbability($userId, $fingerprints, $userCounts);
+        $fraudProbability = $this->calculateDeviceFraudProbability($userId, $fingerprints);
 
         // Determine the worst shared-device match.
         $sharedDevice = null;
@@ -671,10 +679,15 @@ class DeviceFingerprinter {
      * Accepts optional pre-fetched data so callers (e.g. getAggregatedFingerprintData)
      * can avoid redundant queries.
      *
-     * @param int        $userId
-     * @param array|null $fingerprints  Pre-fetched getUserFingerprints() result.
-     * @param object[]|null            $fingerprints  Pre-fetched getUserFingerprints() result.
-     * @param array<string, int>|null  $userCounts    Pre-fetched getFingerprintUserCounts() map.
+     * Built from AUTOMATION evidence only. How many accounts share a device
+     * is not an input (F-184, user decision: shared devices are recorded,
+     * never penalised), and the stored risk_level is not read either,
+     * because storeFingerprint() raises it to 'medium' for a shared device
+     * so admins can see it. The automation thresholds below are exactly the
+     * ones that set risk_level from automation.
+     *
+     * @param int           $userId
+     * @param object[]|null $fingerprints  Pre-fetched getUserFingerprints() result.
      * @return float 0-1 probability
      *
      * @phpstan-param list<object{
@@ -686,17 +699,11 @@ class DeviceFingerprinter {
      *   last_seen: string
      * }>|null $fingerprints
      */
-    public function calculateDeviceFraudProbability(int $userId, ?array $fingerprints = null, ?array $userCounts = null): float {
+    public function calculateDeviceFraudProbability(int $userId, ?array $fingerprints = null): float {
         $fingerprints ??= $this->getUserFingerprints($userId);
 
         if (empty($fingerprints)) {
             return 0.1; // Low risk - no fingerprint data yet
-        }
-
-        // Batch-fetch user counts if not provided.
-        if ($userCounts === null) {
-            $fpHashes   = array_map(fn($fp) => $fp->fingerprint, $fingerprints);
-            $userCounts = $this->getFingerprintUserCounts($fpHashes);
         }
 
         $scores = [];
@@ -707,17 +714,11 @@ class DeviceFingerprinter {
             // Automation score contributes
             $score += $fp->automation_score / 100 * 0.4;
 
-            // Risk level contributes based on config thresholds
-            if ($fp->risk_level === 'high') {
+            // Automation band (the automation half of risk_level).
+            if ($fp->automation_score >= $this->automationHigh) {
                 $score += 0.3;
-            } elseif ($fp->risk_level === 'medium') {
+            } elseif ($fp->automation_score >= $this->automationMedium) {
                 $score += 0.15;
-            }
-
-            // Check if this fingerprint is shared
-            $userCount = $userCounts[$fp->fingerprint] ?? 0;
-            if ($userCount > 1) {
-                $score += min(0.3, ($userCount - 1) * 0.1);
             }
 
             $scores[] = $score;

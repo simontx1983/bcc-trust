@@ -13,6 +13,7 @@ declare(strict_types=1);
 namespace {
     if (!defined('BCC_TRUST_MIGRATION_COMPLETE'))   { define('BCC_TRUST_MIGRATION_COMPLETE', 'complete'); }
     if (!defined('BCC_TRUST_MIGRATION_INCOMPLETE')) { define('BCC_TRUST_MIGRATION_INCOMPLETE', 'incomplete'); }
+    if (!defined('BCC_TRUST_MIGRATION_MORE')) { define('BCC_TRUST_MIGRATION_MORE', 'more'); }
 
     if (!function_exists('get_users')) {
         /** @param array<string, mixed> $args @return list<int> */

@@ -119,7 +119,11 @@ add_action( 'admin_post_bcc_trust_ring_action', function () {
     }
 
     \BCC\Trust\Core\Plugin::instance()->moderationService()
-        ->handleRingAction( $resolved['user_ids'], $resolved['action'] );
+        ->handleRingAction(
+            $resolved['user_ids'],
+            $resolved['action'],
+            sanitize_textarea_field( wp_unslash( (string) ( $_POST['reason'] ?? '' ) ) )
+        );
 } );
 
 /**
@@ -160,7 +164,7 @@ add_action( 'admin_post_bcc_trust_bulk_action', function () {
 
 add_action( 'admin_menu', function () {
     add_submenu_page(
-        'bcc-trust-dashboard',
+        \BCC\Trust\Core\Admin\AdminMenus::MODERATION,
         'Moderation',
         'Moderation',
         'manage_options',
@@ -194,8 +198,14 @@ function bcc_trust_render_moderation(): void {
         'clear_votes'        => static function () use ( $mod ) {
             $mod->clearVotes( absint( $_POST['user_id'] ?? 0 ) );
         },
+        'restore_votes'      => static function () use ( $mod ) {
+            $mod->restoreVotes( absint( $_POST['user_id'] ?? 0 ) );
+        },
         'clear_fingerprints' => static function () use ( $mod ) {
             $mod->clearFingerprints( absint( $_POST['user_id'] ?? 0 ) );
+        },
+        'reset_fraud_score'  => static function () use ( $mod ) {
+            $mod->resetFraudScore( absint( $_POST['user_id'] ?? 0 ) );
         },
         'reanalyze_user'     => static function () use ( $mod ) {
             $mod->reanalyzeUser( absint( $_POST['user_id'] ?? 0 ) );
@@ -205,6 +215,9 @@ function bcc_trust_render_moderation(): void {
             $newScore = absint( $_POST['override_score_value'] ?? 0 );
             $reason   = sanitize_textarea_field( $_POST['override_reason'] ?? '' );
             $mod->overrideScore( $userId, $newScore, $reason );
+        },
+        'undo_score_override' => static function () use ( $mod ) {
+            $mod->undoScoreOverride( absint( $_POST['user_id'] ?? 0 ) );
         },
         'add_whitelist'      => static function () use ( $mod ) {
             $type  = sanitize_text_field( $_POST['whitelist_type'] ?? '' );

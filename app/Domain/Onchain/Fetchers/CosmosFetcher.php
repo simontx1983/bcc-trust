@@ -485,9 +485,14 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     /**
      * Fetch ALL active validators from the chain's bonded set.
      *
-     * Uses the paginated LCD staking endpoint to get up to 500 validators
-     * in a single call. Returns lightweight rows (no per-validator uptime
-     * or governance calls — those are expensive and done on refresh).
+     * Walks the paginated LCD staking endpoint ({@see getBondedValidators()}).
+     * Returns lightweight rows (no per-validator uptime or governance calls —
+     * those are expensive and done on refresh).
+     *
+     * ⚠ F-62: `[]` also means "the bonded set could not be read to its end".
+     * ChainRefreshService already treats an empty index as a partial run (no
+     * upsert, no baseline, no mint), which is the only safe reading of a set
+     * that may be missing validators.
      *
      * @return array<int, array<string, mixed>> Array of validator data arrays ready for bulkUpsert.
      */
@@ -917,17 +922,30 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * Returns the unwrapped `data` envelope on success, null on transport
      * / non-200 / unparseable JSON.
      *
+     * `$contractRefusalIsAnswer` (opt-in): a 5xx that is the CONTRACT
+     * refusing the query (CosmwasmClassifier::isContractRefusal) returns
+     * immediately as a failure, with NO retry and NO breaker charge. For
+     * token-level reads whose ids come from callers (the NFT-piece route),
+     * so bogus token ids cannot open the chain's breaker. Off by default;
+     * every other caller keeps the strict treatment.
+     *
      * @param array<string, mixed> $queryArr  e.g. ['tokens' => ['owner' => '...']]
      * @return array<string, mixed>|null
      */
-    private function wasmSmartQuery(string $contractAddress, array $queryArr): ?array
-    {
+    private function wasmSmartQuery(
+        string $contractAddress,
+        array $queryArr,
+        bool $contractRefusalIsAnswer = false,
+        ?int $deadlineAt = null
+    ): ?array {
         $path = self::wasmSmartQueryPath($contractAddress, $queryArr);
         if ($path === null) {
             return null;
         }
 
-        $response = $this->lcdGet($path);
+        $response = $contractRefusalIsAnswer
+            ? $this->lcdGetResultData($path, $deadlineAt)
+            : $this->lcdGet($path, [], null, $deadlineAt);
         if (!is_array($response) || !isset($response['data']) || !is_array($response['data'])) {
             return null;
         }
@@ -1181,7 +1199,7 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *     attributes: list<array{trait_type: string, value: string|int|float|bool, rarity_pct?: float}>
      * }
      */
-    public function fetchTokenMetadata(string $contract, string $tokenId): array
+    public function fetchTokenMetadata(string $contract, string $tokenId, ?int $deadlineAt = null): array
     {
         $empty = [
             'name'            => null,
@@ -1209,7 +1227,15 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             return $cached;
         }
 
-        $data = $this->wasmSmartQuery($contract, ['nft_info' => ['token_id' => $tokenId]]);
+        // Token ids reach here from the anonymous NFT-piece route, so a
+        // contract refusing an unknown/invalid id must not retry or charge
+        // the breaker (F-154).
+        $data = $this->wasmSmartQuery(
+            $contract,
+            ['nft_info' => ['token_id' => $tokenId]],
+            true,
+            $deadlineAt
+        );
         if ($data === null) {
             // Don't cache transport failures — a flaky LCD shouldn't poison
             // a 7-day cache window with empty results.
@@ -1449,7 +1475,7 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *
      * @return array{wallet_address: string}|null
      */
-    public function cw721OwnerOf(string $contract, string $tokenId): ?array
+    public function cw721OwnerOf(string $contract, string $tokenId, ?int $deadlineAt = null): ?array
     {
         if ($contract === '' || $tokenId === '') {
             return null;
@@ -1469,9 +1495,11 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             return $cached;
         }
 
+        // Same as nft_info: caller-supplied token id, so a contract refusal
+        // is an answer, not a node fault (F-154).
         $data = $this->wasmSmartQuery($contract, [
             'owner_of' => ['token_id' => $tokenId],
-        ]);
+        ], true, $deadlineAt);
         if ($data === null) {
             // Don't cache transport failures.
             return null;
@@ -1506,11 +1534,21 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
 
     // ── Delegations (by delegator account) ─────────────────────────────────
 
+    /** Delegations requested per LCD page (the endpoint's own page cap). */
+    private const DELEGATIONS_PAGE_LIMIT = 500;
+
+    /**
+     * Most pages followed for one delegator. A set still carrying a
+     * `next_key` after this many pages is INCOMPLETE and reads as UNKNOWN,
+     * never as the truncated set (F-63).
+     */
+    private const DELEGATIONS_MAX_PAGES = 5;
+
     /**
      * Fetch the set of validators this account delegates to.
      *
-     * One paginated LCD call. Capped at 500 entries — well above any realistic
-     * delegator's validator count, and the LCD endpoint's own page cap.
+     * Paginated LCD walk: 500 entries a page, following `next_key` for at
+     * most {@see DELEGATIONS_MAX_PAGES} pages.
      *
      * Legacy shape: collapses transport failures to []. Callers that must
      * distinguish "no delegations" from "could not check" (the delegator-
@@ -1519,17 +1557,19 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *
      * @return array<int, array{validator_address: string, shares: string|null, amount: float|null}>
      */
-    public function fetch_delegations(string $delegatorAddress): array
+    public function fetch_delegations(string $delegatorAddress, ?int $deadlineAt = null): array
     {
-        return $this->fetch_delegations_result($delegatorAddress) ?? [];
+        return $this->fetch_delegations_result($delegatorAddress, $deadlineAt) ?? [];
     }
 
     /**
      * Nullable variant of {@see fetch_delegations}: preserves the
      * transport-failure signal instead of collapsing it to [].
      *
-     *   - null → LCD unreachable / non-200 / unparseable (UNKNOWN —
-     *            the caller must NOT read this as "no delegations").
+     *   - null → LCD unreachable / non-200 / unparseable, OR a 200 whose
+     *            body is not a readable delegations response, OR a set
+     *            that could not be read to its end (UNKNOWN — the caller
+     *            must NOT read this as "no delegations").
      *   - []   → the LCD answered and the account delegates to nothing.
      *   - rows → the account's live delegation set.
      *
@@ -1539,30 +1579,125 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      *
      * @return array<int, array{validator_address: string, shares: string|null, amount: float|null}>|null
      */
-    public function fetch_delegations_result(string $delegatorAddress): ?array
+    public function fetch_delegations_result(string $delegatorAddress, ?int $deadlineAt = null): ?array
     {
-        $response = $this->lcdGet("/cosmos/staking/v1beta1/delegations/{$delegatorAddress}", [
-            'pagination.limit' => 500,
-        ]);
+        // ⚠⚠ F-156: THE DEADLINE IS A PARAMETER AND IS NOT DEFAULTED HERE,
+        // AND THAT IS THE WHOLE DESIGN.
+        //
+        // This walk has three callers with opposite needs. The delegator JOIN
+        // gate runs inside a user's request and must be bounded. The revoke
+        // sweep and wallet seeding are cron, where an incomplete answer is
+        // expensive and latency is free — and note which way an unfinished
+        // walk falls below: `null` = UNKNOWN, which the sweep SKIPS. A
+        // deadline hardcoded here would therefore not break the sweep, it
+        // would quietly stop it revoking on a slow LCD, which is worse than
+        // slow because nothing would say so.
+        //
+        // ⚠ AN INSTANT, NOT A DURATION. Up to DELEGATIONS_MAX_PAGES pages
+        // are walked here and the caller may walk them once PER WALLET, so a
+        // per-call duration would multiply by both. One instant, computed by
+        // the caller with the user waiting, bounds the whole thing.
 
-        if ($response === null) {
-            // Transport failure — preserve UNKNOWN.
+        // ⚠ F-63: EVERY ANSWER HERE IS EITHER COMPLETE OR null.
+        //
+        // The revoke sweep removes a member on INELIGIBLE, and "no row for
+        // this validator" is INELIGIBLE. So any response this cannot read
+        // to its end must come back as null (UNKNOWN), never as a partial
+        // or empty set: a 200 that is not a delegations response, an item
+        // that cannot be read, and a set cut off at a page boundary each
+        // used to read as "does not delegate" and evict the member — and,
+        // being non-null, was cached for 5 minutes and written through to
+        // the delegation index, wiping it.
+        $rows    = [];
+        $pageKey = null;
+
+        for ($page = 0; $page < self::DELEGATIONS_MAX_PAGES; $page++) {
+            $params = ['pagination.limit' => self::DELEGATIONS_PAGE_LIMIT];
+            if ($pageKey !== null) {
+                $params['pagination.key'] = $pageKey;
+            }
+
+            $response = $this->lcdGet(
+                "/cosmos/staking/v1beta1/delegations/{$delegatorAddress}",
+                $params,
+                null,
+                $deadlineAt
+            );
+
+            if ($response === null) {
+                // Transport failure — on ANY page — preserves UNKNOWN. Rows
+                // from earlier pages are not the whole set.
+                return null;
+            }
+
+            $pageRows = $this->parseDelegationsPage($response);
+            if ($pageRows === null) {
+                \BCC\Core\Log\Logger::warning('[Cosmos Fetcher] unreadable delegations response; treating as UNKNOWN', [
+                    'chain_id' => (int) ($this->chain->id ?? 0),
+                    'page'     => $page,
+                ]);
+                return null;
+            }
+            foreach ($pageRows as $row) {
+                $rows[] = $row;
+            }
+
+            $nextKey = $response['pagination']['next_key'] ?? null;
+            if (!is_string($nextKey) || $nextKey === '') {
+                // The LCD says this is the last page: the set is complete.
+                return $rows;
+            }
+            $pageKey = $nextKey;
+        }
+
+        // Still a next_key after the cap: the set is INCOMPLETE, and an
+        // incomplete set may be missing the one delegation that matters.
+        \BCC\Core\Log\Logger::warning('[Cosmos Fetcher] delegations exceed the page cap; treating as UNKNOWN', [
+            'chain_id'  => (int) ($this->chain->id ?? 0),
+            'max_pages' => self::DELEGATIONS_MAX_PAGES,
+        ]);
+        return null;
+    }
+
+    /**
+     * PURE-ish. Parse one `/cosmos/staking/v1beta1/delegations` page, or
+     * null when it is not a readable delegations response (F-63).
+     *
+     * Same strictness as {@see parseCw721TokensData()}: the list key must
+     * be present and a list, and an item that cannot be read voids the
+     * page rather than being dropped — dropping it would undercount the
+     * delegator, which the revoke sweep acts on.
+     *
+     * An unreadable `balance.amount` is NOT a void: the row is kept with a
+     * null amount, which the eligibility service already treats as UNKNOWN
+     * for that validator.
+     *
+     * @param array<string, mixed> $response
+     * @return list<array{validator_address: string, shares: string|null, amount: float|null}>|null
+     */
+    private function parseDelegationsPage(array $response): ?array
+    {
+        if (!array_key_exists('delegation_responses', $response)) {
+            return null;
+        }
+        $items = $response['delegation_responses'];
+        if (!is_array($items) || !array_is_list($items)) {
             return null;
         }
 
-        if (empty($response['delegation_responses'])) {
-            return [];
-        }
-
         $rows = [];
-        foreach ($response['delegation_responses'] as $item) {
+        foreach ($items as $item) {
+            if (!is_array($item) || !is_array($item['delegation'] ?? null)) {
+                return null;
+            }
             $validator = $item['delegation']['validator_address'] ?? null;
-            if (!$validator) {
-                continue;
+            if (!is_string($validator) || $validator === '') {
+                return null;
             }
 
             $shares    = $item['delegation']['shares'] ?? null;
-            $rawAmount = $item['balance']['amount'] ?? null;
+            $balance   = $item['balance'] ?? null;
+            $rawAmount = is_array($balance) ? ($balance['amount'] ?? null) : null;
 
             $rows[] = [
                 'validator_address' => $validator,
@@ -2007,9 +2142,26 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * @param array<string, string|int> $params
      * @return array<string, mixed>|null
      */
-    private function lcdGet(string $path, array $params = [], ?ProviderOutcomeReceipt $outcome = null): ?array
+    private function lcdGet(
+        string $path,
+        array $params = [],
+        ?ProviderOutcomeReceipt $outcome = null,
+        ?int $deadlineAt = null
+    ): ?array {
+        $result = $this->lcdGetResult($path, $params, false, $outcome, false, $deadlineAt);
+
+        return $result['ok'] ? $result['data'] : null;
+    }
+
+    /**
+     * {@see lcdGet()} with contract refusals treated as answers (no retry,
+     * no breaker charge). Only {@see wasmSmartQuery()} opts in.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function lcdGetResultData(string $path, ?int $deadlineAt = null): ?array
     {
-        $result = $this->lcdGetResult($path, $params, false, $outcome);
+        $result = $this->lcdGetResult($path, [], false, null, true, $deadlineAt);
 
         return $result['ok'] ? $result['data'] : null;
     }
@@ -2047,7 +2199,9 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         string $path,
         array $params = [],
         bool $smartQuery = false,
-        ?ProviderOutcomeReceipt $outcome = null
+        ?ProviderOutcomeReceipt $outcome = null,
+        bool $contractRefusalIsAnswer = false,
+        ?int $deadlineAt = null
     ): array {
         $classifier = \BCC\Trust\Onchain\Services\CosmwasmClassifier::class;
         $chainId    = (int) ($this->chain->id ?? 0);
@@ -2087,6 +2241,17 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             'outcome'     => $outcome,
         ];
 
+        // ⚠ F-156: an ABSOLUTE instant, supplied by whichever caller has a
+        // user waiting on it, and SHARED by every call that caller makes.
+        // Absent (the default, and every background caller) = no deadline,
+        // which is today's behaviour exactly. Set here rather than inside
+        // this class because the same LCD methods serve the revoke sweep and
+        // wallet seeding, where completing the walk matters more than latency
+        // — see fetch_delegations_result().
+        if ($deadlineAt !== null) {
+            $retryOptions['deadline_at'] = $deadlineAt;
+        }
+
         // ONLY smart queries may reinterpret a 5xx. A code listing or a
         // contract listing that 500s really is a node problem, and must
         // keep its retries and its breaker protection — see the parameter
@@ -2094,6 +2259,14 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         if ($smartQuery) {
             $retryOptions['application_error'] = static fn(string $body, int $code): bool
                 => self::isSmartQueryApplicationError($body, $code);
+        } elseif ($contractRefusalIsAnswer) {
+            // Token-level reads driven by caller-supplied ids (the NFT-piece
+            // route): a contract refusing an unknown or invalid token_id is
+            // an answer, not a node fault. See CosmwasmClassifier::isContractRefusal.
+            $retryOptions['application_error'] = static fn(string $body, int $code): bool
+                => \BCC\Trust\Onchain\Services\CosmwasmClassifier::isContractRefusal(
+                    self::extractLcdErrorMessage($body)
+                );
         }
 
         $response = ApiRetry::get($url, [
@@ -2387,32 +2560,88 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         return round((float) $amount / pow(10, $this->decimals), 6);
     }
 
+    /**
+     * Resolve the validator OPERATOR address for this chain.
+     *
+     * Two different kinds of input reach this method and they must not be
+     * treated alike:
+     *
+     *  - an OPERATOR address, read from `onchain_validators.operator_address`
+     *    (EnrichmentScheduler::enrich). Already canonical, because the chain's
+     *    own validator list is where it came from. Return it untouched.
+     *  - an ACCOUNT address, the user's wallet (WalletSeedService), used to ask
+     *    "is this wallet a validator operator?". This one genuinely has to be
+     *    re-encoded under the operator HRP.
+     *
+     * ⚠⚠⚠ RE-ENCODING IS NOT STRING SUBSTITUTION. A bech32 checksum covers
+     * the HRP, so swapping the prefix in place leaves a checksum that no longer
+     * validates. Doing exactly that produced 1,241 production
+     * `LCD 500 ... decoding bech32 failed: invalid checksum` errors against
+     * Crypto.org between 2026-10-24 and 2026-11-03 -- 81% of all production
+     * errors -- each retried four times, each charging the chain's circuit
+     * breaker, which then skipped that chain's indexing 61 times and so withheld
+     * its validator pages. Decode and re-encode through Support\Bech32, which
+     * verifies the checksum coming in and recomputes it going out.
+     *
+     * ⚠⚠⚠ THE OPERATOR HRP IS NOT ALWAYS `<bech32_prefix>valoper`, AND IT IS
+     * NOT DERIVABLE FROM ANY CONFIGURATION WE HOLD. Crypto.org Chain stores
+     * `bech32_prefix = 'cro'` but its operator HRP is `crocncl`, and the Cosmos
+     * chain-registry publishes no `bech32_config` for that chain, so the
+     * convention gives the WRONG answer and no lookup table of ours can say
+     * otherwise. Only the chain itself can: the addresses its own validator list
+     * returns. That is why an address whose HRP is not this chain's ACCOUNT
+     * prefix is returned UNCHANGED -- the caller is already holding the chain's
+     * own spelling, and overwriting it with a guess is what broke this.
+     *
+     * ⚠ KNOWN LIMITATION, stated rather than papered over: for a chain whose
+     * operator HRP does not follow the convention, converting an ACCOUNT address
+     * still yields the conventional spelling and so will not resolve. It now
+     * fails CLEANLY -- a checksum-valid address the chain simply does not know,
+     * i.e. one 404 -- instead of malformed, which cost four retries and a breaker
+     * charge. Closing it properly needs a per-chain operator HRP, which is a
+     * schema change and is deliberately out of scope here.
+     *
+     * @param string $address Operator address, or the wallet's account address.
+     */
     private function ensureValoperPrefix(string $address): string
     {
+        // Fast path: already a conventional operator address. Deliberately ahead
+        // of any decoding, so per-validator enrichment on standard chains behaves
+        // byte-for-byte as before and pays nothing for this fix. Safe as a
+        // substring test because 'valoper' cannot occur inside a bech32 data
+        // part -- the charset excludes 'o'.
         if (strpos($address, 'valoper') !== false) {
             return $address;
         }
 
-        // Use bech32_prefix from chain config (DB-driven, no code change needed
-        // to add new Cosmos chains). Falls back to hardcoded map for chains
-        // where the config hasn't been populated yet.
         $bech32Prefix = $this->chain->bech32_prefix ?? null;
 
-        // Validate: bech32 HRPs are strictly lowercase alpha. A bad DB value
-        // here would produce broken addresses that silently fail LCD lookups.
-        if ($bech32Prefix && !preg_match('/^[a-z]+$/', $bech32Prefix)) {
-            $bech32Prefix = null; // fall through to hardcoded map
+        // bech32 HRPs are strictly lowercase alpha.
+        if (!is_string($bech32Prefix) || !preg_match('/^[a-z]+$/', $bech32Prefix)) {
+            return $address;
         }
 
-        if ($bech32Prefix) {
-            $pos = strpos($address, '1');
-            if ($pos !== false) {
-                $existingPrefix = substr($address, 0, $pos);
-                return str_replace($existingPrefix . '1', $bech32Prefix . 'valoper1', $address);
-            }
+        // Checksum-verified decode. Anything that is not valid bech32 passes
+        // through untouched: letting the provider reject the caller's own input is
+        // honest, manufacturing a different address out of it is not.
+        $decoded = Bech32::decode($address);
+        if ($decoded === null) {
+            return $address;
         }
 
-        return $address;
+        // Not this chain's ACCOUNT prefix, so it is already an operator address in
+        // the chain's own spelling (Crypto.org's `crocncl`). Leave it exactly as
+        // the chain gave it to us.
+        if ($decoded['hrp'] !== $bech32Prefix) {
+            return $address;
+        }
+
+        $bytes = Bech32::decodeToBytes($address);
+        if ($bytes === null || $bytes === '') {
+            return $address;
+        }
+
+        return Bech32::encode($bech32Prefix . 'valoper', $bytes);
     }
 
     private function parseStatus(string $status): string
@@ -2561,9 +2790,52 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
         return Bech32::decodeToBytes($bech32);
     }
 
+    /** Bonded validators requested per LCD page. */
+    private const BONDED_PAGE_LIMIT = 500;
+
+    /**
+     * Largest bonded set accepted as complete — far above any chain's
+     * max_validators. A set that grows past this is INCOMPLETE.
+     *
+     * ⚠ THE CAP IS ON VALIDATORS, NOT PAGES. Some public LCD gateways silently
+     * clamp pagination.limit (100 is common). A page cap of 4 then meant any
+     * chain with more than 400 bonded validators hit the cap on every run:
+     * partial for ever, never indexed, with only a warning to show for it.
+     */
+    private const BONDED_MAX_VALIDATORS = 2000;
+
+    /**
+     * Request ceiling for one walk, separate from the validator cap: it only
+     * bounds how many calls a gateway that clamps pages very small can cost.
+     * At 2,000 validators it still admits pages as small as 50.
+     */
+    private const BONDED_MAX_PAGES = 40;
+
     /**
      * Get the bonded validator set for this chain, sorted by tokens desc.
      * Cached per chain ID — fetched once per PHP process.
+     *
+     * ⚠ F-62: COMPLETE OR EMPTY — NEVER A TRUNCATED SET.
+     *
+     * This used to make one request at pagination.limit=500 and never read
+     * `next_key`, so a larger set came back as its first page and reached the
+     * index run as an ordinary, clean fetch — upserted, eligible to become the
+     * baseline, and fed to the page-mint allowlist. The index run's count
+     * heuristics cannot see a page-size cap (two truncated fetches agree with
+     * each other).
+     *
+     * Now the walk follows `next_key` until the set ends, accepting at most
+     * {@see BONDED_MAX_VALIDATORS} validators in at most {@see BONDED_MAX_PAGES}
+     * requests. A transport failure on any page, an unreadable page, or a set
+     * that passes either bound returns `[]`: the index run reads an empty
+     * index as PARTIAL (no upsert, no baseline, no mint, no dead-marking).
+     *
+     * ⚠ `[]` IS STILL CACHED FOR THE PROCESS, on purpose. Every later caller in
+     * the same process reads it safely — {@see findInBondedCache()} falls back
+     * to the single-validator LCD call and {@see fetchVotingPowerRank()} gives
+     * an unknown (null) rank — whereas NOT caching it would make each of those
+     * calls re-walk up to {@see BONDED_MAX_PAGES} pages against a provider that
+     * is already failing. The next process (the next cron run) retries.
      *
      * @return array<int, array<string, mixed>>
      */
@@ -2575,23 +2847,119 @@ class CosmosFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             return self::$validatorListCache[$chainId];
         }
 
-        $response = $this->lcdGet('/cosmos/staking/v1beta1/validators', [
-            'status'           => 'BOND_STATUS_BONDED',
-            'pagination.limit' => 500,
-        ], $outcome);
+        $vals    = [];
+        $pageKey = null;
 
-        if (!$response || empty($response['validators'])) {
-            self::$validatorListCache[$chainId] = [];
-            return [];
+        for ($page = 0; $page < self::BONDED_MAX_PAGES; $page++) {
+            $params = [
+                'status'           => 'BOND_STATUS_BONDED',
+                'pagination.limit' => self::BONDED_PAGE_LIMIT,
+            ];
+            if ($pageKey !== null) {
+                $params['pagination.key'] = $pageKey;
+            }
+
+            $response = $this->lcdGet('/cosmos/staking/v1beta1/validators', $params, $outcome);
+            if ($response === null) {
+                // Transport failure on ANY page: earlier pages are not the set.
+                self::$validatorListCache[$chainId] = [];
+                return [];
+            }
+
+            $pageVals = self::parseBondedValidatorsPage($response);
+            if ($pageVals === null) {
+                \BCC\Core\Log\Logger::warning('[Cosmos Fetcher] unreadable bonded-validators response; set treated as incomplete', [
+                    'chain_id' => $chainId,
+                    'page'     => $page,
+                ]);
+                self::$validatorListCache[$chainId] = [];
+                return [];
+            }
+            foreach ($pageVals as $v) {
+                $vals[] = $v;
+            }
+
+            if (count($vals) > self::BONDED_MAX_VALIDATORS) {
+                \BCC\Core\Log\Logger::warning('[Cosmos Fetcher] bonded set exceeds the validator cap; set treated as incomplete', [
+                    'chain_id'       => $chainId,
+                    'max_validators' => self::BONDED_MAX_VALIDATORS,
+                ]);
+                self::$validatorListCache[$chainId] = [];
+                return [];
+            }
+
+            $rawNext = $response['pagination']['next_key'] ?? null;
+            $nextKey = is_string($rawNext) ? $rawNext : '';
+            $hasMore = $nextKey !== '';
+
+            if ($hasMore && $page === 0 && count($pageVals) < self::BONDED_PAGE_LIMIT) {
+                // The node returned a short page and still has more: it is
+                // clamping pagination.limit. Not an error — the walk follows
+                // next_key either way — but it is what spends the request
+                // ceiling, so say what the node actually returned.
+                \BCC\Core\Log\Logger::info(sprintf(
+                    '[Cosmos Fetcher] chain %d clamps bonded-validator pages: asked for %d, got %d',
+                    $chainId,
+                    self::BONDED_PAGE_LIMIT,
+                    count($pageVals)
+                ));
+            }
+
+            if (!$hasMore) {
+                // Last page: the set is complete.
+                // ⚠ Never a raw provider value into bccomp(): it THROWS (an
+                // Error, not an Exception) on a malformed operand. See
+                // StakeAmount::sortable(); an unreadable amount sorts as 0.
+                usort($vals, static function (array $a, array $b): int {
+                    return \BCC\Trust\Onchain\Support\StakeAmount::compareDesc($a, $b, 'tokens');
+                });
+
+                self::$validatorListCache[$chainId] = $vals;
+                return $vals;
+            }
+            $pageKey = $nextKey;
         }
 
-        $vals = $response['validators'];
-        usort($vals, function ($a, $b) {
-            return bccomp($b['tokens'] ?? '0', $a['tokens'] ?? '0');
-        });
+        \BCC\Core\Log\Logger::warning('[Cosmos Fetcher] bonded walk reached the request ceiling; set treated as incomplete', [
+            'chain_id'  => $chainId,
+            'max_pages' => self::BONDED_MAX_PAGES,
+            'fetched'   => count($vals),
+        ]);
+        self::$validatorListCache[$chainId] = [];
+        return [];
+    }
 
-        self::$validatorListCache[$chainId] = $vals;
-        return $vals;
+    /**
+     * PURE. One `/cosmos/staking/v1beta1/validators` page, or null when it is
+     * not a readable bonded-validators response (F-62). An item that cannot
+     * be read voids the page: dropping it would silently shrink the set.
+     *
+     * @param array<string, mixed> $response
+     * @return list<array<string, mixed>>|null
+     */
+    private static function parseBondedValidatorsPage(array $response): ?array
+    {
+        if (!array_key_exists('validators', $response)) {
+            return null;
+        }
+        $items = $response['validators'];
+        if (!is_array($items) || !array_is_list($items)) {
+            return null;
+        }
+
+        $out = [];
+        foreach ($items as $item) {
+            if (!is_array($item)) {
+                return null;
+            }
+            $operator = $item['operator_address'] ?? null;
+            if (!is_string($operator) || $operator === '') {
+                return null;
+            }
+            $out[] = $item;
+        }
+
+        return $out;
     }
 
     private function fetchVotingPowerRank(string $valoper): ?int

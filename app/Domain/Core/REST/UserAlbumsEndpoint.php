@@ -34,6 +34,7 @@ use BCC\Trust\Core\Repositories\PhotoRepository;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\PeepSoAlbumAccess;
 use BCC\Trust\Core\Support\PeepSoFriendGate;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\UserSlugResolver;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -74,6 +75,16 @@ final class UserAlbumsEndpoint
         $targetId = UserSlugResolver::resolve($slug);
         if ($targetId === 0) {
             return ApiResponse::error('bcc_not_found', 'User not found.', 404);
+        }
+
+        // §F-02 profile-wide gate, which STACKS WITH the per-album gate
+        // below rather than replacing it. The two answer different
+        // questions: this one is "may the viewer see this person at all",
+        // PeepSoAlbumAccess::canView is "may they see this album". A
+        // PUBLIC album belonging to an "only me" profile was reachable
+        // before precisely because only the second question was asked.
+        if (!ProfileAccess::canViewProfile($targetId)) {
+            return ProfileAccess::forbidden();
         }
 
         $viewerId = get_current_user_id();
@@ -187,13 +198,33 @@ final class UserAlbumsEndpoint
      * Stable enum the frontend keys on. Matches the rest of the §3.1
      * privacy vocabulary (`public` / `site_members` / `friends_only`
      * / `only_me`) so MemberPrivacy and album privacy share copy.
+     *
+     * ⚠ `friends_only` is part of that vocabulary but is NO LONGER
+     * EMITTED by this endpoint — see the note on level 30 below. The enum
+     * the frontend must handle is unchanged; one of its values has simply
+     * stopped occurring here, which is why this is additive for clients
+     * rather than a breaking narrowing.
      */
     private function privacySlug(int $access): string
     {
         return match ($access) {
             PeepSoAlbumAccess::ACCESS_PUBLIC  => 'public',
             PeepSoAlbumAccess::ACCESS_MEMBERS => 'site_members',
-            PeepSoAlbumAccess::ACCESS_FRIENDS => 'friends_only',
+            // ⚠ 30 reports as `only_me`, NOT `friends_only`, and that is
+            // deliberate rather than a mis-mapping.
+            //
+            // BCC has no friends feature — peepso-friends was removed from
+            // production (F-178) — so `PeepSoAlbumAccess::canView()` resolves
+            // level 30 to owner-only, with no admin exemption either (the
+            // user's choice, recorded in that class). Reporting
+            // `friends_only` therefore described an audience that cannot
+            // exist, and because the frontend renders the server's slug and
+            // label verbatim per §A2, an owner saw a "FRIENDS" chip on an
+            // album only they could open.
+            //
+            // The SLUG changes, the BEHAVIOUR does not: level 30 was already
+            // owner-only before this, and still is.
+            PeepSoAlbumAccess::ACCESS_FRIENDS => 'only_me',
             PeepSoAlbumAccess::ACCESS_PRIVATE => 'only_me',
             default                           => 'only_me',
         };
@@ -210,7 +241,10 @@ final class UserAlbumsEndpoint
         $defaults = [
             PeepSoAlbumAccess::ACCESS_PUBLIC  => 'Public',
             PeepSoAlbumAccess::ACCESS_MEMBERS => 'Members',
-            PeepSoAlbumAccess::ACCESS_FRIENDS => 'Friends',
+            // ⚠ Matches 40's label for the same reason the slug does: with
+            // no friends feature, level 30 IS owner-only, so "Friends"
+            // named an audience that cannot exist. See privacySlug().
+            PeepSoAlbumAccess::ACCESS_FRIENDS => 'Private',
             PeepSoAlbumAccess::ACCESS_PRIVATE => 'Private',
         ];
         $label = $defaults[$access] ?? 'Private';

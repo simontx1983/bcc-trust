@@ -215,7 +215,8 @@ final class GroupsService
             $isMember,
             $isNftHolder,
             $isOwner,
-            $trustGateMin
+            $trustGateMin,
+            is_string($validatorStats['min_stake_display'] ?? null) ? $validatorStats['min_stake_display'] : null
         );
 
         $feedVisible    = $permissions['can_read_feed']['allowed'];
@@ -743,9 +744,10 @@ final class GroupsService
         bool $isMember,
         bool $isNftHolder,
         bool $isOwner = false,
-        int $trustGateMin = 0
+        int $trustGateMin = 0,
+        ?string $validatorMinStakeDisplay = null
     ): array {
-        $canJoin     = $this->resolveCanJoin($ctx, $viewerId, $isMember, $isNftHolder, $trustGateMin);
+        $canJoin     = $this->resolveCanJoin($ctx, $viewerId, $isMember, $isNftHolder, $trustGateMin, $validatorMinStakeDisplay);
         $canLeave    = $this->resolveCanLeave($viewerId, $isMember, $isOwner);
         $canReadFeed = $this->resolveCanReadFeed($ctx, $viewerId, $isMember);
 
@@ -764,7 +766,8 @@ final class GroupsService
         int $viewerId,
         bool $isMember,
         bool $isNftHolder,
-        int $trustGateMin = 0
+        int $trustGateMin = 0,
+        ?string $validatorMinStakeDisplay = null
     ): array {
         if ($viewerId <= 0) {
             return [
@@ -806,7 +809,9 @@ final class GroupsService
         if ($ctx->type === GroupType::Validator) {
             return [
                 'allowed'     => false,
-                'unlock_hint' => 'Delegate to this validator to join its community.',
+                'unlock_hint' => $validatorMinStakeDisplay !== null
+                    ? sprintf('Delegate at least %s to this validator to join its community.', $validatorMinStakeDisplay)
+                    : 'Delegate to this validator to join its community.',
                 'reason_code' => 'not_eligible',
             ];
         }

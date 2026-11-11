@@ -208,6 +208,96 @@ final class StewardshipSweepServiceTest extends TestCase
         );
     }
 
+    // ── F-40: a deadline-cut SHORT batch must not wrap the cursor ───────
+
+    /** Budget is 30 s; base 1_000 → deadline 1_030. */
+    private const PAST_DEADLINE = 1_031;
+
+    public function testAShortBatchCutByTheDeadlineResumesInsteadOfWrapping(): void
+    {
+        // Two communities (< BATCH_LIMIT): the clock runs out after the first.
+        $svc = $this->sweep(
+            candidates: [[self::GROUP_A, self::OWNER_A], [self::GROUP_B, self::OWNER_B]],
+            actives:    [self::GROUP_A => 6, self::GROUP_B => 7],
+        );
+        $svc->clockTicks = [1_000, 1_000, self::PAST_DEADLINE];
+
+        $svc->run();
+
+        self::assertSame(
+            [[self::OWNER_A, StewardshipSweepService::periodSourceId(self::GROUP_A, self::PERIOD)]],
+            $svc->ingestCalls,
+            'control: only the first community was processed'
+        );
+        self::assertSame(self::GROUP_A, $svc->cursor, 'resume after the last processed id — NOT 0');
+        self::assertSame([[0, self::GROUP_A, false]], $svc->advances, 'not a wrap');
+
+        // The next run picks up the unprocessed tail.
+        $svc->clockTicks = [];
+        $svc->run();
+        self::assertSame(
+            [
+                [self::OWNER_A, StewardshipSweepService::periodSourceId(self::GROUP_A, self::PERIOD)],
+                [self::OWNER_B, StewardshipSweepService::periodSourceId(self::GROUP_B, self::PERIOD)],
+            ],
+            $svc->ingestCalls
+        );
+        self::assertSame(0, $svc->cursor, 'tail consumed → now it wraps');
+    }
+
+    public function testADeadlineBeforeAnyCandidateLeavesTheCursorWhereItWas(): void
+    {
+        $svc = new RecordingStewardshipSweep(
+            [[self::GROUP_A, self::OWNER_A], [self::GROUP_B, self::OWNER_B]],
+            [self::GROUP_A => 6, self::GROUP_B => 7],
+            [],
+            [],
+            self::PERIOD,
+            initialCursor: 5
+        );
+        $svc->clockTicks = [1_000, self::PAST_DEADLINE];
+
+        $svc->run();
+
+        self::assertSame([], $svc->ingestCalls);
+        self::assertSame(5, $svc->cursor, 'nothing processed → resume from the same place');
+        self::assertSame([[5, 5, false]], $svc->advances);
+    }
+
+    public function testAShortBatchProcessedToTheEndStillWraps(): void
+    {
+        // Same short batch, clock never runs out → the pre-F-40 wrap holds.
+        $svc = $this->sweep(
+            candidates: [[self::GROUP_A, self::OWNER_A], [self::GROUP_B, self::OWNER_B]],
+            actives:    [self::GROUP_A => 6, self::GROUP_B => 7],
+        );
+        $svc->clockTicks = [1_000, 1_000, 1_000];
+
+        $svc->run();
+
+        self::assertSame(0, $svc->cursor);
+        self::assertSame([[0, 0, true]], $svc->advances);
+    }
+
+    public function testAFullBatchCutShortKeepsTheLastProcessedId(): void
+    {
+        // BATCH_LIMIT (100) communities, cut after the third.
+        $candidates = [];
+        $actives    = [];
+        for ($g = 1; $g <= 100; $g++) {
+            $candidates[] = [$g, 1000 + $g];
+            $actives[$g]  = 6;
+        }
+        $svc = new RecordingStewardshipSweep($candidates, $actives, [], [], self::PERIOD);
+        $svc->clockTicks = [1_000, 1_000, 1_000, 1_000, self::PAST_DEADLINE];
+
+        $svc->run();
+
+        self::assertCount(3, $svc->ingestCalls);
+        self::assertSame(3, $svc->cursor);
+        self::assertSame([[0, 3, false]], $svc->advances);
+    }
+
     /**
      * Derive the credited group ids (ascending) from recorded ingest
      * calls — sourceId = groupId * 1_000_000 + period (periodSourceId).
@@ -307,9 +397,22 @@ final class RecordingStewardshipSweep extends StewardshipSweepService
         $this->cursorWrites[] = $groupId;
     }
 
+    /** @var list<array{int, int, bool}> [from, to, wrapped] per cursor move. */
+    public array $advances = [];
+
+    /**
+     * Scripted clock: each now() call returns the next value (the last one
+     * repeats). Empty = the fixed 1_000 below. The FIRST call is run()'s
+     * deadline base; each later call is the per-candidate budget check.
+     *
+     * @var list<int>
+     */
+    public array $clockTicks = [];
+
     protected function onCursorAdvance(int $from, int $to, bool $wrapped): void
     {
-        // No-op in tests — keeps the double WP/Logger-free.
+        // Recorded, not logged — keeps the double WP/Logger-free.
+        $this->advances[] = [$from, $to, $wrapped];
     }
 
     protected function activityHeat(array $groupIds, int $sinceSeconds): array
@@ -348,6 +451,9 @@ final class RecordingStewardshipSweep extends StewardshipSweepService
 
     protected function now(): int
     {
-        return 1_000; // fixed clock — well inside the budget for the small batches here
+        if ($this->clockTicks === []) {
+            return 1_000; // fixed clock — well inside the budget for the small batches here
+        }
+        return count($this->clockTicks) > 1 ? array_shift($this->clockTicks) : $this->clockTicks[0];
     }
 }

@@ -241,6 +241,40 @@ final class AnnouncementRepository
         return $page['rows'];
     }
 
+    /**
+     * Does the rotator have anything to show on this page?
+     *
+     * Backs `Card.announcements.has_any`, whose only job is to let the page
+     * reserve the bar's height BEFORE the client fetch resolves — without
+     * that, an announcement-bearing page paints with nothing at the top and
+     * then inserts the bar, displacing the heading and everything under it.
+     *
+     * ⚠ It goes through `publicPage()` rather than composing its own
+     * predicate, and it must stay that way. This builder's own docblock says
+     * why: "two hand-written copies of a visibility-bearing query is how one
+     * of them ends up missing a predicate." Because this is the SAME path
+     * `rotator()` takes, differing only in `limit`, it cannot answer true
+     * where the rotator would return nothing — agreement is structural, not
+     * something a test has to keep chasing.
+     *
+     * Bounded (§4): `limit = 1`, so `publicPage()` fetches 2 rows at most.
+     *
+     * @throws RepositoryException when the read fails
+     */
+    public function hasActive(int $pageId): bool
+    {
+        $page = $this->publicPage(
+            $pageId,
+            1,
+            null,
+            KeysetCursor::SURFACE_ANNOUNCEMENTS_ACTIVE,
+            AnnouncementVisibility::notArchivedSql($this->metaTable, 'p'),
+            'active'
+        );
+
+        return $page['rows'] !== [];
+    }
+
     // ── Owner read — the ONLY one that may return unpublished rows ───────
 
     /**
@@ -334,6 +368,18 @@ final class AnnouncementRepository
                 // and the view-model disagreeing about the same row.
                 $clauses[] = '(p.post_status = %s AND ' . self::BLOCKED_EXPR . ' IS NULL)';
                 $params[]  = 'draft';
+                continue;
+            }
+            if ($status === AnnouncementCapabilityResolver::STATUS_PUBLISHED) {
+                // ⚠ Blocked rows are excluded here for the same reason the
+                // `draft` branch excludes them: the view-model checks the
+                // blocked marker BEFORE `post_status`, so a row left `publish`
+                // while carrying arm C's marker reports its own status as
+                // `blocked`. Without this the filter and the view-model would
+                // disagree about the same row — `?status=published` returning
+                // something that says `blocked`.
+                $clauses[] = '(p.post_status = %s AND ' . self::BLOCKED_EXPR . ' IS NULL)';
+                $params[]  = 'publish';
                 continue;
             }
             $clauses[] = '(p.post_status = %s)';
@@ -953,6 +999,17 @@ final class AnnouncementRepository
             // `_bcc_announcement_blocked_at`, so the two are separable in SQL
             // and the parameter means what it says.
             AnnouncementCapabilityResolver::STATUS_BLOCKED,
+            // ⚠⚠ PUBLISHED IS NOW ACCEPTED, and the reason it was refused has
+            // been measured and does not hold. The refusal said "the public
+            // list serves published rows" — true of the ROWS and false of the
+            // CAPABILITIES. §4.32.11 forbids the public list from carrying
+            // `capabilities` for ANY viewer, so an operator could obtain
+            // management capabilities for a published announcement only by
+            // fetching each row's detail individually: an N+1 over the whole
+            // billboard, which is the precise thing a list surface exists to
+            // prevent. The owner list is the only surface that may carry them
+            // for a set of rows, so this is where the gap closes.
+            AnnouncementCapabilityResolver::STATUS_PUBLISHED,
         ];
 
         $out = [];
@@ -973,11 +1030,26 @@ final class AnnouncementRepository
      * `scheduled` → `future`, `draft` → `draft`. ⚠ Nothing maps to
      * `publish` — a mapping that did would make a non-public row public.
      */
+    /**
+     * ⚠⚠ THIS MAPPING IS WHY ADDING `published` TO THE ENUM IS NOT A ONE-LINE
+     * CHANGE. The earlier body was `=== STATUS_SCHEDULED ? 'future' : 'draft'`
+     * — an unrecognised status fell through to `'draft'`. So widening
+     * `ownerStatuses()` alone would have made `?status=published` compose
+     * `p.post_status = 'draft'` and answer with ORDINARY DRAFTS under a
+     * published query: the same "wrong page that looks right" failure the
+     * `blocked` parameter was refused for until arm C existed.
+     *
+     * Now exhaustive by match, so a status added to the contract without a
+     * WordPress mapping is a type error at the call site rather than a silent
+     * fallback to drafts.
+     */
     private static function wpStatusFor(string $contractStatus): string
     {
-        return $contractStatus === AnnouncementCapabilityResolver::STATUS_SCHEDULED
-            ? 'future'
-            : 'draft';
+        return match ($contractStatus) {
+            AnnouncementCapabilityResolver::STATUS_SCHEDULED => 'future',
+            AnnouncementCapabilityResolver::STATUS_PUBLISHED => 'publish',
+            default                                          => 'draft',
+        };
     }
 
     /**

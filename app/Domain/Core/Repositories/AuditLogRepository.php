@@ -156,42 +156,28 @@ class AuditLogRepository {
     public function getRecentActions( int $userId, int $days = 30 ): array {
         global $wpdb;
 
-        return $wpdb->get_results( $wpdb->prepare(
+        // Bounded (F-128): this had no LIMIT, so a very active account
+        // loaded its whole month of audit rows into PHP on every behaviour
+        // analysis. Keep the MOST RECENT rows (DESC + LIMIT), then return
+        // them oldest-first as before — callers walk them chronologically.
+        /** @var list<ActivityActionRow> $rows */
+        $rows = $wpdb->get_results( $wpdb->prepare(
             "SELECT created_at, action
              FROM {$this->table}
              WHERE user_id = %d
-               AND created_at > DATE_SUB(NOW(), INTERVAL %d DAY)
-             ORDER BY created_at ASC",
-            $userId,
-            $days
-        ) );
-    }
-
-    /**
-     * Get browsing + voting actions for a user (page_view, vote_up, vote_down, page_visit).
-     *
-     * @param int $userId
-     * @param int $days
-     * @param int $limit
-     * @return object[]
-     * @phpstan-return list<ActivityBrowsingRow>
-     */
-    public function getBrowsingAndVotingActions( int $userId, int $days = 30, int $limit = 200 ): array {
-        global $wpdb;
-
-        return $wpdb->get_results( $wpdb->prepare(
-            "SELECT action, target_id, created_at
-             FROM {$this->table}
-             WHERE user_id = %d
-               AND action IN ('page_view', 'vote_up', 'vote_down', 'page_visit')
                AND created_at > DATE_SUB(NOW(), INTERVAL %d DAY)
              ORDER BY created_at DESC
              LIMIT %d",
             $userId,
             $days,
-            $limit
+            self::RECENT_ACTIONS_CAP
         ) );
+
+        return array_reverse( $rows );
     }
+
+    /** Max audit rows one behaviour analysis reads (most recent first). */
+    public const RECENT_ACTIONS_CAP = 5000;
 
     /**
      * Get weekly activity summary for a user over the last N days.
@@ -218,36 +204,50 @@ class AuditLogRepository {
         ) );
     }
 
-    /**
-     * Count vote actions for a user within a time window.
-     *
-     * @param int $userId
-     * @param int $minutes Lookback window in minutes.
-     * @return int
-     */
-    public function countRecentVoteActions( int $userId, int $minutes ): int {
-        global $wpdb;
-
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM {$this->table}
-             WHERE user_id = %d
-             AND action IN ('vote_up', 'vote_down')
-             AND created_at > (UTC_TIMESTAMP() - INTERVAL %d MINUTE)",
-            $userId,
-            $minutes
-        ) );
-    }
+    // countRecentVoteActions() removed (F-102): it counted 'vote_up' /
+    // 'vote_down' audit rows, which nothing writes, so rapid-vote detection
+    // was always 0. FraudDetector::detectRapidVoting() now counts the votes
+    // table via VoteRepository::countByVoterSince().
 
     /**
-     * Count distinct users sharing an IP address (excluding a given user) within a time window.
+     * Count distinct users on the same network as an IP (excluding a given
+     * user) within a time window.
      *
-     * @param string $ipBinary Binary IP address.
+     * "Same network" (F-108, user decision): IPv4 is the exact address;
+     * IPv6 is the /64 the address sits in. One IPv6 client rotates through
+     * its /64 (privacy extensions, RFC 8981), so an exact IPv6 match let a
+     * single person look like many networks AND split one household into
+     * strangers. The stored ip_address stays the full address; the /64 is
+     * applied here, at comparison time.
+     *
+     * The IPv6 match is a byte range over the first 8 bytes, so it still
+     * walks idx_ip_lookup (ip_address, created_at). Only 16-byte values can
+     * fall inside a range whose two bounds share an 8-byte prefix, so IPv4
+     * rows never match an IPv6 query.
+     *
+     * @param string $ipBinary Binary IP address (inet_pton: 4 or 16 bytes).
      * @param int    $excludeUserId
      * @param int    $days Lookback window in days.
      * @return int
      */
     public function countDistinctUsersForIp( string $ipBinary, int $excludeUserId, int $days ): int {
         global $wpdb;
+
+        if ( strlen( $ipBinary ) === 16 ) {
+            $prefix = substr( $ipBinary, 0, 8 );
+            return (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(DISTINCT user_id)
+                 FROM {$this->table}
+                 WHERE ip_address BETWEEN %s AND %s
+                 AND user_id != %d
+                 AND user_id IS NOT NULL
+                 AND created_at > (UTC_TIMESTAMP() - INTERVAL %d DAY)",
+                $prefix . str_repeat( "\x00", 8 ),
+                $prefix . str_repeat( "\xff", 8 ),
+                $excludeUserId,
+                $days
+            ) );
+        }
 
         return (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(DISTINCT user_id)

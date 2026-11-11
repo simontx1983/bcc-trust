@@ -89,7 +89,11 @@ if (!defined('ABSPATH')) {
  *     delegator_count: string|null,
  *     jailed_count: string|null,
  *     fetched_at: string,
- *     logo_url: string|null
+ *     logo_url: string|null,
+ *     moniker: string,
+ *     chain_id: int|numeric-string,
+ *     chain_type: string,
+ *     native_token: string|null
  * }
  *
  * @phpstan-type ValidatorCardPageRow object{
@@ -107,7 +111,11 @@ if (!defined('ABSPATH')) {
  *     delegator_count: string|null,
  *     jailed_count: string|null,
  *     fetched_at: string,
- *     logo_url: string|null
+ *     logo_url: string|null,
+ *     moniker: string,
+ *     chain_id: int|numeric-string,
+ *     chain_type: string,
+ *     native_token: string|null
  * }
  *
  * @phpstan-type ValidatorAggregateStats object{
@@ -452,11 +460,17 @@ final class ValidatorRepository
         $wallets = WalletRepository::table();
         $chains  = ChainRepository::table();
 
+        // ⚠ v.moniker rides along DELIBERATELY. The card's display name
+        // used to come from the frozen post_title; taking it from here means
+        // the batch that already feeds chains, signals and the logo answers
+        // the name too, so a 24-card directory grid pays ZERO extra queries
+        // for it. Both SELECTs below share this list.
         $selectCols =
             "v.id AS validator_id, c.slug AS chain_slug, c.name AS chain_name,
              v.operator_address, v.status, v.uptime_30d, v.commission_rate,
              v.voting_power_rank, v.total_stake, v.self_stake,
-             v.delegator_count, v.jailed_count, v.fetched_at, v.logo_url";
+             v.delegator_count, v.jailed_count, v.fetched_at, v.logo_url,
+             v.moniker, v.chain_id, c.chain_type, c.native_token";
 
         $ph = implode(',', array_fill(0, count($idList), '%d'));
 
@@ -530,14 +544,52 @@ final class ValidatorRepository
 
         $expiresAt = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
 
-        $existing = $wpdb->get_var($wpdb->prepare(
-            "SELECT id FROM {$table}
-             WHERE wallet_link_id = %d AND chain_id = %d AND operator_address = %s
-             LIMIT 1",
-            $walletLinkId,
+        // F-141: look the row up by the table's REAL unique key,
+        // uq_chain_operator (chain_id, operator_address). The lookup used to
+        // include wallet_link_id, so a validator the indexer had already
+        // bulk-inserted (wallet_link_id NULL) was missed, the plain INSERT
+        // below then collided with the unique key, and the method returned a
+        // STALE $wpdb->insert_id from an unrelated earlier insert — the
+        // validator was never linked to the verified wallet, silently.
+        //
+        // The owner is read THROUGH wallet_links: disconnecting a wallet
+        // hard-deletes its wallet_links row without nulling
+        // onchain_validators.wallet_link_id, so a raw id here can point at a
+        // link that no longer exists. A dangling owner is treated as
+        // unlinked — otherwise a legitimate re-claim after unlink would be
+        // refused on every seed run, forever — and claiming it heals the row.
+        $wallets     = WalletRepository::table();
+        $existingRow = $wpdb->get_row($wpdb->prepare(
+            "SELECT v.id, wl.id AS live_link_id
+               FROM {$table} v
+               LEFT JOIN {$wallets} wl ON wl.id = v.wallet_link_id
+              WHERE v.chain_id = %d AND v.operator_address = %s
+              LIMIT 1",
             (int) $data['chain_id'],
             $data['operator_address']
         ));
+        if ($existingRow === null && $wpdb->last_error !== '') {
+            return false;
+        }
+
+        $existing = null;
+        if ($existingRow !== null) {
+            $owner = $existingRow->live_link_id === null ? null : (int) $existingRow->live_link_id;
+            // A row already linked to a DIFFERENT wallet link is not taken
+            // over here: this path seeds on verify and has no authority to
+            // re-home another link's validator. Unlinked (bulk-indexed) rows
+            // and rows already ours are claimed/refreshed below.
+            if ($owner !== null && $owner !== $walletLinkId) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] validator upsert: row already linked to another wallet; not re-homed', [
+                    'validator_id'      => (int) $existingRow->id,
+                    'chain_id'          => (int) $data['chain_id'],
+                    'existing_link_id'  => $owner,
+                    'requested_link_id' => $walletLinkId,
+                ]);
+                return false;
+            }
+            $existing = (int) $existingRow->id;
+        }
 
         $row = [
             'wallet_link_id'   => $walletLinkId,
@@ -579,13 +631,20 @@ final class ValidatorRepository
             }
         }
 
-        if ($existing) {
-            $wpdb->update($table, $row, ['id' => (int) $existing], $format, ['%d']);
-            return (int) $existing;
+        if ($existing !== null) {
+            if ($wpdb->update($table, $row, ['id' => $existing], $format, ['%d']) === false) {
+                return false;
+            }
+            return $existing;
         }
 
-        $wpdb->insert($table, $row, $format);
-        return $wpdb->insert_id ?: false;
+        // Check the insert itself: on failure $wpdb->insert_id still holds
+        // the id of whatever was inserted last on this connection.
+        if ($wpdb->insert($table, $row, $format) === false) {
+            return false;
+        }
+        $insertId = (int) $wpdb->insert_id;
+        return $insertId > 0 ? $insertId : false;
     }
 
     /**
@@ -1223,6 +1282,71 @@ final class ValidatorRepository
     }
 
     /**
+     * Resolve a chain's operator addresses to validator row ids.
+     *
+     * Used by the indexer to hand the placeholder minter an EXACT allowlist
+     * of the validators that chain's fetch actually returned in this run, so
+     * a row the fetch did not contain cannot get a page however the `status`
+     * column labels it. Measured 2026-11-02: 149 of 693 staging candidates
+     * were absent from their chain's latest complete fetch and every one was
+     * still labelled `active`, several unseen for over 90 days.
+     *
+     * ⚠ Not `getMonikersByAddresses()`: that is capped at 100 pairs for the
+     * recommender's bounded result set, and a chain's bonded set is larger
+     * (696 on Solana). This chunks instead of truncating — silently dropping
+     * addresses here would shrink the allowlist and DENY pages, which fails
+     * closed but would look like missing data.
+     *
+     * Bounded (§4): chunked `IN (...)` with an explicit LIMIT per chunk,
+     * selecting `id` only.
+     *
+     * @param list<string> $operatorAddresses
+     * @return list<int>
+     */
+    public static function idsForOperatorAddresses(int $chainId, array $operatorAddresses): array
+    {
+        if ($chainId <= 0 || $operatorAddresses === []) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($operatorAddresses as $address) {
+            $address = trim((string) $address);
+            if ($address !== '') {
+                $clean[$address] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $table = self::table();
+        $out   = [];
+
+        foreach (array_chunk(array_keys($clean), 200) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '%s'));
+            $params       = array_merge([$chainId], $chunk);
+
+            /** @var list<string>|null $ids */
+            $ids = $wpdb->get_col($wpdb->prepare(
+                "SELECT id
+                   FROM {$table}
+                  WHERE chain_id = %d
+                    AND operator_address IN ({$placeholders})
+                  LIMIT " . count($chunk),
+                ...$params
+            ));
+
+            foreach (($ids ?: []) as $id) {
+                $out[] = (int) $id;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * Enumerate validators that have NO peepso-page backing yet — neither
      * a user-linked wallet (wallet_link_id IS NULL) nor a system-minted
      * placeholder page (no post_meta `_bcc_onchain_validator_id` row).
@@ -1235,6 +1359,14 @@ final class ValidatorRepository
      * uses the `_bcc_onchain_validator_id` key — index lookup is fast
      * because postmeta has KEY(meta_key, meta_value(N)).
      *
+     * ⚠ $onlyValidatorIds has THREE meanings and they are not interchangeable:
+     *   null  — no restriction (the manual CLI backfill's behaviour, unchanged)
+     *   []    — MINT NONE. Fails closed: an allowlist that resolved to nothing
+     *           must never widen back to every validator.
+     *   list  — restrict to exactly these validator ids.
+     *
+     * @param list<int>|null $onlyValidatorIds
+     *
      * @return list<object{
      *     id: int,
      *     operator_address: string,
@@ -1245,7 +1377,12 @@ final class ValidatorRepository
      *     chain_name: string
      * }>
      */
-    public static function findMissingPlaceholderPage(?int $chainId, int $limit, int $offset): array
+    public static function findMissingPlaceholderPage(
+        ?int $chainId,
+        int $limit,
+        int $offset,
+        ?array $onlyValidatorIds = null
+    ): array
     {
         global $wpdb;
         $table  = self::table();
@@ -1257,6 +1394,26 @@ final class ValidatorRepository
         if ($chainId !== null) {
             $where[]  = 'v.chain_id = %d';
             $params[] = $chainId;
+        }
+
+        // ⚠ EMPTY ALLOWLIST MEANS MINT NONE, not 'no filter'. Returning early
+        // rather than composing an empty IN () — which is a SQL syntax error,
+        // and whose 'fix' of dropping the clause would silently mint everything.
+        if ($onlyValidatorIds !== null) {
+            $ids = [];
+            foreach ($onlyValidatorIds as $id) {
+                $id = (int) $id;
+                if ($id > 0) {
+                    $ids[$id] = true;
+                }
+            }
+            if ($ids === []) {
+                return [];
+            }
+
+            $idList   = array_keys($ids);
+            $where[]  = 'v.id IN (' . implode(',', array_fill(0, count($idList), '%d')) . ')';
+            $params   = array_merge($params, $idList);
         }
 
         $params[] = max(1, min($limit, 500));
@@ -1670,7 +1827,9 @@ final class ValidatorRepository
      *     total_stake: string|null,
      *     delegator_count: string|null,
      *     native_token: string|null,
-     *     page_slug: string|null
+     *     chain_name: string|null,
+     *     page_slug: string|null,
+     *     page_title: string|null
      * }>
      */
     public static function findCommunityStatsByIds(array $validatorIds): array
@@ -1702,14 +1861,17 @@ final class ValidatorRepository
          *     total_stake: string|null,
          *     delegator_count: string|null,
          *     native_token: string|null,
-         *     page_slug: string|null
+         *     chain_name: string|null,
+         *     page_slug: string|null,
+         *     page_title: string|null
          * }>|null $rows
          */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT v.id AS validator_id, v.moniker, v.status, v.commission_rate,
                     v.total_stake, v.delegator_count,
-                    c.native_token,
-                    COALESCE(p_wallet.post_name, p_meta.post_name) AS page_slug
+                    c.native_token, c.name AS chain_name,
+                    COALESCE(p_wallet.post_name, p_meta.post_name) AS page_slug,
+                    COALESCE(p_wallet.post_title, p_meta.post_title) AS page_title
                FROM {$table} v
                JOIN {$chains} c ON c.id = v.chain_id
                LEFT JOIN {$wallets} w        ON w.id = v.wallet_link_id
@@ -1739,7 +1901,9 @@ final class ValidatorRepository
                     'total_stake'     => $row->total_stake,
                     'delegator_count' => $row->delegator_count,
                     'native_token'    => $row->native_token,
+                    'chain_name'      => $row->chain_name,
                     'page_slug'       => $row->page_slug,
+                    'page_title'      => $row->page_title,
                 ];
             }
         }
@@ -1765,4 +1929,50 @@ final class ValidatorRepository
         ));
     }
 
+    /**
+     * The validator moniker currently recorded for a page, for display.
+     *
+     * ⚠ SINGLE-CARD PATH ONLY. A list request arrives with the
+     * findCardRowsByPageIds() bundle, which carries `moniker` already, so
+     * CardViewService prefers that and never reaches this method - otherwise
+     * the name would cost one query PER CARD in the directory grid.
+     *
+     * Resolves the same two ways a validator page can be bound as the other
+     * per-page readers in this class: a wallet link for a claimed validator,
+     * and the `_bcc_onchain_validator_id` post_meta for a system-minted
+     * placeholder. Bounded to one row.
+     */
+    public static function findMonikerByPageId(int $pageId): ?string
+    {
+        if ($pageId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $table   = self::table();
+        $wallets = DB::table('wallet_links');
+
+        $moniker = $wpdb->get_var($wpdb->prepare(
+            "SELECT v.moniker
+               FROM {$table} v
+               JOIN {$wallets} w ON w.id = v.wallet_link_id
+              WHERE w.post_id = %d
+              LIMIT 1",
+            $pageId
+        ));
+
+        if ($moniker === null) {
+            $moniker = $wpdb->get_var($wpdb->prepare(
+                "SELECT v.moniker
+                   FROM {$wpdb->postmeta} pm
+                   JOIN {$table} v ON v.id = CAST(pm.meta_value AS UNSIGNED)
+                  WHERE pm.meta_key = '_bcc_onchain_validator_id'
+                    AND pm.post_id = %d
+                  LIMIT 1",
+                $pageId
+            ));
+        }
+
+        return $moniker === null ? null : (string) $moniker;
+    }
 }

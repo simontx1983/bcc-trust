@@ -69,12 +69,44 @@ final class NftHolders1155DeltaIntegrationTest extends TestCase
         self::assertSame(4, $this->heldTotal(), 'holder of 5 who sent 1 must still read 4 — not 0');
     }
 
-    public function testFullOutflowRemovesTheRow(): void
+    public function testFullOutflowLeavesNoHolding(): void
     {
         $this->delta(5, 100);
         $this->delta(-5, 105);
 
-        self::assertNull($this->heldTotal(), 'balance zero → row cleaned up (no lingering 0-row)');
+        // F-65 part B: the row is KEPT as a balance-0 tombstone (so an older
+        // positive delta arriving later is refused), but no reader sees it.
+        self::assertNull($this->heldTotal(), 'balance zero → not a holding to any reader');
+        self::assertSame(0, $this->storedBalance(), 'kept as a tombstone');
+    }
+
+    public function testATombstoneRefusesAnOlderPositiveDelta(): void
+    {
+        // F-65 part B, the out-first case: the OUT (block 105) is ingested
+        // BEFORE the older acquiring IN (block 100). The tombstone remembers
+        // block 105, so the strict guard refuses the older +5 and the wallet
+        // never shows a token it no longer holds.
+        $this->delta(-5, 105);
+        $this->delta(5, 100);
+
+        self::assertNull($this->heldTotal());
+
+        // …while a genuinely NEWER inflow brings it back.
+        $this->delta(2, 110);
+        self::assertSame(2, $this->heldTotal());
+    }
+
+    /** The raw stored balance for (WALLET, CONTRACT, '1'), or null if no row. */
+    private function storedBalance(): ?int
+    {
+        global $wpdb;
+        $v = $wpdb->get_var($wpdb->prepare(
+            'SELECT balance FROM `' . NftHoldingsRepository::table() . '` WHERE wallet_link_id = %d AND contract_address = %s AND token_id = %s',
+            self::WALLET,
+            self::CONTRACT,
+            '1'
+        ));
+        return $v === null ? null : (int) $v;
     }
 
     public function testReprocessedRangeIsIdempotent(): void
@@ -92,9 +124,10 @@ final class NftHolders1155DeltaIntegrationTest extends TestCase
     public function testNegativeOnlySeedIsCleanedUp(): void
     {
         // Forward-history gap: we never saw the acquiring IN, only an OUT.
-        // Seeds 0 and is removed, rather than creating a phantom 0-row.
+        // Seeds a balance-0 tombstone (F-65 part B), which no reader sees.
         $this->delta(-3, 100);
         self::assertNull($this->heldTotal());
+        self::assertSame(0, $this->storedBalance());
     }
 
     public function testGateSumsAcrossTokenIds(): void

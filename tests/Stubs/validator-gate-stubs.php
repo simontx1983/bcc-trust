@@ -108,9 +108,20 @@ namespace BCC\Trust\Onchain\Services {
     if (!class_exists(NftGroupGateService::class, false)) {
         class NftGroupGateService
         {
+            /**
+             * Fixture `opted_out`: false | true/'voluntary' (a self-leave,
+             * TTL'd) | 'permanent' (a moderator eviction). Faithful to the
+             * real map: both kinds are "active" for auto-add and listings,
+             * but only 'permanent' refuses an explicit Join (F-158).
+             */
             public function isOptOutActive(int $userId, int $groupId): bool
             {
                 return (bool) ($GLOBALS['__bcc_valgate_fixture']['opted_out'] ?? false);
+            }
+
+            public function isPermanentOptOut(int $userId, int $groupId): bool
+            {
+                return ($GLOBALS['__bcc_valgate_fixture']['opted_out'] ?? false) === 'permanent';
             }
 
             public function clearOptOut(int $userId, int $groupId): void

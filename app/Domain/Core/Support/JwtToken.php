@@ -91,6 +91,8 @@ final class JwtToken
     public const ERR_NOT_YET_VALID = 'jwt_not_yet_valid';
     public const ERR_MISSING_CLAIM = 'jwt_missing_claim';
     public const ERR_REVOKED       = 'jwt_revoked';
+    /** This one token was signed out via POST /auth/logout (per-jti denylist). */
+    public const ERR_LOGGED_OUT    = 'jwt_logged_out';
 
     /**
      * Encode a token for the given user + handle.
@@ -283,7 +285,120 @@ final class JwtToken
             return ['ok' => false, 'error' => self::ERR_REVOKED];
         }
 
+        // Single-token logout (F-120): a token signed out via POST
+        // /auth/logout is denylisted by its jti until it could no longer be
+        // used anyway (exp + skew + refresh grace). Checked here — the path
+        // both decode() and decodeForRefresh() share — so a logged-out token
+        // can neither authenticate nor be refreshed.
+        // The denylist lives in the user's own meta, which currentTokenVersion()
+        // above has just loaded into WP's per-request meta cache — so this
+        // check costs no extra query on the hot path (staging/prod run with
+        // no persistent object cache, where a transient would be one DB query
+        // per authenticated request).
+        $jti = (string) ($payload['jti'] ?? '');
+        if ($jti !== '' && self::isLoggedOut($userId, $jti)) {
+            return ['ok' => false, 'error' => self::ERR_LOGGED_OUT];
+        }
+
         return ['ok' => true, 'payload' => $payload];
+    }
+
+    /** User-meta key holding the user's single-token-logout denylist. */
+    public const DENYLIST_META_KEY = 'bcc_jwt_denylist';
+
+    /** Most entries kept per user (oldest-expiring dropped beyond it). */
+    public const DENYLIST_MAX_ENTRIES = 100;
+
+    /**
+     * Sign out ONE token (F-120): denylist its jti for as long as the token
+     * could otherwise still be used — until exp, plus the decode skew, plus
+     * the refresh grace window (decodeForRefresh accepts a token that long
+     * past exp). Other tokens of the same user are unaffected; for "every
+     * device" use revokeAllForUser(). No-op without a jti or user id.
+     *
+     * Stored as user meta `{ sha256(jti)[0..40] => until_ts }`, pruned of
+     * expired entries on every write and capped at DENYLIST_MAX_ENTRIES.
+     *
+     * @param array<string, mixed> $payload a payload returned by decode()/decodeForRefresh()
+     */
+    public static function logOut(array $payload): void
+    {
+        $jti    = (string) ($payload['jti'] ?? '');
+        $userId = (int) ($payload['user_id'] ?? 0);
+        if ($jti === '' || $userId <= 0) {
+            return;
+        }
+
+        // Read-modify-write: serialise per user so two concurrent logouts
+        // cannot each read the old list and drop the other's entry. If the
+        // lock cannot be had (contended past the wait, or the driver errored)
+        // the write still happens — logout is best-effort and must never fail
+        // — and only that narrow lost-update race remains.
+        $lockKey = self::DENYLIST_LOCK_PREFIX . $userId;
+        $locked  = \BCC\Core\DB\AdvisoryLock::acquire($lockKey, self::DENYLIST_LOCK_WAIT);
+        if (!$locked) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] jwt denylist written without lock', ['user_id' => $userId]);
+        }
+
+        try {
+            // Re-read under the lock: this request's meta cache may predate a
+            // concurrent writer's update.
+            wp_cache_delete($userId, 'user_meta');
+
+            $now  = time();
+            $list = self::denylist($userId);
+            foreach ($list as $hash => $until) {
+                if ($until < $now) {
+                    unset($list[$hash]);
+                }
+            }
+            $list[self::denylistHash($jti)] = $now + self::denylistTtl((int) ($payload['exp'] ?? 0));
+            if (count($list) > self::DENYLIST_MAX_ENTRIES) {
+                asort($list);
+                $list = array_slice($list, -self::DENYLIST_MAX_ENTRIES, null, true);
+            }
+            update_user_meta($userId, self::DENYLIST_META_KEY, $list);
+        } finally {
+            if ($locked) {
+                \BCC\Core\DB\AdvisoryLock::release($lockKey);
+            }
+        }
+    }
+
+    private const DENYLIST_LOCK_PREFIX = 'bcc_jwt_deny_';
+
+    /** Seconds logOut() waits for the per-user denylist lock. */
+    private const DENYLIST_LOCK_WAIT = 2;
+
+    /** Seconds a logged-out jti must stay denylisted. Always ≥ 1. */
+    public static function denylistTtl(int $exp): int
+    {
+        return max(1, $exp - time() + self::SKEW_SECONDS + self::REFRESH_GRACE_SECONDS);
+    }
+
+    private static function isLoggedOut(int $userId, string $jti): bool
+    {
+        $until = self::denylist($userId)[self::denylistHash($jti)] ?? null;
+        return $until !== null && $until >= time();
+    }
+
+    /** @return array<string, int> */
+    private static function denylist(int $userId): array
+    {
+        $raw = get_user_meta($userId, self::DENYLIST_META_KEY, true);
+        if (!is_array($raw)) {
+            return [];
+        }
+        $out = [];
+        foreach ($raw as $hash => $until) {
+            $out[(string) $hash] = (int) $until;
+        }
+        return $out;
+    }
+
+    private static function denylistHash(string $jti): string
+    {
+        return substr(hash('sha256', $jti), 0, 40);
     }
 
     /**

@@ -77,14 +77,19 @@ if (!defined('ABSPATH')) {
 final class AnnouncementViewerStanding
 {
     /**
-     * The four keys `AnnouncementCapabilityResolver::forRow()` reads.
+     * The five keys `AnnouncementCapabilityResolver::forRow()` reads.
      *
-     * ⚠ ALL FOUR ARE ALWAYS PRESENT. The resolver fails closed on an absent
+     * ⚠ ALL FIVE ARE ALWAYS PRESENT. The resolver fails closed on an absent
      * key, which is correct of it, but it means a partial array silently
      * denies — exactly the defect this class replaces. Returning a complete
      * array is the whole point, so there is no early return that omits keys.
      *
-     * @return array{authenticated: bool, suspended: bool, fraud_locked: bool, good_standing: bool}
+     * ⚠ `user_id` is NOT a standing flag; it is here because this array is
+     * the resolver's only channel for viewer identity, and the report gate's
+     * self-report rung needs it to compare against the row's author. It is
+     * reported as `0` for an anonymous viewer, which matches no author.
+     *
+     * @return array{authenticated: bool, suspended: bool, fraud_locked: bool, good_standing: bool, user_id: int}
      */
     public static function forViewer(int $viewerId): array
     {
@@ -99,6 +104,7 @@ final class AnnouncementViewerStanding
                 'suspended'     => false,
                 'fraud_locked'  => false,
                 'good_standing' => false,
+                'user_id'       => 0,
             ];
         }
 
@@ -107,6 +113,7 @@ final class AnnouncementViewerStanding
             'suspended'     => self::isSuspended($viewerId),
             'fraud_locked'  => self::isFraudLocked($viewerId),
             'good_standing' => self::isInGoodStanding($viewerId),
+            'user_id'       => $viewerId,
         ];
     }
 

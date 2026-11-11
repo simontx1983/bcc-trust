@@ -176,24 +176,25 @@ final class IndependentFraudSignalsTest extends TestCase
         self::assertNotContains('medium_device_fraud', $r['triggers']);
     }
 
-    public function testSharedDeviceScoresFivePerAccount(): void
+    /**
+     * F-184 (user decision): a shared device is RECORDED (trigger, count and
+     * a zero-point signal admins can see) and scores nothing. It used to add
+     * min(30, accounts × 5).
+     */
+    public function testSharedDeviceIsRecordedButScoresNothing(): void
     {
-        W::$deviceData['shared_device'] = ['user_count' => 4];
+        foreach ([4, 50] as $accounts) {
+            W::$deviceData['shared_device'] = ['user_count' => $accounts];
 
-        $r = $this->analyse();
+            $r = $this->analyse();
 
-        self::assertSame(20, $r['score']);
-        self::assertContains('shared_device_4_users', $r['triggers']);
-    }
-
-    public function testSharedDeviceIsCappedAtThirty(): void
-    {
-        W::$deviceData['shared_device'] = ['user_count' => 50];
-
-        $r = $this->analyse();
-
-        self::assertSame(30, $r['score'], 'min(30, count * 5)');
-        self::assertContains('shared_device_50_users', $r['triggers']);
+            self::assertSame(0, $r['score'], "$accounts accounts on one device add no points");
+            self::assertContains('shared_device_' . $accounts . '_users', $r['triggers']);
+            self::assertSame($accounts, $r['details']['shared_device_count']);
+            $signal = array_values(array_filter($r['signals'], static fn (array $s): bool => $s['type'] === 'shared_device'))[0];
+            self::assertSame(0, $signal['points']);
+            self::assertFalse($signal['punitive']);
+        }
     }
 
     // ══ 3. behavioural signals ════════════════════════════════════════

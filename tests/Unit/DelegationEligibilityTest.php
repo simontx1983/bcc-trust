@@ -202,6 +202,55 @@ final class DelegationEligibilityTest extends TestCase
         self::assertSame([], $GLOBALS['__bcc_deleg_fixture']['fetch_calls']);
     }
 
+    // ── A FAILED wallet read is not an empty wallet list ─────────────
+
+    /**
+     * ⚠⚠ The regression this pair exists for.
+     *
+     * The service used to call the log-and-continue `getForUser()`, so a
+     * failed query returned [] and took the "no verified wallet on this
+     * chain — definite non-delegator" branch, yielding INELIGIBLE. The
+     * revoke sweep acts on INELIGIBLE by REMOVING the member, so a DB
+     * hiccup evicted delegators who never stopped delegating.
+     *
+     * `getForUserOrThrow()` existed for exactly this — its docblock records
+     * the same bug hitting the holder-group sweep (PR 7.14) — and the
+     * delegation path was never switched over.
+     *
+     * The failure direction must be UNKNOWN, which the sweep skips.
+     */
+    public function testAFailedWalletReadIsUnknownRatherThanIneligible(): void
+    {
+        $this->withWallets(['cosmos1real']);
+        $GLOBALS['__bcc_deleg_fixture']['wallet_read_fails'] = true;
+
+        $verdict = $this->verdictFor(self::config());
+
+        self::assertTrue($verdict->isUnknown(), 'a read that did not run must not decide anything');
+        self::assertFalse($verdict->isIneligible(), 'INELIGIBLE is what the sweep removes on');
+        self::assertFalse($verdict->isEligible());
+
+        // And it must not have guessed from a provider call either.
+        self::assertSame([], $GLOBALS['__bcc_deleg_fixture']['fetch_calls']);
+    }
+
+    /**
+     * The other half: a read that SUCCEEDS and genuinely finds no wallet on
+     * this chain is still INELIGIBLE. Without this control the fix above
+     * could have been "return UNKNOWN whenever the list is empty", which
+     * would stop the sweep ever removing a real non-delegator.
+     */
+    public function testAnEmptyWalletListFromASUCCESSFULReadIsStillIneligible(): void
+    {
+        $this->withWallets([]);
+        $GLOBALS['__bcc_deleg_fixture']['wallet_read_fails'] = false;
+
+        $verdict = $this->verdictFor(self::config());
+
+        self::assertTrue($verdict->isIneligible());
+        self::assertFalse($verdict->isUnknown());
+    }
+
     public function testNonCosmosChainIsUnknownAndNeverFetches(): void
     {
         // Fail closed on an unsupported chain — never a fake "ineligible"

@@ -23,12 +23,14 @@ namespace BCC\Trust\Core\REST\Auth;
 
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Services\AccountRecoveryService;
 use BCC\Trust\Core\Services\AuthMailer;
 use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Services\UserViewService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\FrontendRedirect;
 use BCC\Trust\Core\Support\JwtToken;
+use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Response;
 
 if (!defined('ABSPATH')) {
@@ -87,7 +89,7 @@ final class AuthSupport
     public const LOGIN_ACCOUNT_RATE_WINDOW = 900;
     /** Anon-IP-keyed throttle for the public wallet-nonce route. Same budget as the authed nonce. */
     public const WALLET_NONCE_RATE_LIMIT = 10;
-    /** Anon-IP-keyed throttle for wallet-login. Sibling of /auth/login. */
+    /** Per-WALLET (chain + address) throttle for wallet-login, per minute (F-123; was per IP). */
     public const WALLET_LOGIN_RATE_LIMIT = 5;
     /** Anon-IP-keyed throttle for wallet-signup. Sibling of /auth/signup. */
     public const WALLET_SIGNUP_RATE_LIMIT = 5;
@@ -132,8 +134,54 @@ final class AuthSupport
     public const TWO_FA_OTP_TTL = 300;
     /** 2FA challenge-token transient TTL: 10 minutes. */
     public const TWO_FA_CHALLENGE_TTL = 600;
-    /** Anon-IP-keyed (per-minute) throttle for /auth/oauth. */
+
+    /**
+     * Wrong 2FA codes allowed per (user, challenge) before the OTP and the
+     * challenge are burned and the user must sign in again (F-124). The
+     * per-IP TWO_FA_VERIFY_RATE_LIMIT alone did not bound an attacker who
+     * spreads guesses across addresses.
+     */
+    public const TWO_FA_MAX_FAILURES = 5;
+    /** Per-PROVIDER-IDENTITY (provider + provider_id) throttle for /auth/oauth, per minute (F-131; was per IP). */
     public const OAUTH_LOGIN_RATE_LIMIT = 10;
+
+    /**
+     * Route-wide ceilings (per 60 s) for the two sign-in routes the frontend
+     * calls SERVER-SIDE (F-123 / F-131). Their per-identity buckets replace
+     * the per-IP ones: every call arrives from the BFF's single egress IP, so
+     * a per-IP bucket was one shared bucket — anyone could lock every user
+     * out. The ceiling bounds total load; it is set well above peak sign-ins.
+     */
+    public const WALLET_LOGIN_GLOBAL_LIMIT = 300;
+    public const OAUTH_LOGIN_GLOBAL_LIMIT  = 300;
+
+    /**
+     * Throttle a sign-in attempt per IDENTITY plus a route-wide ceiling, both
+     * with EXPLICIT bucket keys (Throttle otherwise keys an anonymous caller
+     * by action + client IP — the shared-BFF-IP problem this replaces).
+     *
+     * $identity is hashed, so the bucket key never carries the raw wallet
+     * address or provider id. Returns false (→ 429) when either bucket is
+     * exhausted.
+     */
+    public static function allowIdentityAttempt(string $action, string $identity, int $perIdentity, int $global): bool
+    {
+        if (!\BCC\Core\Security\Throttle::allow($action . '_global', $global, 60, $action . '_global')) {
+            // The route-wide ceiling tripping means EVERY identity is now
+            // refused — a flood, or the ceiling set too low for real traffic.
+            // Count it so it is visible, never silent.
+            if (class_exists(\BCC\Core\Observability\DegradationMetrics::class)) {
+                \BCC\Core\Observability\DegradationMetrics::record('auth_throttle', $action . '_ceiling');
+            }
+            return false;
+        }
+        return \BCC\Core\Security\Throttle::allow(
+            $action,
+            $perIdentity,
+            60,
+            $action . ':' . substr(hash('sha256', $identity), 0, 32)
+        );
+    }
     /** Anon-IP-keyed (per-minute) throttle for /auth/oauth-complete. */
     public const OAUTH_COMPLETE_RATE_LIMIT = 5;
     /** OAuth provider-token transient TTL: 15 minutes. */
@@ -151,6 +199,14 @@ final class AuthSupport
 
     /** OTP transient TTL: 15 minutes. */
     public const OTP_TTL = 900;
+
+    /**
+     * Wrong email-verification codes allowed per (user, current code) before
+     * that code is burned (F-48). A correct code signs the caller in, so the
+     * per-IP VERIFY_EMAIL_RATE_LIMIT alone did not bound an attacker who
+     * spreads guesses across addresses. Mirrors TWO_FA_MAX_FAILURES (F-124).
+     */
+    public const VERIFY_EMAIL_MAX_FAILURES = 5;
     /** Verify-token transient TTL: 24 hours. */
     public const TOKEN_TTL = 86400;
 
@@ -262,6 +318,16 @@ final class AuthSupport
         wp_set_current_user($userId);
         wp_set_auth_cookie($userId, true);
 
+        // Email ownership just changed hands from "unproven" to "proven".
+        // Revoke every Bearer token minted before this point: if someone
+        // else created the account with this address (the pre-hijack case),
+        // their sessions must not survive the inbox owner's verification.
+        // Every account reaching here had a TYPED address (password, X,
+        // wallet, or a legacy account via resend) — provider-verified
+        // signups never do — so this runs on every verification.
+        // Revoke FIRST, then mint: the token below carries the bumped
+        // version and is the verifier's working session.
+        JwtToken::revokeAllForUser($userId);
         $token = JwtToken::encode($userId, $handle);
 
         Logger::audit('email_verified', [
@@ -287,10 +353,37 @@ final class AuthSupport
             'expires_in'       => self::JWT_TTL_SECONDS,
             'token_type'       => 'Bearer',
             'in_good_standing' => self::resolveInGoodStanding($userId),
+            // How many wallets are linked to the account the caller just
+            // proved the email of. > 0 tells the frontend to show "this
+            // account has a wallet linked — is it yours?" (it lists them via
+            // the owner-only GET /wallets with the fresh token above, and
+            // removes one via DELETE /wallets/{id}). A count only — no wallet
+            // detail rides an auth response (wallet-privacy policy).
+            'linked_wallet_count' => self::linkedWalletCount($userId),
         ]);
         $response->header('Cache-Control', 'no-store');
 
         return $response;
+    }
+
+    /**
+     * Number of wallet links on the account, for the post-verification
+     * "is this wallet yours?" prompt. Reads through the fail-CLOSED
+     * repository path; if the read does not run, logs and returns 0 so the
+     * verification itself still completes (the prompt is advisory — the
+     * owner can always review wallets in Settings).
+     */
+    private static function linkedWalletCount(int $userId): int
+    {
+        try {
+            return count(WalletRepository::getForUserOrThrow($userId));
+        } catch (\Throwable $e) {
+            Logger::warning('[bcc-trust] verify-email: linked wallet count unavailable', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return 0;
+        }
     }
 
     /**
@@ -338,6 +431,119 @@ final class AuthSupport
     public static function storeVerifyToken(string $token, int $userId): void
     {
         set_transient('bcc_vt_' . $token, (string) $userId, self::TOKEN_TTL);
+    }
+
+    /**
+     * Start (or restart) email verification for $userId at $email.
+     *
+     * Generates a fresh OTP (overwriting any previous one, so only the newest
+     * mail's code works) and a single-use verify token, stores both, and
+     * mails the standard verification email with a one-shot link to
+     * /verify-email. The user completes it via POST /auth/verify-email
+     * (EmailVerificationController), whose finalizeVerification() is the
+     * ONLY place that sets META_EMAIL_VERIFIED = '1' for user_email.
+     *
+     * Does NOT touch META_EMAIL_VERIFIED — callers set '0' themselves where
+     * the account is pending. Best-effort: AuthMailer never throws, and a
+     * mail failure records a DegradationMetric without rolling anything back
+     * (the user can resend via /auth/resend-verification).
+     *
+     * Shared by password signup, X signup (oauth-complete), wallet signup and
+     * resendVerification — one sequence, so the paths cannot drift.
+     */
+    public static function beginEmailVerification(int $userId, string $email): void
+    {
+        $otpCode     = self::generateOtp();
+        $verifyToken = self::generateVerifyToken();
+        self::storeOtpForUser($userId, $otpCode);
+        self::storeVerifyToken($verifyToken, $userId);
+
+        $verifyPath = '/verify-email?email=' . rawurlencode($email) . '&token=' . rawurlencode($verifyToken);
+        AuthMailer::sendVerificationEmail(
+            $userId,
+            $email,
+            $otpCode,
+            FrontendRedirect::defaultReturn($verifyPath)
+        );
+    }
+
+    /**
+     * Email state for a freshly created wallet-signup account.
+     *
+     * Sets META_EMAIL_VERIFIED = '0' — a wallet signature proves control of
+     * the wallet, not of the inbox. A caller-supplied (real) address gets the
+     * standard verification email, so its owner can prove it; a wallet
+     * placeholder (`wallet-…@noreply.bcc.local`, no inbox) gets no mail and
+     * stays '0'. Wallet users sign in with their wallet, so '0' gates nothing
+     * for them except OAuth link-by-email (mayLinkOauthByEmail).
+     */
+    public static function startWalletSignupEmailVerification(int $userId, string $email): void
+    {
+        update_user_meta($userId, self::META_EMAIL_VERIFIED, '0');
+
+        if ($email === '' || AccountRecoveryService::isPlaceholderEmail($email)) {
+            return;
+        }
+
+        self::beginEmailVerification($userId, $email);
+    }
+
+    /**
+     * Whether an OAuth sign-in may be linked into an existing account by
+     * EMAIL match (oauthLogin's fallback after the provider-id lookup).
+     *
+     * Only an account whose user_email ownership was proven — exactly '1',
+     * set by finalizeVerification() after an OTP/link verify, or by a
+     * provider-verified signup — may be linked. Fail closed on '0'
+     * (pending), '' (legacy, never verified) and anything else: an email
+     * match against an unproven address proves nothing about identity, and
+     * linking would let whoever typed a victim's address first receive the
+     * victim's later sign-in (pre-account-takeover).
+     */
+    public static function mayLinkOauthByEmail(string $emailVerifiedFlag): bool
+    {
+        return $emailVerifiedFlag === '1';
+    }
+
+    /**
+     * Whether an email forwarded by the OAuth bridge counts as verified BY
+     * THE PROVIDER — the only case in which it may (a) be email-matched to an
+     * existing account and (b) start a new account at '1'.
+     *
+     * Requires the signed bridge payload to say so explicitly
+     * (`email_verified` is the JSON boolean `true` — not "1", not 1, not
+     * "true") for a provider whose verification we trust (Google), and a
+     * well-formed address. Everything else fails closed: an email's mere
+     * presence proves nothing, since a provider can return an unverified one.
+     *
+     * @param mixed $emailVerifiedClaim the bridge's `email_verified` value
+     */
+    public static function isProviderVerifiedEmail(string $provider, string $email, $emailVerifiedClaim): bool
+    {
+        return $provider === 'google'
+            && $emailVerifiedClaim === true
+            && $email !== ''
+            && is_email($email) !== false;
+    }
+
+    /**
+     * Opaque identity of the user's CURRENT email-verification code, or null
+     * when none is pending. A hash of the stored HMAC — never the code — so a
+     * per-code counter keyed on it starts fresh whenever a new code is sent.
+     */
+    public static function emailOtpIdentity(int $userId): ?string
+    {
+        $stored = get_transient('bcc_otp_' . (string) $userId);
+        if ($stored === false || !is_string($stored) || $stored === '') {
+            return null;
+        }
+        return substr(hash('sha256', $stored), 0, 32);
+    }
+
+    /** Burn the user's pending email-verification code (the emailed link stays valid). */
+    public static function burnEmailOtp(int $userId): void
+    {
+        delete_transient('bcc_otp_' . (string) $userId);
     }
 
     /**
@@ -487,15 +693,28 @@ final class AuthSupport
 
     // ── 2FA OTP / challenge-token helpers ─────────────────────────────
 
-    public static function store2faOtp(int $userId, string $otpCode): void
+    /**
+     * Transient-key fragment for a challenge token: a hash, so the raw token
+     * (a bearer secret for the 2FA step) never appears in an option name.
+     */
+    public static function twoFaChallengeKey(string $challengeToken): string
     {
-        $hash = hash_hmac('sha256', $otpCode, (string) wp_salt('auth'));
-        set_transient('bcc_2fa_otp_' . (string) $userId, $hash, self::TWO_FA_OTP_TTL);
+        return substr(hash('sha256', $challengeToken), 0, 40);
     }
 
-    public static function consume2faOtp(int $userId, string $code): bool
+    /**
+     * Store the OTP for ONE challenge (F-124). Bound to the challenge, not
+     * the user: a challenge can only ever guess — and burn — its own code.
+     */
+    public static function store2faOtp(string $challengeToken, string $otpCode): void
     {
-        $key    = 'bcc_2fa_otp_' . (string) $userId;
+        $hash = hash_hmac('sha256', $otpCode, (string) wp_salt('auth'));
+        set_transient('bcc_2fa_otp_' . self::twoFaChallengeKey($challengeToken), $hash, self::TWO_FA_OTP_TTL);
+    }
+
+    public static function consume2faOtp(string $challengeToken, string $code): bool
+    {
+        $key    = 'bcc_2fa_otp_' . self::twoFaChallengeKey($challengeToken);
         $stored = get_transient($key);
         if ($stored === false || !is_string($stored) || $stored === '') {
             return false;
@@ -508,12 +727,41 @@ final class AuthSupport
         return true;
     }
 
-    public static function store2faChallenge(string $token, int $userId): void
+    /**
+     * Destroy a challenge's pending 2FA OTP (attempt cap reached — the code
+     * can no longer be guessed; the user must sign in again for a new one).
+     */
+    public static function burn2faOtp(string $challengeToken): void
     {
-        set_transient('bcc_2fa_ct_' . $token, (string) $userId, self::TWO_FA_CHALLENGE_TTL);
+        delete_transient('bcc_2fa_otp_' . self::twoFaChallengeKey($challengeToken));
     }
 
-    /** Validate a challenge token without consuming it. Returns userId or null. */
+    /**
+     * Register $token as the user's ONE live 2FA challenge (F-124).
+     *
+     * A per-user pointer names the current challenge; peek2faChallenge()
+     * honours only that one, so a new login makes every earlier challenge
+     * for the user unusable (for verify AND resend) and its OTP is deleted.
+     * Without this, minting N challenges (each needs the password) would buy
+     * N × TWO_FA_MAX_FAILURES guesses at a valid code. Consequence: a second
+     * concurrent login (another device) cancels the first's pending 2FA.
+     */
+    public static function store2faChallenge(string $token, int $userId): void
+    {
+        $pointerKey = 'bcc_2fa_current_' . (string) $userId;
+        $previous   = get_transient($pointerKey);
+        if (is_string($previous) && $previous !== '') {
+            delete_transient('bcc_2fa_otp_' . $previous);
+        }
+        set_transient('bcc_2fa_ct_' . $token, (string) $userId, self::TWO_FA_CHALLENGE_TTL);
+        set_transient($pointerKey, self::twoFaChallengeKey($token), self::TWO_FA_CHALLENGE_TTL);
+    }
+
+    /**
+     * Validate a challenge token without consuming it. Returns userId, or null
+     * when the token is unknown/expired OR has been superseded by a newer
+     * login for the same user (only the current challenge is live).
+     */
     public static function peek2faChallenge(string $token): ?int
     {
         if ($token === '') {
@@ -524,7 +772,14 @@ final class AuthSupport
             return null;
         }
         $id = (int) $stored;
-        return $id > 0 ? $id : null;
+        if ($id <= 0) {
+            return null;
+        }
+        $current = get_transient('bcc_2fa_current_' . (string) $id);
+        if (!is_string($current) || !hash_equals($current, self::twoFaChallengeKey($token))) {
+            return null;
+        }
+        return $id;
     }
 
     /** Delete the challenge token transient (call after successful OTP verify). */

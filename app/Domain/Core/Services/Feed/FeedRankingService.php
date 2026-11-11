@@ -38,6 +38,7 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Services\GroupContextResolver;
+use BCC\Trust\Core\Support\RestrictedGroups;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -71,6 +72,15 @@ final class FeedRankingService
      */
     public const HOT_WARM_LIMIT = 20;
 
+    /**
+     * Candidate-batch size for the exact mutual-block probe.
+     *
+     * Well under `getMutuallyBlockedSetOrUnknown()`'s own candidate cap, so
+     * that cap can never silently truncate this check — see
+     * {@see dropMutuallyBlockedAuthors()}.
+     */
+    private const BLOCK_PROBE_CHUNK = 100;
+
     public function __construct(
         private readonly ActivityFeedService $activityFeed,
         private readonly ReputationRepository $reputationRepo,
@@ -99,7 +109,46 @@ final class FeedRankingService
      *
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
-    public function getHotFeed(?string $cursor = null, int $limit = self::HOT_WARM_LIMIT): array
+    public function getHotFeed(
+        ?string $cursor = null,
+        int $limit = self::HOT_WARM_LIMIT,
+        int $viewerId = 0
+    ): array {
+        $payload = $this->hotFeedPayload($cursor, $limit);
+
+        // ⚠⚠ PER-VIEWER FILTER, APPLIED AFTER THE SHARED CACHE AND NEVER
+        // WRITTEN BACK INTO IT. The payload above is built with the
+        // ANONYMOUS posture (viewer 0) and cached for everyone, which is
+        // what makes /feed/hot cheap and publicly cacheable. §K1 mutual
+        // invisibility still has to hold for a signed-in reader, so the
+        // block filter runs here, on this request's own copy.
+        //
+        // ⚠ The cache write lives inside hotFeedPayload(), so it is
+        // STRUCTURALLY impossible for a filtered, viewer-specific payload to
+        // reach the shared cache — rather than merely being careful about
+        // the order of two statements. One viewer's filtered feed being
+        // served to everyone else would be a far worse bug than the one
+        // this fixes, and it is the reason the split exists.
+        //
+        // ⚠ `$viewerId` 0 (anonymous, and the cron warm path) short-circuits
+        // inside the filter, so logged-out behaviour is byte-identical.
+        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+
+        return $payload;
+    }
+
+    /**
+     * The shared, anonymous hot-feed payload — exactly the former
+     * getHotFeed body, cache and all.
+     *
+     * ⚠ VIEWER-INDEPENDENT BY CONSTRUCTION, and it must stay that way: its
+     * result is stored in a cache shared by every reader, including
+     * logged-out ones, and is warmed by cron under
+     * {@see warmHotFeed()}. Nothing viewer-specific may enter here.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    private function hotFeedPayload(?string $cursor, int $limit): array
     {
         if ($cursor !== null) {
             return $this->buildHotFeed($cursor, $limit);
@@ -114,6 +163,7 @@ final class FeedRankingService
 
         $payload = $this->buildHotFeed(null, $limit);
         wp_cache_set($key, $payload, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
+
         return $payload;
     }
 
@@ -136,13 +186,32 @@ final class FeedRankingService
      */
     private function buildHotFeed(?string $cursor, int $limit): array
     {
-        $excluded       = $this->reputationRepo->getCautionAndRiskyUserIds();
-        $hidden         = $this->hiddenRepo->getAllHiddenIds();
-        // Anon viewer (id=0) → exclude every non-open group. Restricted-
-        // group resolution happens BEFORE the underlying SQL builds the
-        // exclude IN clause, so empty list short-circuits the LEFT JOIN.
-        $excludedGroups = self::resolveRestrictedGroupIds(0);
+        $excluded = $this->reputationRepo->getCautionAndRiskyUserIds();
+        $hidden   = $this->hiddenRepo->getAllHiddenIds();
 
+        // ⚠ NO RESTRICTED-GROUP LIST IS COMPUTED HERE, DELIBERATELY.
+        //
+        // This used to call `resolveRestrictedGroupIds(0)` and pass the
+        // result as `$excludedGroupIds`. That parameter is a DOCUMENTED
+        // NO-OP in bcc-core — an exclusion passed there filters NOTHING
+        // (see the `@param $excludedGroupIds` entry on
+        // PeepSoActivityRepository::getActivities, and the "live
+        // counterpart" note on `$restrictedGroupIds`). So the call was
+        // dead work on every hot-feed rebuild, and worse, it read as
+        // though a group gate were being applied right here.
+        //
+        // The gate that ACTUALLY protects this read is the per-post
+        // `_bcc_post_visibility = 'public_all'` requirement, which
+        // getActivities applies on every global path where no
+        // `$groupGateMode` is passed — this one. A group-tagged post
+        // reaches the anonymous hot feed only when explicitly marked for
+        // global syndication, which is STRICTER than the
+        // "(non-open groups) - (viewer memberships)" subtraction the
+        // removed comment described: a post in an OPEN group is withheld
+        // too unless it carries `public_all`.
+        //
+        // Passing null makes that the single visible story. Nothing about
+        // what this feed returns changes.
         $payload = $this->activityFeed->getFeed(
             0,
             ActivityFeedService::SCOPE_FOR_YOU,
@@ -151,7 +220,7 @@ final class FeedRankingService
             $excluded === [] ? null : $excluded,
             $hidden === []   ? null : $hidden,
             null,
-            $excludedGroups === [] ? null : $excludedGroups
+            null
         );
 
         // viewerId=0 — anonymous; reaction hydration fills counts but
@@ -182,12 +251,18 @@ final class FeedRankingService
      *     (§O4.1 caution/risky shadow-limit) — IDENTICAL call, no merge.
      *   - same `$hidden` set: $this->hiddenRepo->getAllHiddenIds()
      *     (§K1-C moderation hide) — IDENTICAL call.
-     *   - same restricted-group exclusion computed with `self::resolveRestrictedGroupIds(0)`
-     *     — deliberately the ANONYMOUS posture (viewer id 0), exactly as
-     *     getHotFeed does. We do NOT subtract the real viewer's memberships
-     *     here: doing so would WIDEN the candidate set to include the viewer's
-     *     own gated-group posts, which the public hot feed never shows. The
-     *     tag feed's visible set is thus a strict subset of the hot feed's.
+     *   - same restricted-group posture: NEITHER method computes one, because
+     *     `$excludedGroupIds` is a documented NO-OP in bcc-core. Both used to
+     *     call `self::resolveRestrictedGroupIds(0)` and pass the result; both
+     *     now pass null. ⚠ The parity still holds and still matters — what
+     *     holds it is the `public_all` gate on the next bullet, NOT an
+     *     exclusion list. Neither method may start passing a REAL
+     *     `$restrictedGroupIds`/`$groupGateMode` without the other, or the
+     *     invariant breaks.
+     *   - neither passes the real viewer's memberships, which would WIDEN the
+     *     candidate set to the viewer's own gated-group posts — something the
+     *     public hot feed never shows. The tag feed's visible set is thus a
+     *     strict subset of the hot feed's.
      *   - same global-feed visibility gate: `onlyForGroupId = null` →
      *     PeepSoActivityRepository applies the `public_all` LEFT JOIN gate
      *     (group posts surface only when `_bcc_post_visibility = 'public_all'`;
@@ -215,10 +290,13 @@ final class FeedRankingService
             return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
         }
 
-        // Visibility gates — computed IDENTICALLY to getHotFeed (see docblock).
-        $excluded       = $this->reputationRepo->getCautionAndRiskyUserIds();
-        $hidden         = $this->hiddenRepo->getAllHiddenIds();
-        $excludedGroups = self::resolveRestrictedGroupIds(0);
+        // Visibility gates — computed IDENTICALLY to getHotFeed (see docblock),
+        // which now includes NOT computing a restricted-group list: the
+        // `$excludedGroupIds` parameter below is a no-op in bcc-core, so the
+        // `public_all` gate is what holds the hot-feed parity. Changing one of
+        // the two methods here without the other breaks the stated invariant.
+        $excluded = $this->reputationRepo->getCautionAndRiskyUserIds();
+        $hidden   = $this->hiddenRepo->getAllHiddenIds();
 
         $payload = $this->activityFeed->getFeed(
             $viewerId,
@@ -228,10 +306,23 @@ final class FeedRankingService
             $excluded === [] ? null : $excluded,
             $hidden === []   ? null : $hidden,
             null,
-            $excludedGroups === [] ? null : $excludedGroups,
+            null,
             null,
             $hashtag
         );
+
+        // ⚠⚠ F-54: THIS SURFACE HAD NO BLOCK FILTERING AT ALL, which is a
+        // §K1 gap rather than a cap problem. The docblock above says the
+        // gates are "computed IDENTICALLY to getHotFeed" — and that is how
+        // it happened: the hot feed is ANONYMOUS (`viewerId` 0, globally
+        // cached), so it has no block list to apply, and the tag feed was
+        // modelled on it while taking a real `$viewerId`.
+        //
+        // ⇒ That parity is deliberately broken here, because the two
+        // methods do not have the same inputs. The reputation and hidden
+        // gates stay identical; the viewer-specific one cannot, and could
+        // never have been shared with a globally cached anonymous feed.
+        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
@@ -278,6 +369,11 @@ final class FeedRankingService
             $excludedGroups === [] ? null : $excludedGroups
         );
 
+        // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
+        // `$excluded` list above is a cheap pre-filter and is NOT sufficient
+        // — see dropMutuallyBlockedAuthors().
+        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
     }
@@ -315,6 +411,13 @@ final class FeedRankingService
             $hidden === []   ? null : $hidden
         );
         if ($item === null) {
+            return null;
+        }
+
+        // ⚠ F-54: the same exact check, on a single row. This method's
+        // contract is already "404 rather than leak", so a blocked author
+        // here becomes a 404 exactly as an excluded one does.
+        if (self::dropMutuallyBlockedAuthors([$item], $viewerId) === []) {
             return null;
         }
 
@@ -362,6 +465,65 @@ final class FeedRankingService
             $hidden === []   ? null : $hidden,
             $excludedGroups === [] ? null : $excludedGroups
         );
+
+        // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
+        // `$excluded` list above is a cheap pre-filter and is NOT sufficient
+        // — see dropMutuallyBlockedAuthors().
+        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+
+        $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
+        return $payload;
+    }
+
+    /**
+     * Page stream — the posts written for one validator page. Backs
+     * `GET /bcc/v1/pages/{id}/feed`.
+     *
+     * Shares the author wall's hydration chain and its two user-level
+     * exclusion lists, but NOT its third: the author wall also passes
+     * `resolveRestrictedGroupIds($viewerId)` (the §4.7.x leak gate) and this
+     * path deliberately passes no group exclusion at all.
+     *
+     * ⚠ That is safe by construction, not by oversight, and the construction
+     * is what carries it: `PostsService::createStatus()` refuses a
+     * `target_page_id` together with a `group_id` (asserted by
+     * `PagePostsIntegrationTest::testPageAndGroupTogetherAreRefusedEvenForTheOperator`),
+     * and `stampPageTarget()` is the only writer of `PAGE_TARGET_META`. So a
+     * page-marked post always has `group_id = 0` and can never sit inside a
+     * closed, secret or NFT-gated group. If anything ever stamps that marker
+     * on a group post, this route — `permission_callback => '__return_true'` —
+     * has no second line of defence, so add the group exclusion before
+     * widening who may write the marker.
+     *
+     * The candidate set is keyed on the post marker alone, so a post keeps its
+     * place after its author stops being the page's operator. Confirming the id
+     * is a published validator page is the endpoint's job, before this runs.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    public function getActivityForPage(int $pageId, int $viewerId, ?string $cursor = null, int $limit = 20): array
+    {
+        $excluded = self::mergeExclusions(
+            $this->reputationRepo->getCautionAndRiskyUserIds(),
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
+        );
+
+        $hidden = $this->hiddenRepo->getAllHiddenIds();
+
+        $payload = $this->activityFeed->getActivityForPage(
+            $pageId,
+            $viewerId,
+            $cursor,
+            $limit,
+            $excluded === [] ? null : $excluded,
+            $hidden === []   ? null : $hidden
+        );
+
+        // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
+        // `$excluded` list above is a cheap pre-filter and is NOT sufficient
+        // — see dropMutuallyBlockedAuthors().
+        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
@@ -463,6 +625,11 @@ final class FeedRankingService
             $hallFeed === 'ranked' ? 'ranked' : 'main'
         );
 
+        // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
+        // `$excluded` list above is a cheap pre-filter and is NOT sufficient
+        // — see dropMutuallyBlockedAuthors().
+        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
     }
@@ -513,18 +680,144 @@ final class FeedRankingService
      */
     private static function resolveRestrictedGroupIds(int $viewerId): array
     {
-        $nonOpen = PeepSoGroupRepository::getNonOpenGroupIds();
-        if ($nonOpen === []) {
-            return [];
+        // Extracted to Support\RestrictedGroups so the profile Blog tab can
+        // ask the same question (§11 — one definition of "restricted", not
+        // two). This method stays as the feed's call-site name; the five
+        // call sites above are untouched. forViewer() is the behaviour that
+        // used to live here, byte for byte, including passing the
+        // repository's default 500 bound explicitly.
+        return RestrictedGroups::forViewer($viewerId);
+    }
+
+    /**
+     * Drop items whose author is mutually blocked with the viewer — the
+     * EXACT check, over this page's authors only.
+     *
+     * ⚠⚠ WHY THE PRE-FILTER IS NOT ENOUGH (F-54). Every caller above
+     * merges `getBlockedIds()` and `getBlockerIds()` into an `$excluded`
+     * list that the SQL narrows on. Both are `LIMIT 500` with NO ordering
+     * and NO completeness signal, so a viewer who blocks more than 500
+     * people simply does not get the 501st excluded, and sees their posts.
+     * There is not even a way to tell "exactly 500" from "500 and more".
+     *
+     * ⚠ AND THEY FAIL OPEN ON A DB ERROR. `$wpdb->get_col()` never
+     * returns null; a failed query returns `[]`, which reads as "blocks
+     * nobody" — so an unreadable block table showed every blocked author.
+     *
+     * ⭐ THE CAP IS WHAT MOVES, AND THAT IS THE WHOLE FIX. Asking "which
+     * of THESE authors is blocked" bounds the question by PAGE SIZE (at most
+     * a few tens) instead of by how many people the viewer blocks
+     * (unbounded, and 500+ is an ordinary number for a heavy blocker). The
+     * pre-filter stays, as a cheap way to keep obvious noise out of the
+     * query; correctness now comes from here.
+     *
+     * ⚠ FAIL CLOSED. `null` means the block read FAILED, not that nobody
+     * is blocked, so the page is dropped rather than risk showing a blocked
+     * author. Same rule and same reasoning as
+     * {@see \BCC\Trust\Core\Services\MessagesService}'s inbox and thread
+     * previews, which withhold every preview on an unreadable block table.
+     * An empty feed on a DB fault is ugly, safe, and self-correcting on the
+     * next request — and in practice the feed query itself is unlikely to
+     * have survived whatever broke this one.
+     *
+     * ⚠ CHUNKED, deliberately. `getMutuallyBlockedSetOrUnknown()` caps its
+     * own candidate list, and the defect being fixed here IS a silent cap,
+     * so this must not depend on another one. A page cannot currently reach
+     * one chunk (REST clamps `limit` to 50), so the loop runs once; what it
+     * buys is that raising a page limit later cannot quietly re-open this.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private static function dropMutuallyBlockedAuthors(array $items, int $viewerId): array
+    {
+        if ($viewerId <= 0 || $items === []) {
+            return $items;
         }
-        if ($viewerId <= 0) {
-            return $nonOpen;
+
+        $authorIds = self::authorIdsOf($items);
+        if ($authorIds === []) {
+            return $items;
         }
-        $myGroups = PeepSoGroupRepository::getUserMemberGroupIds($viewerId, 1000);
-        if ($myGroups === []) {
-            return $nonOpen;
+
+        $blocked = [];
+        foreach (array_chunk($authorIds, self::BLOCK_PROBE_CHUNK) as $chunk) {
+            $set = PeepSoBlockRepository::getMutuallyBlockedSetOrUnknown($viewerId, $chunk);
+            if ($set === null) {
+                return [];
+            }
+            foreach ($set as $id => $_) {
+                $blocked[(int) $id] = true;
+            }
         }
-        return array_values(array_diff($nonOpen, $myGroups));
+
+        if ($blocked === []) {
+            return $items;
+        }
+
+        $kept = [];
+        foreach ($items as $item) {
+            $uid = self::authorIdOf($item);
+            if ($uid > 0 && isset($blocked[$uid])) {
+                continue;
+            }
+            $kept[] = $item;
+        }
+
+        return $kept;
+    }
+
+    /**
+     * Distinct author ids on a page.
+     *
+     * Same extraction as {@see FeedHydrationPipeline}'s batch resolvers,
+     * which is where the shape is established: the author block is
+     * pre-hydrated by bcc-core's `ActivityFeedService` (`'id' => (int)
+     * $u->ID`) and so is an int by the time it reaches either of us.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<int>
+     */
+    private static function authorIdsOf(array $items): array
+    {
+        $ids = [];
+        foreach ($items as $item) {
+            $uid = self::authorIdOf($item);
+            if ($uid > 0) {
+                $ids[$uid] = true;
+            }
+        }
+
+        return array_keys($ids);
+    }
+
+    /** @param array<string, mixed> $item */
+    private static function authorIdOf(array $item): int
+    {
+        $author = is_array($item['author'] ?? null) ? $item['author'] : [];
+        $id     = $author['id'] ?? null;
+
+        // ⚠⚠ A NUMERIC STRING COUNTS, AND THIS IS A FAIL-OPEN GUARD RATHER
+        // THAN TOLERANCE FOR ITS OWN SAKE. An `is_int`-only test returns 0
+        // for `"42"`, every author id becomes 0, and the block filter then
+        // silently matches nobody — a viewer would see blocked authors with
+        // no error anywhere.
+        //
+        // ⚠ The hot-feed path makes that reachable: those items come back
+        // through `wp_cache_get()`, so their types survive whatever the
+        // object-cache backend does to them on the way out. Serialising
+        // backends preserve ints; a backend that round-trips through JSON or
+        // a text column does not, and this class is in no position to know
+        // which is installed.
+        //
+        // ⚠ `ctype_digit` rather than `is_numeric`: ids are unsigned
+        // integers, and `is_numeric` would also accept `"1e3"`, `" 7"` and
+        // `"-1"`. The cast must mean what the string says.
+        if (is_int($id)) {
+            return $id;
+        }
+
+        return is_string($id) && $id !== '' && ctype_digit($id) ? (int) $id : 0;
     }
 
     /**

@@ -87,6 +87,16 @@ function bcc_trust_render_user_list() {
         $n = intval( $_GET['bulk'] );
         echo '<div class="notice notice-success is-dismissible"><p>Bulk action applied to ' . $n . ' user(s).</p></div>';
     }
+    // F-114: a bulk suspend skips the acting admin, administrators and
+    // already-suspended users instead of suspending (again). Say who.
+    $bulk_skipped = isset( $_GET['bulk_skipped'] ) ? intval( $_GET['bulk_skipped'] ) : 0;
+    if ( $bulk_skipped > 0 ) {
+        $bulk_skip_lines = \BCC\Trust\Core\Plugin::instance()->moderationService()->takeSuspendSkips();
+        echo '<div class="notice notice-warning is-dismissible"><p>'
+            . esc_html( sprintf( 'Skipped %d user(s): ', $bulk_skipped ) )
+            . esc_html( $bulk_skip_lines !== [] ? implode( '; ', $bulk_skip_lines ) . '.' : 'see the audit log for who and why.' )
+            . '</p></div>';
+    }
     ?>
 
     <div style="margin-top:0;">
@@ -167,18 +177,18 @@ function bcc_trust_render_user_list() {
 
                             <td>
                                 <?php if ( $u->is_suspended || $u->active_suspensions > 0 ): ?>
-                                    <span style="background:#f44336;color:#fff;padding:3px 8px;border-radius:3px;">Suspended</span>
+                                    <span style="background:var(--bcc-danger);color:#fff;padding:3px 8px;border-radius:3px;">Suspended</span>
                                 <?php else: ?>
-                                    <span style="background:#4caf50;color:#fff;padding:3px 8px;border-radius:3px;">Active</span>
+                                    <span style="background:var(--bcc-success);color:#fff;padding:3px 8px;border-radius:3px;">Active</span>
                                 <?php endif; ?>
                                 <?php if ( $u->is_verified ): ?>
-                                    <br><small style="color:#4caf50;">✓ Verified</small>
+                                    <br><small style="color:var(--bcc-success);">✓ Verified</small>
                                 <?php endif; ?>
                             </td>
 
                             <td>
                                 <div style="display:flex;align-items:center;gap:6px;">
-                                    <div style="width:60px;height:8px;background:#eee;border-radius:4px;overflow:hidden;">
+                                    <div style="width:60px;height:8px;background:var(--bcc-bg-code);border-radius:4px;overflow:hidden;">
                                         <div style="width:<?php echo esc_attr(intval($u->fraud_score)); ?>%;height:100%;background:<?php echo esc_attr( \BCC\Trust\Core\Support\Formatting::scoreColor( $u->fraud_score ) ); ?>;"></div>
                                     </div>
                                     <?php echo intval($u->fraud_score); ?>

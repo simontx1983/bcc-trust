@@ -16,9 +16,8 @@
 
 namespace BCC\Trust\Core\REST\Auth;
 
-use BCC\Trust\Core\Services\AuthMailer;
+use BCC\Trust\Core\Services\AccountRecoveryService;
 use BCC\Trust\Core\Support\ApiResponse;
-use BCC\Trust\Core\Support\FrontendRedirect;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -158,7 +157,41 @@ final class EmailVerificationController
             return ApiResponse::error('bcc_already_verified', 'This email is already verified.', 409);
         }
 
+        // Count EVERY attempt BEFORE comparing (L2) — see TwoFactorController:
+        // caps comparisons per (user, current code) at VERIFY_EMAIL_MAX_FAILURES
+        // even under concurrent guesses; an attempt beyond it burns the code
+        // without comparing. Same generic answer. Only while a code is pending.
+        $otpId = AuthSupport::emailOtpIdentity($userId);
+        if ($otpId !== null && !\BCC\Core\Security\Throttle::allow(
+            'verify_email_attempt',
+            AuthSupport::VERIFY_EMAIL_MAX_FAILURES,
+            AuthSupport::OTP_TTL,
+            'verify_email_attempt:' . $userId . ':' . $otpId
+        )) {
+            AuthSupport::burnEmailOtp($userId);
+            \BCC\Core\Log\Logger::audit('verify_email_attempts_exhausted', ['user_id' => $userId]);
+            return ApiResponse::error('bcc_invalid_otp', 'Invalid or expired code.', 400);
+        }
+
         if (!AuthSupport::consumeOtpForUser($userId, $code)) {
+            // Attempt cap (F-48), per (user, current code): a correct code
+            // signs the caller in, so guesses spread across IPs must be
+            // bounded per account. A Throttle bucket with an EXPLICIT key
+            // (never split by client IP) counts wrong codes over the code's
+            // lifetime; the MAX-th burns the code. Keyed on the code's
+            // identity, so a resend starts a fresh count. The emailed link
+            // (a separate, unguessable token) and resend keep working, and
+            // the answer stays the generic one — no new enumeration signal.
+            // A degraded limiter fails closed (burns).
+            if ($otpId !== null && !\BCC\Core\Security\Throttle::allow(
+                'verify_email_fail',
+                AuthSupport::VERIFY_EMAIL_MAX_FAILURES - 1,
+                AuthSupport::OTP_TTL,
+                'verify_email_fail:' . $userId . ':' . $otpId
+            )) {
+                AuthSupport::burnEmailOtp($userId);
+                \BCC\Core\Log\Logger::audit('verify_email_attempts_exhausted', ['user_id' => $userId]);
+            }
             return ApiResponse::error('bcc_invalid_otp', 'Invalid or expired code.', 400);
         }
 
@@ -171,7 +204,8 @@ final class EmailVerificationController
      * Always returns ok=true regardless of whether the email matches a
      * registered unverified account (anti-enumeration; mirrors forgotPassword).
      * Side effects fire only when a real account with _bcc_email_verified = '0'
-     * is found.
+     * (pending) or '' (legacy, never verified) is found, and its address is
+     * not a wallet placeholder.
      *
      * On match: invalidates the existing OTP transient (overwrite), generates
      * a fresh OTP + token, stores both, and dispatches a new email. Old
@@ -196,20 +230,20 @@ final class EmailVerificationController
             $userId        = (int) $user->ID;
             $emailVerified = (string) get_user_meta($userId, AuthSupport::META_EMAIL_VERIFIED, true);
 
-            // Only resend for accounts that are explicitly pending
-            // verification. Already-verified and legacy accounts are
-            // silently skipped — the anti-enumeration response hides which.
-            if ($emailVerified === '0') {
-                // Overwrite the existing OTP (if any) so the previous code
+            // Resend for accounts whose email is NOT yet proven: pending ('0')
+            // and legacy no-marker ('') accounts. A legacy account needs this
+            // path because OAuth sign-in only links by email into a '1'
+            // account — verifying here is how it gets there. Already-verified
+            // accounts and wallet placeholder addresses (an internal
+            // noreply.bcc.local alias, no inbox) are silently skipped; the
+            // anti-enumeration response hides which.
+            if (
+                ($emailVerified === '0' || $emailVerified === '')
+                && !AccountRecoveryService::isPlaceholderEmail($email)
+            ) {
+                // Overwrites the existing OTP (if any) so the previous code
                 // immediately stops working — only the new email is valid.
-                $otpCode     = AuthSupport::generateOtp();
-                $verifyToken = AuthSupport::generateVerifyToken();
-                AuthSupport::storeOtpForUser($userId, $otpCode);
-                AuthSupport::storeVerifyToken($verifyToken, $userId);
-
-                $verifyPath = '/verify-email?email=' . rawurlencode($email) . '&token=' . rawurlencode($verifyToken);
-                $verifyUrl  = FrontendRedirect::defaultReturn($verifyPath);
-                AuthMailer::sendVerificationEmail($userId, $email, $otpCode, $verifyUrl);
+                AuthSupport::beginEmailVerification($userId, $email);
             }
         }
 

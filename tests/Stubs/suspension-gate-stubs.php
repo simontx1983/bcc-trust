@@ -31,6 +31,21 @@ namespace BCC\Core\Security {
     }
 }
 
+namespace BCC\Trust\Core\Security {
+    // WatchingEndpoint::watch throttles through bcc-trust's own RateLimiter
+    // (DB-backed in production). Same fixture switch as Throttle above.
+    if (!class_exists(RateLimiter::class, false)) {
+        class RateLimiter
+        {
+            public static function allow(string $action, ?int $limit = null, ?int $window = null): bool
+            {
+                $GLOBALS['__bcc_susp_fixture']['throttle_calls'][] = [$action, (int) $limit, (int) $window];
+                return empty($GLOBALS['__bcc_susp_fixture']['throttled']);
+            }
+        }
+    }
+}
+
 namespace BCC\Core\Permissions {
     if (!class_exists(Permissions::class, false)) {
         class Permissions
@@ -39,6 +54,19 @@ namespace BCC\Core\Permissions {
             {
                 $GLOBALS['__bcc_susp_fixture']['bypass_args'][] = $allowAdminBypass;
                 return empty($GLOBALS['__bcc_susp_fixture']['suspended']);
+            }
+
+            /**
+             * Tri-state mirror of bcc-core Permissions::suspensionState() (#84):
+             * TRUE suspended, FALSE not, NULL unknown. Ids listed in
+             * $GLOBALS['__bcc_suspension_unknown'] read as UNKNOWN.
+             */
+            public static function suspensionState(?int $userId = null, bool $allowAdminBypass = true): ?bool
+            {
+                if (in_array($userId, $GLOBALS['__bcc_suspension_unknown'] ?? [], true)) {
+                    return null;
+                }
+                return !self::is_not_suspended((int) $userId, $allowAdminBypass);
             }
         }
     }

@@ -120,7 +120,9 @@ final class CommentStokeEndpoint
             return ApiResponse::error('bcc_not_found', 'Comment not found.', 404);
         }
 
-        $gateError = GroupInteractionGate::checkPost($userId, (int) $meta->parent_post_id);
+        // Same message as the unknown-comment 404 above, so a comment in a
+        // secret group is indistinguishable from one that does not exist.
+        $gateError = GroupInteractionGate::checkPost($userId, (int) $meta->parent_post_id, 'Comment not found.');
         if ($gateError !== null) {
             return $gateError;
         }

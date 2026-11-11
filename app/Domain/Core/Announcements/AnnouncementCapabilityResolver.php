@@ -9,7 +9,8 @@
  *
  *   (a) the feature gate            `Card.announcements` — presence IS the gate
  *   (b) owner-level, per PAGE       `can_create` · `can_manage`
- *   (c) row-level, per ANNOUNCEMENT `can_edit` · `can_pin` · `can_archive`
+ *   (c) row-level, per ANNOUNCEMENT `can_edit` · `can_pin` · `can_archive` ·
+ *       `can_publish`
  *                                   `can_manage_comments` · `can_comment`
  *   (d) administrator, per ROUTE    `can_inspect_drafts` · `can_inspect_removed`
  *                                   `can_restore_comment`
@@ -134,6 +135,19 @@ final class AnnouncementCapabilityResolver
      */
     public const REASON_ARCHIVED          = 'announcement_archived';
     public const REASON_NOT_PUBLISHED     = 'announcement_not_published';
+
+    /**
+     * ⚠⚠ THE ONE NEW REASON CODE IN THIS CHANGE, and it is unavoidable: no
+     * existing code in §4.32.9 describes "this row is already live".
+     * `announcement_not_published` is its exact opposite and
+     * `announcement_archived` is a different, permanent condition.
+     *
+     * ⚠ It is added to the contract in the same batch, because §4.32.9's
+     * inventory is closed and a client meeting an unrecognised reason takes its
+     * own refusal path — an undocumented code would land as a disabled control
+     * with no copy. The frontend handoff names it explicitly for that reason.
+     */
+    public const REASON_ALREADY_PUBLISHED = 'announcement_already_published';
     public const REASON_UNAVAILABLE       = 'announcement_unavailable';
     public const REASON_COMMENTS_DISABLED = 'comments_disabled';
     public const REASON_AUTH_REQUIRED     = 'auth_required';
@@ -153,6 +167,26 @@ final class AnnouncementCapabilityResolver
      * (§4.32.11).
      */
     public const REASON_ALREADY_REPORTED  = 'already_reported';
+
+    /**
+     * The viewer wrote the thing they are asking to report.
+     *
+     * ⚠⚠ THIS CLOSES A DEAD CONTROL THAT WAS ALWAYS DEAD ON THE OWNER
+     * SURFACE. `AnnouncementRepository`'s owner reads bind
+     * `p.post_author = <resolved operator>`, so EVERY row an operator sees
+     * on the owner list or as owner-detail was authored by that operator —
+     * and `ContentReportService::fileReport()` refuses a self-report with
+     * `400 "You can't report your own post."` So before this rung,
+     * `can_report` was `allowed` on every row of the one surface where it
+     * could never succeed.
+     *
+     * ⚠ It is the ROUTE's rung, in the route's position: `fileReport()`
+     * checks suspension first, then validates, then resolves the target's
+     * author and compares. So this sits after `suspended` / `fraud_locked`
+     * and before `already_reported`, which is the throttle/duplicate rung
+     * the route reaches afterwards.
+     */
+    public const REASON_OWN_CONTENT       = 'own_content';
 
     /**
      * The one wire reason for every ownership refusal, whatever the
@@ -202,6 +236,11 @@ final class AnnouncementCapabilityResolver
         self::REASON_FRAUD_LOCKED,
         self::REASON_FEATURE_DISABLED,
         self::REASON_ALREADY_REPORTED,
+        // ⚠ Added with the reporting route (§4.32.4). A client that has no
+        // copy for it renders a DENIED capability, which hides the control —
+        // the correct outcome here, so an un-updated client degrades to the
+        // behaviour this rung exists to produce rather than to a wrong one.
+        self::REASON_OWN_CONTENT,
     ];
 
     /**
@@ -273,6 +312,8 @@ final class AnnouncementCapabilityResolver
      *   - `status`            one of the four §4.32.13 READ states
      *   - `is_archived`       bool
      *   - `comments_enabled`  bool
+     *   - `author_user_id`    int   (the self-report rung, and — F-147 — the
+     *                                 author-only rung of edit / pin / publish)
      *
      * `$viewer` is the viewer's standing, computed by the caller from the
      * existing services — this class performs no standing check:
@@ -280,6 +321,13 @@ final class AnnouncementCapabilityResolver
      *   - `suspended`      bool
      *   - `fraud_locked`   bool
      *   - `good_standing`  bool  (member standing for commenting)
+     *   - `user_id`        int   (for the report gate's self-report rung)
+     *
+     * ⚠ `author_user_id` and `user_id` are capability INPUTS and must never
+     * reach the wire: §4.32.2 forbids `post_author` on an announcement
+     * payload, and the whole point of the ownership-reason discipline is
+     * that a response never discloses who the operator is. The view service
+     * passes the author into this array and NOT into the view-model.
      *
      * Missing keys fail closed: an absent `authenticated` reads as not
      * authenticated, an absent `is_archived` reads as archived. A partial
@@ -291,7 +339,7 @@ final class AnnouncementCapabilityResolver
      * @param array<string, mixed> $viewer
      *
      * @return array{
-     *     can_edit: Entry, can_pin: Entry, can_archive: Entry,
+     *     can_edit: Entry, can_pin: Entry, can_archive: Entry, can_publish: Entry,
      *     can_manage_comments: Entry, can_comment: Entry, can_report: Entry
      * }
      */
@@ -305,14 +353,61 @@ final class AnnouncementCapabilityResolver
         $archived   = self::flag($row, 'is_archived', true);   // absent ⇒ archived
         $published  = self::status($row) === self::STATUS_PUBLISHED;
 
+        // ⚠⚠ F-147: EDIT, PIN AND PUBLISH ARE AUTHOR-ONLY; ARCHIVE IS NOT.
+        // After a claim hand-over the current operator sees the previous
+        // operator's notices on the detail read. Archive is open to them
+        // (AnnouncementWriteService::archive() falls back to the page's public
+        // row), but edit, pin and publish still resolve the row through the
+        // author-bound findForOwner() and answer 404 — so those three must
+        // not advertise a control the route refuses.
+        //
+        // ⚠ The author is a NARROWING input here, never a granting one
+        // (§4.32.2 forbids it as authority): $isAuthor can only be true when
+        // $isOperator already is. An absent / unreadable author fails closed.
+        $isAuthor = $isOperator && self::authoredByOperator($decision, $row);
+
         return [
-            'can_edit'            => self::ownerAction($isOperator, $archived, $featureEnabled),
-            'can_pin'             => self::pin($isOperator, $archived, $published, $featureEnabled),
-            'can_archive'         => self::ownerAction($isOperator, $archived, $featureEnabled),
+            'can_edit'            => self::ownerAction($isAuthor, $archived, $featureEnabled),
+            'can_pin'             => self::pin($isAuthor, $archived, $published, $featureEnabled),
+            // ⚠⚠ NARROWED WITH THE ROUTE, and it has to be. The archive route
+            // refuses any non-published row (§4.32.6), so leaving this as a
+            // plain owner action would hand a client a permitted capability for
+            // a request that answers 409 — a control that draws, clicks and
+            // fails. Every dead control found in this feature hid a second
+            // defect behind it, so the capability and the route move together.
+            //
+            // The ladder is `pin()`'s, reused rather than copied: both answer
+            // the same question — may this operator act on a PUBLISHED, live
+            // row — and both return `announcement_not_published` for the same
+            // condition, so a client renders them identically.
+            'can_archive'         => self::publishedOwnerAction(
+                $isOperator,
+                $archived,
+                $published,
+                $featureEnabled
+            ),
             // ⚠ STAYS TRUE ON AN ARCHIVED ROW. §4.32.7 keeps an archived
             // discussion visible and read-only while operator moderation
             // remains available — a closed discussion nobody can clean up
             // is worse than a closed discussion.
+            // ⚠⚠ `can_publish` IS NOT DERIVED FROM `can_edit`, and must never be.
+            // They diverge on the two states that matter most: a PUBLISHED row
+            // is editable and cannot be published again, and an ARCHIVED row is
+            // neither. A client inferring publication permission from `can_edit`
+            // would draw Publish on a live notice and get `409 Already
+            // published.` — and would be guessing at an authorization answer the
+            // server already knows.
+            //
+            // The rungs below are the publish ROUTE's own rungs, in its order.
+            // `AnnouncementWriteService::publish()` refuses, in sequence:
+            // a non-operator (403 via a FRESH authority resolution), a row that
+            // is not the operator's own (404), an archived row
+            // (409 "An archived announcement cannot be published."), and a row
+            // already published (409 "Already published."). Everything else —
+            // draft, scheduled, and blocked as the permitted recovery path —
+            // proceeds. This capability answers the same question the route
+            // answers, so the two cannot disagree about a row.
+            'can_publish'         => self::publish($isAuthor, $archived, $published, $featureEnabled),
             'can_manage_comments' => self::manageComments($isOperator, $featureEnabled),
             'can_comment'         => self::comment($row, $viewer, $archived, $published, $featureEnabled),
             // ⚠ NOT gated on $archived. §4.32.6 keeps an archived
@@ -352,9 +447,10 @@ final class AnnouncementCapabilityResolver
     // ── (d) Administrator — a separate object, never merged ──────────────
 
     /**
-     * Administrator recovery rights (§4.32.2): READ-ONLY inspection plus
-     * comment restoration. An administrator may not create, edit,
-     * schedule, publish, pin or archive, and may not act as the operator.
+     * Administrator rights (§4.32.2): inspection, comment restoration and —
+     * F-147, user decision 2026-11-11 — archiving any published notice
+     * (`can_archive_any`). An administrator may not create, edit, schedule,
+     * publish or pin, and may not act as the operator.
      *
      * ⚠ This is a THIRD object, never merged into the owner or row scopes.
      * An administrator who is independently the resolved operator gets
@@ -366,7 +462,7 @@ final class AnnouncementCapabilityResolver
      *
      * @return array{
      *     can_inspect_drafts: Entry, can_inspect_removed: Entry,
-     *     can_restore_comment: Entry
+     *     can_restore_comment: Entry, can_archive_any: Entry
      * }
      */
     public static function forAdministrator(bool $isAdministrator, bool $featureEnabled): array
@@ -378,6 +474,7 @@ final class AnnouncementCapabilityResolver
                 'can_inspect_drafts'  => $denied,
                 'can_inspect_removed' => $denied,
                 'can_restore_comment' => $denied,
+                'can_archive_any'     => $denied,
             ];
         }
 
@@ -385,6 +482,7 @@ final class AnnouncementCapabilityResolver
             'can_inspect_drafts'  => Permission::allow(),
             'can_inspect_removed' => Permission::allow(),
             'can_restore_comment' => Permission::allow(),
+            'can_archive_any'     => Permission::allow(),
         ];
     }
 
@@ -403,8 +501,15 @@ final class AnnouncementCapabilityResolver
     }
 
     /**
-     * Edit and archive share a ladder exactly, so they share a producer.
-     * Two copies of a fail-closed sequence is how divergent answers start.
+     * The ladder for an owner action that needs no publication rung — which,
+     * since the archive route began refusing unpublished rows, is `can_edit`
+     * alone.
+     *
+     * ⚠ This docblock read "Edit and archive share a ladder exactly, so they
+     * share a producer" and that stopped being true: archive moved to
+     * {@see self::publishedOwnerAction()} alongside pin. Corrected here rather
+     * than left as a comment describing a sharing that no longer happens —
+     * the original point still stands, it just now applies to the OTHER pair.
      *
      * @return Entry
      */
@@ -443,12 +548,96 @@ final class AnnouncementCapabilityResolver
         bool $published,
         bool $featureEnabled
     ): array {
+        // Delegates: `can_pin` and `can_archive` are provably the same ladder
+        // now that archive refuses unpublished rows, and §11 forbids a parallel
+        // implementation of logic that already exists. Kept as a named method
+        // because the capability it answers is named, and because its callers
+        // and tests address it by name.
+        return self::publishedOwnerAction($isOperator, $archived, $published, $featureEnabled);
+    }
+
+    /**
+     * `can_publish` — may this operator move this row to published NOW.
+     *
+     * ⚠ The inverse of {@see self::publishedOwnerAction()} on its last rung: pin
+     * and archive need a row that IS published, publish needs one that is NOT.
+     * Written as its own ladder rather than a negation, because the reason codes
+     * differ and a negated producer would have to invent one.
+     *
+     * ⚠⚠ A blocked row is PUBLISHABLE, deliberately. §4.32.17's arm C forces a
+     * row back to draft when operator authority lapsed at publication time, and
+     * `publish()` clears that marker — but only after its own operator check
+     * passes, so the recovery is not a bypass. A capability that refused blocked
+     * rows would hide the one route back from a state the operator did not
+     * choose. Since `status()` reports `blocked` and not `published`, the
+     * `!$published` rung admits it without a special case.
+     *
+     * ⚠ `announcement_archived` on an archived row, with no unlock hint:
+     * archival is one-way, so there is no action that would re-enable this.
+     * And `announcement_not_published` would be exactly the wrong code here —
+     * it describes the condition that PERMITS publishing.
+     *
+     * @return Entry
+     */
+    private static function publish(
+        bool $isOperator,
+        bool $archived,
+        bool $published,
+        bool $featureEnabled
+    ): array {
         if (!$featureEnabled) {
             return Permission::deny(self::REASON_FEATURE_DISABLED);
         }
         if (!$isOperator) {
             return Permission::deny(self::REASON_NOT_CLAIMER);
         }
+        if ($archived) {
+            return Permission::deny(self::REASON_ARCHIVED);
+        }
+        if ($published) {
+            // Already live. `announcement_archived` is not it and
+            // `announcement_not_published` is its opposite, so this is the one
+            // rung in the row block that needs a code of its own.
+            return Permission::deny(self::REASON_ALREADY_PUBLISHED);
+        }
+        return Permission::allow();
+    }
+
+    /**
+     * The ladder for an owner action that requires a PUBLISHED, unarchived row.
+     *
+     * Order is load-bearing and is the same order the routes apply: the feature
+     * switch first (an off feature is not an ownership question), then
+     * ownership, then archival, then publication. Reversing the last two would
+     * report `announcement_not_published` for an archived draft, naming the
+     * condition the operator cannot fix instead of the one that is permanent.
+     *
+     * @return Entry
+     */
+    private static function publishedOwnerAction(
+        bool $isOperator,
+        bool $archived,
+        bool $published,
+        bool $featureEnabled
+    ): array {
+        if (!$featureEnabled) {
+            return Permission::deny(self::REASON_FEATURE_DISABLED);
+        }
+        if (!$isOperator) {
+            return Permission::deny(self::REASON_NOT_CLAIMER);
+        }
+        // ⚠ The next two rungs are ORDER-SENSITIVE and their order is pinned by
+        // M3 of scripts/tests/announcement-capability-mutation-controls.sh,
+        // which swaps them and requires a named test to die. The comment sits
+        // ABOVE the block rather than inside it for that reason: M3 anchors on
+        // the exact statement sequence, and a comment between `if ($archived)`
+        // and its `return` silently breaks the control — reported `broken`,
+        // which is a control that tests nothing. It did exactly that once.
+        //
+        // Archival outranks publication because archival cannot be undone
+        // (§4.32.6) while publication can; naming the fixable condition on a
+        // row that is permanently closed would promise a path that is gone.
+        // No unlock hint on the archived rung, for the same reason.
         if ($archived) {
             return Permission::deny(self::REASON_ARCHIVED);
         }
@@ -612,6 +801,25 @@ final class AnnouncementCapabilityResolver
         if (self::flag($viewer, 'fraud_locked', true)) {
             return Permission::deny(self::REASON_FRAUD_LOCKED);
         }
+
+        // ⚠⚠ THE SELF-REPORT RUNG — the one that made this capability honest.
+        // `ContentReportService::fileReport()` refuses a self-report, and the
+        // owner reads bind `post_author` to the resolved operator, so without
+        // this every owner-surface row advertised a report the server would
+        // reject.
+        //
+        // ⚠ BOTH ids must be POSITIVE for the match to count. A zero author
+        // (an unreadable `post_author`) must not collide with a zero viewer
+        // (anonymous) and deny a stranger the report control — and an
+        // anonymous viewer is already denied by the `authenticated` rung
+        // above, so the only effect of a loose comparison would be a wrong
+        // reason on a row nobody can report anyway.
+        $authorId = self::id($row, 'author_user_id');
+        $viewerId = self::id($viewer, 'user_id');
+        if ($authorId > 0 && $authorId === $viewerId) {
+            return Permission::deny(self::REASON_OWN_CONTENT);
+        }
+
         if (self::flag($viewer, 'already_reported', false)) {
             return Permission::deny(self::REASON_ALREADY_REPORTED);
         }
@@ -666,4 +874,47 @@ final class AnnouncementCapabilityResolver
             self::STATUS_BLOCKED,
         ], true) ? $status : self::STATUS_DRAFT;
     }
-}
+
+    /**
+     * F-147: the resolved operator wrote this row. Both ids must be positive
+     * — a zero author (unreadable `post_author`) never matches.
+     *
+     * @param array<string, mixed> $decision
+     * @param array<string, mixed> $row
+     */
+    private static function authoredByOperator(array $decision, array $row): bool
+    {
+        $operatorId = self::id($decision, 'operator_user_id');
+        $authorId   = self::id($row, 'author_user_id');
+
+        return $operatorId > 0 && $authorId === $operatorId;
+    }
+
+    /**
+     * A non-negative id from a capability input array.
+     *
+     * ⚠ ABSENT, NULL, NON-NUMERIC AND NEGATIVE ALL READ AS 0, and 0 never
+     * matches — see the rung. This is the one place in the class where the
+     * fail-closed default is permissive, and it is deliberate: the
+     * restrictive reading of an unreadable author id would be to deny every
+     * viewer the report control on that row, which would suppress the
+     * challenge §4.32.6 exists to preserve. Denying a report is not the safe
+     * direction; refusing to disclose is, and that is the route's job.
+     *
+     * ⚠ Accepts a numeric STRING because `post_author` comes back from MySQL
+     * as one.
+     *
+     * @param array<string, mixed> $source
+     */
+    private static function id(array $source, string $key): int
+    {
+        $value = $source[$key] ?? null;
+
+        if (!is_int($value) && !(is_string($value) && $value !== '' && ctype_digit($value))) {
+            return 0;
+        }
+
+        $id = (int) $value;
+
+        return $id > 0 ? $id : 0;
+    }}

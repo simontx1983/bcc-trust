@@ -161,7 +161,7 @@ function bcc_trust_render_page_list() {
                         <tr>
                             <td>
                                 <div style="display:flex;align-items:center;gap:6px;">
-                                    <div style="width:40px;height:8px;background:#eee;border-radius:4px;overflow:hidden;">
+                                    <div style="width:40px;height:8px;background:var(--bcc-bg-code);border-radius:4px;overflow:hidden;">
                                         <div style="width:<?php echo esc_attr( $pg->trust_score ); ?>%;height:100%;background:<?php echo esc_attr( $tier_info['color'] ); ?>;"></div>
                                     </div>
                                     <strong><?php echo esc_html( round( $pg->trust_score, 1 ) ); ?></strong>
@@ -179,7 +179,7 @@ function bcc_trust_render_page_list() {
                                         <?php echo esc_html( $pg->owner_name ?: 'User #' . $pg->owner_id ); ?>
                                     </a>
                                 <?php else: ?>
-                                    <span style="color:#999;">&mdash;</span>
+                                    <span style="color:var(--bcc-text-muted);">&mdash;</span>
                                 <?php endif; ?>
                             </td>
 
@@ -192,7 +192,7 @@ function bcc_trust_render_page_list() {
                             <td>
                                 <?php echo (int) $pg->vote_count; ?>
                                 <?php if ( $pg->unique_voters ): ?>
-                                    <br><small style="color:#888;"><?php echo (int) $pg->unique_voters; ?> unique</small>
+                                    <br><small style="color:var(--bcc-text-muted);"><?php echo (int) $pg->unique_voters; ?> unique</small>
                                 <?php endif; ?>
                             </td>
 
@@ -200,9 +200,9 @@ function bcc_trust_render_page_list() {
 
                             <td>
                                 <?php if ( $flag_count > 0 ): ?>
-                                    <span style="color:#b45309;font-weight:600;"><?php echo $flag_count; ?></span>
+                                    <span style="color:var(--bcc-warning);font-weight:600;"><?php echo $flag_count; ?></span>
                                 <?php else: ?>
-                                    <span style="color:#999;">0</span>
+                                    <span style="color:var(--bcc-text-muted);">0</span>
                                 <?php endif; ?>
                             </td>
 
@@ -212,7 +212,7 @@ function bcc_trust_render_page_list() {
                                 if ( $pg->is_verified )      $badges[] = 'Email';
                                 if ( $pg->github_username )  $badges[] = 'GH';
                                 if ( $pg->has_wallet )       $badges[] = 'Wallet';
-                                echo $badges ? esc_html( implode( ', ', $badges ) ) : '<span style="color:#999;">&mdash;</span>';
+                                echo $badges ? esc_html( implode( ', ', $badges ) ) : '<span style="color:var(--bcc-text-muted);">&mdash;</span>';
                                 ?>
                             </td>
 

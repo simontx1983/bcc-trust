@@ -209,16 +209,20 @@ final class AnnouncementsEndpoint
                     'status' => [
                         'required' => false,
                         'type'     => 'string',
-                        // ⚠⚠ `blocked` IS NOW ACCEPTED; `published` is still
-                        // absent, because a published announcement is served by
-                        // the public list. `blocked` was refused while
-                        // reconciler arm C did not exist — nothing then
-                        // distinguished a blocked row from an ordinary draft,
-                        // so accepting the parameter would have returned
-                        // ordinary drafts. Arm C stamps
-                        // `_bcc_announcement_blocked_at`, so the filter is now
-                        // real; see AnnouncementRepository::ownerStatuses().
-                        'enum'              => ['draft', 'scheduled', 'blocked'],
+                        // ⚠⚠ ALL FOUR WRITE STATES ARE NOW ACCEPTED, and each
+                        // was added only once its filter could mean what it
+                        // says. `blocked` was refused while reconciler arm C
+                        // did not exist — nothing then distinguished a blocked
+                        // row from an ordinary draft, so the parameter would
+                        // have returned ordinary drafts. `published` was
+                        // refused because "the public list serves it", which is
+                        // true of the ROWS and false of the CAPABILITIES:
+                        // §4.32.11 forbids the public list from carrying
+                        // `capabilities` for any viewer, so an operator had no
+                        // way to obtain management capabilities for a set of
+                        // published rows. See
+                        // AnnouncementRepository::ownerStatuses().
+                        'enum'              => ['draft', 'scheduled', 'blocked', 'published'],
                         // ⚠ Explicit validator: without one, `enum` beside a
                         // sanitizer is decorative — the /members defect.
                         'validate_callback' => 'rest_validate_request_arg',
@@ -458,14 +462,25 @@ final class AnnouncementsEndpoint
      * else's claim, and competing claims (§4.32.2). The authority retains
      * a finer internal reason and this handler never serialises it.
      *
-     * ⚠⚠ `?status=blocked` is REFUSED by the route's enum, and that is the
-     * honest answer rather than a silent one. §4.32.13 defines `blocked`
-     * as a row flagged by **reconciler arm C**, which does not exist — it
-     * has no WordPress `post_status`, so nothing distinguishes it from an
-     * ordinary draft. Accepting it would map to `draft` and return
-     * ORDINARY DRAFTS: a wrong answer that looks right. A rejected
-     * parameter is visible; a wrong page is not. `published` is refused for
-     * the contract's own reason — the public list serves it.
+     * ⚠⚠ ALL FOUR §4.32.13 WRITE STATES ARE ACCEPTED — `draft`, `scheduled`,
+     * `blocked` and `published` — but the DEFAULT IS STILL
+     * `['draft', 'scheduled']` and deliberately unchanged. The default is
+     * what §4.32.4 documents and what every existing caller receives, so
+     * widening it would change the meaning of a request nobody edited.
+     * `?status=published` is an explicit opt-in.
+     *
+     * ⚠ `published` was previously refused on the grounds that "the public
+     * list serves it". That is true of the ROWS and false of the
+     * CAPABILITIES: §4.32.11 forbids the public list from carrying
+     * `capabilities` for any viewer, so an operator could obtain management
+     * capabilities for published announcements only one row at a time through
+     * the detail route — an N+1 over the whole billboard. This list is the
+     * only surface permitted to carry them for a set of rows.
+     *
+     * ⚠ Only ONE status per request, deliberately not a comma list. A
+     * multi-status parameter would change the shape of a documented parameter
+     * rather than extend its vocabulary, and the panel's tabs are per-state
+     * anyway.
      */
     public function ownerList(WP_REST_Request $request): WP_REST_Response
     {

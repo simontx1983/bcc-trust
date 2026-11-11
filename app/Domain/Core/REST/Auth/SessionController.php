@@ -5,6 +5,10 @@
  * Routes:
  *   - POST /auth/logout-everywhere — revoke every outstanding token
  *   - POST /auth/refresh           — silent-refresh an expired-OK JWT
+ *   - GET  /auth/session           — validate the presented Bearer JWT and
+ *                                     say whose session it is (no refresh grace)
+ *   - POST /auth/logout            — sign out the presented Bearer JWT only
+ *                                     (per-jti denylist); always 200
  *
  * Split out of AuthEndpoint (Phase 11 architecture split #3 of 4). Route
  * blocks + handler bodies are VERBATIM; shared helpers + constants moved
@@ -17,10 +21,12 @@
 namespace BCC\Trust\Core\REST\Auth;
 
 use BCC\Core\Log\Logger;
+use BCC\Trust\Core\Repositories\PushSubscriptionRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\BearerAuth;
 use BCC\Trust\Core\Support\JwtToken;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -65,6 +71,174 @@ final class SessionController
                 'permission_callback' => '__return_true',
             ]
         );
+
+        // GET /auth/session — server-side validation of a Bearer JWT for the
+        // frontend's NextAuth `bcc-verified` provider, so it builds a session
+        // from what the SERVER says the token is, never from a POST body.
+        // Auth is decided inside the handler from the presented token itself.
+        register_rest_route(
+            AuthSupport::ROUTE_NAMESPACE,
+            '/auth/session',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [$instance, 'session'],
+                'permission_callback' => '__return_true',
+            ]
+        );
+
+        // POST /auth/logout — sign out THIS token (F-120). Before it, "sign
+        // out" only cleared the browser's NextAuth cookie; a copied bearer
+        // stayed valid until expiry. Auth is the presented token itself.
+        register_rest_route(
+            AuthSupport::ROUTE_NAMESPACE,
+            '/auth/logout',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'logout'],
+                'permission_callback' => '__return_true',
+            ]
+        );
+    }
+
+    /** Per-TOKEN ceiling for GET /auth/session (calls arrive from one BFF IP). */
+    public const SESSION_RATE_LIMIT = 60;
+
+    /** Per-TOKEN ceiling for POST /auth/logout. */
+    public const LOGOUT_RATE_LIMIT = 30;
+
+    /**
+     * POST /auth/logout — sign out the PRESENTED Bearer token, and only it.
+     *
+     * Decodes the token itself (never the cookie session) with
+     * decodeForRefresh(), so a token still inside its refresh-grace window —
+     * one /auth/refresh would accept — is signed out too. A valid token's jti
+     * is denylisted (JwtToken::logOut) until it could no longer be used:
+     * afterwards it fails every authenticated route, /auth/refresh and
+     * GET /auth/session with ERR_LOGGED_OUT. Other sessions of the same user
+     * are untouched (that is POST /auth/logout-everywhere).
+     *
+     * Always 200 `{ ok: true }`, idempotent: logging out must never fail
+     * visibly, and a missing, invalid or already-dead token has nothing left
+     * to sign out. Per-token throttle (429), no-store + Vary: Authorization.
+     */
+    public function logout(WP_REST_Request $request): WP_REST_Response
+    {
+        unset($request);
+
+        $token = BearerAuth::readBearerToken();
+        if ($token === null) {
+            return self::sessionHeaders(ApiResponse::ok(['ok' => true]));
+        }
+
+        if (!\BCC\Core\Security\Throttle::allow(
+            'auth_logout',
+            self::LOGOUT_RATE_LIMIT,
+            60,
+            'auth_logout:' . substr(hash('sha256', $token), 0, 32)
+        )) {
+            return self::sessionHeaders(ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429));
+        }
+
+        $decoded = JwtToken::decodeForRefresh($token);
+        if ($decoded['ok']) {
+            JwtToken::logOut($decoded['payload']);
+            Logger::audit('user_logout', [
+                'user_id' => (int) ($decoded['payload']['user_id'] ?? 0),
+            ]);
+        }
+
+        return self::sessionHeaders(ApiResponse::ok(['ok' => true]));
+    }
+
+    /**
+     * GET /auth/session — whose session is this Bearer token?
+     *
+     * Validates the token PRESENTED in the Authorization header — read with
+     * BearerAuth's own header reader and decoded with the canonical
+     * JwtToken::decode() (signature, iss, aud, exp + 60 s skew, token-version
+     * revocation; NOT decodeForRefresh's grace window). It deliberately does
+     * NOT use get_current_user_id(): BearerAuth defers to any earlier auth, so
+     * a request carrying a valid WP cookie plus a forged Bearer would read as
+     * the cookie's user — exactly the "trust something other than the token"
+     * this route exists to remove.
+     *
+     * 200 `{ user_id, handle, in_good_standing, expires_at }`:
+     *   - handle: the CURRENT handle from user meta (the token's claim goes
+     *     stale after a handle change);
+     *   - in_good_standing: AuthSupport::resolveInGoodStanding — FAILS OPEN,
+     *     so it is display state, never a security gate;
+     *   - expires_at: the token's own `exp` (unix seconds). decode() accepts
+     *     a token up to 60 s past it.
+     * 401 `bcc_unauthorized` for a missing, malformed, invalid, expired or
+     * revoked token, or a deleted user — one code, no reason (the reason goes
+     * to the audit log only). 409 `bcc_invalid_state` when the user has no
+     * handle. 429 per token, checked BEFORE decode.
+     */
+    public function session(WP_REST_Request $request): WP_REST_Response
+    {
+        unset($request);
+
+        $token = BearerAuth::readBearerToken();
+        if ($token === null) {
+            return self::sessionUnauthorized('missing');
+        }
+
+        // Per-TOKEN bucket, before any decode work: every call arrives from
+        // the frontend server's single egress IP, so a per-IP bucket would
+        // be shared by all users. A hash, so the bucket key is not the token.
+        // The key is passed EXPLICITLY (4th argument): without it, Throttle
+        // folds an anonymous caller's IP subnet into the key, so the bucket
+        // would really be per (token, IP) rather than per token.
+        if (!\BCC\Core\Security\Throttle::allow(
+            'auth_session',
+            self::SESSION_RATE_LIMIT,
+            60,
+            'auth_session:' . substr(hash('sha256', $token), 0, 32)
+        )) {
+            return self::sessionHeaders(ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429));
+        }
+
+        $decoded = JwtToken::decode($token);
+        if (!$decoded['ok']) {
+            return self::sessionUnauthorized($decoded['error']);
+        }
+        $payload = $decoded['payload'];
+
+        $userId = (int) ($payload['user_id'] ?? 0);
+        $exp    = (int) ($payload['exp'] ?? 0);
+        if ($userId <= 0 || $exp <= 0 || !(get_userdata($userId) instanceof \WP_User)) {
+            return self::sessionUnauthorized('user');
+        }
+
+        $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
+        if ($handle === '') {
+            return self::sessionHeaders(ApiResponse::error('bcc_invalid_state', 'Account is missing a handle — contact support.', 409));
+        }
+
+        return self::sessionHeaders(ApiResponse::ok([
+            'user_id'          => $userId,
+            'handle'           => $handle,
+            'in_good_standing' => AuthSupport::resolveInGoodStanding($userId),
+            'expires_at'       => $exp,
+        ]));
+    }
+
+    /** One 401 for every rejection; the reason is logged, never returned. */
+    private static function sessionUnauthorized(string $reason): WP_REST_Response
+    {
+        Logger::audit('auth_session_rejected', ['reason' => $reason]);
+        return self::sessionHeaders(ApiResponse::error('bcc_unauthorized', 'Not signed in.', 401));
+    }
+
+    /**
+     * Every /auth/session response — 200, 401, 409, 429 — is per-token and
+     * must never be cached or served to a different Authorization.
+     */
+    private static function sessionHeaders(WP_REST_Response $response): WP_REST_Response
+    {
+        $response->header('Cache-Control', 'no-store');
+        $response->header('Vary', 'Authorization');
+        return $response;
     }
 
     /**
@@ -109,6 +283,13 @@ final class SessionController
         // for this user fails ERR_REVOKED on next use, including the
         // bearer that authenticated THIS request.
         JwtToken::revokeAllForUser($userId);
+
+        // Revoking every token must also stop pushes to every device: a
+        // push subscription outlives the session that registered it, so
+        // without this a "sign out everywhere" kept notifying (and leaking
+        // notification text to) the very devices it was meant to cut off.
+        // Each device re-registers on its next sign-in. [F-76]
+        (new PushSubscriptionRepository())->deleteAllForUser($userId);
 
         $response = ApiResponse::ok(['ok' => true]);
         $response->header('Cache-Control', 'no-store');
@@ -180,7 +361,15 @@ final class SessionController
         // Mid-session compromise mitigation: a user flagged suspended
         // can no longer refresh, forcing them through the canonical
         // signOut → re-login path where the suspension is surfaced.
-        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId)) {
+        //
+        // ⚠ Only a KNOWN suspension refuses. An UNKNOWN state (null: the
+        // suspension could not be read) lets the refresh through. A refused
+        // refresh SIGNS THE USER OUT (the frontend's tryRefresh treats any
+        // non-OK answer as a dead session), so a DB blip must never refuse
+        // it. A genuinely suspended user is still caught by every write gate
+        // and by the next refresh once the read works.
+        $suspension = \BCC\Core\Permissions\Permissions::suspensionState($userId);
+        if ($suspension === true) {
             return ApiResponse::error('bcc_forbidden', 'Account is not in good standing.', 403);
         }
 

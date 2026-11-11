@@ -4,7 +4,9 @@ namespace BCC\Trust\Onchain\Services;
 
 use BCC\Core\PeepSo\PeepSo;
 use BCC\Core\ServiceLocator;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Repositories\SignalRepository;
+use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\Support\ChainSupport;
 
 if (!defined('ABSPATH')) {
@@ -124,13 +126,52 @@ final class SignalRefreshService
     private const BATCH_SIZE = 20;
 
     /**
-     * Daily cron: kick off the batch refresh cycle.
+     * The refresh cycle's cursor: the LAST owner (user_id) fully refreshed.
+     * Persistent option, not a transient — see processBatch().
+     */
+    private const CURSOR_OPTION = 'bcc_onchain_refresh_cursor';
+
+    /** The old OFFSET cursor (F-11). Deleted on the next daily run. */
+    private const LEGACY_OFFSET_OPTION = 'bcc_onchain_refresh_offset';
+
+    /** @var (\Closure(int): void)|null test-only page refresher */
+    private static ?\Closure $pageRefresher = null;
+
+    /** @var (\Closure(): int)|null test-only clock (seconds) */
+    private static ?\Closure $clock = null;
+
+    /**
+     * @internal TESTS ONLY. Replaces the per-page refresh and the clock so
+     * the cursor's behaviour across time-outs can be pinned without real
+     * providers or real time. Production never calls this.
+     *
+     * @param (\Closure(int): void)|null $pageRefresher
+     * @param (\Closure(): int)|null     $clock
+     */
+    public static function setTestSeams(?\Closure $pageRefresher, ?\Closure $clock): void
+    {
+        self::$pageRefresher = $pageRefresher;
+        self::$clock         = $clock;
+    }
+
+    private static function now(): int
+    {
+        return self::$clock !== null ? (self::$clock)() : time();
+    }
+
+    /**
+     * Daily cron: kick off the batch refresh cycle — or resume one.
      *
      * Instead of scheduling O(N) individual wp_cron events (which bloats
-     * the serialized _cron option), we store the batch offset in a
-     * transient and schedule a SINGLE continuation event. Each tick
-     * processes BATCH_SIZE pages within a time budget, then re-schedules
-     * itself if more pages remain.
+     * the serialized _cron option), the cycle keeps ONE cursor and schedules
+     * a SINGLE continuation event. Each tick refreshes owners within a time
+     * budget, then re-schedules itself while owners remain.
+     *
+     * ⚠ F-11: AN UNFINISHED CYCLE IS RESUMED, NOT RESTARTED. This used to
+     * delete the cursor every day, so a cycle that did not finish within the
+     * day started over at the first owner and the owners past that point
+     * were never reached. A cursor present here means the previous cycle is
+     * still in progress; the daily run carries on from it.
      *
      * Hooked to: bcc_onchain_daily_refresh
      */
@@ -149,8 +190,17 @@ final class SignalRefreshService
             // Process any pending bonus retries first.
             BonusRetryService::processAll();
 
-            // Reset the batch cursor and start processing.
-            delete_option('bcc_onchain_refresh_offset');
+            // The old OFFSET cursor is meaningless under the keyset cursor.
+            delete_option(self::LEGACY_OFFSET_OPTION);
+
+            if (get_option(self::CURSOR_OPTION, null) !== null) {
+                if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                    \BCC\Core\Log\Logger::info('[SignalRefresh] resuming unfinished refresh cycle', [
+                        'after_user_id' => (int) get_option(self::CURSOR_OPTION, 0),
+                    ]);
+                }
+            }
+
             self::processBatch();
         } finally {
             \BCC\Core\DB\AdvisoryLock::release('bcc_onchain_daily_refresh');
@@ -158,11 +208,25 @@ final class SignalRefreshService
     }
 
     /**
-     * Process a batch of pages within the time budget.
+     * Refresh owners within the time budget, from the cursor.
      *
-     * If more pages remain after the budget is exhausted, schedules a
-     * single continuation event 30 seconds in the future. This keeps
-     * the _cron option at O(1) size instead of O(N).
+     * If owners remain when the budget is spent, schedules a single
+     * continuation event 30 seconds in the future. This keeps the _cron
+     * option at O(1) size instead of O(N).
+     *
+     * ⚠ F-11: KEYSET, PER-OWNER CURSOR.
+     *   - Owners are read in ascending user_id AFTER the cursor (keyset), not
+     *     by OFFSET over an unordered DISTINCT — which neither MySQL nor
+     *     MariaDB keeps stable across ticks, so OFFSET skipped and repeated.
+     *   - The cursor is the last owner FULLY refreshed and advances after
+     *     EACH owner. It used to be the offset of the current page, so a
+     *     time-out mid-page redid that page's owners next tick — and a tick
+     *     that could not finish one page never advanced at all.
+     *   - A failed read is NOT the end of the list: the cursor is kept and
+     *     the next tick retries.
+     *
+     * The cursor is a persistent option, not a transient: a transient's TTL
+     * can expire mid-cycle and lose it.
      *
      * Hooked to: bcc_onchain_refresh_batch
      */
@@ -178,75 +242,102 @@ final class SignalRefreshService
         }
 
         try {
-        $startTime    = time();
-        $startTimeMic = microtime(true);
-        // Use wp_option (persistent) instead of transient for the batch
-        // cursor. Transients have a TTL that can expire mid-batch if the
-        // full refresh takes longer than HOUR_IN_SECONDS, losing the cursor
-        // and causing pages to be skipped or re-processed.
-        $offset    = (int) get_option('bcc_onchain_refresh_offset', 0);
+            $startTime    = self::now();
+            $startTimeMic = microtime(true);
+            $cursor       = (int) get_option(self::CURSOR_OPTION, 0);
+            $supported    = ChainSupport::supported();
+            $hasMore      = false;
 
-        $walletService = ServiceLocator::resolveWalletLinkRead();
-        $supported     = ChainSupport::supported();
-        $hasMore       = false;
-
-        do {
-            // Time budget check — yield to avoid PHP timeout.
-            if ((time() - $startTime) >= self::BATCH_TIME_BUDGET) {
-                $hasMore = true;
-                break;
-            }
-
-            $owners = $walletService->getUserIdsWithLinks($supported, self::BATCH_SIZE, $offset);
-
-            if (empty($owners)) {
-                break;
-            }
-
-            foreach ($owners as $ownerId) {
-                $pageId = ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($ownerId);
-
-                if ($pageId) {
-                    self::fetchAndStoreForPage($pageId, false, $startTimeMic);
-                }
-
-                // Re-check time budget after each page (API calls are slow).
-                // Wall clock advances during fetchAndStoreForPage() — re-evaluate.
+            do {
                 if (self::isTimeBudgetExceeded($startTime)) {
                     $hasMore = true;
-                    break 2;
+                    break;
                 }
-            }
 
-            $offset += self::BATCH_SIZE;
+                try {
+                    $owners = WalletRepository::getUserIdsWithChainSlugsAfter($supported, $cursor, self::BATCH_SIZE);
+                } catch (RepositoryReadFailure $e) {
+                    // Not "no more owners": keep the cursor, retry next tick.
+                    if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                        \BCC\Core\Log\Logger::warning('[SignalRefresh] owner read failed; cycle kept, retrying next tick', [
+                            'after_user_id' => $cursor,
+                        ]);
+                    }
+                    $hasMore = true;
+                    break;
+                }
 
-            // If we got a full batch, there may be more.
-            if (count($owners) === self::BATCH_SIZE) {
-                $hasMore = true;
+                if ($owners === []) {
+                    break;
+                }
+
+                foreach ($owners as $ownerId) {
+                    // One owner's failure must not cost the tick its progress:
+                    // log it and move past that owner, so a page that always
+                    // throws cannot stall the cycle on itself. The next
+                    // cycle refreshes it again.
+                    try {
+                        self::refreshOwner($ownerId, $startTimeMic);
+                    } catch (\Throwable $e) {
+                        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                            \BCC\Core\Log\Logger::warning('[SignalRefresh] owner refresh failed; skipped for this cycle', [
+                                'user_id' => $ownerId,
+                                'error'   => $e->getMessage(),
+                            ]);
+                        }
+                    }
+
+                    // This owner is done: the cursor moves past it NOW, so a
+                    // time-out below resumes on the next owner, not on this
+                    // page's first.
+                    $cursor = $ownerId;
+
+                    // Re-check time budget after each owner (API calls are
+                    // slow; the wall clock advanced during the refresh).
+                    if (self::isTimeBudgetExceeded($startTime)) {
+                        $hasMore = true;
+                        break 2;
+                    }
+                }
+
+                // A short page is the last page.
+                $hasMore = count($owners) === self::BATCH_SIZE;
+            } while ($hasMore);
+
+            if ($hasMore) {
+                // Save cursor and schedule continuation — single event, O(1).
+                update_option(self::CURSOR_OPTION, $cursor, false);
+
+                if (!wp_next_scheduled('bcc_onchain_refresh_batch')) {
+                    \BCC\Core\Cron\AsyncDispatcher::scheduleSingle(
+                        self::now() + 30,
+                        'bcc_onchain_refresh_batch',
+                        [],
+                        'bcc-onchain'
+                    );
+                }
             } else {
-                $hasMore = false;
+                // Every owner refreshed — the cycle is complete.
+                delete_option(self::CURSOR_OPTION);
             }
-        } while (true);
-
-        if ($hasMore) {
-            // Save cursor and schedule continuation — single event, O(1).
-            update_option('bcc_onchain_refresh_offset', $offset, false);
-
-            if (!wp_next_scheduled('bcc_onchain_refresh_batch')) {
-                \BCC\Core\Cron\AsyncDispatcher::scheduleSingle(
-                    time() + 30,
-                    'bcc_onchain_refresh_batch',
-                    [],
-                    'bcc-onchain'
-                );
-            }
-        } else {
-            // All pages processed — clean up cursor.
-            delete_option('bcc_onchain_refresh_offset');
-        }
-
         } finally {
             \BCC\Core\DB\AdvisoryLock::release('bcc_onchain_refresh_batch');
+        }
+    }
+
+    /**
+     * Refresh one owner's page (or the test seam's stand-in).
+     */
+    private static function refreshOwner(int $ownerId, float $startTimeMic): void
+    {
+        if (self::$pageRefresher !== null) {
+            (self::$pageRefresher)($ownerId);
+            return;
+        }
+
+        $pageId = ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($ownerId);
+        if ($pageId) {
+            self::fetchAndStoreForPage($pageId, false, $startTimeMic);
         }
     }
 
@@ -268,6 +359,6 @@ final class SignalRefreshService
      */
     private static function isTimeBudgetExceeded(int $startTime): bool
     {
-        return (time() - $startTime) >= self::BATCH_TIME_BUDGET;
+        return (self::now() - $startTime) >= self::BATCH_TIME_BUDGET;
     }
 }

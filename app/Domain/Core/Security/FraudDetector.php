@@ -67,11 +67,22 @@ class FraudDetector {
     }
 
     /**
-     * Detect rapid voting using config thresholds
+     * Rapid voting: more than BCC_TRUST_RAPID_VOTE_LIMIT votes CAST within
+     * the last BCC_TRUST_RAPID_VOTE_WINDOW minutes.
+     *
+     * F-102: this used to count audit-log rows with action 'vote_up' /
+     * 'vote_down' — actions nothing writes — so it was always 0 and both the
+     * VoteService gate and the +30 `rapid_voting` fraud signal were dead.
+     * It now counts the votes table itself (every status, so a burst that is
+     * immediately retracted still counts). No new writes.
      */
     public static function detectRapidVoting(int $userId): bool {
 
-        $count = self::auditLogRepo()->countRecentVoteActions($userId, BCC_TRUST_RAPID_VOTE_WINDOW);
+        // created_at is written with current_time('mysql') (site-local), so
+        // the cutoff is computed in the same frame.
+        $since = gmdate('Y-m-d H:i:s', (int) current_time('timestamp') - BCC_TRUST_RAPID_VOTE_WINDOW * 60);
+
+        $count = self::voteRepo()->countByVoterSince($userId, $since, false);
 
         return $count > BCC_TRUST_RAPID_VOTE_LIMIT;
     }
@@ -315,18 +326,23 @@ class FraudDetector {
             ];
         }
 
-        // Check for multiple accounts on same device (uses pre-fetched data).
+        // Multiple accounts on the same device: OBSERVATION, not a fraud
+        // signal (F-184, user decision). A household or office sharing one
+        // computer is ordinary, and the "device" is a hash of IP + request
+        // headers, so two people on one router with the same browser build
+        // collide. It used to add min(30, accounts × 5). Trigger and
+        // `details` are RETAINED as the durable record admins see, and
+        // because `details` feeds `confidence`.
         if ($deviceData['shared_device']) {
-            $userCount    = $deviceData['shared_device']['user_count'];
-            $devicePoints = min(30, $userCount * 5);
+            $userCount = $deviceData['shared_device']['user_count'];
             $results['triggers'][] = 'shared_device_' . $userCount . '_users';
-            $results['score'] += $devicePoints;
             $results['details']['shared_device_count'] = $userCount;
             $results['signals'][] = [
                 'type'        => 'shared_device',
-                'points'      => $devicePoints,
+                'points'      => 0,
+                'punitive'    => false,
                 'description' => sprintf(
-                    'Device fingerprint shared by %d different accounts',
+                    'Device fingerprint shared by %d different accounts (observation only — adds no fraud points)',
                     $userCount
                 ),
             ];

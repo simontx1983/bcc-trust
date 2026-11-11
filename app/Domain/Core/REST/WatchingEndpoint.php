@@ -268,6 +268,12 @@ final class WatchingEndpoint
             return ApiResponse::error('bcc_rate_limited', 'Too many watches. Please wait.', 429);
         }
 
+        // §M suspension gate (F-109): watching notifies the target. UNwatch
+        // stays open (retracting your own action).
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         $targetKind = (string) $request->get_param('target_kind');
         $targetId   = (int) $request->get_param('target_id');
 

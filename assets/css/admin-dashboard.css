@@ -2,7 +2,10 @@
  * BCC Trust Engine — Admin Dashboard
  * "Forge" Design System for WordPress Admin
  *
- * Dark-mode, industrial-craft aesthetic with precision data visualization.
+ * Component layer for the Trust pages (dashboard, moderation, debug). The
+ * palette is NOT defined here: the --bcc-* tokens come from bcc-core's
+ * shared light "paper" sheet (assets/css/bcc-admin.css, enqueued on every
+ * ?page=bcc-* screen), so these pages match every other BCC admin page.
  * Overrides default WP admin styling on BCC dashboard pages only.
  *
  * Scoped via .bcc-admin-wrap to prevent global leaks.
@@ -12,81 +15,7 @@
    1. DESIGN TOKENS
    ═══════════════════════════════════════════════════════════════════════════ */
 
-.bcc-admin-wrap {
-    /* Surfaces */
-    --bcc-bg:                #0f1117;
-    --bcc-bg-raised:         #171a21;
-    --bcc-bg-card:           #1c1f28;
-    --bcc-bg-card-hover:     #22252f;
-    --bcc-bg-input:          #13151b;
-    --bcc-bg-overlay:        rgba(15, 17, 23, 0.85);
-
-    /* Borders */
-    --bcc-border:            rgba(255, 255, 255, 0.06);
-    --bcc-border-strong:     rgba(255, 255, 255, 0.12);
-    --bcc-border-focus:      #3b82f6;
-
-    /* Text */
-    --bcc-text:              #e2e5ed;
-    --bcc-text-secondary:    #8b92a5;
-    --bcc-text-muted:        #555d73;
-    --bcc-text-inverse:      #0f1117;
-
-    /* Accents */
-    --bcc-accent:            #3b82f6;
-    --bcc-accent-hover:      #2563eb;
-    --bcc-success:           #22c55e;
-    --bcc-success-bg:        rgba(34, 197, 94, 0.08);
-    --bcc-warning:           #f59e0b;
-    --bcc-warning-bg:        rgba(245, 158, 11, 0.08);
-    --bcc-danger:            #ef4444;
-    --bcc-danger-bg:         rgba(239, 68, 68, 0.08);
-    --bcc-info:              #06b6d4;
-    --bcc-info-bg:           rgba(6, 182, 212, 0.08);
-
-    /* Tier Colors */
-    --bcc-tier-elite:        #a78bfa;
-    --bcc-tier-trusted:      #34d399;
-    --bcc-tier-neutral:      #60a5fa;
-    --bcc-tier-caution:      #fbbf24;
-    --bcc-tier-risky:        #f87171;
-
-    /* Fraud Colors */
-    --bcc-fraud-critical:    #c084fc;
-    --bcc-fraud-high:        #f87171;
-    --bcc-fraud-medium:      #fb923c;
-    --bcc-fraud-low:         #fbbf24;
-    --bcc-fraud-minimal:     #34d399;
-
-    /* Typography */
-    --bcc-font:              'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    --bcc-font-mono:         'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
-    --bcc-font-display:      'Outfit', 'DM Sans', -apple-system, sans-serif;
-
-    /* Spacing */
-    --bcc-space-xs:          6px;
-    --bcc-space-sm:          10px;
-    --bcc-space-md:          16px;
-    --bcc-space-lg:          24px;
-    --bcc-space-xl:          36px;
-    --bcc-space-2xl:         48px;
-
-    /* Radius */
-    --bcc-radius-sm:         6px;
-    --bcc-radius-md:         10px;
-    --bcc-radius-lg:         14px;
-    --bcc-radius-pill:       999px;
-
-    /* Shadows */
-    --bcc-shadow-sm:         0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
-    --bcc-shadow-md:         0 4px 16px rgba(0, 0, 0, 0.35);
-    --bcc-shadow-lg:         0 12px 40px rgba(0, 0, 0, 0.4);
-    --bcc-shadow-glow:       0 0 20px rgba(59, 130, 246, 0.15);
-
-    /* Transitions */
-    --bcc-ease:              cubic-bezier(0.4, 0, 0.2, 1);
-    --bcc-duration:          0.18s;
-}
+/* Tokens live in bcc-core/assets/css/bcc-admin.css (body.bcc-admin). */
 
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -204,16 +133,16 @@
 }
 
 .bcc-admin-wrap .nav-tab-wrapper .nav-tab:hover {
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba(15, 13, 9, 0.05);
     color: var(--bcc-text);
 }
 
 .bcc-admin-wrap .nav-tab-wrapper .nav-tab-active,
 .bcc-admin-wrap .nav-tab-wrapper .nav-tab.nav-tab-active {
-    background: var(--bcc-accent);
-    color: #fff;
+    background: var(--bcc-bg-card);
+    color: var(--bcc-text-strong);
     font-weight: 600;
-    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+    box-shadow: inset 0 3px 0 var(--bcc-action);
 }
 
 
@@ -345,7 +274,7 @@
 .bcc-admin-wrap table.striped tbody > tr:nth-child(odd) > th,
 .bcc-admin-wrap .wp-list-table.striped > tbody > :nth-child(odd) td,
 .bcc-admin-wrap .wp-list-table.striped > tbody > :nth-child(odd) th {
-    background: rgba(255, 255, 255, 0.02) !important;
+    background: rgba(15, 13, 9, 0.025) !important;
 }
 
 .bcc-admin-wrap .wp-list-table tbody tr:last-child td {
@@ -354,7 +283,7 @@
 
 .bcc-admin-wrap .wp-list-table tbody tr:hover td,
 .bcc-admin-wrap .widefat tbody tr:hover td {
-    background: rgba(255, 255, 255, 0.04) !important;
+    background: rgba(15, 13, 9, 0.05) !important;
 }
 
 /* Row actions */
@@ -381,7 +310,7 @@
 .bcc-admin-wrap [style*="height: 8px"][style*="background: #e"],
 .bcc-admin-wrap [style*="height:8px"][style*="background:#e"],
 .bcc-admin-wrap .bcc-progress {
-    background: rgba(255, 255, 255, 0.06) !important;
+    background: rgba(15, 13, 9, 0.075) !important;
     border-radius: var(--bcc-radius-pill) !important;
     overflow: hidden !important;
     position: relative;
@@ -447,17 +376,17 @@
 
 .bcc-admin-wrap .button-primary,
 .bcc-admin-wrap input[type="submit"].button-primary {
-    background: var(--bcc-accent) !important;
-    border-color: var(--bcc-accent) !important;
-    color: #fff !important;
-    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25) !important;
+    background: var(--bcc-action) !important;
+    border-color: var(--bcc-action-hover) !important;
+    color: var(--bcc-text-strong) !important;
+    box-shadow: 0 2px 8px rgba(240, 90, 40, 0.25) !important;
     text-shadow: none !important;
 }
 
 .bcc-admin-wrap .button-primary:hover {
-    background: var(--bcc-accent-hover) !important;
-    border-color: var(--bcc-accent-hover) !important;
-    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35) !important;
+    background: var(--bcc-action-hover) !important;
+    border-color: var(--bcc-action-hover) !important;
+    box-shadow: 0 4px 12px rgba(240, 90, 40, 0.35) !important;
     transform: translateY(-1px);
 }
 
@@ -489,8 +418,8 @@
 }
 
 .bcc-admin-wrap .button.bcc-btn-danger:hover {
-    background: #dc2626 !important;
-    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.35) !important;
+    background: var(--bcc-danger) !important;
+    box-shadow: 0 4px 12px rgba(178, 58, 36, 0.35) !important;
 }
 
 
@@ -519,7 +448,7 @@
 .bcc-admin-wrap select:focus,
 .bcc-admin-wrap textarea:focus {
     border-color: var(--bcc-border-focus) !important;
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15) !important;
+    box-shadow: 0 0 0 3px rgba(240, 90, 40, 0.15) !important;
     outline: none !important;
 }
 
@@ -674,7 +603,7 @@
 .bcc-admin-wrap [style*="background: #9c27b0"],
 .bcc-admin-wrap [style*="background:#9c27b0"] {
     background: var(--bcc-fraud-critical) !important;
-    box-shadow: 0 0 12px rgba(192, 132, 252, 0.2);
+    box-shadow: 0 0 12px rgba(109, 67, 201, 0.2);
 }
 
 /* High: red */
@@ -772,10 +701,10 @@
     font-family: var(--bcc-font-mono);
     font-size: 0.78rem;
     color: var(--bcc-info);
-    background: rgba(6, 182, 212, 0.08);
+    background: rgba(31, 95, 158, 0.08);
     padding: 2px 7px;
     border-radius: 4px;
-    border: 1px solid rgba(6, 182, 212, 0.12);
+    border: 1px solid rgba(31, 95, 158, 0.12);
 }
 
 
@@ -794,8 +723,8 @@
 }
 
 @keyframes bcc-pulse-glow {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
-    50%      { box-shadow: 0 0 16px 4px rgba(59, 130, 246, 0.12); }
+    0%, 100% { box-shadow: 0 0 0 0 rgba(240, 90, 40, 0); }
+    50%      { box-shadow: 0 0 16px 4px rgba(240, 90, 40, 0.12); }
 }
 
 .bcc-admin-wrap .bcc-stat-card,
@@ -963,7 +892,7 @@
 /* Progress bar tracks — the #eee bars */
 .bcc-admin-wrap div[style*="background:#eee"],
 .bcc-admin-wrap div[style*="background: #eee"] {
-    background: rgba(255, 255, 255, 0.08) !important;
+    background: rgba(15, 13, 9, 0.1) !important;
 }
 
 /* Expanded row backgrounds */
@@ -1251,4 +1180,19 @@
 .bcc-admin-wrap .tablenav-pages .current {
     color: var(--bcc-text) !important;
     font-weight: 600;
+}
+
+/* Moderation user-detail panels (moved from an inline <style> in moderation-user.php). */
+.bcc-admin-wrap .bcc-panel {
+    background: var(--bcc-bg-card);
+    padding: 20px;
+    margin-top: 20px;
+    border: 1px solid var(--bcc-border);
+    border-radius: var(--bcc-radius-md);
+}
+
+.bcc-admin-wrap .bcc-panel h2 {
+    margin-top: 0;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--bcc-border);
 }

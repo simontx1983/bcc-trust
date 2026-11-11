@@ -25,6 +25,7 @@
 namespace BCC\Trust\Core\Repositories;
 
 use BCC\Trust\Core\Database\TableRegistry;
+use BCC\Trust\Core\Exceptions\RepositoryException;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -44,6 +45,9 @@ final class PageFollowRepository
 {
     /** Explicit column list — must match schema-page-follows.php. */
     private const COLUMNS = 'id, user_id, page_id, card_kind, tier_at_watch, created_at';
+
+    /** One read page of follow rows; also bounds deleteByIds(). */
+    public const DRAIN_PAGE_SIZE = 5000;
 
     private string $table;
 
@@ -195,6 +199,8 @@ final class PageFollowRepository
      * is unlikely to accrue more than a few dozen pre-claim followers.
      *
      * @phpstan-return list<PageFollowRow>
+     * @throws RepositoryException when the read itself failed, so the caller
+     *         cannot mistake a broken query for a page with no followers
      */
     public function findByPageId(int $pageId): array
     {
@@ -204,14 +210,45 @@ final class PageFollowRepository
 
         global $wpdb;
 
-        /** @var list<PageFollowRow>|null */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        // Can a failed read be told apart from an empty one? YES, and only
+        // this way. `get_results()` returns an empty array for BOTH "this
+        // page has no followers" and "the query errored", and the drain's
+        // loop reads `[]` as "nothing left to do" and stops — so a failed
+        // read looked exactly like a completed drain: no warning, no retry
+        // owed, rows silently left behind. `last_error` is the one thing
+        // that separates them, and it is cleared immediately before the read
+        // so a stale error from an unrelated earlier query cannot be
+        // attributed to this one (wpdb::query() flushes it the same way).
+        //
+        // Fail CLOSED by throwing, rather than returning a sentinel: the
+        // caller is a claim-time hook and the safe answer to "I could not
+        // read the follow table" is to stop and leave the rows alone.
+        // Same idiom as PageReadModelRepository::readScoreRowOrThrow().
+        $sql = $wpdb->prepare(
             'SELECT ' . self::COLUMNS . " FROM {$this->table}
               WHERE page_id = %d
               ORDER BY created_at ASC, id ASC
-              LIMIT 5000",
+              LIMIT " . self::DRAIN_PAGE_SIZE . "",
             $pageId
-        ));
+        );
+
+        // An unbuildable statement is a failure in its own right, and one
+        // WordPress reports WITHOUT setting an error.
+        if ($sql === null || $sql === '') {
+            throw new RepositoryException('page_follows_read_not_prepared');
+        }
+
+        $wpdb->last_error = '';
+
+        /** @var list<PageFollowRow>|null $rows */
+        $rows = $wpdb->get_results($sql);
+
+        // Local copy + strlen: PHPStan's wpdb stub narrows last_error to the
+        // literal '' (same workaround as readScoreRowOrThrow()).
+        $lastError = (string) $wpdb->last_error;
+        if (strlen($lastError) > 0) {
+            throw new RepositoryException('page_follows_read_failed');
+        }
 
         return $rows ?: [];
     }
@@ -235,10 +272,53 @@ final class PageFollowRepository
     }
 
     /**
-     * Delete every page-follow row for one page. Called by the
-     * onPageClaimed migration once each row has been promoted to a
-     * PeepSo follow. Returns rows-deleted.
+     * Delete exactly the rows named, and nothing else.
+     *
+     * ⚠ The companion to {@see deleteByPageId()}, which deletes EVERY row
+     * for a page. The follower drain must only remove rows it actually
+     * handled: a row whose PeepSo follow failed has to survive for the next
+     * attempt, and a page with more rows than one read page must not have
+     * the unread remainder destroyed.
+     *
+     * Bounded (§4): the id list is capped at one read page's worth, and the
+     * caller passes ids it just read.
+     *
+     * ⚠ Returns `false` on a failed query, NOT 0. Collapsing the two made
+     * the drain's summary log claim `deleted: 0` for both "the DELETE matched
+     * nothing" and "the DELETE errored and every row is still there" — and
+     * the caller, seeing no failure, re-read the same full page and migrated
+     * every row again. {@see deleteById()} has carried `int|false` for the
+     * same reason since it was written.
+     *
+     * @param list<int> $ids
+     * @return int|false rows deleted, or false when the DELETE itself failed
      */
+    public function deleteByIds(array $ids): int|false
+    {
+        $clean = [];
+        foreach ($ids as $id) {
+            $id = (int) $id;
+            if ($id > 0) {
+                $clean[$id] = true;
+            }
+        }
+        if ($clean === []) {
+            return 0;
+        }
+
+        $list = array_slice(array_keys($clean), 0, self::DRAIN_PAGE_SIZE);
+
+        global $wpdb;
+
+        $placeholders = implode(',', array_fill(0, count($list), '%d'));
+        $deleted      = $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$this->table} WHERE id IN ({$placeholders})",
+            ...$list
+        ));
+
+        return is_int($deleted) ? $deleted : false;
+    }
+
     public function deleteByPageId(int $pageId): int
     {
         if ($pageId <= 0) {

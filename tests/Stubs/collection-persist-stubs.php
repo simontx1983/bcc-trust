@@ -1,11 +1,19 @@
 <?php
 
 /**
- * Fake-at-FQN CollectionRepository for CollectionPersistBatch tests.
+ * Fakes-at-FQN for CollectionPersistBatch tests: the collection repository
  *
  * Scripted per call so a batch can mix created / updated / failed outcomes —
  * which is the whole point: a PARTIAL failure must be distinguishable from a
  * total one, and both from complete success.
+ *
+ * Plus a DegradationMetrics SPY. #221 records the loss on the health
+ * surface from inside persist(), so without this stub every existing case
+ * in CollectionPersistBatchTest would fatal on a missing class the moment a
+ * batch failed — and a spy, not a no-op, because the point is to assert
+ * WHICH (subsystem, event) pairs were recorded and how many times. Shape
+ * copied verbatim from tests/Stubs/provisioning-intent-stubs.php so the two
+ * cannot drift.
  */
 
 declare(strict_types=1);
@@ -46,6 +54,44 @@ namespace BCC\Trust\Onchain\Repositories {
                     'status' => $status,
                     'id'     => $status === 'failed' ? 0 : count(self::$calls),
                 ];
+            }
+        }
+    }
+}
+
+namespace BCC\Core\Observability {
+
+    if (!class_exists(__NAMESPACE__ . '\\DegradationMetrics', false)) {
+        final class DegradationMetrics
+        {
+            /** @var list<array{subsystem: string, event: string}> */
+            public static array $recorded = [];
+
+            public static function record(string $subsystem, string $event): void
+            {
+                self::$recorded[] = ['subsystem' => $subsystem, 'event' => $event];
+            }
+
+            public static function reset(): void
+            {
+                self::$recorded = [];
+            }
+
+            /**
+             * Event names recorded for one subsystem, in order.
+             *
+             * @return list<string>
+             */
+            public static function eventsFor(string $subsystem): array
+            {
+                $out = [];
+                foreach (self::$recorded as $row) {
+                    if ($row['subsystem'] === $subsystem) {
+                        $out[] = $row['event'];
+                    }
+                }
+
+                return $out;
             }
         }
     }

@@ -462,6 +462,20 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_post_shortcodes';
     }
 
+    /** One shared public profile per verified validator operator account. */
+    public static function operatorProfiles(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_operator_profiles';
+    }
+
+    /** Optional chain/page-specific overrides owned by the current operator. */
+    public static function operatorProfileOverrides(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_operator_profile_overrides';
+    }
+
     // NOTE: bcc_user_locals removed — Halls membership ledger is PeepSo's
     // peepso_group_members; primary-Hall pointer is wp_usermeta.bcc_primary_hall_group_id.
     // NOTE: bcc_page_claims removed — page claims merged into bcc_onchain_claims
@@ -510,6 +524,9 @@ final class TableRegistry
             'attestor_reliability_cache' => self::attestorReliabilityCache(),
             // Post-shortcode permalink sidecar
             'post_shortcodes'    => self::postShortcodes(),
+            // Shared validator-operator profile + page-specific overrides
+            'operator_profiles'          => self::operatorProfiles(),
+            'operator_profile_overrides' => self::operatorProfileOverrides(),
         ];
     }
 }

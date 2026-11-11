@@ -54,12 +54,34 @@ final class AnnouncementCommentService
     public const ERR_NOT_FOUND   = 'bcc_not_found';
     public const ERR_CONFLICT    = 'bcc_conflict';
     public const ERR_UNAVAILABLE = 'bcc_unavailable';
+    public const ERR_RATE_LIMITED = 'bcc_rate_limited';
+
+    /**
+     * Per-commenter burst seatbelt (F-133). Announcement comments notify the
+     * page's audience, so an unthrottled writer was a spam and notification
+     * fan-out vector. The SAME budget as direct messages
+     * (MessagesService::RATE_LIMIT_*): 30 per 5 minutes, via bcc-core Throttle.
+     */
+    public const RATE_LIMIT_PER_WINDOW     = 30;
+    public const RATE_LIMIT_WINDOW_SECONDS = 300;
 
     /** §4.32.9 — the view-model id prefix for a comment. */
     public const ID_PREFIX = 'acmt_';
 
     private AnnouncementCommentRepository $comments;
     private AnnouncementRepository $announcements;
+
+    /**
+     * F-151: Authority::decide() is deliberately uncached and costs a claim
+     * query. listThread() called it once PER COMMENT (N queries for N rows,
+     * plus one in canComment()), and remove() resolved it twice — so the
+     * capability shown could differ from the one that authorized the action.
+     * Memoised per (page, viewer) for this service's lifetime (one request):
+     * one query, one answer for every caller. A thrown lookup is not cached.
+     *
+     * @var array<string, array{decision: string, reason: string|null, operator_user_id: int|null}>
+     */
+    private array $decisions = [];
 
     public function __construct(
         ?AnnouncementCommentRepository $comments = null,
@@ -127,6 +149,7 @@ final class AnnouncementCommentService
      * Refusal order is fixed and load-bearing, because two conditions can hold
      * at once and the client renders distinct copy per reason:
      *
+     *   0. per-commenter throttle               -> 429 bcc_rate_limited (F-133)
      *   1. announcement not publicly readable   -> 404 (existence hidden)
      *   2. `parent_id` sent                     -> 400 replies_not_supported
      *   3. archived                             -> 403 announcement_archived
@@ -148,6 +171,13 @@ final class AnnouncementCommentService
         ?string $nowUtc = null
     ): array {
         $now = $nowUtc ?? gmdate('Y-m-d H:i:s');
+
+        // ⓪ Throttle FIRST (throttle-before-credentials rule, F-133), ahead
+        // of every lookup. A 429 says nothing about whether the announcement
+        // exists, so the existence-hiding 404 below is unaffected.
+        if (!\BCC\Core\Security\Throttle::allow('announcement_comment', self::RATE_LIMIT_PER_WINDOW, self::RATE_LIMIT_WINDOW_SECONDS)) {
+            return self::fail(self::ERR_RATE_LIMITED, 'Too many comments. Please wait.', 429);
+        }
 
         $row = $this->publicAnnouncementOrNull($announcementId);
         if ($row === null) {
@@ -538,6 +568,16 @@ final class AnnouncementCommentService
     }
 
     /** Is this viewer the resolved operator of the announcement's page? */
+    /**
+     * @return array{decision: string, reason: string|null, operator_user_id: int|null}
+     */
+    private function decide(int $pageId, int $viewerId): array
+    {
+        $key = $pageId . ':' . $viewerId;
+
+        return $this->decisions[$key] ??= Authority::decide($pageId, $viewerId);
+    }
+
     private function isOperatorOf(\stdClass $row, int $viewerId): bool
     {
         if ($viewerId <= 0) {
@@ -550,7 +590,7 @@ final class AnnouncementCommentService
         }
 
         try {
-            $decision = Authority::decide($pageId, $viewerId);
+            $decision = $this->decide($pageId, $viewerId);
         } catch (\Throwable $e) {
             return false;
         }
@@ -574,7 +614,7 @@ final class AnnouncementCommentService
         $pageId = (int) ($row->page_id ?? ($row->post_parent ?? 0));
 
         try {
-            $decision = Authority::decide($pageId, $viewerId);
+            $decision = $this->decide($pageId, $viewerId);
         } catch (\Throwable $e) {
             $decision = ['decision' => 'denied', 'reason' => null, 'operator_user_id' => null];
         }

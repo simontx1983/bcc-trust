@@ -340,6 +340,8 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-nft-selections.php';
 // demand + scam signals behind the Verify Collections queue.
 require_once BCC_TRUST_PATH . 'includes/database/schema-collection-signals.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-claims.php';
+// Shared operator branding plus optional per-validator-page overrides.
+require_once BCC_TRUST_PATH . 'includes/database/schema-operator-profiles.php';
 // Validator messaging — durable first-activation record (one row per
 // validator page; the pre-claim backlog belongs to first activation
 // only, transfers never replay it).
@@ -474,6 +476,7 @@ function bcc_onchain_ensure_schema(): bool {
     bcc_onchain_create_user_nft_selections_table();
     bcc_onchain_create_collection_signals_table();
     bcc_onchain_create_claims_table();
+    bcc_onchain_create_operator_profiles_table();
     // Validator messaging first-activation record
     bcc_create_validator_msg_activation_table();
     bcc_create_validator_msg_queue_table();
@@ -696,8 +699,14 @@ add_action('bcc_trust_feed_hot_warm', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->warmHotFeed();
 });
 add_action('bcc_trust_weekly_digest', function () {
-    \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest();
+    \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest(
+        \BCC\Trust\Core\Services\DigestService::TRIGGER_CRON
+    );
+    // Keep the slot on the chosen local weekday + hour across DST.
+    \BCC\Trust\Core\Services\DigestScheduler::realign();
 });
+// Admin-chosen digest weekday/hour + on/off (Email Digest page).
+\BCC\Trust\Core\Services\DigestScheduler::register();
 // Scale-hardening Phase 3 (2026-05-13): weekly slow-ring endorsement
 // scan. Catches paced reciprocity patterns the burst gates miss.
 add_action('bcc_trust_weekly_slow_ring_scan', function () {
@@ -725,33 +734,20 @@ add_action('bcc_trust_daily_contribution_recovery', function () {
 // (`provisioning_state = 'requested'`). Verification is still required and is
 // re-checked per collection; it no longer authorizes anything on its own.
 // Idempotent — re-running creates no duplicates.
+//
+// ⚠ NFT holder groups ONLY. A delegator community is never created by this
+// sweep or by any event: its page's operator chooses to create it through
+// POST /pages/{id}/delegator-group and sets the minimum delegation there.
 add_action('bcc_gated_group_provision', function () {
     $result = \BCC\Trust\Onchain\OnchainPlugin::instance()
         ->gatedGroupProvisioningService()
         ->processRequested();
 
-    if ($result['created'] > 0 || !empty($result['errors'])) {
+    // ⚠ `contended` is in this condition deliberately. Without it a sweep
+    // that was locked out of EVERY queued row logs nothing at all — the one
+    // shape where counting contention is worth anything. See #368.
+    if ($result['created'] > 0 || ($result['contended'] ?? 0) > 0 || !empty($result['errors'])) {
         \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group provisioning sweep', $result);
-    }
-
-    // Validator/delegator communities ride the SAME daily hook (no new
-    // cron registration — deliberate). The `bcc_page_claimed` subscriber
-    // provisions on the claim event; this backfill covers claims that
-    // predate the feature and any missed event. Idempotent. Isolated in
-    // its own try so a validator-side failure can't abort the holder
-    // sweep's already-recorded result.
-    try {
-        $validatorResult = \BCC\Trust\Onchain\OnchainPlugin::instance()
-            ->validatorGroupProvisioningService()
-            ->provisionAll();
-
-        if ($validatorResult['created'] > 0 || !empty($validatorResult['errors'])) {
-            \BCC\Core\Log\Logger::info('[bcc-trust] Delegator-community provisioning sweep', $validatorResult);
-        }
-    } catch (\Throwable $e) {
-        \BCC\Core\Log\Logger::warning('[bcc-trust] Delegator-community provisioning sweep failed', [
-            'error' => $e->getMessage(),
-        ]);
     }
 });
 
@@ -766,43 +762,6 @@ add_action('bcc_gated_group_provision', function () {
 // under `cleanup_only`, and
 // includes/database/unschedule-hall-provision.php clears the event from
 // installs that already carry it.
-
-// Validator/delegator communities — provision on the platform-facing
-// claim event. `bcc_page_claimed` fires only after claim verification
-// (wallet-signature proof), so the claim itself is the arming act: no
-// delegator-count floor. Filtered to validator-operator claims; the
-// operator becomes the group OWNER (moderation has an owner, and the
-// owner is exempt from the gate + revoke by existing guards).
-// Idempotent — re-firing finds the existing group and no-ops.
-add_action('bcc_page_claimed', function ($userId, $pageId, $entityType, $entityId, $role): void {
-    if ((string) $entityType !== 'validator' || (string) $role !== 'operator') {
-        return;
-    }
-
-    try {
-        $result = \BCC\Trust\Onchain\OnchainPlugin::instance()
-            ->validatorGroupProvisioningService()
-            ->provisionForClaim((int) $userId, (int) $entityId);
-
-        if ($result['status'] === 'created' || $result['status'] === 'error') {
-            \BCC\Core\Log\Logger::info('[bcc-trust] Delegator-community provisioning (claim event)', [
-                'user_id'      => (int) $userId,
-                'validator_id' => (int) $entityId,
-                'status'       => $result['status'],
-                'group_id'     => $result['group_id'],
-                'message'      => $result['message'],
-            ]);
-        }
-    } catch (\Throwable $e) {
-        // Never let community provisioning break the claim flow — the
-        // daily backfill retries.
-        \BCC\Core\Log\Logger::warning('[bcc-trust] Delegator-community provisioning (claim event) failed', [
-            'user_id'      => (int) $userId,
-            'validator_id' => (int) $entityId,
-            'error'        => $e->getMessage(),
-        ]);
-    }
-}, 30, 5);
 
 // V2 (PR 4): NFT-gated holder groups — reconcile sweep for users who
 // opted into auto-join via `bcc_auto_join_eligible_groups` user_meta.
@@ -1204,44 +1163,13 @@ add_action('bcc_trust_divergence_state_sweep', static function (): void {
 // so a target's score drifts even with no new attestation events; this sweep
 // re-synthesizes every target that holds an active attestation. Paginated +
 // per-target isolated (a single failure → an `attestation_synthesis`
-// DegradationMetric, never aborts the sweep). The work-list (a GROUP BY over
-// active rows) is stable during the run because recomputeFor() touches only the
-// score table, never the attestation table — so OFFSET paging is safe.
+// DegradationMetric, never aborts the sweep). Keyset-paged and run under an
+// advisory lock (F-93) — see AttestationScoreSynthesis::runDecaySweep().
 add_action('bcc_trust_daily_attestation_decay', static function (): void {
     try {
-        $plugin     = \BCC\Trust\Core\Plugin::instance();
-        $repo       = $plugin->attestationRepository();
-        $synthesis  = $plugin->attestationScoreSynthesis();
-        $offset     = 0;
-        $batch      = 500;
-        $maxBatches = 200; // safety bound — up to 100k targets per run
-        $processed  = 0;
-        $failed     = 0;
+        $summary = \BCC\Trust\Core\Plugin::instance()->attestationScoreSynthesis()->runDecaySweep();
 
-        for ($i = 0; $i < $maxBatches; $i++) {
-            $targets = $repo->listTargetsWithActiveAttestations($offset, $batch);
-            if ($targets === []) {
-                break;
-            }
-            foreach ($targets as $t) {
-                try {
-                    $synthesis->recomputeFor($t->target_kind, (int) $t->target_id);
-                    $processed++;
-                } catch (\Throwable $e) {
-                    $failed++;
-                    \BCC\Core\Observability\DegradationMetrics::record('attestation_synthesis', 'decay_recompute_failed');
-                }
-            }
-            if (count($targets) < $batch) {
-                break;
-            }
-            $offset += $batch;
-        }
-
-        \BCC\Core\Log\Logger::info('[bcc-trust] Attestation decay sweep complete', [
-            'processed' => $processed,
-            'failed'    => $failed,
-        ]);
+        \BCC\Core\Log\Logger::info('[bcc-trust] Attestation decay sweep complete', $summary);
     } catch (\Throwable $e) {
         \BCC\Core\Log\Logger::warning('[bcc-trust] Attestation decay sweep callback failed', [
             'error' => $e->getMessage(),
@@ -1605,15 +1533,10 @@ add_action('init', function () {
 |--------------------------------------------------------------------------
 */
 
-add_action('bcc.trust.recalculate_score', function (int $pageId) {
-    try {
-        \BCC\Trust\Core\Plugin::instance()->voteService()->recalculateScore($pageId);
-    } catch (\Exception $e) {
-        \BCC\Core\Log\Logger::info('[bcc-trust] Score recalculation failed', [
-            'page_id' => $pageId,
-            'error'   => $e->getMessage(),
-        ]);
-    }
+add_action('bcc.trust.recalculate_score', function (int $pageId): void {
+    // Never throws: VoteService::recalculateScoreOrRequeue() catches
+    // \Throwable, logs at error and re-flags the page for the cron (F-110).
+    \BCC\Trust\Core\Plugin::instance()->voteService()->recalculateScoreOrRequeue($pageId);
 });
 
 // Admin report penalty — fired by the disputes admin panel.
@@ -1739,6 +1662,33 @@ add_action('plugins_loaded', function (): void {
 
     // Prune quarantined bonus entries (>14 days or >100 rows) on daily refresh.
     add_action('bcc_onchain_daily_refresh', [\BCC\Trust\Onchain\Services\BonusRetryService::class, 'pruneQuarantine'], 20);
+
+    // F-65 part B: prune old balance-0 holdings tombstones (bounded; see
+    // NftHoldingsRepository::pruneTombstones() for the lateness bound).
+    //
+    // ⚠ A CLOSURE, NOT [class, 'pruneTombstones']. do_action() with no
+    // arguments still passes ONE argument, '', to a callback registered with
+    // the default accepted_args = 1 — and '' into `int $limit` is a TypeError
+    // that would take down every later bcc_onchain_daily_refresh callback.
+    // The closure takes nothing and calls with the default limit; the catch
+    // keeps a prune failure from reaching its siblings either.
+    add_action('bcc_onchain_daily_refresh', static function (): void {
+        try {
+            $limit   = \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::TOMBSTONE_PRUNE_LIMIT;
+            $removed = \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::pruneTombstones($limit);
+            if (class_exists('BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::info('[bcc-trust] holdings tombstones pruned', ['removed' => $removed, 'limit' => $limit]);
+                if ($removed >= $limit) {
+                    // More old tombstones than one run removes: a build-up.
+                    \BCC\Core\Log\Logger::warning('[bcc-trust] holdings tombstone prune hit its cap; more remain', ['limit' => $limit]);
+                }
+            }
+        } catch (\Throwable $e) {
+            if (class_exists('BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] holdings tombstone prune failed', ['error' => $e->getMessage()]);
+            }
+        }
+    }, 30);
 
     // Domain event hooks.
     add_action('bcc_onchain_claim_verified', [\BCC\Trust\Onchain\Services\BonusService::class, 'applyClaimBonus'], 10, 4);
@@ -1971,7 +1921,6 @@ add_action('plugins_loaded', function (): void {
                 'restUrl' => esc_url_raw(rest_url('bcc/v1/onchain')),
                 'nonce'   => wp_create_nonce('wp_rest'),
             ]);
-            wp_enqueue_style('bcc-onchain-admin', BCC_TRUST_URL . 'assets/css/bcc-onchain.css', [], BCC_TRUST_VERSION);
         }
     });
 
@@ -2555,6 +2504,10 @@ add_action('admin_notices', function () {
 // Missing onchain API key warnings — without these, signals silently
 // return empty data and trust scores are systematically understated.
 add_action('admin_notices', function () {
+    // F-117: names wp-config constants — admins only, not every wp-admin user.
+    if (!current_user_can('manage_options')) {
+        return;
+    }
     $missing = [];
     if (!defined('BCC_ETHERSCAN_API_KEY') || BCC_ETHERSCAN_API_KEY === '') {
         $missing[] = 'BCC_ETHERSCAN_API_KEY';
@@ -2565,7 +2518,7 @@ add_action('admin_notices', function () {
     if (!empty($missing)) {
         printf(
             '<div class="notice notice-error"><p><strong>BCC Trust (Onchain):</strong> Missing API keys in wp-config.php: <code>%s</code>. On-chain trust signals are disabled until these are configured.</p></div>',
-            esc_html(implode('</code>, <code>', $missing))
+            implode('</code>, <code>', array_map('esc_html', $missing))
         );
     }
 });
@@ -2616,12 +2569,15 @@ if (is_admin()) {
     // isn't visited.
     require_once BCC_TRUST_PATH . 'includes/admin/tabs/tab-repair.php';
     add_action('admin_menu', function () {
+        // Developer group under BCC System — listed only when
+        // BCC_DEV_TOOLS === true; the page itself stays gated by
+        // BCC_REPAIR_ENABLED.
         add_submenu_page(
-            'bcc-system-health',
+            \BCC\Trust\Core\Admin\AdminMenus::parentFor(\BCC\Trust\Core\Admin\AdminMenus::REPAIR_SLUG),
             'Repair (dangerous)',
-            '🔧 Repair',
+            'Repair',
             'manage_options',
-            'bcc-system-repair',
+            \BCC\Trust\Core\Admin\AdminMenus::REPAIR_SLUG,
             'bcc_trust_render_repair_tab'
         );
     }, 25);
@@ -2630,6 +2586,7 @@ if (is_admin()) {
     // health signals (stale chains, dispute
     // adjudication delays, permanent orphans). Replaces N separate
     // banners with one summary banner + a dedicated page.
+    \BCC\Trust\Core\Admin\AdminMenus::register();
     \BCC\Trust\Core\Admin\NotificationCenter::register();
 
     // Phase 3 deferred items — Wallet audit + Sessions surfaces.
@@ -2637,4 +2594,7 @@ if (is_admin()) {
     // remain on the per-user Moderation page.
     \BCC\Trust\Core\Admin\WalletAuditPage::register();
     \BCC\Trust\Core\Admin\SessionsPage::register();
+    \BCC\Trust\Core\Admin\EmailDigestPage::register();
+    // One-off cleanup of removed add-ons' data (hidden page, dry run first).
+    \BCC\Trust\Core\Admin\PeepSoLeftoversPage::register();
 }

@@ -122,9 +122,11 @@ class StewardshipSweepService
 
         $period     = $this->isoPeriod();
         $maxGroupId = $afterGroupId;
+        $cutShort   = false;
 
         foreach ($candidates as $c) {
             if ($this->now() >= $deadline) {
+                $cutShort = true;
                 break; // Budget exhausted — cursor persists the last processed id.
             }
 
@@ -151,13 +153,18 @@ class StewardshipSweepService
             }
         }
 
-        // Advance the cursor. A short batch (fewer than BATCH_LIMIT) means we
-        // consumed the tail of the set → wrap to 0 so the next run restarts
-        // from the beginning; every community is thus covered within a bounded
-        // number of weeks. Stewardship credit is idempotent per (group, ISO
-        // week), so re-covering a community in a later week just mints that
-        // week's credit — never a double-count.
-        $reachedEnd = count($candidates) < self::BATCH_LIMIT;
+        // Advance the cursor. A short batch (fewer than BATCH_LIMIT) that was
+        // processed TO THE END means we consumed the tail of the set → wrap to
+        // 0 so the next run restarts from the beginning; every community is
+        // thus covered within a bounded number of weeks. But if the time
+        // budget cut the batch short, the tail was NOT consumed: keep the
+        // cursor at the last processed id (or where it was, if nothing was
+        // processed) so the next run resumes there instead of skipping the
+        // unprocessed communities until the following full cycle (F-40).
+        // Stewardship credit is idempotent per (group, ISO week), so
+        // re-covering a community in a later week just mints that week's
+        // credit — never a double-count.
+        $reachedEnd = !$cutShort && count($candidates) < self::BATCH_LIMIT;
         $newCursor  = $reachedEnd ? 0 : $maxGroupId;
         $this->writeCursor($newCursor);
         $this->onCursorAdvance($afterGroupId, $newCursor, $reachedEnd);

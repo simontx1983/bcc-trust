@@ -271,6 +271,69 @@ final class AnnouncementRepositoryIntegrationTest extends TestCase
         self::assertSame(['ours'], $this->titles($this->repo->listActive(self::PAGE_ID, 20, null)));
     }
 
+    // ── 1b. hasActive() — backs Card.announcements.has_any ───────────
+
+    /**
+     * `has_any` only earns its place if it agrees with the rotator, because
+     * the rotator is what the bar renders. These assert the agreement in
+     * both directions rather than asserting the boolean alone — a true that
+     * the bar then contradicts would reserve a strip for nothing.
+     */
+    public function testHasActiveIsTrueExactlyWhenTheRotatorHasSomethingToShow(): void
+    {
+        self::assertFalse($this->repo->hasActive(self::PAGE_ID), 'nothing seeded yet');
+        self::assertSame([], $this->titles($this->repo->rotator(self::PAGE_ID)));
+
+        $this->seed('properly published');
+
+        self::assertTrue($this->repo->hasActive(self::PAGE_ID));
+        self::assertSame(['properly published'], $this->titles($this->repo->rotator(self::PAGE_ID)));
+    }
+
+    /**
+     * ⚠ The one that matters: a row EXISTS, so a naive count or an
+     * `EXISTS` over the post type alone would answer true. It is invisible
+     * because the authorization marker is absent, and `hasActive()` must
+     * agree with the rotator rather than with the table.
+     */
+    public function testHasActiveIsFalseWhenTheOnlyRowFailsAVisibilityPredicate(): void
+    {
+        $this->seed('forced to publish', authorizedAt: null, authorizedUserId: null);
+
+        self::assertSame([], $this->titles($this->repo->rotator(self::PAGE_ID)));
+        self::assertFalse($this->repo->hasActive(self::PAGE_ID), 'a row the rotator will not show is not "any"');
+    }
+
+    /** A draft is the operator's business; the bar has nothing to reserve for it. */
+    public function testHasActiveIsFalseForADraftOnly(): void
+    {
+        $this->seed('still a draft', status: 'draft');
+
+        self::assertFalse($this->repo->hasActive(self::PAGE_ID));
+    }
+
+    /**
+     * §4.32.6 keeps an archived announcement public, but the BAR shows the
+     * active set, so an archived-only page reserves nothing. This is the
+     * case a `COUNT(*) WHERE public` would get wrong.
+     */
+    public function testHasActiveIsFalseWhenEveryVisibleRowIsArchived(): void
+    {
+        $this->seed('archived early', archivedAt: '2026-04-01 00:00:00');
+
+        self::assertSame([], $this->titles($this->repo->rotator(self::PAGE_ID)));
+        self::assertNotSame([], $this->titles($this->repo->listArchived(self::PAGE_ID, 20, null)), 'still public, just archived');
+        self::assertFalse($this->repo->hasActive(self::PAGE_ID));
+    }
+
+    /** Another page's announcement is not this page's. */
+    public function testHasActiveDoesNotLeakAcrossPages(): void
+    {
+        $this->seed('belongs to another page', parent: self::PAGE_ID + 1);
+
+        self::assertFalse($this->repo->hasActive(self::PAGE_ID));
+    }
+
     // ── 2. Ordering and archival (§4.32.6, §4.32.12) ─────────────────────
 
     public function testTheActiveListIsPinnedFirstThenNewestFirst(): void
@@ -519,19 +582,75 @@ final class AnnouncementRepositoryIntegrationTest extends TestCase
     }
 
     /**
-     * ⚠⚠ `blocked` is REFUSED today — reconciler arm C does not exist, so
-     * nothing can distinguish it from an ordinary draft. Accepting it would
-     * return ordinary drafts: a wrong answer that looks right.
+     * An unrecognised status, or none at all, returns nothing rather than
+     * everything — a filter that falls open is worse than one that refuses.
+     *
+     * ⚠ `blocked` and `published` USED TO BE IN THIS LIST, and the docblock
+     * above it still claimed `blocked` was refused long after
+     * `ownerStatuses()` began accepting it. The assertion kept passing for a
+     * reason the comment did not describe: no seeded row carried arm C's
+     * marker, so the blocked filter matched nothing. Both statuses are now
+     * supported and have their own cases.
      */
-    public function testTheOwnerListRefusesBlockedAndPublishedStatuses(): void
+    public function testTheOwnerListReturnsNothingForAnUnsupportedStatusSet(): void
     {
         $this->seed('a draft', status: 'draft', authorizedAt: null, authorizedUserId: null);
         $this->seed('published');
 
-        foreach ([[Caps::STATUS_BLOCKED], [Caps::STATUS_PUBLISHED], ['nonsense'], []] as $statuses) {
+        foreach ([['nonsense'], []] as $statuses) {
             $page = $this->repo->listForOwner(self::PAGE_ID, self::operator(), $statuses, 20, null);
             self::assertSame([], $this->titles($page), 'unsupported status set must return nothing');
         }
+    }
+
+    /**
+     * ⚠⚠ THE CASE THE WHOLE CHANGE EXISTS FOR, AND THE ONE THAT CATCHES THE
+     * TRAP IN IT.
+     *
+     * `?status=published` must return the PUBLISHED row. Before this change
+     * `wpStatusFor()` fell through to `'draft'` for every status it did not
+     * recognise, so widening the accepted list alone would have composed
+     * `p.post_status = 'draft'` and answered with the DRAFT — a wrong page
+     * that looks right, and one a test asserting merely "non-empty" would
+     * have waved straight through. Hence exact titles, with a draft present
+     * to be wrongly returned.
+     */
+    public function testTheOwnerListReturnsPublishedRowsAndNotDrafts(): void
+    {
+        $this->seed('a draft', status: 'draft', authorizedAt: null, authorizedUserId: null);
+        $this->seed('live on the billboard');
+
+        $page = $this->repo->listForOwner(
+            self::PAGE_ID,
+            self::operator(),
+            [Caps::STATUS_PUBLISHED],
+            20,
+            null
+        );
+
+        self::assertSame(['live on the billboard'], $this->titles($page));
+    }
+
+    /**
+     * The default is UNCHANGED. §4.32.4 documents `['draft', 'scheduled']`,
+     * and that is what every caller which does not send the parameter
+     * receives — so adding a value to the vocabulary must not change the
+     * meaning of a request nobody edited.
+     */
+    public function testThePublishedStatusIsOptInAndNotPartOfTheDefault(): void
+    {
+        $this->seed('a draft', status: 'draft', authorizedAt: null, authorizedUserId: null);
+        $this->seed('live on the billboard');
+
+        $page = $this->repo->listForOwner(
+            self::PAGE_ID,
+            self::operator(),
+            [Caps::STATUS_DRAFT, Caps::STATUS_SCHEDULED],
+            20,
+            null
+        );
+
+        self::assertSame(['a draft'], $this->titles($page));
     }
 
     public function testTheOwnerListOrdersByEffectiveDateNewestFirst(): void

@@ -101,7 +101,31 @@ final class CommentDeleteEvidenceEventTest extends TestCase
         $repo = new CommentRepository();
         $repo->metaByActId[456] = self::metaRow(456, 777, 555, 9);
 
-        $result = self::service($repo)->deleteComment('feed_123', 'comment_456', 10);
+        // F-47: a cross-author attempt is a 403 only when the parent post is
+        // one the viewer can see (an ungrouped, published post here). Hidden
+        // parents read as 404; see CommentExistenceOracleTest.
+        CommentDeleteFakes::$activities[123] = (object) [
+            'act_id'          => 123,
+            'act_external_id' => 555,
+            'act_module_id'   => 1,
+            'act_status'      => 'publish',
+        ];
+        $service = self::service($repo);
+        (new ReflectionClass(CommentService::class))->getProperty('visibility')->setValue(
+            $service,
+            new class extends \BCC\Trust\Core\Services\FeedItemReportVisibility {
+                public function __construct()
+                {
+                }
+
+                public function canSee(int $viewerId, object $activity): bool
+                {
+                    return true;
+                }
+            }
+        );
+
+        $result = $service->deleteComment('feed_123', 'comment_456', 10);
 
         self::assertSame('bcc_forbidden', $result['error'] ?? null);
         self::assertSame([], CommentDeleteFakes::$writerCalls);

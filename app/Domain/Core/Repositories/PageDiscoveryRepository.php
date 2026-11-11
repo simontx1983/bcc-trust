@@ -396,6 +396,43 @@ final class PageDiscoveryRepository
     }
 
     /**
+     * The published peepso-pages among the given ids, keyed by id. An id that
+     * was trashed, drafted, deleted or is not a page is simply absent.
+     *
+     * Single bulk SELECT, bounded by the caller's IN-list (one feed page).
+     *
+     * @param  list<int> $pageIds
+     * @return array<int, object{ID: int|numeric-string, post_title: string, post_name: string}>
+     */
+    public static function findPublishedByIds(array $pageIds): array
+    {
+        if ($pageIds === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
+
+        /** @var list<object{ID: int|numeric-string, post_title: string, post_name: string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT ID, post_title, post_name
+               FROM {$wpdb->posts}
+              WHERE ID IN ({$placeholders})
+                AND post_type = 'peepso-page'
+                AND post_status = 'publish'
+              LIMIT %d",
+            ...[...$pageIds, count($pageIds)]
+        ));
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            $out[(int) $row->ID] = $row;
+        }
+
+        return $out;
+    }
+
+    /**
      * Of the given post IDs, return those whose chain meta resolves to
      * $chainId. Matches EITHER `_bcc_gate_chain_id` (NFT holder groups)
      * OR `_bcc_chain_tag` (user-created plain groups); meta_value is a

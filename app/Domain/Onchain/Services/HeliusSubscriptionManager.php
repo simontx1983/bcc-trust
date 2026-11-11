@@ -3,6 +3,7 @@
 namespace BCC\Trust\Onchain\Services;
 
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\Support\ApiRetry;
 
@@ -40,6 +41,31 @@ final class HeliusSubscriptionManager
     public const HELIUS_API_BASE   = 'https://api.helius.xyz';
     private const HTTP_TIMEOUT     = 15;
     private const MAX_ADDRESSES    = 100000;
+
+    /**
+     * ⚠ F-64: ONE LOCK FOR EVERY READ-MODIFY-WRITE OF THE SHARED LIST.
+     *
+     * The webhook holds one address list and every change is GET → edit →
+     * PUT of the WHOLE list. The subscribe job, the unsubscribe job and the
+     * reconcile ran that unlocked, so two overlapping writers lost whichever
+     * change PUT first.
+     *
+     * A MySQL advisory lock: session-scoped, so a crashed worker's lock is
+     * released when its connection drops and cannot wedge subscriptions. The
+     * wait is bounded; a busy lock returns false / null, which the async jobs
+     * already treat as "retry later" (bounded backoff in bcc-trust.php, with
+     * the reconcile as backstop) — a deferred change, never a dropped one.
+     */
+    /** Lock-name segment; listLockName() resolves it as {prefix}bcc_helius_address_list. */
+    private const LIST_LOCK         = 'helius_address_list';
+
+    /**
+     * Shrink floor for a resync PUT (F-64 review): with at least this many
+     * remote addresses, a resync that would leave fewer than half of them is
+     * refused unless an operator overrides it.
+     */
+    private const SHRINK_FLOOR_MIN_REMOTE = 10;
+    private const LIST_LOCK_TIMEOUT = 10;
 
     /**
      * Provision the shared webhook ONCE. No-op (returns existing id) if
@@ -101,6 +127,16 @@ final class HeliusSubscriptionManager
             return false;
         }
 
+        $result = self::withListLock(static fn (): bool => self::addLocked($webhookId, $walletLinkId, $walletAddress));
+
+        return $result === true;
+    }
+
+    /**
+     * addAddress()'s read-modify-write. Runs ONLY under the list lock.
+     */
+    private static function addLocked(string $webhookId, int $walletLinkId, string $walletAddress): bool
+    {
         $current = self::fetchAddresses($webhookId);
         if ($current === null) {
             return false;
@@ -152,6 +188,35 @@ final class HeliusSubscriptionManager
             return true;
         }
 
+        $result = self::withListLock(static fn (): bool => self::removeLocked($webhookId, $walletLinkId, $walletAddress));
+
+        return $result === true;
+    }
+
+    /**
+     * removeAddress()'s read-modify-write. Runs ONLY under the list lock.
+     */
+    private static function removeLocked(string $webhookId, int $walletLinkId, string $walletAddress): bool
+    {
+        // ⚠ F-64: the address may still belong to ANOTHER link — two users can
+        // link the same Solana address. Taking it off the shared list would
+        // stop that user's events. Unknown is not "no": a failed check defers.
+        $solanaChain = ChainRepository::getBySlug('solana');
+        if ($solanaChain === null) {
+            return false;
+        }
+        try {
+            $others = WalletRepository::countOtherLinksForChainAddress((int) $solanaChain->id, $walletAddress, $walletLinkId);
+        } catch (RepositoryReadFailure $e) {
+            return false;
+        }
+        if ($others > 0) {
+            if ($walletLinkId > 0) {
+                WalletRepository::markHeliusManaged($walletLinkId, false);
+            }
+            return true;
+        }
+
         $current = self::fetchAddresses($webhookId);
         if ($current === null) {
             return false;
@@ -179,9 +244,14 @@ final class HeliusSubscriptionManager
      * table. Used by the admin "Resync addresses" button + as a
      * recovery tool when bookkeeping drift is detected.
      *
-     * @return array{remote_count: int, local_count: int, applied: bool}|null
+     * `$allowShrink` is the OPERATOR override for the shrink floor (see
+     * resyncLocked()): the admin Resync form passes it only when an operator
+     * has ticked "I have confirmed a mass unlink". The reconcile cron never
+     * does.
+     *
+     * @return array{remote_count: int, local_count: int, applied: bool, refused?: string}|null
      */
-    public static function resyncFromWalletLinks(): ?array
+    public static function resyncFromWalletLinks(bool $allowShrink = false): ?array
     {
         $webhookId = (string) get_option(self::OPTION_WEBHOOK_ID, '');
         if ($webhookId === '') {
@@ -193,8 +263,28 @@ final class HeliusSubscriptionManager
             return null;
         }
 
-        $managed   = WalletRepository::listForChainBySolanaSync((int) $solanaChain->id, true);
-        $unmanaged = WalletRepository::listForChainBySolanaSync((int) $solanaChain->id, false);
+        return self::withListLock(static fn (): ?array => self::resyncLocked($webhookId, (int) $solanaChain->id, $allowShrink));
+    }
+
+    /**
+     * resyncFromWalletLinks()'s read-modify-write. Runs ONLY under the list
+     * lock.
+     *
+     * @return array{remote_count: int, local_count: int, applied: bool, refused?: string}|null
+     */
+    private static function resyncLocked(string $webhookId, int $solanaChainId, bool $allowShrink): ?array
+    {
+        // ⚠ F-64: FAIL-CLOSED READS. The result is PUT as the WHOLE list, so a
+        // failed DB read that came back [] wiped every subscription.
+        try {
+            $managed   = WalletRepository::listForChainBySolanaSyncOrThrow($solanaChainId, true);
+            $unmanaged = WalletRepository::listForChainBySolanaSyncOrThrow($solanaChainId, false);
+        } catch (RepositoryReadFailure $e) {
+            \BCC\Core\Log\Logger::warning('[HeliusSubscriptionManager] resync skipped: wallet_links read failed', [
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
         $localAddresses = [];
         foreach ($managed as $w) {
             $localAddresses[$w['wallet_address']] = true;
@@ -204,6 +294,11 @@ final class HeliusSubscriptionManager
         }
         $localList = array_keys($localAddresses);
         if (count($localList) > self::MAX_ADDRESSES) {
+            // L3: say so — the addresses past the cap are not subscribed.
+            \BCC\Core\Log\Logger::warning('[HeliusSubscriptionManager] local set exceeds the webhook address cap; truncating', [
+                'local' => count($localList),
+                'cap'   => self::MAX_ADDRESSES,
+            ]);
             $localList = array_slice($localList, 0, self::MAX_ADDRESSES);
         }
 
@@ -217,16 +312,53 @@ final class HeliusSubscriptionManager
         $localSorted = $localList;
         sort($localSorted);
         if ($remote !== $localSorted) {
+            // ⚠ F-64 review: SHRINK FLOOR. The PUT replaces the WHOLE list, so a
+            // local read that came back far smaller than reality would
+            // unsubscribe everyone missing from it. Fail-closed reads remove the
+            // known causes; this is the backstop for an unknown one. Refused:
+            // shrinking a non-empty remote list to empty, or — with at least
+            // SHRINK_FLOOR_MIN_REMOTE remote addresses — to under half. Small
+            // lists are exempt from the ratio so an ordinary unlink converges.
+            // A genuine mass unlink needs the operator override.
+            $remoteCount = count($remote);
+            $localCount  = count($localList);
+            $shrinksToEmpty = $remoteCount > 0 && $localCount === 0;
+            $shrinksByHalf  = $remoteCount >= self::SHRINK_FLOOR_MIN_REMOTE && $localCount * 2 < $remoteCount;
+            if (!$allowShrink && ($shrinksToEmpty || $shrinksByHalf)) {
+                \BCC\Core\Log\Logger::warning('[HeliusSubscriptionManager] resync refused: it would shrink the remote list sharply', [
+                    'remote_count' => $remoteCount,
+                    'local_count'  => $localCount,
+                ]);
+                return [
+                    'remote_count' => $remoteCount,
+                    'local_count'  => $localCount,
+                    'applied'      => false,
+                    'refused'      => 'shrink',
+                ];
+            }
+
             if (!self::patchAddresses($webhookId, $localList)) {
                 return null;
             }
             $applied = true;
+        }
 
-            // Bring the helius_managed flag in line with reality.
-            foreach ($managed as $w) {
+        // Bring the helius_managed flag in line with what the list now holds.
+        //
+        // ⚠ F-70: THIS WAS INVERTED. It marked every managed row false and
+        // every unmanaged row true, right after PUTting both onto the list,
+        // so the admin status misreported and the next resync flipped them
+        // all back. A row is managed iff its address is on the list: true for
+        // every listed address, false only for rows the cap left out. Only
+        // rows whose flag actually changes are written.
+        $listed = array_fill_keys($localList, true);
+        foreach ($managed as $w) {
+            if (!isset($listed[$w['wallet_address']])) {
                 WalletRepository::markHeliusManaged($w['id'], false);
             }
-            foreach ($unmanaged as $w) {
+        }
+        foreach ($unmanaged as $w) {
+            if (isset($listed[$w['wallet_address']])) {
                 WalletRepository::markHeliusManaged($w['id'], true);
             }
         }
@@ -287,17 +419,71 @@ final class HeliusSubscriptionManager
         if ($detail === null) {
             return null;
         }
-        $addresses = $detail['accountAddresses'] ?? [];
-        if (!is_array($addresses)) {
-            return [];
+        // ⚠ F-64: COMPLETE OR null. Callers PUT an edited copy of this as
+        // the WHOLE list, so returning [] for a missing or malformed list
+        // made addAddress() PUT just the new address — wiping every other
+        // subscriber — and dropping an unreadable entry dropped that
+        // subscription on the next write. A list this cannot read entirely
+        // is unknown; callers treat null as "do not write, retry later".
+        if (!array_key_exists('accountAddresses', $detail)) {
+            return null;
+        }
+        $addresses = $detail['accountAddresses'];
+        if (!is_array($addresses) || !array_is_list($addresses)) {
+            return null;
         }
         $clean = [];
         foreach ($addresses as $a) {
-            if (is_string($a) && $a !== '') {
-                $clean[] = $a;
+            if (!is_string($a) || $a === '') {
+                return null;
             }
+            $clean[] = $a;
         }
         return $clean;
+    }
+
+    /**
+     * Run one read-modify-write of the shared address list under the list
+     * lock. Returns null — without running $fn — when the lock is busy, so
+     * callers defer rather than write over a concurrent change.
+     *
+     * ⚠ The release is in `finally`, on every path including a throw, and is
+     * matched one-for-one with the acquire (GET_LOCK is reentrant per
+     * session, so an unmatched acquire would keep the lock held).
+     *
+     * @template T
+     * @param  callable(): T $fn
+     * @return T|null
+     */
+    private static function withListLock(callable $fn): mixed
+    {
+        $lock = self::listLockName();
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($lock, self::LIST_LOCK_TIMEOUT)) {
+            \BCC\Core\Log\Logger::info('[HeliusSubscriptionManager] address list busy; deferring');
+            return null;
+        }
+        try {
+            return $fn();
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
+        }
+    }
+
+    /**
+     * The list lock's name, carrying this site's table prefix.
+     *
+     * ⚠ GET_LOCK names are SERVER-WIDE. Staging and production sharing one
+     * MySQL server would otherwise serialise against each other's Helius
+     * writes. The prefix comes from DB::table() — the sanctioned accessor —
+     * because a service may not touch $wpdb (arch guardrail
+     * WPDB_OUTSIDE_REPO); it yields "{prefix}bcc_helius_address_list". The
+     * value names a lock, not a table. MySQL caps a lock name at 64
+     * characters, so it is truncated defensively rather than letting
+     * GET_LOCK error.
+     */
+    private static function listLockName(): string
+    {
+        return substr(\BCC\Core\DB\DB::table(self::LIST_LOCK), 0, 64);
     }
 
     /**
@@ -343,18 +529,22 @@ final class HeliusSubscriptionManager
             return false;
         }
 
-        $response = ApiRetry::request(
-            static fn () => wp_remote_request(
-                self::HELIUS_API_BASE . '/v0/webhooks/' . rawurlencode($webhookId)
-                . '?api-key=' . rawurlencode($apiKey),
-                [
-                    'method'    => 'PUT',
-                    'timeout'   => self::HTTP_TIMEOUT,
-                    'headers'   => ['Content-Type' => 'application/json'],
-                    'body'      => $body,
-                    'sslverify' => true,
-                ]
-            ),
+        // ⚠ Through ApiRetry::post — which runs SafeHttpClient::prepareArgs()
+        // (metadata-host blocklist, public-IP validation, the resolved-IP pin,
+        // the negative DNS cache) — not a bare wp_remote_request(). The
+        // webhook GET and the provisioning POST already went this way; only
+        // this PUT did not. wp_remote_post() lets the caller's `method`
+        // override POST, so the request is still a PUT.
+        $response = ApiRetry::post(
+            self::HELIUS_API_BASE . '/v0/webhooks/' . rawurlencode($webhookId)
+            . '?api-key=' . rawurlencode($apiKey),
+            [
+                'method'    => 'PUT',
+                'timeout'   => self::HTTP_TIMEOUT,
+                'headers'   => ['Content-Type' => 'application/json'],
+                'body'      => $body,
+                'sslverify' => true,
+            ],
             ['label' => 'Helius webhook patch addresses']
         );
 

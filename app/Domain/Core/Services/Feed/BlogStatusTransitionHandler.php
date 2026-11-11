@@ -53,6 +53,7 @@ namespace BCC\Trust\Core\Services\Feed;
 
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Repositories\PeepSoActivityWriter;
+use BCC\Trust\Core\Services\PostsService;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -140,6 +141,50 @@ final class BlogStatusTransitionHandler
         // performance plugins gate revisions on a custom filter).
         if (function_exists('wp_save_post_revision')) {
             wp_save_post_revision($postId);
+        }
+
+        // §D6 group blogs — a draft PARKS its intended group in sidecar
+        // meta instead of attaching, because attachToGroup fires
+        // `peepso_groups_new_post` the moment it writes, and a draft must
+        // not summon a group to read something unpublished. This is the
+        // one place the attach happens for a draft→publish flip, and it
+        // runs BEFORE the activity-row event so every subscriber sees the
+        // post already carrying its group.
+        //
+        // The helper is idempotent: it re-gates the author's standing, it
+        // no-ops when `peepso_group_id` is already set, and it clears the
+        // sidecar — so an unpublish/republish cycle cannot notify the
+        // group a second time.
+        $parked = PostsService::attachParkedBlogGroup($postId, $authorId);
+
+        // ⚠⚠ STOP IF THE GATE REFUSED AND THE POST WENT BACK TO DRAFT.
+        //
+        // Everything below treats this as a successful publish, and the
+        // listeners on `bcc_blog_post_created` do four things that are all
+        // wrong for a post that is no longer published:
+        //
+        //   - insert the activity row. The nested revert's publish→draft
+        //     branch already ran and found no row to remove, so this one
+        //     would be an ORPHAN — surfacing a draft on the feed, which is
+        //     the exact failure the parked-sidecar design exists to avoid.
+        //   - credit rank evidence for a publication that did not happen.
+        //   - start the Apprentice confirmation clock, which is then voided
+        //     as `content_unpublished` and imposes the 7-day cool-off. So a
+        //     REFUSAL WOULD PENALISE THE AUTHOR for a post the gate
+        //     withheld on their behalf.
+        //   - run the first-action and tier listeners on the same false
+        //     premise.
+        //
+        // This early return is the whole of H1. The revert alone was not
+        // enough: it put the row back to draft and then let the rest of the
+        // publish pipeline run anyway.
+        if ($parked === PostsService::PARKED_REVERTED) {
+            Logger::warning('[BlogStatusTransitionHandler] publish refused by the group gate; reverted to draft', [
+                'post_id' => $postId,
+                'user_id' => $authorId,
+            ]);
+
+            return;
         }
 
         do_action('bcc_blog_post_created', $authorId, $postId);

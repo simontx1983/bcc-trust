@@ -139,11 +139,45 @@ final class ValidatorGroupGateTest extends TestCase
         self::assertNoMembershipWritten();
     }
 
-    public function testActiveOptOutBlocksJoinBeforeAnyEligibilityCheck(): void
+    /**
+     * F-158 (product decision 2026-11-10): leaving must not lock a member
+     * out of rejoining with a click. A VOLUNTARY opt-out no longer blocks
+     * an explicit Join; eligibility is still required, and success clears it.
+     */
+    public function testAVoluntaryOptOutNoLongerBlocksAnExplicitJoin(): void
     {
-        $GLOBALS['__bcc_valgate_fixture']['opted_out'] = true;
-        // Even a fully-eligible delegator stays out while the opt-out is
-        // live — including the PERMANENT opt-out a mod eviction writes.
+        $GLOBALS['__bcc_valgate_fixture']['opted_out'] = 'voluntary';
+        $GLOBALS['__bcc_valgate_fixture']['verdict']   = DelegationVerdict::eligible(1.0, 25.0);
+
+        $result = $this->service()->joinIfEligible(self::USER_ID, self::GROUP_ID);
+
+        self::assertTrue($result->success);
+        self::assertSame(JoinResult::CODE_OK, $result->code);
+        self::assertSame([[self::USER_ID, self::GROUP_ID]], self::joinCalls());
+        self::assertSame([[self::USER_ID, self::GROUP_ID]], $GLOBALS['__bcc_valgate_fixture']['cleared'], 'success clears the opt-out');
+    }
+
+    public function testAVoluntaryOptOutStillRequiresEligibility(): void
+    {
+        $GLOBALS['__bcc_valgate_fixture']['opted_out'] = 'voluntary';
+        $GLOBALS['__bcc_valgate_fixture']['verdict']   = DelegationVerdict::ineligible(1.0, 0.0);
+
+        $result = $this->service()->joinIfEligible(self::USER_ID, self::GROUP_ID);
+
+        self::assertFalse($result->success);
+        self::assertSame(JoinResult::CODE_NOT_ELIGIBLE, $result->code);
+        self::assertNoMembershipWritten();
+        self::assertSame([], $GLOBALS['__bcc_valgate_fixture']['cleared'], 'a refused join leaves the opt-out in place');
+    }
+
+    /**
+     * ⚠ A MODERATOR EVICTION STILL REFUSES (confirmed by the user). The
+     * permanent opt-out is what stops an evicted member rejoining the moment
+     * they still delegate. Refused before any eligibility read.
+     */
+    public function testAModEvictedDelegatorIsStillRefusedOnExplicitJoin(): void
+    {
+        $GLOBALS['__bcc_valgate_fixture']['opted_out'] = 'permanent';
         $GLOBALS['__bcc_valgate_fixture']['verdict']   = DelegationVerdict::eligible(1.0, 99.0);
 
         $result = $this->service()->joinIfEligible(self::USER_ID, self::GROUP_ID);

@@ -207,7 +207,7 @@ final class ValidatorPageOperatorAuthority
      * which reads as "nobody has claimed this" when the truth is "this
      * page is out of scope". The distinction matters for the audit trail.
      */
-    private static function isValidatorPage(int $pageId): bool
+    public static function isValidatorPage(int $pageId): bool
     {
         $post = get_post($pageId);
         if (!$post instanceof \WP_Post

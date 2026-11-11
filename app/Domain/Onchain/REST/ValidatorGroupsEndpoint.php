@@ -176,6 +176,10 @@ final class ValidatorGroupsEndpoint
             }
 
             if ($optOuts->isOptOutActive($userId, $cfg->groupId)) {
+                // F-158: same field and values as the holder-groups listing.
+                $item['opt_out_kind'] = $optOuts->isPermanentOptOut($userId, $cfg->groupId)
+                    ? HolderGroupsEndpoint::OPT_OUT_KIND_REMOVED
+                    : HolderGroupsEndpoint::OPT_OUT_KIND_LEFT;
                 $optedOut[] = $item;
                 continue;
             }
@@ -335,10 +339,12 @@ final class ValidatorGroupsEndpoint
      *     total_stake: string|null,
      *     delegator_count: string|null,
      *     native_token: string|null,
+     *     chain_name?: string|null,
      *     page_slug: string|null
      * }|null $row
      * @return array{
      *     moniker: string|null,
+     *     chain_name: string|null,
      *     status: string|null,
      *     commission: float|null,
      *     total_stake: float|null,
@@ -359,6 +365,7 @@ final class ValidatorGroupsEndpoint
 
         return [
             'moniker'           => $row->moniker !== null && $row->moniker !== '' ? (string) $row->moniker : null,
+            'chain_name'        => isset($row->chain_name) && $row->chain_name !== '' ? (string) $row->chain_name : null,
             'status'            => $row->status !== null && $row->status !== '' ? (string) $row->status : null,
             'commission'        => $row->commission_rate !== null ? (float) $row->commission_rate : null,
             'total_stake'       => $row->total_stake !== null ? (float) $row->total_stake : null,
@@ -376,7 +383,7 @@ final class ValidatorGroupsEndpoint
      * "1 ATOM" / "2.5 OSMO" / "1" (token unknown). Null when the gate is
      * unset — mirrors formatMinBalanceDisplay's null-when-ungated rule.
      */
-    private static function formatMinStakeDisplay(?float $minStake, ?string $nativeToken): ?string
+    public static function formatMinStakeDisplay(?float $minStake, ?string $nativeToken): ?string
     {
         if ($minStake === null || $minStake <= 0.0) {
             return null;
@@ -398,6 +405,7 @@ final class ValidatorGroupsEndpoint
      *     total_stake: string|null,
      *     delegator_count: string|null,
      *     native_token: string|null,
+     *     chain_name?: string|null,
      *     page_slug: string|null
      * }|null $statsRow
      * @param array{posts_last_7d: int, last_activity_at: string|null, heat: string, heat_label: string} $activity
@@ -432,17 +440,35 @@ final class ValidatorGroupsEndpoint
                 );
 
             case JoinResult::CODE_OPT_OUT_ACTIVE:
+                // Since F-158 this is ONLY a moderator eviction (a voluntary
+                // leave no longer blocks an explicit Join), so the copy says
+                // so. The old "try again later or rejoin from the discovery
+                // page" pointed at the very gate that was refusing.
                 return ApiResponse::error(
                     'bcc_permission_denied',
-                    'You opted out of this community recently. Try again later or rejoin from the discovery page.',
-                    403
+                    'A moderator removed you from this community, so you cannot rejoin it.',
+                    403,
+                    ['reason_code' => 'opt_out_active']
                 );
 
             case JoinResult::CODE_NOT_ELIGIBLE:
+                // ⚠ The minimum MUST travel as structured data, not only in
+                // the message. The frontend's §γ rule forbids rendering
+                // `error.message`, so a figure that lives only there cannot
+                // reach the user: the card surfaces showed "you don't delegate
+                // enough" with no amount. `min_stake_display` is the same
+                // pre-formatted string the card and the unlock hint carry.
+                // Null only when the gate config or the chain's native token
+                // is unreadable — the message degrades in step.
+                $refusal = $this->buildNotEligibleRefusal($groupId);
                 return ApiResponse::error(
                     'bcc_permission_denied',
-                    $this->buildNotEligibleHint($groupId),
-                    403
+                    $refusal['message'],
+                    403,
+                    [
+                        'reason_code'       => 'not_eligible',
+                        'min_stake_display' => $refusal['min_stake_display'],
+                    ]
                 );
 
             case JoinResult::CODE_CHAIN_UNSUPPORTED:
@@ -471,11 +497,21 @@ final class ValidatorGroupsEndpoint
         );
     }
 
-    private function buildNotEligibleHint(int $groupId): string
+    /**
+     * The not-eligible refusal, as both the operator-facing sentence and the
+     * machine-readable minimum behind it. One computation, so the two can
+     * never disagree about the number.
+     *
+     * @return array{message: string, min_stake_display: string|null}
+     */
+    private function buildNotEligibleRefusal(int $groupId): array
     {
         $config = ValidatorGroupRepository::getGateConfig($groupId);
         if ($config === null) {
-            return 'Delegate to this validator to join its community.';
+            return [
+                'message'           => 'Delegate to this validator to join its community.',
+                'min_stake_display' => null,
+            ];
         }
 
         $statsRows = ValidatorRepository::findCommunityStatsByIds([$config->validatorId]);
@@ -489,14 +525,22 @@ final class ValidatorGroupsEndpoint
             $row !== null ? $row->native_token : null
         );
 
-        if ($minDisplay !== null && $config->minStake > 1.0) {
-            return $moniker !== null
-                ? sprintf('Delegate at least %s to %s to join this community.', $minDisplay, $moniker)
-                : sprintf('Delegate at least %s to this validator to join.', $minDisplay);
+        // Always named: the operator chose this number, and a minimum at or
+        // below 1 is as binding as one above it.
+        if ($minDisplay !== null) {
+            return [
+                'message' => $moniker !== null
+                    ? sprintf('Delegate at least %s to %s to join this community.', $minDisplay, $moniker)
+                    : sprintf('Delegate at least %s to this validator to join.', $minDisplay),
+                'min_stake_display' => $minDisplay,
+            ];
         }
 
-        return $moniker !== null
-            ? sprintf('Delegate to %s to join this community.', $moniker)
-            : 'Delegate to this validator to join its community.';
+        return [
+            'message' => $moniker !== null
+                ? sprintf('Delegate to %s to join this community.', $moniker)
+                : 'Delegate to this validator to join its community.',
+            'min_stake_display' => null,
+        ];
     }
 }

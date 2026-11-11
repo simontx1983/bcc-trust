@@ -37,15 +37,22 @@ if (!function_exists('bcc_trust_drop_trust_flags_table')) {
             return;
         }
 
+        // F-149: a refused or failed drop re-checks at most hourly.
+        if (bcc_trust_migration_backoff_active('trust_flags_table')) {
+            return;
+        }
+
         global $wpdb;
 
         $table = $wpdb->prefix . 'bcc_trust_flags';
 
-        $tableExists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
-        if ($tableExists === $table) {
-            // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-            $wpdb->query("DROP TABLE IF EXISTS `{$table}`");
-
+        // Drops only an EMPTY resurrected table; one that came back with rows
+        // (e.g. a rollback to older code) is left in place and reported.
+        $result = bcc_trust_drop_retired_table_if_empty($table, 'trust_flags_table');
+        if ($result === 'failed' || $result === 'refused') {
+            return;
+        }
+        if ($result === 'dropped') {
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::warning(
                     '[bcc-trust] dropped retired bcc_trust_flags table',
