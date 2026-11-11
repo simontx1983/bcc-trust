@@ -1025,6 +1025,9 @@ final class NftHoldingsRepository
     /** Tombstones older than this are pruned. See pruneTombstones(). */
     public const TOMBSTONE_RETENTION_DAYS = 30;
 
+    /** Tombstones removed per prune run (one daily tick). */
+    public const TOMBSTONE_PRUNE_LIMIT = 500;
+
     /**
      * Delete old balance-0 tombstones, bounded. Hooked to the daily
      * `bcc_onchain_daily_refresh`.
@@ -1043,7 +1046,7 @@ final class NftHoldingsRepository
      *
      * @return int rows removed
      */
-    public static function pruneTombstones(int $limit = 500): int
+    public static function pruneTombstones(int $limit = self::TOMBSTONE_PRUNE_LIMIT): int
     {
         global $wpdb;
         $table  = self::table();
