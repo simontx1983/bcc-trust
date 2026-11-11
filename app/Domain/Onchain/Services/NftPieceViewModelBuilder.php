@@ -80,6 +80,22 @@ final class NftPieceViewModelBuilder
     /** Cache TTL for indexed-chain piece metadata. Matches §4.17 max-age. */
     private const PIECE_CACHE_TTL_SECONDS = 4 * HOUR_IN_SECONDS;
 
+    /**
+     * F-156 — total upstream budget for ONE piece request, in seconds.
+     *
+     * Shared by every upstream call this builder makes (metadata, and the
+     * Cosmos owner lookup), because they are all one user's wait. Larger
+     * than the join gate's because this route's slowest provider timeout is
+     * Solana's 30s, so a smaller budget could not fit a single attempt.
+     *
+     * ⚠ A MISS HERE IS NOT A BLANK PAGE. Metadata runs first and is the
+     * only part that cannot be skipped; an owner lookup with nothing left
+     * answers [null, [], 0], which omits the `owner` block and renders the
+     * rest. The route's §4.17 `bcc_upstream_unavailable` already covers the
+     * case where metadata itself cannot be read.
+     */
+    private const UPSTREAM_DEADLINE = 35;
+
     /** Error codes mapped 1:1 to §4.17 error codes. */
     public const ERROR_INVALID_CHAIN         = 'bcc_invalid_chain';
     public const ERROR_NOT_FOUND             = 'bcc_not_found';
@@ -166,6 +182,24 @@ final class NftPieceViewModelBuilder
             $cosmosFetcher = $maybeFetcher;
         }
 
+        // ⚠⚠ F-156: ONE UPSTREAM BUDGET FOR THE WHOLE REQUEST, fixed here.
+        //
+        // This builder has exactly one caller — the anonymous NftPieceEndpoint
+        // — so everything below runs with a user waiting. Two upstream calls
+        // can happen: metadata (step 4) and, on Cosmos, the owner lookup
+        // (step 6). Unbounded, each is its own ApiRetry sequence: 4 attempts
+        // plus 8s of backoff, which is 56s at the EVM 12s timeout and 128s at
+        // the Solana 30s one — and 136s for the two Cosmos calls together.
+        //
+        // ⚠ A SHARED INSTANT, NOT A PER-CALL DURATION, for that last reason:
+        // handing each call "35 seconds" would bound each call and leave the
+        // request at 70s. Sharing it means the owner lookup gets whatever
+        // metadata left behind, and that degrades correctly —
+        // resolveCosmosOwner() answers [null, [], 0] on failure, which omits
+        // the owner block and still renders the piece. Metadata is the one
+        // that cannot be skipped, and it goes first.
+        $upstreamDeadlineAt = time() + self::UPSTREAM_DEADLINE;
+
         // ── 4. Per-token metadata (with cache provenance) ──────────
         [$pieceMeta, $cacheState] = self::resolvePieceMetadata(
             $chain,
@@ -173,7 +207,8 @@ final class NftPieceViewModelBuilder
             $chainId,
             $normalizedContract,
             $tokenId,
-            $isCosmos
+            $isCosmos,
+            $upstreamDeadlineAt
         );
 
         // ── 5. Token-standard guard (strict allow-list) ────────────
@@ -192,7 +227,13 @@ final class NftPieceViewModelBuilder
         // the LCD call fails or the token does not exist (transport
         // failures aren't cached, so a retry will surface the data).
         [$dominantOwner, $extraOwners, $ownersCount] = $isCosmos
-            ? self::resolveCosmosOwner($cosmosFetcher, $chainId, $normalizedContract, $tokenId)
+            ? self::resolveCosmosOwner(
+                $cosmosFetcher,
+                $chainId,
+                $normalizedContract,
+                $tokenId,
+                $upstreamDeadlineAt
+            )
             : self::resolveOwners($chainId, $normalizedContract, $tokenId, $tokenStandard);
 
         // ── 7. Marketplace links ────────────────────────────────────
@@ -298,7 +339,8 @@ final class NftPieceViewModelBuilder
         int $chainId,
         string $contract,
         string $tokenId,
-        bool $isCosmos
+        bool $isCosmos,
+        ?int $deadlineAt = null
     ): array {
         if ($isCosmos) {
             $fetcher = FetcherFactory::make_for_chain($chain);
@@ -308,7 +350,7 @@ final class NftPieceViewModelBuilder
                     'No fetcher driver for chain.'
                 );
             }
-            $meta = $fetcher->fetchTokenMetadata($contract, $tokenId);
+            $meta = $fetcher->fetchTokenMetadata($contract, $tokenId, $deadlineAt);
             // CosmosFetcher returns the empty shape on transport failure
             // (vs throwing). We treat all-null as "either token does
             // not exist or LCD timed out"; per §4.17 we surface
@@ -358,7 +400,7 @@ final class NftPieceViewModelBuilder
         // request entry (STALE) vs no row at all (MISS).
         $cacheState = $cached !== null ? self::CACHE_STALE : self::CACHE_MISS;
 
-        $fetched = self::fetchUpstreamMetadata($chain, $chainType, $contract, $tokenId);
+        $fetched = self::fetchUpstreamMetadata($chain, $chainType, $contract, $tokenId, $deadlineAt);
         if ($fetched === null) {
             // If we have a stale row but the upstream failed, fall
             // back to serving the stale data — the §4.17 SWR contract
@@ -445,17 +487,18 @@ final class NftPieceViewModelBuilder
         object $chain,
         string $chainType,
         string $contract,
-        string $tokenId
+        string $tokenId,
+        ?int $deadlineAt = null
     ): ?array {
         $fetcher = FetcherFactory::make_for_chain($chain);
 
         if ($fetcher instanceof EvmFetcher) {
-            $raw = $fetcher->fetchMetadataForToken($contract, $tokenId);
+            $raw = $fetcher->fetchMetadataForToken($contract, $tokenId, $deadlineAt);
         } elseif ($fetcher instanceof SolanaFetcher) {
             // Solana: mint IS the token; both contract and tokenId
             // carry the same value upstream. We pass `$contract`
             // (which equals `$tokenId` for SPL paths) to the fetcher.
-            $raw = $fetcher->fetchMetadataForMint($contract);
+            $raw = $fetcher->fetchMetadataForMint($contract, $deadlineAt);
         } else {
             return null;
         }
@@ -607,12 +650,13 @@ final class NftPieceViewModelBuilder
         ?CosmosFetcher $fetcher,
         int $chainId,
         string $contract,
-        string $tokenId
+        string $tokenId,
+        ?int $deadlineAt = null
     ): array {
         if ($fetcher === null) {
             return [null, [], 0];
         }
-        $owner = $fetcher->cw721OwnerOf($contract, $tokenId);
+        $owner = $fetcher->cw721OwnerOf($contract, $tokenId, $deadlineAt);
         if ($owner === null) {
             return [null, [], 0];
         }
