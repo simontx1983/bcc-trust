@@ -157,6 +157,58 @@ namespace BCC\Trust\Tests\Integration {
             self::assertNotNull($wpdb->get_var($wpdb->prepare("SELECT id FROM `{$wpdb->prefix}bcc_chains` WHERE id = %d", $this->chainId)));
         }
 
+        /**
+         * #425 review M1: posts that reference the CHAIN directly — a
+         * chain-gated group (`_bcc_gate_chain_id`) or a Hall tagged with the
+         * chain (`_bcc_chain_tag`) — must also refuse the retirement.
+         *
+         * @return array<string, array{string}>
+         */
+        public static function chainReferencingMetaKeys(): array
+        {
+            return [
+                'chain-gated group' => ['_bcc_gate_chain_id'],
+                'chain-tagged hall' => ['_bcc_chain_tag'],
+            ];
+        }
+
+        #[\PHPUnit\Framework\Attributes\DataProvider('chainReferencingMetaKeys')]
+        public function testAPostReferencingTheChainRefusesTheRetirement(string $metaKey): void
+        {
+            global $wpdb;
+            $this->stargazeFixture();
+            $postId = $this->insertPost('draft'); // non-trashed, even unpublished, counts
+            $wpdb->query($wpdb->prepare(
+                "INSERT INTO `{$wpdb->postmeta}` (post_id, meta_key, meta_value) VALUES (%d, %s, %s)",
+                $postId,
+                $metaKey,
+                (string) $this->chainId
+            ));
+            self::assertSame('', $wpdb->last_error, 'fixture: chain-reference meta');
+
+            \bcc_trust_retire_stargaze_chain();
+
+            self::assertFalse(\get_option(self::RETIRED), "{$metaKey} must refuse the retirement");
+            self::assertNotNull($wpdb->get_var($wpdb->prepare("SELECT id FROM `{$wpdb->prefix}bcc_chains` WHERE id = %d", $this->chainId)));
+        }
+
+        /** A TRASHED post referencing the chain does not block it. */
+        public function testATrashedChainReferenceDoesNotBlockTheRetirement(): void
+        {
+            global $wpdb;
+            $this->stargazeFixture();
+            $postId = $this->insertPost('trash');
+            $wpdb->query($wpdb->prepare(
+                "INSERT INTO `{$wpdb->postmeta}` (post_id, meta_key, meta_value) VALUES (%d, '_bcc_chain_tag', %s)",
+                $postId,
+                (string) $this->chainId
+            ));
+
+            \bcc_trust_retire_stargaze_chain();
+
+            self::assertNotFalse(\get_option(self::RETIRED));
+        }
+
         public function testAHoldingOnTheChainRefusesTheRetirement(): void
         {
             global $wpdb;
