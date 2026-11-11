@@ -1746,15 +1746,23 @@ final class AttestationRepository
      * Distinct (target_kind, target_id) pairs that currently hold at least one
      * active attestation — the daily decay-recompute sweep work-list (Slice E).
      * Decay is time-dependent, so a target's score drifts even with no new
-     * events; the cron re-synthesizes every active target. OFFSET-paginated
-     * (daily batch, not a hot path); deterministic order for stable paging.
+     * events; the cron re-synthesizes every active target.
      *
-     * @return list<object{target_kind: string, target_id: int}>
+     * KEYSET-paginated after (`$afterKind`, `$afterId`), in
+     * (target_kind, target_id) order; pass ('', 0) for the first page.
+     * F-93: this used to be OFFSET-paginated on the assumption that the
+     * work-list is stable during a run. It is not: members cast and revoke
+     * attestations while the sweep runs, and every such change shifts an
+     * OFFSET window over the GROUP BY result, so a target was skipped or
+     * processed twice. A keyset cursor resumes strictly after the last
+     * target seen, whatever changed before it.
+     *
+     * @return list<object{target_kind: string, target_id: int}>|null null when the read failed
      */
-    public function listTargetsWithActiveAttestations(int $offset, int $limit): array
+    public function listTargetsWithActiveAttestationsAfter(string $afterKind, int $afterId, int $limit): ?array
     {
-        $offset = max(0, $offset);
-        $limit  = max(1, min(5000, $limit));
+        $afterId = max(0, $afterId);
+        $limit   = max(1, min(5000, $limit));
 
         /** @var wpdb $wpdb */
         global $wpdb;
@@ -1763,19 +1771,22 @@ final class AttestationRepository
         $sql = "SELECT target_kind, target_id"
             . " FROM `{$table}`"
             . ' WHERE revoked_at IS NULL'
+            . ' AND (target_kind > %s OR (target_kind = %s AND target_id > %d))'
             . ' GROUP BY target_kind, target_id'
             . ' ORDER BY target_kind ASC, target_id ASC'
-            . ' LIMIT %d OFFSET %d';
+            . ' LIMIT %d';
 
         /** @phpstan-ignore-next-line argument.type */
-        $prepared = $wpdb->prepare($sql, $limit, $offset);
+        $prepared = $wpdb->prepare($sql, $afterKind, $afterKind, $afterId, $limit);
         if (!is_string($prepared)) {
-            return [];
+            return null;
         }
 
+        // A failed read is NULL, never [] — the sweep treats [] as "reached
+        // the end" and would otherwise restart its cursor on a DB error.
         $rows = $wpdb->get_results($prepared);
-        if (!is_array($rows)) {
-            return [];
+        if (!is_array($rows) || $wpdb->last_error !== '') {
+            return null;
         }
 
         $out = [];
