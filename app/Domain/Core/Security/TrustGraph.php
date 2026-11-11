@@ -37,6 +37,9 @@ class TrustGraph {
     const CACHE_GROUP = 'bcc_trust_graph';
     const CACHE_TTL   = BCC_TRUST_CACHE_GRAPH;
 
+    /** Rank of a member with no inbound edges yet (F-106: neutral, not low). */
+    private const NEUTRAL_RANK = 0.5;
+
     /**
      * Config-based weights and thresholds
      */
@@ -469,12 +472,63 @@ class TrustGraph {
             return [];
         }
 
+        return self::normalizeRanks( $ranks, $graph, $outgoing );
+    }
+
+    /**
+     * Min-max normalise raw PageRank values into [0.15, 0.95], with ONE
+     * exception: a member nobody inside the scope links TO gets the neutral
+     * 0.5 (F-106, user decision).
+     *
+     * Min-max puts whoever has the lowest raw rank at 0 → clamped to 0.15.
+     * In practice that was always a member with no inbound edges: someone
+     * who has voted or vouched but has not yet been voted on or vouched
+     * for. 0.15 is under FraudDetector's 0.2 cut, so the newest
+     * participants took `very_low_trust` (+30 fraud points) for simply not
+     * having been reviewed yet. Absence of inbound trust is not evidence of
+     * distrust, so such a member starts NEUTRAL.
+     *
+     * The min/max are still computed over EVERY member, so the rank of
+     * anyone who does have inbound edges is exactly what it was before.
+     *
+     * Shared by the batch (per component) and incremental (per
+     * neighbourhood) passes so the two can never disagree.
+     *
+     * @param  array<int, float>             $ranks    userId => raw rank, the scope.
+     * @param  array<int, array<int, float>> $graph    source => [target => weight].
+     * @param  array<int, float>             $outgoing source => out-weight sum.
+     * @return array<int, float>                       userId => normalised rank.
+     */
+    private static function normalizeRanks( array $ranks, array $graph, array $outgoing ): array {
+        if ( $ranks === [] ) {
+            return [];
+        }
+
+        // An inbound edge counts only when it can carry rank: the source is
+        // in scope and has outgoing weight (the same test the PageRank loop
+        // applies before adding a contribution).
+        $hasInbound = [];
+        foreach ( $graph as $from => $targets ) {
+            if ( ! isset( $ranks[ $from ] ) || ( $outgoing[ $from ] ?? 0.0 ) <= 0 ) {
+                continue;
+            }
+            foreach ( $targets as $to => $weight ) {
+                if ( $weight > 0 && isset( $ranks[ $to ] ) ) {
+                    $hasInbound[ $to ] = true;
+                }
+            }
+        }
+
         $maxRank    = max( $ranks );
         $minRank    = min( $ranks );
         $range      = $maxRank - $minRank;
         $normalized = [];
 
         foreach ( $ranks as $u => $rank ) {
+            if ( ! isset( $hasInbound[ $u ] ) ) {
+                $normalized[ $u ] = self::NEUTRAL_RANK;
+                continue;
+            }
             $raw = ( $range > 0 ) ? ( ( $rank - $minRank ) / $range ) : 0.5;
             $normalized[ $u ] = max( 0.15, min( 0.95, $raw ) );
         }
@@ -588,15 +642,7 @@ class TrustGraph {
         }
 
         // 6. Normalize within the subgraph (same compression as batch)
-        $maxRank = max( $ranks );
-        $minRank = min( $ranks );
-        $range   = $maxRank - $minRank;
-        $normalized = [];
-
-        foreach ( $ranks as $u => $rank ) {
-            $raw = ( $range > 0 ) ? ( ( $rank - $minRank ) / $range ) : 0.5;
-            $normalized[ $u ] = max( 0.15, min( 0.95, $raw ) );
-        }
+        $normalized = self::normalizeRanks( $ranks, $graph, $outgoing );
 
         // 7. Persist only for the dirty users + their immediate neighbors
         foreach ( $normalized as $u => $rank ) {
