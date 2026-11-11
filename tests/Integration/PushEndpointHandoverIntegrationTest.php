@@ -103,6 +103,47 @@ final class PushEndpointHandoverIntegrationTest extends TestCase
         self::assertCount(1, $this->endpointsOf(self::BOB), 'other users untouched');
     }
 
+    /**
+     * Registrations of the same endpoint are serialised: unlocked, two
+     * accounts registering at the same instant each deleted the other's
+     * not-yet-written row and both inserted, leaving two owners. While
+     * another session holds the endpoint's lock, a registration waits, then
+     * refuses and writes nothing; once the lock is free it proceeds, and it
+     * never leaves the lock held.
+     */
+    public function testARegistrationRefusesWhileAnotherHoldsTheEndpointLock(): void
+    {
+        global $wpdb;
+        self::assertGreaterThan(0, $this->repo->upsert(self::ALICE, self::SHARED_BROWSER, 'pA', 'aA', null));
+
+        $lock = PushSubscriptionRepository::lockKey(PushSubscriptionRepository::hashEndpoint(self::SHARED_BROWSER));
+        self::assertLessThanOrEqual(64, strlen($lock), 'GET_LOCK names are capped at 64 characters');
+
+        $peer = mysqli_connect(
+            getenv('BCC_TEST_DB_HOST') ?: '127.0.0.1',
+            getenv('BCC_TEST_DB_USER') ?: 'root',
+            getenv('BCC_TEST_DB_PASS') ?: 'root',
+            (string) $wpdb->get_var('SELECT DATABASE()'),
+            (int) (getenv('BCC_TEST_DB_PORT') ?: 10005)
+        );
+        self::assertInstanceOf(\mysqli::class, $peer);
+        $held = $peer->query("SELECT GET_LOCK('" . $peer->real_escape_string($lock) . "', 0)");
+        self::assertSame('1', $held instanceof \mysqli_result ? (string) $held->fetch_row()[0] : null, 'control: the peer holds the lock');
+
+        try {
+            self::assertSame(0, $this->repo->upsert(self::BOB, self::SHARED_BROWSER, 'pB', 'aB', null), 'refused while locked');
+            self::assertSame([], $this->endpointsOf(self::BOB), 'and nothing written');
+            self::assertSame([self::SHARED_BROWSER], $this->endpointsOf(self::ALICE), 'nor anything deleted');
+        } finally {
+            $peer->query("SELECT RELEASE_LOCK('" . $peer->real_escape_string($lock) . "')");
+            $peer->close();
+        }
+
+        self::assertGreaterThan(0, $this->repo->upsert(self::BOB, self::SHARED_BROWSER, 'pB', 'aB', null), 'proceeds once free');
+        self::assertSame([self::SHARED_BROWSER], $this->endpointsOf(self::BOB));
+        self::assertSame('1', (string) $wpdb->get_var($wpdb->prepare('SELECT IS_FREE_LOCK(%s)', $lock)), 'the lock is released after a registration');
+    }
+
     /** @return list<string> */
     private function endpointsOf(int $userId): array
     {
