@@ -106,7 +106,11 @@ final class UserReviewsService
         $perPage = max(1, min(self::MAX_PAGE_SIZE, $perPage));
         $offset  = ($page - 1) * $perPage;
 
-        $total = $this->voteRepository->countByVoter($userId);
+        // F-55: the count paired with findByVoterPaginated(): it excludes
+        // moderation-hidden reviews exactly as the list does, so the total
+        // and the pages agree. (countByVoter() still counts every active
+        // vote for weight and stats; that is a separate product question.)
+        $total = $this->voteRepository->countReviewsByVoter($userId);
         if ($total === 0) {
             return self::emptyPage($page, $perPage, false);
         }
