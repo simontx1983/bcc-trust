@@ -43,6 +43,9 @@ namespace BCC\Trust\Rank\Tests\Unit {
             TestEngine::$secondsPerUser = 0;
             TestEngine::$cursor = null;
             TestEngine::$continuations = 0;
+            TestEngine::$lockHeldElsewhere = false;
+            TestEngine::$lockHeld = false;
+            TestEngine::$releases = 0;
             TestSnapshot::$clock = 0;
             TestSnapshot::$secondsPerBatch = 0;
             TestSnapshot::$day = '2026-11-11';
@@ -152,6 +155,62 @@ namespace BCC\Trust\Rank\Tests\Unit {
             self::assertSame([], \RankSweepWorld::$evaluated);
         }
 
+        // ── daily evaluate: single-flight lock (F-13 follow-up) ────────
+
+        public function testAHeldLockSkipsTheTickAndTouchesNothing(): void
+        {
+            // The daily event firing while a continuation is mid-sweep: both
+            // would read the same cursor and evaluate the same members.
+            \RankSweepWorld::$userIds = self::users(6);
+            TestEngine::$cursor = 9;
+            TestEngine::$lockHeldElsewhere = true;
+
+            self::engine()->runDailyEvaluate();
+
+            self::assertSame([], \RankSweepWorld::$evaluated);
+            self::assertSame(9, TestEngine::$cursor);
+            self::assertSame(0, TestEngine::$continuations);
+            self::assertSame(0, TestEngine::$releases, 'a lock this run did not take is not released');
+        }
+
+        public function testTheLockIsReleasedAfterACompleteRun(): void
+        {
+            \RankSweepWorld::$userIds = self::users(4);
+
+            self::engine()->runDailyEvaluate();
+
+            self::assertSame(self::users(4), \RankSweepWorld::$evaluated);
+            self::assertSame(1, TestEngine::$releases);
+            self::assertFalse(TestEngine::$lockHeld);
+        }
+
+        public function testTheLockIsReleasedWhenTheBudgetCutsTheRun(): void
+        {
+            \RankSweepWorld::$userIds = self::users(10);
+            TestEngine::$secondsPerUser = 10;
+
+            self::engine()->runDailyEvaluate();
+
+            self::assertSame(1, TestEngine::$continuations);
+            self::assertSame(1, TestEngine::$releases, 'the continuation must be able to take the lock');
+            self::assertFalse(TestEngine::$lockHeld);
+        }
+
+        public function testTheLockIsReleasedWhenTheReadFails(): void
+        {
+            \RankSweepWorld::$userIds = self::users(4);
+            \RankSweepWorld::$readFailures = 1;
+
+            try {
+                self::engine()->runDailyEvaluate();
+                self::fail('a failed read must propagate');
+            } catch (RepositoryReadFailure) {
+            }
+
+            self::assertSame(1, TestEngine::$releases);
+            self::assertFalse(TestEngine::$lockHeld);
+        }
+
         // ── daily tier snapshot ─────────────────────────────────────────
 
         public function testSnapshotGivesEveryUserTodaysRowTheSameDay(): void
@@ -245,6 +304,9 @@ namespace BCC\Trust\Rank\Tests\Unit {
         public static int $secondsPerUser = 0;
         public static ?int $cursor = null;
         public static int $continuations = 0;
+        public static bool $lockHeldElsewhere = false;
+        public static bool $lockHeld = false;
+        public static int $releases = 0;
 
         public function evaluate(int $userId): void
         {
@@ -260,6 +322,21 @@ namespace BCC\Trust\Rank\Tests\Unit {
         protected function writeEvaluateCursor(int $userId): void { self::$cursor = $userId; }
         protected function clearEvaluateCursor(): void { self::$cursor = null; }
         protected function scheduleEvaluateContinuation(): void { self::$continuations++; }
+
+        protected function acquireEvaluateLock(): bool
+        {
+            if (self::$lockHeldElsewhere || self::$lockHeld) {
+                return false;
+            }
+            self::$lockHeld = true;
+            return true;
+        }
+
+        protected function releaseEvaluateLock(): void
+        {
+            self::$releases++;
+            self::$lockHeld = false;
+        }
     }
 
     /** TierSnapshotService with its sweep collaborators replaced. */
