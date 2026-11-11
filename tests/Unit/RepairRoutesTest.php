@@ -34,6 +34,7 @@ final class RepairRoutesTest extends TestCase
         RepairRouteStubState::$canManage = true;
         RepairRouteStubState::$nonceOk   = true;
         $_POST = ['_wpnonce' => 'n'];
+        $_SERVER['REQUEST_METHOD'] = 'POST';
     }
 
     public function testBothButtonRoutesAreRegistered(): void
@@ -67,6 +68,33 @@ final class RepairRoutesTest extends TestCase
         $this->expectException(RepairRouteDied::class);
         $this->expectExceptionMessage('Unauthorized');
         (RepairRouteStubState::$actions['admin_post_bcc_trust_db_check'])();
+    }
+
+    public function testRoutesDieOnGetEvenWithAValidNonce(): void
+    {
+        // F-91: a crafted GET link carrying a valid nonce must not run a repair.
+        define('BCC_REPAIR_ENABLED', true);
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        RepairService::registerActions();
+
+        foreach (['admin_post_bcc_trust_db_check', 'admin_post_bcc_trust_cleanup_fraud', 'admin_post_bcc_trust_complete_page_repair'] as $hook) {
+            try {
+                (RepairRouteStubState::$actions[$hook])();
+                self::fail("{$hook} ran on GET");
+            } catch (RepairRouteDied $e) {
+                self::assertStringContainsString('submitted as a form', $e->getMessage());
+            }
+        }
+    }
+
+    public function testCompletePageRepairHonoursTheKillSwitch(): void
+    {
+        // F-91: repairPages() used to skip BCC_REPAIR_ENABLED.
+        RepairService::registerActions();
+
+        $this->expectException(RepairRouteDied::class);
+        $this->expectExceptionMessage('Repair is disabled');
+        (RepairRouteStubState::$actions['admin_post_bcc_trust_complete_page_repair'])();
     }
 
     public function testRoutesDieOnBadNonce(): void

@@ -89,6 +89,11 @@ final class RepairService
         if (!current_user_can('manage_options')) {
             wp_die('Unauthorized access.');
         }
+        // F-91: every repair action is a form POST — never a GET link.
+        $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string) $_SERVER['REQUEST_METHOD']) : '';
+        if ($method !== 'POST') {
+            wp_die('Repair actions must be submitted as a form.');
+        }
         if (!isset($_POST['_wpnonce']) || !wp_verify_nonce($_POST['_wpnonce'], $action)) {
             wp_die('Security check failed.');
         }
@@ -509,10 +514,10 @@ final class RepairService
      */
     public function repairPages(): void
     {
-        if (!current_user_can('manage_options')) {
-            wp_die('Unauthorized');
-        }
-        check_admin_referer('bcc_trust_admin_action');
+        // F-91: was its own capability + check_admin_referer() (which reads
+        // $_REQUEST, so a GET link worked) and skipped the BCC_REPAIR_ENABLED
+        // kill switch every other repair action honours.
+        $this->securityCheck();
 
         $scoreRepo      = Plugin::instance()->scoreRepository();
         $voteRepo       = Plugin::instance()->voteRepository();
