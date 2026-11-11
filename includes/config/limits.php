@@ -64,6 +64,18 @@ define('BCC_TRUST_RATE_WINDOW_POST_DELETE', 600);
 define('BCC_TRUST_RATE_LIMIT_BLOG_COVER_UPLOAD', 5);
 define('BCC_TRUST_RATE_WINDOW_BLOG_COVER_UPLOAD', 60);
 
+// Profile avatar + cover uploads (MyProfileEndpoint, F-58). One per-user
+// budget shared by both routes: each upload is a file write plus PeepSo's
+// multi-size resize, and they were unthrottled, so a script could fill the
+// uploads directory. A burst limit matching the blog-cover writer keeps the
+// "try another crop" loop comfortable; the hourly ceiling stops a sustained
+// script at the burst rate (5/min would otherwise be 7,200 files a day).
+// Checked BEFORE the file is read or written.
+define('BCC_TRUST_RATE_LIMIT_PROFILE_IMAGE_UPLOAD', 5);
+define('BCC_TRUST_RATE_WINDOW_PROFILE_IMAGE_UPLOAD', 60);
+define('BCC_TRUST_RATE_LIMIT_PROFILE_IMAGE_UPLOAD_HOURLY', 20);
+define('BCC_TRUST_RATE_WINDOW_PROFILE_IMAGE_UPLOAD_HOURLY', 3600);
+
 // Card-watch / unwatch throttle (WatchingEndpoint watch / unwatch).
 //
 // Scale-hardening pass (2026-05-13): the watch-graph was previously
