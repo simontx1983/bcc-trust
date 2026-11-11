@@ -13,7 +13,7 @@
  *   bypass_args  list<bool>       records $allowAdminBypass per gate call
  *   repo_reached bool             set when GatedGroupRepository is queried
  *   throttled    bool             true → Throttle::allow() returns false (429)
- *   throttle_calls list<array{string,int,int}> records [key, limit, window]
+ *   throttle_calls list<array{string,int,int,?string}> records [key, limit, window, bucket key]
  */
 
 declare(strict_types=1);
@@ -24,7 +24,7 @@ namespace BCC\Core\Security {
         {
             public static function allow(string $key, int $limit, int $window, ?string $bucketKey = null): bool
             {
-                $GLOBALS['__bcc_susp_fixture']['throttle_calls'][] = [$key, $limit, $window];
+                $GLOBALS['__bcc_susp_fixture']['throttle_calls'][] = [$key, $limit, $window, $bucketKey];
                 return empty($GLOBALS['__bcc_susp_fixture']['throttled']);
             }
         }

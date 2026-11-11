@@ -163,6 +163,11 @@ final class MyProfileFieldsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Per-ACCOUNT limit on cheap self-scoped writes (F-134).
+        if (!\BCC\Core\Security\Throttle::allow('me_write', \BCC\Trust\Core\REST\Auth\AuthSupport::ME_WRITE_RATE_LIMIT, 60, 'me_write:' . $userId)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please slow down.', 429);
+        }
+
         // §M suspension gate (F-109): field VALUES are public profile
         // content. patchVisibility stays open (hiding your own info).
         if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
@@ -233,6 +238,11 @@ final class MyProfileFieldsEndpoint
         $userId = get_current_user_id();
         if ($userId <= 0) {
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        // Per-ACCOUNT limit on cheap self-scoped writes (F-134).
+        if (!\BCC\Core\Security\Throttle::allow('me_write', \BCC\Trust\Core\REST\Auth\AuthSupport::ME_WRITE_RATE_LIMIT, 60, 'me_write:' . $userId)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please slow down.', 429);
         }
 
         $key = (string) $request->get_param('key');
