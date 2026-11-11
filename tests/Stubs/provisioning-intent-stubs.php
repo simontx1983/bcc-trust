@@ -318,6 +318,15 @@ namespace BCC\Core\DB {
              */
             public static array $timeouts = [];
 
+            /**
+             * Runs once a lock is GRANTED, before acquire() returns — models
+             * the lock winner completing its work while this caller waited
+             * out the lock (F-161: the loser then holds a stale pre-lock row).
+             *
+             * @var (callable(string): void)|null
+             */
+            public static $onAcquire = null;
+
             public static function reset(): void
             {
                 self::$acquirable = true;
@@ -325,6 +334,7 @@ namespace BCC\Core\DB {
                 self::$acquired   = [];
                 self::$released   = [];
                 self::$timeouts   = [];
+                self::$onAcquire  = null;
             }
 
             public static function acquire(string $key, int $timeout = 0): bool
@@ -336,6 +346,9 @@ namespace BCC\Core\DB {
                     return false;
                 }
                 self::$held[$key] = true;
+                if (self::$onAcquire !== null) {
+                    (self::$onAcquire)($key);
+                }
 
                 return true;
             }

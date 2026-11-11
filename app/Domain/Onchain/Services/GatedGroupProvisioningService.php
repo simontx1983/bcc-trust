@@ -1147,6 +1147,31 @@ final class GatedGroupProvisioningService {
         string $canonical,
         object $row
     ): array {
+        // F-161: `$row` was read BEFORE the per-collection lock. A run that
+        // waited out the lock enters here with that stale row while the
+        // winner has already created the community AND moved the row to
+        // provisioned. Re-read under the lock: if the winner finished, this
+        // run's correct answer is `exists`, exactly as the class docblock
+        // promises the loser — not an `unconfirmed` from a requested →
+        // provisioned compare-and-swap that can no longer match (which used
+        // to write a provision_failed audit row for a correctly provisioned
+        // collection and count it as a sweep failure).
+        $fresh = CollectionRepository::readProvisioningRow($collectionId);
+        if ($fresh['available']
+            && $fresh['row'] !== null
+            && (string) $fresh['row']->provisioning_state === ProvisioningState::PROVISIONED
+        ) {
+            return [
+                'status'           => 'exists',
+                'group_id'         => $groupId,
+                'message'          => 'Community already exists.',
+                'failure_code'     => null,
+                'failure_record'   => self::RECORD_NOT_APPLICABLE,
+                'failure_recorded' => false,
+                'audit_degraded'   => false,
+            ];
+        }
+
         $requestedBy = (int) $row->provisioning_requested_by ?: null;
         $requestedAt = $row->provisioning_requested_at !== null
             ? (string) $row->provisioning_requested_at
