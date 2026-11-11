@@ -7,7 +7,15 @@ namespace BCC\Trust\Core\Tests\Unit;
 use BCC\Trust\Core\REST\CommentStokeEndpoint;
 use BCC\Trust\Core\REST\HallsEndpoint;
 use BCC\Trust\Core\REST\HelpfulMarkEndpoint;
+use BCC\Trust\Core\REST\MyBlocksEndpoint;
 use BCC\Trust\Core\REST\MyGroupsEndpoint;
+use BCC\Trust\Core\REST\MyProfileEndpoint;
+use BCC\Trust\Core\REST\MyProfileFieldsEndpoint;
+use BCC\Trust\Core\REST\OnboardingEndpoint;
+use BCC\Trust\Core\REST\PagesEndpoint;
+use BCC\Trust\Core\REST\PhotoAltEndpoint;
+use BCC\Trust\Core\REST\WatchingEndpoint;
+use BCC\Trust\Onchain\Services\ClaimService;
 use BCC\Trust\Core\REST\ReactionsEndpoint;
 use BCC\Trust\Core\REST\StokeEndpoint;
 use BCC\Trust\Core\Services\CommentService;
@@ -151,6 +159,147 @@ final class SuspensionGateParityTest extends TestCase
     {
         $response = self::endpoint(HelpfulMarkEndpoint::class)->addPostMark(new \WP_REST_Request());
         self::assertSuspendedRejection($response);
+    }
+
+    // ── F-109: page management, watch, and public profile content ───────
+
+    public function testPageClaimRejectsSuspendedUser(): void
+    {
+        self::assertSuspendedRejection(self::endpoint(PagesEndpoint::class)->claim(new \WP_REST_Request()));
+    }
+
+    public function testPageClaimThrottleRunsBeforeSuspension(): void
+    {
+        $GLOBALS['__bcc_susp_fixture']['throttled'] = true;
+        self::assertThrottledBeforeSuspension(self::endpoint(PagesEndpoint::class)->claim(new \WP_REST_Request()));
+    }
+
+    public function testPageAvatarUploadRejectsSuspendedUser(): void
+    {
+        self::assertSuspendedRejection(self::endpoint(PagesEndpoint::class)->uploadAvatar(new \WP_REST_Request()));
+    }
+
+    public function testPageAvatarDeleteRejectsSuspendedUser(): void
+    {
+        self::assertSuspendedRejection(self::endpoint(PagesEndpoint::class)->deleteAvatar(new \WP_REST_Request()));
+    }
+
+    public function testWatchRejectsSuspendedUser(): void
+    {
+        self::assertSuspendedRejection(self::endpoint(WatchingEndpoint::class)->watch(new \WP_REST_Request()));
+    }
+
+    public function testWatchThrottleRunsBeforeSuspension(): void
+    {
+        $GLOBALS['__bcc_susp_fixture']['throttled'] = true;
+        self::assertThrottledBeforeSuspension(self::endpoint(WatchingEndpoint::class)->watch(new \WP_REST_Request()));
+    }
+
+    public function testProfileEditRejectsSuspendedUser(): void
+    {
+        self::assertSuspendedRejection(self::endpoint(MyProfileEndpoint::class)->patch(new \WP_REST_Request()));
+    }
+
+    public function testProfileAvatarUploadRejectsSuspendedUser(): void
+    {
+        self::assertSuspendedRejection(self::endpoint(MyProfileEndpoint::class)->uploadAvatar(new \WP_REST_Request()));
+    }
+
+    public function testProfileCoverUploadRejectsSuspendedUser(): void
+    {
+        self::assertSuspendedRejection(self::endpoint(MyProfileEndpoint::class)->uploadCover(new \WP_REST_Request()));
+    }
+
+    public function testProfileCoverPositionRejectsSuspendedUser(): void
+    {
+        self::assertSuspendedRejection(self::endpoint(MyProfileEndpoint::class)->patchCoverPosition(new \WP_REST_Request()));
+    }
+
+    public function testProfileFieldValueRejectsSuspendedUser(): void
+    {
+        self::assertSuspendedRejection(self::endpoint(MyProfileFieldsEndpoint::class)->patchValue(new \WP_REST_Request()));
+    }
+
+    public function testPhotoAltRejectsSuspendedUser(): void
+    {
+        self::assertSuspendedRejection(self::endpoint(PhotoAltEndpoint::class)->patch(new \WP_REST_Request()));
+    }
+
+    public function testHandleChangeRejectsSuspendedUser(): void
+    {
+        self::assertSuspendedRejection(self::endpoint(OnboardingEndpoint::class)->updateHandle(new \WP_REST_Request()));
+    }
+
+    /**
+     * Review M1: the operator profile (shared fields, per-page overrides,
+     * logo) is public page content too.
+     *
+     * @return iterable<string, array{string}>
+     */
+    public static function operatorProfileWrites(): iterable
+    {
+        yield 'shared profile'       => ['updateShared'];
+        yield 'page override'        => ['updatePageOverride'];
+        yield 'page override reset'  => ['resetPageOverride'];
+        yield 'logo upload'          => ['uploadLogo'];
+        yield 'logo delete'          => ['deleteLogo'];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('operatorProfileWrites')]
+    public function testOperatorProfileWritesRejectSuspendedUser(string $method): void
+    {
+        $endpoint = self::endpoint(\BCC\Trust\Onchain\REST\OperatorProfileEndpoint::class);
+        self::assertSuspendedRejection($endpoint->{$method}(new \WP_REST_Request()));
+    }
+
+    public function testClaimServiceRejectsSuspendedUserAtTheServiceBoundary(): void
+    {
+        $result = ClaimService::claim(7, 'validator', 1);
+
+        self::assertFalse($result['success'] ?? null);
+        self::assertSame('bcc_forbidden', $result['error'] ?? null);
+        self::assertSame('Your account is suspended.', $result['message'] ?? null);
+        self::assertSame([false], $GLOBALS['__bcc_susp_fixture']['bypass_args']);
+    }
+
+    /**
+     * DELIBERATELY OPEN while suspended: self-protection, retraction and
+     * account hygiene. A suspended user must still be able to block
+     * someone, unwatch, remove their own avatar/cover, hide profile
+     * fields, and manage privacy, notification and account settings.
+     * Pinned at source level, so gating one of these by accident fails here.
+     *
+     * @return iterable<string, array{class-string, string}>
+     */
+    public static function deliberatelyOpen(): iterable
+    {
+        yield 'block create'          => [MyBlocksEndpoint::class, 'create'];
+        yield 'block remove'          => [MyBlocksEndpoint::class, 'remove'];
+        yield 'unwatch'               => [WatchingEndpoint::class, 'unwatch'];
+        yield 'own avatar delete'     => [MyProfileEndpoint::class, 'deleteAvatar'];
+        yield 'own cover delete'      => [MyProfileEndpoint::class, 'deleteCover'];
+        yield 'field visibility'      => [MyProfileFieldsEndpoint::class, 'patchVisibility'];
+        yield 'privacy'               => [\BCC\Trust\Core\REST\MyPrivacyEndpoint::class, 'patch'];
+        yield 'profile prefs'         => [\BCC\Trust\Core\REST\MyProfilePrefsEndpoint::class, 'patch'];
+        yield 'email change'          => [\BCC\Trust\Core\REST\MyAccountEndpoint::class, 'patchEmail'];
+        yield 'password change'       => [\BCC\Trust\Core\REST\MyAccountEndpoint::class, 'patchPassword'];
+        yield 'account delete'        => [\BCC\Trust\Core\REST\MyAccountEndpoint::class, 'deleteAccount'];
+    }
+
+    /** @param class-string $class */
+    #[\PHPUnit\Framework\Attributes\DataProvider('deliberatelyOpen')]
+    public function testSelfProtectionRoutesStayOpenWhileSuspended(string $class, string $method): void
+    {
+        $ref   = new \ReflectionMethod($class, $method);
+        $lines = file((string) $ref->getFileName());
+        self::assertIsArray($lines);
+        $body = implode('', array_slice($lines, $ref->getStartLine() - 1, $ref->getEndLine() - $ref->getStartLine() + 1));
+
+        self::assertStringNotContainsString(
+            'is_not_suspended',
+            $body,
+            "{$class}::{$method} must stay usable by a suspended account"
+        );
     }
 
     /**

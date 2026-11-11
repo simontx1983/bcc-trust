@@ -242,6 +242,13 @@ final class PagesEndpoint
         $userId = get_current_user_id();
         $pageId = (int) $request->get_param('id');
 
+        // §M suspension gate (F-109): a suspended account cannot manage a
+        // page. Runs before the claimer lookup, so it costs no page or claim
+        // read. Anonymous callers fall through to requireClaimer's 401.
+        if ($userId > 0 && !\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         $gate = self::requireClaimer($pageId, $userId);
         if ($gate !== null) {
             return $gate;
@@ -293,6 +300,11 @@ final class PagesEndpoint
     {
         $userId = get_current_user_id();
         $pageId = (int) $request->get_param('id');
+
+        // §M suspension gate (F-109): see uploadAvatar.
+        if ($userId > 0 && !\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
 
         $gate = self::requireClaimer($pageId, $userId);
         if ($gate !== null) {
@@ -366,6 +378,13 @@ final class PagesEndpoint
 
         if (!\BCC\Core\Security\Throttle::allow(self::RATE_LIMIT_BUCKET, self::RATE_LIMIT_BUDGET, self::RATE_LIMIT_WINDOW)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many claim attempts. Please wait.', 429);
+        }
+
+        // §M suspension gate (F-109), admin bypass OFF: a suspended account
+        // must not take over a validator page. Throttle stays FIRST
+        // (throttle-before-credentials rule).
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
         }
 
         $pageId     = (int) $request->get_param('id');
