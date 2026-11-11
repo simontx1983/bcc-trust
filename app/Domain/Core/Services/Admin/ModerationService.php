@@ -165,6 +165,57 @@ final class ModerationService
         return ['success' => true, 'message' => $message, 'pages_affected' => $result['pages']];
     }
 
+    /**
+     * Restore every vote of this user that moderation removed (status 3 → 1)
+     * and is not yet purged, then recalculate the affected pages. The undo
+     * for clearVotes() / ring invalidation, per voter.
+     *
+     * @param int $userId The voter whose moderated votes to restore.
+     * @return array{success: bool, message: string, pages_affected: int}
+     */
+    public function restoreVotes(int $userId): array
+    {
+        try {
+            $result = $this->voteRemovalService
+                ->restoreModeratedVotesCastBy([$userId], 'admin_restore_votes', get_current_user_id());
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] restore_votes_failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            echo '<div class="notice notice-error"><p>Failed to restore votes: database error. Nothing was restored.</p></div>';
+            return ['success' => false, 'message' => 'Failed to restore votes: database error.', 'pages_affected' => 0];
+        }
+
+        $message = sprintf(
+            'Votes restored: %d across %d pages (%d recalculated now, %d queued for the recalculation cron).',
+            $result['removed'],
+            $result['pages'],
+            $result['recalculated'],
+            $result['queued']
+        );
+        echo '<div class="notice notice-success"><p>' . esc_html($message) . '</p></div>';
+        return ['success' => true, 'message' => $message, 'pages_affected' => $result['pages']];
+    }
+
+    /**
+     * How many of this user's moderation-removed votes restoreVotes() would
+     * bring back. Null when the count cannot be read (the button is then
+     * hidden rather than claiming zero).
+     */
+    public function restorableVoteCount(int $userId): ?int
+    {
+        try {
+            return $this->voteRemovalService->countRestorableFor($userId);
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] restorable_vote_count_failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
+
     // ──────────────────────────────────────────────────────────────
     // CLEAR FINGERPRINTS
     // ──────────────────────────────────────────────────────────────

@@ -78,35 +78,15 @@ final class VoteRemovalService
             return self::emptyResult();
         }
 
-        /** @var array{vote_ids: list<int>, page_ids: list<int>} $tx */
+        /** @var array{vote_ids: list<int>, page_ids: list<int>, voter_ids: list<int>} $tx */
         $tx = TransactionManager::run(function () use ($voterIds): array {
-            $voteIds = [];
-            $pageIds = [];
-            $afterId = 0;
-            do {
-                $refs = $this->voteRepo->getActiveVoteRefsByVoters($voterIds, $afterId, self::READ_PAGE);
-                foreach ($refs as $ref) {
-                    $voteIds[]              = $ref->id;
-                    $pageIds[$ref->page_id] = $ref->page_id;
-                    $afterId                = $ref->id;
-                }
-            } while (count($refs) === self::READ_PAGE);
-
-            if ($voteIds !== []) {
-                $this->voteRepo->transitionStatus(
-                    $voteIds,
-                    VoteRepository::STATUS_ACTIVE,
-                    VoteRepository::STATUS_MODERATION_REMOVED
-                );
-                $this->scoreRepo->flagPagesForRecalculation(array_values($pageIds));
-            }
-
-            // Every active vote these voters had is gone.
-            foreach ($voterIds as $voterId) {
-                $this->userInfoRepo->updateVotesCast($voterId, 0);
-            }
-
-            return ['vote_ids' => $voteIds, 'page_ids' => array_values($pageIds)];
+            $refs = $this->collectByVoters($voterIds, VoteRepository::STATUS_ACTIVE);
+            return $this->transition(
+                $refs,
+                VoteRepository::STATUS_ACTIVE,
+                VoteRepository::STATUS_MODERATION_REMOVED,
+                $voterIds
+            );
         });
 
         $this->audit($auditAction, $actorId, $voterIds, $tx['vote_ids'], count($tx['page_ids']));
@@ -129,36 +109,124 @@ final class VoteRemovalService
     {
         /** @var array{vote_ids: list<int>, page_ids: list<int>, voter_ids: list<int>} $tx */
         $tx = TransactionManager::run(function () use ($voteIds): array {
-            $refs = $this->voteRepo->getVoteRefsByIdsAndStatus($voteIds, VoteRepository::STATUS_MODERATION_REMOVED);
-
-            $ids    = [];
-            $pages  = [];
-            $voters = [];
-            foreach ($refs as $ref) {
-                $ids[]                     = $ref->id;
-                $pages[$ref->page_id]      = $ref->page_id;
-                $voters[$ref->voter_user_id] = $ref->voter_user_id;
-            }
-
-            if ($ids !== []) {
-                $this->voteRepo->transitionStatus(
-                    $ids,
-                    VoteRepository::STATUS_MODERATION_REMOVED,
-                    VoteRepository::STATUS_ACTIVE
-                );
-                $this->scoreRepo->flagPagesForRecalculation(array_values($pages));
-            }
-
-            foreach ($voters as $voterId) {
-                $this->userInfoRepo->updateVotesCast($voterId, $this->voteRepo->countByVoter($voterId));
-            }
-
-            return ['vote_ids' => $ids, 'page_ids' => array_values($pages), 'voter_ids' => array_values($voters)];
+            return $this->transition(
+                $this->voteRepo->getVoteRefsByIdsAndStatus($voteIds, VoteRepository::STATUS_MODERATION_REMOVED),
+                VoteRepository::STATUS_MODERATION_REMOVED,
+                VoteRepository::STATUS_ACTIVE,
+                []
+            );
         });
 
         $this->audit($auditAction, $actorId, $tx['voter_ids'], $tx['vote_ids'], count($tx['page_ids']));
 
         return $this->afterCommit($tx['vote_ids'], $tx['page_ids']);
+    }
+
+    /**
+     * Restore every moderation-removed vote cast by the given voters (the
+     * admin "Restore moderated votes" action). Same guarantees as
+     * restoreModeratedVotes(); rows already purged are simply gone.
+     *
+     * @param list<int> $voterIds
+     * @return array{removed: int, vote_ids: list<int>, pages: int, recalculated: int, queued: int}
+     *         `removed` is the count of votes RESTORED here.
+     * @throws \Throwable on any DB failure — nothing is restored in that case
+     */
+    public function restoreModeratedVotesCastBy(array $voterIds, string $auditAction, int $actorId): array
+    {
+        $voterIds = array_values(array_unique(array_filter(array_map('intval', $voterIds), static fn (int $v): bool => $v > 0)));
+        if ($voterIds === []) {
+            return self::emptyResult();
+        }
+
+        /** @var array{vote_ids: list<int>, page_ids: list<int>, voter_ids: list<int>} $tx */
+        $tx = TransactionManager::run(function () use ($voterIds): array {
+            return $this->transition(
+                $this->collectByVoters($voterIds, VoteRepository::STATUS_MODERATION_REMOVED),
+                VoteRepository::STATUS_MODERATION_REMOVED,
+                VoteRepository::STATUS_ACTIVE,
+                $voterIds
+            );
+        });
+
+        $this->audit($auditAction, $actorId, $voterIds, $tx['vote_ids'], count($tx['page_ids']));
+
+        return $this->afterCommit($tx['vote_ids'], $tx['page_ids']);
+    }
+
+    /**
+     * How many moderation-removed votes restoreModeratedVotesCastBy() would
+     * bring back for this voter (drives the admin button label).
+     *
+     * @throws \Throwable on database failure
+     */
+    public function countRestorableFor(int $voterId): int
+    {
+        return $this->voteRepo->countModeratedByVoter($voterId);
+    }
+
+    /**
+     * All votes in `$status` cast by the voters, keyset-paginated.
+     *
+     * @param list<int> $voterIds
+     * @return list<object{id: int, voter_user_id: int, page_id: int}>
+     */
+    private function collectByVoters(array $voterIds, int $status): array
+    {
+        $all     = [];
+        $afterId = 0;
+        do {
+            $refs = $this->voteRepo->getVoteRefsByVoters($voterIds, $status, $afterId, self::READ_PAGE);
+            foreach ($refs as $ref) {
+                $all[]   = $ref;
+                $afterId = $ref->id;
+            }
+        } while (count($refs) === self::READ_PAGE);
+
+        return $all;
+    }
+
+    /**
+     * Inside the caller's transaction: flip `$refs` from `$from` to `$to`,
+     * then work from the rows that ACTUALLY moved (re-read in `$to`), not
+     * from the rows read beforehand — a vote changed by a concurrent request
+     * in between is neither audited nor recalculated as if it had moved.
+     * Flags the moved votes' pages and recounts votes_cast for every voter
+     * involved from the live table (a vote cast mid-flight stays counted).
+     *
+     * @param list<object{id: int, voter_user_id: int, page_id: int}> $refs
+     * @param list<int> $alsoRecountVoters voters to recount even if none of their votes moved
+     * @return array{vote_ids: list<int>, page_ids: list<int>, voter_ids: list<int>}
+     */
+    private function transition(array $refs, int $from, int $to, array $alsoRecountVoters): array
+    {
+        $moved = [];
+        if ($refs !== []) {
+            $ids = array_map(static fn (object $r): int => $r->id, $refs);
+            $this->voteRepo->transitionStatus($ids, $from, $to);
+            $moved = $this->voteRepo->getVoteRefsByIdsAndStatus($ids, $to);
+        }
+
+        $voteIds = [];
+        $pages   = [];
+        $voters  = [];
+        foreach ($alsoRecountVoters as $v) {
+            $voters[$v] = $v;
+        }
+        foreach ($moved as $ref) {
+            $voteIds[]                   = $ref->id;
+            $pages[$ref->page_id]        = $ref->page_id;
+            $voters[$ref->voter_user_id] = $ref->voter_user_id;
+        }
+
+        if ($pages !== []) {
+            $this->scoreRepo->flagPagesForRecalculation(array_values($pages));
+        }
+        foreach ($voters as $voterId) {
+            $this->userInfoRepo->updateVotesCast($voterId, $this->voteRepo->countByVoter($voterId));
+        }
+
+        return ['vote_ids' => $voteIds, 'page_ids' => array_values($pages), 'voter_ids' => array_values($voters)];
     }
 
     /**
