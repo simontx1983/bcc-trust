@@ -62,9 +62,50 @@ final class PushDispatcher
     /** Transient key prefix. Keys are bcc_push_q_{user_id}_{event_type}. */
     private const QUEUE_KEY_PREFIX = 'bcc_push_q_';
 
+    /**
+     * @param (\Closure(array<string, mixed>, array<string, mixed>): WebPush)|null $webPushFactory
+     *   Builds the WebPush client for ONE subscription from (auth, Guzzle
+     *   client options). Null = `new WebPush`. A test seam: it lets a test
+     *   see the options each send is built with, and never touch the network.
+     */
     public function __construct(
         private readonly PushSubscriptionRepository $subscriptionRepo,
+        private readonly ?\Closure $webPushFactory = null,
     ) {
+    }
+
+    /**
+     * Guzzle client options for ONE push endpoint (F-75).
+     *
+     * ⚠ DNS REBINDING. The send-time check resolves the endpoint's host and
+     * refuses a private IP, but Guzzle then resolved it AGAIN to connect, so
+     * a hostile DNS server could answer public for the check and private for
+     * the request. The fix is SafeHttpClient's own pin: the address the check
+     * approved is handed to cURL as CURLOPT_RESOLVE, so the connection goes
+     * there and nowhere else.
+     *
+     *  - `$pin` is SafeHttpClient::resolveEntryFor()'s "host:port:ip", or
+     *    null for an IP-literal host (validated as public; no DNS to pin).
+     *  - The handler is FORCED to cURL. Guzzle's default can be its stream
+     *    handler, which silently ignores the `curl` option, so the pin would
+     *    fail OPEN. It is wrapped in HandlerStack::create() because
+     *    WebPush's expired-subscription report (410/404) comes from Guzzle's
+     *    http_errors middleware; a bare handler would report those as sent.
+     *  - Redirects stay off (audit HIGH #3): each hop could target a private
+     *    IP and would not be pinned.
+     *
+     * @return array<string, mixed>
+     */
+    public static function clientOptionsFor(?string $pin): array
+    {
+        $options = [
+            'allow_redirects' => false,
+            'handler'         => \GuzzleHttp\HandlerStack::create(new \GuzzleHttp\Handler\CurlMultiHandler()),
+        ];
+        if ($pin !== null) {
+            $options['curl'] = [CURLOPT_RESOLVE => [$pin]];
+        }
+        return $options;
     }
 
     /**
@@ -189,34 +230,41 @@ final class PushDispatcher
             return;
         }
 
+        // F-75: the DNS pin only binds on cURL. Without it every send would
+        // go out unpinned, so none goes out (as SafeHttpClient refuses).
+        if (!function_exists('curl_init')) {
+            Logger::error('[PushDispatcher] cURL missing, refusing to send unpinned pushes', [
+                'event_type' => $eventType,
+                'subs'       => count($subs),
+            ]);
+            foreach ($subs as $_) {
+                PushMetrics::recordFailure($eventType);
+            }
+            return;
+        }
+
         $payloadJson = (string) wp_json_encode($body);
 
-        // allow_redirects: false (audit HIGH #3) — the endpoint POST goes
-        // through minishlink/web-push's own Guzzle client, which bypasses
-        // SafeHttpClient. Disabling redirects stops a push service (or a
-        // hostile endpoint) from 3xx-redirecting the request to an internal
-        // IP, which would defeat the private-IP checks below.
-        $webPush = new WebPush(['VAPID' => $auth], [], 30, ['allow_redirects' => false]);
-
-        // Build endpoint → row-id map so we can tombstone by id when
-        // a report comes back as expired. The web-push library only
-        // identifies reports by endpoint URL, not by our row id.
-        $endpointToId = [];
         foreach ($subs as $row) {
             if (!isset($row->endpoint, $row->id, $row->p256dh_key, $row->auth_key)) {
                 continue;
             }
             $endpoint = (string) $row->endpoint;
 
-            // Delivery-time SSRF re-check (audit HIGH #3). Store-time
-            // validation lives in MyPushSubscriptionEndpoint, but rows
-            // predating that gate — or whose host now resolves to a
-            // private IP — are caught here before we hand the URL to the
-            // library's Guzzle transport. Same https + public-IP rule,
-            // same single source of truth (SafeHttpClient).
-            if (strtolower((string) wp_parse_url($endpoint, PHP_URL_SCHEME)) !== 'https'
-                || SafeHttpClient::validatePublicUrl($endpoint) instanceof \WP_Error
-            ) {
+            // Delivery-time SSRF check + DNS pin (audit HIGH #3, F-75).
+            // Store-time validation lives in MyPushSubscriptionEndpoint, but
+            // rows predating that gate, or whose host now resolves to a
+            // private IP, are caught here. prepareArgs() is SafeHttpClient's
+            // single validation (https + public IP) AND returns the address
+            // it approved, which the send is then pinned to.
+            $pin  = null;
+            $args = strtolower((string) wp_parse_url($endpoint, PHP_URL_SCHEME)) === 'https'
+                ? SafeHttpClient::prepareArgs($endpoint, [])
+                : new \WP_Error('push_endpoint_not_https', 'push endpoint is not https');
+            if (!($args instanceof \WP_Error)) {
+                $pin = SafeHttpClient::resolveEntryFor($args, $endpoint);
+            }
+            if ($args instanceof \WP_Error) {
                 Logger::warning('[PushDispatcher] skipping subscription with unsafe endpoint', [
                     'event_type' => $eventType,
                     'sub_id'     => (int) $row->id,
@@ -224,8 +272,6 @@ final class PushDispatcher
                 PushMetrics::recordFailure($eventType);
                 continue;
             }
-
-            $endpointToId[$endpoint] = (int) $row->id;
 
             try {
                 $sub = Subscription::create([
@@ -245,13 +291,31 @@ final class PushDispatcher
             }
 
             PushMetrics::recordAttempt($eventType);
-            $webPush->queueNotification($sub, $payloadJson);
+            $this->sendOne($auth, $pin, $sub, $payloadJson, (int) $row->id, $eventType);
         }
+    }
 
+    /**
+     * Send ONE subscription through its own client, pinned to its own
+     * endpoint's approved address (F-75). One client per subscription
+     * because WebPush takes Guzzle options per client and the pin is per
+     * endpoint; findAllForUser() caps a user at 25.
+     *
+     * @param array<string, mixed> $auth
+     */
+    private function sendOne(array $auth, ?string $pin, Subscription $sub, string $payloadJson, int $rowId, string $eventType): void
+    {
         try {
+            $vapid   = ['VAPID' => $auth];
+            $options = self::clientOptionsFor($pin);
+            $webPush = $this->webPushFactory !== null
+                ? ($this->webPushFactory)($vapid, $options)
+                : new WebPush($vapid, [], 30, $options);
+
+            $webPush->queueNotification($sub, $payloadJson);
+
             foreach ($webPush->flush() as $report) {
                 $endpoint = $report->getEndpoint();
-                $rowId    = $endpointToId[$endpoint] ?? 0;
 
                 if ($report->isSuccess()) {
                     PushMetrics::recordSuccess($eventType);
@@ -279,14 +343,12 @@ final class PushDispatcher
             }
         } catch (\Throwable $e) {
             // Library-level explosion (e.g. malformed VAPID, GMP missing).
-            // Mark every queued report as a failure so the metrics don't
-            // silently underreport.
-            $remaining = count($endpointToId);
-            for ($i = 0; $i < $remaining; $i++) {
-                PushMetrics::recordFailure($eventType);
-            }
+            // Count it as this subscription's failure so the metrics don't
+            // silently underreport; the other subscriptions still send.
+            PushMetrics::recordFailure($eventType);
             Logger::error('[PushDispatcher] flush exception', [
                 'event_type' => $eventType,
+                'sub_id'     => $rowId,
                 'error'      => $e->getMessage(),
             ]);
         }
