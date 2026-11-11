@@ -1152,9 +1152,25 @@ final class UserViewService
 
         return [
             'can_follow'       => ['allowed' => $isOther,    'unlock_hint' => null],
+            // ⚠ `reason_code` IS FORWARDED, and leaving it out was an
+            // oversight rather than a convention: `CardViewService`
+            // emits the whole `canMessage()` return for its own
+            // `can_message`, so the card surfaces have always carried
+            // three keys while this one carried two. Adding it makes the
+            // two surfaces AGREE.
+            //
+            // ⚠⚠ Without it `/u/[handle]` cannot see
+            // `reason_code: 'unavailable'` at all, and the frontend's
+            // omit branch would appear to work only by accident — via
+            // the `unlock_hint: null` pairing, which is a second
+            // safeguard, not the signal.
+            //
+            // It is always present (null when messaging is allowed), so
+            // a client reads `null` rather than `undefined`.
             'can_message'      => [
                 'allowed'     => $canMessagePerm['allowed'],
                 'unlock_hint' => $canMessagePerm['unlock_hint'],
+                'reason_code' => $canMessagePerm['reason_code'],
             ],
             'can_block'        => ['allowed' => $isOther,    'unlock_hint' => null],
             'can_edit_profile' => ['allowed' => $isSelf,     'unlock_hint' => null],
