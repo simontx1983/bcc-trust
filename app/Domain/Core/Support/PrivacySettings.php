@@ -71,6 +71,27 @@ final class PrivacySettings
     private const META_PREFIX = 'bcc_privacy_';
 
     /**
+     * `peepso_users.usr_profile_acc` = 30, "friends only".
+     *
+     * ⚠ Spelled out rather than referenced from a PeepSo constant because
+     * the constant is `PeepSoFriendsPlugin::ACCESS_FRIENDS`, defined in
+     * the OPTIONAL peepso-friends plugin — and the clause that uses this
+     * exists precisely for the case where that plugin is GONE. Referring
+     * to it would make the guard undefined exactly when it is needed.
+     * PeepSo core declares only 10, 20 and 40.
+     */
+    private const PROFILE_ACC_FRIENDS = 30;
+
+    /**
+     * The PeepSo user-meta key behind BCC's `hide_from_search` toggle.
+     *
+     * ⚠ NOT under `META_PREFIX`: this key is PeepSo's own, written by
+     * `MyProfilePrefsEndpoint` so PeepSo's surfaces honour it too. The
+     * `bcc_privacy_*` namespace is for keys BCC owns outright.
+     */
+    private const HIDE_FROM_LISTING_META = 'peepso_is_hide_profile_from_user_listing';
+
+    /**
      * Read the §K2 flags for the user view-model. Always returns a
      * complete array — missing meta defaults to false (V1 baseline:
      * everything public per §K2).
@@ -160,6 +181,99 @@ final class PrivacySettings
     public static function registerSearchFilter(): void
     {
         add_filter('peepso_user_search_args', [self::class, 'filterPeepSoSearchArgs'], 20, 1);
+
+        // ⚠ TWO MECHANISMS, DELIBERATELY, because the settings live in
+        // different tables and only one is reachable by `meta_query`.
+        //
+        //   hide_from_search  → `wp_usermeta`, so the args filter above
+        //                       can carry it as a `meta_query` clause.
+        //   profile level     → `peepso_users.usr_profile_acc`, which is
+        //                       NOT usermeta, so no `meta_query` can
+        //                       express it. It needs SQL — hence
+        //                       `pre_user_query`.
+        //
+        // Priority 20 so it runs AFTER PeepSo's own `pre_user_query`
+        // (registered at the default 10 inside `PeepSoUserSearch`). The
+        // clause below brings its own join rather than reusing PeepSo's
+        // `acc` alias, so it does not actually depend on that ordering —
+        // but a predictable order is worth having anyway.
+        add_action('pre_user_query', [self::class, 'filterPeepSoUserQuery'], 20, 1);
+    }
+
+    /**
+     * BCC's own profile-level exclusion for PeepSo's user search.
+     *
+     * ⚠⚠ WHY THIS EXISTS: PeepSo CORE's search only excludes level 40
+     * (`usr_profile_acc <> ACCESS_PRIVATE`) and gates level 20
+     * (`IF(= ACCESS_MEMBERS, $viewer > 0, TRUE)`). The level-30 clause
+     * came ONLY from the peepso-friends plugin
+     * (`peepsofriends.php`, `IF(usr_profile_acc = 30, ps_fnd.fnd_id IS
+     * NOT NULL, TRUE)`). With that add-on removed, nothing excludes 30 —
+     * so a "friends only" profile becomes UNREACHABLE on its profile
+     * routes (the gate denies it) while still being LISTED in the member
+     * directory and its search. Listed but unreachable is precisely the
+     * inconsistency F-02 exists to remove, and it would arrive by plugin
+     * removal rather than by any code change.
+     *
+     * BCC exposes `profile_visibility` through its own API and documents
+     * what each level means, so the guarantee has to be ours and must not
+     * depend on which PeepSo add-ons happen to be installed.
+     *
+     * ⚠ ONLY APPLIED WHEN peepso-friends IS ABSENT. While that plugin is
+     * present its clause already handles 30 correctly — a friend SEES a
+     * level-30 user — and adding a blanket exclusion on top would hide
+     * level-30 users from their own friends, which is stricter than the
+     * setting means. So this fills a gap rather than duplicating a rule:
+     *   plugin present → PeepSo's friends clause governs level 30;
+     *   plugin absent  → this clause governs it, as owner + admins only,
+     *                    which is the user's stated intent for a product
+     *                    with no friends feature.
+     *
+     * Scoped to PeepSo's own searches by the `_peepso_user_id` query var
+     * that `PeepSoUserSearch` always sets. ⚠ That scoping is load-bearing:
+     * `pre_user_query` fires for EVERY `WP_User_Query` in the request,
+     * including wp-admin's user list and other plugins' lookups, and a
+     * privacy clause leaking into those would be a bug of its own.
+     *
+     * @param \WP_User_Query $query
+     */
+    public static function filterPeepSoUserQuery(\WP_User_Query $query): void
+    {
+        // Not a PeepSo search ⇒ not ours to touch. `query_vars` is always
+        // an array on WP_User_Query, so this is the only guard needed.
+        if (!array_key_exists('_peepso_user_id', $query->query_vars)) {
+            return;
+        }
+        // peepso-friends present ⇒ its own clause owns level 30.
+        if (class_exists('\\PeepSoFriendsPlugin')) {
+            return;
+        }
+        // Admins see everyone, matching both `is_accessible_static` and
+        // PeepSo's own treatment of its hide-from-listing clause.
+        if (class_exists('\\PeepSo') && \PeepSo::is_admin()) {
+            return;
+        }
+
+        global $wpdb;
+
+        $viewerId = (int) ($query->query_vars['_peepso_user_id'] ?? 0);
+
+        // Own join and own alias (`bcc_acc`), so this does not depend on
+        // PeepSo's `acc` join existing or on hook ordering.
+        $query->query_from .= ' LEFT JOIN `' . $wpdb->prefix . 'peepso_users` `bcc_acc`'
+            . ' ON `bcc_acc`.`usr_id` = `' . $wpdb->users . '`.`ID`';
+
+        // Exclude level 30 unless the row IS the viewer. A missing
+        // peepso_users row is NOT excluded — absence means "never set",
+        // whose schema default is public, and treating it as 30 would
+        // hide unsynced accounts for no reason.
+        $query->query_where .= $wpdb->prepare(
+            ' AND (`bcc_acc`.`usr_profile_acc` IS NULL'
+            . ' OR `bcc_acc`.`usr_profile_acc` <> %d'
+            . ' OR `' . $wpdb->users . '`.`ID` = %d)',
+            self::PROFILE_ACC_FRIENDS,
+            $viewerId
+        );
     }
 
     /**
@@ -189,15 +303,52 @@ final class PrivacySettings
             ],
         ];
 
+        // ── hide_from_search, honoured unconditionally ────────────────
+        //
+        // ⚠ PeepSo HAS a clause for this, but it is gated on its own
+        // admin option: `1 === intval(get_option('allow_hide_user_from_user_listing', 0))`.
+        // That option is OFF on production, so the setting has never
+        // actually worked — while BCC's contract has promised since v1.64
+        // that it "excludes the user from directory + member search".
+        //
+        // The promise is OURS: the toggle is exposed through BCC's own
+        // `PATCH /me/profile-prefs`. Leaving it contingent on a
+        // third-party admin checkbox means an admin can silently
+        // un-break or re-break our documented behaviour with no signal.
+        // So this clause is unconditional and ADDITIVE — if the PeepSo
+        // option is ever enabled, both clauses apply and agree.
+        //
+        // Same NOT-EXISTS-OR-FALSY shape as the opt-out above, for the
+        // same reason: users who never touched the setting have no meta
+        // row at all, and a bare `value != '1'` would exclude them.
+        $hideClause = [
+            'relation' => 'OR',
+            [
+                'key'     => self::HIDE_FROM_LISTING_META,
+                'compare' => 'NOT EXISTS',
+            ],
+            [
+                'key'     => self::HIDE_FROM_LISTING_META,
+                'value'   => '1',
+                'compare' => '!=',
+            ],
+        ];
+
+        $bccClauses = [
+            'relation' => 'AND',
+            $optoutClause,
+            $hideClause,
+        ];
+
         if (isset($args['meta_query']) && is_array($args['meta_query'])) {
             $existing = $args['meta_query'];
             $args['meta_query'] = [
                 'relation' => 'AND',
                 $existing,
-                $optoutClause,
+                $bccClauses,
             ];
         } else {
-            $args['meta_query'] = $optoutClause;
+            $args['meta_query'] = $bccClauses;
         }
 
         return $args;
