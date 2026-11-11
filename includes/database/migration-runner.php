@@ -100,6 +100,77 @@ if (!function_exists('bcc_trust_migration_backoff_active')) {
             ]);
         }
     }
+
+    /**
+     * Refuse to destroy data (F-149): start the retry backoff and log WHAT
+     * was spared, so an operator can decide. Distinct from a failed step —
+     * nothing errored; the migration declined to delete rows.
+     *
+     * @param array<string, mixed> $context
+     */
+    function bcc_trust_migration_refuse_destructive(string $migrationId, string $reason, array $context): void
+    {
+        set_transient('bcc_trust_migration_backoff_' . $migrationId, 1, HOUR_IN_SECONDS);
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] migration refused to destroy data; not marking done, re-checking in 1h', [
+                'migration' => $migrationId,
+                'reason'    => $reason,
+            ] + $context);
+        }
+    }
+
+    /**
+     * Drop a RETIRED table only when it is empty (F-149).
+     *
+     * The resurrection-proof drops re-probe hourly and remove any retired
+     * table that reappears. A table that reappears WITH ROWS is not drift to
+     * be silently cleaned: it is what a tarball rollback to older code
+     * produces, and rolling forward again must not delete that data. So:
+     *
+     *   'absent'  — the table is not there; nothing to do.
+     *   'dropped' — it was there and empty; it is gone now.
+     *   'refused' — it holds rows; left in place, logged with the count,
+     *               backoff started. The caller must not stamp done.
+     *   'failed'  — a probe, the count or the DROP errored; backoff
+     *               started. The caller must not stamp done.
+     *
+     * @return 'absent'|'dropped'|'refused'|'failed'
+     */
+    function bcc_trust_drop_retired_table_if_empty(string $table, string $migrationId): string
+    {
+        global $wpdb;
+
+        $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+        if ($exists === null && $wpdb->last_error !== '') {
+            bcc_trust_migration_step_failed($migrationId, "probe {$table}");
+            return 'failed';
+        }
+        if ($exists !== $table) {
+            return 'absent';
+        }
+
+        // Table name is $wpdb->prefix + a hard-coded suffix — no user input.
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $rows = $wpdb->get_var("SELECT COUNT(*) FROM `{$table}`");
+        if ($rows === null) {
+            bcc_trust_migration_step_failed($migrationId, "count {$table}");
+            return 'failed';
+        }
+        if ((int) $rows > 0) {
+            bcc_trust_migration_refuse_destructive($migrationId, 'retired table reappeared with rows', [
+                'table' => $table,
+                'rows'  => (int) $rows,
+            ]);
+            return 'refused';
+        }
+
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        if ($wpdb->query("DROP TABLE IF EXISTS `{$table}`") === false) {
+            bcc_trust_migration_step_failed($migrationId, "drop {$table}");
+            return 'failed';
+        }
+        return 'dropped';
+    }
 }
 
 if (!function_exists('bcc_trust_pending_migrations')) {
