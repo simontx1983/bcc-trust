@@ -39,13 +39,6 @@ final class NftGroupGateService {
     private const PERMANENT_OPT_OUT_TIMESTAMP = 0;
 
     /**
-     * Per-request memo of decoded opt-out maps, keyed by user_id.
-     *
-     * @var array<int, array<int, int>>
-     */
-    private array $optOutCache = [];
-
-    /**
      * Verify eligibility and join via PeepSoGroupWriter. This is the
      * EXPLICIT, user-initiated Join.
      *
@@ -387,21 +380,26 @@ final class NftGroupGateService {
     }
 
     /**
+     * Read the opt-out map from user meta on EVERY call.
+     *
+     * ⚠ No per-instance memo (#409 / F-158). Since F-158 the join gate refuses
+     * only a PERMANENT opt-out (a moderator eviction). An instance that had
+     * memoized the map while the member had merely left would go on reading
+     * "left" after another instance recorded the eviction, and would let the
+     * evicted member rejoin. WordPress already caches user meta per request
+     * (and in the object cache), so the memo saved only a json_decode.
+     *
      * @return array<int, int>
      */
     private function loadOptOutMap(int $userId): array {
-        if (isset($this->optOutCache[$userId])) {
-            return $this->optOutCache[$userId];
-        }
-
         $raw = (string) get_user_meta($userId, self::USER_META_OPT_OUT, true);
         if ($raw === '') {
-            return $this->optOutCache[$userId] = [];
+            return [];
         }
 
         $decoded = json_decode($raw, true);
         if (!is_array($decoded)) {
-            return $this->optOutCache[$userId] = [];
+            return [];
         }
 
         $map = [];
@@ -412,7 +410,7 @@ final class NftGroupGateService {
                 $map[$gid] = $ts;
             }
         }
-        return $this->optOutCache[$userId] = $map;
+        return $map;
     }
 
     /**
@@ -421,7 +419,6 @@ final class NftGroupGateService {
     private function persistOptOutMap(int $userId, array $map): void {
         if ($map === []) {
             delete_user_meta($userId, self::USER_META_OPT_OUT);
-            $this->optOutCache[$userId] = [];
             return;
         }
         update_user_meta(
@@ -429,6 +426,5 @@ final class NftGroupGateService {
             self::USER_META_OPT_OUT,
             wp_json_encode($map)
         );
-        $this->optOutCache[$userId] = $map;
     }
 }
