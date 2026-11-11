@@ -598,10 +598,33 @@ final class ApiRetry
      * the caller's own, or the honest worst case.
      *
      * ⭐ THE DEFAULT IS WHAT KEEPS THIS PR BEHAVIOUR-PRESERVING across all
-     * two dozen existing call sites. `now + worstCaseSeconds()` is, by
-     * construction, at or beyond the longest run that was previously
-     * possible, so no existing caller can reach it. The deadline only bites
-     * where a caller asked for one.
+     * two dozen existing call sites: it must be a deadline that CANNOT
+     * FIRE. The deadline only bites where a caller asked for one.
+     *
+     * ⚠⚠ AND IT IS ONE ATTEMPT WIDER THAN THE WORST CASE, DELIBERATELY.
+     * `worstCaseSeconds($maxRetries, $timeout)` is the exact worst case and
+     * leaves ZERO slack, which is not the same as unreachable. Work the last
+     * retry's check through: it asks
+     *
+     *     deadline - (maxRetries x (timeout + overhead) + sleeps) >= FLOOR
+     *
+     * and with `deadline` set to the exact worst case that reduces to
+     * `timeout - maxRetries x overhead >= MIN_ATTEMPT_BUDGET`. At
+     * `timeout = 5` — KeybaseLogoResolver's, the smallest in this tree —
+     * that is an equality with NO room: any real time not inside the
+     * `timeout` budget drops the final attempt. And there always is some:
+     * WordPress's own argument processing and response parsing, the
+     * breaker's `get_option`/`update_option` round trips, and `time()`'s
+     * one-second granularity, which can tick mid-attempt and cost a whole
+     * second to rounding alone.
+     *
+     * ⇒ So the default budgets for one more attempt than can happen. That
+     * is a reason rather than a chosen number: it scales with the timeout
+     * instead of guessing an overhead, needs no new constant, and makes the
+     * margin ~2.7s per attempt at `timeout = 5` and ~9s at 15, where a flat
+     * `+ MIN_ATTEMPT_BUDGET` would have left only ~1.7s at the very call
+     * site that exposed the problem. Being generous costs nothing here,
+     * because an unreachable deadline's only job is to be unreachable.
      *
      * ⚠ It is still worth defaulting rather than leaving it at 0: with a
      * default in place, {@see capTimeoutToDeadline()} and the retry checks
@@ -624,7 +647,8 @@ final class ApiRetry
         // fallback mirrors WordPress's own default for the one that forgets.
         $timeout = (int) ($secured['timeout'] ?? self::WP_DEFAULT_TIMEOUT);
 
-        return time() + self::worstCaseSeconds($maxRetries, $timeout);
+        // `$maxRetries + 1`: one attempt of slack. See the note above.
+        return time() + self::worstCaseSeconds($maxRetries + 1, $timeout);
     }
 
     /**

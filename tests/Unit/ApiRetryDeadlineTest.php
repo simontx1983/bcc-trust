@@ -171,6 +171,90 @@ final class ApiRetryDeadlineTest extends TestCase
         self::assertSame([2, 3, 3], \BccSleepSpy::$slept);
     }
 
+    /**
+     * ⚠⚠ THE DEFAULT MUST SURVIVE REAL ELAPSED TIME, NOT JUST THE MODELLED
+     * KIND. Found in review of this PR: the default was the EXACT worst
+     * case, and zero slack is not the same as unreachable. The last retry's
+     * check reduces to `timeout - maxRetries x overhead >= floor`, so at
+     * `timeout = 5` — KeybaseLogoResolver's, the smallest here — it was an
+     * equality, and any time spent outside the `timeout` budget (WP arg
+     * processing, response parsing, the breaker's option round trips, or
+     * `time()`'s one-second granularity ticking mid-attempt) silently
+     * dropped the fourth attempt.
+     *
+     * ⭐ DRIVEN THROUGH THE REAL DEFAULT, by reflection, rather than through
+     * a restatement of the formula. A test that recomputed the expected
+     * default would pass against any formula including the broken one; this
+     * one asks `resolveDeadline()` what it actually chose and then checks
+     * that a full sequence fits inside it with a second of unmodelled time
+     * per attempt. Reverting the `+ 1` fails it.
+     */
+    public function testTheDefaultDeadlineSurvivesPerAttemptOverhead(): void
+    {
+        // The smallest timeout in the tree, which is where the margin was nil.
+        $timeout = 5;
+
+        \BccSleepSpy::startClock(self::T0);
+        $deadlineAt = self::defaultDeadlineFor($timeout);
+
+        $attempts = 0;
+        $fn = static function () use (&$attempts, $timeout) {
+            $attempts++;
+            // The timeout itself, PLUS one second that no budget models.
+            \BccSleepSpy::advance($timeout + 1);
+
+            return \BccHttp::response(500, '{"message":"boom"}');
+        };
+
+        ApiRetry::request($fn, [
+            'chain_id'    => self::CHAIN,
+            'label'       => 'deadline',
+            'deadline_at' => $deadlineAt,
+        ]);
+
+        self::assertSame(
+            4,
+            $attempts,
+            'the DEFAULT deadline must not cost an attempt; it exists to be unreachable'
+        );
+    }
+
+    /**
+     * And the slack is at least a whole attempt, stated as a property of the
+     * default rather than as its arithmetic — so a future change to how the
+     * margin is derived keeps passing as long as the margin is real.
+     */
+    public function testTheDefaultDeadlineIsWiderThanTheWorstCase(): void
+    {
+        \BccSleepSpy::startClock(self::T0);
+
+        foreach ([5, 12, 15, 30] as $timeout) {
+            $exact  = ApiRetry::worstCaseSeconds(ApiRetry::DEFAULT_MAX_RETRIES, $timeout);
+            $actual = self::defaultDeadlineFor($timeout) - self::T0;
+
+            self::assertGreaterThanOrEqual(
+                $exact + $timeout,
+                $actual,
+                "the default for timeout={$timeout} must leave at least one attempt of slack"
+            );
+        }
+    }
+
+    /**
+     * The default `resolveDeadline()` picks for a given timeout, read from
+     * the method itself.
+     */
+    private static function defaultDeadlineFor(int $timeout): int
+    {
+        $m = (new ReflectionClass(ApiRetry::class))->getMethod('resolveDeadline');
+        $m->setAccessible(true);
+
+        /** @var int $out */
+        $out = $m->invoke(null, [], ['timeout' => $timeout]);
+
+        return $out;
+    }
+
     // ── the deadline doing its job ──────────────────────────────────────
 
     /**
