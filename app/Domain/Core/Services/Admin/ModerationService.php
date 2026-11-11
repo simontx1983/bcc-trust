@@ -343,10 +343,9 @@ final class ModerationService
      * (F-103, user decision). The undo for a wrongly accumulated score (e.g.
      * a household that shared a device before the once-per-window rule).
      *
-     * A clean slate for the penalty window (user decision): the score and
-     * peak go to 0, but the member's recorded shared-device penalties are
-     * KEPT, so the same shared device cannot re-add points until its 30-day
-     * window expires. Drops cached fraud / rate-limit state and flags every
+     * The score and peak go to 0. (Shared devices no longer add points at
+     * all since F-184, so there is no per-device penalty record to keep or
+     * clear.) Drops cached fraud / rate-limit state and flags every
      * page the member voted on so the fraud discount on their votes is
      * recomputed. Audited with the replaced values.
      *

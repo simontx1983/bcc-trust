@@ -179,7 +179,6 @@ return array(
     'BCC\\Trust\\Core\\Security\\AuditMeta' => $baseDir . '/app/Domain/Core/Security/AuditMeta.php',
     'BCC\\Trust\\Core\\Security\\BehavioralAnalyzer' => $baseDir . '/app/Domain/Core/Security/BehavioralAnalyzer.php',
     'BCC\\Trust\\Core\\Security\\DeviceFingerprinter' => $baseDir . '/app/Domain/Core/Security/DeviceFingerprinter.php',
-    'BCC\\Trust\\Core\\Security\\DeviceSharingPenaltyLedger' => $baseDir . '/app/Domain/Core/Security/DeviceSharingPenaltyLedger.php',
     'BCC\\Trust\\Core\\Security\\FraudDetector' => $baseDir . '/app/Domain/Core/Security/FraudDetector.php',
     'BCC\\Trust\\Core\\Security\\FraudWhitelist' => $baseDir . '/app/Domain/Core/Security/FraudWhitelist.php',
     'BCC\\Trust\\Core\\Security\\IpResolver' => $baseDir . '/app/Domain/Core/Security/IpResolver.php',

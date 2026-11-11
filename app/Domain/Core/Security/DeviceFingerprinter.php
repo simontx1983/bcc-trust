@@ -356,7 +356,16 @@ class DeviceFingerprinter {
             return false;
         }
 
-        // Check if this fingerprint exists for other users
+        // Other accounts seen on this fingerprint. Recorded (audit log +
+        // risk_level 'medium' when shared by BCC_TRUST_RING_MIN_SIZE or more)
+        // so admins can see shared devices; it adds NO fraud points and no
+        // vote-weight discount (F-184, user decision).
+        //
+        // ⚠ The two callers key this differently, so one physical device can
+        // appear under two fingerprints: VoteService passes
+        // generateFingerprint() (the raw server-side header hash), while
+        // UserStatusController passes sha256(that hash | wp_salt('auth')).
+        // Neither is a client-side fingerprint: both are IP + request headers.
         $existingUsers = $this->fpRepo->getOtherUsersForFingerprint($fingerprint, $userId);
 
         $multipleAccounts = !empty($existingUsers);
@@ -414,17 +423,15 @@ class DeviceFingerprinter {
                 $this->getFormatSpecifiers($data)
             );
 
-            // If multiple accounts detected, update user_info
+            // Shared device: recorded for admin review only (F-184).
             if ($multipleAccounts) {
-                $applied = $this->applySharingPenalty($userId, 'device_sharing', $fingerprint, min(20, $sharedCount * 5));
-
                 AuditLogger::log('device_sharing_detected', $userId, [
                     'fingerprint' => $fingerprint,
                     'shared_count' => $sharedCount,
                     'other_users' => wp_list_pluck($existingUsers, 'user_id'),
                     'automation_score' => $automationData['confidence'] ?? 0,
                     'risk_level' => $riskLevel,
-                    'points_applied' => $applied,
+                    'points_applied' => 0, // F-184: recorded, never penalised
                 ], 'user');
             }
 
@@ -445,17 +452,15 @@ class DeviceFingerprinter {
                 return false;
             }
 
-            // If multiple accounts detected, update user_info
+            // Shared device: recorded for admin review only (F-184).
             if ($multipleAccounts) {
-                $applied = $this->applySharingPenalty($userId, 'device_sharing', $fingerprint, min(20, $sharedCount * 5));
-
                 AuditLogger::log('device_sharing_detected', $userId, [
                     'fingerprint' => $fingerprint,
                     'shared_count' => $sharedCount,
                     'other_users' => wp_list_pluck($existingUsers, 'user_id'),
                     'automation_score' => $automationData['confidence'] ?? 0,
                     'risk_level' => $riskLevel,
-                    'points_applied' => $applied,
+                    'points_applied' => 0, // F-184: recorded, never penalised
                 ], 'user');
             }
 
@@ -537,48 +542,6 @@ class DeviceFingerprinter {
         }
         
         return $formats;
-    }
-
-    /**
-     * Apply a shared-device fraud penalty — at most once per device per
-     * window, capped in total, and never for an admin-whitelisted device or
-     * IP (F-103). Returns the points actually added (0 when suppressed).
-     *
-     * @param string $reason    'device_sharing' (the server-fingerprint
-     *                          penalty was dropped, F-108; its ledger
-     *                          entries simply age out)
-     * @param string $deviceKey the shared fingerprint (client or srv_)
-     */
-    private function applySharingPenalty(int $userId, string $reason, string $deviceKey, int $requested): int {
-        if (FraudWhitelist::isFingerprintWhitelisted($deviceKey)
-            || FraudWhitelist::isIpWhitelisted($this->getClientIp())) {
-            return 0;
-        }
-
-        // Allowance → increment → record must be atomic per account, or two
-        // concurrent votes could both see "not yet penalised" and both add
-        // the penalty. Non-blocking: a request that loses the race applies
-        // nothing now; a later vote applies it if it is still due.
-        $lockKey  = 'bcc_device_sharing_' . $userId;
-        $hasLocks = class_exists('\\BCC\\Core\\DB\\AdvisoryLock');
-        if ($hasLocks && !\BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0)) {
-            return 0;
-        }
-
-        try {
-            $points = DeviceSharingPenaltyLedger::allowance($userId, $reason, $deviceKey, $requested);
-            if ($points <= 0) {
-                return 0;
-            }
-
-            $this->userInfoRepo->incrementFraudScore($userId, $points, $reason);
-            DeviceSharingPenaltyLedger::record($userId, $reason, $deviceKey, $points);
-            return $points;
-        } finally {
-            if ($hasLocks) {
-                \BCC\Core\DB\AdvisoryLock::release($lockKey);
-            }
-        }
     }
 
     /**
@@ -669,7 +632,7 @@ class DeviceFingerprinter {
         $fpHashes   = array_map(fn($fp) => $fp->fingerprint, $fingerprints);
         $userCounts = $this->getFingerprintUserCounts($fpHashes);
 
-        $fraudProbability = $this->calculateDeviceFraudProbability($userId, $fingerprints, $userCounts);
+        $fraudProbability = $this->calculateDeviceFraudProbability($userId, $fingerprints);
 
         // Determine the worst shared-device match.
         $sharedDevice = null;
@@ -716,10 +679,15 @@ class DeviceFingerprinter {
      * Accepts optional pre-fetched data so callers (e.g. getAggregatedFingerprintData)
      * can avoid redundant queries.
      *
-     * @param int        $userId
-     * @param array|null $fingerprints  Pre-fetched getUserFingerprints() result.
-     * @param object[]|null            $fingerprints  Pre-fetched getUserFingerprints() result.
-     * @param array<string, int>|null  $userCounts    Pre-fetched getFingerprintUserCounts() map.
+     * Built from AUTOMATION evidence only. How many accounts share a device
+     * is not an input (F-184, user decision: shared devices are recorded,
+     * never penalised), and the stored risk_level is not read either,
+     * because storeFingerprint() raises it to 'medium' for a shared device
+     * so admins can see it. The automation thresholds below are exactly the
+     * ones that set risk_level from automation.
+     *
+     * @param int           $userId
+     * @param object[]|null $fingerprints  Pre-fetched getUserFingerprints() result.
      * @return float 0-1 probability
      *
      * @phpstan-param list<object{
@@ -731,17 +699,11 @@ class DeviceFingerprinter {
      *   last_seen: string
      * }>|null $fingerprints
      */
-    public function calculateDeviceFraudProbability(int $userId, ?array $fingerprints = null, ?array $userCounts = null): float {
+    public function calculateDeviceFraudProbability(int $userId, ?array $fingerprints = null): float {
         $fingerprints ??= $this->getUserFingerprints($userId);
 
         if (empty($fingerprints)) {
             return 0.1; // Low risk - no fingerprint data yet
-        }
-
-        // Batch-fetch user counts if not provided.
-        if ($userCounts === null) {
-            $fpHashes   = array_map(fn($fp) => $fp->fingerprint, $fingerprints);
-            $userCounts = $this->getFingerprintUserCounts($fpHashes);
         }
 
         $scores = [];
@@ -752,17 +714,11 @@ class DeviceFingerprinter {
             // Automation score contributes
             $score += $fp->automation_score / 100 * 0.4;
 
-            // Risk level contributes based on config thresholds
-            if ($fp->risk_level === 'high') {
+            // Automation band (the automation half of risk_level).
+            if ($fp->automation_score >= $this->automationHigh) {
                 $score += 0.3;
-            } elseif ($fp->risk_level === 'medium') {
+            } elseif ($fp->automation_score >= $this->automationMedium) {
                 $score += 0.15;
-            }
-
-            // Check if this fingerprint is shared
-            $userCount = $userCounts[$fp->fingerprint] ?? 0;
-            if ($userCount > 1) {
-                $score += min(0.3, ($userCount - 1) * 0.1);
             }
 
             $scores[] = $score;

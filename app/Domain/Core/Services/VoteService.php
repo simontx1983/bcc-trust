@@ -899,11 +899,9 @@ class VoteService {
      */
     private function buildCachedSignals(int $voterId, string $fingerprint): array {
         $automationData = $this->fingerprinter->detectAutomation();
+        // Stored (and any sharing recorded) for admins; shared-device signals
+        // no longer feed the vote weight (F-184).
         $this->fingerprinter->storeFingerprint($voterId, $fingerprint, $automationData);
-
-        $userCount   = $this->fingerprinter->getFingerprintUserCount($fingerprint);
-        $multiRisk   = $userCount > BCC_TRUST_RING_MIN_SIZE;
-        $deviceFraud = $this->fingerprinter->calculateDeviceFraudProbability($voterId);
 
         $userInfo  = $this->getUserInfo($voterId); // cached
         $trustRank = $userInfo !== null ? (float) $userInfo->trust_rank : 0.0;
@@ -912,11 +910,9 @@ class VoteService {
         $behaviorScore = $userInfo !== null ? (float) $userInfo->behavior_score : 0.0;
 
         return [
-            'automation'               => $automationData,
-            'multi_account_risk'       => $multiRisk,
-            'device_fraud_probability' => $deviceFraud,
-            'behavior_score'           => $behaviorScore,
-            'trust_rank'               => $trustRank,
+            'automation'     => $automationData,
+            'behavior_score' => $behaviorScore,
+            'trust_rank'     => $trustRank,
         ];
     }
 
