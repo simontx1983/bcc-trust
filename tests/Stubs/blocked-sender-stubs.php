@@ -127,6 +127,18 @@ namespace BCC\Core\Repositories {
             /** @var array<string, bool> "viewerId:rootId" => is a participant */
             public static array $participants = [];
 
+            /**
+             * "viewerId:messageId" => a recipient row exists.
+             *
+             * ⚠ Keyed on the MESSAGE, not the conversation, because the
+             * real predicate is not conversation-scoped — that is
+             * precisely why the service ANDs it with its own
+             * conversation check rather than relying on it.
+             *
+             * @var array<string, bool>
+             */
+            public static array $received = [];
+
             /** @var list<array{int, int}> every markConversationAsViewed call */
             public static array $viewedCalls = [];
 
@@ -137,6 +149,7 @@ namespace BCC\Core\Repositories {
             {
                 self::$roots        = [];
                 self::$participants = [];
+                self::$received     = [];
                 self::$viewedCalls  = [];
                 self::$calls        = [];
             }
@@ -151,6 +164,16 @@ namespace BCC\Core\Repositories {
             {
                 self::$calls[] = 'userIsParticipant(' . $userId . ',' . $rootMsgId . ')';
                 return self::$participants[$userId . ':' . $rootMsgId] ?? false;
+            }
+
+            /**
+             * "was this message sent to this viewer?" — the fourth gate
+             * on the reveal route (bcc-core #64).
+             */
+            public static function viewerReceivedMessage(int $userId, int $messageId): bool
+            {
+                self::$calls[] = 'viewerReceivedMessage(' . $userId . ',' . $messageId . ')';
+                return self::$received[$userId . ':' . $messageId] ?? false;
             }
 
             public static function markConversationAsViewed(int $userId, int $rootMsgId): void

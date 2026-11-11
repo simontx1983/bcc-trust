@@ -56,6 +56,7 @@ final class MessageRevealTest extends TestCase
     private const OTHER_CONVERSATION = 600;
     private const MESSAGE = 900;
     private const FOREIGN_MESSAGE = 901;
+    private const UNDELIVERED_MESSAGE = 902;
     private const REAL_BODY = 'SENTINEL-the-actual-private-message-text';
 
     protected function setUp(): void
@@ -96,6 +97,11 @@ final class MessageRevealTest extends TestCase
         PeepSoMessageRepository::$participants = [
             self::VIEWER . ':' . self::CONVERSATION => true,
         ];
+        // The fourth gate: the viewer must have a RECIPIENT ROW for
+        // this message, not merely be in the conversation.
+        PeepSoMessageRepository::$received = [
+            self::VIEWER . ':' . self::MESSAGE => true,
+        ];
         self::seedMessage(self::MESSAGE);
     }
 
@@ -125,9 +131,10 @@ final class MessageRevealTest extends TestCase
                 'findRootConversationId(' . self::CONVERSATION . ')',
                 'userIsParticipant(' . self::VIEWER . ',' . self::CONVERSATION . ')',
                 'findRootConversationId(' . self::MESSAGE . ')',
+                'viewerReceivedMessage(' . self::VIEWER . ',' . self::MESSAGE . ')',
             ],
             PeepSoMessageRepository::$calls,
-            'The gate order is fixed: resolve the conversation, check participation, then check the message belongs to it.'
+            'The gate order is fixed: resolve the conversation, check participation, check the message belongs to it, then check the viewer was actually sent it.'
         );
     }
 
@@ -152,30 +159,103 @@ final class MessageRevealTest extends TestCase
         $this->assertSame('bcc_not_found', $out['error']);
     }
 
-    public function testAMessageFromAnotherConversationIsRefused(): void
+    /**
+     * THE AND, and it is deliberately the adversarial case: the viewer
+     * DID receive `FOREIGN_MESSAGE` -- it is in another conversation
+     * they also belong to -- so the recipient check alone returns true
+     * for it. The predicate behind that check carries NO conversation,
+     * by design, so if the conversation comparison were ever replaced
+     * by it, this message would be fetchable through the wrong
+     * conversation's id. The seed is what makes the test sharp: with
+     * `$received` left empty it would pass against a resolver that had
+     * dropped the comparison entirely.
+     */
+    public function testAMessageFromAnotherConversationIsRefusedEvenWhenTheViewerReceivedIt(): void
     {
         self::seedHappyPath();
         PeepSoMessageRepository::$roots[self::FOREIGN_MESSAGE] = self::OTHER_CONVERSATION;
+        PeepSoMessageRepository::$participants[self::VIEWER . ':' . self::OTHER_CONVERSATION] = true;
+        PeepSoMessageRepository::$received[self::VIEWER . ':' . self::FOREIGN_MESSAGE] = true;
         self::seedMessage(self::FOREIGN_MESSAGE);
 
         $out = self::service()->revealMessageBody(self::VIEWER, self::CONVERSATION, self::FOREIGN_MESSAGE);
 
         $this->assertSame('bcc_not_found', $out['error']);
+        $this->assertArrayNotHasKey('body', $out);
     }
 
     /**
-     * ⚠⚠ THE ORACLE TEST. Four different causes of refusal must produce
+     * THE HOLE REVIEW FOUND. A participant with no recipient row for
+     * this message never saw it in the thread, so revealing it would
+     * disclose text the platform withheld from them. The three ordinary
+     * ways a participant legitimately lacks that row: the other party
+     * blocked them before the message was sent, the message predates
+     * their joining a group conversation, or they deleted that one
+     * message from their own view.
+     */
+    public function testAParticipantWhoNeverReceivedTheMessageIsRefused(): void
+    {
+        self::seedHappyPath();
+        PeepSoMessageRepository::$roots[self::UNDELIVERED_MESSAGE] = self::CONVERSATION;
+        self::seedMessage(self::UNDELIVERED_MESSAGE);
+        // No $received entry: PeepSo created no recipient row.
+
+        $out = self::service()->revealMessageBody(self::VIEWER, self::CONVERSATION, self::UNDELIVERED_MESSAGE);
+
+        $this->assertSame('bcc_not_found', $out['error']);
+        $this->assertArrayNotHasKey('body', $out);
+    }
+
+    /**
+     * The id handed to the recipient check must be the VIEWER's -- the
+     * caller of the route -- and not the message author's or any other
+     * id in scope. Pinned behaviourally rather than by reading the
+     * source: the stranger here IS a participant and the message IS in
+     * the conversation, and the only seeded recipient row belongs to
+     * VIEWER, so a refusal can only come from the stranger's own id
+     * reaching the check.
+     */
+    public function testTheRecipientCheckIsAskedAboutTheViewerNotAnyoneElse(): void
+    {
+        self::seedHappyPath();
+        PeepSoMessageRepository::$participants[self::STRANGER . ':' . self::CONVERSATION] = true;
+
+        $out = self::service()->revealMessageBody(self::STRANGER, self::CONVERSATION, self::MESSAGE);
+
+        $this->assertSame('bcc_not_found', $out['error']);
+        $this->assertContains(
+            'viewerReceivedMessage(' . self::STRANGER . ',' . self::MESSAGE . ')',
+            PeepSoMessageRepository::$calls,
+            'The check must be asked about the caller, not about whoever the seeded row belongs to.'
+        );
+        $this->assertNotContains(
+            'viewerReceivedMessage(' . self::VIEWER . ',' . self::MESSAGE . ')',
+            PeepSoMessageRepository::$calls
+        );
+    }
+
+    /**
+     * ⚠⚠ THE ORACLE TEST. FIVE different causes of refusal must produce
      * byte-identical results, so the route cannot be used to probe which
      * message ids exist or which conversations a stranger belongs to.
      * Comparing them to each OTHER is what makes that checkable —
      * asserting each against an expected code would pass even if the
      * messages differed.
+     *
+     * ⚠ The fifth — "you are in this conversation, this message is in
+     * it, and it was never delivered to you" — is the one that matters
+     * most here. It is the only refusal a viewer could otherwise infer
+     * something from: a distinguishable response would tell them a
+     * message exists in their own conversation that they were not sent,
+     * which is exactly the fact a block is keeping from them.
      */
     public function testEveryRefusalIsByteIdentical(): void
     {
         self::seedHappyPath();
         PeepSoMessageRepository::$roots[self::FOREIGN_MESSAGE] = self::OTHER_CONVERSATION;
         self::seedMessage(self::FOREIGN_MESSAGE);
+        PeepSoMessageRepository::$roots[self::UNDELIVERED_MESSAGE] = self::CONVERSATION;
+        self::seedMessage(self::UNDELIVERED_MESSAGE);
 
         $svc = self::service();
 
@@ -183,13 +263,39 @@ final class MessageRevealTest extends TestCase
         $wrongConversation = $svc->revealMessageBody(self::VIEWER, self::CONVERSATION, self::FOREIGN_MESSAGE);
         $noSuchMessage     = $svc->revealMessageBody(self::VIEWER, self::CONVERSATION, 999999);
         $noSuchConversation = $svc->revealMessageBody(self::VIEWER, 777777, self::MESSAGE);
+        $neverDelivered    = $svc->revealMessageBody(self::VIEWER, self::CONVERSATION, self::UNDELIVERED_MESSAGE);
 
         $this->assertSame($notAParticipant, $wrongConversation);
         $this->assertSame($notAParticipant, $noSuchMessage);
         $this->assertSame($notAParticipant, $noSuchConversation);
+        $this->assertSame($notAParticipant, $neverDelivered);
         $this->assertSame(
             ['error' => 'bcc_not_found', 'message' => 'Conversation not found.'],
             $notAParticipant
+        );
+    }
+
+    /**
+     * Anti-vacuity for the five cases above: with the fourth gate
+     * wired, a suite of refusals alone would also pass against a
+     * resolver that refused EVERYTHING. The happy path has to still
+     * work in the same seeded world, and it has to return the real text.
+     */
+    public function testTheFourthGateStillLetsADeliveredMessageThrough(): void
+    {
+        self::seedHappyPath();
+        PeepSoMessageRepository::$roots[self::UNDELIVERED_MESSAGE] = self::CONVERSATION;
+        self::seedMessage(self::UNDELIVERED_MESSAGE);
+
+        $svc = self::service();
+
+        $this->assertSame(
+            ['error' => 'bcc_not_found', 'message' => 'Conversation not found.'],
+            $svc->revealMessageBody(self::VIEWER, self::CONVERSATION, self::UNDELIVERED_MESSAGE)
+        );
+        $this->assertSame(
+            ['id' => self::MESSAGE, 'body' => self::REAL_BODY],
+            $svc->revealMessageBody(self::VIEWER, self::CONVERSATION, self::MESSAGE)
         );
     }
 

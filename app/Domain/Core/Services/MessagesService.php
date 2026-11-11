@@ -855,16 +855,30 @@ final class MessagesService
      * participates in — the explicit tap-to-reveal fetch behind the
      * substituted thread body (#122).
      *
-     * Reuses the same three primitives `getThread` gates on, in the same
-     * order, plus one: the message's own root conversation must be the
-     * conversation asked for. Nothing here is new machinery.
+     * Reuses the same primitives `getThread` gates on, in the same
+     * order, plus two: the message's own root conversation must be the
+     * conversation asked for, AND the viewer must actually have a
+     * recipient row for it. Nothing here is new machinery.
+     *
+     * ⚠⚠ THE GOVERNING INVARIANT: a reveal returns no more than the
+     * thread read would have returned for this viewer. That is why the
+     * recipient check exists and why it is shaped exactly like
+     * `findMessagesInConversation`'s own predicate — including the
+     * absence of an `mrec_deleted` filter, which the thread read also
+     * omits. Too loose discloses a message PeepSo never delivered
+     * (notably one sent AFTER the other party blocked the viewer:
+     * `add_message` builds recipient rows through a participants query
+     * that LEFT JOINs `peepso_blocks` in both directions, so the
+     * blocked side gets no row at all). Too strict produces a message
+     * the viewer can read in the thread but cannot reveal.
      *
      * ⚠⚠ EVERY refusal is the SAME 404 with the SAME message. "You are
-     * not a participant", "that message is not in this conversation" and
-     * "no such message" must be indistinguishable, or the route becomes
-     * an oracle for probing which message ids exist and which
-     * conversations a stranger belongs to. That is why there is one
-     * `notFound` local and every branch returns it.
+     * not a participant", "that message is not in this conversation",
+     * "that message was never sent to you" and "no such message" must be
+     * indistinguishable, or the route becomes an oracle for probing
+     * which message ids exist and which conversations a stranger
+     * belongs to. That is why there is one `notFound` local and every
+     * branch returns it.
      *
      * ⚠ It does NOT mark anything read. `getThread` deliberately marks
      * the conversation viewed as a side effect of serving a page;
@@ -903,6 +917,20 @@ final class MessagesService
         // message's own root and comparing is what makes a cross-thread
         // id a 404 rather than a disclosure.
         if (PeepSoMessageRepository::findRootConversationId($messageId) !== $rootMsgId) {
+            return $notFound;
+        }
+
+        // ⚠⚠ THE FOURTH GATE, and the one review found missing.
+        // Participation is NOT the same as having been SENT this
+        // message: `getThread` is RECIPIENT-scoped, so a participant
+        // who has no recipient row for a message never saw it in the
+        // thread and must not be able to reveal it. This is deliberately
+        // ANDed with the conversation check above rather than replacing
+        // it — the primitive asks only "was this message sent to this
+        // viewer", with no conversation in the predicate, so on its own
+        // it would let a message the viewer received in ANOTHER
+        // conversation be fetched through this one's id.
+        if (!PeepSoMessageRepository::viewerReceivedMessage($viewerId, $messageId)) {
             return $notFound;
         }
 
@@ -1493,6 +1521,28 @@ final class MessagesService
      * letters. Requiring each head segment to end in `_` means only a
      * real table prefix can precede it.
      *
+     * ⚠⚠ It carries `/i`, and the reason is MySQL rather than PHP.
+     * PeepSo READS the flag with `get_user_option`, which resolves
+     * through the user-meta cache — a PHP array lookup, so a
+     * differently-cased stored key would never be read, and on the read
+     * side `/i` would buy nothing. But this veto sits on the WRITE, and
+     * `update_metadata()` chooses between update and insert with a
+     * direct `SELECT ... WHERE meta_key = %s`. `wp_usermeta.meta_key` is
+     * `utf8mb4_unicode_520_ci` here (measured), so a write keyed
+     * `PeepSo_should_get_chats` finds the CANONICAL lowercase row and
+     * updates it — setting the real flag. Without `/i` that write
+     * passes the veto and the suppression fails silently.
+     *
+     * ⚠ The tightening above survives it: `/i` loosens the head
+     * segments' case, not the requirement that each end in `_`, so
+     * `evilpeepso_should_get_chats` is still not a match. Both
+     * directions are asserted.
+     *
+     * ⚠ `peepso_should_get_chats_delay` is deliberately OUT of scope —
+     * the pattern is `$`-anchored. Its only writer passes
+     * `get_current_user_id()`: it is the viewer's own polling interval,
+     * never a recipient's, so it is not part of the send fan-out.
+     *
      * ⚠ What this suppresses is NOT SSE. `PeepSoSSEEvents::trigger()`
      * returns at its first statement ("SSE is not working yet"), so
      * every SSE call site is already a no-op. The live signal PeepSo
@@ -1504,7 +1554,7 @@ final class MessagesService
     {
         return static function ($check, $objectId, $metaKey) use ($senderId) {
             // Only PeepSo's chat-ping flag, under any table prefix.
-            if (!is_string($metaKey) || preg_match('/^([a-z0-9]+_)*peepso_should_get_chats$/', $metaKey) !== 1) {
+            if (!is_string($metaKey) || preg_match('/^([a-z0-9]+_)*peepso_should_get_chats$/i', $metaKey) !== 1) {
                 return $check;
             }
 

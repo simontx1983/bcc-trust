@@ -161,6 +161,91 @@ final class BlockedRecipientChatPingVetoTest extends TestCase
         }
     }
 
+    /**
+     * ⚠⚠ THE PATTERN CARRIES `/i`, AND THE REASON IS MySQL, NOT PHP.
+     *
+     * It is tempting to argue the other way: PeepSo reads the flag with
+     * `get_user_option('peepso_should_get_chats')`
+     * (`peepso-messages/peepsomessages.php:205`), which resolves through
+     * the user-meta cache — a PHP array lookup, so a differently-cased
+     * STORED key would never be read, and `/i` would buy nothing. That
+     * reasoning is about the read, and the veto sits on the WRITE.
+     *
+     * `update_metadata()` decides between update and insert with a
+     * direct `SELECT ... WHERE meta_key = %s`, and `wp_usermeta.meta_key`
+     * is `utf8mb4_unicode_520_ci` on this platform (measured, not
+     * assumed). So a write keyed `PeepSo_should_get_chats` finds the
+     * CANONICAL lowercase row and updates IT — setting the real flag
+     * that `get_user_option` then reads as truthy. A case-sensitive veto
+     * would wave that write through and the blocker's client would start
+     * polling, with nothing else behind it to catch the miss.
+     *
+     * The same collation is why `REGEXP '[A-Z]'` matches lowercase on
+     * this database: PHP's case sensitivity and MySQL's do not agree,
+     * and a gate on a key has to be as loose as the comparison that key
+     * will eventually be subjected to.
+     */
+    public function testACaseVariantOfTheFlagIsStillSuppressed(): void
+    {
+        PeepSoBlockRepository::$blocking = [[self::BLOCKER, self::SENDER]];
+        $veto = self::veto(self::SENDER);
+
+        foreach ([
+            'PeepSo_should_get_chats',
+            'PEEPSO_SHOULD_GET_CHATS',
+            'WP_3_PeepSo_Should_Get_Chats',
+        ] as $key) {
+            $this->assertFalse(
+                $veto(null, self::BLOCKER, $key),
+                "key {$key} differs only in case, so update_metadata's _ci SELECT would land it on the canonical row"
+            );
+        }
+    }
+
+    /**
+     * ⚠ And the tightening SURVIVES the case-insensitivity. `/i` makes
+     * the head segments case-insensitive too, so it would be easy to
+     * assume the lookalike now slips through. It does not — each head
+     * segment must still end in `_`, which is structural and unaffected
+     * by case. Asserted rather than assumed, because the two changes
+     * pull in opposite directions: one deliberately loosens the pattern,
+     * and the point of this case is that it did not loosen THAT.
+     */
+    public function testTheLookalikeStillDoesNotMatchUnderCaseInsensitivity(): void
+    {
+        PeepSoBlockRepository::$blocking = [[self::BLOCKER, self::SENDER]];
+        $veto = self::veto(self::SENDER);
+
+        foreach ([
+            'EvilPeepSo_should_get_chats',
+            'XPEEPSO_SHOULD_GET_CHATS',
+            'evilpeepso_should_get_chats',
+        ] as $key) {
+            $this->assertNull(
+                $veto(null, self::BLOCKER, $key),
+                "key {$key} has no separator before the literal, so it is not a prefixed flag"
+            );
+        }
+    }
+
+    /**
+     * ⚠ The sibling key `peepso_should_get_chats_delay` is NOT the
+     * ping and is deliberately outside the pattern (it is anchored with
+     * `$`). Its only writer passes `get_current_user_id()`
+     * (`peepsomessages.php:220`) — the viewer's own polling interval,
+     * never a recipient's — so it is not part of the send fan-out and
+     * vetoing it would suppress a write that tells nobody anything.
+     * Pinned so the anchor is not "tidied" into a prefix match later.
+     */
+    public function testTheDelaySiblingKeyIsNotVetoed(): void
+    {
+        PeepSoBlockRepository::$blocking = [[self::BLOCKER, self::SENDER]];
+
+        $this->assertNull(
+            self::veto(self::SENDER)(null, self::BLOCKER, 'peepso_should_get_chats_delay')
+        );
+    }
+
     public function testANonStringMetaKeyIsPassedThrough(): void
     {
         PeepSoBlockRepository::$blocking = [[self::BLOCKER, self::SENDER]];
