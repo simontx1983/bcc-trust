@@ -128,7 +128,7 @@ final class SessionController
             self::SESSION_RATE_LIMIT,
             60
         )) {
-            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+            return self::sessionHeaders(ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429));
         }
 
         $decoded = JwtToken::decode($token);
@@ -145,25 +145,30 @@ final class SessionController
 
         $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
         if ($handle === '') {
-            return ApiResponse::error('bcc_invalid_state', 'Account is missing a handle — contact support.', 409);
+            return self::sessionHeaders(ApiResponse::error('bcc_invalid_state', 'Account is missing a handle — contact support.', 409));
         }
 
-        $response = ApiResponse::ok([
+        return self::sessionHeaders(ApiResponse::ok([
             'user_id'          => $userId,
             'handle'           => $handle,
             'in_good_standing' => AuthSupport::resolveInGoodStanding($userId),
             'expires_at'       => $exp,
-        ]);
-        $response->header('Cache-Control', 'no-store');
-        $response->header('Vary', 'Authorization');
-        return $response;
+        ]));
     }
 
     /** One 401 for every rejection; the reason is logged, never returned. */
     private static function sessionUnauthorized(string $reason): WP_REST_Response
     {
         Logger::audit('auth_session_rejected', ['reason' => $reason]);
-        $response = ApiResponse::error('bcc_unauthorized', 'Not signed in.', 401);
+        return self::sessionHeaders(ApiResponse::error('bcc_unauthorized', 'Not signed in.', 401));
+    }
+
+    /**
+     * Every /auth/session response — 200, 401, 409, 429 — is per-token and
+     * must never be cached or served to a different Authorization.
+     */
+    private static function sessionHeaders(WP_REST_Response $response): WP_REST_Response
+    {
         $response->header('Cache-Control', 'no-store');
         $response->header('Vary', 'Authorization');
         return $response;

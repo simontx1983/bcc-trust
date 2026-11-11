@@ -135,10 +135,17 @@ final class AuthSessionEndpointTest extends TestCase
     #[DataProvider('rejected')]
     public function testMissingOrMalformedCredentialsAreOneUniform401(?string $authorization): void
     {
-        [$status, $body] = self::call($authorization);
+        [$status, $body, $res] = self::call($authorization);
 
         self::assertSame(401, $status);
         self::assertSame(['code' => 'bcc_unauthorized', 'message' => 'Not signed in.', 'status' => 401], $body['error']);
+        self::assertNoStoreVaryAuthorization($res);
+    }
+
+    private static function assertNoStoreVaryAuthorization(\WP_REST_Response $res): void
+    {
+        self::assertSame('no-store', self::headers($res)['Cache-Control'] ?? null);
+        self::assertSame('Authorization', self::headers($res)['Vary'] ?? null);
     }
 
     public function testAnExpiredTokenIs401(): void
@@ -185,20 +192,22 @@ final class AuthSessionEndpointTest extends TestCase
         $token = JwtToken::encode(self::USER, 'h');
         $GLOBALS['__bcc_ph']['meta'][self::USER]['bcc_handle'] = '';
 
-        [$status, $body] = self::call('Bearer ' . $token);
+        [$status, $body, $res] = self::call('Bearer ' . $token);
 
         self::assertSame(409, $status);
         self::assertSame('bcc_invalid_state', $body['error']['code']);
+        self::assertNoStoreVaryAuthorization($res);
     }
 
     public function testTheThrottleIsPerTokenAndRunsBeforeDecode(): void
     {
         $GLOBALS['__bcc_ph']['throttle_deny'] = true;
 
-        [$status, $body] = self::call('Bearer not.a.jwt');
+        [$status, $body, $res] = self::call('Bearer not.a.jwt');
 
         self::assertSame(429, $status, 'a denied bucket answers before any decode (even for a garbage token)');
         self::assertSame('bcc_rate_limited', $body['error']['code']);
+        self::assertNoStoreVaryAuthorization($res);
         self::assertSame(
             ['auth_session:' . substr(hash('sha256', 'not.a.jwt'), 0, 32)],
             $GLOBALS['__bcc_ph']['throttle_keys'],
