@@ -230,6 +230,28 @@ final class SuspensionGateParityTest extends TestCase
         self::assertSuspendedRejection(self::endpoint(OnboardingEndpoint::class)->updateHandle(new \WP_REST_Request()));
     }
 
+    /**
+     * Review M1: the operator profile (shared fields, per-page overrides,
+     * logo) is public page content too.
+     *
+     * @return iterable<string, array{string}>
+     */
+    public static function operatorProfileWrites(): iterable
+    {
+        yield 'shared profile'       => ['updateShared'];
+        yield 'page override'        => ['updatePageOverride'];
+        yield 'page override reset'  => ['resetPageOverride'];
+        yield 'logo upload'          => ['uploadLogo'];
+        yield 'logo delete'          => ['deleteLogo'];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('operatorProfileWrites')]
+    public function testOperatorProfileWritesRejectSuspendedUser(string $method): void
+    {
+        $endpoint = self::endpoint(\BCC\Trust\Onchain\REST\OperatorProfileEndpoint::class);
+        self::assertSuspendedRejection($endpoint->{$method}(new \WP_REST_Request()));
+    }
+
     public function testClaimServiceRejectsSuspendedUserAtTheServiceBoundary(): void
     {
         $result = ClaimService::claim(7, 'validator', 1);

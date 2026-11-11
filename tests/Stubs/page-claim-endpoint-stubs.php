@@ -96,3 +96,20 @@ namespace BCC\Core\Security {
         }
     }
 }
+
+namespace BCC\Core\Permissions {
+    // F-109: PagesEndpoint::claim() now calls the REAL
+    // Permissions::is_not_suspended(), which calls user_can() unqualified.
+    // The integration bootstrap has no user_can(). This is namespace-scoped,
+    // so it binds ONLY for Permissions, and it lives here (loaded only by this
+    // separate-process suite), never in the bootstrap. The fixture user is
+    // not an administrator. Suspension itself is still read for real (no
+    // user_info row → not suspended).
+    if (!function_exists(__NAMESPACE__ . '\\user_can')) {
+        /** @param int|\WP_User $user */
+        function user_can($user, string $capability, ...$args): bool
+        {
+            return false;
+        }
+    }
+}
