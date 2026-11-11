@@ -25,6 +25,14 @@ final class PeepSoLeftoversRepository
     /** Upper bound on distinct meta keys listed for one prefix. */
     public const PREFIX_KEY_LIMIT = 200;
 
+    /** Site-prefixed name for an inventory table (e.g. `peepso_friends`). */
+    public function tableName(string $shortName): string
+    {
+        global $wpdb;
+
+        return $this->identifier((string) $wpdb->prefix . $shortName);
+    }
+
     public function tableExists(string $table): bool
     {
         global $wpdb;

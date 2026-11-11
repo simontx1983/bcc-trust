@@ -189,11 +189,11 @@ final class PeepSoLeftoversService
     public function plan(string $group): array
     {
         $g = self::GROUPS[$group];
-        global $wpdb;
 
         $tables = [];
         foreach ($g['tables'] as $t) {
-            $tables[$wpdb->prefix . $t] = $this->repo->countRows($wpdb->prefix . $t);
+            $full          = $this->repo->tableName($t);
+            $tables[$full] = $this->repo->countRows($full);
         }
 
         $config  = get_option(self::CONFIG_OPTION, []);
