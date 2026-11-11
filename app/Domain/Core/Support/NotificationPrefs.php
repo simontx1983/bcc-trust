@@ -70,6 +70,7 @@ final class NotificationPrefs
         NotificationType::DIVERGENCE_STATE_WARNING,
         NotificationType::HOLDER_COMMUNITY_LIVE,
         NotificationType::DELEGATOR_GROUP_REMOVED,
+        NotificationType::CONTENT_AUTO_HIDDEN,
     ];
 
     /**
@@ -131,6 +132,7 @@ final class NotificationPrefs
         'bell_bcc_divergence_state_warning'                  => true,
         'bell_bcc_holder_community_live'                     => true,
         'bell_bcc_delegator_group_removed'                   => true,
+        'bell_bcc_content_auto_hidden'                       => true,
         'push_master'                                        => false,
         'push_event_review'                                  => true,
         'push_event_dispute_outcome'                         => true,

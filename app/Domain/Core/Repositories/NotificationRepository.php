@@ -228,11 +228,12 @@ final class NotificationRepository
         // Same valid-type scope as countUnreadForUser — the digest must
         // not resurrect rows of retired types the bell list won't show.
         //
-        // ⚠ Less one: a delegator-group removal is bell only, by requirement,
-        // and every other unread row here goes out in an email.
+        // ⚠ Less the BELL_ONLY types (delegator-group removal, auto-hide
+        // notice): they are in-app only by requirement, and every other
+        // unread row here goes out in an email.
         $types = array_values(array_diff(
             \BCC\Trust\Core\Support\NotificationType::ALL,
-            [\BCC\Trust\Core\Support\NotificationType::DELEGATOR_GROUP_REMOVED]
+            \BCC\Trust\Core\Support\NotificationType::BELL_ONLY
         ));
         $placeholders = implode(',', array_fill(0, count($types), '%s'));
 
