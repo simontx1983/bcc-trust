@@ -26,24 +26,30 @@
 namespace BCC\Trust\Core\Services\Feed;
 
 use BCC\Core\Feed\ReactionGrammarMap;
+use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\GifRepository;
+use BCC\Trust\Core\Repositories\PageDiscoveryRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\PostShortcodeRepository;
 use BCC\Trust\Core\Repositories\StokeRepository;
 use BCC\Trust\Core\Services\AttestationService;
 use BCC\Trust\Core\Services\AuthorBadgeResolver;
 use BCC\Trust\Core\Services\BlogService;
+use BCC\Trust\Core\Services\CardViewService;
 use BCC\Trust\Core\Services\CommentService;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\Mentions\MentionOverlayService;
 use BCC\Trust\Core\Services\UserViewService;
 use BCC\Trust\Core\Support\CardUrlMap;
+use BCC\Trust\Core\Support\GroupAttribution;
+use BCC\Trust\Core\Support\NoReactionsGate;
 use BCC\Trust\Core\Support\ReactionGrammarRegistry;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -92,6 +98,7 @@ final class FeedHydrationPipeline
         $items = $this->hydrateSocialProofReactors($items);
         $items = self::hydrateViewerPermissions($items, $viewerId);
         $items = $this->hydrateGroupContexts($items, $viewerId);
+        $items = self::hydratePageContexts($items);
         $items = $this->hydrateCommentCounts($items, $viewerId);
         // Links stage runs LAST — after hydrateAuthorBadges/Ranks, so
         // author.handle is final when the permalink is composed.
@@ -169,6 +176,104 @@ final class FeedHydrationPipeline
             $items[$idx]['links'] = $links;
         }
         return $items;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Page context hydration
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Attach `page_context` to every item: the validator page the post was
+     * written for, or null when it carries no marker or the page no longer
+     * resolves to a published page.
+     *
+     *   page_context: { id, name, handle, url, label } | null
+     *
+     * The key is always present, unlike `group`. The label describes the post,
+     * not the author's standing today, so it does not consult the operator
+     * authority and survives the author losing that status.
+     *
+     * `name` follows the card's rule: the live moniker over the frozen post
+     * title, so the label reads the same as the page it links to.
+     *
+     * Batched: one meta prime for the items, then one page read and one
+     * moniker read for the distinct pages. A page of unmarked posts stops
+     * after the meta prime.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private static function hydratePageContexts(array $items): array
+    {
+        if ($items === []) {
+            return [];
+        }
+
+        $postIdsByItem = [];
+        foreach ($items as $i => $item) {
+            $items[$i]['page_context'] = null;
+
+            // external_id, not the act_id — see hydrateGroupContexts.
+            $extId = is_int($item['external_id'] ?? null) ? $item['external_id'] : 0;
+            if ($extId > 0) {
+                $postIdsByItem[$i] = $extId;
+            }
+        }
+        if ($postIdsByItem === []) {
+            return $items;
+        }
+
+        update_meta_cache('post', array_values($postIdsByItem));
+
+        $pageIdsByItem = [];
+        foreach ($postIdsByItem as $i => $postId) {
+            $pageId = (int) get_post_meta($postId, PeepSoActivityRepository::PAGE_TARGET_META, true);
+            if ($pageId > 0) {
+                $pageIdsByItem[$i] = $pageId;
+            }
+        }
+        if ($pageIdsByItem === []) {
+            return $items;
+        }
+
+        $distinctPageIds = array_values(array_unique($pageIdsByItem));
+        $pages           = PageDiscoveryRepository::findPublishedByIds($distinctPageIds);
+        if ($pages === []) {
+            return $items;
+        }
+        $validatorRows = ValidatorRepository::findCardRowsByPageIds(array_keys($pages));
+
+        foreach ($pageIdsByItem as $i => $pageId) {
+            $page = $pages[$pageId] ?? null;
+            if ($page === null) {
+                continue;
+            }
+            $firstRow = $validatorRows[$pageId][0] ?? null;
+
+            $items[$i]['page_context'] = self::pageContext(
+                $pageId,
+                CardViewService::preferMoniker($firstRow?->moniker, (string) $page->post_title),
+                (string) $page->post_name
+            );
+        }
+
+        return $items;
+    }
+
+    /**
+     * The wire shape of `page_context`.
+     *
+     * @return array{id: int, name: string, handle: string, url: string, label: string}
+     */
+    private static function pageContext(int $pageId, string $name, string $handle): array
+    {
+        return [
+            'id'     => $pageId,
+            'name'   => $name,
+            'handle' => $handle,
+            'url'    => CardUrlMap::frontendUrl('validator', $handle),
+            'label'  => 'Operator of ' . $name,
+        ];
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -333,20 +438,13 @@ final class FeedHydrationPipeline
         string $slug,
         bool $viewerIsMember
     ): array {
-        $block = [
-            'id'           => $ctx->groupId,
-            'type'         => $ctx->type->value,
-            'verification' => $ctx->verification?->toApiResponse(),
-        ];
-
-        $mayKnow = $ctx->privacy !== PeepSoPrivacy::Secret || $viewerIsMember;
-        if (!$mayKnow || $name === '' || $slug === '') {
-            return $block;
-        }
-
-        $block['name'] = $name;
-        $block['link'] = CardUrlMap::groupUrl($ctx->type->value, $slug);
-        return $block;
+        // Extracted to Support\GroupAttribution so the profile Blog tab can
+        // compose the same block (§11 — a PRIVACY gate must have exactly one
+        // definition, because two copies drift and only one of them gets
+        // fixed). This method keeps the feed's call-site name and signature,
+        // so the eight cases in FeedGroupAttributionTest pin the extracted
+        // body through this seam, unchanged.
+        return GroupAttribution::compose($ctx, $name, $slug, $viewerIsMember);
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -512,6 +610,14 @@ final class FeedHydrationPipeline
                 $item['body'] = $pageClaimBodies[$pageClaimExtToSid[$extId]];
             } elseif ($kind === 'review' && isset($reviewExtToSid[$extId], $reviewBodies[$reviewExtToSid[$extId]])) {
                 $item['body'] = $reviewBodies[$reviewExtToSid[$extId]];
+            } elseif ($kind === 'review' && isset($reviewExtToSid[$extId])) {
+                // F-88: the review's vote resolved but is no longer active —
+                // retracted, removed by dispute or removed by moderation
+                // (findManyActiveByIds returns active rows only). Drop the
+                // item rather than render a removed review with an empty
+                // body. Read-time, so it covers every removal path and
+                // reverses itself if the vote is restored or re-cast.
+                continue;
             } elseif ($kind === 'photo' && isset($photoBodies[$extId])) {
                 $item['body'] = $photoBodies[$extId];
             } elseif ($kind === 'gif' && isset($gifBodies[$extId])) {
@@ -1177,14 +1283,36 @@ final class FeedHydrationPipeline
                 }
             }
 
-            $item['reactions'] = [
+            $reactions = [
                 'kind_grammar'       => $grammar,
-                'counts'             => $counts,
+                // ⚠ Through the boundary: an EMPTY dict must serialize as
+                // `{}`, not `[]`. PHP encodes an empty array as a JSON
+                // ARRAY, which would make the no-reactions kind ship a
+                // different TYPE for `counts` than every other grammar.
+                'counts'             => ReactionGrammarMap::countsForWire($counts),
                 'viewer_reaction'    => $viewerKind,
-                'heat_stage'         => $heatByAct[$actId] ?? 1,
-                'viewer_has_stoked'  => $viewerStokedAct[$actId] ?? false,
-                'stoke_count'        => $countByAct[$actId] ?? 0,
             ];
+
+            // A kind that takes no reactions gets NO Stoke fields at all
+            // (contract §4.32.15). Omitted, not zeroed: `heat_stage => 1`
+            // is a REAL (if cold) heat signal and a consumer renders a lit
+            // affordance from it, while `stoke_count => 0` still says a
+            // stoke surface exists. The grammar already empties `counts`;
+            // these three are the fields the grammar does not reach.
+            //
+            // ⚠ Omission alone does NOT remove the rendered control — the
+            // consuming client falls back to an ash flame when they are
+            // absent, by design. Suppression there is a separate change;
+            // this is the half that stops the server CLAIMING a stoke
+            // surface exists, and is what makes a client that honours the
+            // contract correct rather than merely lucky.
+            if (!NoReactionsGate::kindTakesNoReactions($postKind)) {
+                $reactions['heat_stage']        = $heatByAct[$actId] ?? 1;
+                $reactions['viewer_has_stoked'] = $viewerStokedAct[$actId] ?? false;
+                $reactions['stoke_count']       = $countByAct[$actId] ?? 0;
+            }
+
+            $item['reactions'] = $reactions;
             $hydrated[] = $item;
         }
         return $hydrated;
@@ -1345,7 +1473,27 @@ final class FeedHydrationPipeline
 
         $hydrated = [];
         foreach ($items as $item) {
-            $eid = (int) ($item['external_id'] ?? 0);
+            $eid      = (int) ($item['external_id'] ?? 0);
+            $postKind = is_string($item['post_kind'] ?? null) ? $item['post_kind'] : '';
+
+            // ⚠ AN ANNOUNCEMENT GETS NO COUNT, NOT A ZERO. Its discussion
+            // lives in its own comment type, and `peepso_disable_comments`
+            // is set on the backing post — so the ACTIVITY comment count
+            // this method reads is structurally zero and KNOWN TO BE WRONG.
+            // Emitting it would put "0 comments" on a notice with a live
+            // discussion, which reads as "nobody replied" rather than as a
+            // missing integration. Contract §4.32.15: source the real count
+            // or emit none, never substitute this one.
+            //
+            // The comment CONTROL is unaffected — it navigates to the
+            // permalink, where the discussion is. Only the figure is
+            // withheld, and only until A5 can supply the real one.
+            if (NoReactionsGate::kindTakesNoReactions($postKind)) {
+                unset($item['comment_count']);
+                $hydrated[] = $item;
+                continue;
+            }
+
             $item['comment_count'] = isset($gatedSkip[$eid])
                 ? 0
                 : ($countsByParent[$eid] ?? 0);

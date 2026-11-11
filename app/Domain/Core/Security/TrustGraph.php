@@ -684,14 +684,23 @@ class TrustGraph {
         $lockHeld    = \BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0);
 
         try {
-            $offset      = (int) (wp_cache_get('vote_ring_offset', self::CACHE_GROUP) ?: 0);
-            $mutualVotes = $this->voteRepo->getMutualVotePairs($minSize, $pageLimit, $offset);
+            // Keyset cursor (F-108): the last (user_a, user_b) pair seen. An
+            // OFFSET over an unordered GROUP BY skipped and repeated pairs.
+            $cursor = wp_cache_get('vote_ring_cursor', self::CACHE_GROUP);
+            [$afterA, $afterB] = (is_array($cursor) && count($cursor) === 2)
+                ? [(int) $cursor[0], (int) $cursor[1]]
+                : [0, 0];
+            $mutualVotes = $this->voteRepo->getMutualVotePairs($minSize, $pageLimit, $afterA, $afterB);
 
             if ($lockHeld) {
-                // Only the lock holder advances the shared cursor. Reset when the
-                // result set was smaller than the page (we've walked the tail).
-                $nextOffset = (count($mutualVotes) === $pageLimit) ? $offset + $pageLimit : 0;
-                wp_cache_set('vote_ring_offset', $nextOffset, self::CACHE_GROUP, self::CACHE_TTL);
+                // Only the lock holder advances the shared cursor. Full page →
+                // resume after its last pair; short page → the tail was
+                // walked, start again from the beginning.
+                $last = end($mutualVotes);
+                $next = (count($mutualVotes) === $pageLimit && is_object($last))
+                    ? [(int) $last->user_a, (int) $last->user_b]
+                    : [0, 0];
+                wp_cache_set('vote_ring_cursor', $next, self::CACHE_GROUP, self::CACHE_TTL);
             }
         } finally {
             if ($lockHeld) {
@@ -738,14 +747,30 @@ class TrustGraph {
                     // Store pattern for ML analysis
                     $this->storeVoteRingPattern($component, $strength);
 
-                    // Only penalise members the first time this ring is detected.
-                    // A sorted hash of member IDs uniquely identifies the ring;
-                    // a 30-day transient prevents re-penalising on subsequent runs.
+                    // SOFT FLAG: record the observation, do NOT increment
+                    // fraud_score. This mirrors detectSlowEndorsementRings()
+                    // below, which has always had this posture; the burst
+                    // detector is now consistent with it.
+                    //
+                    // ⚠ The 30-day transient is RETAINED. It no longer
+                    // dedupes a penalty, but it still dedupes the log line,
+                    // and it is load-bearing for ROLLBACK: reverting this
+                    // change while the transients are intact leaves each
+                    // already-flagged ring un-penalised until its key
+                    // lapses, whereas clearing them would re-penalise every
+                    // member on the next pass. Do not clear them in the
+                    // same change that reverts this one.
                     $ringKey = $this->ringTransientKey('vote', $component);
                     if (false === get_transient($ringKey)) {
-                        foreach ($component as $uid) {
-                            $this->userInfoRepo->incrementFraudScore((int)$uid, 15, 'vote_ring_member');
-                        }
+                        \BCC\Core\Log\Logger::info(
+                            '[bcc-trust] vote_ring detected (soft-flag)',
+                            [
+                                'size'     => count($component),
+                                'strength' => round($strength, 2),
+                                'users'    => $component,
+                            ]
+                        );
+
                         set_transient($ringKey, 1, 30 * DAY_IN_SECONDS);
                     }
                 }
@@ -778,9 +803,14 @@ class TrustGraph {
      * soft-flagging over auto-punishment initially):
      *   - Pattern stored for ML / ops review.
      *   - Audit log written so the ring is visible to operators.
-     *   - NO automatic fraud_score increment (unlike detectVoteRings
-     *     which adds 15 per member, or detectEndorsementRings DFS
-     *     which adds 20). Operator escalates manually if real.
+     *   - NO automatic fraud_score increment. Operator escalates
+     *     manually if real.
+     *
+     * ⚠ This posture is NO LONGER UNIQUE to this detector. It used to be
+     * the exception: detectVoteRings() added 15 per member and
+     * detectEndorsementRings() added 20. Both now soft-flag the same way,
+     * so this detector is the PRECEDENT the other two were brought into
+     * line with rather than the odd one out.
      *
      * Threshold tuning:
      *   - Mutual-count threshold per pair = 1 (decoupled from
@@ -819,10 +849,15 @@ class TrustGraph {
         $pageLimit  = 500;
         $lockKey    = 'bcc_slow_endorse_ring_cursor';
         $lockHeld   = \BCC\Core\DB\AdvisoryLock::acquire($lockKey, 0);
-        $offsetKey  = 'slow_endorsement_ring_offset_w' . $windowDays;
+        // Keyset cursor (F-143): the last (user_a, user_b) pair seen. An
+        // OFFSET over an unordered GROUP BY skipped and repeated pairs.
+        $cursorKey  = 'slow_endorsement_ring_cursor_w' . $windowDays;
 
         try {
-            $offset  = (int) (wp_cache_get($offsetKey, self::CACHE_GROUP) ?: 0);
+            $cursor = wp_cache_get($cursorKey, self::CACHE_GROUP);
+            [$afterA, $afterB] = (is_array($cursor) && count($cursor) === 2)
+                ? [(int) $cursor[0], (int) $cursor[1]]
+                : [0, 0];
             // mutual_count threshold = 1: any reciprocity in the window
             // surfaces; component-size gates further. (Vote rings use
             // $minSize for both pair- and component-thresholds; for
@@ -833,12 +868,18 @@ class TrustGraph {
                 $windowDays,
                 1,
                 $pageLimit,
-                $offset
+                $afterA,
+                $afterB
             );
 
             if ($lockHeld) {
-                $nextOffset = (count($mutuals) === $pageLimit) ? $offset + $pageLimit : 0;
-                wp_cache_set($offsetKey, $nextOffset, self::CACHE_GROUP, self::CACHE_TTL);
+                // Full page → resume after its last pair; short page → the
+                // tail was walked, start again from the beginning.
+                $last = end($mutuals);
+                $next = (count($mutuals) === $pageLimit && $last !== false)
+                    ? [(int) $last->user_a, (int) $last->user_b]
+                    : [0, 0];
+                wp_cache_set($cursorKey, $next, self::CACHE_GROUP, self::CACHE_TTL);
             }
         } finally {
             if ($lockHeld) {
@@ -982,6 +1023,51 @@ class TrustGraph {
     }
 
     /**
+     * Store an endorsement-ring observation.
+     *
+     * The pattern_type 'endorsement_ring' was read by
+     * AdminDashboardRepository::ecosystemSlowRings() long before anything
+     * wrote it; this is the writer.
+     *
+     * ⚠ CONFIDENCE IS A PLACEHOLDER, NOT A MEASUREMENT. Unlike
+     * detectVoteRings() and detectSlowEndorsementRings(), this detector
+     * applies NO strength gate of any kind — a single vouch per edge around
+     * a three-member cycle qualifies — so there is no strength to derive a
+     * confidence from. `confidence` is NOT NULL on wp_bcc_patterns, so
+     * "unknown" cannot be stored; 0.0 is used to avoid asserting a
+     * certainty the rule does not support.
+     *
+     * ⚠ The consequence is that `AVG(confidence)` over mixed pattern_types
+     * now averages a measured value with a placeholder. The one caller that
+     * reads confidence (`getLatestByType`) asks only for
+     * 'slow_endorsement_ring', so no current reader is affected — but a
+     * future cross-type average would be wrong, and the fix is a nullable
+     * column rather than a fabricated number here.
+     *
+     * @param int[] $ring
+     */
+    private function storeEndorsementRingPattern(array $ring): void {
+        try {
+            $this->patternRepo->storePattern(
+                0, // system-level pattern, no specific user
+                'endorsement_ring',
+                [
+                    'users' => $ring,
+                    'size'  => count($ring),
+                    // Stated so a reader of the row does not assume a gate
+                    // was applied and merely went unrecorded.
+                    'strength'      => null,
+                    'strength_note' => 'this detector applies no strength gate',
+                ],
+                0.0,
+                date('Y-m-d H:i:s', strtotime('+30 days'))
+            );
+        } catch (\Exception $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] [BCC TrustGraph] storeEndorsementRingPattern insert failed: ', ['detail' => $e->getMessage()]);
+        }
+    }
+
+    /**
      * Build a deterministic transient key for a detected ring.
      *
      * Sorting the member IDs before hashing ensures the same set of users
@@ -1057,7 +1143,15 @@ class TrustGraph {
      * A→B→C→A style endorsement rings are invisible to detectVoteRings()
      * because that method only examines mutual vote pairs, not endorsements.
      * This method builds a directed endorser→page_owner graph and uses DFS
-     * to find back edges (cycles), penalising all members found.
+     * to find back edges (cycles), RECORDING all members found.
+     *
+     * ⚠ It used to penalise them — 20 points each. It no longer does: it
+     * stores an observation and logs a soft-flag, like
+     * detectSlowEndorsementRings(). Note how weak the rule is as evidence of
+     * anything: ANY directed cycle of >= $minSize qualifies, with no
+     * strength gate, no volume gate and no time window, so one vouch per
+     * edge around three people is enough — which is also what three
+     * tradespeople who rate each other produce.
      *
      * @return array<int, array<string, mixed>>
      */
@@ -1116,12 +1210,37 @@ class TrustGraph {
                 'detected_at' => current_time('mysql'),
             ];
 
-            // Only penalise members the first time this ring is detected.
+            // SOFT FLAG: record the observation, do NOT increment
+            // fraud_score. Same posture as detectSlowEndorsementRings().
+            //
+            // ⚠ The pattern store is NEW HERE, and it has to be. The
+            // 20-point increment used to be this detector's ONLY durable
+            // artefact — nothing wrote an `endorsement_ring` pattern row,
+            // and the ring list itself is cache-only. Removing the
+            // increment without adding this would have deleted the
+            // observation rather than making it non-punitive.
+            //
+            // It also connects a consumer that has been reading an
+            // always-empty result: AdminDashboardRepository asks
+            // PatternRepository for the three types 'vote_ring',
+            // 'endorsement_ring' and 'slow_endorsement_ring', and the
+            // Ecosystem tab renders a count for each. Only two were ever
+            // written, so that middle count has always been zero.
+            //
+            // ⚠ The 30-day transient is RETAINED — see the rollback note
+            // in detectVoteRings().
             $ringKey = $this->ringTransientKey('endorse', $cycle);
             if (false === get_transient($ringKey)) {
-                foreach ($cycle as $uid) {
-                    $this->userInfoRepo->incrementFraudScore((int) $uid, 20, 'endorsement_ring');
-                }
+                $this->storeEndorsementRingPattern($cycle);
+
+                \BCC\Core\Log\Logger::info(
+                    '[bcc-trust] endorsement_ring detected (soft-flag)',
+                    [
+                        'size'  => count($cycle),
+                        'users' => $cycle,
+                    ]
+                );
+
                 set_transient($ringKey, 1, 30 * DAY_IN_SECONDS);
             }
         }

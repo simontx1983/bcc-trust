@@ -4,7 +4,12 @@
  *
  * Three routes for the Account sub-tab on /settings/profile (V2 Phase 2.5):
  *
- *   PATCH  /me/account/email     — change email (requires current password)
+ *   PATCH  /me/account/email     — request an email change (requires current
+ *                                   password); the new address is held PENDING
+ *                                   and an OTP is mailed to it
+ *   POST   /me/account/email/verify — confirm the OTP; only then does the new
+ *                                   address replace user_email (verified), and
+ *                                   earlier Bearer tokens are revoked
  *   PATCH  /me/account/password  — change password (requires current password)
  *   DELETE /me/account           — delete account (requires current password)
  *
@@ -14,7 +19,8 @@
  * `peepso/classes/profile.php::delete_profile`.
  *
  * Storage:
- *   - Email     → `wp_users.user_email` via `wp_update_user`
+ *   - Email     → `wp_users.user_email` via `wp_update_user`, only after the
+ *                  OTP confirms the new address (PendingEmailService)
  *   - Password  → `wp_users.user_pass` via `wp_set_password`
  *   - Delete    → `wp_delete_user` (PeepSo's hooks fire on `delete_user`,
  *                  which fans out to its activity / friends / messages
@@ -39,7 +45,10 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Security\AuditLogger;
+use BCC\Trust\Core\Services\AccountRecoveryService;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
+use BCC\Trust\Core\Services\AuthMailer;
+use BCC\Trust\Core\Services\PendingEmailService;
 use BCC\Trust\Core\Support\ApiResponse;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -69,6 +78,16 @@ final class MyAccountEndpoint
             [
                 'methods'             => WP_REST_Server::EDITABLE,
                 'callback'            => [$instance, 'patchEmail'],
+                'permission_callback' => '__return_true',
+            ]
+        );
+
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/me/account/email/verify',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'verifyEmailChange'],
                 'permission_callback' => '__return_true',
             ]
         );
@@ -142,39 +161,116 @@ final class MyAccountEndpoint
             );
         }
 
-        // Capture the OLD email BEFORE wp_update_user overwrites it — the
-        // security mailer needs to send a canary "your email was changed
-        // away from this address" notice to the old inbox. Without this
-        // capture there'd be no way to reach the legit user if an attacker
-        // hijacked the session and rotated the email.
         $existingUser = get_userdata($userId);
-        $oldEmail     = $existingUser instanceof \WP_User ? (string) $existingUser->user_email : '';
-
-        $result = wp_update_user([
-            'ID'         => $userId,
-            'user_email' => $email,
-        ]);
-        if (is_wp_error($result)) {
-            return ApiResponse::error(
-                'bcc_internal_error',
-                'Could not update email. Please try again.',
-                500
-            );
+        $currentEmail = $existingUser instanceof \WP_User ? (string) $existingUser->user_email : '';
+        if (strtolower($currentEmail) === strtolower($email)) {
+            // Nothing to change — and nothing to prove.
+            $resp = ApiResponse::ok(['ok' => true, 'pending' => false]);
+            $resp->header('Cache-Control', 'no-store');
+            return $resp;
         }
 
-        // Account-state mutation — log after the write commits. We do NOT
-        // record the new email in meta to avoid duplicating PII in two
-        // tables; the wp_users row is the source of truth.
+        // Verify-before-promote. The new address is NOT written to user_email
+        // here: it is held pending and an OTP goes to the NEW inbox; only
+        // POST /me/account/email/verify with that code promotes it (and marks
+        // it verified). Until then the account keeps its current address and
+        // verification state. Writing it straight away let a password holder
+        // re-point a VERIFIED account at an address they don't own, with the
+        // '1' carried over — so the real owner's later Google sign-in linked
+        // into their account (pre-hijack). A new request supersedes any
+        // earlier pending one.
+        $otp = PendingEmailService::stage($userId, $email, PendingEmailService::PURPOSE_CHANGE);
+        AuthMailer::sendEmailChangeOtp($email, $otp);
+
+        // We do NOT record the new email in meta/audit to avoid duplicating
+        // PII; the canary mails go out when the change is confirmed.
+        AuditLogger::log('account_email_change_requested', $userId, [], 'user', $userId);
+
+        $resp = ApiResponse::ok([
+            'ok'           => true,
+            'pending'      => true,
+            'email_masked' => PendingEmailService::maskEmail($email),
+            'expires_in'   => PendingEmailService::PENDING_TTL,
+        ]);
+        $resp->header('Cache-Control', 'no-store');
+        return $resp;
+    }
+
+    /**
+     * POST /me/account/email/verify — confirm the pending email change.
+     *
+     * Body: { code }. A correct code promotes the pending address to
+     * user_email and marks it verified (PendingEmailService::confirm). The
+     * account's credentials just changed, so — exactly like patchPassword —
+     * every earlier Bearer token is revoked and a fresh one is returned for
+     * the caller (`token`, `expires_in`, `token_type`); the client must store
+     * it. Both addresses get the change canary.
+     *
+     * @param WP_REST_Request<array<string, mixed>> $request
+     */
+    public function verifyEmailChange(WP_REST_Request $request): WP_REST_Response
+    {
+        $userId = get_current_user_id();
+        if ($userId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+        // Mirrors the recovery-email verify ceiling: a 6-digit OTP under
+        // 10/hour per user + a 15-minute TTL is not brute-forceable.
+        if (!\BCC\Core\Security\Throttle::allow('account_email_verify:' . $userId, 10, 3600)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many attempts. Please wait.', 429);
+        }
+
+        $code = trim((string) $request->get_param('code'));
+        if ($code === '') {
+            return ApiResponse::error('bcc_invalid_request', 'Verification code is required.', 422);
+        }
+
+        $confirmed = PendingEmailService::confirm($userId, $code, PendingEmailService::PURPOSE_CHANGE);
+        if (!$confirmed['ok']) {
+            switch ($confirmed['error']) {
+                case PendingEmailService::ERR_NONE:
+                    return ApiResponse::error('bcc_invalid_request', 'No pending email change. Please start again.', 400);
+                case PendingEmailService::ERR_BAD_CODE:
+                    // Distinct code (same one /auth/verify-email uses for a
+                    // wrong code) so a client tells "retry the code" from
+                    // "start again" (400 above) without relying on status alone.
+                    return ApiResponse::error('bcc_invalid_otp', 'Incorrect code. Check the latest email and try again.', 422);
+                case PendingEmailService::ERR_CONFLICT:
+                    return ApiResponse::error('bcc_conflict', 'That email is already in use.', 409);
+                default:
+                    return ApiResponse::error('bcc_internal_error', 'Could not update email. Please try again.', 500);
+            }
+        }
+        $newEmail = $confirmed['email'];
+        $oldEmail = $confirmed['old_email'];
+
+        // Revoke FIRST, then mint — the fresh token carries the bumped
+        // version; every session minted before the change now fails
+        // ERR_REVOKED. (Same order and reason as patchPassword.)
+        \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
+        $handle     = (string) get_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE, true);
+        $freshToken = \BCC\Trust\Core\Support\JwtToken::encode($userId, $handle);
+
+        // Account-state mutation — log after the write commits.
         AuditLogger::log('account_email_changed', $userId, [], 'user', $userId);
 
         // Side-channel notification: tell BOTH addresses out-of-band so a
-        // compromised-session attacker can't silently rotate the email
-        // and lock the legitimate user out. Best-effort; never throws.
-        if ($oldEmail !== '' && $oldEmail !== $email) {
-            AccountSecurityMailer::emailChanged($userId, $oldEmail, $email);
+        // compromised-session attacker can't silently rotate the email and
+        // lock the legitimate user out. A placeholder has no inbox — notify
+        // the new address only. Best-effort; never throws.
+        if ($oldEmail === '' || AccountRecoveryService::isPlaceholderEmail($oldEmail)) {
+            AccountSecurityMailer::recoveryEmailConfirmed($userId, $newEmail);
+        } elseif (strtolower($oldEmail) !== strtolower($newEmail)) {
+            AccountSecurityMailer::emailChanged($userId, $oldEmail, $newEmail);
         }
 
-        $resp = ApiResponse::ok(['email' => $email]);
+        $resp = ApiResponse::ok([
+            'ok'         => true,
+            'email'      => $newEmail,
+            'token'      => $freshToken,
+            'expires_in' => \BCC\Trust\Core\Support\JwtToken::TTL_SECONDS,
+            'token_type' => 'Bearer',
+        ]);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
     }
@@ -241,6 +337,11 @@ final class MyAccountEndpoint
         \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
         $handle    = (string) get_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE, true);
         $freshToken = \BCC\Trust\Core\Support\JwtToken::encode($userId, $handle);
+
+        // A rotation cuts off every other token, so it must also cut off
+        // every device's push subscription — including the caller's own,
+        // which its client re-registers. [F-76]
+        (new \BCC\Trust\Core\Repositories\PushSubscriptionRepository())->deleteAllForUser($userId);
 
         // Credential rotation — log without the password value (obviously).
         AuditLogger::log('account_password_changed', $userId, [], 'user', $userId);

@@ -32,7 +32,9 @@ use BCC\Trust\Core\Repositories\GitHubRepository;
 use BCC\Trust\Core\Repositories\XRepository;
 use BCC\Trust\Core\Services\Mentions\MentionSearchService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\BoundedIntParam;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\UserSlugResolver;
 use BCC\Trust\Infrastructure\EdgeCache;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
@@ -68,6 +70,15 @@ final class UsersEndpoint
 
     /** Activity wall — cursor pagination, mirrors the Floor feed. */
     private const ACTIVITY_DEFAULT_LIMIT = 20;
+
+    /**
+     * ⚠ Were inline literals in the route schema. Named so the handler
+     * and the declaration cannot drift apart — the whole failure mode
+     * this change exists to close is a declared bound that nothing
+     * enforces.
+     */
+    private const ENDORSEMENTS_DEFAULT_LIMIT = 20;
+    private const ENDORSEMENTS_MAX_LIMIT     = 50;
     private const ACTIVITY_MAX_LIMIT     = 50;
 
     /**
@@ -164,7 +175,11 @@ final class UsersEndpoint
                         'default'           => self::DEFAULT_WEEKS,
                         'minimum'           => 1,
                         'maximum'           => self::MAX_WEEKS,
-                        'sanitize_callback' => 'absint',
+                        // ⚠ NOT absint — see BoundedIntParam. absint rewrites
+                        // invalid input into valid input, and a declared bound
+                        // beside any sanitizer does not bind at all. The handler
+                        // enforces this maximum.
+                        'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
                     ],
                 ],
             ]
@@ -195,7 +210,11 @@ final class UsersEndpoint
                         'default'           => self::BLOG_DEFAULT_LIMIT,
                         'minimum'           => 1,
                         'maximum'           => self::BLOG_MAX_LIMIT,
-                        'sanitize_callback' => 'absint',
+                        // ⚠ NOT absint — see BoundedIntParam. absint rewrites
+                        // invalid input into valid input, and a declared bound
+                        // beside any sanitizer does not bind at all. The handler
+                        // enforces this maximum.
+                        'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
                     ],
                 ],
             ]
@@ -251,7 +270,11 @@ final class UsersEndpoint
                         'default'           => self::ACTIVITY_DEFAULT_LIMIT,
                         'minimum'           => 1,
                         'maximum'           => self::ACTIVITY_MAX_LIMIT,
-                        'sanitize_callback' => 'absint',
+                        // ⚠ NOT absint — see BoundedIntParam. absint rewrites
+                        // invalid input into valid input, and a declared bound
+                        // beside any sanitizer does not bind at all. The handler
+                        // enforces this maximum.
+                        'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
                     ],
                 ],
             ]
@@ -277,10 +300,11 @@ final class UsersEndpoint
                     'limit' => [
                         'required'          => false,
                         'type'              => 'integer',
-                        'default'           => 20,
+                        'default'           => self::ENDORSEMENTS_DEFAULT_LIMIT,
                         'minimum'           => 1,
-                        'maximum'           => 50,
-                        'sanitize_callback' => 'absint',
+                        'maximum'           => self::ENDORSEMENTS_MAX_LIMIT,
+                        // ⚠ NOT absint — see BoundedIntParam.
+                        'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
                     ],
                 ],
             ]
@@ -298,12 +322,27 @@ final class UsersEndpoint
                 'callback'            => [new self(), 'members'],
                 'permission_callback' => '__return_true',
                 'args'                => [
+                    // ⚠⚠ `sanitize_callback` is DELIBERATELY NOT `absint`
+                    // on these two. `absint` rewrites invalid input into
+                    // valid input — `absint('-5') === 5` — so a parser
+                    // running after it has already lost what it needs to
+                    // refuse. `keepScalar` preserves the caller's text for
+                    // {@see BoundedIntParam::parse()} in the handler.
+                    //
+                    // ⚠ The argument must still declare SOME
+                    // `sanitize_callback`: WordPress substitutes
+                    // `rest_parse_request_arg` only for an argument that
+                    // declares none, and that path answers
+                    // `rest_invalid_param`, discarding the contract's own
+                    // error code. `minimum`/`maximum` below are therefore
+                    // documentation of the bound; the handler is where it
+                    // binds. See BoundedIntParam's class docblock.
                     'page' => [
                         'required'          => false,
                         'type'              => 'integer',
                         'default'           => 1,
                         'minimum'           => 1,
-                        'sanitize_callback' => 'absint',
+                        'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
                     ],
                     'per_page' => [
                         'required'          => false,
@@ -311,7 +350,7 @@ final class UsersEndpoint
                         'default'           => self::LIST_DEFAULT_PER_PAGE,
                         'minimum'           => 1,
                         'maximum'           => self::LIST_MAX_PER_PAGE,
-                        'sanitize_callback' => 'absint',
+                        'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
                     ],
                     'q' => [
                         'required'          => false,
@@ -362,12 +401,16 @@ final class UsersEndpoint
                 'type'              => 'string',
                 'sanitize_callback' => 'sanitize_text_field',
             ],
+            // ⚠ NOT absint on either — see BoundedIntParam. These args are
+            // shared by /users/:handle/reviews and /users/:handle/disputes,
+            // so both routes are enforced at the one site in
+            // handleListEndpoint().
             'page' => [
                 'required'          => false,
                 'type'              => 'integer',
                 'default'           => 1,
                 'minimum'           => 1,
-                'sanitize_callback' => 'absint',
+                'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
             ],
             'per_page' => [
                 'required'          => false,
@@ -375,7 +418,7 @@ final class UsersEndpoint
                 'default'           => self::LIST_DEFAULT_PER_PAGE,
                 'minimum'           => 1,
                 'maximum'           => self::LIST_MAX_PER_PAGE,
-                'sanitize_callback' => 'absint',
+                'sanitize_callback' => [BoundedIntParam::class, 'keepScalar'],
             ],
         ];
     }
@@ -387,6 +430,15 @@ final class UsersEndpoint
         $userId = UserSlugResolver::resolve($handle);
         if ($userId === 0) {
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
+        }
+
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
         }
 
         $viewerId = get_current_user_id();
@@ -418,6 +470,17 @@ final class UsersEndpoint
 
     public function blog(WP_REST_Request $request): WP_REST_Response
     {
+        // ⚠⚠ THE BOUND IS CHECKED BEFORE THE HANDLE LOOKUP, which is a
+        // deliberate change of precedence: a request carrying BOTH an
+        // unknown handle and an out-of-range limit now answers 400 where
+        // it used to answer 404. The reason is that
+        // `UserSlugResolver::resolve()` is a database read, and a refused
+        // request should not pay for one.
+        $limit = BoundedIntParam::parse($request->get_param('limit'), 1, self::BLOG_MAX_LIMIT);
+        if ($limit === null) {
+            return self::badLimit(self::BLOG_MAX_LIMIT);
+        }
+
         $handle = (string) $request->get_param('handle');
 
         $userId = UserSlugResolver::resolve($handle);
@@ -425,13 +488,17 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $cursorParam = $request->get_param('cursor');
         $cursor      = is_string($cursorParam) && $cursorParam !== '' ? $cursorParam : null;
-
-        $limit = (int) $request->get_param('limit');
-        if ($limit < 1) {
-            $limit = 20;
-        }
 
         $viewerId = get_current_user_id();
         $payload  = Plugin::instance()->blogService()->getUserBlog($userId, $viewerId, $cursor, $limit);
@@ -448,6 +515,12 @@ final class UsersEndpoint
 
     public function activity(WP_REST_Request $request): WP_REST_Response
     {
+        // Bound before the handle lookup — see blog() for the precedence note.
+        $limit = BoundedIntParam::parse($request->get_param('limit'), 1, self::ACTIVITY_MAX_LIMIT);
+        if ($limit === null) {
+            return self::badLimit(self::ACTIVITY_MAX_LIMIT);
+        }
+
         $handle = (string) $request->get_param('handle');
 
         $userId = UserSlugResolver::resolve($handle);
@@ -455,13 +528,17 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $cursorParam = $request->get_param('cursor');
         $cursor      = is_string($cursorParam) && $cursorParam !== '' ? $cursorParam : null;
-
-        $limit = (int) $request->get_param('limit');
-        if ($limit < 1) {
-            $limit = self::ACTIVITY_DEFAULT_LIMIT;
-        }
 
         $viewerId = get_current_user_id();
         $payload  = Plugin::instance()->feedRankingService()->getActivityForAuthor(
@@ -489,6 +566,17 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
+        // ⚠ The bound is checked AFTER the throttle and BEFORE the handle
+        // lookup. The throttle stays first on purpose — it is the guard
+        // against a hot profile starving the namespace, and a malformed
+        // request should not get a free pass around it. So this route is
+        // the one where a refusal is not literally zero reads: it pays the
+        // pre-existing rate-limit check and nothing else.
+        $limit = BoundedIntParam::parse($request->get_param('limit'), 1, self::ENDORSEMENTS_MAX_LIMIT);
+        if ($limit === null) {
+            return self::badLimit(self::ENDORSEMENTS_MAX_LIMIT);
+        }
+
         $handle = (string) $request->get_param('handle');
 
         $userId = UserSlugResolver::resolve($handle);
@@ -496,9 +584,13 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
-        $limit = (int) $request->get_param('limit');
-        if ($limit < 1) {
-            $limit = 20;
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
         }
 
         $service      = Plugin::instance()->endorsementService();
@@ -509,24 +601,54 @@ final class UsersEndpoint
             'items' => $items,
             'total' => count($items),
         ]);
-        // Public read with per-page snapshot — short shared cache absorbs
-        // tab-strip toggles. Vary on Authorization so an auth flip
-        // (sign-in / sign-out) doesn't serve a cached anon response.
-        $response->header('Cache-Control', 'public, max-age=15');
-        $response->header('Vary', 'Authorization');
+        // ⚠ PRIVATE, not public — this answer is now VIEWER-DEPENDENT.
+        //
+        // §F-02 added the profile gate above, so whether this route
+        // returns a payload or a 403 depends on who is asking (owner,
+        // admin, friend, signed-in member, stranger). A shared cache
+        // holding one viewer's 200 would serve it to a viewer the gate
+        // refused — which is a worse leak than the ungated read the gate
+        // was added to close. `Vary: Authorization` alone is NOT enough:
+        // the owner/admin/friend distinctions turn on the SESSION, and
+        // two different signed-in viewers can send byte-identical
+        // Authorization headers from a shared-cache point of view.
+        //
+        // The gate and this header MUST move together. Flipping the gate
+        // on while leaving `public` here would have been a regression.
+        $response->header('Cache-Control', 'private, max-age=15');
+        $response->header('Vary', 'Authorization, Cookie');
 
         return $response;
     }
 
     public function members(WP_REST_Request $request): WP_REST_Response
     {
-        $page    = (int) $request->get_param('page');
-        $perPage = (int) $request->get_param('per_page');
-        if ($page < 1) {
-            $page = 1;
-        }
-        if ($perPage < 1) {
-            $perPage = self::LIST_DEFAULT_PER_PAGE;
+        // ⚠⚠ THIS IS THE FIRST STATEMENT FOR A REASON. §4's `/members`
+        // entry promises an error for an invalid `page` / `per_page`, and
+        // a refusal is only worth anything if it lands before the work.
+        //
+        // Below this block the route performs a global type-count query and
+        // then `MemberSummaryPrefetcher::primeFor` — eleven batched maps
+        // whose cost scales with `$perPage`. A request that asked for
+        // 100,000 rows must not pay for any of it, and before this change
+        // it did: measured on WordPress 6.7.2, `?per_page=100000` answered
+        // 200 and issued a real `LIMIT 100000`.
+        //
+        // The old code clamped the LOWER bound only — `$perPage < 1` became
+        // the default — so there was no upper bound anywhere in the
+        // request path, and the declared `'maximum' => 50` bound nothing.
+        $page    = BoundedIntParam::parse($request->get_param('page'), 1, null);
+        $perPage = BoundedIntParam::parse($request->get_param('per_page'), 1, self::LIST_MAX_PER_PAGE);
+
+        if ($page === null || $perPage === null) {
+            // One message for both, and it states the bounds rather than
+            // echoing what was sent — the caller knows what they sent.
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'page must be a whole number >= 1; per_page must be a whole number between 1 and '
+                    . self::LIST_MAX_PER_PAGE . '.',
+                400
+            );
         }
 
         $qParam = $request->get_param('q');
@@ -646,9 +768,71 @@ final class UsersEndpoint
             $args['search_columns'] = ['user_login', 'display_name', 'user_nicename'];
         }
 
-        $query = new \WP_User_Query($args);
-        /** @var list<int|numeric-string> $rawIds */
-        $rawIds = $query->get_results();
+        // ⚠⚠ ROUTED THROUGH PeepSoUserSearch, NOT a bare WP_User_Query.
+        //
+        // The bare query bypassed PeepSo's privacy filter set entirely, so
+        // this directory — and its `q` search — listed members at
+        // `usr_profile_acc` 20, 30 and 40 to anyone. The single-profile
+        // routes were gated in v1.91 while the list that links to them was
+        // not, which made the gate a speed bump rather than a boundary.
+        //
+        // PeepSoUserSearch applies the SAME SQL PeepSo uses on its own
+        // surfaces, IN THE QUERY. That is the load-bearing part: a
+        // post-filter over the returned page would under-fill it (ask for
+        // 20, get 14) and leave `total` counting rows the viewer may not
+        // see. Filtering inside the query keeps both exact.
+        //
+        // It also honours three things this endpoint never implemented:
+        // banned and unvalidated accounts are excluded (`usr_role`), blocks
+        // are respected in both directions when `user_blocking_enable` is
+        // on, and `hide_from_search` finally works — the contract has
+        // promised since v1.64 that it "excludes the user from directory +
+        // member search", and nothing enforced it. ⚠ So member COUNTS can
+        // legitimately drop with this change; that is the setting starting
+        // to work, not data loss.
+        //
+        // ── Why the args keep working, verified rather than assumed ─────
+        //
+        // ORDER: `pre_user_query` overwrites `query_orderby` with a
+        // name-based CASE, but a block below it honours `orderby` + `order`
+        // and maps `'registered'` to `user_registered`. Both are passed
+        // above, so `registered DESC` survives.
+        //
+        // SEARCH: the third constructor argument is deliberately EMPTY and
+        // must stay so. PeepSo's own search clause is `if (!empty($search))`,
+        // so an empty string skips it and WP's `search` / `search_columns`
+        // above keep doing the work. ⛔ Do NOT pass `$q` here: PeepSo
+        // searches a first/last-name concat plus `user_login`, and
+        // optionally `user_email` behind the `members_email_searchable`
+        // option — which would widen this route to email fragments the
+        // contract deliberately excludes.
+        //
+        // TOTAL: `pre_user_query` smuggles a `GROUP BY` into
+        // `query_orderby`. That is not a typo of theirs to work around —
+        // WP builds the statement as
+        // `SELECT {fields} {from} {where} {orderby} {limit}` with
+        // `SQL_CALC_FOUND_ROWS` in `{fields}` and reads the count back via
+        // `SELECT FOUND_ROWS()`, so the GROUP BY is inside the counted
+        // statement and the total is of GROUPED rows. Exact.
+        //
+        // ⚠ Side effect, accepted knowingly: the constructor calls
+        // `remove_all_filters('pre_get_users')` for the rest of the
+        // request. Neither bcc-trust nor bcc-core registers anything on
+        // that hook, so nothing of ours breaks — but a future feature that
+        // did would silently lose it on this route.
+        if (class_exists('\\PeepSoUserSearch')) {
+            $search  = new \PeepSoUserSearch($args, $viewerId > 0 ? $viewerId : null, '');
+            /** @var list<int|numeric-string> $rawIds */
+            $rawIds = $search->results;
+            $total  = (int) $search->total;
+        } else {
+            // ⚠ Fail CLOSED. No PeepSo means no privacy filter, so there
+            // is no safe way to list members — an empty directory is
+            // recoverable, a leaked one is not. Same posture as
+            // ProfileAccess and MentionPolicy.
+            $rawIds = [];
+            $total  = 0;
+        }
         $userIds = array_map('intval', $rawIds);
 
         // Prefetch everything the member-card rows read — the eleven
@@ -681,7 +865,16 @@ final class UsersEndpoint
             }
         }
 
-        $total      = (int) $query->get_total();
+        // $total was set alongside the id query above — it comes from
+        // PeepSoUserSearch's own `total`, which is WP's FOUND_ROWS() over
+        // the privacy-filtered, GROUP BY'd statement. It therefore counts
+        // exactly the rows this viewer could page through, so `total` and
+        // `total_pages` agree with what the pages actually contain.
+        //
+        // ⚠ Do NOT reintroduce a second count here. Counting separately
+        // from the id query is how a filtered list ends up advertising
+        // more members than it will ever show.
+        //
         // $perPage is guaranteed >= 1 by the bounds-check above.
         $totalPages = (int) ceil($total / $perPage);
 
@@ -904,8 +1097,59 @@ final class UsersEndpoint
      *
      * @param callable(int, int, int, int): array<string, mixed> $compose
      */
+    /**
+     * The refusals for an out-of-range bound.
+     *
+     * ⚠ Three producers rather than one, because each states the bound it
+     * actually enforced. A single generic message would be the quiet way
+     * to let `weeks`' cap of 104 and the lists' cap of 50 drift into
+     * sounding like the same rule.
+     *
+     * ⚠ `bcc_invalid_request` is the house validation code (used across
+     * this file already). §4's `/members` entry previously named
+     * `bcc_validation`, which has no producer anywhere; the contract
+     * correction for that is a separate docs change.
+     */
+    private static function badLimit(int $max): WP_REST_Response
+    {
+        return ApiResponse::error(
+            'bcc_invalid_request',
+            'limit must be a whole number between 1 and ' . $max . '.',
+            400
+        );
+    }
+
+    private static function badBound(string $param, int $max): WP_REST_Response
+    {
+        return ApiResponse::error(
+            'bcc_invalid_request',
+            $param . ' must be a whole number between 1 and ' . $max . '.',
+            400
+        );
+    }
+
+    private static function badPagination(int $maxPerPage): WP_REST_Response
+    {
+        return ApiResponse::error(
+            'bcc_invalid_request',
+            'page must be a whole number >= 1; per_page must be a whole number between 1 and '
+                . $maxPerPage . '.',
+            400
+        );
+    }
+
     private function handleListEndpoint(WP_REST_Request $request, callable $compose): WP_REST_Response
     {
+        // ⚠⚠ ONE SITE, TWO ROUTES. Both /users/:handle/reviews and
+        // /users/:handle/disputes come through here, so this is the only
+        // place either one's pagination is bounded — and before the
+        // handle lookup, so a refused request performs no read.
+        $page    = BoundedIntParam::parse($request->get_param('page'), 1, null);
+        $perPage = BoundedIntParam::parse($request->get_param('per_page'), 1, self::LIST_MAX_PER_PAGE);
+        if ($page === null || $perPage === null) {
+            return self::badPagination(self::LIST_MAX_PER_PAGE);
+        }
+
         $handle = (string) $request->get_param('handle');
 
         $userId = UserSlugResolver::resolve($handle);
@@ -913,13 +1157,13 @@ final class UsersEndpoint
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
-        $page    = (int) $request->get_param('page');
-        $perPage = (int) $request->get_param('per_page');
-        if ($page < 1) {
-            $page = 1;
-        }
-        if ($perPage < 1) {
-            $perPage = self::LIST_DEFAULT_PER_PAGE;
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
         }
 
         $viewerId = get_current_user_id();
@@ -937,22 +1181,43 @@ final class UsersEndpoint
 
     public function shiftLog(WP_REST_Request $request): WP_REST_Response
     {
-        $handle = (string) $request->get_param('handle');
-        $weeks  = (int) $request->get_param('weeks');
-        if ($weeks < 1) {
-            $weeks = self::DEFAULT_WEEKS;
+        // ⚠ `weeks` has its OWN documented cap — 104, not the 50 the other
+        // routes carry. Enforcing one shared number here would silently
+        // halve a documented two-year window.
+        $weeks = BoundedIntParam::parse($request->get_param('weeks'), 1, self::MAX_WEEKS);
+        if ($weeks === null) {
+            return self::badBound('weeks', self::MAX_WEEKS);
         }
+
+        $handle = (string) $request->get_param('handle');
 
         $userId = UserSlugResolver::resolve($handle);
         if ($userId === 0) {
             return ApiResponse::error('bcc_not_found', 'Handle not found.', 404);
         }
 
+        // §F-02 profile-wide visibility. Runs on EVERY per-user route, not
+        // just the ones that looked risky: a "friends"/"only me" profile
+        // whose endorsements were gated but whose main payload was not is
+        // not private, it is inconsistent. See ProfileAccess for why the
+        // ladder is PeepSo's and why every uncertain path denies.
+        if (!ProfileAccess::canViewProfile($userId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $payload = Plugin::instance()->shiftLogService()->getShiftLog($userId, $weeks);
 
         $response = ApiResponse::ok($payload);
-        // Per contract §4.4
-        $response->header('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+        // ⚠ PRIVATE, not public — viewer-dependent since §F-02 added the
+        // profile gate above. Same reasoning as endorsements(); the long
+        // 300s shared window made this the worst of the three to leave
+        // public, because a single cached 200 would have been replayed to
+        // refused viewers for five minutes.
+        //
+        // ⚠ This CHANGES a value the contract pins in §4.4, so the
+        // contract note must land with it.
+        $response->header('Cache-Control', 'private, max-age=300');
+        $response->header('Vary', 'Authorization, Cookie');
 
         return $response;
     }

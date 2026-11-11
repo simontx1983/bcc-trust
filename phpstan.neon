@@ -5,8 +5,33 @@ parameters:
     level: 8
     paths:
         - app/
+        # ⚠ BOUNDED EXPANSION, two files, not all of includes/.
+        #
+        # includes/ was outside PHPStan's scope entirely, and that is how a
+        # reference to \BCC\Trust\Core\Log\Logger — a class that does not
+        # exist — reached the REFUSAL PATH of a destructive admin action. The
+        # only tool that would have known was not looking.
+        #
+        # Analysing the whole of includes/ surfaces a pre-existing backlog
+        # (missingType.return, several function.notFound) that is not this
+        # change's to carry. These two files are the destructive ring surface
+        # and its renderer, they are clean, and adding them is what makes the
+        # class-not-found category impossible here in future.
+        - includes/admin/moderation.php
+        - includes/admin/tabs/tab-rings.php
     scanDirectories:
         - ../bcc-core/src/
+    scanFiles:
+        # ⚠ SCANNED FOR SYMBOLS, NOT ANALYSED. moderation.php require_once's
+        # these five siblings and calls a render function from each; without
+        # them PHPStan reports five function.notFound for code that is
+        # perfectly correct. Listing them here teaches it the symbols without
+        # pulling their own pre-existing backlog into this change.
+        - includes/admin/moderation-list.php
+        - includes/admin/moderation-user.php
+        - includes/admin/moderation-ip.php
+        - includes/admin/moderation-device.php
+        - includes/admin/moderation-pages.php
     bootstrapFiles:
         - vendor/php-stubs/wordpress-stubs/wordpress-stubs.php
         - vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php

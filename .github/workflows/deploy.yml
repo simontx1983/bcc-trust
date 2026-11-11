@@ -28,6 +28,10 @@ on:
         type: choice
         options: [staging, production]
         default: staging
+      expected_sha:
+        description: "REQUIRED for production: the full 40-character commit SHA approved for deploy"
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -85,28 +89,70 @@ jobs:
         with:
           ref: ${{ steps.t.outputs.ref }}
 
+      # ⚠⚠ THE PRODUCTION RACE GUARD — asserts the CHECKED-OUT COMMIT, not
+      # the current value of main.
+      #
+      # A production dispatch resolves REF to `refs/heads/main`; there is no
+      # SHA input upstream of this step. And `concurrency` serialises deploys
+      # with cancel-in-progress: false, so a dispatch can QUEUE behind an
+      # in-flight deploy and check out main at an arbitrary later time. No
+      # out-of-band read of main before dispatching can bound that window —
+      # which is why a procedural re-read is not a substitute for this step.
+      #
+      # Once checkout has run, the bytes that will be rsynced are fixed, so
+      # verifying THOSE is race-free regardless of what main does next.
+      #
+      # Placed immediately after checkout and BEFORE `Set up SSH`, so a
+      # refusal happens with no deploy key written and no connection to the
+      # host. Staging is untouched: the `if` gates on production, and the
+      # workflow_run auto-deploy passes no inputs at all.
+      #
+      # ⚠ expected_sha arrives through `env`, never interpolated into the
+      # script body — a ${{ }} expansion inside `run:` is a shell-injection
+      # seam for anyone who can dispatch the workflow.
+      - name: Refuse unless the checked-out commit is the approved SHA
+        if: steps.t.outputs.environment == 'production'
+        env:
+          EXPECTED_SHA: ${{ github.event.inputs.expected_sha }}
+        run: |
+          EXPECTED="$EXPECTED_SHA"
+          if [ -z "$EXPECTED" ]; then
+            echo "::error::production deploys require expected_sha (the approved full 40-character commit SHA)"
+            exit 1
+          fi
+          if [ ${#EXPECTED} -ne 40 ]; then
+            echo "::error::expected_sha must be a FULL 40-character SHA (got ${#EXPECTED} characters)"
+            exit 1
+          fi
+          case "$EXPECTED" in
+            *[!0-9a-f]*)
+              echo "::error::expected_sha must be 40 lowercase hexadecimal characters"
+              exit 1
+              ;;
+          esac
+          ACTUAL="$(git rev-parse HEAD)"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::REFUSING TO DEPLOY — checked-out HEAD $ACTUAL does not match the approved $EXPECTED. main moved between approval and dispatch."
+            exit 1
+          fi
+          echo "Approved commit confirmed: $ACTUAL"
+
       - name: Set up SSH
+        env:
+          HK: ${{ secrets.DEPLOY_HOST_KEY }}
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          # Prefer a PINNED host key (secret DEPLOY_HOST_KEY, captured once via
+          # PINNED host key only (secret DEPLOY_HOST_KEY, captured once via
           # `ssh-keyscan -p PORT HOST`): zero network, zero flake, and real
-          # MITM protection — re-scanning on every run made
-          # StrictHostKeyChecking=yes theater. Fallback: retried keyscan (the
-          # single un-retried scan failed ~50% of dispatches on this host;
-          # stderr was also discarded, which is why it never self-explained).
-          HK="${{ secrets.DEPLOY_HOST_KEY }}"
-          if [ -n "$HK" ]; then
-            printf '%s\n' "$HK" > ~/.ssh/known_hosts
-          else
-            for i in 1 2 3 4 5; do
-              ssh-keyscan -T 10 -p "${{ secrets.DEPLOY_PORT }}" -H "${{ secrets.DEPLOY_HOST }}" > ~/.ssh/known_hosts && [ -s ~/.ssh/known_hosts ] && break
-              echo "keyscan attempt $i failed" >&2
-              sleep 2
-            done
-            [ -s ~/.ssh/known_hosts ] || { echo "::error::ssh-keyscan produced no host key after 5 attempts"; exit 1; }
-          fi
+          # MITM protection. F-43: the keyscan FALLBACK is gone — scanning on
+          # every run is trust-on-first-use, which makes the later
+          # StrictHostKeyChecking=yes theater, and it only ever ran when the
+          # secret was missing. A missing key now fails the deploy instead of
+          # silently trusting whatever answers on that IP.
+          [ -n "$HK" ] || { echo "::error::DEPLOY_HOST_KEY secret is not set - refusing to keyscan (trust-on-first-use). Capture it once with ssh-keyscan and store it as the secret."; exit 1; }
+          printf '%s\n' "$HK" > ~/.ssh/known_hosts
 
       - name: Deploy (plugin-scoped rsync, delayed delete + updates)
         run: |
@@ -121,8 +167,27 @@ jobs:
           # sweep. Collapses the mixed-tree window from the full transfer
           # duration to a sub-second rename pass — the window that produced
           # cross-plugin fatals mid-deploy (2026-08-05 incident).
+          # F-36: dev-only files are HIDDEN from the transfer (rsync `H`), not
+          # excluded. A plain --exclude also PROTECTS the path on the server, so
+          # copies already deployed would be stranded forever (exactly how .git
+          # was). `H` hides on the sender only, so --delete removes the existing
+          # server copies in this same run. Root-anchored (leading /) on purpose:
+          # an unanchored 'tests' would also drop vendor/*/tests/.
+          # bcc-trust keeps shipping scripts/ — operator runbooks run them with
+          # `wp eval-file` — and scripts/.htaccess denies web access to it.
           rsync -az --delete --delete-delay --delay-updates \
             --exclude='.git' --exclude='.github' \
+            --filter='H /tests/' \
+            --filter='H /composer.json' \
+            --filter='H /composer.lock' \
+            --filter='H /phpstan.neon' \
+            --filter='H /phpstan-bootstrap.php' \
+            --filter='H /phpunit.xml.dist' \
+            --filter='H /phpunit-integration.xml.dist' \
+            --filter='H /.gitignore' \
+            --filter='H /.gitattributes' \
+            --filter='H /docs/' \
+            --filter='H /MIGRATED-FROM.md' \
             -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes" \
             ./ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:$TARGET/"
 
@@ -173,3 +238,61 @@ jobs:
           probe "/wp-json/bcc/v1/ranks"
           probe "/wp-json/bcc/v1/search/groups?q=ping"
           probe "/wp-json/bcc/v1/cards?per_page=1"
+
+      # ── #286: AN EXCLUDED PATH IS ALSO PROTECTED FROM --delete ───────────
+      # `--exclude` without a leading slash matches at ANY depth, and rsync
+      # never deletes what it was told to exclude. So anything named .git or
+      # .github already sitting in the target is permanently stranded: not
+      # transferred, not deleted, and invisible to every manifest check that
+      # applies the same excludes. Staging carried a 603-file .git frozen at a
+      # 2026-04 commit, plus three vendor .github workflow files, for months.
+      #
+      # ⛔ This step deliberately does NOT touch the excludes. Un-excluding
+      # .git would be far worse than the orphan: at this point in the job the
+      # runner's .git/config still holds the credential actions/checkout wrote
+      # (http.https://github.com/.extraheader = AUTHORIZATION: basic ***).
+      # That is only unset by the post-checkout step, which runs AFTER the
+      # rsync — so un-excluding .git would publish a live token into a
+      # web-served directory. Verified in run 42457064423: checkout is step 3,
+      # rsync step 6, the unset step 16.
+      #
+      # It runs LAST, after the health probe, on purpose. A stranded path is
+      # inert: it is not served as code and does not change the shipped
+      # bytes. So the steps that DO speak to whether the release is sound
+      # must run first and be seen. Sitting before them, this guard would
+      # skip `Confirm deployed version` and the health probe on code that
+      # has ALREADY shipped - hiding a real outage behind a housekeeping
+      # failure, and leaving the operator with a red run and no idea
+      # whether the deploy itself worked.
+      - name: Refuse a target that still holds .git or .github
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "${{ secrets.DEPLOY_PORT }}" \
+            -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" bash -s <<REMOTE
+          T="${{ secrets.DEPLOY_BASE }}/${{ steps.t.outputs.subpath }}"
+          # ⚠ ANTI-VACUITY. A guard that finds nothing because it looked in the
+          # wrong place reads exactly like a clean target, and this project has
+          # shipped that failure before. Prove we are inside the deployed
+          # plugin before a zero is allowed to mean anything.
+          test -d "\$T" || { echo "::error::deploy guard: \$T is not a directory"; exit 1; }
+          test -f "\$T/$PLUGIN.php" || { echo "::error::deploy guard: \$T holds no $PLUGIN.php - wrong path, refusing to report it clean"; exit 1; }
+          FOUND=\$(find "\$T" \( -name .git -o -name .github \) -print | LC_ALL=C sort)
+          if [ -n "\$FOUND" ]; then
+            printf '%s\n' "\$FOUND" | sed 's|^|  stranded: |'
+            N=\$(printf '%s\n' "\$FOUND" | wc -l)
+            echo "::error::deploy guard: \$N stranded path(s) in the deploy target. rsync cannot clear these - it excludes them, and --delete skips what it excludes. Remove each listed path once by hand on the server. Do NOT un-exclude .git."
+            exit 1
+          fi
+          echo "deploy guard: no stranded .git/.github under \$T"
+          # F-36: the hidden dev-only paths must be gone from the target too —
+          # proves the first deploy with the new filters actually removed them.
+          LEFT=""
+          for p in tests docs composer.json composer.lock phpstan.neon phpstan-bootstrap.php phpunit.xml.dist phpunit-integration.xml.dist .gitignore .gitattributes MIGRATED-FROM.md; do
+            [ -e "\$T/\$p" ] && LEFT="\$LEFT \$p"
+          done
+          if [ -n "\$LEFT" ]; then
+            echo "::error::deploy guard: dev-only path(s) still in the deploy target:\$LEFT - the rsync H filters should have removed them."
+            exit 1
+          fi
+          echo "deploy guard: no dev-only paths under \$T"
+          REMOTE

@@ -73,6 +73,21 @@ namespace {
             /** @var list<string> every option/transient/cache write, as "kind:key" */
             public static array $writes = [];
 
+            // ── the DETAIL view's world ─────────────────────────────────
+            /** @var object|null the single row findForAdminDetail() returns */
+            public static ?object $row = null;
+            /** @var bool make the detail read throw, i.e. the table is unreadable */
+            public static bool $detailThrows = false;
+            /** @var bool make the community lookup throw */
+            public static bool $communityThrows = false;
+            /** @var string|null the deny/allow rule for the hide section */
+            public static ?string $hideRule = null;
+            /** @var bool make the hide-rule read throw */
+            public static bool $hideThrows = false;
+            public static int $detailReads = 0;
+            public static int $communityReads = 0;
+            public static int $hideReads = 0;
+
             /** @var list<string> every advisory-lock or breaker probe touch */
             public static array $probes = [];
 
@@ -108,6 +123,14 @@ namespace {
                 self::$index         = [];
                 self::$indexReadFails = false;
                 self::$hubWallets    = [];
+                self::$row             = null;
+                self::$detailThrows    = false;
+                self::$communityThrows = false;
+                self::$hideRule        = null;
+                self::$hideThrows      = false;
+                self::$detailReads     = 0;
+                self::$communityReads  = 0;
+                self::$hideReads       = 0;
             }
 
             /** @return \WP_Error */
@@ -189,7 +212,60 @@ namespace {
         }
     }
     if (!function_exists('get_permalink')) {
-        function get_permalink($post = 0): string { return 'https://example.test/?p=' . (int) $post; }
+        function get_permalink($post = 0): string { \BccPostCacheSpy::$permalinks[] = (int) $post; return 'https://example.test/?p=' . (int) $post; }
+    }
+    if (!class_exists('BccPostCacheSpy', false)) {
+        /**
+         * Records the post-cache priming and every permalink read.
+         *
+         * `get_permalink()` is still called once per rendered row — that is
+         * a cache READ, not a query, and moving it out of the loop would
+         * change nothing. What must hold is that the cache was PRIMED once
+         * beforehand, so those reads are hits. The prefetch test asserts
+         * `$primes === 1` and that the primed id set covers every permalink
+         * that was then read.
+         */
+        final class BccPostCacheSpy
+        {
+            /** @var int how many times the post cache was primed */
+            public static int $primes = 0;
+
+            /** @var list<int> the ids handed to each prime, flattened */
+            public static array $primed = [];
+
+            /** @var list<int> every post id a permalink was read for */
+            public static array $permalinks = [];
+
+            public static function reset(): void
+            {
+                self::$primes = 0;
+                self::$primed = [];
+                self::$permalinks = [];
+            }
+        }
+    }
+    if (!function_exists('mysql2date')) {
+        /**
+         * Formats a MySQL datetime. Deliberately returns a STRING here, but
+         * production's WordPress returns `int|string|false` — which is why
+         * the caller casts. Keeping the stub honest about the happy path only
+         * is fine; the cast is what PHPStan checks.
+         */
+        function mysql2date(string $format, string $date, bool $translate = true)
+        {
+            $ts = strtotime($date);
+            return $ts === false ? false : date($format, $ts);
+        }
+    }
+    if (!function_exists('_prime_post_caches')) {
+        /** @param list<int> $ids */
+        function _prime_post_caches(array $ids, bool $terms = true, bool $meta = true): void
+        {
+            \BccPostCacheSpy::$primes++;
+            foreach ($ids as $id) {
+                \BccPostCacheSpy::$primed[] = (int) $id;
+            }
+        }
     }
     if (!function_exists('wp_create_nonce')) {
         /**
@@ -360,9 +436,52 @@ namespace BCC\Core\DB {
 
 namespace BCC\Core\Repositories {
     if (!class_exists(PeepSoGroupRepository::class, false)) {
+        /**
+         * Same arrangement as the gated-group stub: the per-group counter is
+         * kept callable so a restored per-row count is caught by an
+         * assertion rather than a fatal.
+         *
+         * `findManyByIds()` mirrors the real bcc-core method, which already
+         * returns `member_count` per group from ONE aggregate query under
+         * the same `gm_user_status LIKE` filter `countGroupMembers()` uses.
+         */
         final class PeepSoGroupRepository
         {
-            public static function countGroupMembers(int $groupId): int { return 0; }
+            /** @var int per-group counts — MUST stay 0 during a render */
+            public static int $perRowCalls = 0;
+
+            /** @var int set-based reads — one per render when any group resolves */
+            public static int $batchCalls = 0;
+
+            /** @var array<int,int> group id => member count, seeded by the test */
+            public static array $memberCounts = [];
+
+            public static function countGroupMembers(int $groupId): int
+            {
+                self::$perRowCalls++;
+                return self::$memberCounts[$groupId] ?? 0;
+            }
+
+            /**
+             * @param list<int> $groupIds
+             * @return array<int, object>
+             */
+            public static function findManyByIds(array $groupIds): array
+            {
+                self::$batchCalls++;
+
+                $out = [];
+                foreach ($groupIds as $groupId) {
+                    $out[(int) $groupId] = (object) [
+                        'id'           => (string) $groupId,
+                        'post_name'    => 'group-' . $groupId,
+                        'post_title'   => 'Group ' . $groupId,
+                        'post_content' => '',
+                        'member_count' => (string) (self::$memberCounts[(int) $groupId] ?? 0),
+                    ];
+                }
+                return $out;
+            }
         }
     }
 }
@@ -405,10 +524,51 @@ namespace BCC\Trust\Onchain\Repositories {
     if (!class_exists(CollectionRepository::class, false)) {
         final class CollectionRepository
         {
-            /** @return array{items: list<object>, total: int, pages: int, available: bool} */
-            public static function listForAdminState(string $tab, int $page = 1, int $perPage = 50, ?string $chainSlug = null, ?string $tokenStandard = null): array
+            /**
+             * The DETAIL read. Counted, and able to THROW — the three-way
+             * outcome is the thing under test, so a stub that could only
+             * return a row or null would make the read-failure case
+             * untestable.
+             */
+            public static function findForAdminDetail(int $collectionId): ?object
             {
-                $rows  = \BccRenderWorld::$rows;
+                \BccRenderWorld::$detailReads++;
+                if (\BccRenderWorld::$detailThrows) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(
+                        self::class, 'findForAdminDetail', 'injected read failure'
+                    );
+                }
+                return \BccRenderWorld::$row;
+            }
+            /** @return array{items: list<object>, total: int, pages: int, available: bool} */
+            /**
+             * ⚠ THE SEARCH TERM MUST BE HONOURED HERE, NOT IGNORED.
+             *
+             * PHP silently accepts a surplus argument to a user-defined
+             * method, so a stub that kept the old 5-parameter signature
+             * would take the term and drop it — and every render test of a
+             * searched page would exercise the UNSEARCHED list while
+             * appearing to pass. The filter is deliberately crude (it only
+             * has to narrow); the real SQL is pinned by
+             * CollectionAdminSearchIntegrationTest.
+             */
+            public static function listForAdminState(string $tab, int $page = 1, int $perPage = 50, ?string $chainSlug = null, ?string $tokenStandard = null, ?string $search = null): array
+            {
+                $rows = \BccRenderWorld::$rows;
+
+                $term = $search === null ? '' : trim($search);
+                if ($term !== '') {
+                    $rows = array_values(array_filter($rows, static function (object $r) use ($term): bool {
+                        foreach (['collection_name', 'contract_address', 'canonical_identifier'] as $f) {
+                            $v = $r->$f ?? null;
+                            if (is_string($v) && stripos($v, $term) !== false) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }));
+                }
+
                 $slice = array_slice($rows, ($page - 1) * $perPage, $perPage);
                 return ['items' => $slice, 'total' => count($rows), 'pages' => (int) ceil(max(1, count($rows)) / $perPage), 'available' => true];
             }
@@ -457,9 +617,66 @@ namespace BCC\Trust\Onchain\Repositories {
     }
 
     if (!class_exists(GatedGroupRepository::class, false)) {
+        /**
+         * ⚠ BOTH FORMS ARE PRESENT ON PURPOSE.
+         *
+         * `findGroupForCollection()` is the PER-ROW form. Production no
+         * longer calls it from the render loop, and
+         * `VerifyCollectionsCommunityCellPrefetchTest` asserts its counter
+         * stays at 0 — so a mutant that restores the N+1 is caught here
+         * rather than by a fatal, which would read as a kill for the wrong
+         * reason. Keeping it callable is what makes that assertion mean
+         * something.
+         */
         final class GatedGroupRepository
         {
-            public static function findGroupForCollection(int $chainId, string $contract): ?int { return null; }
+            /** @var int per-row lookups — MUST stay 0 during a render */
+            public static int $perRowCalls = 0;
+
+            /** @var int set-based lookups — one per render, regardless of row count */
+            public static int $batchCalls = 0;
+
+            /** @var list<int> the pair-count handed to each set-based call */
+            public static array $batchSizes = [];
+
+            /** @var array<int,int> collection row id => group id, seeded by the test */
+            public static array $groupByRowId = [];
+
+            public static function findGroupForCollection(int $chainId, string $contract): ?int
+            {
+                self::$perRowCalls++;
+                return null;
+            }
+
+            /** The AUTHORITATIVE by-row-id lookup the detail view uses. */
+            public static function findPublishedGroupIdForCollectionId(int $collectionId): ?int
+            {
+                \BccRenderWorld::$communityReads++;
+                if (\BccRenderWorld::$communityThrows) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(
+                        self::class, 'findPublishedGroupIdForCollectionId', 'injected read failure'
+                    );
+                }
+                return null;
+            }
+
+            /**
+             * @param array<array-key, array{chain_id:int, contract:string}> $pairs
+             * @return array<array-key, int>
+             */
+            public static function findGroupsForCollections(array $pairs): array
+            {
+                self::$batchCalls++;
+                self::$batchSizes[] = count($pairs);
+
+                $out = [];
+                foreach ($pairs as $rowId => $_pair) {
+                    if (isset(self::$groupByRowId[(int) $rowId])) {
+                        $out[$rowId] = self::$groupByRowId[(int) $rowId];
+                    }
+                }
+                return $out;
+            }
         }
     }
 
@@ -525,7 +742,28 @@ namespace BCC\Trust\Onchain\Repositories {
         {
             public const RULE_DENY  = 'deny';
             public const RULE_ALLOW = 'allow';
-            public static function getRule(int $chainId, string $contract): ?string { return null; }
+            public static function getRule(int $chainId, string $contract): ?string
+            {
+                \BccRenderWorld::$hideReads++;
+                return \BccRenderWorld::$hideRule;
+            }
+
+            /**
+             * The FAIL-CLOSED arm. Able to throw, because the whole point
+             * of the detail view's hide section is that "could not read"
+             * is rendered as itself rather than as "not hidden" — and a
+             * stub that could only return would make that untestable.
+             */
+            public static function getRuleOrThrow(int $chainId, string $contract): ?string
+            {
+                \BccRenderWorld::$hideReads++;
+                if (\BccRenderWorld::$hideThrows) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(
+                        self::class, 'getRuleOrThrow', 'injected read failure'
+                    );
+                }
+                return \BccRenderWorld::$hideRule;
+            }
         }
     }
 }
@@ -536,24 +774,6 @@ namespace BCC\Trust\Onchain\Services {
         {
             /** @return array<string, mixed> */
             public static function buildSummary(): array { return ['chains' => [], 'issues' => []]; }
-        }
-    }
-}
-
-namespace BCC\Trust\Onchain\Admin\Views {
-    if (!class_exists(CosmwasmScannerPanel::class, false)) {
-        final class CosmwasmScannerPanel
-        {
-            /** @param array<string, mixed> $summary */
-            public static function render(array $summary): void { echo '<div data-fake="scanner-panel"></div>'; }
-            public static function renderCandidateDetail(object $collection, object $candidate, ?object $family, bool $isVerified, int $colspan): void {}
-        }
-    }
-
-    if (!class_exists(DiscoveryScanPanel::class, false)) {
-        final class DiscoveryScanPanel
-        {
-            public static function render(object $chain, bool $scannable, string $whyNot = ''): void { echo '<div data-fake="scan-panel"></div>'; }
         }
     }
 }

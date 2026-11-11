@@ -29,42 +29,31 @@
  * lag_blocks is a virtual GENERATED column so the operator dashboard
  * doesn't have to compute (head - last_processed) on every read.
  *
- * ── CosmWasm discovery extension (2026-08) ─────────────────────────────
- * The `cw_*` columns are a NARROW extension for CW-721 discovery. They
- * carry OVERALL PER-CHAIN worker state and progress ONLY — never
- * per-code-family or per-contract state, which live in their own tables:
+ * ── CosmWasm discovery extension: REMOVED (S9b, 2026-10) ───────────────
+ * This table carried seven `cw_*` columns and one index over two of them,
+ * holding overall per-chain CW-721 discovery progress: a durable
+ * discovery state, the resumable `pagination.key` cursor for the walk of
+ * `/cosmwasm/wasm/v1/code`, a max-code-id watermark, three timestamps and
+ * a sanitized error excerpt. Two sibling tables held the per-code-family
+ * and per-contract state.
  *
- *   wp_bcc_chain_checkpoints          ← per-chain worker state + progress
- *   wp_bcc_cosmwasm_code_families     code-family inventory + classification
- *   wp_bcc_cosmwasm_contracts         contract inventory + classification
- *   wp_bcc_onchain_collections        canonical collection model (UNCHANGED)
- *   wp_bcc_onchain_nft_spam_contracts operator allow/deny (REUSED)
+ * S8 deleted every reader and writer; S9a removed the columns from
+ * `ChainCheckpointRepository::COLUMNS`; S9b dropped the columns, the index
+ * and both sibling tables. The drop is
+ * `includes/database/drop-scanner-schema.php`.
  *
- * The extension is deliberately here rather than in a fourth table: this
- * table already IS the shared "where is each chain-walking worker up to"
- * primitive, and a second per-chain progress table would be exactly the
- * parallel implementation §11 forbids.
+ * ⚠ THE INDEX MATTERED. `KEY idx_cw_discovery (cw_discovery_state,
+ * cw_last_discovery_at)` spanned two of the retired columns, so this
+ * `CREATE TABLE` could not simply lose the column lines — stripping them
+ * while keeping the index is invalid DDL (`ERROR 1072: Key column
+ * 'cw_discovery_state' doesn't exist in table`). The migration drops the
+ * index explicitly and first, for the same reason.
  *
- *   - cw_discovery_state — idle | backfilling | backfilled | unsupported
- *     | paused. `unsupported` is durable and terminal for chains with no
- *     wasm module (cryptoorgchain answers the wasmd endpoints with HTTP
- *     501 — measured); it must never be retried by the routine sweeps.
- *     A chain whose LCD is merely DOWN (kujira, 502 — measured) stays in
- *     its current state and is retried.
- *   - cw_code_cursor — opaque `pagination.key` for the resumable
- *     historical walk of `/cosmwasm/wasm/v1/code`. Progress is a cursor
- *     plus a max-code-id watermark and NEVER a percentage: only ONE of
- *     the nine cosmos chains honours `pagination.count_total`
- *     (measured), so a reported total cannot be trusted.
- *   - cw_max_code_id — highest code id observed on this chain.
- *   - cw_backfill_completed_at — set once the historical walk drains.
- *   - cw_last_discovery_at — last incremental discovery pass.
- *   - cw_metadata_refreshed_at — durable ≥30-day elapsed guard for the
- *     "monthly" migration-check + mutable-metadata pass. wp-cron has no
- *     monthly interval, so the pass rides a DAILY hook and this column
- *     is what makes it monthly. No invented cron interval.
- *   - cw_last_error — sanitized ≤255-char excerpt, same convention as
- *     `last_error`. Raw LCD bodies are never stored.
+ * What this table still is, unchanged: the shared "where is each
+ * chain-walking worker up to" primitive, read by the EVM indexer, the
+ * circuit breaker and the daily CU budget. A second per-chain progress
+ * table would be exactly the parallel implementation §11 forbids, which is
+ * why the discovery extension lived here rather than in a fourth table.
  *
  * @package BCC\Trust\Onchain
  * @subpackage Database
@@ -106,15 +95,7 @@ function bcc_onchain_create_chain_checkpoints_table(): void {
         last_run_at DATETIME DEFAULT NULL,
         last_error VARCHAR(255) DEFAULT NULL,
         block_progression_history VARCHAR(500) DEFAULT NULL,
-        cw_discovery_state VARCHAR(20) NOT NULL DEFAULT 'idle',
-        cw_code_cursor VARCHAR(255) DEFAULT NULL,
-        cw_max_code_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-        cw_backfill_completed_at DATETIME DEFAULT NULL,
-        cw_last_discovery_at DATETIME DEFAULT NULL,
-        cw_metadata_refreshed_at DATETIME DEFAULT NULL,
-        cw_last_error VARCHAR(255) DEFAULT NULL,
-        PRIMARY KEY (chain_id),
-        KEY idx_cw_discovery (cw_discovery_state, cw_last_discovery_at)
+        PRIMARY KEY (chain_id)
     ) {$charset_collate};";
 
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';

@@ -48,35 +48,53 @@ final class NftDriverRegistryTest extends TestCase
     // ── The load-bearing negative ───────────────────────────────────────
 
     /**
-     * NO EVM CHAIN CAN BE ENUMERATED. Not one of the seven, on any
-     * configuration. No provider sells chain-wide NFT contract enumeration
-     * on EVM; Alchemy enumerates a WALLET's contracts, which is a different
-     * question that lives under WALLET_DISCOVERY.
+     * ⚠⚠⚠ NOTHING IN THIS BUILD ENUMERATES A CHAIN, UNDER ANY SPELLING.
+     *
+     * Three cases stood here until S7: that no EVM chain had an enumeration
+     * driver, that Solana had none, and that Cosmos was the only family that
+     * did. They expressed the negative as an EMPTY DRIVER LIST on a surviving
+     * `enumeration` operation — the registry proving the refusal rather than
+     * asserting it.
+     *
+     * S7 removed the operation and its only driver, so the negative is now
+     * expressed by the operation not existing at all. That is strictly
+     * stronger: an empty list can be filled by adding a driver, whereas a
+     * missing operation cannot be satisfied by any registry row, any override
+     * row, or any credential.
+     *
+     * This replaces all three, and it checks the LITERALS as well as the
+     * constants — the constants are gone, so a reintroduction would most
+     * likely arrive as a hand-written string.
      */
-    public function testNoEvmChainHasAnEnumerationDriver(): void
+    public function testNoOperationOrDriverEnumeratesAChain(): void
     {
-        foreach (['ethereum', 'base', 'polygon', 'arbitrum', 'optimism', 'avalanche', 'bsc'] as $slug) {
+        self::assertNotContains('enumeration', NftDriverRegistry::operations());
+        self::assertCount(5, NftDriverRegistry::operations(), 'five operations remain');
+
+        // No driver, on any chain family, declares it.
+        foreach ([
+            self::chain('cosmos', 'cosmos'),
+            self::chain('cosmos', 'injective'),
+            self::chain('evm', 'ethereum'),
+            self::chain('solana', 'solana'),
+        ] as $chain) {
             self::assertSame(
                 [],
-                NftDriverRegistry::driversFor(self::chain('evm', $slug), NftDriverRegistry::OP_ENUMERATION, []),
-                "EVM chain {$slug} must have no enumeration driver"
+                NftDriverRegistry::driversFor($chain, 'enumeration', []),
+                'an unknown operation must resolve to no drivers'
             );
         }
-    }
 
-    public function testSolanaHasNoEnumerationDriver(): void
-    {
+        // And the removed driver key is unknown even when a row names it.
         self::assertSame(
             [],
-            NftDriverRegistry::driversFor(self::chain('solana', 'solana'), NftDriverRegistry::OP_ENUMERATION, [])
-        );
-    }
-
-    public function testCosmosIsTheOnlyFamilyWithAnEnumerationDriver(): void
-    {
-        self::assertSame(
-            [NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION],
-            NftDriverRegistry::driversFor(self::chain('cosmos', 'cosmos'), NftDriverRegistry::OP_ENUMERATION, [])
+            NftDriverRegistry::driversFor(self::chain('cosmos', 'cosmos'), 'enumeration', [[
+                'operation'  => 'enumeration',
+                'driver_key' => 'cosmwasm_enumeration',
+                'enabled'    => true,
+                'priority'   => 1,
+            ]]),
+            'a database row must not be able to resurrect a removed operation'
         );
     }
 
@@ -184,9 +202,9 @@ final class NftDriverRegistryTest extends TestCase
 
         self::assertSame(
             [],
-            NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_ENUMERATION, [[
-                'operation'  => NftDriverRegistry::OP_ENUMERATION,
-                'driver_key' => NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::driversFor($chain, NftDriverRegistry::OP_VALIDATION, [[
+                'operation'  => NftDriverRegistry::OP_VALIDATION,
+                'driver_key' => NftDriverRegistry::DRIVER_CW721_LCD,
                 'enabled'    => false,
                 'priority'   => 10,
             ]])
@@ -244,18 +262,18 @@ final class NftDriverRegistryTest extends TestCase
             // enumeration by inserting a record for a driver that has never
             // existed. It must stay [].
             'invented enumeration driver on EVM' => [
-                'evm', 'ethereum', NftDriverRegistry::OP_ENUMERATION,
-                ['operation' => NftDriverRegistry::OP_ENUMERATION, 'driver_key' => 'evm_enumeration', 'enabled' => true, 'priority' => 1],
+                'evm', 'ethereum', NftDriverRegistry::OP_VALIDATION,
+                ['operation' => NftDriverRegistry::OP_VALIDATION, 'driver_key' => 'evm_enumeration', 'enabled' => true, 'priority' => 1],
             ],
             // A REAL driver, but one that cannot enumerate anything.
             'real driver claiming enumeration on EVM' => [
-                'evm', 'ethereum', NftDriverRegistry::OP_ENUMERATION,
-                ['operation' => NftDriverRegistry::OP_ENUMERATION, 'driver_key' => NftDriverRegistry::DRIVER_ALCHEMY_NFT, 'enabled' => true, 'priority' => 1],
+                'evm', 'ethereum', NftDriverRegistry::OP_VALIDATION,
+                ['operation' => NftDriverRegistry::OP_VALIDATION, 'driver_key' => NftDriverRegistry::DRIVER_ALCHEMY_NFT, 'enabled' => true, 'priority' => 1],
             ],
             // A real Cosmos enumerator, pointed at a chain it does not serve.
             'cosmos enumerator aimed at Solana' => [
-                'solana', 'solana', NftDriverRegistry::OP_ENUMERATION,
-                ['operation' => NftDriverRegistry::OP_ENUMERATION, 'driver_key' => NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION, 'enabled' => true, 'priority' => 1],
+                'solana', 'solana', NftDriverRegistry::OP_VALIDATION,
+                ['operation' => NftDriverRegistry::OP_VALIDATION, 'driver_key' => NftDriverRegistry::DRIVER_CW721_LCD, 'enabled' => true, 'priority' => 1],
             ],
             // A real driver on the right chain, claiming an operation it
             // does not perform — the EVM validation that PR 8 will build.
@@ -311,10 +329,15 @@ final class NftDriverRegistryTest extends TestCase
 
     // ── Shape of the registry itself ────────────────────────────────────
 
-    public function testThereAreExactlySixOperations(): void
+    /**
+     * ⚠ SIX until S7 removed `enumeration`, which led this list. The order of
+     * the remaining five is unchanged on purpose: a consumer that indexed by
+     * name is unaffected, and one that indexed by position was already wrong.
+     */
+    public function testThereAreExactlyFiveOperations(): void
     {
         self::assertSame(
-            ['enumeration', 'curated_feed', 'wallet_discovery', 'validation', 'metadata', 'ownership'],
+            ['curated_feed', 'wallet_discovery', 'validation', 'metadata', 'ownership'],
             NftDriverRegistry::operations()
         );
     }

@@ -44,6 +44,7 @@ final class OnchainAdminSweepActionsTest extends TestCase
 
         $_POST = [];
         $_GET  = [];
+        $_SERVER['REQUEST_METHOD'] = 'POST';
     }
 
     /** Simulate WordPress firing a given admin_post_ hook. */
@@ -97,6 +98,22 @@ final class OnchainAdminSweepActionsTest extends TestCase
 
         $this->assertSame([], \BCC\Trust\Onchain\Services\ChainRefreshService::$calls);
         $this->assertSame([], \BCC\Trust\Core\Security\AuditLogger::$rows);
+    }
+
+    public function testGetRequestPerformsNoWorkEvenWithAValidNonce(): void
+    {
+        // F-91: a sweep makes billable provider calls, so a GET link that
+        // carries a valid nonce must not start one.
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+
+        $this->expectException(\BccAdminDie::class);
+
+        try {
+            $this->fire(ChainSweepActions::ACTION_VALIDATORS);
+        } finally {
+            $this->assertSame([], \BCC\Trust\Onchain\Services\ChainRefreshService::$calls);
+            $this->assertSame([], \BCC\Trust\Core\Security\AuditLogger::$rows);
+        }
     }
 
     public function testInvalidNoncePerformsNoWork(): void

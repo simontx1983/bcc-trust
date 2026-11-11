@@ -36,13 +36,20 @@
 
 namespace BCC\Trust\Core\Services;
 
+use BCC\Trust\Core\Announcements\AnnouncementCapabilityResolver;
+use BCC\Trust\Core\Announcements\AnnouncementFeature;
+use BCC\Trust\Onchain\Services\DelegatorGroupView;
+use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
+use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Trust\Core\Repositories\PageReadModelRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\PageTypeMap;
+use BCC\Trust\Core\Support\Permission as PermissionShape;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Repositories\OperatorProfileRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorMsgActivationRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
@@ -77,7 +84,9 @@ if (!defined('ABSPATH')) {
  *   attestation_active_counts?: array<int, int>,
  *   attestation_revoked_counts?: array<int, int>,
  *   validator_rows?: array<int, list<ValidatorCardRow>>,
- *   page_entities?: array<int, array{entity_type: string, entity_id: int}>
+ *   operator_profiles?: array<int, array{brand_name: string, bio: string, website_url: string, x_url: string, discord_url: string, telegram_url: string, logo_attachment_id: int|null}>,
+ *   page_entities?: array<int, array{entity_type: string, entity_id: int}>,
+ *   delegator_groups?: array<int, array{id: int, slug: string, url: string, min_stake: string, min_stake_display: string|null, validator: array{id: int, name: string, chain_slug: string, chain_name: string}}>
  * }
  *
  * Already-loaded group data the community-card composer consumes. Both
@@ -302,12 +311,55 @@ final class CardViewService
             ? ($prefetched['validator_logos'][$pageId] ?? null)
             : null;
 
-        return [
+        $operatorProfile = null;
+        if ($kind === 'validator') {
+            if ($prefetched !== null && isset($prefetched['operator_profiles'])) {
+                $operatorProfile = $prefetched['operator_profiles'][$pageId] ?? null;
+            } else {
+                $operators = ClaimRepository::resolveVerifiedOperatorForPages([$pageId]);
+                $operatorProfile = (new OperatorProfileRepository())
+                    ->findPublicForResolvedPages($operators)[$pageId] ?? null;
+            }
+        }
+        $operatorProfileLogo = self::operatorProfileLogoUrl($operatorProfile);
+
+        // ⛔⛔ A VALIDATOR PROFILE SHOWS THE CURRENT MONIKER.
+        //
+        // $name above is post_title, which ValidatorPageMinter writes ONCE
+        // and nothing resyncs - there is no wp_update_post anywhere in
+        // Domain/Onchain. Measured on production: 61 of 2,906 validator
+        // pages showed a stale name, and some were actively misleading -
+        // one rendered as "Cosmostation" while the operator had renamed
+        // itself "[Shutting down] cosmostation please redelegate".
+        //
+        // ⚠ PAGE IDENTITY IS DELIBERATELY UNTOUCHED. $handle stays
+        // post_name and nothing here writes to wp_posts, so every /v/<slug>
+        // link keeps working across a rename. Freezing the slug is what
+        // makes those links permanent; only the DISPLAY was wrong.
+        //
+        // ⚠ Bundle first, query second, and kind-gated. A list request
+        // carries the prefetched rows, which now include the moniker, so the
+        // directory pays nothing. Only a single-card read falls through to a
+        // query, and only for a validator - a project or creator card must
+        // not pay for a lookup that cannot apply to it.
+        if ($kind === 'validator') {
+            $moniker = is_array($validatorRows)
+                ? (isset($validatorRows[0]->moniker) ? (string) $validatorRows[0]->moniker : null)
+                : ValidatorRepository::findMonikerByPageId($pageId);
+
+            $name = self::preferMoniker($moniker, $name);
+        }
+
+        $card = [
             'id'                  => $pageId,
             'name'                => $name,
             'handle'              => $handle,
             'card_kind'           => $kind,
             'bio'                 => self::resolvePageBio($post),
+            // Validator community branding is separate from chain identity
+            // and from the frozen post title/slug. Unclaimed and ambiguous
+            // pages receive null rather than another operator's profile.
+            'operator_profile'   => self::shapeOperatorProfile($operatorProfile, $operatorProfileLogo),
             'trust_score'         => $trustScore,
             'reputation_tier'     => $tier,
             // v1.57: entity cards now carry the SAME trust vocabulary as
@@ -388,7 +440,7 @@ final class CardViewService
                 $name,
                 'tier',
                 $rep['reputation_tier'],
-                self::resolvePageAvatarUrl($pageId, $validatorRows, $validatorLogo)
+                self::resolvePageAvatarUrl($pageId, $validatorRows, $validatorLogo, $operatorProfileLogo)
             ),
             'stats'               => self::buildPageStats($trustScore, $rm),
             // Where a message to this entity would GO — the frontend
@@ -424,6 +476,81 @@ final class CardViewService
             'links'               => self::buildLinks($kind, $handle),
             'actions'             => self::buildPageActions($kind, $pageId, $prefetched),
         ];
+
+        // ⚠⚠ §4.32 ANNOUNCEMENTS — THE KEY WHOSE PRESENCE IS THE FEATURE GATE.
+        //
+        // The frontend mounts BOTH announcement surfaces on `announcements
+        // != null` and nothing else: no client flag, no env var. Without this
+        // block the bar and the tab render nothing and issue no requests, which
+        // is the correct fail-closed state but also makes the feature
+        // unreachable however many routes are live.
+        //
+        // ⚠ THE KEY IS OMITTED ENTIRELY WHEN THE BLOCK IS NULL, never emitted
+        // as null. `forOwnerScope()` returns null only when the switch is off,
+        // and its own docblock states the contract: "an emitted-but-denied
+        // block would make the client mount the surface and issue requests that
+        // are all going to 404. The caller omits the key entirely on null."
+        // A non-operator still gets the block, with both entries denied
+        // `not_claimer` — the public bar must render for everyone.
+        //
+        // Validator-only: announcements are a validator-page feature, and
+        // `decide()` answers `not_a_validator_page` for anything else, so
+        // calling it for a builder or nft card would do work to reach null.
+        if ($kind === 'validator') {
+            $operatorDecision = ValidatorPageOperatorAuthority::decide($pageId, $viewerId);
+
+            $announcements = AnnouncementCapabilityResolver::forOwnerScope(
+                $operatorDecision,
+                AnnouncementFeature::isEnabled()
+            );
+            if ($announcements !== null) {
+                // `has_any` exists so the page can reserve the bar's height
+                // before the client fetch resolves. Without it the bar sits
+                // at the very top with nothing rendered, then inserts itself
+                // and displaces the heading and everything below.
+                //
+                // ⚠ DETAIL PATH ONLY. `getPageCardForList()` loops this
+                // method once per card, so computing it there would add a
+                // query per validator card in the directory grid — and the
+                // grid never renders the bar, so it would buy nothing. The
+                // key is therefore ABSENT on the list path, which is the same
+                // additive-optional convention as the block that holds it;
+                // the client reserves nothing when it is absent.
+                //
+                // ⚠ Fails to FALSE, deliberately. A read failure must not
+                // reserve a blank strip at the top of every page — false
+                // degrades to the pre-existing behaviour (a shift only where
+                // announcements exist), while true would introduce a gap on
+                // the pages that have none, which is most of them.
+                if ($prefetched === null) {
+                    try {
+                        $announcements['has_any'] = (new AnnouncementRepository())
+                            ->hasActive((int) $pageId);
+                    } catch (\Throwable) {
+                        $announcements['has_any'] = false;
+                    }
+                }
+
+                $card['announcements'] = $announcements;
+            }
+
+            // The page stream. Its key is what mounts the public feed, so it
+            // must NOT sit behind the announcements switch above. `can_post`
+            // comes from the one decision this card resolves.
+            $card['page_stream'] = [
+                'can_post' => $operatorDecision['decision'] === ValidatorPageOperatorAuthority::DECISION_OPERATOR,
+            ];
+            // Shares the decision above and the batched rows, so a list surface
+            // pays no per-card query for this block.
+            $card['delegator_group'] = DelegatorGroupView::forCard(
+                $pageId,
+                $operatorDecision['decision'] === ValidatorPageOperatorAuthority::DECISION_OPERATOR,
+                $validatorRows,
+                $prefetched['delegator_groups'] ?? null
+            );
+        }
+
+        return $card;
     }
 
     /**
@@ -517,6 +644,27 @@ final class CardViewService
             'volatile'                 => false,
             'unresolved_claims_count'  => $activeCount,
         ];
+    }
+
+    /**
+     * Resolve a member-card handle to a user id, for a CALLER THAT MUST
+     * GATE on the same user this service will render.
+     *
+     * ⚠⚠ EXISTS SO THE GATE AND THE PAYLOAD CANNOT DISAGREE, and that is
+     * not hypothetical. This service's `resolveHandle()` matches ONLY the
+     * `bcc_handle` meta, whereas {@see UserSlugResolver::resolve()} also
+     * falls back to `user_login` and then to a sluggified
+     * `user_nicename`. The two therefore resolve DIFFERENT sets: a legacy
+     * account with no `bcc_handle` resolves through UserSlugResolver and
+     * not through this one. A gate built on the other resolver would
+     * judge one user's privacy and then render — or 404 — a different
+     * one, which is how a gate ends up protecting the wrong person.
+     *
+     * @see \BCC\Trust\Core\REST\CardsEndpoint::handle()
+     */
+    public static function resolveMemberCardHandle(string $handle): int
+    {
+        return self::resolveHandle($handle);
     }
 
     /**
@@ -658,6 +806,10 @@ final class CardViewService
             // §K3 — chains is page-only. Always null on member cards
             // for shape uniformity.
             'chains'              => null,
+            // Operator branding is validator-page-only. Always null here
+            // for shape uniformity (§2.9 envelope: the key is always
+            // present, so a client never sees undefined vs null).
+            'operator_profile'   => null,
             // §N8 — members are always claimed (a wp_user exists by
             // being on the platform). WANTED corner stamp targets
             // unclaimed page entities (validator/project/creator); on
@@ -828,6 +980,10 @@ final class CardViewService
             'endorse_unlock_hint' => null,
             'viewer_attestation'  => null,
             'chains'              => null,
+            // Operator branding is validator-page-only. Always null here
+            // for shape uniformity (§2.9 envelope: the key is always
+            // present, so a client never sees undefined vs null).
+            'operator_profile'   => null,
             'is_claimed'          => true,
             // Communities aren't on-chain-claimed — always false, emitted
             // for shape uniformity (mirrors is_claimed above).
@@ -956,6 +1112,16 @@ final class CardViewService
     // Resolution helpers
     // ──────────────────────────────────────────────────────────────────
 
+    /** wp_posts.post_name is varchar(200) — the bound that decides a match. */
+    private const MAX_SLUG_LENGTH = 200;
+
+    /**
+     * A cheapness bound on the raw `:id`, deliberately looser than the slug
+     * bound: the frontend escapes every `%` as `%25`, so the URL spelling of a
+     * 200-character slug can be meaningfully longer than the slug itself.
+     */
+    private const MAX_RAW_CARD_ID_LENGTH = 600;
+
     private static function resolvePagePost(string $id): ?\WP_Post
     {
         if ($id === '') {
@@ -966,7 +1132,11 @@ final class CardViewService
         if (ctype_digit($id)) {
             $post = get_post((int) $id);
         } else {
-            $post = get_page_by_path($id, OBJECT, 'peepso-page');
+            $slug = self::canonicalSlugFor($id);
+            if ($slug === null) {
+                return null;
+            }
+            $post = get_page_by_path($slug, OBJECT, 'peepso-page');
         }
 
         if (!$post instanceof \WP_Post) {
@@ -976,6 +1146,193 @@ final class CardViewService
             return null;
         }
         return $post;
+    }
+
+    /**
+     * The `post_name` this `:id` names, or null when it names nothing we are
+     * willing to look up.
+     *
+     * Applies to the SLUG branch only. The numeric-post_id branch above and
+     * the bcc_handle branch ({@see self::resolveHandle}) are untouched.
+     *
+     * WHY THIS EXISTS. `sanitize_title()` percent-encodes every non-ASCII
+     * character, so a page whose title carries an emoji is stored with a
+     * literal `%f0%9f…` in `post_name` — 126 of the 2,806 peepso-page rows.
+     * Those pages had no reachable URL at all: the route rejected `%`, and the
+     * `id` argument's old `sanitize_text_field` callback STRIPPED the octets
+     * (`bonynode%f0%9f%92%9a-…` became `bonynode-…`), so even a widened
+     * pattern would have resolved a DIFFERENT page rather than 404ing.
+     *
+     * Four checks, in order, each closing something that was measured rather
+     * than supposed:
+     *
+     * 1. A loose bound on the raw id, and a 200 bound on the CANDIDATE. The id
+     *    is not a `post_name`; it is a URL spelling of one, and the frontend
+     *    escapes every `%` as `%25`. Bounding the raw id at 200 left the one
+     *    page whose frontend spelling is 215 characters reachable by a direct
+     *    API call and unreachable through the site.
+     *
+     * 2. A charset floor, because `id` is ALSO reachable through the query
+     *    string and 'GET' outranks 'URL' in
+     *    WP_REST_Request::get_parameter_order() — verified against production,
+     *    where `/cards/validator/ztake-org-cosmos-54at8c?id=mantra-cosmos-uv234h`
+     *    answers with the MANTRA card. So CardsEndpoint::ID_PATTERN bounds only
+     *    the URL spelling and cannot be the whole check.
+     *    CardIdAddressabilityTest pins the two against each other.
+     *
+     * 3. The candidate must be the stored slug after zero or one url-decode
+     *    ({@see self::slugCandidateFor}).
+     *
+     * 4. ⚠⚠ And then the structural check, which is the one canonicality
+     *    cannot do ({@see self::pathSegmentsFor}). `%2f` and `%20` are valid
+     *    octets that `sanitize_title()` calls canonical, but
+     *    get_page_by_path() decodes a SECOND time and gives them structural
+     *    meaning — so `…%252Fadmin` passes every spelling test and then splits
+     *    into two segments, and `…%2520cosmos` is silently rewritten to
+     *    `…-cosmos`. Requiring that core will search for exactly one segment
+     *    AND that it equals the chosen candidate refuses both.
+     *
+     * Measured across all 2,806 peepso-page rows, in BOTH the stored and the
+     * frontend spelling: 0 unreachable, 0 resolved to a slug other than their
+     * own. Re-derived against WordPress 7.0.2 and 7.1.4 (production's version)
+     * with byte-identical results.
+     *
+     * ⚠ Accepted consequence: `%7A` for `z` and `%2d` for `-` still resolve the
+     * page they spell, so one page can have more than one URL. That is
+     * ordinary percent-encoding transparency — core's own get_page_by_path()
+     * has behaved this way for every page on the site since long before this
+     * route existed — and it names no page the caller did not name.
+     *
+     * ⚠ Deliberate non-goal: nothing here rewrites or re-slugs stored data,
+     * and no redirect is issued.
+     *
+     * ⚠ A raw, unencoded UTF-8 id is refused by the charset floor. On the URL
+     * path that is no change — the route rejected it before. On the query
+     * string the position is narrower than it looks and is NOT claimed here as
+     * "no change": real core (7.0.2 and 7.1.4 alike) would resolve a raw-UTF-8
+     * `?id=`, yet production does not — a 2-byte character comes back
+     * `bcc_invalid_request`, meaning `sanitize_text_field` returned empty, so
+     * the bytes reaching the handler were not valid UTF-8. Non-ASCII does not
+     * survive production's query string today, so nothing that works is lost;
+     * the mechanism was not pinned down from outside and is not asserted here.
+     */
+    private static function canonicalSlugFor(string $id): ?string
+    {
+        // Cheapness only. The bound that matters is on the CANDIDATE below, not
+        // on the URL spelling: the frontend escapes every `%` as `%25`, so a
+        // 200-character `post_name` can legitimately arrive as a longer id.
+        // Measured over all 2,806 peepso-page rows: the longest frontend
+        // spelling is 215 characters, and a 200-cap here made the one page
+        // behind it unreachable through the site while a direct API call with
+        // its stored slug still worked.
+        if ($id === '' || strlen($id) > self::MAX_RAW_CARD_ID_LENGTH) {
+            return null;
+        }
+
+        // The charset floor. Repeats CardsEndpoint::ID_PATTERN because `id` is
+        // ALSO reachable through the query string, which outranks the URL
+        // segment, so the route pattern cannot be the only check.
+        if (preg_match('/\A[A-Za-z0-9%][A-Za-z0-9_%-]*\z/D', $id) !== 1) {
+            return null;
+        }
+
+        // An id with no `%` is exactly what the pre-change pattern already
+        // admitted, and it is returned UNTOUCHED — behaviour unchanged by
+        // construction. The structural check below is deliberately skipped
+        // here, and skipping it is safe rather than convenient: on this
+        // charset `urldecode()` and `rawurlencode()` are both the identity,
+        // there is no `%2F` or `%20` for core to reinterpret, and so core
+        // always searches exactly one segment. Running the check anyway would
+        // REFUSE an uppercase ASCII slug, because core lowercases it at lookup
+        // time and the result would stop equalling the candidate — a URL that
+        // works today.
+        if (!str_contains($id, '%')) {
+            return strlen($id) > self::MAX_SLUG_LENGTH ? null : $id;
+        }
+
+        $candidate = self::slugCandidateFor($id);
+
+        // wp_posts.post_name is varchar(200), so a longer candidate cannot
+        // match a row (§2 bounded reads).
+        if ($candidate === null || $candidate === '' || strlen($candidate) > self::MAX_SLUG_LENGTH) {
+            return null;
+        }
+
+        // ⚠⚠ THE BINDING CHECK, and canonicality is not a substitute for it.
+        // get_page_by_path() decodes AGAIN and gives `%2F` and `%20` structural
+        // meaning, so a candidate that `sanitize_title()` calls canonical can
+        // still be re-interpreted: `%2f` IS a valid octet, so the
+        // double-encoded `…%252Fadmin` passes every spelling test above and
+        // then splits into `bonynode` + `admin`, sending core off to walk post
+        // ancestry. Canonicality bounds SPELLING; it does not bound STRUCTURE.
+        //
+        // So do not restate core's rules — replay them, and require that what
+        // core will actually search for is exactly one segment AND is the
+        // candidate we chose. Anything core would rewrite or split is refused.
+        if (self::pathSegmentsFor($candidate) !== [$candidate]) {
+            return null;
+        }
+
+        return $candidate;
+    }
+
+    /**
+     * The `post_name` this id names, before the structural check.
+     *
+     * Only ever called for an id containing `%`; the percent-free case returns
+     * earlier, untouched. Two spellings are legitimate because two kinds of
+     * caller exist: the id may BE `post_name` with its octets intact (a direct
+     * API caller echoing it back), or `post_name` percent-escaped once (this
+     * project's frontend — Next hands `params.slug` the normalized but still-
+     * encoded path segment, and `cardEntityPath()` then applies
+     * `encodeURIComponent`).
+     */
+    private static function slugCandidateFor(string $id): ?string
+    {
+        $lower = strtolower($id);
+
+        // Spelling 1 — the id IS the stored slug, octets intact.
+        if (sanitize_title(rawurldecode($lower)) === $lower) {
+            return $lower;
+        }
+
+        // Spelling 2 — the stored slug escaped ONCE, which is what the
+        // frontend sends: `/v/bonynode%f0%9f%92%9a-…` arrives here as
+        // `bonynode%25F0%259F%2592%259A-…`.
+        $decoded = strtolower(rawurldecode($id));
+        if ($decoded !== '' && sanitize_title($decoded) === $decoded) {
+            return $decoded;
+        }
+
+        return null;
+    }
+
+    /**
+     * The `post_name` values get_page_by_path() will actually search for.
+     *
+     * A verbatim replay of its normalization prefix (wp-includes/post.php) —
+     * byte-identical in WordPress 7.0.2 and 7.1.4, both checked. Kept as a
+     * replay rather than a summary so it tracks core instead of restating a
+     * conclusion about it.
+     *
+     * @return list<string>
+     */
+    private static function pathSegmentsFor(string $path): array
+    {
+        $path = rawurlencode(urldecode($path));
+        $path = str_replace('%2F', '/', $path);
+        $path = str_replace('%20', ' ', $path);
+
+        // ⚠ Not `array_map('sanitize_title_for_query', …)`. A string callable is
+        // always resolved in the GLOBAL namespace, so the string form cannot be
+        // substituted in a test and would fatal in the unit suite, which runs
+        // with no WordPress. The closure resolves in THIS namespace, which is
+        // also what lets CardIdAddressabilityTest hand it recorded real-core
+        // values instead of a reimplementation.
+        return array_map(
+            static fn (string $part): string => sanitize_title_for_query($part),
+            explode('/', trim($path, '/'))
+        );
     }
 
     private static function resolveHandle(string $handle): int
@@ -1328,17 +1685,67 @@ final class CardViewService
     }
 
     /**
-     * Resolve a peepso-page's avatar URL — PeepSoPagePhoto first, post
-     * thumbnail second. Empty string when neither resolves; the
-     * frontend renders the initials monogram fallback in that case.
+     * @param array{brand_name: string, bio: string, website_url: string, x_url: string, discord_url: string, telegram_url: string, logo_attachment_id: int|null}|null $profile
+     */
+    private static function operatorProfileLogoUrl(?array $profile): ?string
+    {
+        $attachmentId = $profile['logo_attachment_id'] ?? null;
+        if (!is_int($attachmentId) || $attachmentId <= 0) {
+            return null;
+        }
+
+        // ⚠ BOUNDED SIZE, NOT 'full'. BlogCoverImageWriter accepts up to
+        // 8 MiB and 24 million pixels, and this URL is rendered on every
+        // validator card including directory grids — 'full' shipped the
+        // original to each one. 'medium' matches the card-avatar
+        // convention (resolvePageAvatarUrl uses 'thumbnail') and
+        // wp_get_attachment_image_url falls back to the full URL when the
+        // intermediate size is missing, so nothing breaks for an image
+        // uploaded before this size existed.
+        $url = wp_get_attachment_image_url($attachmentId, 'medium');
+        return is_string($url) && $url !== '' ? $url : null;
+    }
+
+    /**
+     * @param array{brand_name: string, bio: string, website_url: string, x_url: string, discord_url: string, telegram_url: string, logo_attachment_id: int|null}|null $profile
+     * @return array{brand_name: string, bio: string, website_url: string, socials: array{x: string, discord: string, telegram: string}, logo_url: string|null}|null
+     */
+    private static function shapeOperatorProfile(?array $profile, ?string $logoUrl): ?array
+    {
+        if ($profile === null) {
+            return null;
+        }
+
+        return [
+            'brand_name'  => $profile['brand_name'],
+            'bio'         => $profile['bio'],
+            'website_url' => $profile['website_url'],
+            'socials'     => [
+                'x'        => $profile['x_url'],
+                'discord'  => $profile['discord_url'],
+                'telegram' => $profile['telegram_url'],
+            ],
+            'logo_url'    => $logoUrl,
+        ];
+    }
+
+    /**
+     * Resolve a peepso-page's avatar URL — page upload, shared operator
+     * branding, then the chain-imported logo. Empty string when none
+     * resolves; the frontend renders the initials monogram fallback.
      *
      * `$validatorRows` (when non-null) is the page's slice of the
      * PageCardPrefetcher batch — its first row's logo_url replaces the
-     * findLogoByPageId query in step 3.
+     * findLogoByPageId query in the final step.
      *
      * @phpstan-param list<ValidatorCardRow>|null $validatorRows
      */
-    private static function resolvePageAvatarUrl(int $pageId, ?array $validatorRows = null, ?string $batchedValidatorLogo = null): string
+    private static function resolvePageAvatarUrl(
+        int $pageId,
+        ?array $validatorRows = null,
+        ?string $batchedValidatorLogo = null,
+        ?string $operatorProfileLogo = null
+    ): string
     {
         // 1. PeepSo page avatar (manual upload).
         if (class_exists('PeepSoPagePhoto')) {
@@ -1358,7 +1765,13 @@ final class CardViewService
             return $thumb;
         }
 
-        // 3. Auto-imported validator logo (self-hosted). Lowest precedence,
+        // 3. Shared operator branding. A page-specific upload above wins;
+        // one account logo then carries consistently across its chains.
+        if ($operatorProfileLogo !== null && $operatorProfileLogo !== '') {
+            return $operatorProfileLogo;
+        }
+
+        // 4. Auto-imported validator logo (self-hosted). Lowest precedence,
         //    so a claimer/manual image above always overrides it.
         if ($validatorRows !== null) {
             $first = $validatorRows[0] ?? null;
@@ -1380,7 +1793,7 @@ final class CardViewService
             return $logo;
         }
 
-        // 4. Empty → frontend renders the initials monogram fallback.
+        // 5. Empty → frontend renders the initials monogram fallback.
         return '';
     }
 
@@ -1553,6 +1966,25 @@ final class CardViewService
             'can_stand_behind' => self::attestationPermToCardPerm($attestationPerms['can_stand_behind']),
             'can_report'       => self::attestationPermToCardPerm($attestationPerms['can_report']),
         ];
+
+        // UNCLAIMED page (post_author 0 — nobody has claimed it yet): vouch,
+        // back and report are structurally unavailable, for EVERY viewer,
+        // anon included. The cast write refuses the same target
+        // (AttestationService::checkCastEligibility → resolveTargetOwnerUserId
+        // reads the same post_author → 404), so offering the action only
+        // produced a button whose write always failed. Hidden per §N7 (no
+        // hint); `unclaimed` tells the client WHY, so it can show Message
+        // in its place. Decided here, not in getViewerActionPermissions():
+        // that resolver treats target 0 as "viewer gates only" for the
+        // endorse gate (EndorsementService::resolveViewerVouchGate).
+        if ($pageOwnerUserId <= 0) {
+            $unclaimed = ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'unclaimed'];
+            $attestationFields = [
+                'can_vouch'        => $unclaimed,
+                'can_stand_behind' => $unclaimed,
+                'can_report'       => $unclaimed,
+            ];
+        }
 
         if ($viewerId <= 0) {
             // Legacy permissions stay in their existing locked shape;
@@ -1882,19 +2314,34 @@ final class CardViewService
     }
 
     /**
+     * Forwarder. The shape itself now lives in
+     * {@see \BCC\Trust\Core\Support\Permission}, because
+     * `docs/pattern-registry.md` names THIS method as the canonical
+     * producer while `private` kept every other consumer from reaching
+     * it -- so the triple got open-coded in fourteen files instead. The
+     * forwarder is kept so the registry entry still resolves and so the
+     * 28 call sites in this file need no edit.
+     *
      * @return Permission
      */
     private static function allow(): array
     {
-        return ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
+        return PermissionShape::allow();
     }
 
     /**
+     * Forwarder -- see {@see self::allow()}.
+     *
+     * WARNING: the argument order is INVERTED relative to
+     * `Permission::deny()`, which takes the reason code first because it
+     * is the required one. Kept as-is here so this file 28 call sites
+     * are untouched; a reader comparing the two should expect the swap.
+     *
      * @return Permission
      */
     private static function deny(?string $unlockHint, string $reasonCode): array
     {
-        return ['allowed' => false, 'unlock_hint' => $unlockHint, 'reason_code' => $reasonCode];
+        return PermissionShape::deny($reasonCode, $unlockHint);
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -2008,5 +2455,28 @@ final class CardViewService
                 'requires_auth' => true,
             ],
         ];
+    }
+    /**
+     * Choose the display name: the current moniker, else the stored title.
+     *
+     * ⭐ PURE ON PURPOSE. The bundle-or-query decision stays at the call
+     * site so this - the part with the actual rule in it - is unit-testable
+     * with no database, no WordPress and no fixtures.
+     *
+     * ⚠ A BLANK MONIKER IS NOT A NAME. Trimmed-empty, whitespace-only and
+     * null all fall back, so a page whose validator row has never been
+     * enriched keeps the title it was minted with rather than rendering
+     * nameless. Production carries monikers with real leading whitespace
+     * (' polkachu.com'), which is why the trim is on the value that gets
+     * DISPLAYED and not only on the emptiness test.
+     *
+     * ⚠ The fallback is returned UNTRIMMED, exactly as stored, so this
+     * cannot change what a non-validator card or an un-enriched page shows.
+     */
+    public static function preferMoniker(?string $moniker, string $fallback): string
+    {
+        $moniker = $moniker === null ? '' : trim($moniker);
+
+        return $moniker !== '' ? $moniker : $fallback;
     }
 }

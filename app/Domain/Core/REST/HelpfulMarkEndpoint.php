@@ -38,6 +38,7 @@ namespace BCC\Trust\Core\REST;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\GroupInteractionGate;
+use BCC\Trust\Core\Support\NoReactionsGate;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -157,6 +158,22 @@ final class HelpfulMarkEndpoint
             return $gateError;
         }
 
+        // An announcement takes no engagement at all (contract §4.32.15),
+        // and THIS endpoint is the reputation-bearing one: a helpful mark
+        // mints rank evidence crediting the CONTENT AUTHOR, so leaving it
+        // open would let an announcement move its own operator standing.
+        //
+        // Keyed on the POST act in both branches. For $isComment the id is
+        // a comment id, and announcement comments are a separate system
+        // (A5) that projects no activity — so the lookup finds no module
+        // and the gate correctly declines to interfere. Passing it anyway
+        // keeps one call site instead of two and cannot false-positive:
+        // NoReactionsGate only refuses a module it can resolve.
+        $noReactions = NoReactionsGate::check($actId);
+        if ($noReactions !== null) {
+            return $noReactions;
+        }
+
         $repo = Plugin::instance()->helpfulMarkRepository();
 
         if ($isAdd) {
@@ -202,6 +219,7 @@ final class HelpfulMarkEndpoint
             return ApiResponse::error('bcc_not_found', 'Comment not found.', 404);
         }
 
-        return GroupInteractionGate::checkPost($userId, (int) $meta->parent_post_id);
+        // Same message as the unknown-comment 404 above (secret-group oracle).
+        return GroupInteractionGate::checkPost($userId, (int) $meta->parent_post_id, 'Comment not found.');
     }
 }

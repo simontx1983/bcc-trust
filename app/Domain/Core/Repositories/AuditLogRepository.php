@@ -156,42 +156,28 @@ class AuditLogRepository {
     public function getRecentActions( int $userId, int $days = 30 ): array {
         global $wpdb;
 
-        return $wpdb->get_results( $wpdb->prepare(
+        // Bounded (F-128): this had no LIMIT, so a very active account
+        // loaded its whole month of audit rows into PHP on every behaviour
+        // analysis. Keep the MOST RECENT rows (DESC + LIMIT), then return
+        // them oldest-first as before — callers walk them chronologically.
+        /** @var list<ActivityActionRow> $rows */
+        $rows = $wpdb->get_results( $wpdb->prepare(
             "SELECT created_at, action
              FROM {$this->table}
              WHERE user_id = %d
-               AND created_at > DATE_SUB(NOW(), INTERVAL %d DAY)
-             ORDER BY created_at ASC",
-            $userId,
-            $days
-        ) );
-    }
-
-    /**
-     * Get browsing + voting actions for a user (page_view, vote_up, vote_down, page_visit).
-     *
-     * @param int $userId
-     * @param int $days
-     * @param int $limit
-     * @return object[]
-     * @phpstan-return list<ActivityBrowsingRow>
-     */
-    public function getBrowsingAndVotingActions( int $userId, int $days = 30, int $limit = 200 ): array {
-        global $wpdb;
-
-        return $wpdb->get_results( $wpdb->prepare(
-            "SELECT action, target_id, created_at
-             FROM {$this->table}
-             WHERE user_id = %d
-               AND action IN ('page_view', 'vote_up', 'vote_down', 'page_visit')
                AND created_at > DATE_SUB(NOW(), INTERVAL %d DAY)
              ORDER BY created_at DESC
              LIMIT %d",
             $userId,
             $days,
-            $limit
+            self::RECENT_ACTIONS_CAP
         ) );
+
+        return array_reverse( $rows );
     }
+
+    /** Max audit rows one behaviour analysis reads (most recent first). */
+    public const RECENT_ACTIONS_CAP = 5000;
 
     /**
      * Get weekly activity summary for a user over the last N days.
@@ -218,25 +204,10 @@ class AuditLogRepository {
         ) );
     }
 
-    /**
-     * Count vote actions for a user within a time window.
-     *
-     * @param int $userId
-     * @param int $minutes Lookback window in minutes.
-     * @return int
-     */
-    public function countRecentVoteActions( int $userId, int $minutes ): int {
-        global $wpdb;
-
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM {$this->table}
-             WHERE user_id = %d
-             AND action IN ('vote_up', 'vote_down')
-             AND created_at > (UTC_TIMESTAMP() - INTERVAL %d MINUTE)",
-            $userId,
-            $minutes
-        ) );
-    }
+    // countRecentVoteActions() removed (F-102): it counted 'vote_up' /
+    // 'vote_down' audit rows, which nothing writes, so rapid-vote detection
+    // was always 0. FraudDetector::detectRapidVoting() now counts the votes
+    // table via VoteRepository::countByVoterSince().
 
     /**
      * Count distinct users sharing an IP address (excluding a given user) within a time window.

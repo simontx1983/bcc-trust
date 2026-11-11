@@ -25,6 +25,25 @@ use BCC\Trust\Tests\Integration\MysqliWpdb;
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/MysqliWpdb.php';
 
+// WP core row-format constants for `$wpdb->get_results()`.
+//
+// ⚠ ADDED FOR S9b, AND THEY CLOSE A REAL FIDELITY GAP. A dozen production
+// repositories pass `ARRAY_A`, and `SHOW CREATE TABLE` is read as `ARRAY_N`.
+// `MysqliWpdb::get_results()` took only `$sql` until now, and PHP silently
+// IGNORES a surplus argument to a user-defined method — so those calls were
+// not erroring, they were quietly getting objects here and arrays in
+// production. The double now honours the argument, and these are the names
+// it is passed by. WordPress's own values are these exact strings.
+if (!defined('OBJECT')) {
+    define('OBJECT', 'OBJECT');
+}
+if (!defined('ARRAY_A')) {
+    define('ARRAY_A', 'ARRAY_A');
+}
+if (!defined('ARRAY_N')) {
+    define('ARRAY_N', 'ARRAY_N');
+}
+
 // Point ABSPATH at a tiny stub tree so the schema installers'
 // `require_once ABSPATH . 'wp-admin/includes/upgrade.php'` resolves to an empty
 // file (dbDelta is stubbed below) instead of pulling in WordPress core.
@@ -144,6 +163,44 @@ if (!function_exists('get_option')) {
             $GLOBALS['__bcc_test_options'][$key] = $value;
         }
         return true;
+    }
+
+    /**
+     * ⚠ DELIBERATELY WRITES THROUGH TO THE REAL `wp_options` TABLE.
+     *
+     * The other three stubs above are array-backed, but this bootstrap also
+     * creates a genuine `wp_options` (see the rate-limiter note below), and
+     * the scanner-schema drop migration reads the option NAMES it sweeps
+     * straight out of `{$wpdb->options}` with a LIKE, then deletes each one
+     * through `delete_option()`. An array-only stub would let that sweep
+     * report success while every row it was meant to remove stayed in the
+     * table — the sweep would be structurally untestable.
+     *
+     * So this deletes from both representations, which is also the only way
+     * the two cannot disagree. Nothing called `delete_option()` in the
+     * integration suite before this, so there is no prior behaviour to change.
+     *
+     * @see bcc_trust_drop_scanner_schema()
+     */
+    function delete_option(string $key): bool
+    {
+        $existed = isset($GLOBALS['__bcc_test_options'][$key]);
+        unset($GLOBALS['__bcc_test_options'][$key]);
+
+        global $wpdb;
+        // NOT `instanceof wpdb` - the integration harness runs on the
+        // MysqliWpdb double, which is deliberately not a subclass.
+        if (is_object($wpdb) && isset($wpdb->options)) {
+            $deleted = $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$wpdb->options} WHERE option_name = %s",
+                $key
+            ));
+            if (is_int($deleted) && $deleted > 0) {
+                return true;
+            }
+        }
+
+        return $existed;
     }
     // ── PR 7.2: the i18n surface an operator-facing service reaches for ──
     //
@@ -314,8 +371,14 @@ require_once dirname(__DIR__, 2) . '/includes/config.php';
 // CU counter has rolled over. Returning a full datetime here made that
 // comparison NEVER match, so every increment looked like a new day.
 if (!function_exists('current_time')) {
-    /** @return string|int */
-    function current_time(string $type, int $gmt = 0)
+    /**
+     * `$gmt` is `int|bool` as in core WordPress: strict-typed callers
+     * (RankPendingRepository::resolve passes `true`) TypeError against an
+     * `int`-only stub.
+     *
+     * @return string|int
+     */
+    function current_time(string $type, int|bool $gmt = 0)
     {
         if ($type === 'timestamp' || $type === 'U') {
             return time();
@@ -521,6 +584,18 @@ if (!function_exists('wp_cache_get')) {
      */
     function wp_cache_add($key, $value, string $group = '', int $expire = 0): bool
     {
+        // ⚠ Injectable write failure. A real external object cache can refuse
+        // a write (backend down, memory pressure, connection reset), and the
+        // production fallbacks that exist for exactly that are otherwise
+        // UNREACHABLE from a test: with the honest stub below, wp_cache_add
+        // only fails when the key already exists, in which case wp_cache_incr
+        // succeeds and the transient branch never runs.
+        //
+        // Default is off, so every existing suite takes the same path it took
+        // before this hook existed.
+        if (!empty($GLOBALS['__bcc_test_object_cache_write_fails'])) {
+            return false;
+        }
         if (isset($GLOBALS['__bcc_test_object_cache'][$group][$key])) {
             return false;
         }
@@ -539,6 +614,9 @@ if (!function_exists('wp_cache_get')) {
      */
     function wp_cache_incr($key, int $offset = 1, string $group = '')
     {
+        if (!empty($GLOBALS['__bcc_test_object_cache_write_fails'])) {
+            return false;   // see wp_cache_add() for why this hook exists
+        }
         if (!isset($GLOBALS['__bcc_test_object_cache'][$group][$key])) {
             return false;
         }
@@ -550,10 +628,23 @@ if (!function_exists('wp_cache_get')) {
      * per-request and needs none). The in-memory store above is NOT an
      * external object cache, so answering false is the honest answer and
      * keeps the branch that runs here the same one a plain WP install takes.
+     *
+     * ⚠ FALSE REMAINS THE DEFAULT, deliberately: staging has no
+     * object-cache.php, so false is what this deployment actually does, and
+     * every suite written before this hook keeps the branch it was written
+     * against.
+     *
+     * A test may set $GLOBALS['__bcc_test_ext_object_cache'] = true to
+     * exercise the OTHER branch. That matters because the
+     * object-cache-then-transient fallback in PushMetrics is the pattern the
+     * vote-ring storage proposal copies, and half of it — the half that runs
+     * on a host WITH a persistent cache — cannot be reached at all while this
+     * function is a hard-coded false. A fallback whose preferred path is
+     * never executed in any test is not a tested fallback.
      */
     function wp_using_ext_object_cache(): bool
     {
-        return false;
+        return !empty($GLOBALS['__bcc_test_ext_object_cache']);
     }
 }
 
@@ -564,6 +655,10 @@ bcc_trust_create_content_reports_table();
 
 require_once dirname(__DIR__, 2) . '/includes/database/schema-stokes.php';
 bcc_trust_create_stokes_table();
+
+// Apprentice confirmation clock — RankPendingRestartIntegrationTest (F-71).
+require_once dirname(__DIR__, 2) . '/includes/database/schema-rank-pending.php';
+bcc_trust_create_rank_pending_table();
 
 // WordPress core wp_options (the rate limiter is option-backed via $wpdb->options).
 $GLOBALS['wpdb']->query(
@@ -624,6 +719,7 @@ $created = $GLOBALS['wpdb']->query(
         ID BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         post_title VARCHAR(255) NOT NULL DEFAULT '',
         post_name VARCHAR(200) NOT NULL DEFAULT '',
+        post_content LONGTEXT NULL,
         post_type VARCHAR(20) NOT NULL DEFAULT 'post',
         post_status VARCHAR(20) NOT NULL DEFAULT 'publish',
         PRIMARY KEY (ID),
@@ -705,6 +801,22 @@ require_once dirname(__DIR__, 2) . '/includes/database/schema-completion.php';
 require_once dirname(__DIR__, 2) . '/includes/database/schema-wallets.php';
 bcc_onchain_create_wallet_links_table();
 
+// Shared operator branding plus optional per-validator-page overrides.
+//
+// Required here rather than fixtured per-test so the REAL installer builds
+// the REAL schema: `bio TEXT NOT NULL` carries no default (MySQL forbids one
+// on TEXT), so a hand-rolled fixture table with a nullable bio would accept
+// writes that production rejects under STRICT_TRANS_TABLES and the suite
+// would prove the opposite of what it claims.
+//
+// Load order matters: TableRegistry::exists() MEMOIZES its answer per
+// process, so a `false` recorded before these tables exist would make every
+// repository call in the run take the table-missing branch and return
+// empty — silently, with no failure. Creating them during bootstrap means
+// no test can observe the pre-creation state.
+require_once dirname(__DIR__, 2) . '/includes/database/schema-operator-profiles.php';
+bcc_onchain_create_operator_profiles_table();
+
 require_once dirname(__DIR__, 2) . '/includes/database/schema-nft-holdings.php';
 bcc_onchain_create_nft_holdings_table();
 
@@ -719,17 +831,17 @@ bcc_onchain_create_chain_checkpoints_table();
 require_once dirname(__DIR__, 2) . '/includes/database/schema-nft-spam-contracts.php';
 bcc_onchain_create_nft_spam_contracts_table();
 
-require_once dirname(__DIR__, 2) . '/includes/database/schema-cosmwasm-code-families.php';
-bcc_onchain_create_cosmwasm_code_families_table();
+// ⚠ S9b REMOVED THREE require_once LINES HERE, and removing the CREATE calls
+// without them is what turned both integration jobs red on f530bd82:
+// `schema-cosmwasm-code-families.php`, `schema-cosmwasm-contracts.php` and
+// `schema-discovery-runs.php` are deleted, so the bootstrap died on
+// `Failed opening required …` before a single test ran.
+//
+// Nothing re-creates those tables now. `ScannerSchemaDropIntegrationTest`
+// builds its own faithful-enough copies in setUp(), because the migration
+// only ever DROPs them, and drops them again in tearDown().
 
-require_once dirname(__DIR__, 2) . '/includes/database/schema-cosmwasm-contracts.php';
 
-// PR 7A discovery-run ledger. Required here so the integration suite can
-// exercise the real table — uq_active, the claim compare-and-swap and the
-// lease reaper are all database behaviour that a double cannot prove.
-require_once dirname(__DIR__, 2) . '/includes/database/schema-discovery-runs.php';
-bcc_onchain_create_discovery_runs_table();
-bcc_onchain_create_cosmwasm_contracts_table();
 
 // ── Stubs the validator-message-queue worker/repo need ──────────────────────
 if (!function_exists('wp_generate_uuid4')) {

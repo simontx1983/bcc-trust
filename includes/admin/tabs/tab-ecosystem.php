@@ -33,16 +33,36 @@ function bcc_trust_render_ecosystem_tab() {
     $repo   = \BCC\Trust\Core\Plugin::instance()->adminDashboardRepository();
     $days   = isset( $_GET['days'] ) ? max( 1, min( (int) $_GET['days'], 90 ) ) : 7;
     $rollup = $repo->getEcosystemRollup( $days );
+    // `?? true` keeps a cached rollup written by the previous build rendering
+    // exactly as before rather than greeting the operator with a false error.
+    $rollup_ok = ( $rollup['ok'] ?? true ) === true;
     ?>
 
-    <div class="bcc-panel" style="border-left:5px solid #607d8b;">
+    <?php if ( ! $rollup_ok ) : ?>
+        <?php // ⚠ This panel is a JOURNAL: an operator reads it for sustained
+              // patterns and treats a quiet week as good news. Five reads feed
+              // it, and a failed one used to arrive as an empty section
+              // indistinguishable from a genuinely quiet window — then the
+              // half-empty rollup was CACHED for the TTL, so the quiet week
+              // outlived the fault. Neither happens now. ?>
+        <div class="notice notice-error inline" style="margin:0 0 16px 0;">
+            <p>
+                <strong><?php esc_html_e( 'Part of this journal could not be read.', 'bcc-trust' ); ?></strong>
+                <?php esc_html_e( 'At least one of the five aggregates behind this page did not run, so the sections below are incomplete. A quiet section here is not evidence of a quiet week. The failure is recorded in the application log with the aggregate that failed, and this incomplete result has NOT been cached.', 'bcc-trust' ); ?>
+            </p>
+        </div>
+    <?php endif; ?>
+
+    <div class="bcc-panel" style="border-left:5px solid var(--bcc-border-strong);">
         <h2 style="margin-top:0;">Ecosystem — operator journal</h2>
-        <p style="margin:0;color:#666;">
+        <p style="margin:0;color:var(--bcc-text-secondary);">
             Window: <strong>last <?php echo (int) $rollup['window_days']; ?> days</strong>
             · generated <?php echo esc_html( $rollup['generated_at'] ); ?> UTC
-            · cached up to 5 minutes.
+            <?php // Only a complete rollup is cached, so the claim has to move
+                  // with the verdict rather than always promising a cache. ?>
+            · <?php echo $rollup_ok ? 'cached up to 5 minutes.' : 'not cached (incomplete).'; ?>
         </p>
-        <p style="margin:8px 0 0;color:#666;font-size:13px;">
+        <p style="margin:8px 0 0;color:var(--bcc-text-secondary);font-size:13px;">
             Read this weekly. Notice <em>sustained</em> patterns; ignore single spikes.
             Healthy looks boring.
         </p>
@@ -54,7 +74,7 @@ function bcc_trust_render_ecosystem_tab() {
                 $active = ( $rollup['window_days'] === $w );
             ?>
                 <a href="<?php echo $url; ?>" class="button button-small"
-                   <?php if ( $active ) echo 'style="background:#607d8b;color:#fff;border-color:#455a64;"'; ?>>
+                   <?php if ( $active ) echo 'style="background:var(--bcc-text-muted);color:#fff;border-color:var(--bcc-border-strong);"'; ?>>
                     <?php echo (int) $w; ?>d
                 </a>
             <?php endforeach; ?>
@@ -73,7 +93,7 @@ function bcc_trust_render_ecosystem_tab() {
         <h3 style="margin-top:0;">◇ Slow-ring activity</h3>
 
         <?php if ( (int) $sr['total'] === 0 ): ?>
-            <p style="color:#4caf50;margin:0;">
+            <p style="color:var(--bcc-success);margin:0;">
                 <strong>No rings detected in window.</strong>
                 Detector is running on the weekly cron; an empty week is the
                 healthy default.
@@ -96,7 +116,7 @@ function bcc_trust_render_ecosystem_tab() {
                 </tbody>
             </table>
             <?php if ( $latest !== null ): ?>
-                <p style="margin-top:10px;color:#666;font-size:13px;">
+                <p style="margin-top:10px;color:var(--bcc-text-secondary);font-size:13px;">
                     Latest slow-ring detection:
                     <?php echo esc_html( $latest['detected_at'] ?? '—' ); ?>
                     <?php if ( $latest['size'] !== null ): ?>
@@ -146,7 +166,7 @@ function bcc_trust_render_ecosystem_tab() {
         <h3 style="margin-top:0;">◇ Dispute-flow health</h3>
 
         <?php if ( $totalOpened === 0 && $totalResolved === 0 ): ?>
-            <p style="color:#666;margin:0;">No disputes in window — quiet floor.</p>
+            <p style="color:var(--bcc-text-secondary);margin:0;">No disputes in window — quiet floor.</p>
         <?php else: ?>
             <p style="margin:0 0 8px;">
                 <strong><?php echo $totalOpened; ?></strong> opened ·
@@ -181,7 +201,7 @@ function bcc_trust_render_ecosystem_tab() {
                 </span>
             </p>
 
-            <p style="margin-top:10px;font-size:13px;color:#777;">
+            <p style="margin-top:10px;font-size:13px;color:var(--bcc-text-muted);">
                 Disputes are decided by open community voting on the poll
                 engine (Rank Phase 6). Per-poll tallies and quorum progress
                 stay sealed until closure — inspect closed polls via the
@@ -216,7 +236,7 @@ function bcc_trust_render_ecosystem_tab() {
                     <tr>
                         <td style="padding:3px 0;width:90px;"><?php echo esc_html( $r['label'] ); ?></td>
                         <td style="padding:3px 0;">
-                            <div style="height:8px;background:#eee;border-radius:4px;overflow:hidden;">
+                            <div style="height:8px;background:var(--bcc-bg-code);border-radius:4px;overflow:hidden;">
                                 <div style="width:<?php echo $pct; ?>%;height:100%;background:<?php echo esc_attr( $r['color'] ); ?>;"></div>
                             </div>
                         </td>
@@ -225,7 +245,7 @@ function bcc_trust_render_ecosystem_tab() {
                 <?php endforeach; ?>
             </tbody>
         </table>
-        <p style="margin-top:8px;font-size:13px;color:#777;">
+        <p style="margin-top:8px;font-size:13px;color:var(--bcc-text-muted);">
             Week-over-week tier movement deltas are deferred to a follow-up — they
             need a prior-period snapshot store. Current state shown above; track
             stability by reading this tab on a weekly cadence.
@@ -242,14 +262,14 @@ function bcc_trust_render_ecosystem_tab() {
     ?>
     <div class="bcc-panel">
         <h3 style="margin-top:0;">◇ Watch-graph activity</h3>
-        <p style="margin:0;color:#777;font-size:12px;">
+        <p style="margin:0;color:var(--bcc-text-muted);font-size:12px;">
             Operator-only. NEVER shown publicly. Capped at 5. This list is
             <em>not</em> a leaderboard — it's a celebrity-gravity early-warning
             surface (Phase 4 audit constraint).
         </p>
 
         <?php if ( $newPulls === 0 ): ?>
-            <p style="color:#666;margin:10px 0 0;">No new pulls in window — quiet floor.</p>
+            <p style="color:var(--bcc-text-secondary);margin:10px 0 0;">No new pulls in window — quiet floor.</p>
         <?php else: ?>
             <p style="margin:10px 0;">
                 <strong><?php echo $newPulls; ?></strong> new Keep-Tabs actions in window.
@@ -268,14 +288,14 @@ function bcc_trust_render_ecosystem_tab() {
                                 <td style="padding:3px 0;text-align:right;">
                                     <strong>+<?php echo (int) $g['gained']; ?></strong>
                                     <?php if ( $flagCelebrity ): ?>
-                                        <span style="color:#ff9800;font-size:11px;margin-left:6px;">monitor</span>
+                                        <span style="color:var(--bcc-warning);font-size:11px;margin-left:6px;">monitor</span>
                                     <?php endif; ?>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
                     </tbody>
                 </table>
-                <p style="margin-top:8px;font-size:13px;color:#777;">
+                <p style="margin-top:8px;font-size:13px;color:var(--bcc-text-muted);">
                     Notice if the same name appears across 4+ consecutive windows.
                     Sustained accumulation differentiates earned standing from
                     manufactured celebrity. Single big weeks are noise.
@@ -307,7 +327,7 @@ function bcc_trust_render_ecosystem_tab() {
     <div class="bcc-panel">
         <h3 style="margin-top:0;">◇ Feed dominance</h3>
         <?php if ( $totalP === 0 ): ?>
-            <p style="color:#666;margin:0;">No posts in window — quiet floor.</p>
+            <p style="color:var(--bcc-text-secondary);margin:0;">No posts in window — quiet floor.</p>
         <?php else: ?>
             <p style="margin:0;">
                 <strong><?php echo $totalP; ?></strong> posts ·
@@ -324,7 +344,7 @@ function bcc_trust_render_ecosystem_tab() {
                 </span>
             </p>
 
-            <p style="margin:10px 0 6px;font-size:13px;color:#777;">By kind:</p>
+            <p style="margin:10px 0 6px;font-size:13px;color:var(--bcc-text-muted);">By kind:</p>
             <table style="width:100%;max-width:520px;">
                 <tbody>
                     <?php
@@ -352,20 +372,20 @@ function bcc_trust_render_ecosystem_tab() {
     // SECTION 6 — Deferred surfaces (honest about gaps)
     // ─────────────────────────────────────────────────────────────────
     ?>
-    <div class="bcc-panel" style="border-left:5px solid #cfd8dc;">
+    <div class="bcc-panel" style="border-left:5px solid var(--bcc-border);">
         <h3 style="margin-top:0;">Surfaces deferred to follow-up passes</h3>
         <table style="width:100%;max-width:760px;">
             <tbody>
                 <tr>
                     <td style="padding:6px 0;width:200px;"><strong>Chain activity</strong></td>
-                    <td style="padding:6px 0;color:#666;">
+                    <td style="padding:6px 0;color:var(--bcc-text-secondary);">
                         Needs page→chain bridge (entity_category → chain_id resolver).
                         Once wired, this surfaces per-chain dispute counts + acceptance rates.
                     </td>
                 </tr>
                 <tr>
                     <td style="padding:6px 0;"><strong>Attention-gravity WoW deltas</strong></td>
-                    <td style="padding:6px 0;color:#666;">
+                    <td style="padding:6px 0;color:var(--bcc-text-secondary);">
                         Needs prior-period snapshot store. Once wired, this surfaces
                         watch-concentration trajectory and the "same name in top-5 for
                         4+ consecutive weeks" celebrity-gravity notice.
@@ -373,7 +393,7 @@ function bcc_trust_render_ecosystem_tab() {
                 </tr>
                 <tr>
                     <td style="padding:6px 0;"><strong>EXTERNAL slot fire rate</strong></td>
-                    <td style="padding:6px 0;color:#666;">
+                    <td style="padding:6px 0;color:var(--bcc-text-secondary);">
                         Needs HighlightStrip fetch-rate instrumentation in the resolver.
                         Once wired, surfaces what fraction of HighlightStrip fetches
                         actually returned an EXTERNAL highlight + dismissal rate by category.
@@ -381,7 +401,7 @@ function bcc_trust_render_ecosystem_tab() {
                 </tr>
             </tbody>
         </table>
-        <p style="margin-top:10px;font-size:12px;color:#777;">
+        <p style="margin-top:10px;font-size:12px;color:var(--bcc-text-muted);">
             These placeholders are intentional — the tab tells the truth about what
             is and isn't wired. Activating each is a one-line change in
             <code>AdminDashboardRepository::getEcosystemRollup</code> when the producer
@@ -394,15 +414,15 @@ function bcc_trust_render_ecosystem_tab() {
     // Operator reading-key footer
     // ─────────────────────────────────────────────────────────────────
     ?>
-    <div class="bcc-panel" style="border-left:5px solid #455a64;background:#fafafa;">
+    <div class="bcc-panel" style="border-left:5px solid var(--bcc-border-strong);background:var(--bcc-bg-card);">
         <h3 style="margin-top:0;">Reading-key</h3>
-        <p style="margin:0;font-size:13px;color:#444;">
+        <p style="margin:0;font-size:13px;color:var(--bcc-text-secondary);">
             <strong>Healthy looks boring.</strong> The civic test: an operator
             should be able to read this tab in 10–15 minutes once a week, leave
             with one intuition about whether the ecosystem is stable, drifting,
             or distorting, and act on at most one signal.
         </p>
-        <ul style="margin:8px 0 0;font-size:13px;color:#555;line-height:1.5;">
+        <ul style="margin:8px 0 0;font-size:13px;color:var(--bcc-text-secondary);line-height:1.5;">
             <li><strong>Sustained patterns</strong> matter; individual spikes do not.</li>
             <li><strong>Trajectory</strong> beats <strong>snapshot</strong> — notice 4+ week trends.</li>
             <li><strong>Soft-flag rings</strong> are for review, not automatic punishment.</li>

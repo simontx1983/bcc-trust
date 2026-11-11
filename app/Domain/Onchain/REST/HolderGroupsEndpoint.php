@@ -54,6 +54,16 @@ final class HolderGroupsEndpoint
 {
     private const ROUTE_NAMESPACE = 'bcc/v1';
 
+    /**
+     * `opted_out[].opt_out_kind` wire values (F-158, contract v1.8X). Shared
+     * with ValidatorGroupsEndpoint so the two listings cannot drift.
+     *   left    — the member left (voluntary, TTL'd); an explicit Join
+     *             overrides it, so the client may offer Join.
+     *   removed — a moderator eviction (permanent); Join is refused.
+     */
+    public const OPT_OUT_KIND_LEFT    = 'left';
+    public const OPT_OUT_KIND_REMOVED = 'removed';
+
     public static function register(): void
     {
         $instance = new self();
@@ -221,6 +231,13 @@ final class HolderGroupsEndpoint
             }
 
             if ($gateService->isOptOutActive($userId, $cfg->groupId)) {
+                // F-158: which KIND of opt-out, so the client offers Join
+                // only where it can succeed. "left" = the member left
+                // (voluntary; an explicit Join overrides it). "removed" = a
+                // moderator eviction (permanent; Join is refused).
+                $item['opt_out_kind'] = $gateService->isPermanentOptOut($userId, $cfg->groupId)
+                    ? self::OPT_OUT_KIND_REMOVED
+                    : self::OPT_OUT_KIND_LEFT;
                 $optedOut[] = $item;
                 continue;
             }
@@ -496,9 +513,13 @@ final class HolderGroupsEndpoint
                 );
 
             case JoinResult::CODE_OPT_OUT_ACTIVE:
+                // Since F-158 this is ONLY a moderator eviction (a voluntary
+                // leave no longer blocks an explicit Join), so the copy says
+                // so. The old "try again later or rejoin from the discovery
+                // page" pointed at the very gate that was refusing.
                 return ApiResponse::error(
                     'bcc_permission_denied',
-                    'You opted out of this community recently. Try again later or rejoin from the discovery page.',
+                    'A moderator removed you from this community, so you cannot rejoin it.',
                     403
                 );
 

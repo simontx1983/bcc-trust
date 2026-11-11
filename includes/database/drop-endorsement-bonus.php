@@ -30,6 +30,10 @@ if (!function_exists('bcc_trust_drop_endorsement_bonus')) {
         if (get_option('bcc_trust_endorsement_bonus_dropped')) {
             return;
         }
+        // F-150: a failed step leaves this unstamped; retry at most hourly.
+        if (bcc_trust_migration_backoff_active('endorsement_bonus')) {
+            return;
+        }
 
         global $wpdb;
 
@@ -37,6 +41,10 @@ if (!function_exists('bcc_trust_drop_endorsement_bonus')) {
         foreach (['bcc_trust_page_scores', 'bcc_page_read_model'] as $suffix) {
             $table  = $wpdb->prefix . $suffix;
             $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+            if ($exists === null && $wpdb->last_error !== '') {
+                bcc_trust_migration_step_failed('endorsement_bonus', "probe {$suffix}");
+                return;
+            }
             if ($exists !== $table) {
                 continue;
             }
@@ -45,9 +53,16 @@ if (!function_exists('bcc_trust_drop_endorsement_bonus')) {
                 "SHOW COLUMNS FROM `{$table}` LIKE %s",
                 'endorsement_bonus'
             ));
+            if ($hasCol === null && $wpdb->last_error !== '') {
+                bcc_trust_migration_step_failed('endorsement_bonus', "probe {$suffix}.endorsement_bonus");
+                return;
+            }
             if ($hasCol === 'endorsement_bonus') {
                 // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-                $wpdb->query("ALTER TABLE `{$table}` DROP COLUMN `endorsement_bonus`");
+                if ($wpdb->query("ALTER TABLE `{$table}` DROP COLUMN `endorsement_bonus`") === false) {
+                    bcc_trust_migration_step_failed('endorsement_bonus', "drop {$suffix}.endorsement_bonus");
+                    return;
+                }
                 $dropped[] = $suffix;
             }
         }

@@ -613,16 +613,45 @@ class UserInfoRepository {
     /**
      * Suspend user.
      *
-     * @throws RepositoryException on database failure
+     * ⚠ FAILS LOUDLY ON A MISSING ROW (F-112). `$wpdb->update()` matching zero
+     * rows is not an error, so a user with no user_info row used to "suspend"
+     * silently: the flag every enforcement path reads (is_suspended) never
+     * landed, yet the caller reported success. Callers ensure the row exists
+     * first (ModerationService syncs it via UserSyncService). If it is still
+     * absent here, this throws, so the caller's transaction rolls back the
+     * suspensions row too.
+     *
+     * fraud_triggers is MERGED, not overwritten: the reason and timestamp
+     * are added to the existing JSON (the same read-merge as unsuspendUser),
+     * so earlier fraud evidence on the row is kept.
+     *
+     * @throws RepositoryException on database failure or a missing row
      */
     public function suspendUser(int $userId, string $reason): void {
         global $wpdb;
 
+        // Read the CURRENT triggers straight from the table, not the 5-min
+        // row cache, so the merge cannot drop a key written since.
+        $currentRaw = $wpdb->get_var($wpdb->prepare(
+            "SELECT fraud_triggers FROM {$this->table} WHERE user_id = %d",
+            $userId
+        ));
+        if ($currentRaw === null && !$this->exists($userId)) {
+            throw new RepositoryException('UserInfoRepository::suspendUser: no user_info row for user ' . $userId);
+        }
+
+        $triggers = is_string($currentRaw) && $currentRaw !== '' ? json_decode($currentRaw, true) : [];
+        if (!is_array($triggers)) {
+            $triggers = [];
+        }
+        $triggers['suspension_reason'] = $reason;
+        $triggers['suspended_at']      = current_time('mysql');
+
         $result = $wpdb->update(
             $this->table,
             [
-                'is_suspended' => 1,
-                'fraud_triggers' => json_encode(['suspension_reason' => $reason, 'suspended_at' => current_time('mysql')])
+                'is_suspended'   => 1,
+                'fraud_triggers' => json_encode($triggers),
             ],
             ['user_id' => $userId],
             ['%d', '%s'],
@@ -1172,18 +1201,25 @@ class UserInfoRepository {
     /**
      * Delete orphaned user_info records.
      *
-     * @return int Number of rows deleted.
+     * @return int Rows actually deleted.
+     * @throws RepositoryException when the DELETE fails.
      */
     public function deleteOrphaned(): int
     {
         global $wpdb;
 
-        return (int) $wpdb->query($wpdb->prepare(
+        $result = $wpdb->query($wpdb->prepare(
             "DELETE u FROM {$this->table} u
              LEFT JOIN {$wpdb->users} w ON u.user_id = w.ID
              WHERE w.ID IS NULL AND %d",
             1
         ));
+
+        if ($result === false) {
+            throw new RepositoryException('UserInfoRepository::deleteOrphaned failed: ' . $wpdb->last_error);
+        }
+
+        return (int) $result;
     }
 
     /**
@@ -1293,6 +1329,45 @@ class UserInfoRepository {
         );
 
         $this->invalidateCache($userId);
+    }
+
+    /**
+     * Admin reset: set BOTH fraud_score and peak_fraud_score to 0.
+     *
+     * The peak is what normally keeps a score from decaying below half its
+     * high-water mark (the anti-oscillation floor); a manual reset must clear
+     * it too, or the daily decay would put the score straight back. Returns
+     * the values that were replaced (for the audit trail), or null when the
+     * user has no user_info row.
+     *
+     * @return array{fraud_score: int, peak_fraud_score: int}|null
+     * @throws RepositoryException on database failure
+     */
+    public function resetFraudScore(int $userId): ?array {
+        global $wpdb;
+
+        $before = $this->getByUserId($userId);
+        if ($before === null) {
+            return null;
+        }
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table}
+                SET fraud_score = 0, peak_fraud_score = 0, updated_at = %s
+              WHERE user_id = %d",
+            current_time('mysql'),
+            $userId
+        ));
+        if ($result === false) {
+            throw new RepositoryException('UserInfoRepository::resetFraudScore failed for user ' . $userId . ': ' . $wpdb->last_error);
+        }
+
+        $this->invalidateCache($userId);
+
+        return [
+            'fraud_score'      => (int) $before->fraud_score,
+            'peak_fraud_score' => (int) ($before->peak_fraud_score ?? 0),
+        ];
     }
 
     /**

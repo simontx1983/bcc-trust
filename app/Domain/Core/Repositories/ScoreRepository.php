@@ -689,6 +689,40 @@ class ScoreRepository {
     }
 
     /**
+     * Flag many pages for the recalculation cron in chunked UPDATEs.
+     *
+     * Bulk counterpart of flagForRecalculation() for paths that change many
+     * pages' votes at once (VoteRemovalService). Throws on a DB error so the
+     * enclosing transaction rolls back rather than leaving removed votes
+     * behind unflagged pages.
+     *
+     * @param list<int> $pageIds
+     * @throws RepositoryException
+     */
+    public function flagPagesForRecalculation(array $pageIds): void {
+        global $wpdb;
+
+        $ids = [];
+        foreach ($pageIds as $id) {
+            $i = (int) $id;
+            if ($i > 0) {
+                $ids[$i] = $i;
+            }
+        }
+
+        foreach (array_chunk(array_values($ids), 500) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '%d'));
+            $result = $wpdb->query($wpdb->prepare(
+                "UPDATE {$this->table} SET recalculate_required = 1 WHERE page_id IN ({$placeholders})",
+                ...$chunk
+            ));
+            if ($result === false) {
+                throw new RepositoryException('ScoreRepository::flagPagesForRecalculation failed: ' . $wpdb->last_error);
+            }
+        }
+    }
+
+    /**
      * Flag all pages owned by a user for deferred score recalculation.
      *
      * Issues a single atomic UPDATE instead of N per-page queries.
@@ -1943,29 +1977,53 @@ class ScoreRepository {
     }
 
     /**
-     * Delete orphaned score rows (pages that no longer exist in wp_posts).
+     * Delete orphaned score rows: PAGE rows whose post no longer exists.
      *
-     * @return int Number of rows deleted.
+     * ⚠ Member self-page rows (page_id > MemberSelfPageService::ID_BASE —
+     * a member's trust row, keyed ID_BASE + user_id) are NEVER posts, so a
+     * plain "no matching wp_posts row" test matches EVERY member. They are
+     * excluded here; a deleted member's row is removed by deleteSelfPage()
+     * on user deletion.
+     *
+     * Bounded: up to $limit orphaned page ids, all their category rows.
+     * MySQL / MariaDB reject LIMIT on a multi-table DELETE (the previous
+     * `DELETE s … JOIN … LIMIT` form was a syntax error that deleted
+     * nothing and reported 0), so the ids are picked in a materialised
+     * derived table — which also lifts the same-table subquery restriction.
+     *
+     * @return int Rows actually deleted.
+     * @throws RepositoryException when the DELETE fails.
      */
     public function deleteOrphaned(int $limit = 1000): int
     {
         global $wpdb;
 
-        // Bounded DELETE so an admin-invoked cleanup on a site with
-        // millions of orphaned rows does not DDL-lock the table. The
-        // `AND %d` no-op guard is preserved from the original query.
-        $limit = max(1, min(10000, $limit));
-        return (int) $wpdb->query($wpdb->prepare(
-            "DELETE s FROM {$this->table} s
-             LEFT JOIN {$wpdb->posts} p ON s.page_id = p.ID
-             WHERE p.ID IS NULL
-             LIMIT %d",
+        $limit  = max(1, min(10000, $limit));
+        $result = $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$this->table}
+             WHERE page_id IN (
+                 SELECT page_id FROM (
+                     SELECT DISTINCT s.page_id
+                     FROM {$this->table} s
+                     LEFT JOIN {$wpdb->posts} p ON s.page_id = p.ID
+                     WHERE p.ID IS NULL AND s.page_id <= %d
+                     LIMIT %d
+                 ) orphan_ids
+             )",
+            \BCC\Trust\Core\Services\MemberSelfPageService::ID_BASE,
             $limit
         ));
+
+        if ($result === false) {
+            throw new RepositoryException('ScoreRepository::deleteOrphaned failed: ' . $wpdb->last_error);
+        }
+
+        return (int) $result;
     }
 
     /**
-     * Count orphaned score rows (bounded).
+     * Count orphaned PAGE score rows (bounded). Same definition as
+     * deleteOrphaned(): member self-page rows are never counted.
      */
     public function countOrphaned(int $limit = 10000): int
     {
@@ -1980,9 +2038,10 @@ class ScoreRepository {
                 SELECT s.page_id
                 FROM {$this->table} s
                 LEFT JOIN {$wpdb->posts} p ON s.page_id = p.ID
-                WHERE p.ID IS NULL
+                WHERE p.ID IS NULL AND s.page_id <= %d
                 LIMIT %d
              ) t",
+            \BCC\Trust\Core\Services\MemberSelfPageService::ID_BASE,
             $limit
         ));
     }

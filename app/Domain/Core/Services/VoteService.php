@@ -632,27 +632,36 @@ class VoteService {
             return;
         }
 
-        // Count distinct voters on this page in the last 5 minutes.
+        // Count distinct voters on this page in the last
+        // BCC_TRUST_FAN_IN_PRE_GATE_WINDOW_MINUTES (5). F-105 (user
+        // decision): this used to read a 24-HOUR window despite this comment,
+        // so a merely popular page (15+ voters in a day) locked every
+        // newcomer out of voting on it for the rest of the day.
         // Uses a cheap cached query — the result is approximate under
         // high concurrency but sufficient for a pre-gate.
         $cacheKey = 'fan_in_' . $pageId;
         $recentVoters = wp_cache_get($cacheKey, 'bcc_trust_fan_in');
 
         if ($recentVoters === false) {
-            $recentVoters = $this->voteRepo->getRecentVotersWithRegistration($pageId, 1);
+            $since = gmdate(
+                'Y-m-d H:i:s',
+                (int) current_time('timestamp') - BCC_TRUST_FAN_IN_PRE_GATE_WINDOW_MINUTES * 60
+            );
+            $recentVoters = $this->voteRepo->countRecentDistinctVoters($pageId, $since);
             // Cache for 5 seconds — long enough to absorb duplicate DB hits on
             // near-simultaneous requests, short enough that a coordinated burst
             // of 15+ votes in a 5-second window can't all read a stale count.
             wp_cache_set($cacheKey, $recentVoters, 'bcc_trust_fan_in', 5);
         }
+        $recentVoters = (int) $recentVoters;
 
         $fanInThreshold = (int) apply_filters('bcc_trust_fan_in_pre_gate_threshold', 15);
 
-        if (count($recentVoters) >= $fanInThreshold) {
+        if ($recentVoters >= $fanInThreshold) {
             AuditLogger::log('fan_in_pre_gate_blocked', $pageId, [
                 'voter_id'      => $voterId,
                 'account_days'  => $accountDays,
-                'recent_voters' => count($recentVoters),
+                'recent_voters' => $recentVoters,
                 'threshold'     => $fanInThreshold,
             ], 'page');
             throw new VoteEligibilityException(
@@ -926,28 +935,27 @@ class VoteService {
     }
 
     /**
-     * Resolve ALL category IDs for a page.
+     * The category rows a vote is written under: always the single canonical
+     * row, category_id = 0 (F-84; user decision — a page has ONE trust score).
      *
-     * Every vote now applies to all categories on the page. Returns an array
-     * of term_id integers, or [0] (uncategorised sentinel) when the page
-     * has no category assignments.
+     * This used to return EVERY PeepSo category of the page, writing one
+     * votes row per category. A page with two categories then held two rows
+     * for one member's vote, and every page-level read that sums rows — the
+     * authoritative recalc, the vote tallies, trust-graph edges, ring scans —
+     * counted that vote twice. It also sent the instant per-vote delta only
+     * to the category score rows, so the canonical category-0 row every
+     * reader uses stayed stale until the next recalc.
      *
-     * @return int[]
+     * Writing once at 0 makes every reader correct by construction, whatever
+     * categories a page has (PeepSo is now limited to one category per page,
+     * but pages that already carry several remain). The array shape is kept
+     * so castVote's per-category loop stays unchanged.
+     *
+     * @return list<int>
      */
     private function resolveVoteCategoryIds(int $pageId): array {
-        $categories = $this->getPageCategories($pageId);
-        if (empty($categories)) {
-            return [0]; // uncategorized sentinel
-        }
-        return array_map(fn($t) => (int) $t->term_id, $categories);
-    }
-
-    /**
-     * @return object[]
-     * @phpstan-return list<object{term_id: int|numeric-string}>
-     */
-    private function getPageCategories(int $pageId): array {
-        return $this->voteRepo->getPageCategories($pageId);
+        unset($pageId);
+        return [0];
     }
 
     private function getPageOwnerId(int $pageId): int {
@@ -1244,6 +1252,45 @@ class VoteService {
     }
 
     /**
+     * Recalculate a page's score now; on ANY failure, log it and hand the
+     * page back to the 5-minute recalculation cron. Never throws.
+     *
+     * The fire-and-forget entry point for paths that change a page's votes
+     * outside the vote writer (the `bcc.trust.recalculate_score` action,
+     * admin/moderation removals). F-110: that action used to catch only
+     * \Exception and log at info — a TypeError escaped and aborted the
+     * caller's per-page loop after its deletes had already run, and every
+     * failure was invisible. Callers that report "N pages recalculated"
+     * must count the `true` returns, not the pages they asked for.
+     *
+     * @return bool true when the recalculation completed; false when it
+     *              failed (logged at error, page re-flagged when possible).
+     */
+    public function recalculateScoreOrRequeue(int $pageId): bool {
+        try {
+            $this->recalculateScore($pageId);
+            return true;
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] Score recalculation failed', [
+                'page_id' => $pageId,
+                'type'    => get_class($e),
+                'error'   => $e->getMessage(),
+            ]);
+        }
+
+        try {
+            $this->scoreRepo->flagForRecalculation($pageId);
+        } catch (\Throwable $flagError) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] Score recalculation re-flag failed', [
+                'page_id' => $pageId,
+                'error'   => $flagError->getMessage(),
+            ]);
+        }
+
+        return false;
+    }
+
+    /**
      * Recalculate a page's score from its full vote history.
      *
      * Race-condition fix (Issue 8):
@@ -1310,13 +1357,22 @@ class VoteService {
             // formulas that the PHP loop used, producing identical results.
             $voteAggregates = $this->voteRepo->getVoteAggregatesForPage($pageId);
 
-            // Fast path: no active votes → ensure default row and return.
-            // Checked INSIDE the lock to prevent TOCTOU race where a
-            // concurrent first vote commits between an outside-lock COUNT
-            // check and the FOR UPDATE acquisition.
-            if ((int) $voteAggregates->vote_count === 0) {
-                $score = $this->scoreRepo->getByPageId($pageId)
-                    ?? $this->scoreRepo->createDefault($pageId, $ownerId);
+            // Fast path: no active votes AND no score row yet → create the
+            // default row and return. Checked INSIDE the lock to prevent the
+            // TOCTOU race where a concurrent first vote commits between an
+            // outside-lock COUNT check and the FOR UPDATE acquisition.
+            //
+            // ⚠ Only when NO row exists. A page whose last votes were
+            // soft-deleted still carries the score its old votes produced,
+            // and returning that row here (the previous behaviour) left a
+            // phantom score + tier in place forever while clearing the
+            // recalc flag (F-81). With a row present, fall through to the
+            // full recompute below: zero aggregates give positive/negative
+            // 0, vote_count 0 and confidence 0, the tier is re-derived, and
+            // recalculateFromVotes() carries every bonus column through
+            // exactly as on any other recalc — no second zeroing formula.
+            if ((int) $voteAggregates->vote_count === 0 && empty($lockedRows)) {
+                $score = $this->scoreRepo->createDefault($pageId, $ownerId);
                 // Only clear the flag when the page lock was actually held —
                 // a lock-less recalc leaves it set so the next tick re-processes.
                 if ($clearRecalcFlag && $lockAcquired) {

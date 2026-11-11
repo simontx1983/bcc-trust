@@ -317,6 +317,7 @@ final class OnchainAdminHallCreateTest extends TestCase
             'exists'     => ['exists', 'exists'],
             'incomplete' => ['incomplete', 'incomplete'],
             'skipped'    => ['skipped', 'refused'],
+            'busy'       => ['busy', 'busy'],
             'error'      => ['error', 'failed'],
         ];
     }
@@ -353,6 +354,33 @@ final class OnchainAdminHallCreateTest extends TestCase
         } catch (\BccAdminRedirect $r) {
             self::assertNotSame('created', $r->args['bcc_hall']);
             self::assertSame('incomplete', $r->args['bcc_hall']);
+        }
+    }
+
+    /**
+     * `busy` MUST NOT be laundered into `failed`.
+     *
+     * Before #123 there was no `busy` arm, so a contended lock fell through
+     * the switch to `default` and told the operator the Hall creation had
+     * FAILED. It had not: another request was already provisioning the same
+     * chain and nothing was created. A wrong notice in the alarming
+     * direction invites the one thing that makes it worse -- pressing the
+     * button again.
+     */
+    public function testBusyIsNotReportedAsFailed(): void
+    {
+        \BCC\Trust\Onchain\Services\HallProvisioningService::$result['status'] = 'busy';
+
+        $this->seedPost();
+        $this->armNonceFor(self::CHAIN_ID);
+
+        try {
+            ChainsPage::handle_hall_create();
+            self::fail('Expected PRG.');
+        } catch (\BccAdminRedirect $r) {
+            self::assertSame('busy', $r->args['bcc_hall']);
+            self::assertNotSame('failed', $r->args['bcc_hall']);
+            self::assertNotSame('created', $r->args['bcc_hall']);
         }
     }
 

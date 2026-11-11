@@ -153,6 +153,26 @@ class VoteRepository {
     private const CACHE_GROUP = 'bcc_votes';
     private const CACHE_TTL   = 60; // seconds
 
+    // ── votes.status values ──────────────────────────────────────────────
+    /** Retracted by the voter (re-casting restores the row). */
+    public const STATUS_REMOVED            = 0;
+    /** Live vote — the only status any score/feed reader counts. */
+    public const STATUS_ACTIVE             = 1;
+    /** Removed by accepted dispute adjudication — re-vote blocked. */
+    public const STATUS_DISPUTE_REMOVED    = 2;
+    /**
+     * Removed by moderation (admin clear, ring invalidation, account
+     * deletion) — re-vote blocked, restorable for
+     * MODERATION_RESTORE_WINDOW_DAYS, then purged (F-104).
+     */
+    public const STATUS_MODERATION_REMOVED = 3;
+
+    /** How long a moderation-removed vote stays restorable before purge. */
+    public const MODERATION_RESTORE_WINDOW_DAYS = 90;
+
+    /** Max ids per IN (…) list in the bulk status helpers. */
+    private const BULK_CHUNK = 500;
+
     private string $table;
 
     /**
@@ -284,9 +304,13 @@ class VoteRepository {
     }
 
     /**
-     * Bulk-fetch vote rows by primary key. Used by FeedRankingService
-     * to hydrate review post bodies for an entire feed page in one
-     * round trip (vs N+1).
+     * Bulk-fetch ACTIVE (status = 1) vote rows by primary key. Used by
+     * ReviewBodyHydrator to hydrate review post bodies for an entire feed
+     * page in one round trip (vs N+1).
+     *
+     * Active only (F-88): a review whose vote was retracted (0), removed by
+     * dispute (2) or removed by moderation (3) must not render in any feed.
+     * A missing row here is how the feed learns to drop the item.
      *
      * Cache is intentionally bypassed — feed-page hydration is rare
      * enough that the per-vote cache (60s TTL) doesn't help, and the
@@ -294,9 +318,9 @@ class VoteRepository {
      * feed page cap (50 items at a time).
      *
      * @param list<int> $voteIds
-     * @return array<int, object> vote_id → row
+     * @return array<int, object> vote_id → row (active votes only)
      */
-    public function findManyByIds(array $voteIds): array
+    public function findManyActiveByIds(array $voteIds): array
     {
         if ($voteIds === []) {
             return [];
@@ -320,7 +344,8 @@ class VoteRepository {
         /** @var list<object>|null $rows */
         $rows = $wpdb->get_results(
             "SELECT " . self::COLUMNS . " FROM {$this->table}
-              WHERE id IN ({$idList})"
+              WHERE id IN ({$idList})
+                AND status = 1"
         );
 
         $out = [];
@@ -740,7 +765,11 @@ class VoteRepository {
 
         return (int) $wpdb->get_var(
             $wpdb->prepare(
-                "SELECT COUNT(*) FROM {$this->table} WHERE page_id = %d AND status = 1",
+                // Moderation-hidden reviews do not count (user decision; see
+                // hiddenReviewExclusion()).
+                "SELECT COUNT(*) FROM {$this->table} v
+                  WHERE v.page_id = %d AND v.status = 1
+                    AND " . $this->hiddenReviewExclusion('v'),
                 $pageId
             )
         );
@@ -868,11 +897,22 @@ class VoteRepository {
      * NOW(), so the comparison carries no timezone drift.
      *
      * ── vesting-aware weight ──
-     * Uses vested_weight when populated (the graduation cron keeps it current
-     * with the voter's vesting stage) and falls back to weight on legacy rows
-     * where vested_weight was never written. Without the fallback, a stage-0
-     * voter's 10-percent vote was summed at full effective weight, nullifying
-     * the documented Sybil-mitigation vesting.
+     * Sums vested_weight — the value VoteWriter applied to the score,
+     * including any velocity-cap clamp written back by correctWeight().
+     * There is deliberately NO fallback to the raw `weight` column: the old
+     * COALESCE(NULLIF(vested_weight, 0), weight) treated 0 as "unset", so a
+     * vote the velocity cap had FULLY blocked (vested_weight = 0) re-entered
+     * every recalc at its raw, unvested weight and undid the cap (F-80).
+     * Every vote row is written through VoteWriter, which always sets
+     * vested_weight; production had zero legacy rows relying on the fallback
+     * when it was removed (measured 2026-11-10).
+     *
+     * ── moderation-hidden reviews ──
+     * A review whose feed activity is moderation-hidden does not count while
+     * it is hidden, and counts again once restored (user decision). Same
+     * predicate as the review list reads (hiddenReviewExclusion(), F-55).
+     * Hide / restore re-trigger this recalculation for the page via
+     * ReviewVisibilityScoreSync.
      *
      * ── retroactive fraud discount ──
      * SAFETY CONTRACT: the SQL implements a simplified fraud_score-only model.
@@ -925,7 +965,7 @@ class VoteRepository {
                           THEN 1
                         ELSE 0
                     END AS is_mature,
-                    COALESCE(NULLIF(v.vested_weight, 0), v.weight)
+                    v.vested_weight
                     * CASE
                         WHEN COALESCE(ui.fraud_score, 0) <= %d
                           THEN 1.0
@@ -950,6 +990,7 @@ class VoteRepository {
                 LEFT JOIN {$wpdb->users} u ON v.voter_user_id = u.ID
                 WHERE v.page_id = %d
                   AND v.status  = 1
+                  AND " . $this->hiddenReviewExclusion('v') . "
              ) d",
             $minVoterAgeDays, // maturity: INTERVAL %d DAY for user_registered cutoff
             $fraudMedium,   // fraud: current <= threshold → no discount
@@ -1051,6 +1092,7 @@ class VoteRepository {
                  LEFT JOIN {$wpdb->posts} p ON v.page_id = p.ID
                  WHERE v.voter_user_id = %d
                    AND v.status        = 1
+                   AND " . $this->hiddenReviewExclusion('v') . "
                  ORDER BY v.created_at DESC
                  LIMIT %d OFFSET %d",
                 $voterId,
@@ -1112,10 +1154,11 @@ class VoteRepository {
                         explanation,
                         reason,
                         created_at
-                 FROM {$this->table}
-                 WHERE page_id = %d
-                   AND status  = 1
-                 ORDER BY created_at DESC
+                 FROM {$this->table} v
+                 WHERE v.page_id = %d
+                   AND v.status  = 1
+                   AND " . $this->hiddenReviewExclusion('v') . "
+                 ORDER BY v.created_at DESC
                  LIMIT %d OFFSET %d",
                 $pageId,
                 $limit,
@@ -1146,11 +1189,146 @@ class VoteRepository {
         }
         global $wpdb;
         return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$this->table}
-             WHERE page_id = %d
-               AND status  = 1",
+            "SELECT COUNT(*) FROM {$this->table} v
+             WHERE v.page_id = %d
+               AND v.status  = 1
+               AND " . $this->hiddenReviewExclusion('v'),
             $pageId
         ));
+    }
+
+    /**
+     * Count of the reviews a member wrote that their profile's Reviews
+     * list SHOWS: active, and not moderation-hidden (F-55). The paired
+     * count for {@see findByVoterPaginated()}.
+     *
+     * ⚠ Deliberately NOT a change to {@see countByVoter()}: that count
+     * feeds vote weight, quests and profile stats, where whether a hidden
+     * review should still count is an open product question (scoring is
+     * out of F-55's scope).
+     */
+    public function countReviewsByVoter(int $voterId): int
+    {
+        if ($voterId <= 0) {
+            return 0;
+        }
+        global $wpdb;
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->table} v
+             WHERE v.voter_user_id = %d
+               AND v.status        = 1
+               AND " . $this->hiddenReviewExclusion('v'),
+            $voterId
+        ));
+    }
+
+    /**
+     * F-55 — SQL predicate excluding reviews whose FEED ACTIVITY is
+     * moderation-hidden, for the review LIST reads only.
+     *
+     * A review is a votes row. Its feed activity (ActivityStreamWriter::
+     * handleReviewPublished) points act_external_id at a backing wp_post
+     * whose meta is `_bcc_activity_module = 'review'` and
+     * `_bcc_activity_sidecar_id = <vote id>`. Moderation (admin hide,
+     * auto-hide, undo-of-restore: every writer of bcc_hidden_activities)
+     * hides that ACTIVITY, so a list that reads the votes table directly
+     * kept showing the hidden review. Excluding in SQL keeps COUNT and
+     * LIMIT/OFFSET consistent; a PHP post-filter would not.
+     *
+     * - Driven from the (small) hidden table; every join is on an indexed
+     *   key (act_id, post_id).
+     * - The sidecar id is compared NUMERICALLY: a string compare of the
+     *   LONGTEXT meta_value against CAST(id AS CHAR) can raise an
+     *   illegal-mix-of-collations error on MySQL 8.
+     * - Without PeepSo's activities table there are no review activities
+     *   to hide, and the join would error, so the predicate is a no-op.
+     *
+     * PUBLIC so the scoring follow-up (a moderation-hidden review stops
+     * counting toward scores and tallies while hidden; user decision) can
+     * reuse exactly this predicate instead of growing a parallel one (§11).
+     * It is single-purpose: give it the votes-table alias, AND it into a
+     * WHERE clause.
+     *
+     * @param string $alias the votes-table alias in the calling query
+     */
+    public function hiddenReviewExclusion(string $alias): string
+    {
+        global $wpdb;
+        $activities = $wpdb->prefix . 'peepso_activities';
+        $hidden     = \BCC\Trust\Core\Database\TableRegistry::hiddenActivities();
+        if (!\BCC\Trust\Core\Database\TableRegistry::exists($activities)
+            || !\BCC\Trust\Core\Database\TableRegistry::exists($hidden)) {
+            return '1 = 1';
+        }
+
+        return "NOT EXISTS (
+                    SELECT 1
+                      FROM {$hidden} h
+                      INNER JOIN {$activities} a ON a.act_id = h.act_id
+                      INNER JOIN {$wpdb->postmeta} pm_mod
+                              ON pm_mod.post_id = a.act_external_id
+                             AND pm_mod.meta_key = '_bcc_activity_module'
+                             AND pm_mod.meta_value = 'review'
+                      INNER JOIN {$wpdb->postmeta} pm_sc
+                              ON pm_sc.post_id = a.act_external_id
+                             AND pm_sc.meta_key = '_bcc_activity_sidecar_id'
+                     WHERE CAST(pm_sc.meta_value AS UNSIGNED) = {$alias}.id
+                )";
+    }
+
+    /**
+     * The review vote behind a REVIEW activity — the page whose score it
+     * feeds and the voter whose trust-graph edge it feeds — or null when the
+     * activity is not a review (or PeepSo's table is absent). The reverse of
+     * the hiddenReviewExclusion() join: activity → backing wp_post → review
+     * sidecar meta → votes row.
+     *
+     * Status is deliberately not filtered: hiding or restoring a review whose
+     * vote has since been removed still warrants a recalculation of its page.
+     *
+     * @return array{page_id: int, voter_id: int}|null
+     * @throws RepositoryException on database failure
+     */
+    public function findReviewVoteByActivity(int $actId): ?array
+    {
+        if ($actId <= 0) {
+            return null;
+        }
+        global $wpdb;
+        $activities = $wpdb->prefix . 'peepso_activities';
+        if (!\BCC\Trust\Core\Database\TableRegistry::exists($activities)) {
+            return null;
+        }
+
+        $sql = $wpdb->prepare(
+            "SELECT v.page_id, v.voter_user_id
+               FROM {$activities} a
+               INNER JOIN {$wpdb->postmeta} pm_mod
+                       ON pm_mod.post_id = a.act_external_id
+                      AND pm_mod.meta_key = '_bcc_activity_module'
+                      AND pm_mod.meta_value = 'review'
+               INNER JOIN {$wpdb->postmeta} pm_sc
+                       ON pm_sc.post_id = a.act_external_id
+                      AND pm_sc.meta_key = '_bcc_activity_sidecar_id'
+               INNER JOIN {$this->table} v
+                       ON v.id = CAST(pm_sc.meta_value AS UNSIGNED)
+              WHERE a.act_id = %d
+              LIMIT 1",
+            $actId
+        );
+        if (!is_string($sql) || $sql === '') {
+            throw new RepositoryException('VoteRepository::findReviewVoteByActivity: wpdb::prepare() produced no statement');
+        }
+
+        /** @var object{page_id: int|numeric-string, voter_user_id: int|numeric-string}|null $row */
+        $row = $wpdb->get_row($sql);
+        if ($wpdb->last_error !== '') {
+            throw new RepositoryException('VoteRepository::findReviewVoteByActivity failed: ' . $wpdb->last_error);
+        }
+        if (!is_object($row)) {
+            return null;
+        }
+        return ['page_id' => (int) $row->page_id, 'voter_id' => (int) $row->voter_user_id];
     }
 
     /**
@@ -1216,15 +1394,31 @@ class VoteRepository {
     }
 
     /**
-     * Count active votes by voter since a MySQL DATETIME boundary.
-     * Used by the §O3 living header for today's reviews_written count.
+     * Count votes by voter cast since a MySQL DATETIME boundary (site-local
+     * time, the frame `created_at` is written in).
+     *
+     * Default: ACTIVE votes only — the §O3 living header's "reviews today".
+     * `$activeOnly = false` counts every row cast in the window whatever its
+     * status: the rapid-voting detector (F-102) measures how fast a voter
+     * CASTS, so a burst that is immediately retracted must still count.
+     * (Re-casting a retracted vote resets its created_at, so it counts too.)
      */
-    public function countByVoterSince( int $voterId, string $sinceMysql ): int {
+    public function countByVoterSince( int $voterId, string $sinceMysql, bool $activeOnly = true ): int {
         if ($voterId <= 0 || $sinceMysql === '') {
             return 0;
         }
 
         global $wpdb;
+
+        if ( ! $activeOnly ) {
+            return (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(*) FROM {$this->table}
+                 WHERE voter_user_id = %d
+                   AND created_at   >= %s",
+                $voterId,
+                $sinceMysql
+            ) );
+        }
 
         return (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(*) FROM {$this->table}
@@ -1234,18 +1428,6 @@ class VoteRepository {
             $voterId,
             $sinceMysql
         ) );
-    }
-
-    /**
-     * Get PeepSo category IDs for a page.
-     *
-     * Delegates to PeepSoQueryRepository (centralised PeepSo table access).
-     *
-     * @return object[] Array of objects with term_id property.
-     * @phpstan-return list<object{term_id: int|numeric-string}>
-     */
-    public function getPageCategories(int $pageId): array {
-        return PeepSoQueryRepository::getPageCategories($pageId);
     }
 
     /**
@@ -1276,9 +1458,10 @@ class VoteRepository {
                 MAX(created_at) as last_vote_at,
                 AVG(CASE WHEN vote_type > 0 THEN weight ELSE NULL END) as avg_upvote_weight,
                 AVG(CASE WHEN vote_type < 0 THEN weight ELSE NULL END) as avg_downvote_weight
-             FROM {$this->table}
-             WHERE page_id = %d
-               AND status  = 1",
+             FROM {$this->table} v
+             WHERE v.page_id = %d
+               AND v.status  = 1
+               AND " . $this->hiddenReviewExclusion('v'),
             $pageId
         ) );
 
@@ -1312,9 +1495,10 @@ class VoteRepository {
                 "SELECT vote_type,
                         COUNT(DISTINCT voter_user_id) as count,
                         SUM(weight) as total_weight
-                 FROM {$this->table}
-                 WHERE page_id = %d
-                   AND status  = 1
+                 FROM {$this->table} v
+                 WHERE v.page_id = %d
+                   AND v.status  = 1
+                   AND " . $this->hiddenReviewExclusion('v') . "
                  GROUP BY vote_type",
                 $pageId
             )
@@ -1398,10 +1582,15 @@ class VoteRepository {
             $affected = $wpdb->query(
                 $wpdb->prepare(
                     "DELETE FROM {$this->table}
-                     WHERE status     = 0
-                       AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY)
+                     WHERE (status = %d AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY))
+                        OR (status = %d AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY))
                      LIMIT %d",
+                    self::STATUS_REMOVED,
                     $this->cleanupDays,
+                    // Moderation removals stay restorable for the full
+                    // window, independent of the retraction retention.
+                    self::STATUS_MODERATION_REMOVED,
+                    self::MODERATION_RESTORE_WINDOW_DAYS,
                     $batchSize
                 )
             );
@@ -1511,6 +1700,18 @@ class VoteRepository {
         if ( $existing && (int) $existing->status === 2 ) {
             throw new \BCC\Trust\Core\Exceptions\VoteEligibilityException(
                 'Your previous vote on this page was removed by dispute adjudication and cannot be recast.'
+            );
+        }
+
+        // ── Case B2: Moderation-removed row (status = 3) ─────────────────────
+        // Removed by an admin action (clear votes, ring invalidation). The
+        // voter must not be able to undo a moderation decision by simply
+        // voting again; an admin restore is the only way back (F-104).
+        // Without this branch the row also fell through to Case C and the
+        // INSERT collided with uq_voter_page_cat.
+        if ( $existing && (int) $existing->status === self::STATUS_MODERATION_REMOVED ) {
+            throw new \BCC\Trust\Core\Exceptions\VoteEligibilityException(
+                'Your previous vote on this page was removed by moderation and cannot be recast.'
             );
         }
 
@@ -1695,7 +1896,7 @@ class VoteRepository {
         return $wpdb->get_results( $wpdb->prepare(
             "SELECT DISTINCT v.page_id, s.page_owner_id
              FROM {$this->table} v
-             JOIN {$scoresTable} s ON v.page_id = s.page_id
+             JOIN {$scoresTable} s ON v.page_id = s.page_id AND s.category_id = 0
              WHERE v.voter_user_id = %d AND v.status = 1
              LIMIT %d",
             $userId,
@@ -1719,9 +1920,9 @@ class VoteRepository {
         return (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(DISTINCT v1.page_id)
              FROM {$this->table} v1
-             JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id
+             JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id AND s1.category_id = 0
              JOIN {$this->table} v2 ON v2.voter_user_id = s1.page_owner_id
-             JOIN {$scoresTable} s2 ON v2.page_id = s2.page_id
+             JOIN {$scoresTable} s2 ON v2.page_id = s2.page_id AND s2.category_id = 0
              WHERE v1.voter_user_id = %d
                AND v2.voter_user_id = s1.page_owner_id
                AND s2.page_owner_id = %d
@@ -1748,9 +1949,9 @@ class VoteRepository {
         return (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT COUNT(*)
              FROM {$this->table} v1
-             JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id
+             JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id AND s1.category_id = 0
              JOIN {$this->table} v2 ON v2.voter_user_id = s1.page_owner_id
-             JOIN {$scoresTable} s2 ON v2.page_id = s2.page_id
+             JOIN {$scoresTable} s2 ON v2.page_id = s2.page_id AND s2.category_id = 0
              WHERE v1.voter_user_id = %d
                AND v2.voter_user_id = s1.page_owner_id
                AND s2.page_owner_id = %d
@@ -1846,6 +2047,8 @@ class VoteRepository {
      * @phpstan-return list<object{voter_user_id: int|numeric-string, registered: string|null}>
      */
     public function getRecentVotersWithRegistration( int $pageId, int $days = 1 ): array {
+        // (Day-scale window: FraudDetector's async fan-in analysis. The
+        // synchronous pre-gate uses countRecentDistinctVoters() below.)
         global $wpdb;
 
         $userInfoTable = \BCC\Trust\Core\Database\TableRegistry::userInfo();
@@ -1860,6 +2063,28 @@ class VoteRepository {
              GROUP BY v.voter_user_id",
             $pageId,
             $days
+        ) );
+    }
+
+    /**
+     * Distinct voters with an ACTIVE vote cast on the page since a DATETIME
+     * boundary (site-local, the frame created_at is written in). Used by the
+     * synchronous fan-in pre-gate, which only needs the count over a short
+     * window (F-105: 5 minutes).
+     */
+    public function countRecentDistinctVoters( int $pageId, string $sinceMysql ): int {
+        if ( $pageId <= 0 || $sinceMysql === '' ) {
+            return 0;
+        }
+        global $wpdb;
+
+        return (int) $wpdb->get_var( $wpdb->prepare(
+            "SELECT COUNT(DISTINCT voter_user_id) FROM {$this->table}
+              WHERE page_id = %d
+                AND status = 1
+                AND created_at >= %s",
+            $pageId,
+            $sinceMysql
         ) );
     }
 
@@ -1891,13 +2116,22 @@ class VoteRepository {
     /**
      * Get mutual vote pairs for vote ring detection.
      *
+     * KEYSET-paginated (F-108): rows come ordered by the pair (user_a,
+     * user_b) and the caller passes the last pair it saw. The old LIMIT /
+     * OFFSET walk had no ORDER BY over a GROUP BY, so the group order could
+     * change between pages and the ring cron skipped some pairs and saw
+     * others twice. The scores joins read the canonical category_id = 0 row
+     * only — the PK is (page_id, category_id), so a page with category rows
+     * used to multiply mutual_count and total_weight (the F-142 family).
+     *
      * @param int $minSize    Minimum mutual count threshold.
      * @param int $pageLimit  Maximum rows to return.
-     * @param int $offset     Offset for pagination.
+     * @param int $afterUserA Keyset cursor: user_a of the last pair seen (0 = start).
+     * @param int $afterUserB Keyset cursor: user_b of the last pair seen.
      * @return object[]
      * @phpstan-return list<MutualVotePair>
      */
-    public function getMutualVotePairs( int $minSize, int $pageLimit = 500, int $offset = 0 ): array {
+    public function getMutualVotePairs( int $minSize, int $pageLimit = 500, int $afterUserA = 0, int $afterUserB = 0 ): array {
         global $wpdb;
 
         $scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
@@ -1909,19 +2143,23 @@ class VoteRepository {
                 COUNT(*) as mutual_count,
                 SUM(v1.weight + v2.weight) as total_weight
              FROM {$this->table} v1
-             JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id
+             JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id AND s1.category_id = 0
              JOIN {$this->table} v2 ON v2.voter_user_id = s1.page_owner_id
-             JOIN {$scoresTable} s2 ON v2.page_id = s2.page_id
+             JOIN {$scoresTable} s2 ON v2.page_id = s2.page_id AND s2.category_id = 0
              WHERE v1.status = 1
                AND v2.status = 1
                AND s2.page_owner_id = v1.voter_user_id
                AND v1.voter_user_id != v2.voter_user_id
+               AND (v1.voter_user_id > %d OR (v1.voter_user_id = %d AND v2.voter_user_id > %d))
              GROUP BY v1.voter_user_id, v2.voter_user_id
              HAVING mutual_count >= %d
-             LIMIT %d OFFSET %d",
+             ORDER BY v1.voter_user_id ASC, v2.voter_user_id ASC
+             LIMIT %d",
+            max( 0, $afterUserA ),
+            max( 0, $afterUserA ),
+            max( 0, $afterUserB ),
             $minSize,
-            $pageLimit,
-            $offset
+            $pageLimit
         ) );
     }
 
@@ -1968,106 +2206,203 @@ class VoteRepository {
     // Admin / moderation bulk operations
     // -------------------------------------------------------------------------
 
-    /**
-     * Soft-delete all active votes by a voter.
-     *
-     * @return int|false Number of rows updated, or false on failure.
-     */
-    public function softDeleteAllByVoter(int $voterId)
-    {
-        global $wpdb;
-
-        return $wpdb->update(
-            $this->table,
-            ['status' => 0, 'updated_at' => current_time('mysql')],
-            ['voter_user_id' => $voterId],
-            ['%d', '%s'],
-            ['%d']
-        );
-    }
+    // The unscoped bulk soft-deletes (softDeleteAllByVoter / softDeleteByVoterIds /
+    // softDeleteByPageIds) were removed (F-122/F-104): they set status = 0 with
+    // no `status = 1` filter, which turned dispute-removed rows (2) back into
+    // ordinary retractions — re-enabling the voter (upsert Case B) and making
+    // the rows eligible for cleanupOldDeleted() — and made admin removals
+    // indistinguishable from user retractions. All bulk removal now goes
+    // through VoteRemovalService, which uses the two helpers below.
 
     /**
-     * Get distinct active page IDs voted on by a voter.
+     * Votes in `$status` cast by any of the given voters, as minimal refs,
+     * keyset-paginated by id. Read inside the removal/restore transaction.
      *
-     * @return int[]
+     * @param list<int> $voterIds
+     * @return list<object{id: int, voter_user_id: int, page_id: int}>
+     * @throws RepositoryException on database failure (wpdb returns [] on
+     *         error, so the error is detected via last_error, not the result)
      */
-    public function getActivePageIdsByVoter(int $voterId): array
+    public function getVoteRefsByVoters(array $voterIds, int $status, int $afterId, int $limit): array
     {
-        global $wpdb;
-
-        return array_map('intval', $wpdb->get_col($wpdb->prepare(
-            "SELECT DISTINCT page_id FROM {$this->table} WHERE voter_user_id = %d AND status = 1",
-            $voterId
-        )));
-    }
-
-    /**
-     * Soft-delete all active votes by voters in a set of user IDs.
-     *
-     * @param int[] $voterIds
-     * @return int|false Number of rows updated, or false on failure.
-     */
-    public function softDeleteByVoterIds(array $voterIds)
-    {
-        global $wpdb;
-
-        if (empty($voterIds)) {
-            return 0;
-        }
-
-        $placeholders = implode(',', array_fill(0, count($voterIds), '%d'));
-
-        return $wpdb->query($wpdb->prepare(
-            "UPDATE {$this->table} SET status = 0, updated_at = %s
-             WHERE voter_user_id IN ({$placeholders})",
-            current_time('mysql'), ...$voterIds
-        ));
-    }
-
-    /**
-     * Get distinct active page IDs voted on by any of the given voter IDs.
-     *
-     * @param int[] $voterIds
-     * @return int[]
-     */
-    public function getActivePageIdsByVoterIds(array $voterIds): array
-    {
-        global $wpdb;
-
-        if (empty($voterIds)) {
+        $voterIds = array_values(array_unique(array_filter(array_map('intval', $voterIds), static fn (int $v): bool => $v > 0)));
+        if ($voterIds === []) {
             return [];
         }
 
+        global $wpdb;
         $placeholders = implode(',', array_fill(0, count($voterIds), '%d'));
 
-        return array_map('intval', $wpdb->get_col($wpdb->prepare(
-            "SELECT DISTINCT page_id FROM {$this->table}
-             WHERE voter_user_id IN ({$placeholders}) AND status = 1",
-            ...$voterIds
-        )));
+        $sql = self::preparedOrThrow($wpdb->prepare(
+            "SELECT id, voter_user_id, page_id FROM {$this->table}
+              WHERE voter_user_id IN ({$placeholders})
+                AND status = %d
+                AND id > %d
+              ORDER BY id ASC
+              LIMIT %d",
+            ...array_merge($voterIds, [$status, $afterId, max(1, $limit)])
+        ), __METHOD__);
+
+        // wpdb resets last_error at the start of every query, so a non-empty
+        // value here belongs to THIS read.
+        $rows = $wpdb->get_results($sql);
+        if ($wpdb->last_error !== '') {
+            throw new RepositoryException('VoteRepository::getVoteRefsByVoters failed: ' . $wpdb->last_error);
+        }
+
+        $out = [];
+        foreach ((array) $rows as $row) {
+            $out[] = (object) [
+                'id'            => (int) $row->id,
+                'voter_user_id' => (int) $row->voter_user_id,
+                'page_id'       => (int) $row->page_id,
+            ];
+        }
+        return $out;
     }
 
     /**
-     * Soft-delete all active votes on the given page IDs.
+     * Votes with the given ids that are currently in `$status`, as minimal refs.
      *
-     * @param int[] $pageIds
-     * @return int|false
+     * @param list<int> $voteIds
+     * @return list<object{id: int, voter_user_id: int, page_id: int}>
+     * @throws RepositoryException on database failure
      */
-    public function softDeleteByPageIds(array $pageIds)
+    public function getVoteRefsByIdsAndStatus(array $voteIds, int $status): array
     {
         global $wpdb;
+        $out = [];
 
-        if (empty($pageIds)) {
-            return 0;
+        foreach (array_chunk(self::positiveIds($voteIds), self::BULK_CHUNK) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '%d'));
+
+            $sql = self::preparedOrThrow($wpdb->prepare(
+                "SELECT id, voter_user_id, page_id FROM {$this->table}
+                  WHERE id IN ({$placeholders}) AND status = %d
+                  ORDER BY id ASC",
+                ...array_merge($chunk, [$status])
+            ), __METHOD__);
+
+            $rows = $wpdb->get_results($sql);
+            if ($wpdb->last_error !== '') {
+                throw new RepositoryException('VoteRepository::getVoteRefsByIdsAndStatus failed: ' . $wpdb->last_error);
+            }
+
+            foreach ((array) $rows as $row) {
+                $out[] = (object) [
+                    'id'            => (int) $row->id,
+                    'voter_user_id' => (int) $row->voter_user_id,
+                    'page_id'       => (int) $row->page_id,
+                ];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Move the given votes from `$fromStatus` to `$toStatus`, chunked.
+     *
+     * The `status = $fromStatus` predicate is load-bearing: a row that is no
+     * longer in the expected state (e.g. dispute-removed, or already
+     * restored) is never touched.
+     *
+     * @param list<int> $voteIds
+     * @return int Rows changed.
+     * @throws RepositoryException on database failure
+     */
+    public function transitionStatus(array $voteIds, int $fromStatus, int $toStatus): int
+    {
+        global $wpdb;
+        $ids     = self::positiveIds($voteIds);
+        $changed = 0;
+        $now     = current_time('mysql');
+
+        foreach (array_chunk($ids, self::BULK_CHUNK) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '%d'));
+
+            $sql = self::preparedOrThrow($wpdb->prepare(
+                "UPDATE {$this->table}
+                    SET status = %d, updated_at = %s
+                  WHERE id IN ({$placeholders}) AND status = %d",
+                ...array_merge([$toStatus, $now], $chunk, [$fromStatus])
+            ), __METHOD__);
+
+            $result = $wpdb->query($sql);
+            if ($result === false) {
+                throw new RepositoryException('VoteRepository::transitionStatus failed: ' . $wpdb->last_error);
+            }
+            $changed += (int) $result;
         }
 
-        $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
+        foreach ($ids as $id) {
+            $this->bustVoteCache($id);
+        }
 
-        return $wpdb->query($wpdb->prepare(
-            "UPDATE {$this->table} SET status = 0, updated_at = %s
-             WHERE page_id IN ({$placeholders})",
-            current_time('mysql'), ...$pageIds
-        ));
+        return $changed;
+    }
+
+    /**
+     * How many of a voter's votes are moderation-removed and not yet purged —
+     * exactly what VoteRemovalService::restoreModeratedVotesCastBy() would
+     * bring back. (cleanupOldDeleted() purges them once they are older than
+     * MODERATION_RESTORE_WINDOW_DAYS.)
+     *
+     * @throws RepositoryException on database failure
+     */
+    public function countModeratedByVoter(int $voterId): int
+    {
+        if ($voterId <= 0) {
+            return 0;
+        }
+        global $wpdb;
+
+        $sql = self::preparedOrThrow($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->table}
+              WHERE voter_user_id = %d
+                AND status = %d",
+            $voterId,
+            self::STATUS_MODERATION_REMOVED
+        ), __METHOD__);
+
+        $count = $wpdb->get_var($sql);
+        if ($wpdb->last_error !== '') {
+            throw new RepositoryException('VoteRepository::countModeratedByVoter failed: ' . $wpdb->last_error);
+        }
+        return (int) $count;
+    }
+
+    /**
+     * #69 failure class: `$wpdb->prepare()` returns '' (or null) on a
+     * placeholder/argument mismatch, after which get_results()/query() run
+     * NOTHING and leave last_error empty — a read that "succeeds" with no
+     * rows. The removal/restore helpers must never mistake that for "no
+     * votes", so it is a hard failure here.
+     *
+     * @param mixed $prepared
+     * @throws RepositoryException
+     */
+    private static function preparedOrThrow($prepared, string $where): string
+    {
+        if (!is_string($prepared) || $prepared === '') {
+            throw new RepositoryException($where . ': wpdb::prepare() produced no statement');
+        }
+        return $prepared;
+    }
+
+    /**
+     * @param array<mixed> $ids
+     * @return list<int>
+     */
+    private static function positiveIds(array $ids): array
+    {
+        $out = [];
+        foreach ($ids as $id) {
+            $i = (int) $id;
+            if ($i > 0) {
+                $out[$i] = $i;
+            }
+        }
+        return array_values($out);
     }
 
     /**

@@ -32,6 +32,7 @@ use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\DelegationRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\ValueObjects\DelegationVerdict;
 use BCC\Trust\Onchain\ValueObjects\ValidatorGatedGroupConfig;
@@ -49,10 +50,17 @@ final class DelegationEligibilityService
 
     /**
      * Verdict for a single delegator-community config.
+     *
+     * `$deadlineAt` is an ABSOLUTE unix instant bounding every LCD call this
+     * makes, or null for "no deadline" — the default, and what the revoke
+     * sweep uses. See {@see verdictsForUser()}.
      */
-    public function verdictFor(int $userId, ValidatorGatedGroupConfig $config): DelegationVerdict
-    {
-        $verdicts = $this->verdictsForUser($userId, [$config]);
+    public function verdictFor(
+        int $userId,
+        ValidatorGatedGroupConfig $config,
+        ?int $deadlineAt = null
+    ): DelegationVerdict {
+        $verdicts = $this->verdictsForUser($userId, [$config], $deadlineAt);
         return $verdicts[$config->groupId]
             ?? DelegationVerdict::unknown($config->minStake, null);
     }
@@ -67,10 +75,23 @@ final class DelegationEligibilityService
      * Cosmos fetcher yield UNKNOWN (fail closed — never a fake
      * "ineligible" that could feed a revoke).
      *
+     * ⚠⚠ F-156: `$deadlineAt` IS AN INSTANT AND IT IS SHARED, WHICH IS THE
+     * ONLY SHAPE THAT BOUNDS THIS. One call can walk up to
+     * DELEGATIONS_MAX_PAGES pages PER VERIFIED WALLET on the chain, so a
+     * per-call duration would multiply by pages and by wallets both. One
+     * instant, fixed before the first call, bounds the user's wait whatever
+     * that fan-out turns out to be.
+     *
+     * ⚠ null = no deadline, and that is the default on purpose. The revoke
+     * sweep calls this from cron, where an unfinished walk returns UNKNOWN
+     * and is SKIPPED — so a deadline there would silently stop revoking on a
+     * slow LCD rather than merely slowing it down. Only a caller with a user
+     * waiting should pass one.
+     *
      * @param list<ValidatorGatedGroupConfig> $configs
      * @return array<int, DelegationVerdict> keyed by group_id
      */
-    public function verdictsForUser(int $userId, array $configs): array
+    public function verdictsForUser(int $userId, array $configs, ?int $deadlineAt = null): array
     {
         if ($userId <= 0 || $configs === []) {
             return [];
@@ -81,7 +102,29 @@ final class DelegationEligibilityService
             $byChain[$cfg->chainId][] = $cfg;
         }
 
-        $wallets = WalletRepository::getForUser($userId, null, true);
+        // ⚠⚠ FAIL-CLOSED READ. This must be the THROWING variant.
+        //
+        // `getForUser()` logs-and-continues: a failed query returns [], and
+        // the `$chainWallets === []` branch below treats [] as a DEFINITE
+        // non-delegator and returns INELIGIBLE — which the revoke sweep
+        // acts on by removing the member. So a transient DB fault would
+        // evict a delegator who never stopped delegating.
+        //
+        // This is not hypothetical: `getForUserOrThrow()`'s own docblock
+        // records it happening to the holder-group sweep (PR 7.14). The
+        // delegation path was written later and never switched over.
+        //
+        // A read that did not run must reach the verdict as UNKNOWN, which
+        // the sweep skips and the join gate refuses with a retryable 503.
+        try {
+            $wallets = WalletRepository::getForUserOrThrow($userId, null, true);
+        } catch (RepositoryReadFailure $e) {
+            $unknown = [];
+            foreach ($configs as $cfg) {
+                $unknown[$cfg->groupId] = DelegationVerdict::unknown($cfg->minStake, null);
+            }
+            return $unknown;
+        }
 
         $out = [];
         foreach ($byChain as $chainId => $chainConfigs) {
@@ -113,7 +156,7 @@ final class DelegationEligibilityService
             // failure for that wallet.
             $setsByWallet = [];
             foreach ($chainWallets as $w) {
-                $setsByWallet[] = $this->delegationsForWallet($fetcher, $w, $chainId);
+                $setsByWallet[] = $this->delegationsForWallet($fetcher, $w, $chainId, $deadlineAt);
             }
 
             foreach ($chainConfigs as $cfg) {
@@ -217,8 +260,12 @@ final class DelegationEligibilityService
      * @param object{id: string|int, wallet_address: string} $wallet
      * @return array<int, array{validator_address: string, shares: string|null, amount: float|null}>|null
      */
-    private function delegationsForWallet(CosmosFetcher $fetcher, object $wallet, int $chainId): ?array
-    {
+    private function delegationsForWallet(
+        CosmosFetcher $fetcher,
+        object $wallet,
+        int $chainId,
+        ?int $deadlineAt = null
+    ): ?array {
         $walletLinkId = (int) $wallet->id;
         $cacheKey     = 'delegations:' . $walletLinkId;
 
@@ -228,9 +275,11 @@ final class DelegationEligibilityService
             return $cached;
         }
 
-        $rows = $fetcher->fetch_delegations_result((string) $wallet->wallet_address);
+        $rows = $fetcher->fetch_delegations_result((string) $wallet->wallet_address, $deadlineAt);
         if ($rows === null) {
-            // Don't cache transport failures.
+            // Don't cache transport failures — and a deadline-stopped walk
+            // arrives here as null too, so it is not cached either. The next
+            // request gets a fresh budget rather than a remembered timeout.
             return null;
         }
 

@@ -52,13 +52,41 @@ if (!defined('ABSPATH')) {
 final class ReciprocityPenaltyResolver
 {
     /**
-     * §12 q6 — mutual pair dampener. Tunable; closed-network testing
-     * retunes. Picked at 0.50 to mirror the wallet-age floor and to
-     * neutralize a hypothetical 2× cartel-stacking effect (two
-     * operators attesting to each other twice each = same outcome
-     * as one operator attesting twice unilaterally).
+     * ⚠⚠ WAS 0.50. NOW BASELINE — ORDINARY RECIPROCITY IS NOT PENALISED.
+     *
+     * The 0.50 halved an attestation's weight whenever the target had any
+     * active reverse attestation on the attestor. That did not match this
+     * mechanism's own documented design, in two directions:
+     *
+     *   SPEC (trust-attestation-risk-assessment.md, cartel mitigation #3):
+     *     "both attestations get baseline weight only (no diversity
+     *      bonus). Detects reciprocal backing WITHOUT FORBIDDING IT — the
+     *      attestations still count, they just don't compound."
+     *
+     *   1. "baseline weight only" is x1.0. Halving the base weight is a
+     *      PENALTY the spec never authorised.
+     *   2. The spec asked for the DIVERSITY BONUS to be suppressed so a
+     *      reciprocal pair does not COMPOUND. This class never touched
+     *      it: the 1.3x multiplier lives in AttestationScoreSynthesis and
+     *      is gated purely on the count of distinct sources, with no
+     *      reciprocity input at all.
+     *
+     * So the one thing the spec asked for was not done, and a different,
+     * harsher thing was. This change does the first half — restore
+     * baseline weight.
+     *
+     * ⚠ IT DELIBERATELY DOES NOT DO THE SECOND HALF. Suppressing the
+     * diversity bonus for reciprocal sources would LOWER scores for some
+     * targets, and the old specification is design evidence, not standing
+     * authorization for a further policy change. Current diversity
+     * behaviour is characterised by tests, not altered. See
+     * docs/proposal-reciprocity-attestation-dampener.md.
+     *
+     * ⚠ The constant is retained rather than deleted so there is exactly
+     * ONE place to re-enable a weight effect from, if an evidence-led
+     * dampener is ever agreed.
      */
-    public const RECIPROCITY_MULTIPLIER = 0.50;
+    public const RECIPROCITY_MULTIPLIER = 1.00;
 
     /** No-dampening case — passed through unchanged into weight_at_time. */
     public const NO_RECIPROCITY = 1.00;
@@ -69,21 +97,32 @@ final class ReciprocityPenaltyResolver
     }
 
     /**
-     * Resolve the reciprocity multiplier for the given cast.
+     * Is this cast reciprocal? DETECTION ONLY — carries no consequence.
+     *
+     * ⚠ This is the observation, and it is retained on purpose. Before
+     * this change the only durable record that a cast was reciprocal was
+     * the `reciprocity_mult: 0.50` value in its audit row. With the
+     * multiplier at baseline that value no longer distinguishes anything,
+     * so the boolean is surfaced instead and audited as
+     * `reciprocity_detected`. Removing the penalty must not also delete
+     * the evidence — the same reasoning applied to the ring detectors in
+     * #314, where dropping an increment would have erased the only trace
+     * of the observation.
+     *
+     * Exactly ONE reverse-lookup read, as before.
      *
      * @param int    $attestorUserId The operator casting the new attestation.
      * @param string $targetKind     One of the §J.4 target_kinds.
      * @param int    $targetId       The target id.
-     * @return float A multiplier in {RECIPROCITY_MULTIPLIER, NO_RECIPROCITY}.
      */
-    public function weightFor(int $attestorUserId, string $targetKind, int $targetId): float
+    public function isReciprocal(int $attestorUserId, string $targetKind, int $targetId): bool
     {
         // Cards can't cast back — reciprocity is structurally impossible.
         if ($targetKind !== 'user_profile') {
-            return self::NO_RECIPROCITY;
+            return false;
         }
         if ($attestorUserId <= 0 || $targetId <= 0 || $attestorUserId === $targetId) {
-            return self::NO_RECIPROCITY;
+            return false;
         }
 
         // The reverse query: does the target (as attestor) have an
@@ -96,12 +135,39 @@ final class ReciprocityPenaltyResolver
             $attestorUserId
         );
 
-        $hasReverseVouch       = $reverse['vouch']       !== null;
-        $hasReverseStandBehind = $reverse['stand_behind'] !== null;
-        if ($hasReverseVouch || $hasReverseStandBehind) {
-            return self::RECIPROCITY_MULTIPLIER;
-        }
+        return $reverse['vouch'] !== null || $reverse['stand_behind'] !== null;
+    }
 
-        return self::NO_RECIPROCITY;
+    /**
+     * Resolve the reciprocity multiplier for the given cast.
+     *
+     * ⚠ Now returns BASELINE in every case — see RECIPROCITY_MULTIPLIER.
+     * Kept as the §6.3 contract surface and as the single mapping from
+     * "reciprocal" to "weight effect", so a future evidence-led dampener
+     * has one place to live.
+     *
+     * @param int    $attestorUserId The operator casting the new attestation.
+     * @param string $targetKind     One of the §J.4 target_kinds.
+     * @param int    $targetId       The target id.
+     * @return float A multiplier in {RECIPROCITY_MULTIPLIER, NO_RECIPROCITY}.
+     */
+    public function weightFor(int $attestorUserId, string $targetKind, int $targetId): float
+    {
+        return $this->isReciprocal($attestorUserId, $targetKind, $targetId)
+            ? self::RECIPROCITY_MULTIPLIER
+            : self::NO_RECIPROCITY;
+    }
+
+    /**
+     * The weight effect of a known detection, without re-reading.
+     *
+     * ⚠ Exists so the caller can audit the observation AND apply the
+     * multiplier from a SINGLE reverse-lookup. Calling isReciprocal()
+     * and weightFor() in sequence would double the DB read inside the
+     * transaction-locked region.
+     */
+    public static function multiplierFor(bool $isReciprocal): float
+    {
+        return $isReciprocal ? self::RECIPROCITY_MULTIPLIER : self::NO_RECIPROCITY;
     }
 }

@@ -6,7 +6,7 @@ use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Repositories\ScoreRepository;
 use BCC\Trust\Core\Repositories\SuspensionRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
-use BCC\Trust\Core\Repositories\VoteRepository;
+use BCC\Trust\Core\Services\Vote\VoteRemovalService;
 use BCC\Trust\Core\Services\TrustScoreService;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Security\AuditLogger;
@@ -30,18 +30,28 @@ final class ModerationService
 {
     private ScoreRepository $scoreRepository;
     private UserInfoRepository $userInfoRepository;
-    private VoteRepository $voteRepository;
+    private VoteRemovalService $voteRemovalService;
     private SuspensionRepository $suspensionRepository;
+    private \BCC\Trust\Core\Services\EliteOverridePin $elitePin;
+    private \BCC\Trust\Core\Services\ScoreOverrideLedger $overrideLedger;
+    /** @var (\Closure(int): void)|null re-evaluates a page's elite flag; null = Plugin's service */
+    private ?\Closure $eliteRecompute;
 
     public function __construct(
         ScoreRepository $scoreRepository,
         UserInfoRepository $userInfoRepository,
-        VoteRepository $voteRepository
+        VoteRemovalService $voteRemovalService,
+        ?\BCC\Trust\Core\Services\EliteOverridePin $elitePin = null,
+        ?\BCC\Trust\Core\Services\ScoreOverrideLedger $overrideLedger = null,
+        ?\Closure $eliteRecompute = null
     ) {
         $this->scoreRepository      = $scoreRepository;
         $this->userInfoRepository   = $userInfoRepository;
-        $this->voteRepository       = $voteRepository;
+        $this->voteRemovalService   = $voteRemovalService;
         $this->suspensionRepository = \BCC\Trust\Core\Plugin::instance()->suspensionRepository();
+        $this->elitePin             = $elitePin ?? new \BCC\Trust\Core\Services\EliteOverridePin();
+        $this->overrideLedger       = $overrideLedger ?? new \BCC\Trust\Core\Services\ScoreOverrideLedger();
+        $this->eliteRecompute       = $eliteRecompute;
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -56,6 +66,7 @@ final class ModerationService
      */
     public function suspendUser(int $userId, string $reason = 'manual_suspension', string $notes = ''): array
     {
+        $this->ensureUserInfoRow($userId);
         $fraudScore = $this->userInfoRepository->getFraudScore($userId);
 
         // Atomic: the suspensions row and the user_info gate flag must land
@@ -77,6 +88,8 @@ final class ModerationService
             echo '<div class="notice notice-error"><p>Failed to suspend user: database error.</p></div>';
             return ['success' => false, 'message' => 'Failed to suspend user: database error.'];
         }
+
+        $this->revokeSessions($userId);
 
         $this->logAction('admin_suspend', $userId, [
             'reason' => $reason,
@@ -128,37 +141,145 @@ final class ModerationService
     // ──────────────────────────────────────────────────────────────
 
     /**
-     * Soft-delete all votes cast by a user and recalculate affected page scores.
+     * Remove all active votes cast by a user (moderation removal: restorable,
+     * re-vote blocked) and recalculate the affected pages.
+     *
+     * Delegates to VoteRemovalService, the single bulk-removal path, which
+     * leaves dispute-removed votes untouched and audits the removed vote ids.
      *
      * @param int $userId The voter whose votes to clear.
      * @return array{success: bool, message: string, pages_affected: int}
      */
     public function clearVotes(int $userId): array
     {
-        $affectedPages = $this->voteRepository->getActivePageIdsByVoter($userId);
-
-        $r1 = $this->voteRepository->softDeleteAllByVoter($userId);
-
-        if ($r1 === false) {
+        try {
+            $result = $this->voteRemovalService
+                ->removeVotesCastBy([$userId], 'admin_clear_votes', get_current_user_id());
+        } catch (\Throwable $e) {
             Logger::error('[bcc-trust] clear_votes_failed', [
                 'user_id' => $userId,
+                'error'   => $e->getMessage(),
             ]);
-            echo '<div class="notice notice-error"><p>Failed to clear votes: database error.</p></div>';
+            echo '<div class="notice notice-error"><p>Failed to clear votes: database error. Nothing was removed.</p></div>';
             return ['success' => false, 'message' => 'Failed to clear votes: database error.', 'pages_affected' => 0];
         }
 
-        $this->userInfoRepository->updateVotesCast($userId, 0);
+        $message = sprintf(
+            'Votes cleared: %d removed across %d pages (%d recalculated now, %d queued for the recalculation cron).',
+            $result['removed'],
+            $result['pages'],
+            $result['recalculated'],
+            $result['queued']
+        );
+        echo '<div class="notice notice-success"><p>' . esc_html($message) . '</p></div>';
+        return ['success' => true, 'message' => $message, 'pages_affected' => $result['pages']];
+    }
 
-        foreach ($affectedPages as $pageId) {
-            do_action('bcc.trust.recalculate_score', (int) $pageId);
+    /**
+     * Restore every vote of this user that moderation removed (status 3 → 1)
+     * and is not yet purged, then recalculate the affected pages. The undo
+     * for clearVotes() / ring invalidation, per voter.
+     *
+     * @param int $userId The voter whose moderated votes to restore.
+     * @return array{success: bool, message: string, pages_affected: int}
+     */
+    public function restoreVotes(int $userId): array
+    {
+        try {
+            $result = $this->voteRemovalService
+                ->restoreModeratedVotesCastBy([$userId], 'admin_restore_votes', get_current_user_id());
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] restore_votes_failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            echo '<div class="notice notice-error"><p>Failed to restore votes: database error. Nothing was restored.</p></div>';
+            return ['success' => false, 'message' => 'Failed to restore votes: database error.', 'pages_affected' => 0];
         }
 
-        $this->logAction('admin_clear_votes', $userId, [
-            'pages_affected' => count($affectedPages),
+        $message = sprintf(
+            'Votes restored: %d across %d pages (%d recalculated now, %d queued for the recalculation cron).',
+            $result['removed'],
+            $result['pages'],
+            $result['recalculated'],
+            $result['queued']
+        );
+        echo '<div class="notice notice-success"><p>' . esc_html($message) . '</p></div>';
+        return ['success' => true, 'message' => $message, 'pages_affected' => $result['pages']];
+    }
+
+    /**
+     * How many of this user's moderation-removed votes restoreVotes() would
+     * bring back. Null when the count cannot be read (the button is then
+     * hidden rather than claiming zero).
+     */
+    public function restorableVoteCount(int $userId): ?int
+    {
+        try {
+            return $this->voteRemovalService->countRestorableFor($userId);
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] restorable_vote_count_failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // RESET FRAUD SCORE
+    // ──────────────────────────────────────────────────────────────
+
+    /**
+     * Admin reset of a member's fraud score — current AND peak — to 0
+     * (F-103, user decision). The undo for a wrongly accumulated score (e.g.
+     * a household that shared a device before the once-per-window rule).
+     *
+     * A clean slate for the penalty window (user decision): the score and
+     * peak go to 0, but the member's recorded shared-device penalties are
+     * KEPT, so the same shared device cannot re-add points until its 30-day
+     * window expires. Drops cached fraud / rate-limit state and flags every
+     * page the member voted on so the fraud discount on their votes is
+     * recomputed. Audited with the replaced values.
+     *
+     * @return array{success: bool, message: string}
+     */
+    public function resetFraudScore(int $userId): array
+    {
+        try {
+            $previous = $this->userInfoRepository->resetFraudScore($userId);
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] reset_fraud_score_failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            echo '<div class="notice notice-error"><p>Failed to reset the fraud score: database error.</p></div>';
+            return ['success' => false, 'message' => 'Failed to reset the fraud score: database error.'];
+        }
+
+        if ($previous === null) {
+            echo '<div class="notice notice-error"><p>No trust record exists for this user, so there is nothing to reset.</p></div>';
+            return ['success' => false, 'message' => 'No trust record for this user.'];
+        }
+
+        \BCC\Trust\Core\Security\FraudDetector::clearCache($userId);
+        \BCC\Trust\Core\Security\RateLimiter::invalidateUserCache($userId);
+        $pagesFlagged = $this->userInfoRepository->markVotedPagesForRecalculation($userId);
+
+        $this->logAction('admin_fraud_score_reset', $userId, [
+            'previous_fraud_score' => $previous['fraud_score'],
+            'previous_peak_score'  => $previous['peak_fraud_score'],
+            'pages_flagged'        => $pagesFlagged,
         ]);
 
-        echo '<div class="notice notice-success"><p>Votes cleared. ' . count($affectedPages) . ' page scores recalculated.</p></div>';
-        return ['success' => true, 'message' => 'Votes cleared.', 'pages_affected' => count($affectedPages)];
+        $message = sprintf(
+            'Fraud score reset to 0 (was %d, peak %d). %d voted pages queued for recalculation. The score reflects live signals and can rise again if new ones appear.',
+            $previous['fraud_score'],
+            $previous['peak_fraud_score'],
+            $pagesFlagged
+        );
+        echo '<div class="notice notice-success"><p>' . esc_html($message) . '</p></div>';
+        return ['success' => true, 'message' => $message];
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -256,49 +377,86 @@ final class ModerationService
         // would otherwise present as an admin action that "didn't take".
         $tier = TrustScoreService::tierFor((float) $newScore, (float) $newScore, true);
 
-        $affectedPageIds = $this->scoreRepository->getPageIdsByOwner($userId);
+        // One override or undo per user at a time: the ledger is a
+        // read-modify-write, and two admins racing would double-apply.
+        $lock = 'bcc_score_override_' . $userId;
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($lock, 5)) {
+            echo '<div class="notice notice-error"><p>Another score change for this member is in progress. Try again.</p></div>';
+            return ['success' => false, 'message' => 'Another score change for this member is in progress.'];
+        }
 
-        $updated = 0;
-        $now     = gmdate('Y-m-d H:i:s');
+        $updated  = 0;
+        $now      = gmdate('Y-m-d H:i:s');
+        $adminId  = (int) get_current_user_id();
+        $ledgerId = '';
+        /** @var array<int, array{delta: float, prev_pin: array{admin_id: int, granted_at: string}|null}> $ledgerPages */
+        $ledgerPages = [];
 
-        foreach ($affectedPageIds as $pid) {
-            $pid = (int) $pid;
+        try {
+            $affectedPageIds = $this->scoreRepository->getPageIdsByOwner($userId);
 
-            // 1. Fresh canonical recompute FIRST, so the delta below is
-            //    measured against the value every future recalc will
-            //    reproduce — not against a stale row.
-            do_action('bcc.trust.recalculate_score', $pid);
+            foreach ($affectedPageIds as $pid) {
+                $pid = (int) $pid;
 
-            $row     = $this->scoreRepository->getByPageId($pid);
-            $current = $row !== null ? $row->getTotalScore() : 50.0;
-            $delta   = (float) $newScore - $current;
+                // 1. Fresh canonical recompute FIRST, so the delta below is
+                //    measured against the value every future recalc will
+                //    reproduce — not against a stale row.
+                do_action('bcc.trust.recalculate_score', $pid);
 
-            // 2. Accumulate the difference as admin fiat. applyPenalty
-            //    recomputes total_score + reputation_tier inline via the
-            //    canonical formula, mirrors the tier, and invalidates the
-            //    score cache — total_score lands exactly on the target.
-            try {
-                if (abs($delta) > 0.0001) {
-                    $this->scoreRepository->applyPenalty($pid, $delta);
+                $row     = $this->scoreRepository->getByPageId($pid);
+                $current = $row !== null ? $row->getTotalScore() : 50.0;
+                $delta   = (float) $newScore - $current;
+
+                // 2. Accumulate the difference as admin fiat. applyPenalty
+                //    recomputes total_score + reputation_tier inline via the
+                //    canonical formula, mirrors the tier, and invalidates the
+                //    score cache — total_score lands exactly on the target.
+                $applied = 0.0;
+                try {
+                    if (abs($delta) > 0.0001) {
+                        $this->scoreRepository->applyPenalty($pid, $delta);
+                        $applied = $delta;
+                    }
+                    $updated++;
+                } catch (\Throwable $e) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] score override failed for page', [
+                        'page_id' => $pid,
+                        'user_id' => $userId,
+                        'error'   => $e->getMessage(),
+                    ]);
+                    continue;
                 }
-                $updated++;
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] score override failed for page', [
-                    'page_id' => $pid,
-                    'user_id' => $userId,
-                    'error'   => $e->getMessage(),
-                ]);
-                continue;
+
+                // F-113: record exactly what changed, so undo can reverse it.
+                $ledgerPages[$pid] = ['delta' => $applied, 'prev_pin' => $this->elitePin->read($pid)];
+
+                // 3. Elite. An override TO elite STICKS until an admin
+                //    removes it (product decision): the pin is what the
+                //    nightly sweep honours. Any other target REMOVES a pin
+                //    and re-evaluates the flag, so an earlier manual grant
+                //    can no longer outlive an override down.
+                if ($tier === 'elite') {
+                    $this->elitePin->pin($pid, $adminId, $now);
+                    $this->scoreRepository->setEliteEligibility($pid, true, $now);
+                } else {
+                    $this->elitePin->unpin($pid);
+                }
+
+                // 4. Second recompute now REPRODUCES the target (the adjustment
+                //    is a formula input) and pushes it to the read model via the
+                //    priority-20 subscriber — proving durability on the spot.
+                do_action('bcc.trust.recalculate_score', $pid);
+
+                if ($tier !== 'elite') {
+                    $this->recomputeElite($pid);
+                }
             }
 
-            if ($tier === 'elite') {
-                $this->scoreRepository->setEliteEligibility($pid, true, $now);
-            }
-
-            // 3. Second recompute now REPRODUCES the target (the adjustment
-            //    is a formula input) and pushes it to the read model via the
-            //    priority-20 subscriber — proving durability on the spot.
-            do_action('bcc.trust.recalculate_score', $pid);
+            $ledgerId = $ledgerPages === []
+                ? ''
+                : $this->overrideLedger->push($userId, $adminId, $newScore, $reason, $now, $ledgerPages);
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
         }
 
         $this->logAction('admin_score_override', $userId, [
@@ -306,10 +464,125 @@ final class ModerationService
             'new_tier'      => $tier,
             'reason'        => $reason,
             'pages_updated' => $updated,
+            'ledger_id'     => $ledgerId,
+            'elite_pinned'  => $tier === 'elite',
         ]);
 
-        echo '<div class="notice notice-success"><p>Trust score overridden to <strong>' . $newScore . '</strong> (' . esc_html($tier) . ') for ' . intval($updated) . ' page(s). Reason: ' . esc_html($reason) . '</p></div>';
-        return ['success' => true, 'message' => 'Trust score overridden.', 'tier' => $tier, 'pages_updated' => $updated];
+        $eliteNote = $tier === 'elite' ? ' Elite granted manually; stays until removed.' : '';
+        $undoNote  = ($ledgerPages !== [] && $ledgerId === '')
+            ? ' ⚠ The undo record could not be saved, so this override cannot be undone.'
+            : '';
+        echo '<div class="notice notice-success"><p>Trust score overridden to <strong>' . $newScore . '</strong> (' . esc_html($tier) . ') for ' . intval($updated) . ' page(s). Reason: ' . esc_html($reason) . '.' . esc_html($eliteNote . $undoNote) . '</p></div>';
+        return ['success' => true, 'message' => 'Trust score overridden.', 'tier' => $tier, 'pages_updated' => $updated, 'ledger_id' => $ledgerId];
+    }
+
+    /**
+     * Undo the member's LATEST not-yet-undone score override (F-113).
+     *
+     * Applies the inverse of each page's recorded delta (penalties are
+     * additive, so this cancels exactly even if dispute penalties landed
+     * since), restores the elite pin that existed before the override, then
+     * recomputes the score and the elite flag. Refuses when there is nothing
+     * to undo. ⚠ Only the last ScoreOverrideLedger::MAX_ENTRIES overrides per
+     * member are undoable.
+     *
+     * @return array{success: bool, message: string, pages_restored?: int}
+     */
+    public function undoScoreOverride(int $userId): array
+    {
+        $lock = 'bcc_score_override_' . $userId;
+        if ($userId <= 0 || !\BCC\Core\DB\AdvisoryLock::acquire($lock, 5)) {
+            echo '<div class="notice notice-error"><p>Another score change for this member is in progress. Try again.</p></div>';
+            return ['success' => false, 'message' => 'Another score change for this member is in progress.'];
+        }
+
+        $restored = 0;
+        try {
+            $entry = $this->overrideLedger->latestUndoable($userId);
+            if ($entry === null) {
+                echo '<div class="notice notice-error"><p>There is no score override to undo for this member.</p></div>';
+                return ['success' => false, 'message' => 'There is no score override to undo.'];
+            }
+
+            // Mark FIRST: a crash mid-way must not leave the entry undoable,
+            // or a retry would apply the inverse twice.
+            if (!$this->overrideLedger->markUndone($userId, $entry['id'])) {
+                echo '<div class="notice notice-error"><p>Could not record the undo; nothing was changed.</p></div>';
+                return ['success' => false, 'message' => 'Could not record the undo; nothing was changed.'];
+            }
+
+            foreach ($entry['pages'] as $pidKey => $page) {
+                $pid = (int) $pidKey;
+                try {
+                    if (abs($page['delta']) > 0.0001) {
+                        $this->scoreRepository->applyPenalty($pid, -$page['delta']);
+                    }
+                } catch (\Throwable $e) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] score override undo failed for page', [
+                        'page_id' => $pid,
+                        'user_id' => $userId,
+                        'error'   => $e->getMessage(),
+                    ]);
+                    continue;
+                }
+
+                $prev = $page['prev_pin'];
+                if ($prev !== null) {
+                    $this->elitePin->pin($pid, $prev['admin_id'], $prev['granted_at']);
+                } else {
+                    $this->elitePin->unpin($pid);
+                }
+
+                do_action('bcc.trust.recalculate_score', $pid);
+                $this->recomputeElite($pid);
+                $restored++;
+            }
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
+        }
+
+        $this->logAction('admin_score_override_undone', $userId, [
+            'ledger_id'      => $entry['id'],
+            'undone_score'   => $entry['new_score'],
+            'pages_restored' => $restored,
+        ]);
+
+        echo '<div class="notice notice-success"><p>Score override undone for ' . intval($restored) . ' page(s).</p></div>';
+        return ['success' => true, 'message' => 'Score override undone.', 'pages_restored' => $restored];
+    }
+
+    /**
+     * What undoScoreOverride() would undo next, for the admin Undo button:
+     * the latest not-yet-undone override. Null when there is nothing to
+     * undo or the record cannot be read; the button is then hidden.
+     *
+     * @return array{new_score: int, at: string, reason: string}|null
+     */
+    public function latestUndoableOverride(int $userId): ?array
+    {
+        try {
+            $entry = $this->overrideLedger->latestUndoable($userId);
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] latest_undoable_override_failed', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return null;
+        }
+        if ($entry === null) {
+            return null;
+        }
+        return ['new_score' => $entry['new_score'], 'at' => $entry['at'], 'reason' => $entry['reason']];
+    }
+
+    /** Re-evaluate a page's elite flag (it honours the pin). */
+    private function recomputeElite(int $pageId): void
+    {
+        if ($this->eliteRecompute !== null) {
+            ($this->eliteRecompute)($pageId);
+            return;
+        }
+        \BCC\Trust\Core\Plugin::instance()->eliteEligibilityService()->recomputeFor($pageId);
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -345,35 +618,32 @@ final class ModerationService
         switch ($action) {
 
             case 'invalidate_votes':
-                // Soft-delete all votes cast by ring members
-                $affectedPages = $this->voteRepository->getActivePageIdsByVoterIds($userIds);
-                $this->voteRepository->softDeleteByVoterIds($userIds);
-
-                // Invalidate inbound votes (votes on pages owned by ring members).
-                // Single batched query instead of one per user.
-                $ownedPages = $this->scoreRepository->getPageIdsByOwners($userIds);
-
-                if (!empty($ownedPages)) {
-                    $this->voteRepository->softDeleteByPageIds($ownedPages);
-                    $affectedPages = array_unique(array_merge($affectedPages, $ownedPages));
+                // Remove every active vote cast BY ring members — including
+                // their votes on each other's pages, which is how a ring
+                // inflates scores. Third-party votes on ring-owned pages are
+                // deliberately NOT removed here (product decision, F-104):
+                // they come from people outside the ring. Moderation status,
+                // restorable, dispute-removed rows untouched, vote ids audited.
+                try {
+                    $result = $this->voteRemovalService
+                        ->removeVotesCastBy(array_values($userIds), 'admin_ring_invalidate_votes', $adminId);
+                    $msg = 'invalidated_' . $result['pages'];
+                } catch (\Throwable $e) {
+                    Logger::error('[bcc-trust] ring_invalidate_votes_failed', [
+                        'ring_users' => $userIds,
+                        'error'      => $e->getMessage(),
+                    ]);
+                    // Unrecognised by the Rings tab on purpose: it renders
+                    // the "check the application log" warning. Nothing was
+                    // removed (the removal is one transaction).
+                    $msg = 'invalidate_failed';
                 }
-
-                // Recalculate affected pages
-                foreach ($affectedPages as $pageId) {
-                    do_action('bcc.trust.recalculate_score', (int) $pageId);
-                }
-
-                $this->logAction('admin_ring_invalidate_votes', 0, [
-                    'ring_users'     => $userIds,
-                    'pages_affected' => count($affectedPages),
-                ]);
-
-                $msg = 'invalidated_' . count($affectedPages);
                 break;
 
             case 'suspend_all':
                 $suspended = 0;
                 foreach ($userIds as $uid) {
+                    $this->ensureUserInfoRow($uid);
                     $fraudScore = $this->userInfoRepository->getFraudScore($uid);
 
                     try {
@@ -381,6 +651,7 @@ final class ModerationService
                             $this->suspensionRepository->create($uid, $adminId, 'vote_ring', 'Suspended as part of vote ring action.', $fraudScore);
                             $this->userInfoRepository->suspendUser($uid, 'vote_ring');
                         });
+                        $this->revokeSessions($uid);
                         $suspended++;
                     } catch (\Throwable $e) {
                         // Skip this user but keep going; count only the ones
@@ -501,12 +772,14 @@ final class ModerationService
         foreach ($userIds as $uid) {
             switch ($action) {
                 case 'suspend':
+                    $this->ensureUserInfoRow($uid);
                     $score = $this->userInfoRepository->getFraudScore($uid);
                     try {
                         \BCC\Trust\Core\Security\TransactionManager::run(function () use ($uid, $adminId, $score) {
                             $this->suspensionRepository->create($uid, $adminId, 'manual_suspension', '', $score);
                             $this->userInfoRepository->suspendUser($uid, 'manual_suspension');
                         });
+                        $this->revokeSessions($uid);
                         $processed++;
                     } catch (\Throwable $e) {
                         // Log + skip; count only users who actually suspended,
@@ -535,8 +808,19 @@ final class ModerationService
                     break;
 
                 case 'clear_votes':
-                    $this->voteRepository->softDeleteAllByVoter($uid);
-                    $processed++;
+                    // Same single removal path as clearVotes(): recalc,
+                    // votes_cast reset, caches and an audit entry with the
+                    // vote ids — the bulk case used to do none of that (F-81).
+                    try {
+                        $this->voteRemovalService
+                            ->removeVotesCastBy([$uid], 'admin_clear_votes', $adminId);
+                        $processed++;
+                    } catch (\Throwable $e) {
+                        Logger::error('[bcc-trust] bulk_clear_votes_failed', [
+                            'user_id'  => $uid,
+                            'db_error' => $e->getMessage(),
+                        ]);
+                    }
                     break;
 
                 case 'reanalyze':
@@ -617,7 +901,7 @@ final class ModerationService
      */
     public function isIpWhitelisted(string $ip): bool
     {
-        return isset($this->getIpWhitelist()[$ip]);
+        return \BCC\Trust\Core\Security\FraudWhitelist::isIpWhitelisted($ip);
     }
 
     /**
@@ -628,6 +912,36 @@ final class ModerationService
      */
     public function isFingerprintWhitelisted(string $fp): bool
     {
-        return isset($this->getFingerprintWhitelist()[$fp]);
+        return \BCC\Trust\Core\Security\FraudWhitelist::isFingerprintWhitelisted($fp);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // SUSPEND-PATH HELPERS (F-112 / F-119)
+    // ──────────────────────────────────────────────────────────────
+
+    /**
+     * Make sure the user has a user_info row before suspending (F-112).
+     * The gate every enforcement path reads (is_suspended) lives on that
+     * row, so a missing one used to make a suspension a silent no-op. Reuses
+     * UserSyncService, the one place that builds a row from the WP user.
+     * UserInfoRepository::suspendUser() still throws if the row is absent.
+     */
+    private function ensureUserInfoRow(int $userId): void
+    {
+        if ($userId <= 0 || $this->userInfoRepository->exists($userId)) {
+            return;
+        }
+        \BCC\Trust\Core\Plugin::instance()->userSyncService()->sync($userId);
+    }
+
+    /**
+     * Revoke every Bearer token the user holds (F-119), so a session minted
+     * before the suspension stops authenticating everywhere at once, not
+     * just at routes that check suspension. Called only after the suspension
+     * transaction committed. Same mechanism as a password change.
+     */
+    private function revokeSessions(int $userId): void
+    {
+        \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
     }
 }

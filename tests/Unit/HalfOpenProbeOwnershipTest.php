@@ -110,8 +110,28 @@ final class HalfOpenProbeOwnershipTest extends TestCase
         self::assertNotSame([], $sites, 'anti-vacuity: the mutating check must still exist somewhere');
         self::assertSame(
             [
-                'Domain/Onchain/Support/ApiRetry.php:200',
-                'Domain/Onchain/Support/ApiRetry.php:599',
+                // ⚠⚠ LINE-PINNED, AND THE PIN IS THE FRAGILE PART. ANY edit
+                // above a claim site moves these numbers and fails this file
+                // without anything being wrong. F-156(b) moved them TWICE in
+                // one PR — once by adding the deadline checks, then again by
+                // adding a docblock to a method that merely sits above
+                // getBatchSameHost().
+                //
+                // The invariant actually being guarded is "exactly two claim
+                // sites, both in ApiRetry"; the line numbers are incidental
+                // to it, and a line number cannot even tell you the claim is
+                // in the RIGHT METHOD — which is the thing that matters.
+                // Asserting the enclosing method instead would be both
+                // stronger and stable; proposed separately rather than done
+                // here, because relaxing a guard this change does not own is
+                // not a decision to slip into an unrelated PR.
+                //
+                // ⇒ Until then: when these numbers move, CHECK THE ENCLOSING
+                // METHODS are still request() and getBatchSameHost() before
+                // pasting the new ones. Renumbering without that check is how
+                // a real regression would get waved through.
+                'Domain/Onchain/Support/ApiRetry.php:306',
+                'Domain/Onchain/Support/ApiRetry.php:782',
             ],
             $sites,
             "the half-open probe has exactly one owner — ApiRetry. Found:\n  " . implode("\n  ", $sites)
@@ -130,9 +150,13 @@ final class HalfOpenProbeOwnershipTest extends TestCase
             'EVM indexer tick'        => ['Domain/Onchain/Workers/NftEthIndexerWorker.php'],
             'validator index cron'    => ['Domain/Onchain/Services/ChainRefreshService.php'],
             'enrichment scheduler'    => ['Domain/Onchain/Services/EnrichmentScheduler.php'],
-            // Retained but frozen since #261. It must be fixed in place, NOT
-            // unfrozen and NOT deleted: the freeze is a separate guarantee.
-            'cosmwasm discovery (frozen)' => ['Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php'],
+            // ⚠ `cosmwasm discovery` WAS HERE AND IS NOT COMING BACK.
+            // It read `['Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php']`
+            // and carried the note "retained but frozen since #261 — fix in
+            // place, do NOT unfreeze and do NOT delete". S8 deleted the
+            // worker, so the row would now fail on its own "the caller must
+            // still exist" guard. Three outer preflights remain, which is the
+            // whole population of `isResting()` callers.
         ];
     }
 
@@ -155,19 +179,6 @@ final class HalfOpenProbeOwnershipTest extends TestCase
         );
     }
 
-    /** The frozen scanner stays frozen — this PR moves a check, it does not open a door. */
-    public function testTheScannerEntryPointsAreStillFrozen(): void
-    {
-        self::assertTrue(
-            \BCC\Trust\Onchain\Support\ScannerFreeze::frozen(),
-            'ScannerFreeze must still report frozen'
-        );
-        self::assertCount(
-            13,
-            \BCC\Trust\Onchain\Support\ScannerFreeze::FROZEN_ENTRY_POINTS,
-            'the frozen entry-point inventory must be unchanged by this PR'
-        );
-    }
 
     // ── the reader is genuinely side-effect free ────────────────────────
 

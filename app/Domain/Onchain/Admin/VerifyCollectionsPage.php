@@ -16,23 +16,27 @@
 
 namespace BCC\Trust\Onchain\Admin;
 
+use BCC\Trust\Core\Admin\AdminMenus;
+
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Onchain\OnchainPlugin;
-use BCC\Trust\Onchain\Admin\Views\CosmwasmScannerPanel;
+// ── S4: SIX IMPORTS WENT WITH THE SCANNER PANELS ────────────────────────
+//
+// CosmwasmScannerPanel, DiscoveryScanPanel, DiscoveryReadiness,
+// CosmwasmContractRepository, CosmwasmCodeFamilyRepository and
+// CosmwasmDiscoveryHealthSnapshot were all reachable only from the two
+// withdrawn panels and the data gathering that fed them. This page no longer
+// names the scanner in executable code at all.
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Fetchers\CosmosFetcher;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
-use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
-use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Repositories\GatedGroupRepository;
+use BCC\Trust\Onchain\Repositories\NftSpamContractRepository;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\CollectionDemandService;
 use BCC\Trust\Onchain\Services\CollectionStateClassifier;
 use BCC\Trust\Onchain\Services\CommunityRequestService;
-use BCC\Trust\Onchain\Services\CosmwasmDiscoveryHealthSnapshot;
-use BCC\Trust\Onchain\Admin\Views\DiscoveryScanPanel;
-use BCC\Trust\Onchain\Support\DiscoveryReadiness;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Onchain\ValueObjects\ChainDescriptionState;
@@ -208,7 +212,14 @@ final class VerifyCollectionsPage
      * uses. Naming it once stops the two drifting apart the next time a
      * column is added.
      */
-    private const TABLE_COLSPAN = 12;
+    /**
+     * Data columns in the review table, for the "no rows" cell's colspan.
+     * ⚠ Bumped 12 → 13 by the Metadata column. The new column sits AFTER
+     * Community deliberately: inserting it earlier would shift the column
+     * index that VerifyCollectionsCommunityCellPrefetchTest pins, and an
+     * off-by-one there reads as "the community cell is empty".
+     */
+    private const TABLE_COLSPAN = 13;
 
     /*
      * FORCE_RETRY_LIMIT, ADMIN_BACKFILL_REQUESTS and ADMIN_BACKFILL_SECONDS
@@ -220,10 +231,10 @@ final class VerifyCollectionsPage
 
     public static function register_page(): void
     {
-        // Audit follow-up: relocated under BCC System alongside the
-        // other onchain admin pages. Page slug unchanged.
+        // Landing page of the "BCC On-Chain" top-level menu (registered
+        // in AdminMenus). Page slug unchanged.
         add_submenu_page(
-            'bcc-system-health',
+            AdminMenus::ONCHAIN,
             'Verify Collections',
             'Verify Collections',
             'manage_options',
@@ -236,6 +247,94 @@ final class VerifyCollectionsPage
      * Register the inline AJAX handlers. Called from the plugin
      * bootstrap alongside ChainsPage::register_ajax().
      */
+    /**
+     * Resolve every community cell on the page in a BOUNDED number of
+     * reads, independent of how many rows are rendered.
+     *
+     * ── WHAT THIS REPLACED ──────────────────────────────────────────────
+     * The render loop used to call, per row with a community:
+     *   1. `GatedGroupRepository::findGroupForCollection()`  — 1 query, and
+     *      internally a `ChainRepository::getById()` per row as well
+     *   2. `PeepSoGroupRepository::countGroupMembers()`      — 1 query
+     *   3. `get_permalink()`                                 — 1 post read
+     *
+     * At the 100-row page size that is up to ~300 reads for one screen. The
+     * comment above the loop claimed the N+1 was "gone" because PR 6
+     * projected community EXISTENCE; these three were not existence and
+     * were not projected.
+     *
+     * ── WHAT IT DOES INSTEAD — THREE READS, NOT THREE PER ROW ───────────
+     *   1. `findGroupsForCollections()` — ONE query for every
+     *      (chain, contract) pair, using the SAME canonicalisation and the
+     *      SAME `utf8mb4_bin` comparison as the single lookup, so identity
+     *      behaviour is unchanged. Chain families are resolved once per
+     *      DISTINCT chain inside it.
+     *   2. `PeepSoGroupRepository::findManyByIds()` — ONE query returning
+     *      `member_count` per group. ⚠ Reused rather than written: it
+     *      already aggregates `COUNT(gm.gm_id)` under the identical
+     *      `gm_user_status LIKE` filter that `countGroupMembers()` uses, so
+     *      the number displayed is the same number. Writing a second
+     *      counter would have been a §11 duplicate AND a chance for the two
+     *      to disagree.
+     *   3. `_prime_post_caches()` — ONE query, so the `get_permalink()`
+     *      calls still in the loop are cache hits rather than post reads.
+     *      Same precedent as `CardsSearchEndpoint` and
+     *      `EndorsementService`.
+     *
+     * ⚠ A read failure yields an empty map, and the loop then renders
+     * "community present, identity unresolved" — exactly what a single
+     * failed lookup already produced. It never renders "no community" for a
+     * row that has one.
+     *
+     * @param list<object> $rows the FINAL page of rows, after any re-rank
+     * @return array{0: array<int,int>, 1: array<int,int>}
+     *         [collection row id => group post id, group post id => member count]
+     */
+    private static function prefetch_community_cells(array $rows): array
+    {
+        $pairs = [];
+        foreach ($rows as $row) {
+            if ((int) ($row->has_community ?? 0) !== 1) {
+                continue;
+            }
+            $rowId = (int) ($row->id ?? 0);
+            if ($rowId <= 0) {
+                continue;
+            }
+            // Same value the per-row lookup passed: the canonical identifier
+            // when present, else the contract address.
+            $pairs[$rowId] = [
+                'chain_id' => (int) ($row->chain_id ?? 0),
+                'contract' => (string) ($row->canonical_identifier ?? $row->contract_address ?? ''),
+            ];
+        }
+
+        if ($pairs === []) {
+            return [[], []];
+        }
+
+        $groupIds = GatedGroupRepository::findGroupsForCollections($pairs);
+        if ($groupIds === []) {
+            return [[], []];
+        }
+
+        $distinctGroupIds = array_values(array_unique(array_map('intval', $groupIds)));
+
+        $counts = [];
+        foreach (PeepSoGroupRepository::findManyByIds($distinctGroupIds) as $groupId => $group) {
+            $counts[(int) $groupId] = (int) ($group->member_count ?? 0);
+        }
+
+        // Prime the post cache so the loop's get_permalink() calls do not
+        // each read a post. `false, false` — neither terms nor meta are
+        // needed for a permalink.
+        if (function_exists('_prime_post_caches')) {
+            _prime_post_caches($distinctGroupIds, false, false);
+        }
+
+        return [$groupIds, $counts];
+    }
+
     public static function register_ajax(): void
     {
         add_action('wp_ajax_' . self::AJAX_ACTION_TOGGLE, [__CLASS__, 'ajax_toggle_verified']);
@@ -939,19 +1038,19 @@ final class VerifyCollectionsPage
             default                         => '#646970',
         };
         ?>
-        <div style="margin-top:6px;padding:6px 8px;border-left:3px solid <?php echo esc_attr($colour); ?>;background:#f6f7f7;max-width:32em;">
+        <div style="margin-top:6px;padding:6px 8px;border-left:3px solid <?php echo esc_attr($colour); ?>;background:var(--bcc-bg-raised);max-width:32em;">
             <div style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:<?php echo esc_attr($colour); ?>;">
                 Collection description — <?php echo esc_html($label); ?>
             </div>
-            <div style="font-size:12px;color:#1d2327;margin-top:2px;">
+            <div style="font-size:12px;color:var(--bcc-text-strong);margin-top:2px;">
                 <?php echo esc_html($text); ?>
             </div>
             <?php if (is_string($source) && trim($source) !== ''): ?>
-                <div style="font-size:11px;color:#646970;margin-top:2px;">
+                <div style="font-size:11px;color:var(--bcc-text-muted);margin-top:2px;">
                     Imported from <code><?php echo esc_html($source); ?></code>
                 </div>
             <?php endif; ?>
-            <div style="font-size:11px;color:#646970;margin-top:2px;">
+            <div style="font-size:11px;color:var(--bcc-text-muted);margin-top:2px;">
                 Stored for review only. It is <strong>not published anywhere</strong> and is never the
                 community&rsquo;s description.
             </div>
@@ -982,6 +1081,83 @@ final class VerifyCollectionsPage
             <?php endif; ?>
         </div>
         <?php
+    }
+
+    /**
+     * PURE RENDER. The metadata-status cell.
+     *
+     * ⚠ THE LABEL NAMES THE SCOPE, because `metadata_state` is computed PER
+     * FAMILY: a fully successful EVM read reaches `complete` while fetching
+     * fewer fields than Cosmos, and a field the family never fetches is
+     * `not_applicable` rather than a shortfall. A bare "Complete" badge
+     * would invite comparing an EVM row to a Cosmos row as if one scale
+     * applied to both.
+     *
+     * ⚠ AND IT DISTINGUISHES "NEVER CHECKED" FROM "CHECKED AND FOUND
+     * NOTHING". Both store `unavailable`; only `metadata_checked_at`
+     * separates them, and that distinction is the whole reason an operator
+     * would look at this cell — one is a gap in our work, the other is a
+     * fact about the collection.
+     *
+     * An unrecognised value renders as itself, escaped, rather than being
+     * coerced into a known badge: a value from a newer build must not be
+     * shown as something it is not.
+     */
+    private static function renderMetadataStatus(string $state, ?string $checkedAt): void
+    {
+        $known = [
+            'complete'    => ['Complete',    '#00a32a', 'Every field this chain family fetches was read.'],
+            'partial'     => ['Partial',     '#dba617', 'Some fields this chain family fetches are missing.'],
+            'unavailable' => ['Unavailable', '#d63638', 'No metadata could be read for this collection.'],
+        ];
+
+        $checked = is_string($checkedAt) && $checkedAt !== '' && $checkedAt !== '0000-00-00 00:00:00';
+
+        if ($state === '') {
+            echo '<span style="color:var(--bcc-text-muted);" title="This build did not record a metadata state for this row.">&mdash;</span>';
+            return;
+        }
+
+        if (isset($known[$state])) {
+            [$label, $colour, $why] = $known[$state];
+            // ⚠ "Not checked" is NOT the same as "nothing found", and only
+            // metadata_checked_at tells them apart.
+            if ($state === 'unavailable' && !$checked) {
+                printf(
+                    '<span style="color:var(--bcc-text-muted);" title="%s">%s</span>',
+                    esc_attr('No metadata read has been attempted for this row yet, so this is not a statement about the collection.'),
+                    esc_html__('Not checked', 'bcc-trust')
+                );
+                return;
+            }
+            printf(
+                '<span style="color:%s;" title="%s">%s</span>',
+                esc_attr($colour),
+                esc_attr($why . ' Scoped to this chain family — not comparable across families.'),
+                esc_html($label)
+            );
+        } else {
+            printf(
+                '<span style="color:var(--bcc-text-muted);" title="%s">%s</span>',
+                esc_attr('Unrecognised metadata state; shown verbatim rather than mapped to a known label.'),
+                esc_html($state)
+            );
+        }
+
+        if ($checked) {
+            printf(
+                '<div style="color:var(--bcc-text-muted);font-size:11px;" title="%s">%s</div>',
+                esc_attr('When a metadata read was last ATTEMPTED — not when it last succeeded.'),
+                // ⚠ `mysql2date()` returns int|string|false, so the cast is
+                // load-bearing: a false would otherwise reach esc_html().
+                esc_html((string) mysql2date(
+                    is_string(get_option('date_format')) && get_option('date_format') !== ''
+                        ? (string) get_option('date_format')
+                        : 'Y-m-d',
+                    (string) $checkedAt
+                ))
+            );
+        }
     }
 
     public static function renderHideButton(int $rowId, bool $isHidden): void
@@ -1122,7 +1298,7 @@ final class VerifyCollectionsPage
     {
         $args = ['page' => self::PAGE_SLUG];
 
-        foreach (['paged', 'chain', 'token_standard', 'vstate'] as $key) {
+        foreach (['paged', 'chain', 'token_standard', 'vstate', 's'] as $key) {
             if (isset($_POST[$key]) && $_POST[$key] !== '') {
                 $args[$key] = sanitize_text_field((string) $_POST[$key]);
             }
@@ -1330,10 +1506,530 @@ final class VerifyCollectionsPage
         ]);
     }
 
+    /**
+     * The LIST CONTEXT an operator came from, for the Back link.
+     *
+     * ⚠ Only the four keys the list itself reads. An allowlist, not a
+     * passthrough of `$_GET`: a Back link built from whatever arrived would
+     * carry an attacker-chosen query string back into an admin URL.
+     *
+     * @return array<string, string|int>
+     */
+    private static function listContextArgs(): array
+    {
+        $args = ['page' => self::PAGE_SLUG];
+
+        foreach (['vstate', 's', 'chain', 'token_standard', 'paged'] as $key) {
+            if (!isset($_GET[$key])) {
+                continue;
+            }
+            $value = trim(sanitize_text_field((string) $_GET[$key]));
+            if ($value !== '') {
+                $args[$key] = $key === 'paged' ? max(1, (int) $value) : $value;
+            }
+        }
+
+        return $args;
+    }
+
+    /** The URL back to the list, with the operator's filters intact. */
+    private static function listUrl(): string
+    {
+        return add_query_arg(self::listContextArgs(), admin_url('admin.php'));
+    }
+
+    /**
+     * READ-ONLY collection detail.
+     *
+     * ── WHAT IT IS FOR ──────────────────────────────────────────────────
+     * The review table answers "which rows need me". It cannot answer "what
+     * do we actually know about THIS one" — the contract and canonical
+     * identifier are truncated, the description is a badge, and the chain is
+     * a slug. An operator deciding whether to verify a collection had to
+     * read the database.
+     *
+     * ── WHAT IT DELIBERATELY IS NOT ─────────────────────────────────────
+     * ⚠⚠ OPENING IT MUST NOT FETCH OR MUTATE ANYTHING. There is exactly one
+     * collection read, one community lookup, one member-count read and one
+     * hide-rule read. No provider is contacted, no option or transient is
+     * written, no cache is primed, and nothing here takes a nonce — because
+     * nothing here acts.
+     *
+     * The ONE set of controls it surfaces is the existing description
+     * review, through the existing {@see renderDescriptionReview()} with its
+     * own per-row nonce and its own handler. Permissions and behaviour are
+     * untouched; the buttons simply become reachable from here as well.
+     *
+     * ── PERMISSIONS ─────────────────────────────────────────────────────
+     * Reuses `render_page()`'s gate — this renders from inside it, after
+     * `current_user_can('manage_options')` has already run and `wp_die`d
+     * otherwise. The submenu is registered with the same capability. No new
+     * capability, no new route.
+     */
+    private static function render_detail(int $collectionId): void
+    {
+        $listUrl = self::listUrl();
+
+        // ── the read, and its three distinguishable outcomes ────────────
+        $row   = null;
+        $error = null;
+        try {
+            $row = CollectionRepository::findForAdminDetail($collectionId);
+        } catch (RepositoryReadFailure $e) {
+            // ⚠ NOT "not found". Nothing was established about this id, so
+            // nothing is asserted about it.
+            $error = $e;
+        }
+
+        echo '<div class="wrap">';
+
+        if ($error !== null) {
+            printf('<h1>%s</h1>', esc_html__('Collection could not be loaded', 'bcc-trust'));
+            echo '<div class="notice notice-error"><p><strong>';
+            echo esc_html__('This is a database read failure, not a statement about the collection.', 'bcc-trust');
+            echo '</strong> ';
+            echo esc_html__('Nothing is shown rather than a partial or misleading record. Try again, and check the bcc-trust error log if it persists.', 'bcc-trust');
+            echo '</p></div>';
+            printf('<p><a href="%s">%s</a></p>', esc_url($listUrl), esc_html__('Back to the list', 'bcc-trust'));
+            echo '</div>';
+            return;
+        }
+
+        if ($row === null) {
+            printf('<h1>%s</h1>', esc_html__('Collection not found', 'bcc-trust'));
+            echo '<div class="notice notice-warning"><p>';
+            printf(
+                /* translators: %d: collection row id */
+                esc_html__('No collection with id %d exists. It may have been removed since the link was made.', 'bcc-trust'),
+                $collectionId
+            );
+            echo '</p></div>';
+            printf('<p><a href="%s">%s</a></p>', esc_url($listUrl), esc_html__('Back to the list', 'bcc-trust'));
+            echo '</div>';
+            return;
+        }
+
+        $name      = (string) ($row->collection_name ?? '');
+        $heading   = $name !== '' ? $name : sprintf('Collection #%d', (int) ($row->id ?? 0));
+        $family    = (string) ($row->chain_type ?? '');
+        $contract  = (string) ($row->contract_address ?? '');
+        $canonical = $row->canonical_identifier ?? null;
+
+        printf(
+            '<h1 style="margin-bottom:4px;">%s</h1>',
+            esc_html($heading)
+        );
+        printf(
+            '<p style="margin-top:0;"><a href="%s">&larr; %s</a></p>',
+            esc_url($listUrl),
+            esc_html__('Back to the list', 'bcc-trust')
+        );
+
+        if ($name === '') {
+            echo '<div class="notice notice-info inline"><p>';
+            echo esc_html__('This collection has no name recorded. That is normal for a row discovered from a wallet before any metadata read succeeded.', 'bcc-trust');
+            echo '</p></div>';
+        }
+
+        // ── 1. identity and chain ───────────────────────────────────────
+        self::renderDetailSection(__('Identity and chain', 'bcc-trust'), [
+            __('Row id', 'bcc-trust')      => (string) (int) ($row->id ?? 0),
+            __('Chain', 'bcc-trust')       => self::detailChain($row),
+            __('Family', 'bcc-trust')      => $family !== '' ? $family : null,
+            __('Contract', 'bcc-trust')    => $contract !== '' ? self::detailMono($contract) : null,
+            __('Canonical identifier', 'bcc-trust') => is_string($canonical) && $canonical !== ''
+                ? self::detailMono($canonical)
+                    . ($canonical !== $contract
+                        ? '<div style="color:var(--bcc-text-muted);font-size:11px;">'
+                            . esc_html__('Differs from the contract address above — the canonical form is what identity comparisons use.', 'bcc-trust')
+                            . '</div>'
+                        : '')
+                : '<em>' . esc_html__('none recorded', 'bcc-trust') . '</em>',
+            __('Symbol', 'bcc-trust')         => self::detailOrNull($row->collection_symbol ?? null),
+            __('Token standard', 'bcc-trust') => self::detailOrNull($row->token_standard ?? null),
+            __('Total supply', 'bcc-trust')   => self::detailCount($row->total_supply ?? null),
+            __('Marketplace holders', 'bcc-trust') => self::detailCount(
+                $row->unique_holders ?? null,
+                __('BCC has no marketplace-wide holder figure for this collection. This is not a count of zero.', 'bcc-trust')
+            ),
+            __('Source', 'bcc-trust')  => self::detailOrNull($row->source ?? null),
+            __('Verified', 'bcc-trust') => (int) ($row->is_verified ?? 0) === 1
+                ? '<strong style="color:var(--bcc-success);">' . esc_html__('Yes', 'bcc-trust') . '</strong>'
+                : esc_html__('No', 'bcc-trust'),
+        ]);
+
+        // ── 2. validation and metadata ──────────────────────────────────
+        self::renderDetailSection(__('Validation and metadata', 'bcc-trust'), [
+            __('Metadata state', 'bcc-trust') => self::detailMetadata($row, $family),
+            __('Metadata last attempted', 'bcc-trust') => self::detailStamp(
+                $row->metadata_checked_at ?? null,
+                __('When a metadata read was last ATTEMPTED — not when it last succeeded.', 'bcc-trust'),
+                __('never attempted', 'bcc-trust')
+            ),
+            __('Holdings last fetched', 'bcc-trust') => self::detailStamp(
+                $row->fetched_at ?? null,
+                __('Any holdings write bumps this, which is why it is not the metadata timestamp.', 'bcc-trust')
+            ),
+            __('Cache expires', 'bcc-trust') => self::detailStamp($row->expires_at ?? null),
+        ]);
+
+        // ── 3. description review ───────────────────────────────────────
+        echo '<h2>' . esc_html__('Imported description', 'bcc-trust') . '</h2>';
+        $descText = $row->chain_description ?? null;
+        if (!is_string($descText) || trim($descText) === '') {
+            echo '<p style="color:var(--bcc-text-muted);">'
+                . esc_html__('No description has been imported for this collection, so there is nothing to review.', 'bcc-trust')
+                . '</p>';
+        } else {
+            // ⚠ The EXISTING renderer, with its existing per-row nonce and
+            // its existing handler. Reachable from here; unchanged.
+            self::renderDescriptionReview($row);
+        }
+
+        // ── 4. community linkage ────────────────────────────────────────
+        self::renderDetailCommunity((int) ($row->id ?? 0));
+
+        // ── 5. hide status ──────────────────────────────────────────────
+        self::renderDetailHide($row);
+
+        printf(
+            '<p style="margin-top:24px;"><a href="%s">&larr; %s</a></p>',
+            esc_url($listUrl),
+            esc_html__('Back to the list', 'bcc-trust')
+        );
+
+        echo '</div>';
+    }
+
+    /**
+     * PURE RENDER. A labelled definition list.
+     *
+     * A `<dl>` rather than a table because this is label/value pairs, not
+     * tabular data — a screen reader announces each term with its
+     * definition, and the section heading gives it a landmark. Values are
+     * pre-escaped HTML fragments; a null value renders the em dash.
+     *
+     * @param array<string, string|null> $rows
+     */
+    private static function renderDetailSection(string $heading, array $rows): void
+    {
+        printf('<h2>%s</h2>', esc_html($heading));
+        echo '<dl style="display:grid;grid-template-columns:minmax(160px,220px) 1fr;gap:6px 16px;margin:0 0 20px 0;">';
+        foreach ($rows as $label => $value) {
+            printf('<dt style="font-weight:600;color:var(--bcc-text-strong);">%s</dt>', esc_html((string) $label));
+            printf(
+                '<dd style="margin:0;">%s</dd>',
+                $value === null || $value === ''
+                    ? '<span style="color:var(--bcc-text-muted);">&mdash;</span>'
+                    : $value
+            );
+        }
+        echo '</dl>';
+    }
+
+    /** PURE. Monospaced, selectable, full value — never truncated here. */
+    private static function detailMono(string $value): string
+    {
+        return sprintf(
+            '<code style="font-size:12px;word-break:break-all;">%s</code>',
+            esc_html($value)
+        );
+    }
+
+    /** PURE. An escaped scalar, or null so the caller renders the dash. */
+    private static function detailOrNull(mixed $value): ?string
+    {
+        if (!is_string($value) && !is_int($value)) {
+            return null;
+        }
+        $text = trim((string) $value);
+
+        return $text === '' ? null : esc_html($text);
+    }
+
+    /**
+     * PURE. A count, distinguishing NULL from zero.
+     *
+     * ⚠ The same defect #292 fixed in the table: `(int) null` is 0, and
+     * rendering that as "0 holders" states a fact BCC does not have.
+     */
+    private static function detailCount(mixed $value, ?string $nullTitle = null): ?string
+    {
+        if ($value === null || $value === '') {
+            return $nullTitle === null
+                ? null
+                : sprintf(
+                    '<span style="color:var(--bcc-text-muted);" title="%s">%s</span>',
+                    esc_attr($nullTitle),
+                    esc_html__('not known', 'bcc-trust')
+                );
+        }
+
+        return esc_html(number_format_i18n((int) $value));
+    }
+
+    /** PURE. A datetime, or an explicit statement that there is none. */
+    private static function detailStamp(mixed $value, ?string $title = null, ?string $absent = null): ?string
+    {
+        $ok = is_string($value) && $value !== '' && $value !== '0000-00-00 00:00:00';
+        if (!$ok) {
+            return $absent === null
+                ? null
+                : sprintf('<em style="color:var(--bcc-text-muted);">%s</em>', esc_html($absent));
+        }
+
+        $formatted = (string) mysql2date('Y-m-d H:i', (string) $value);
+
+        return $title === null
+            ? esc_html($formatted)
+            : sprintf('<span title="%s">%s</span>', esc_attr($title), esc_html($formatted));
+    }
+
+    /** PURE. The chain, with its family, and an explorer link when there is one. */
+    private static function detailChain(object $row): string
+    {
+        $name = (string) ($row->chain_name ?? '');
+        $slug = (string) ($row->chain_slug ?? '');
+        if ($name === '' && $slug === '') {
+            // A LEFT JOIN that found no chain row. Say so: the collection
+            // references a chain this install does not have.
+            return sprintf(
+                '<span style="color:var(--bcc-danger);">%s</span>',
+                esc_html__('unknown chain — the referenced chain row is missing', 'bcc-trust')
+            );
+        }
+
+        $label = $name !== '' ? $name : $slug;
+        $out   = esc_html($label);
+        if ($slug !== '' && $slug !== $label) {
+            $out .= ' <span style="color:var(--bcc-text-muted);">(' . esc_html($slug) . ')</span>';
+        }
+
+        // ⚠ The explorer root only. There is no per-chain path convention
+        // in this codebase, so a deep link to the contract would 404 on
+        // most families — linking the root is honest, guessing is not.
+        $explorer = $row->explorer_url ?? null;
+        if (is_string($explorer) && $explorer !== '') {
+            $out .= sprintf(
+                ' &middot; <a href="%s" target="_blank" rel="noopener noreferrer">%s</a>',
+                esc_url($explorer),
+                esc_html__('explorer', 'bcc-trust')
+            );
+        }
+
+        return $out;
+    }
+
+    /**
+     * PURE. Metadata state, with its family-specific meaning spelled out.
+     *
+     * ⚠ The state is COMPUTED PER FAMILY, so `complete` does not mean the
+     * same field count on EVM as on Cosmos — a field the family never
+     * fetches is `not_applicable`, not a shortfall. The detail view has
+     * room to say that in words rather than only in a tooltip.
+     */
+    private static function detailMetadata(object $row, string $family): string
+    {
+        $state   = (string) ($row->metadata_state ?? '');
+        $checked = is_string($row->metadata_checked_at ?? null)
+            && (string) $row->metadata_checked_at !== ''
+            && (string) $row->metadata_checked_at !== '0000-00-00 00:00:00';
+
+        $familyNote = $family !== ''
+            ? sprintf(
+                /* translators: %s: chain family, e.g. evm */
+                esc_html__('Scoped to the %s family: a field this family never fetches counts as not applicable, not as missing.', 'bcc-trust'),
+                $family
+            )
+            : esc_html__('Scoped to this collection\'s chain family.', 'bcc-trust');
+
+        if ($state === '') {
+            return '<span style="color:var(--bcc-text-muted);">&mdash;</span><div style="color:var(--bcc-text-muted);font-size:12px;">'
+                . esc_html__('This build recorded no metadata state for this row.', 'bcc-trust')
+                . '</div>';
+        }
+
+        if ($state === 'unavailable' && !$checked) {
+            return '<strong style="color:var(--bcc-text-muted);">' . esc_html__('Not checked', 'bcc-trust') . '</strong>'
+                . '<div style="color:var(--bcc-text-muted);font-size:12px;">'
+                . esc_html__('No metadata read has been attempted, so this is not a statement about the collection.', 'bcc-trust')
+                . '</div>';
+        }
+
+        $known = [
+            'complete'    => ['Complete',    '#00a32a', __('Every field this family fetches was read.', 'bcc-trust')],
+            'partial'     => ['Partial',     '#dba617', __('Some fields this family fetches are missing.', 'bcc-trust')],
+            'unavailable' => ['Unavailable', '#d63638', __('A read was attempted and no metadata could be obtained.', 'bcc-trust')],
+        ];
+
+        if (!isset($known[$state])) {
+            return sprintf(
+                '<span style="color:var(--bcc-text-muted);">%s</span><div style="color:var(--bcc-text-muted);font-size:12px;">%s</div>',
+                esc_html($state),
+                esc_html__('Unrecognised state, shown verbatim rather than mapped to a known label.', 'bcc-trust')
+            );
+        }
+
+        [$label, $colour, $why] = $known[$state];
+
+        return sprintf(
+            '<strong style="color:%s;">%s</strong><div style="color:var(--bcc-text-muted);font-size:12px;">%s %s</div>',
+            esc_attr($colour),
+            esc_html($label),
+            esc_html($why),
+            $familyNote
+        );
+    }
+
+    /**
+     * Community linkage. READ-ONLY, and fail-closed.
+     *
+     * ⚠ Keyed on the ROW ID via the authoritative link, not on a
+     * canonicalised address — the same correction the Remove path carries,
+     * and for the same reason: an address that is not a valid identity on
+     * its chain resolves to null without a query, and a live community
+     * would read as absent.
+     *
+     * ⚠⚠ An unreadable check says so. "No community" and "we could not
+     * look" are different facts, and only one of them is safe to act on.
+     */
+    private static function renderDetailCommunity(int $collectionId): void
+    {
+        echo '<h2>' . esc_html__('Holder community', 'bcc-trust') . '</h2>';
+
+        try {
+            $groupId = GatedGroupRepository::findPublishedGroupIdForCollectionId($collectionId);
+        } catch (RepositoryReadFailure $e) {
+            echo '<div class="notice notice-error inline"><p><strong>';
+            echo esc_html__('Could not determine whether this collection has a holder community.', 'bcc-trust');
+            echo '</strong> ';
+            echo esc_html__('This is a database read failure, not a statement that no community exists. Do not act on it.', 'bcc-trust');
+            echo '</p></div>';
+            return;
+        }
+
+        if ($groupId === null) {
+            echo '<p style="color:var(--bcc-text-muted);">'
+                . esc_html__('No published holder community is linked to this collection.', 'bcc-trust')
+                . '</p>';
+            return;
+        }
+
+        $members   = null;
+        $groupRows = PeepSoGroupRepository::findManyByIds([$groupId]);
+        if (isset($groupRows[$groupId])) {
+            $members = (int) ($groupRows[$groupId]->member_count ?? 0);
+        }
+
+        $permalink = get_permalink($groupId);
+
+        self::renderDetailSection(__('Linked community', 'bcc-trust'), [
+            __('Group id', 'bcc-trust') => (string) $groupId,
+            __('Members', 'bcc-trust')  => $members === null
+                ? sprintf(
+                    '<span style="color:var(--bcc-text-muted);" title="%s">%s</span>',
+                    esc_attr__('The group exists but its member count could not be read.', 'bcc-trust'),
+                    esc_html__('not known', 'bcc-trust')
+                )
+                : esc_html(number_format_i18n($members)),
+            __('Link', 'bcc-trust') => is_string($permalink) && $permalink !== ''
+                ? sprintf(
+                    '<a href="%s" target="_blank" rel="noopener noreferrer">%s</a>',
+                    esc_url($permalink),
+                    esc_html__('open the community', 'bcc-trust')
+                )
+                : null,
+        ]);
+    }
+
+    /**
+     * Hide status. READ-ONLY — this view states it and offers no control.
+     *
+     * ⚠ NO TOGGLE HERE, DELIBERATELY. Hide semantics are a separate
+     * decision; this view only reports what the existing deny rule says,
+     * and the existing control stays on the list where its nonce and
+     * handler already live.
+     */
+    private static function renderDetailHide(object $row): void
+    {
+        echo '<h2>' . esc_html__('Hide status', 'bcc-trust') . '</h2>';
+
+        $chainId  = (int) ($row->chain_id ?? 0);
+        $contract = (string) ($row->contract_address ?? '');
+
+        // ⚠⚠ THE FAIL-CLOSED ARM, DELIBERATELY.
+        //
+        // `getRule()` returns null for "no rule" AND for a failed query,
+        // so this view used to print "not hidden" for a database fault —
+        // stating, about a contract an operator may have deliberately
+        // suppressed, the exact opposite of what was known.
+        //
+        // `getRuleOrThrow()` is the same query with an honest answer.
+        // Nothing here acts on the result, so throwing costs only a
+        // section of the page, and the section it costs is the one that
+        // would otherwise lie.
+        try {
+            $rule = NftSpamContractRepository::getRuleOrThrow($chainId, $contract);
+        } catch (RepositoryReadFailure $e) {
+            echo '<div class="notice notice-error inline"><p><strong>';
+            echo esc_html__('Could not read the hide rules for this contract.', 'bcc-trust');
+            echo '</strong> ';
+            echo esc_html__('This is a database read failure, not a statement that the collection is visible. Do not act on it.', 'bcc-trust');
+            echo '</p></div>';
+            echo '<p style="color:var(--bcc-text-muted);font-size:12px;">'
+                . esc_html__('Hide and Unhide are operated from the list, where the control and its nonce live.', 'bcc-trust')
+                . '</p>';
+            return;
+        }
+
+        $hidden = $rule === NftSpamContractRepository::RULE_DENY;
+
+        if ($hidden) {
+            echo '<p><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:var(--bcc-danger);">'
+                . esc_html__('HIDDEN', 'bcc-trust')
+                . '</span> '
+                . esc_html__('A deny rule on this contract keeps it out of the lists, and survives rediscovery.', 'bcc-trust')
+                . '</p>';
+        } elseif ($rule !== null) {
+            printf(
+                '<p>%s <code>%s</code></p>',
+                esc_html__('Not hidden. An explicit rule is recorded:', 'bcc-trust'),
+                esc_html($rule)
+            );
+        } else {
+            echo '<p style="color:var(--bcc-text-muted);">'
+                . esc_html__('No deny rule is recorded for this contract, so it is not hidden.', 'bcc-trust')
+                . '</p>';
+        }
+
+        echo '<p style="color:var(--bcc-text-muted);font-size:12px;">'
+            . esc_html__('Hide and Unhide are operated from the list, where the control and its nonce live.', 'bcc-trust')
+            . '</p>';
+    }
+
     public static function render_page(): void
     {
         if (!current_user_can('manage_options')) {
             wp_die('Insufficient permissions.');
+        }
+
+        // ── READ-ONLY DETAIL VIEW ───────────────────────────────────────
+        //
+        // ⚠ AFTER the capability gate, so the detail view inherits it
+        // rather than declaring its own — one gate, one place.
+        //
+        // ⚠⚠ AND BEFORE handlePost(). A GET carrying `collection` is a
+        // read; routing it through the POST handler first would mean a
+        // detail link could reach a mutation path, and would also make the
+        // view's "nothing here acts" claim false. A malformed id falls
+        // through to the list rather than rendering an error page for a
+        // typo.
+        if (isset($_GET['collection'])) {
+            $detailId = (int) $_GET['collection'];
+            if ($detailId > 0) {
+                self::render_detail($detailId);
+                return;
+            }
         }
 
         // VC-B branches still post back to this page and return notices
@@ -1345,6 +2041,12 @@ final class VerifyCollectionsPage
         $selectedChain         = isset($_GET['chain']) ? sanitize_text_field((string) $_GET['chain']) : '';
         $selectedTokenStandard = isset($_GET['token_standard'])
             ? sanitize_text_field((string) $_GET['token_standard'])
+            : '';
+        // ⚠ Bounded at the boundary. A 200-char cap keeps the LIKE term and
+        // the URL sane; nothing downstream depends on the length, and a
+        // longer term would narrow to nothing anyway.
+        $searchTerm = isset($_GET['s'])
+            ? trim(mb_substr(sanitize_text_field((string) $_GET['s']), 0, 200))
             : '';
 
         $availableChains    = ChainRepository::getActive();
@@ -1383,7 +2085,8 @@ final class VerifyCollectionsPage
             // accepted id count cannot drift apart.
             self::MAX_BULK_IDS,
             $chainArg,
-            $standardArg
+            $standardArg,
+            $searchTerm !== '' ? $searchTerm : null
         );
 
         // Demand signals, strongest first:
@@ -1430,7 +2133,12 @@ final class VerifyCollectionsPage
                     $p,
                     100,
                     $chainArg,
-                    $standardArg
+                    $standardArg,
+                    // ⚠ The SAME term. Without it the re-rank re-fetches a
+                    // WIDER scope than the page is showing and then slices
+                    // 50 rows out of it, so a searched page would silently
+                    // display rows that do not match the search.
+                    $searchTerm !== '' ? $searchTerm : null
                 );
                 if (!$chunk['available']) {
                     // A failed chunk read must not silently produce a
@@ -1491,66 +2199,11 @@ final class VerifyCollectionsPage
         $stateCounts       = $stateCountsResult['counts'];
         $countsAvailable   = $stateCountsResult['available'];
 
-        // CosmWasm scanner context for the rows about to render.
-        //
-        // TWO bounded batch reads for the WHOLE page, issued once the row
-        // set is final — not one lookup per row. The first pulls the
-        // scanner's inventory row for every visible contract; the second
-        // pulls the code families those rows point at, for the checksum.
-        // Rows the scanner has never seen (manual adds, wallet-link
-        // discoveries, non-Cosmos chains) simply have no entry and render
-        // no scanner detail.
-        $scannerCandidates = [];
-        $scannerFamilies   = [];
-        $scannerChainIds   = [];
-        $scannerAddresses  = [];
-        foreach ($listing['items'] as $listRow) {
-            if ((string) ($listRow->chain_type ?? '') !== 'cosmos') {
-                continue;
-            }
-            $scannerChainIds[]  = (int) $listRow->chain_id;
-            $scannerAddresses[] = (string) $listRow->contract_address;
-        }
-        if ($scannerAddresses !== []) {
-            // Both reads FAIL CLOSED. A row with no scanner entry renders no
-            // scanner detail at all — which is correct when the collection
-            // genuinely came from another path, and a lie when the lookup
-            // simply failed. So a failed read drops the detail for the whole
-            // page and SAYS SO, rather than quietly presenting every row as
-            // "the scanner has never seen this".
-            try {
-                $codeIds = [];
-                foreach (CosmwasmContractRepository::findManyForChains($scannerChainIds, $scannerAddresses) as $candidate) {
-                    $scannerCandidates[(int) $candidate->chain_id . '|' . strtolower((string) $candidate->contract_address)] = $candidate;
-                    $codeIds[] = (int) $candidate->code_id;
-                }
-                if ($codeIds !== []) {
-                    foreach (CosmwasmCodeFamilyRepository::findManyForChains($scannerChainIds, $codeIds) as $family) {
-                        $scannerFamilies[(int) $family->chain_id . '|' . (int) $family->code_id] = $family;
-                    }
-                }
-            } catch (RepositoryReadFailure $e) {
-                $scannerCandidates = [];
-                $scannerFamilies   = [];
-
-                \BCC\Core\Log\Logger::error('[bcc-trust] Verify Collections: scanner detail read failed', [
-                    'action'   => 'verify_collections_scanner_detail_failed',
-                    'method'   => $e->repositoryMethod(),
-                    'db_error' => $e->dbError(),
-                ]);
-
-                $notices[] = [
-                    'type'    => 'error',
-                    'message' => 'The CosmWasm scanner detail could not be loaded for this page (a database read failed), '
-                        . 'so the per-row scanner evidence is hidden rather than shown as "not seen by the scanner". '
-                        . 'The collection rows themselves are unaffected. Check the bcc-trust error log.',
-                ];
-            }
-        }
-
-        // FOUR bounded aggregates for every chain — see the class docblock
-        // on CosmwasmDiscoveryHealthSnapshot. Not a per-chain loop.
-        $scannerSummary = CosmwasmDiscoveryHealthSnapshot::buildSummary();
+        // ⚠ AFTER the re-rank, because the re-rank REPLACES
+        // `$listing['items']`. Prefetching before it would resolve the
+        // wrong page of rows.
+        [$communityGroupIds, $communityMemberCounts] =
+            self::prefetch_community_cells($listing['items']);
 
         // Pill chains: intersection of PILL_CHAIN_SLUGS (filterable) and
         // the active chains registry, in the configured order. A
@@ -1589,72 +2242,6 @@ final class VerifyCollectionsPage
                     <p><?php echo esc_html($notice['message']); ?></p>
                 </div>
             <?php endforeach; ?>
-
-            <?php CosmwasmScannerPanel::render($scannerSummary); ?>
-
-            <?php
-            // ── PR 7 / 7.1: the per-chain Scan control ──────────────────
-            // One panel per chain BCC actually offers NFT discovery on,
-            // rendered beneath the existing scanner summary rather than on
-            // a competing screen.
-            //
-            // ⚠ PR 7.1 — THE SURFACE IS FILTERED BY PRODUCT SUPPORT.
-            // PR 7 rendered a panel for every active Cosmos chain, which
-            // put a Scan button on validator-only chains like Jackal and
-            // Osmosis. That is not a chain "waiting for a toggle": BCC does
-            // not offer NFT discovery there at all, and a disabled button
-            // is a standing invitation to ask why it cannot be enabled.
-            // `bcc_supports_nft_collections` is the owner-controlled answer
-            // and it decides whether the surface exists.
-            //
-            // ⚠ `$readiness` is a DISPLAY decision only. The real refusal is
-            // re-decided by DiscoveryRunService on every request AND by
-            // DiscoveryRunExecutor immediately before provider work, so a
-            // user who re-enables the button in their browser — or forges
-            // the POST outright — gets a bounded refusal, not a scan.
-            $scanChains = array_values(array_filter(
-                ChainRepository::getActive('cosmos'),
-                static fn(object $c): bool => DiscoveryReadiness::isNftDiscoverySurface($c)
-            ));
-
-            // ⚠ NO NEW QUERY. `$scannerSummary` was already built above and
-            // carries, per chain, the eligibility verdict and the backfill
-            // timestamp this decision needs — from ONE bounded checkpoint
-            // read. Re-reading each chain's checkpoint here would put a
-            // per-row query back on a page whose discipline is a fixed
-            // number of reads, which is why CosmwasmScannerPanelOwnershipTest
-            // forbids the checkpoint-repository import in this file.
-            $summaryByChain = [];
-            foreach (($scannerSummary['chains'] ?? []) as $summaryRow) {
-                if (isset($summaryRow['chain_id'])) {
-                    $summaryByChain[(int) $summaryRow['chain_id']] = $summaryRow;
-                }
-            }
-
-            foreach ($scanChains as $scanChain) {
-                $readiness = DiscoveryReadiness::forSummaryRow(
-                    $scanChain,
-                    $summaryByChain[(int) $scanChain->id] ?? []
-                );
-
-                DiscoveryScanPanel::render(
-                    $scanChain,
-                    $readiness['eligible'],
-                    $readiness['eligible'] ? '' : $readiness['reason']
-                );
-            }
-
-            if ($scanChains === []) {
-                // Honest empty state. Silence here would read as a broken
-                // page rather than as a deliberate product position.
-                echo '<p class="description" style="margin:12px 0 0;">'
-                    . esc_html__(
-                        'No chain currently has NFT collection support enabled, so there is nothing to scan. Support is enabled per chain from BCC System → NFT Discovery.',
-                        'bcc-trust'
-                    )
-                    . '</p>';
-            }
-            ?>
 
             <?php
             // Four collection-state sub-tabs. Switching state resets
@@ -1707,7 +2294,7 @@ final class VerifyCollectionsPage
             <?php endif; ?>
 
             <?php if ($vstate === CollectionStateClassifier::TAB_NEEDS_ATTENTION): ?>
-                <p style="margin:-6px 0 12px 0;color:#646970;font-size:12px;">
+                <p style="margin:-6px 0 12px 0;color:var(--bcc-text-muted);font-size:12px;">
                     Rows that no other tab describes honestly: verified with no
                     community, a request that has not been created yet, a failed
                     creation, a community whose collection is no longer verified, or a
@@ -1716,7 +2303,7 @@ final class VerifyCollectionsPage
             <?php endif; ?>
 
             <?php if ($vstate === CollectionStateClassifier::TAB_HIDDEN_BY_OPERATOR): ?>
-                <p style="margin:-6px 0 12px 0;color:#646970;font-size:12px;">
+                <p style="margin:-6px 0 12px 0;color:var(--bcc-text-muted);font-size:12px;">
                     Collections an operator has hidden with a platform-wide DENY rule.
                     This records an operator decision — it is not a claim that the
                     collection is a scam, and nothing in the database records one.
@@ -1724,7 +2311,7 @@ final class VerifyCollectionsPage
             <?php endif; ?>
 
             <?php if ($vstate === CollectionStateClassifier::TAB_DISCOVERED_UNVERIFIED && $demandRanked): ?>
-                <p style="margin:-6px 0 12px 0;color:#646970;font-size:12px;">
+                <p style="margin:-6px 0 12px 0;color:var(--bcc-text-muted);font-size:12px;">
                     Queue ranked by <strong>Linked holders</strong> — collections that
                     real platform wallets hold sort first. Linked holders are counted from
                     BCC's own holdings index, which covers EVM and Solana; other chains show
@@ -1732,9 +2319,9 @@ final class VerifyCollectionsPage
                 </p>
             <?php endif; ?>
 
-            <div style="margin:0 0 16px 0;border:1px solid #c3c4c7;border-radius:4px;padding:8px 12px;background:#fff;">
+            <div style="margin:0 0 16px 0;border:1px solid var(--bcc-border-strong);border-radius:4px;padding:8px 12px;background:var(--bcc-bg-card);">
                 <strong>Adding a collection has moved.</strong>
-                <p style="color:#646970;margin:6px 0 0 0;">
+                <p style="color:var(--bcc-text-muted);margin:6px 0 0 0;">
                     Manual intake now lives in the NFT Discovery control plane, where the
                     chain is selected explicitly and the form is bound to it. This page had
                     two different add forms with different validation and different
@@ -1796,7 +2383,7 @@ final class VerifyCollectionsPage
                     <label for="bcc-vc-chain-filter" style="margin-right:6px;">
                         <strong>Chain:</strong>
                     </label>
-                    <select name="chain" id="bcc-vc-chain-filter" onchange="this.form.submit()">
+                    <select name="chain" id="bcc-vc-chain-filter">
                         <option value="">All chains</option>
                         <?php foreach ($availableChains as $chainOption): ?>
                             <option value="<?php echo esc_attr((string) $chainOption->slug); ?>"
@@ -1812,7 +2399,7 @@ final class VerifyCollectionsPage
                         <label for="bcc-vc-token-filter" style="margin-right:6px;">
                             <strong>Token standard:</strong>
                         </label>
-                        <select name="token_standard" id="bcc-vc-token-filter" onchange="this.form.submit()">
+                        <select name="token_standard" id="bcc-vc-token-filter">
                             <option value="">All standards</option>
                             <?php foreach ($availableStandards as $standard): ?>
                                 <option value="<?php echo esc_attr($standard); ?>"
@@ -1823,9 +2410,45 @@ final class VerifyCollectionsPage
                         </select>
                     </span>
                 <?php endif; ?>
-                <noscript>
-                    <button type="submit" class="button">Filter</button>
-                </noscript>
+                <span>
+                    <label for="bcc-vc-search" style="margin-right:6px;">
+                        <strong>Search:</strong>
+                    </label>
+                    <input type="search"
+                           name="s"
+                           id="bcc-vc-search"
+                           value="<?php echo esc_attr($searchTerm); ?>"
+                           placeholder="Name, contract or identifier"
+                           style="min-width:260px;"
+                           spellcheck="false"
+                           autocomplete="off">
+                </span>
+
+                <?php
+                // ⚠⚠ AN ALWAYS-PRESENT SUBMIT, AND THE SELECTS NO LONGER
+                // AUTO-SUBMIT.
+                //
+                // Both selects carried `onchange="this.form.submit()"` with
+                // this button inside <noscript>. So with JavaScript ON —
+                // which is every real admin session — there was NO submit
+                // control at all, and a keyboard user moving through the
+                // options with the arrow keys fired a form submission on
+                // EVERY keystroke, navigating away mid-selection. The
+                // control was effectively mouse-only.
+                //
+                // One button, always rendered, serves mouse, keyboard and
+                // no-JS identically, and it is also what makes the search
+                // field submittable. The selects are now ordinary selects.
+                ?>
+                <button type="submit" class="button">Filter</button>
+
+                <?php if ($searchTerm !== '' || $selectedChain !== '' || $selectedTokenStandard !== ''): ?>
+                    <a class="button-link"
+                       href="<?php echo esc_url(add_query_arg(
+                           ['page' => self::PAGE_SLUG, 'vstate' => $vstate],
+                           admin_url('admin.php')
+                       )); ?>">Clear filters</a>
+                <?php endif; ?>
             </form>
 
             <?php
@@ -1909,6 +2532,9 @@ final class VerifyCollectionsPage
                             <th style="width:160px;" title="Members of the collection's holder community (only meaningful once verified).">
                                 Community
                             </th>
+                            <th style="width:110px;" title="What BCC knows about this collection's metadata. COMPUTED per chain family, so it is not comparable across families.">
+                                Metadata
+                            </th>
                             <th style="width:80px;">Actions</th>
                         </tr>
                     </thead>
@@ -1917,6 +2543,63 @@ final class VerifyCollectionsPage
                             <tr>
                                 <td colspan="<?php echo (int) self::TABLE_COLSPAN; ?>"><em>
                                     <?php
+                                    // ⚠⚠ THREE DIFFERENT REASONS FOR NO ROWS, AND THEY
+                                    // MUST NOT SHARE ONE MESSAGE.
+                                    //
+                                    // 1. PAST THE LAST PAGE. `paged` is clamped only at
+                                    //    the bottom, so `&paged=99` on a 1-page tab gave
+                                    //    an offset past the end: zero rows, and the tab
+                                    //    its own counter says holds 38. The page then
+                                    //    said "No unverified collections. Add one from
+                                    //    NFT Discovery" — contradicting the counter
+                                    //    beside it and advising the operator to create
+                                    //    data that already exists. Verified in a browser
+                                    //    before this fix.
+                                    // 2. A SEARCH OR FILTER THAT MATCHES NOTHING. The
+                                    //    rows exist; the operator narrowed past them.
+                                    //    Telling them to go and add a collection is the
+                                    //    wrong instruction.
+                                    // 3. GENUINELY EMPTY for this tab — the only case
+                                    //    the original per-tab copy was written for.
+                                    //
+                                    // This is the same class of defect the per-tab
+                                    // messages already guard against ("no collections"
+                                    // when three other tabs are full), one level down.
+                                    $hasAnyInTab  = ($listing['total'] ?? 0) > 0;
+                                    $isFiltered   = $searchTerm !== ''
+                                        || $selectedChain !== ''
+                                        || $selectedTokenStandard !== '';
+                                    $clearUrl     = add_query_arg(
+                                        ['page' => self::PAGE_SLUG, 'vstate' => $vstate],
+                                        admin_url('admin.php')
+                                    );
+
+                                    if ($hasAnyInTab && $page > 1) {
+                                        printf(
+                                            /* translators: 1: requested page, 2: last page with rows */
+                                            esc_html__('Page %1$d is past the end of this list — it has %2$d page(s). Nothing is missing.', 'bcc-trust'),
+                                            (int) $page,
+                                            max(1, (int) $listing['pages'])
+                                        );
+                                        printf(
+                                            ' <a href="%s">%s</a>',
+                                            esc_url(add_query_arg(
+                                                ['page' => self::PAGE_SLUG, 'vstate' => $vstate, 'paged' => 1]
+                                                + ($searchTerm !== '' ? ['s' => $searchTerm] : [])
+                                                + ($selectedChain !== '' ? ['chain' => $selectedChain] : [])
+                                                + ($selectedTokenStandard !== '' ? ['token_standard' => $selectedTokenStandard] : []),
+                                                admin_url('admin.php')
+                                            )),
+                                            esc_html__('Back to the first page', 'bcc-trust')
+                                        );
+                                    } elseif ($isFiltered) {
+                                        echo esc_html__('No collections in this tab match the current search or filters.', 'bcc-trust');
+                                        printf(
+                                            ' <a href="%s">%s</a>',
+                                            esc_url($clearUrl),
+                                            esc_html__('Clear filters', 'bcc-trust')
+                                        );
+                                    } else {
                                     // The empty state is per tab, and says nothing about
                                     // rows in the OTHER tabs — "no collections" when three
                                     // other tabs are full is how an operator concludes the
@@ -1934,6 +2617,7 @@ final class VerifyCollectionsPage
                                         default:
                                             echo 'No unverified collections. Add one from NFT Discovery, or connect a wallet to populate this list.';
                                     }
+                                    }
                                     ?>
                                 </em></td>
                             </tr>
@@ -1947,27 +2631,58 @@ final class VerifyCollectionsPage
                             <tr data-collection-id="<?php echo $rowId; ?>">
                                 <td>
                                     <input type="hidden" name="known[]" value="<?php echo $rowId; ?>">
+                                    <input type="hidden" name="was_verified[<?php echo $rowId; ?>]" value="<?php echo $rowVerified ? '1' : '0'; ?>">
                                     <label class="bcc-vc-toggle" style="display:inline-flex;align-items:center;gap:4px;">
                                         <input type="checkbox"
                                                class="bcc-vc-verify"
                                                name="verified[<?php echo $rowId; ?>]"
                                                value="1"
                                                <?php checked($rowVerified); ?>>
-                                        <span class="bcc-vc-toggle-status" style="font-size:11px;color:#999;"></span>
+                                        <span class="bcc-vc-toggle-status" style="font-size:11px;color:var(--bcc-text-muted);"></span>
                                     </label>
                                 </td>
                                 <td>
-                                    <?php if (!empty($row->image_url)): ?>
-                                        <img src="<?php echo esc_url($row->image_url); ?>"
-                                             alt=""
-                                             style="width:40px;height:40px;border-radius:4px;object-fit:cover;">
+                                    <?php
+                                    // F-117: no remote fetch from wp-admin. image_url is chosen by
+                                    // the collection / its metadata host, so an <img> here made every
+                                    // admin's browser call that host on every page view (IP + UA leak,
+                                    // and a beacon on admin visits). A neutral placeholder instead; the
+                                    // image opens only on an explicit click, https-only, no referrer.
+                                    $imageHref = \BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules::sanitizeImageUrl($row->image_url ?? null);
+                                    ?>
+                                    <?php if ($imageHref !== null): ?>
+                                        <span aria-hidden="true" style="display:inline-block;width:40px;height:40px;border-radius:4px;background:var(--bcc-bg-raised, #f0f0f1);vertical-align:middle;"></span>
+                                        <a href="<?php echo esc_url($imageHref); ?>"
+                                           target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer"
+                                           style="font-size:11px;margin-left:4px;">open image &#8599;</a>
                                     <?php endif; ?>
                                 </td>
                                 <td>
-                                    <strong><?php echo esc_html($row->collection_name ?? '(no name)'); ?></strong>
+                                    <?php
+                                    // ⚠ The NAME is the link, which is what a
+                                    // screen reader and a keyboard user expect:
+                                    // the accessible name of the control is the
+                                    // thing it opens. A bare "View" link in the
+                                    // Actions column would announce as "View"
+                                    // forty times with no subject.
+                                    //
+                                    // The list context rides along, so Back
+                                    // returns to the same tab, page, search and
+                                    // filters.
+                                    $detailUrl = add_query_arg(
+                                        self::listContextArgs() + ['collection' => $rowId],
+                                        admin_url('admin.php')
+                                    );
+                                    printf(
+                                        '<strong><a href="%s" title="%s">%s</a></strong>',
+                                        esc_url($detailUrl),
+                                        esc_attr__('Open the read-only detail view for this collection', 'bcc-trust'),
+                                        esc_html($row->collection_name ?? '(no name)')
+                                    );
+                                    ?>
                                     <?php if ($tokenStandard !== ''): ?>
                                         <br>
-                                        <span style="color:#646970;font-size:11px;"><?php echo esc_html($tokenStandard); ?></span>
+                                        <span style="color:var(--bcc-text-muted);font-size:11px;"><?php echo esc_html($tokenStandard); ?></span>
                                     <?php endif; ?>
                                     <?php
                                     // DECISION 17's reader. Rendered inside the
@@ -1982,17 +2697,38 @@ final class VerifyCollectionsPage
                                 <td>
                                     <?php
                                     // Source badge — where the row came from.
-                                    //   manual    → operator added it by hand (safe to remove)
-                                    //   toplist   → auto-pulled from a chain's top-collections
-                                    //               sync (was 'stargaze' pre-Hub-migration)
+                                    //   manual    → an operator added it by hand (safe to remove)
+                                    //   toplist   → an automated job wrote it. MIXED provenance:
+                                    //               the pre-2026 Stargaze marketplace importer
+                                    //               (renamed from 'stargaze' by
+                                    //               includes/database/retire-stargaze-chain.php)
+                                    //               AND CosmWasm discovery, which wrote through
+                                    //               CollectionRepository::bulkUpsert(). Neither is
+                                    //               curated, and neither implies anyone looked.
                                     //   discovery → seen by the holdings transfer indexer
+                                    //
+                                    // ⚠⚠ THE LABEL IS NOT THE STORED VALUE, AND THE KEY MUST NOT
+                                    // CHANGE. 'toplist' is the value on disk — 218 production rows
+                                    // carry it, 190 of them still unverified — and
+                                    // SolanaGateIdentityManifest::EXPECTED_SOURCE asserts it
+                                    // before and after the Solana gate repair. Renaming the key
+                                    // without migrating rows would drop every one of those rows
+                                    // through to the `??` default, silently mislabelling them
+                                    // again, which is the defect this arm exists to fix. Pinned by
+                                    // CollectionSourceBadgeTest. See #206.
+                                    //
+                                    // "Top list" was the old label and it misinformed the one
+                                    // person it is rendered for: it implies a curated marketplace
+                                    // ranking, when the row is the opposite — an automated write
+                                    // nobody has reviewed. This screen is where the operator
+                                    // decides whether to verify it.
                                     $badge = [
-                                        'manual'    => ['Manual', '#2271b1'],
-                                        'toplist'   => ['Top list', '#646970'],
-                                        'discovery' => ['Discovered', '#646970'],
-                                    ][$source] ?? ['Discovered', '#646970'];
+                                        'manual'    => ['Manual',     '#2271b1', 'Added by hand by an operator.'],
+                                        'toplist'   => ['Auto-added', '#646970', 'Written automatically by the legacy marketplace import or the CosmWasm scanner — not curated, not reviewed. Stored source value: toplist.'],
+                                        'discovery' => ['Discovered', '#646970', 'Seen by the holdings transfer indexer — not curated, not reviewed.'],
+                                    ][$source] ?? ['Discovered', '#646970', 'Unrecognised source value — treat as unreviewed.'];
                                     ?>
-                                    <span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:<?php echo esc_attr($badge[1]); ?>;">
+                                    <span title="<?php echo esc_attr($badge[2]); ?>" style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:<?php echo esc_attr($badge[1]); ?>;">
                                         <?php echo esc_html($badge[0]); ?>
                                     </span>
                                 </td>
@@ -2025,16 +2761,16 @@ final class VerifyCollectionsPage
                                 ?>
                                 <td>
                                     <?php if ($rowSignal['waitlist'] > 0): ?>
-                                        <strong style="color:#2271b1;"><?php echo number_format_i18n($rowSignal['waitlist']); ?></strong>
+                                        <strong style="color:var(--bcc-accent);"><?php echo number_format_i18n($rowSignal['waitlist']); ?></strong>
                                     <?php else: ?>
-                                        <span style="color:#999;">&mdash;</span>
+                                        <span style="color:var(--bcc-text-muted);">&mdash;</span>
                                     <?php endif; ?>
                                 </td>
                                 <td>
                                     <?php if ($rowSignal['spam'] > 0): ?>
-                                        <strong style="color:#d63638;">⚑ <?php echo number_format_i18n($rowSignal['spam']); ?></strong>
+                                        <strong style="color:var(--bcc-danger);">⚑ <?php echo number_format_i18n($rowSignal['spam']); ?></strong>
                                     <?php else: ?>
-                                        <span style="color:#999;">&mdash;</span>
+                                        <span style="color:var(--bcc-text-muted);">&mdash;</span>
                                     <?php endif; ?>
                                 </td>
                                 <td>
@@ -2051,28 +2787,85 @@ final class VerifyCollectionsPage
                                     );
                                     switch ($demandCell['state']):
                                         case CollectionDemandService::STATE_COUNTED: ?>
-                                        <strong style="color:#00a32a;"><?php echo number_format_i18n((int) $demandCell['count']); ?></strong>
+                                        <strong style="color:var(--bcc-success);"><?php echo number_format_i18n((int) $demandCell['count']); ?></strong>
                                         <?php break;
                                         case CollectionDemandService::STATE_NONE_INDEXED: ?>
-                                        <span style="color:#646970;" title="No linked wallet is recorded as holding this collection in BCC's holdings index. The index can lag behind the chain.">None indexed</span>
+                                        <span style="color:var(--bcc-text-muted);" title="No linked wallet is recorded as holding this collection in BCC's holdings index. The index can lag behind the chain.">None indexed</span>
                                         <?php break;
                                         case CollectionDemandService::STATE_UNAVAILABLE: ?>
-                                        <span style="color:#646970;" title="Linked-holder counts could not be read completely just now, so this row's count is unknown.">Unavailable</span>
+                                        <span style="color:var(--bcc-text-muted);" title="Linked-holder counts could not be read completely just now, so this row's count is unknown.">Unavailable</span>
                                         <?php break;
                                         default: ?>
-                                        <span style="color:#646970;" title="BCC keeps no holdings index for this chain, so it does not count linked holders here. Counts are never fetched from outside services while this page loads.">Not calculated</span>
+                                        <span style="color:var(--bcc-text-muted);" title="BCC keeps no holdings index for this chain, so it does not count linked holders here. Counts are never fetched from outside services while this page loads.">Not calculated</span>
                                     <?php endswitch; ?>
                                 </td>
-                                <td><?php echo number_format_i18n((int) ($row->unique_holders ?? 0)); ?></td>
-                                <td class="bcc-vc-community">
+                                  <td>
+                                      <?php
+                                      // ⚠ NULL IS NOT ZERO. `unique_holders` is
+                                      // `INT UNSIGNED DEFAULT NULL` and is only populated for
+                                      // chains BCC counts marketplace-wide, so `?? 0` printed a
+                                      // confident "0 holders" for "we have no figure".
+                                      //
+                                      // The cell immediately above already refuses exactly this
+                                      // ("FOUR STATES, AND NONE OF THEM IS A FABRICATED ZERO"),
+                                      // and the demand sort comparator maps null to -1 rather
+                                      // than 0 for the same reason. This cell was the one place
+                                      // that still conflated them.
+                                      if ($row->unique_holders === null) {
+                                          echo '<span style="color:var(--bcc-text-muted);" title="BCC has no marketplace-wide holder figure for this collection. This is not a count of zero.">&mdash;</span>';
+                                      } else {
+                                          echo number_format_i18n((int) $row->unique_holders);
+                                      }
+                                      ?>
+                                  </td>
+                                  <td class="bcc-vc-community">
+                                      <?php
+                                      // ⚠ RENDER THE CAUSE THE CLASSIFIER ALREADY COMPUTES.
+                                      // CollectionStateClassifier::attentionCause() and
+                                      // causeLabel() existed with no production caller — the
+                                      // page printed one static paragraph listing all six
+                                      // causes and left the operator to infer which applied to
+                                      // each row. The classifier docblock claims each row is
+                                      // "rendered with its cause"; this makes that true.
+                                      //
+                                      // Shown only on the Needs-attention tab, where it is the
+                                      // question being asked. All four inputs are already on
+                                      // the projected row, so there is no extra query.
+                                      if ($vstate === CollectionStateClassifier::TAB_NEEDS_ATTENTION) {
+                                          $cause = CollectionStateClassifier::attentionCause(
+                                              (int) ($row->is_verified ?? 0) === 1,
+                                              $row->canonical_identifier !== null,   // matches the tab predicate exactly:
+                                              // CollectionStateClassifier uses
+                                              // `canonical_identifier IS NOT NULL`, so an
+                                              // empty string must NOT be treated as unresolved
+                                              // or the rendered cause could disagree with the
+                                              // predicate that selected the row onto this tab.
+                                              (int) ($row->has_community ?? 0) === 1,
+                                              (string) ($row->provisioning_state ?? ProvisioningState::NONE)
+                                          );
+                                          if ($cause !== null) {
+                                              printf(
+                                                  '<div style="font-weight:600;margin-bottom:2px;">%s</div>',
+                                                  esc_html(CollectionStateClassifier::causeLabel($cause))
+                                              );
+                                          }
+                                      }
+                                      ?>
                                     <?php
-                                    // PR 6: community existence is PROJECTED by
-                                    // listForAdminState(), so the old per-row
-                                    // findGroupForCollection() N+1 is gone — one
-                                    // page used to issue 50 of them.
+                                    // PR 6 projected community EXISTENCE into
+                                    // listForAdminState(), which removed one N+1.
+                                    // ⚠ Three per-row reads survived it — the
+                                    // group lookup, its member count and its
+                                    // permalink — and the comment that used to sit
+                                    // here claimed the N+1 was "gone", which made
+                                    // them easy to miss. All three are now resolved
+                                    // in bounded set-based reads BEFORE this loop
+                                    // ({@see prefetch_community_cells()}), and this
+                                    // block does array lookups only. Nothing here
+                                    // may issue a query.
                                     //
-                                    // Cell semantics now follow the state machine,
-                                    // not verification:
+                                    // Cell semantics follow the state machine, not
+                                    // verification:
                                     //   community exists → linked member count
                                     //   requested        → "awaiting creation"
                                     //   failed           → the bounded failure reason
@@ -2081,12 +2874,9 @@ final class VerifyCollectionsPage
                                     $rowState     = (string) ($row->provisioning_state ?? ProvisioningState::NONE);
 
                                     if ($hasCommunity) {
-                                        $groupId = GatedGroupRepository::findGroupForCollection(
-                                            (int) $row->chain_id,
-                                            (string) ($row->canonical_identifier ?? $row->contract_address)
-                                        );
+                                        $groupId = $communityGroupIds[(int) $row->id] ?? null;
                                         if ($groupId !== null) {
-                                            $count     = PeepSoGroupRepository::countGroupMembers($groupId);
+                                            $count     = $communityMemberCounts[$groupId] ?? 0;
                                             $permalink = get_permalink($groupId);
                                             $label     = number_format_i18n($count) . ' member' . ($count === 1 ? '' : 's');
                                             if (is_string($permalink) && $permalink !== '') {
@@ -2103,10 +2893,10 @@ final class VerifyCollectionsPage
                                             // the canonical lookup cannot resolve. Say so
                                             // rather than rendering "no community", which
                                             // would invite creating a second one.
-                                            echo '<span style="color:#d63638;">community present, identity unresolved</span>';
+                                            echo '<span style="color:var(--bcc-danger);">community present, identity unresolved</span>';
                                         }
                                     } elseif ($rowState === ProvisioningState::REQUESTED) {
-                                        echo '<span style="color:#2271b1;">Requested &mdash; awaiting creation</span>';
+                                        echo '<span style="color:var(--bcc-accent);">Requested &mdash; awaiting creation</span>';
                                         ?>
                                         <button type="button"
                                                 class="button button-small bcc-vc-create-community"
@@ -2117,14 +2907,61 @@ final class VerifyCollectionsPage
                                     } elseif ($rowState === ProvisioningState::FAILED) {
                                         $code = (string) ($row->provisioning_failure_code ?? '');
                                         printf(
-                                            '<span style="color:#d63638;">Failed: %s</span>',
+                                            '<span style="color:var(--bcc-danger);">Failed: %s</span>',
                                             esc_html(ProvisioningFailureCode::label($code))
                                         );
-                                    } elseif ($rowVerified) {
-                                        echo '<span style="color:#646970;">No community requested</span>';
+                                      } elseif ($rowState === ProvisioningState::PROVISIONED) {
+                                          // ⚠ `provisioned` WITH NO LIVE COMMUNITY IS A
+                                          // CONTRADICTION, not an absence. The community was
+                                          // trashed or deleted out from under the row.
+                                          //
+                                          // This arm used to fall through to "No community
+                                          // requested" below, which is the mis-render
+                                          // CollectionStateClassifier::attentionCause()
+                                          // explicitly warns against: it "would invite an
+                                          // operator to create a second one". The adjacent
+                                          // identity-unresolved arm above already applies that
+                                          // reasoning; this state was the one that did not.
+                                          printf(
+                                              '<span style="color:var(--bcc-danger);">%s</span>',
+                                              esc_html(CollectionStateClassifier::causeLabel(
+                                                  CollectionStateClassifier::CAUSE_CONTRADICTORY_STATE
+                                              ))
+                                          );
+                                      } elseif ($rowVerified) {
+                                          echo '<span style="color:var(--bcc-text-muted);">No community requested</span>';
                                     } else {
-                                        echo '<span style="color:#999;">&mdash;</span>';
+                                        echo '<span style="color:var(--bcc-text-muted);">&mdash;</span>';
                                     }
+                                    ?>
+                                </td>
+                                <td>
+                                    <?php
+                                    // ── METADATA STATUS ────────────────────
+                                    //
+                                    // ⚠ These two columns have been written on
+                                    // intake since PR E and surfaced in NO
+                                    // admin view, so an administrator could
+                                    // not see how much metadata BCC actually
+                                    // holds for a row it is being asked to
+                                    // verify.
+                                    //
+                                    // `metadata_state` is COMPUTED and scoped
+                                    // PER FAMILY, so `complete` does not mean
+                                    // the same field count on EVM as on
+                                    // Cosmos — a field the family never
+                                    // fetches is not a shortfall. The title
+                                    // says so rather than implying a single
+                                    // scale.
+                                    //
+                                    // `metadata_checked_at` is when metadata
+                                    // was ATTEMPTED, not when it succeeded,
+                                    // and is deliberately NOT `fetched_at`
+                                    // (any holdings write bumps that one).
+                                    self::renderMetadataStatus(
+                                        (string) ($row->metadata_state ?? ''),
+                                        $row->metadata_checked_at ?? null
+                                    );
                                     ?>
                                 </td>
                                 <td>
@@ -2140,7 +2977,7 @@ final class VerifyCollectionsPage
                                     $isHidden = (int) ($row->is_hidden ?? 0) === 1;
                                     ?>
                                     <?php if ($isHidden): ?>
-                                        <span style="display:inline-block;margin-bottom:4px;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:#d63638;">HIDDEN</span>
+                                        <span style="display:inline-block;margin-bottom:4px;padding:1px 8px;border-radius:10px;font-size:11px;color:#fff;background:var(--bcc-danger);">HIDDEN</span>
                                     <?php endif; ?>
                                     <?php
                                     // VC-B1: the button reaches its own form
@@ -2161,29 +2998,12 @@ final class VerifyCollectionsPage
                                     <button type="submit"
                                             form="vc-a-del-<?php echo $rowId; ?>"
                                             class="button button-small button-link-delete"
-                                            style="color:#b32d2e;"
+                                            style="color:var(--bcc-danger);"
                                             onclick="return confirm('Remove this collection from the list? This deletes the row only — rediscovery can bring it back. Use Hide to keep it away permanently. A collection with a live community can\'t be removed until its community is gone.');">
                                         Remove
                                     </button>
                                 </td>
                             </tr>
-                            <?php
-                            // Scanner detail sub-row. Pre-fetched above; no
-                            // query here. Absent for anything the CosmWasm
-                            // scanner has no record of.
-                            $scannerKey = (int) $row->chain_id . '|' . strtolower((string) $row->contract_address);
-                            if (isset($scannerCandidates[$scannerKey])) {
-                                $candidateRow = $scannerCandidates[$scannerKey];
-                                $familyKey    = (int) $row->chain_id . '|' . (int) $candidateRow->code_id;
-                                CosmwasmScannerPanel::renderCandidateDetail(
-                                    $row,
-                                    $candidateRow,
-                                    $scannerFamilies[$familyKey] ?? null,
-                                    $rowVerified,
-                                    self::TABLE_COLSPAN
-                                );
-                            }
-                            ?>
                         <?php endforeach; endif; ?>
                     </tbody>
                 </table>
@@ -2194,7 +3014,7 @@ final class VerifyCollectionsPage
                             name="action"
                             value="<?php echo esc_attr(self::ACTION_SAVE); ?>"
                             formaction="<?php echo esc_url(admin_url('admin-post.php')); ?>">Save Verification Changes</button>
-                    <span style="color:#646970;font-size:12px;margin-left:8px;">
+                    <span style="color:var(--bcc-text-muted);font-size:12px;margin-left:8px;">
                         Verify toggles save instantly. This button is a fallback if JavaScript is off.
                     </span>
                 </p>
@@ -2324,7 +3144,7 @@ final class VerifyCollectionsPage
                     post(ACTION_PROVISION, id, 'provision')
                         .then(function (resp) {
                             if (resp && resp.success) {
-                                if (cell) { cell.innerHTML = '<span style="color:#00a32a;font-size:12px;">Community created</span>'; }
+                                if (cell) { cell.innerHTML = '<span style="color:var(--bcc-success);font-size:12px;">Community created</span>'; }
                             } else {
                                 btn.disabled = false;
                                 btn.textContent = 'Create now';
@@ -2396,22 +3216,32 @@ final class VerifyCollectionsPage
      * wins over the name heuristics, which is exactly what "I looked at
      * this and it's fine" means).
      *
-     * ── THE RULE IS AUTHORITY; THE SCANNER FLAG IS A CACHE ──────────────
-     * Writing the rule is not the whole job. The CosmWasm scanner keeps a
-     * `denied` flag ON ITS OWN INVENTORY so its queue predicates stay
-     * cheap and indexed, and that flag is what
-     * {@see CosmwasmContractRepository::findEmittable()} and
-     * {@see CosmwasmContractRepository::countDenied()} read. Leaving it
-     * stale means the hidden contract keeps sitting in the emit queue and
-     * the panel keeps counting it as visible — the emit path's live rule
-     * re-check catches it every single sweep, forever, instead of it
-     * being dropped once.
+     * ── THE RULE IS THE WHOLE JOB (S3) ──────────────────────────────────
+     * This handler writes the authoritative rule and nothing else. It used
+     * to also push the CosmWasm scanner's `denied` flag — a CACHE on the
+     * scanner's own inventory, kept so its queue predicates stayed cheap
+     * and indexed — and then report partial completion when that push could
+     * not be confirmed. That coupling is gone.
      *
-     * So the rule write is followed by
-     * {@see CosmwasmDiscoveryService::syncDenyFlags()} — DENY POINT 4,
-     * which had no production caller at all before this. It is called
-     * with the SINGLE affected contract; it is already bounded to 200 and
-     * needs no widening, and nothing here scans the table.
+     * ⚠ WHY REMOVING IT CHANGES NOTHING AN OPERATOR OR A MEMBER CAN SEE.
+     * The cache was only ever read by the scanner's own queue
+     * ({@see CosmwasmContractRepository::findEmittable()}) and its own count
+     * ({@see CosmwasmContractRepository::countDenied()}). The authority is
+     * `wp_bcc_nft_spam_contracts.rule`, in a DIFFERENT table, and the emit
+     * path re-checks it live on every pass — which is exactly what
+     * `test_the_live_rule_recheck_still_blocks_the_emit_when_the_cached_flag_goes_stale`
+     * asserts, and that test is unchanged by this commit. A stale flag
+     * therefore costs a candidate being reconsidered and re-refused each
+     * sweep, never a hidden collection becoming visible.
+     *
+     * And the scanner is FROZEN — `ScannerFreeze` refuses every entry point,
+     * so nothing sweeps, nothing emits and nothing reads the cache at all.
+     * The column stops being updated from here; existing values go inert and
+     * are dropped with the table in S9.
+     *
+     * ⚠ PUBLIC VISIBILITY, JOINING, MEMBERSHIP AND REVOCATION ARE UNTOUCHED.
+     * None of them ever consulted the scanner cache; they read the rule and
+     * the holdings path, neither of which this commit goes near.
      *
      * ── THE LOOKUP IS KEYED, NOT POSITIONAL ─────────────────────────────
      * {@see CollectionRepository::findManyByIds()} returns a map keyed by
@@ -2516,59 +3346,40 @@ final class VerifyCollectionsPage
             return [['type' => 'error', 'message' => 'Hide: rule write failed. Check the bcc-trust error log.']];
         }
 
-        $scannerSynced = self::syncScannerDenyFlag($chainId, $contract, $hide);
-
         // THE DURABLE RECORD (VC-B1).
         //
         // The outcome is in the ACTION NAME, not in $meta: AuditLogger::log()
         // accepts $meta and the insert array drops it, so anything encoded
-        // there is not durable. "applied" and "sync_unconfirmed" are
-        // therefore separate events rather than one event with a flag.
+        // there is not durable.
+        //
+        // ⚠ THE VOCABULARY NARROWED IN S3, AND THE OLD NAMES STAY VALID.
+        // `admin_vc_hide_sync_unconfirmed` and its unhide twin can no longer
+        // be emitted, because there is no cache push left to be unconfirmed.
+        // Rows already carrying them are ACCURATE HISTORY and must not be
+        // rewritten or reinterpreted: each one means "the rule was written
+        // and the scanner cache push could not be confirmed", which was true
+        // when it was recorded.
         //
         // The target is the COLLECTION row — never the chain. A chain id
         // stored under target_type 'collection' would be indistinguishable
         // from a real collection id in any later forensic query.
         AdminActionSupport::audit(
-            self::hideAuditAction($hide, $scannerSynced),
+            self::hideAuditAction($hide),
             'collection',
             $collectionId,
             ['chain_id' => $chainId, 'contract' => $contract, 'rule' => $rule]
         );
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Verify Collections hide toggle', [
-            'action'         => 'verify_collections_hide',
-            'collection_id'  => $collectionId,
-            'chain_id'       => $chainId,
-            'contract'       => $contract,
-            'rule'           => $rule,
-            'scanner_synced' => $scannerSynced,
-            'operator'       => get_current_user_id(),
+            'action'        => 'verify_collections_hide',
+            'collection_id' => $collectionId,
+            'chain_id'      => $chainId,
+            'contract'      => $contract,
+            'rule'          => $rule,
+            'operator'      => get_current_user_id(),
         ]);
 
         $name = (string) ($row->collection_name ?? $contract);
-
-        if (!$scannerSynced) {
-            // PARTIAL COMPLETION. Naming both halves matters: the operator's
-            // intent IS in force (the rule is authoritative and every emit
-            // re-checks it live), but the scanner's cached flag and the
-            // "hidden by a rule" count derived from it are now stale, so the
-            // page they are looking at will disagree with reality.
-            return [[
-                'type'    => 'warning',
-                'message' => sprintf(
-                    '%s "%s" %s users — the %s rule was written and IS in force. '
-                        . 'What did NOT happen: the CosmWasm scanner\'s cached flag for this contract could not be updated, '
-                        . 'so its inventory still lists the contract the old way and the "hidden by a rule" count on this page is stale. '
-                        . 'Nothing is exposed by that — the emit path re-checks the live rule on every pass — but click %s again once the '
-                        . 'database error clears so the scanner stops reconsidering it. Check the bcc-trust error log.',
-                    $hide ? 'Hid' : 'Restored',
-                    $name,
-                    $hide ? 'from' : 'for',
-                    $rule,
-                    $hide ? 'Hide' : 'Unhide'
-                ),
-            ]];
-        }
 
         return [[
             'type'    => 'success',
@@ -2583,49 +3394,30 @@ final class VerifyCollectionsPage
     }
 
     /**
-     * Sync the scanner's cached deny flag for ONE contract, and report
-     * whether it actually landed.
-     *
-     * ── WHY IT VERIFIES INSTEAD OF TRUSTING THE RETURN ──────────────────
-     * {@see CosmwasmDiscoveryService::syncDenyFlags()} returns "how many
-     * flags changed", and 0 is a perfectly good answer (the flag was
-     * already right). It is therefore useless as a success signal, and it
-     * is 0 in both of the ways this can fail: its per-contract read came
-     * back empty because the query errored, or its UPDATE did not stick.
-     *
-     * So the flag is READ BACK through
-     * {@see CosmwasmContractRepository::deniedFlag()}, which throws rather
-     * than confusing "no row" with "could not read". Three outcomes:
-     *   null  → the scanner has never inventoried this contract, so there
-     *           was nothing to sync and that is a success;
-     *   ===   → the cache agrees with the rule;
-     *   !==   → the write silently did not land — report partial.
-     */
-    /**
      * The VC-B1 audit vocabulary, in one place.
      *
-     * Four names, all inside the 50-character `action` column:
+     * Four names survive S3, all inside the 50-character `action` column:
      *
-     *   admin_vc_hide_applied              (21) rule written, cache agrees
-     *   admin_vc_unhide_applied            (23) rule written, cache agrees
-     *   admin_vc_hide_sync_unconfirmed     (30) rule written, cache stale
-     *   admin_vc_unhide_sync_unconfirmed   (32) rule written, cache stale
+     *   admin_vc_hide_applied      (21) the rule was written
+     *   admin_vc_unhide_applied    (23) the rule was written
+     *   admin_vc_hide_failed       (20) the rule was NOT written
+     *   admin_vc_unhide_failed     (22) the rule was NOT written
      *
-     * "applied" covers BOTH "the scanner's flag now agrees" and "the scanner
-     * has no record of this contract, so there was nothing to sync" — the
-     * two are the same fact from the operator's side: nothing is left stale.
-     * `syncScannerDenyFlag()` already collapses them, and splitting them
-     * here would be a distinction the durable row cannot act on.
+     * ⚠ TWO RETIRED NAMES ARE STILL VALID HISTORY.
+     * `admin_vc_hide_sync_unconfirmed` and `admin_vc_unhide_sync_unconfirmed`
+     * are no longer emitted — S3 removed the scanner-cache push they
+     * described, so the condition cannot arise. Existing rows keep them AND
+     * keep their meaning: at the moment each was written, the rule HAD been
+     * written and the cache push could not be confirmed. Nothing migrates
+     * them, and a forensic reader should not read them as errors.
+     *
+     * "applied" now carries exactly one fact, which is the only fact the
+     * durable row could ever act on: the authoritative rule is in force.
      */
-    private static function hideAuditAction(bool $hide, bool $synced): string
+    private static function hideAuditAction(bool $hide): string
     {
-        if ($synced) {
-            return $hide ? 'admin_vc_hide_applied' : 'admin_vc_unhide_applied';
-        }
-
-        return $hide ? 'admin_vc_hide_sync_unconfirmed' : 'admin_vc_unhide_sync_unconfirmed';
+        return $hide ? 'admin_vc_hide_applied' : 'admin_vc_unhide_applied';
     }
-
     /**
      * The "the authoritative rule was NOT applied" event.
      *
@@ -2644,28 +3436,6 @@ final class VerifyCollectionsPage
     {
         return $hide ? 'admin_vc_hide_failed' : 'admin_vc_unhide_failed';
     }
-
-    private static function syncScannerDenyFlag(int $chainId, string $contract, bool $hide): bool
-    {
-        try {
-            \BCC\Trust\Onchain\Services\CosmwasmDiscoveryService::syncDenyFlags($chainId, [$contract]);
-
-            $flag = CosmwasmContractRepository::deniedFlag($chainId, $contract);
-        } catch (RepositoryReadFailure $e) {
-            \BCC\Core\Log\Logger::error('[bcc-trust] hide toggle: scanner deny-flag sync could not be confirmed', [
-                'action'   => 'verify_collections_hide_sync_failed',
-                'chain_id' => $chainId,
-                'contract' => $contract,
-                'method'   => $e->repositoryMethod(),
-                'db_error' => $e->dbError(),
-            ]);
-
-            return false;
-        }
-
-        return $flag === null || $flag === $hide;
-    }
-
 
     /**
      * V2 Phase 2: pre-verify CW-721 sanity check. Hits the contract's
@@ -2748,6 +3518,28 @@ final class VerifyCollectionsPage
      * deletion can't silently orphan a live PeepSo group. The operator
      * must unverify (and tear the group down) first.
      *
+     * ── THE GUARD ASKS THE AUTHORITATIVE LINK, AND FAILS CLOSED ─────────
+     * It used to ask `findGroupForCollection($chainId, $contract_address)`.
+     * Two problems, both in the direction that permits a delete:
+     *
+     *   1. `_bcc_gate_contract_address` is legacy/display; the identity is
+     *      `_bcc_gate_collection_id`. Matching on the contract string means
+     *      canonicalising it first, and a value that is not a valid
+     *      identity on its chain — the marketplace symbols the eight
+     *      production Solana gates stored — returns null WITHOUT RUNNING A
+     *      QUERY. A live community read as absent.
+     *   2. A failed query also returns null, and null was read as
+     *      permission to delete.
+     *
+     * Both are closed by keying on the row id and guarding the read:
+     * {@see GatedGroupRepository::findPublishedGroupIdForCollectionId()}
+     * throws rather than answering null when it could not look. Note the
+     * row's own `contract_address` is still used for the MESSAGE and the
+     * audit meta — it just no longer decides anything.
+     *
+     * The published-community policy is unchanged: only a published
+     * `peepso-group` blocks, so a trashed group does not strand a row.
+     *
      * @return list<array{type: string, message: string}>
      */
     private static function handleDeleteCollection(int $collectionId): array
@@ -2764,7 +3556,34 @@ final class VerifyCollectionsPage
         $contract = (string) $coll->contract_address;
         $chainId  = (int) $coll->chain_id;
 
-        $groupId = GatedGroupRepository::findGroupForCollection($chainId, $contract);
+        try {
+            $groupId = GatedGroupRepository::findPublishedGroupIdForCollectionId($collectionId);
+        } catch (RepositoryReadFailure $e) {
+            // ⚠ FAIL CLOSED, AND NO DURABLE AUDIT ROW.
+            //
+            // Nothing was established about this collection, so nothing is
+            // asserted about it. An audit row here would durably record a
+            // statement about a community we never managed to look at — the
+            // same reasoning as the AJAX provision path above. The fault
+            // belongs in the application log, which the repository already
+            // wrote once; this adds the operator-facing half.
+            \BCC\Core\Log\Logger::error('[bcc-trust] Verify Collections remove: community check unreadable', [
+                'action'        => 'verify_collections_remove_community_check_failed',
+                'collection_id' => $collectionId,
+                'method'        => $e->repositoryMethod(),
+                'db_error'      => $e->dbError(),
+                'operator'      => get_current_user_id(),
+            ]);
+
+            return [[
+                'type'    => 'error',
+                'message' => 'Remove: could not determine whether this collection still has a '
+                    . 'holder community, so nothing was removed. This is a database read failure, '
+                    . 'not a statement about the collection — try again, and if it persists check '
+                    . 'the database before removing anything.',
+            ]];
+        }
+
         if ($groupId !== null) {
             return [[
                 'type'    => 'warning',
@@ -2817,6 +3636,40 @@ final class VerifyCollectionsPage
 
 
     /**
+     * Which of the submitted rows THIS operator changed (F-117).
+     *
+     * A row whose checkbox still matches the state it was rendered with
+     * ($was) was not touched here and is skipped, so saving from a stale
+     * tab cannot revert another admin's change. A row with no rendered
+     * state (a page from before was_verified existed) is written as
+     * submitted, the old behaviour.
+     *
+     * @param list<int>          $known   Row ids the page rendered.
+     * @param array<int, true>   $checked Row ids submitted checked.
+     * @param array<int, bool>   $was     Rendered verified state per row id.
+     * @return array{0: list<int>, 1: list<int>, 2: int} [verify, unverify, untouched]
+     */
+    public static function partitionChanges(array $known, array $checked, array $was): array
+    {
+        $verify    = [];
+        $unverify  = [];
+        $untouched = 0;
+        foreach ($known as $collectionId) {
+            $now = isset($checked[$collectionId]);
+            if (array_key_exists($collectionId, $was) && $was[$collectionId] === $now) {
+                $untouched++;
+                continue;
+            }
+            if ($now) {
+                $verify[] = $collectionId;
+            } else {
+                $unverify[] = $collectionId;
+            }
+        }
+        return [$verify, $unverify, $untouched];
+    }
+
+    /**
      * @return list<array{type: string, message: string}>
      */
     private static function handleSave(): array
@@ -2860,15 +3713,22 @@ final class VerifyCollectionsPage
             $checked[(int) $id] = true;
         }
 
-        $verify   = [];
-        $unverify = [];
-        foreach ($known as $collectionId) {
-            if (isset($checked[$collectionId])) {
-                $verify[] = $collectionId;
-            } else {
-                $unverify[] = $collectionId;
-            }
+        // F-117: write only the rows THIS operator changed. Each row also
+        // posts the state it was rendered with (was_verified[id]); a row whose
+        // checkbox still matches it was not touched here, so it is left alone
+        // — otherwise saving from a stale tab re-wrote every row on the page
+        // to its old state and silently reverted other admins' changes.
+        // A row without was_verified (a page rendered before this field
+        // existed) keeps the old write-everything behaviour.
+        $wasRaw = isset($_POST['was_verified']) && is_array($_POST['was_verified'])
+            ? $_POST['was_verified']
+            : [];
+        $was = [];
+        foreach ($wasRaw as $id => $v) {
+            $was[(int) $id] = ((string) $v) === '1';
         }
+
+        [$verify, $unverify, $untouched] = self::partitionChanges($known, $checked, $was);
 
         // PR 6: routed through the service, not straight to the repository.
         // The verification write, the withdrawal of any pending request on a
@@ -2895,6 +3755,7 @@ final class VerifyCollectionsPage
             'unverified' => count($unverify),
             'changed'    => $result['changed'],
             'withdrawn'  => $result['withdrawn'],
+            'untouched'  => $untouched,
             'operator'   => get_current_user_id(),
         ]);
 

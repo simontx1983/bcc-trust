@@ -67,6 +67,63 @@ final class FeedCommentCountGatingTest extends TestCase
         ];
     }
 
+    // ── Announcements: no count at all, never a wrong one ─────────────
+
+    /**
+     * ⚠ AN ANNOUNCEMENT GETS NO `comment_count` KEY, NOT A ZERO.
+     *
+     * Its discussion lives in its own comment type and
+     * `peepso_disable_comments` is set on the backing post, so the ACTIVITY
+     * count this method reads is structurally zero and KNOWN TO BE WRONG.
+     * "0 comments" on a notice with a live discussion reads as "nobody
+     * replied" rather than as a missing integration — contract §4.32.15
+     * requires the real count or none, never this one.
+     *
+     * assertArrayNotHasKey, not assertSame(0, ...): the distinction between
+     * an absent key and a zero IS the behaviour, and only the former makes
+     * the client hide the figure.
+     */
+    public function testAnAnnouncementGetsNoCommentCountKeyAtAll(): void
+    {
+        $GLOBALS['__bcc_gate_fixture']['counts'][77] = 12;   // a real discussion exists
+
+        $out = self::hydrate([
+            ['external_id' => 77, 'post_kind' => 'announcement'],
+        ], 9);
+
+        self::assertArrayNotHasKey('comment_count', $out[0]);
+    }
+
+    /**
+     * Anti-vacuity, and the control that matters: the SAME call, the same
+     * fixture, an ordinary kind — the count is present. Without this, a
+     * change that withheld the count from everything would pass the case
+     * above.
+     */
+    public function testAnOrdinaryKindStillGetsItsCountInTheSameCall(): void
+    {
+        $GLOBALS['__bcc_gate_fixture']['counts'] = [77 => 12, 88 => 3];
+
+        $out = self::hydrate([
+            ['external_id' => 77, 'post_kind' => 'announcement'],
+            ['external_id' => 88, 'post_kind' => 'status'],
+        ], 9);
+
+        self::assertArrayNotHasKey('comment_count', $out[0], 'announcement');
+        self::assertSame(3, $out[1]['comment_count'], 'status');
+    }
+
+    /** A missing or unrecognised post_kind keeps its count — no silent loss. */
+    public function testAnAbsentOrUnknownPostKindStillGetsItsCount(): void
+    {
+        $GLOBALS['__bcc_gate_fixture']['counts'][99] = 5;
+
+        foreach ([[], ['post_kind' => 'announcment'], ['post_kind' => '']] as $extra) {
+            $out = self::hydrate([['external_id' => 99] + $extra], 9);
+            self::assertSame(5, $out[0]['comment_count'], (string) json_encode($extra));
+        }
+    }
+
     public function testMemberSeesCountsNonMemberDoesNot(): void
     {
         $GLOBALS['__bcc_gate_fixture']['status_map'] = [

@@ -59,7 +59,14 @@ final class NftHoldingsIndexerPlanTest extends TestCase
             self::CHAIN,
             $events,
             $map,
-            $isSpam ?? static fn (string $c, ?string $n): bool => false
+            $isSpam ?? static fn (string $c, ?string $n): bool => false,
+            // ⚠ The family is now REQUIRED, because the contract identity is
+            // canonicalised per family rather than lowercased. Every fixture
+            // contract here is EVM hex, for which the canonical rule IS
+            // lowercase — so these cases assert the same values they always
+            // did. `NftHoldingsIndexerSolanaMintCaseTest` covers the family
+            // whose rule differs.
+            'evm'
         );
     }
 
@@ -134,6 +141,23 @@ final class NftHoldingsIndexerPlanTest extends TestCase
         self::assertSame([], $out['deltas'], '721 must not use the delta path');
         self::assertCount(1, $out['deletes']);
         self::assertSame(self::LINK_A, $out['deletes'][0]['wallet_link_id']);
+        // F-65: the repository only deletes a row this OUT is not older than,
+        // so the delete must carry the OUT's block.
+        self::assertSame(100, $out['deletes'][0]['block']);
+    }
+
+    public function test721NettedDeleteCarriesTheWinningOutsBlock(): void
+    {
+        // IN at 100 then OUT at 250 for the same key nets to ONE delete, and it
+        // must carry 250 — the block of the OUT that won — not the IN's.
+        $out = $this->plan([
+            $this->ev(['contract_address' => self::C721, 'token_standard' => 'ERC-721', 'to_address' => self::A, 'block_number' => 100]),
+            $this->ev(['contract_address' => self::C721, 'token_standard' => 'ERC-721', 'from_address' => self::A, 'to_address' => self::B, 'block_number' => 250]),
+        ]);
+
+        self::assertCount(1, $out['deletes']);
+        self::assertSame(['wallet_link_id' => self::LINK_A, 'contract' => self::C721, 'token_id' => '1', 'block' => 250, 'chain_id' => self::CHAIN, 'confirmed_at' => '2026-01-01 00:00:00', 'token_standard' => 'ERC-721'], $out['deletes'][0]);
+        self::assertSame(250, $out['upserts'][0]['last_seen_block'], 'the receiver row carries the same block');
     }
 
     public function test721InflowUpsertsAbsoluteBalanceOne(): void

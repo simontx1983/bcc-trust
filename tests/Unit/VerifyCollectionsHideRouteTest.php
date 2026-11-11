@@ -246,19 +246,41 @@ final class VerifyCollectionsHideRouteTest extends TestCase
 
     // ── 8, 9, 10. Rule first; scanner second; never the other way ───────
 
-    public function testTheAuthoritativeRuleIsWrittenBeforeTheScannerIsTouched(): void
+    /**
+     * ⚠ THE SCANNER IS NEVER TOUCHED AT ALL (S3).
+     *
+     * This used to assert an ORDER — rule first, cache second — because both
+     * happened. Only the rule happens now, so the assertion that carries the
+     * change is that the scanner service is not called even once.
+     */
+    public function testTheRuleIsWrittenAndTheScannerIsNeverTouched(): void
     {
         $this->arrange(true);
+
         $this->invoke(true);
 
-        $this->assertCount(1, NftSpamContractRepository::$added);
-        $this->assertSame(NftSpamContractRepository::RULE_DENY, NftSpamContractRepository::$added[0]['rule']);
-        $this->assertSame(self::CHAIN_ID, NftSpamContractRepository::$added[0]['chainId']);
-        $this->assertSame(self::CONTRACT, NftSpamContractRepository::$added[0]['contract']);
-
-        $this->assertCount(1, CosmwasmDiscoveryService::$syncCalls);
-        $this->assertSame([self::CONTRACT], CosmwasmDiscoveryService::$syncCalls[0]['contracts']);
+        $this->assertCount(1, NftSpamContractRepository::$added, 'the rule is written');
+        $this->assertSame(
+            [],
+            CosmwasmDiscoveryService::$syncCalls,
+            'S3: the hide route must not call the scanner deny-flag sync at all'
+        );
+        $this->assertSame(
+            ['admin_vc_hide_applied'],
+            \BCC\Trust\Core\Security\AuditLogger::actions(),
+            'and the durable row is the plain applied event'
+        );
     }
+
+    // ⚠ TWO CASES DELETED BY S3, DELIBERATELY AND NAMED SO THE GAP IS VISIBLE:
+    //
+    //   testAnUnconfirmedSyncAuditsPartialAndNeverFullSuccess
+    //   testAnUnconfirmedUnhideSyncUsesItsOwnEventName
+    //
+    // Both asserted the `*_sync_unconfirmed` events, which can no longer be
+    // emitted because the cache push they described is gone. The names remain
+    // valid in historical rows — see the vocabulary test, which still holds
+    // them to the column width for exactly that reason.
 
     public function testUnhideWritesTheAllowRule(): void
     {
@@ -382,41 +404,7 @@ final class VerifyCollectionsHideRouteTest extends TestCase
         $this->assertSame('success', $this->notices()[0]['type']);
     }
 
-    public function testAnUnconfirmedSyncAuditsPartialAndNeverFullSuccess(): void
-    {
-        $this->arrange(true);
-        CosmwasmContractRepository::$throwOnRead = true;
 
-        $this->invoke(true);
-
-        $this->assertSame(
-            ['admin_vc_hide_sync_unconfirmed'],
-            \BCC\Trust\Core\Security\AuditLogger::actions(),
-            'exactly one row, and it must not claim full success'
-        );
-        $this->assertSame('collection', \BCC\Trust\Core\Security\AuditLogger::$rows[0]['targetType']);
-        $this->assertSame(self::CID, \BCC\Trust\Core\Security\AuditLogger::$rows[0]['targetId']);
-
-        // The authoritative rule still landed.
-        $this->assertCount(1, NftSpamContractRepository::$added);
-
-        $notice = $this->notices()[0];
-        $this->assertSame('warning', $notice['type'], 'partial completion is a warning, not a success');
-        $this->assertStringContainsString('IS in force', $notice['message']);
-    }
-
-    public function testAnUnconfirmedUnhideSyncUsesItsOwnEventName(): void
-    {
-        $this->arrange(false);
-        CosmwasmContractRepository::$throwOnRead = true;
-
-        $this->invoke(false);
-
-        $this->assertSame(
-            ['admin_vc_unhide_sync_unconfirmed'],
-            \BCC\Trust\Core\Security\AuditLogger::actions()
-        );
-    }
 
     // ── 14. Unexpected exception: redacted, correlated, audited once ────
 
@@ -425,7 +413,11 @@ final class VerifyCollectionsHideRouteTest extends TestCase
         $secret = 'Hide provider failure SECRET_INTERNAL_DETAIL';
 
         $this->arrange(true);
-        CosmwasmDiscoveryService::$syncThrows = new \RuntimeException($secret);
+        // ⚠ DRIVEN FROM THE AUTHORITATIVE WRITE NOW. The scanner-cache sync this
+        // used to throw from was removed in S3; the property under test — an
+        // unexpected exception is redacted, correlated and audited once — is
+        // unchanged and still worth covering.
+        NftSpamContractRepository::$addThrows = new \RuntimeException($secret);
 
         $r = $this->invoke(true);
 
@@ -461,14 +453,24 @@ final class VerifyCollectionsHideRouteTest extends TestCase
 
     public function testEveryVcb1AuditActionFitsTheActionColumn(): void
     {
-        $actions = [
+        // Emitted today.
+        $live = [
             'admin_vc_hide_applied',
             'admin_vc_unhide_applied',
-            'admin_vc_hide_sync_unconfirmed',
-            'admin_vc_unhide_sync_unconfirmed',
             'admin_vc_hide_failed',
             'admin_vc_unhide_failed',
         ];
+
+        // ⚠ RETIRED BY S3, STILL VALID HISTORY. No longer emittable, because the
+        // scanner-cache push they described is gone — but existing rows keep them
+        // and keep their meaning, and a forensic reader reads them back out of
+        // the same column. So they stay in the width check.
+        $retired = [
+            'admin_vc_hide_sync_unconfirmed',
+            'admin_vc_unhide_sync_unconfirmed',
+        ];
+
+        $actions = array_merge($live, $retired);
 
         foreach ($actions as $action) {
             $this->assertLessThanOrEqual(
@@ -477,5 +479,111 @@ final class VerifyCollectionsHideRouteTest extends TestCase
                 "`{$action}` would be truncated by the VARCHAR(50) action column, merging two distinct events."
             );
         }
+    }
+
+    // ══ S3: the Hide path names no scanner cache at all ════════════════
+
+    /**
+     * ⚠⚠ STATIC DECOUPLING, NOT JUST BEHAVIOURAL.
+     *
+     * The behavioural tests above show the sync is not CALLED. This shows the
+     * handler cannot call it, because the page does not name it — which is what
+     * stops it being reintroduced by a later edit that looks locally reasonable.
+     *
+     * ⚠ TOKEN-WALKED, NOT GREPPED. This file is full of `{@see Foo::bar()}`
+     * docblock references, including several that deliberately EXPLAIN the
+     * retired cache — a text search would report those as violations and this
+     * test would fail on its own documentation. Comments are not code.
+     */
+    public function testTheHidePathNamesNoScannerCacheInExecutableCode(): void
+    {
+        $path = dirname(__DIR__, 2) . '/app/Domain/Onchain/Admin/VerifyCollectionsPage.php';
+        $src  = (string) file_get_contents($path);
+
+        // Anti-vacuity on the fixture: the file must be the one we think it is.
+        $this->assertStringContainsString(
+            'handleHideToggle',
+            $src,
+            'precondition: this is the page that owns Hide'
+        );
+
+        // Anti-vacuity on the METHOD: at least one forbidden name IS present as
+        // prose, because the docblock explains which cache was retired. A
+        // grep-based version of this test would therefore have failed here.
+        $this->assertStringContainsString(
+            'countDenied',
+            $src,
+            'the docblock still names the retired cache readers, which is why this walks tokens'
+        );
+
+        $forbidden = [
+            'CosmwasmDiscoveryService',
+            'syncDenyFlags',
+            'deniedFlag',
+            'findEmittable',
+            'countDenied',
+        ];
+
+        foreach ($forbidden as $name) {
+            $this->assertSame(
+                0,
+                self::executableReferences($src, $name),
+                $name . ' must not appear in executable code on the Hide page (S3)'
+            );
+        }
+    }
+
+    /**
+     * PLANTED POSITIVE. The walk must be able to SEE an executable reference,
+     * or the four assertions above are worthless.
+     */
+    public function testTheDecouplingWalkDetectsAPlantedExecutableReference(): void
+    {
+        $path = dirname(__DIR__, 2) . '/app/Domain/Onchain/Admin/VerifyCollectionsPage.php';
+        $src  = (string) file_get_contents($path);
+
+        $this->assertSame(0, self::executableReferences($src, 'syncDenyFlags'));
+
+        // Planted as CODE in a fresh PHP block, not as a comment.
+        $planted = $src . '<?php CosmwasmDiscoveryService::syncDenyFlags(1, []); ';
+
+        $this->assertGreaterThan(
+            0,
+            self::executableReferences($planted, 'syncDenyFlags'),
+            'the walk must detect an executable reference when one exists'
+        );
+        $this->assertGreaterThan(
+            0,
+            self::executableReferences($planted, 'CosmwasmDiscoveryService'),
+            'and the class name too'
+        );
+    }
+
+    /**
+     * PLANTED NEGATIVE. The same name inside a docblock must NOT count, or the
+     * test would forbid documenting the retirement.
+     */
+    public function testTheDecouplingWalkIgnoresADocblockReference(): void
+    {
+        $commented = '<?php /** {@see CosmwasmDiscoveryService::syncDenyFlags()} */ $x = 1;';
+
+        $this->assertSame(
+            0,
+            self::executableReferences($commented, 'syncDenyFlags'),
+            'a docblock mention is documentation, not a dependency'
+        );
+    }
+
+    /** Occurrences of a name in EXECUTABLE code: no comments, no strings. */
+    private static function executableReferences(string $src, string $name): int
+    {
+        $found = 0;
+        foreach (token_get_all($src) as $token) {
+            if (is_array($token) && $token[0] === T_STRING && $token[1] === $name) {
+                $found++;
+            }
+        }
+
+        return $found;
     }
 }

@@ -162,6 +162,12 @@ final class OnboardingEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // §M suspension gate (F-109): a suspended account must not rename
+        // itself, which would sidestep reports and mentions keyed on the handle.
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+        }
+
         $handleService = Plugin::instance()->handleService();
 
         // Cooldown check FIRST so a user mashing the rename button

@@ -30,6 +30,16 @@ if (!class_exists('PeepSoGroup')) {
                 BccPeepSoSpy::$created++;
                 BccPeepSoSpy::$lastOwnerId = (int) ($data['owner_id'] ?? 0);
 
+                // ⚠ A THROW, not a 0-id return. The real constructor reaches
+                // `wp_insert_post()`, a `save_post` fan-out and an uploads
+                // mkdir, any of which can throw — and that is the whole reason
+                // the advisory lock is released in a `finally` rather than on
+                // the normal return path (#368). `$createReturnsZero` models
+                // the other failure shape and cannot exercise this one.
+                if (BccPeepSoSpy::$throwOnCreate) {
+                    throw new \RuntimeException('PeepSo group creation threw');
+                }
+
                 // A 0-id group is the shape the real constructor produces when
                 // `wp_insert_post()` fails — the service treats it as a
                 // creation failure rather than a usable group.
@@ -38,6 +48,16 @@ if (!class_exists('PeepSoGroup')) {
                     : 9000 + BccPeepSoSpy::$created;
 
                 BccPeepSoSpy::$lastGroupId = $this->id;
+
+                // F-160: modelled on the REAL create(), which does
+                // `new PeepSoGroupUser($id)` (user defaults to the CURRENT
+                // user) → member_join → member_modify('member_owner').
+                // `owner_id` above is only post_author. A fake that made
+                // owner_id the owner hid the bug this models.
+                BccPeepSoSpy::$creatorIds[] = get_current_user_id();
+                if ($this->id > 0 && !BccPeepSoSpy::$createSkipsOwnerRow) {
+                    BccPeepSoSpy::$memberships[get_current_user_id() . ':' . $this->id] = 'member_owner';
+                }
                 return;
             }
 
@@ -60,11 +80,18 @@ if (!class_exists('PeepSoGroup')) {
 if (!class_exists('PeepSoGroupUser')) {
     final class PeepSoGroupUser
     {
-        public function __construct(private int $groupId, private ?int $userId = null) {}
+        private int $userId;
+
+        /** Like the real model, a NULL user means the CURRENT user. */
+        public function __construct(private int $groupId, ?int $userId = null)
+        {
+            $this->userId = $userId ?? get_current_user_id();
+        }
 
         public function member_leave(): bool
         {
             BccPeepSoSpy::$memberLeaves++;
+            unset(BccPeepSoSpy::$memberships[$this->userId . ':' . $this->groupId]);
             return true;
         }
     }

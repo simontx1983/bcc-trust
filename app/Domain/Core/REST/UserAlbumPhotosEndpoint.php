@@ -32,6 +32,7 @@ use BCC\Trust\Core\Repositories\PhotoRepository;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\PeepSoAlbumAccess;
 use BCC\Trust\Core\Support\PeepSoFriendGate;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\UserSlugResolver;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -74,6 +75,13 @@ final class UserAlbumPhotosEndpoint
         $targetId = UserSlugResolver::resolve($slug);
         if ($targetId === 0) {
             return ApiResponse::error('bcc_not_found', 'User not found.', 404);
+        }
+
+        // §F-02 profile-wide gate — stacks with the per-album
+        // PeepSoAlbumAccess::canView check further down; see the sibling
+        // note in UserAlbumsEndpoint for why both are required.
+        if (!ProfileAccess::canViewProfile($targetId)) {
+            return ProfileAccess::forbidden();
         }
         if ($albumId <= 0) {
             return ApiResponse::error('bcc_not_found', 'Album not found.', 404);

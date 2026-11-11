@@ -208,10 +208,16 @@ final class MyGroupsEndpoint
         }
 
         $groupId = (int) $request->get_param('id');
-        $context = Plugin::instance()->groupContextResolver()->forGroup($groupId);
-        if ($context === null) {
+        // ⚠ EXISTENCE ORACLE (F-47). resolveGroupAccess() is null for a
+        // missing group AND for a SECRET group the caller is not an active
+        // member of; both get this one 404. Before, a secret group answered
+        // 403 "invite-only" on join and 200 on leave, which confirmed that the
+        // id was a secret group.
+        $access = Plugin::instance()->groupsService()->resolveGroupAccess($userId, $groupId);
+        if ($access === null) {
             return ApiResponse::error('bcc_invalid_request', 'Group not found.', 404);
         }
+        $context = $access['ctx'];
 
         // Holder groups, Halls, and delegator communities route through
         // their own endpoints; reject here so the frontend doesn't
@@ -324,10 +330,16 @@ final class MyGroupsEndpoint
         }
 
         $groupId = (int) $request->get_param('id');
-        $context = Plugin::instance()->groupContextResolver()->forGroup($groupId);
-        if ($context === null) {
+        // ⚠ EXISTENCE ORACLE (F-47). resolveGroupAccess() is null for a
+        // missing group AND for a SECRET group the caller is not an active
+        // member of; both get this one 404. Before, a secret group answered
+        // 403 "invite-only" on join and 200 on leave, which confirmed that the
+        // id was a secret group.
+        $access = Plugin::instance()->groupsService()->resolveGroupAccess($userId, $groupId);
+        if ($access === null) {
             return ApiResponse::error('bcc_invalid_request', 'Group not found.', 404);
         }
+        $context = $access['ctx'];
 
         // Holder + delegator groups need to record an opt-out; Halls have
         // their own leave behavior. Route through this endpoint only for

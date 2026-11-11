@@ -6,13 +6,13 @@ namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Admin\ChainsPage;
 use BCC\Trust\Onchain\Services\CosmosEndpointTransition;
-use BCC\Trust\Onchain\Support\CosmwasmScanEligibility;
+
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
 use BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy;
 use BCC\Trust\Onchain\ValueObjects\ProviderFailureKind;
 use BCC\Trust\Onchain\ValueObjects\ProviderRequestClass;
 use PHPUnit\Framework\Attributes\CoversClass;
-use PHPUnit\Framework\Attributes\DataProvider;
+
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -158,60 +158,37 @@ final class EndpointScopedBreakerTest extends TestCase
      * confirmation that only re-checked the count would clear rows nobody
      * reviewed.
      */
-    public function testTheDigestIsSensitiveToWhichRowsNotJustHowMany(): void
+    /**
+     * The reviewed digest is gone, and so is this test's subject.
+     *
+     * It asserted that the digest covered WHICH code families held a cursor
+     * and not merely how many - a real property, of a mechanism that existed
+     * to protect scanner cursors. There are no cursors now, and the staleness
+     * guard is a compare-and-swap on the stored row instead.
+     *
+     * What replaced it, and where:
+     *   - that the write refuses a moved incumbent or a moved identity:
+     *     EndpointTransitionLockAndBreakerTest
+     *   - that the comparison is BYTE-exact, which no PHP fake can show:
+     *     CosmosEndpointSwitchCasIntegrationTest, on MySQL and MariaDB
+     *
+     * Kept as a signpost rather than deleted silently, so a reader looking
+     * for the old guarantee finds out where it went.
+     */
+    public function testTheReviewedDigestWasReplacedByACompareAndSwap(): void
     {
-        $base = CosmosEndpointTransition::digest(8, 'https://a.test', 'https://b.test', [52, 77], false);
-
-        self::assertSame($base, CosmosEndpointTransition::digest(8, 'https://a.test', 'https://b.test', [77, 52], false), 'order must not matter');
-        self::assertNotSame($base, CosmosEndpointTransition::digest(8, 'https://a.test', 'https://b.test', [52, 78], false), 'a different family must change the digest');
-        self::assertNotSame($base, CosmosEndpointTransition::digest(8, 'https://a.test', 'https://b.test', [52], false));
-        self::assertNotSame($base, CosmosEndpointTransition::digest(8, 'https://a.test', 'https://b.test', [52, 77], true), 'the code cursor is part of the plan');
-        self::assertNotSame($base, CosmosEndpointTransition::digest(9, 'https://a.test', 'https://b.test', [52, 77], false));
-        self::assertNotSame($base, CosmosEndpointTransition::digest(8, 'https://a.test', 'https://c.test', [52, 77], false));
+        self::assertFalse(
+            method_exists(CosmosEndpointTransition::class, 'digest'),
+            'the digest is retired; the staleness guard is the CAS'
+        );
+        self::assertTrue(
+            method_exists(CosmosEndpointTransition::class, 'review'),
+            'and the plan is confirmed through a recorded review instead'
+        );
     }
 
     // ── the refusal verdict ─────────────────────────────────────────────
 
-    /** @return array<string, array{bool|null, string}> */
-    public static function verifications(): array
-    {
-        return [
-            'verified'      => [true,  CosmwasmScanEligibility::ELIGIBLE],
-            'not governed'  => [null,  CosmwasmScanEligibility::ELIGIBLE],
-            'unverified'    => [false, CosmwasmScanEligibility::ENDPOINT_UNVERIFIED],
-        ];
-    }
-
-    #[DataProvider('verifications')]
-    public function testAnUnverifiedEndpointRefusesTheScan(?bool $verified, string $expected): void
-    {
-        self::assertSame(
-            $expected,
-            CosmwasmScanEligibility::verdict(8, 'backfilled', true, null, $verified)
-        );
-    }
-
-    public function testEndpointUnverifiedIsNotScannable(): void
-    {
-        self::assertFalse(CosmwasmScanEligibility::isScannable(CosmwasmScanEligibility::ENDPOINT_UNVERIFIED));
-        self::assertTrue(CosmwasmScanEligibility::isScannable(CosmwasmScanEligibility::ELIGIBLE));
-    }
-
-    /**
-     * More actionable answers win. An operator who has not opted in should be
-     * told that, not sent chasing an endpoint.
-     */
-    public function testMoreActionableRefusalsTakePrecedence(): void
-    {
-        self::assertSame(
-            CosmwasmScanEligibility::NOT_OPTED_IN,
-            CosmwasmScanEligibility::verdict(8, 'backfilled', false, null, false)
-        );
-        self::assertSame(
-            CosmwasmScanEligibility::ALLOWLIST_EXCLUDED,
-            CosmwasmScanEligibility::verdict(8, 'backfilled', true, [99], false)
-        );
-    }
 
     // ── the switch is a button, not a migration ─────────────────────────
 

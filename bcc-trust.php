@@ -260,11 +260,23 @@ require_once BCC_TRUST_PATH . 'includes/database/unschedule-automatic-nft-discov
 // created a public group for every chain has no handler any more, but the
 // event survives in wp_options.cron on any install that scheduled it.
 require_once BCC_TRUST_PATH . 'includes/database/unschedule-hall-provision.php';
+// S6 — one-shot removal of the retired `bcc_discovery_run_maintenance`
+// schedule. Both halves of DiscoveryRunMaintenance::register() are gone, so
+// nothing creates the event any more; but it lives in wp_options.cron, not in
+// the code, and WordPress keeps firing it on any install that already
+// scheduled it. Its own done_option: the existing unschedule migrations have
+// already completed everywhere, so folding this hook into one of them would
+// have been a no-op that never ran.
+require_once BCC_TRUST_PATH . 'includes/database/unschedule-discovery-maintenance.php';
 // PR 7.3 — adds bcc_discovery_runs.chunks_used to installs that already have
-// the table. Fresh installs get it from the CREATE TABLE; staging and
-// production both predate it, and a session ceiling cannot be enforced
-// without somewhere durable to count chunks.
-require_once BCC_TRUST_PATH . 'includes/database/add-discovery-run-chunks-used.php';
+// ⚠⚠⚠ S9b — the destructive scanner-schema drop. Three tables and eight
+// columns holding real rows. Runs through the migration runner below, NOT
+// dbDelta, and requires a fresh verified backup immediately before the
+// deploy that lands it — see docs/scanner-schema-drop-runbook.md.
+//
+// `add-discovery-run-chunks-used.php` was required here and is deleted in
+// the same change: it added a column to a table this migration drops.
+require_once BCC_TRUST_PATH . 'includes/database/drop-scanner-schema.php';
 // Pending-data-migration runner. Defines bcc_trust_run_pending_migrations()
 // and its registry, and runs the two backfills above on the ordinary
 // plugins_loaded hook — INDEPENDENT of BCC_TRUST_SCHEMA_VERSION, so a
@@ -287,14 +299,26 @@ add_action('plugins_loaded', 'bcc_trust_run_pending_migrations', 20, 0);
 //     history. It has no chain-selection logic, so it cannot become
 //     automatic discovery.
 //
-// Only the EXECUTOR is wired here. The maintenance sweep needs an actual
-// scheduled event, not just a handler, so its wiring lives in
-// DiscoveryRunMaintenance::register() and is invoked from the plugins_loaded
-// self-heal block below — see the note on DiscoveryRunMaintenance::HOOK.
+// Only the EXECUTOR is wired here, and after S6 it is the ONLY one.
+//
+// The maintenance sweep used to be wired and scheduled by
+// DiscoveryRunMaintenance::register() from the plugins_loaded self-heal block
+// below. S6 retired that hook: both halves of register() are gone, the
+// declaration moved to `cleanup_only`, and
+// includes/database/unschedule-discovery-maintenance.php clears the event
+// from wp_options.cron on installs that already hold one.
+//
+// ⚠ This executor binding STAYS. Freezing what creates work does not stop
+// work already queued, and an unregistered callback on a scheduled event is
+// drift a health check has to explain — a registered no-op that refuses
+// before claiming anything is not. It is unbound only once an operator has
+// confirmed the queue is drained.
 add_action(
     \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::HOOK,
     static function ($runId = 0): void {
-        // The FROZEN entry point, not execute() itself — see ScannerFreeze.
+        // The registered refusal. There is no execute() behind it any more:
+        // S8 deleted the implementation, so this cannot be switched back on
+        // by configuration — only by writing a new scanner.
         \BCC\Trust\Onchain\Workers\DiscoveryRunExecutor::handleQueuedAction((int) $runId);
     },
     10,
@@ -316,6 +340,8 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-nft-selections.php';
 // demand + scam signals behind the Verify Collections queue.
 require_once BCC_TRUST_PATH . 'includes/database/schema-collection-signals.php';
 require_once BCC_TRUST_PATH . 'includes/database/schema-claims.php';
+// Shared operator branding plus optional per-validator-page overrides.
+require_once BCC_TRUST_PATH . 'includes/database/schema-operator-profiles.php';
 // Validator messaging — durable first-activation record (one row per
 // validator page; the pre-claim backlog belongs to first activation
 // only, transfers never replay it).
@@ -332,16 +358,15 @@ require_once BCC_TRUST_PATH . 'includes/database/schema-nft-spam-contracts.php';
 // drivers the code registry already offers and can never grant a new one.
 // Empty on every install — an absent row means "registry default".
 require_once BCC_TRUST_PATH . 'includes/database/schema-chain-nft-capabilities.php';
-// CosmWasm CW-721 discovery (2026-08) — durable code-family inventory +
-// contract inventory. See each schema file's docblock for the five-table
-// division of responsibility and why non-NFT / inconclusive candidates
-// must NOT live on wp_bcc_onchain_collections.
-require_once BCC_TRUST_PATH . 'includes/database/schema-cosmwasm-code-families.php';
-require_once BCC_TRUST_PATH . 'includes/database/schema-cosmwasm-contracts.php';
-// PR 7A: the durable discovery-run ledger. Execution history for
-// administrator-requested scans — NOT a second progress table: it stores
-// counts of work done and never a cursor.
-require_once BCC_TRUST_PATH . 'includes/database/schema-discovery-runs.php';
+// ⚠ S9b DELETED THREE SCHEMA FILES HERE: schema-cosmwasm-code-families.php,
+// schema-cosmwasm-contracts.php and schema-discovery-runs.php. Their tables
+// are dropped by drop-scanner-schema.php, and removing the files is what
+// stops dbDelta re-creating them on the next schema pass.
+//
+// ⚠ That removal is also what moves BCC_TRUST_SCHEMA_VERSION from
+// `1a0bf150b1` to `db054e2c71` — the stamp is a content hash over
+// glob('includes/database/schema-*.php'). So the drop and the schema pass
+// fire on the same first request after deploy.
 // V2 Phase 1b — Helius webhook replay protection (LRU)
 require_once BCC_TRUST_PATH . 'includes/database/schema-helius-seen-signatures.php';
 // V1.5 §D6 — crypto-blog composer chain-tag join + bcc_onchain_chains.color
@@ -451,6 +476,7 @@ function bcc_onchain_ensure_schema(): bool {
     bcc_onchain_create_user_nft_selections_table();
     bcc_onchain_create_collection_signals_table();
     bcc_onchain_create_claims_table();
+    bcc_onchain_create_operator_profiles_table();
     // Validator messaging first-activation record
     bcc_create_validator_msg_activation_table();
     bcc_create_validator_msg_queue_table();
@@ -458,11 +484,9 @@ function bcc_onchain_ensure_schema(): bool {
     bcc_onchain_create_nft_holdings_table();
     bcc_onchain_create_chain_checkpoints_table();
     bcc_onchain_create_nft_spam_contracts_table();
-    // CosmWasm CW-721 discovery. Order matters only in the sense that the
-    // checkpoint table above gains its cw_* columns from the same dbDelta
-    // pass; these two are independent of everything else.
-    bcc_onchain_create_cosmwasm_code_families_table();
-    bcc_onchain_create_cosmwasm_contracts_table();
+    // ⚠ S9b: the two CosmWasm discovery tables are no longer created. The
+    // checkpoint table above no longer declares cw_* columns either, so that
+    // dbDelta pass is now unrelated to the scanner.
     // V2 Phase 1b Helius replay protection
     bcc_onchain_create_helius_seen_signatures_table();
     // V2 Phase 6 (§H1) NFT-piece detail metadata cache
@@ -478,11 +502,12 @@ function bcc_onchain_ensure_schema(): bool {
     // Runs after the color ALTER above; column order is anchored to the base
     // marketplace_template column, so ordering here is not load-bearing.
     bcc_onchain_add_chains_description_column();
-    // Per-chain CosmWasm NFT-discovery opt-in. Same idempotent,
-    // INFORMATION_SCHEMA-gated shape as the description ALTER above.
-    // DEFAULT 0 with NO backfill: running this migration enables discovery
-    // on exactly zero chains.
-    bcc_onchain_add_chains_cosmwasm_discovery_column();
+    // ⚠⚠ S9b DELETED `bcc_onchain_add_chains_cosmwasm_discovery_column()`,
+    // AND THAT DELETION IS LOAD-BEARING. It re-added
+    // `cosmwasm_nft_discovery_enabled` on every schema pass. Left in place it
+    // would have put the column straight back on the first request after the
+    // drop migration removed it — the schema pass and the migration both run
+    // on that same request.
     // Per-chain NFT capability model (PR 2). Two TINYINT(1) NOT NULL
     // DEFAULT 0 columns — BCC product support, and permission to start an
     // administrator-initiated discovery — plus the narrow-only driver
@@ -492,12 +517,10 @@ function bcc_onchain_ensure_schema(): bool {
     bcc_onchain_add_chains_nft_capability_columns();
     bcc_onchain_create_chain_nft_capabilities_table();
 
-    // PR 7A discovery-run ledger. Verified rather than assumed: its return
-    // value joins the completion signal below, so a dbDelta that silently
-    // skipped a column or the active-run unique index cannot be followed by
-    // a schema-version stamp claiming the schema is current.
-    bcc_onchain_create_discovery_runs_table();
-    $discoveryRunsComplete = bcc_onchain_verify_discovery_runs_schema();
+    // ⚠ S9b: the discovery-run ledger is dropped, so neither its create nor
+    // its verify runs, and `$discoveryRunsComplete` has left the completion
+    // signal below. A table that does not exist cannot be verified, and a
+    // gate that waited on it would never be satisfiable.
 
     // PR 7 community-focused collection metadata: four bounded scalar columns
     // plus the empty-image and retired-market normalizations. Verified for the
@@ -531,7 +554,6 @@ function bcc_onchain_ensure_schema(): bool {
     // combined here — a migration must never be skipped because an earlier one
     // failed.
     return $provisioningComplete
-        && $discoveryRunsComplete
         && $communityMetadataComplete
         && $metadataStateComplete;
 }
@@ -677,8 +699,12 @@ add_action('bcc_trust_feed_hot_warm', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->warmHotFeed();
 });
 add_action('bcc_trust_weekly_digest', function () {
-    \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest();
+    \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest(
+        \BCC\Trust\Core\Services\DigestService::TRIGGER_CRON
+    );
 });
+// Admin-chosen digest weekday/hour + on/off (Email Digest page).
+\BCC\Trust\Core\Services\DigestScheduler::register();
 // Scale-hardening Phase 3 (2026-05-13): weekly slow-ring endorsement
 // scan. Catches paced reciprocity patterns the burst gates miss.
 add_action('bcc_trust_weekly_slow_ring_scan', function () {
@@ -706,33 +732,20 @@ add_action('bcc_trust_daily_contribution_recovery', function () {
 // (`provisioning_state = 'requested'`). Verification is still required and is
 // re-checked per collection; it no longer authorizes anything on its own.
 // Idempotent — re-running creates no duplicates.
+//
+// ⚠ NFT holder groups ONLY. A delegator community is never created by this
+// sweep or by any event: its page's operator chooses to create it through
+// POST /pages/{id}/delegator-group and sets the minimum delegation there.
 add_action('bcc_gated_group_provision', function () {
     $result = \BCC\Trust\Onchain\OnchainPlugin::instance()
         ->gatedGroupProvisioningService()
         ->processRequested();
 
-    if ($result['created'] > 0 || !empty($result['errors'])) {
+    // ⚠ `contended` is in this condition deliberately. Without it a sweep
+    // that was locked out of EVERY queued row logs nothing at all — the one
+    // shape where counting contention is worth anything. See #368.
+    if ($result['created'] > 0 || ($result['contended'] ?? 0) > 0 || !empty($result['errors'])) {
         \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group provisioning sweep', $result);
-    }
-
-    // Validator/delegator communities ride the SAME daily hook (no new
-    // cron registration — deliberate). The `bcc_page_claimed` subscriber
-    // provisions on the claim event; this backfill covers claims that
-    // predate the feature and any missed event. Idempotent. Isolated in
-    // its own try so a validator-side failure can't abort the holder
-    // sweep's already-recorded result.
-    try {
-        $validatorResult = \BCC\Trust\Onchain\OnchainPlugin::instance()
-            ->validatorGroupProvisioningService()
-            ->provisionAll();
-
-        if ($validatorResult['created'] > 0 || !empty($validatorResult['errors'])) {
-            \BCC\Core\Log\Logger::info('[bcc-trust] Delegator-community provisioning sweep', $validatorResult);
-        }
-    } catch (\Throwable $e) {
-        \BCC\Core\Log\Logger::warning('[bcc-trust] Delegator-community provisioning sweep failed', [
-            'error' => $e->getMessage(),
-        ]);
     }
 });
 
@@ -747,43 +760,6 @@ add_action('bcc_gated_group_provision', function () {
 // under `cleanup_only`, and
 // includes/database/unschedule-hall-provision.php clears the event from
 // installs that already carry it.
-
-// Validator/delegator communities — provision on the platform-facing
-// claim event. `bcc_page_claimed` fires only after claim verification
-// (wallet-signature proof), so the claim itself is the arming act: no
-// delegator-count floor. Filtered to validator-operator claims; the
-// operator becomes the group OWNER (moderation has an owner, and the
-// owner is exempt from the gate + revoke by existing guards).
-// Idempotent — re-firing finds the existing group and no-ops.
-add_action('bcc_page_claimed', function ($userId, $pageId, $entityType, $entityId, $role): void {
-    if ((string) $entityType !== 'validator' || (string) $role !== 'operator') {
-        return;
-    }
-
-    try {
-        $result = \BCC\Trust\Onchain\OnchainPlugin::instance()
-            ->validatorGroupProvisioningService()
-            ->provisionForClaim((int) $userId, (int) $entityId);
-
-        if ($result['status'] === 'created' || $result['status'] === 'error') {
-            \BCC\Core\Log\Logger::info('[bcc-trust] Delegator-community provisioning (claim event)', [
-                'user_id'      => (int) $userId,
-                'validator_id' => (int) $entityId,
-                'status'       => $result['status'],
-                'group_id'     => $result['group_id'],
-                'message'      => $result['message'],
-            ]);
-        }
-    } catch (\Throwable $e) {
-        // Never let community provisioning break the claim flow — the
-        // daily backfill retries.
-        \BCC\Core\Log\Logger::warning('[bcc-trust] Delegator-community provisioning (claim event) failed', [
-            'user_id'      => (int) $userId,
-            'validator_id' => (int) $entityId,
-            'error'        => $e->getMessage(),
-        ]);
-    }
-}, 30, 5);
 
 // V2 (PR 4): NFT-gated holder groups — reconcile sweep for users who
 // opted into auto-join via `bcc_auto_join_eligible_groups` user_meta.
@@ -1060,31 +1036,31 @@ add_action('plugins_loaded', static function (): void {
     // cleanup-only list and is cleared by
     // includes/database/unschedule-automatic-nft-discovery.php.
     // NOTHING SCHEDULES CW-721 DISCOVERY, AND NOTHING MAY.
-    // CosmwasmDiscoveryWorker deliberately has no register() and owns no
-    // cron hooks: chain-wide discovery is operator-initiated, one named
-    // chain at a time. Re-adding a self-healing registration here would
-    // silently restore unattended chain sweeps on every request — which is
-    // precisely what the anti-drift block above is built to do, and
-    // precisely what discovery must not have.
+    // There is no longer anything to schedule: S8 deleted
+    // CosmwasmDiscoveryWorker with the rest of the chain-wide scanner. The
+    // note stays because the hazard it describes belongs to this BLOCK, not
+    // to that class — a self-healing registration added here would run on
+    // every request, which is exactly how the retired sweeps behaved.
     // Validator-messaging backlog delivery + its recovery sweep. Same
     // self-healing shape: registering from plugins_loaded means a hook
     // added by an update schedules itself without a reactivation.
     \BCC\Trust\Onchain\Workers\ValidatorMsgQueueWorker::register();
 
-    // PR 7A discovery-run ledger maintenance. MAINTENANCE, NOT DISCOVERY:
-    // tick() re-dispatches runs an administrator already requested, recovers
-    // expired leases and prunes terminal history. It owns no chain-selection
-    // logic and cannot create a run, so this is not the unattended scanning
-    // the CW-721 note above forbids.
+    // ⚠ S6: DiscoveryRunMaintenance::register() WAS CALLED HERE AND MUST NOT
+    // COME BACK. Self-healing a retired hook would reschedule the five-minute
+    // sweep on the very next request — the same failure shape the
+    // NftEnrichmentService note above warns about. The hook is now in
+    // `cleanup_only` and is cleared by
+    // includes/database/unschedule-discovery-maintenance.php.
     //
-    // It belongs here rather than beside the executor's add_action because a
-    // handler without a scheduled event is inert: PR 7A declared the hook in
-    // includes/cron-hooks.php and wired the callback, but nothing ever called
-    // wp_schedule_event, so the sweep never ran and the drift detector
-    // reported it permanently MISSING. The reaper is the only thing that
-    // returns an expired lease, so an unscheduled sweep would let one crashed
-    // run hold `uq_active` and block that (job_kind, chain) forever.
-    \BCC\Trust\Onchain\Workers\DiscoveryRunMaintenance::register();
+    // The reasons it originally lived here are recorded because they are what
+    // a future reader will weigh before re-adding it: the reaper was the only
+    // thing that returned an expired lease, so an unscheduled sweep could let
+    // one crashed run hold `uq_active` and block that (job_kind, chain)
+    // indefinitely. That risk is accepted and is now moot — the surface that
+    // created runs went in S4, and S8 deleted DiscoveryRunMaintenance itself
+    // along with the ledger repository, so there is no sweep to schedule and
+    // nothing left that could take a lease to strand.
 
     // Helius dedupe sweep has no host service class (its handler is the
     // inline closure above) so its schedule is inlined here. Same shape
@@ -1586,15 +1562,10 @@ add_action('init', function () {
 |--------------------------------------------------------------------------
 */
 
-add_action('bcc.trust.recalculate_score', function (int $pageId) {
-    try {
-        \BCC\Trust\Core\Plugin::instance()->voteService()->recalculateScore($pageId);
-    } catch (\Exception $e) {
-        \BCC\Core\Log\Logger::info('[bcc-trust] Score recalculation failed', [
-            'page_id' => $pageId,
-            'error'   => $e->getMessage(),
-        ]);
-    }
+add_action('bcc.trust.recalculate_score', function (int $pageId): void {
+    // Never throws: VoteService::recalculateScoreOrRequeue() catches
+    // \Throwable, logs at error and re-flags the page for the cron (F-110).
+    \BCC\Trust\Core\Plugin::instance()->voteService()->recalculateScoreOrRequeue($pageId);
 });
 
 // Admin report penalty — fired by the disputes admin panel.
@@ -1645,6 +1616,32 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
 \BCC\Trust\Core\Support\CorsHandler::register();
 \BCC\Trust\Infrastructure\EdgeCache::init();
 
+// Validator announcements, unit A1 (api-contract-v1.md §4.32): the private
+// `bcc_announcement` post type plus the four guards that stop WordPress's
+// own comment surfaces serving announcement comments.
+//
+// ⚠ Registered at file load and UNCONDITIONALLY — deliberately NOT behind
+// `bcc_announcements_enabled`. §4.32.10: turning the feature off must never
+// *open* the bypass surface, so the switch gates routes and surfaces and
+// never gates a guard. A filter added later than its consumer runs is a
+// filter that did not apply.
+//
+// Inert by construction: there are no routes, no service and no writer, so
+// nothing can create an announcement. The type exists and the guards are
+// live; that is the whole of A1.
+\BCC\Trust\Core\Announcements\AnnouncementPostType::register();
+// §4.32.17 reconciler arm C — the publication-time authority re-check.
+// ⚠⚠ REGISTERED AT BOOT, NOT IN registerRoutes(). Its first placement was
+// inside the REST route registration, which meant it only ever hooked during
+// a REST request — and wp-cron is NOT a REST request, so on the real
+// scheduled path the guard would never have fired at all. The cron probe
+// caught it with has_action() returning false.
+// ⚠ Registered UNCONDITIONALLY, outside the feature switch: it must close a
+// scheduled row whose claim lapsed even if the feature is turned off between
+// scheduling and the due instant. Turning the feature off must never OPEN a
+// publication path.
+\BCC\Trust\Core\Announcements\AnnouncementPublicationGuard::register();
+
 // §K2 / §G1: hook PeepSo's user-search filter so users with
 // `bcc_privacy_discovery_optout = 1` are excluded from search results.
 // Registered at file load (top-level) so the filter is in place by the
@@ -1694,6 +1691,33 @@ add_action('plugins_loaded', function (): void {
 
     // Prune quarantined bonus entries (>14 days or >100 rows) on daily refresh.
     add_action('bcc_onchain_daily_refresh', [\BCC\Trust\Onchain\Services\BonusRetryService::class, 'pruneQuarantine'], 20);
+
+    // F-65 part B: prune old balance-0 holdings tombstones (bounded; see
+    // NftHoldingsRepository::pruneTombstones() for the lateness bound).
+    //
+    // ⚠ A CLOSURE, NOT [class, 'pruneTombstones']. do_action() with no
+    // arguments still passes ONE argument, '', to a callback registered with
+    // the default accepted_args = 1 — and '' into `int $limit` is a TypeError
+    // that would take down every later bcc_onchain_daily_refresh callback.
+    // The closure takes nothing and calls with the default limit; the catch
+    // keeps a prune failure from reaching its siblings either.
+    add_action('bcc_onchain_daily_refresh', static function (): void {
+        try {
+            $limit   = \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::TOMBSTONE_PRUNE_LIMIT;
+            $removed = \BCC\Trust\Onchain\Repositories\NftHoldingsRepository::pruneTombstones($limit);
+            if (class_exists('BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::info('[bcc-trust] holdings tombstones pruned', ['removed' => $removed, 'limit' => $limit]);
+                if ($removed >= $limit) {
+                    // More old tombstones than one run removes: a build-up.
+                    \BCC\Core\Log\Logger::warning('[bcc-trust] holdings tombstone prune hit its cap; more remain', ['limit' => $limit]);
+                }
+            }
+        } catch (\Throwable $e) {
+            if (class_exists('BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] holdings tombstone prune failed', ['error' => $e->getMessage()]);
+            }
+        }
+    }, 30);
 
     // Domain event hooks.
     add_action('bcc_onchain_claim_verified', [\BCC\Trust\Onchain\Services\BonusService::class, 'applyClaimBonus'], 10, 4);
@@ -1900,15 +1924,15 @@ add_action('plugins_loaded', function (): void {
     // a capability check, POST-only, with a route-and-chain-scoped nonce.
     \BCC\Trust\Onchain\Admin\NftDiscoveryPage::register_actions();
     \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_ajax();
-    // PR 7A: read-only run status. No UI ships in this PR; the endpoint
-    // exists so the read model is exercised and proven before PR 7
-    // renders it.
-    \BCC\Trust\Onchain\Admin\DiscoveryRunStatusEndpoint::register();
-
-    // PR 7: the administrator "Scan On-Chain for Easy Discovery" actions.
-    // A thin POST/nonce/capability shell over the PR 7A ledger — it owns no
-    // discovery logic, contacts no provider, and never chooses a scan mode.
-    \BCC\Trust\Onchain\Admin\DiscoveryScanActions::register();
+    // ── S4: THE SCAN SURFACE IS GONE, NOT FROZEN ────────────────────────
+    //
+    // `DiscoveryRunStatusEndpoint::register()` (the run-status AJAX read) and
+    // `DiscoveryScanActions::register()` (the three admin-post scan routes)
+    // used to be called here. Both classes went in S4: the routes they
+    // registered were already unreachable, so that removed dead registration
+    // code rather than changing what a request can reach. S8 has since
+    // deleted the run ledger repository and its service too; the TABLES are
+    // still declared and are dropped in S9.
     \BCC\Trust\Onchain\Admin\VerifyCollectionsPage::register_actions();
     \BCC\Trust\Onchain\Admin\WebhooksPage::register_actions();
     \BCC\Trust\Onchain\Admin\HolderGroupsPage::register_actions();
@@ -1926,7 +1950,6 @@ add_action('plugins_loaded', function (): void {
                 'restUrl' => esc_url_raw(rest_url('bcc/v1/onchain')),
                 'nonce'   => wp_create_nonce('wp_rest'),
             ]);
-            wp_enqueue_style('bcc-onchain-admin', BCC_TRUST_URL . 'assets/css/bcc-onchain.css', [], BCC_TRUST_VERSION);
         }
     });
 
@@ -2185,21 +2208,12 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust vmq',
         \BCC\Trust\Onchain\CLI\ValidatorMsgQueueCommand::class
     );
-    // ONE supervised CosmWasm discovery pass, for ONE chain, watched by a
-    // human. THIS IS THE ONLY ENTRY POINT IT HAS: there is deliberately no
-    // REST route, no admin-post handler, no AJAX action and no cron hook
-    // that reaches CosmwasmOneShotDiscoveryCommand. Since the scheduled
-    // passes were retired it is also the only way an incremental pass runs
-    // at all — an operator names a chain, watches it, and reads a summary
-    // that pass alone produced.
-    // FROZEN (see ScannerFreeze): the one-shot pass is the last way to START a full-chain
-    // discovery run, so the command is not registered. The class is untouched and still tested.
-    if (!\BCC\Trust\Onchain\Support\ScannerFreeze::frozen()) {
-        \WP_CLI::add_command(
-            'bcc-trust cosmwasm',
-            \BCC\Trust\Onchain\CLI\CosmwasmOneShotDiscoveryCommand::class
-        );
-    }
+    // ── `bcc-trust cosmwasm` IS GONE ────────────────────────────────────
+    //
+    // The one-shot supervised pass was the last way to START a full-chain
+    // CosmWasm discovery run. S4 withdrew its registration; S8 deleted
+    // `CosmwasmOneShotDiscoveryCommand` and the whole scanner implementation
+    // behind it. There is no command, no class and no code path left.
     // PR 5b — the eight-row Solana gate-identity repair. THIS IS ITS ONLY
     // ENTRY POINT: there is deliberately no REST route, no admin-post
     // handler, no AJAX action and no cron hook that reaches it. It writes
@@ -2519,6 +2533,10 @@ add_action('admin_notices', function () {
 // Missing onchain API key warnings — without these, signals silently
 // return empty data and trust scores are systematically understated.
 add_action('admin_notices', function () {
+    // F-117: names wp-config constants — admins only, not every wp-admin user.
+    if (!current_user_can('manage_options')) {
+        return;
+    }
     $missing = [];
     if (!defined('BCC_ETHERSCAN_API_KEY') || BCC_ETHERSCAN_API_KEY === '') {
         $missing[] = 'BCC_ETHERSCAN_API_KEY';
@@ -2529,7 +2547,7 @@ add_action('admin_notices', function () {
     if (!empty($missing)) {
         printf(
             '<div class="notice notice-error"><p><strong>BCC Trust (Onchain):</strong> Missing API keys in wp-config.php: <code>%s</code>. On-chain trust signals are disabled until these are configured.</p></div>',
-            esc_html(implode('</code>, <code>', $missing))
+            implode('</code>, <code>', array_map('esc_html', $missing))
         );
     }
 });
@@ -2580,12 +2598,15 @@ if (is_admin()) {
     // isn't visited.
     require_once BCC_TRUST_PATH . 'includes/admin/tabs/tab-repair.php';
     add_action('admin_menu', function () {
+        // Developer group under BCC System — listed only when
+        // BCC_DEV_TOOLS === true; the page itself stays gated by
+        // BCC_REPAIR_ENABLED.
         add_submenu_page(
-            'bcc-system-health',
+            \BCC\Trust\Core\Admin\AdminMenus::parentFor(\BCC\Trust\Core\Admin\AdminMenus::REPAIR_SLUG),
             'Repair (dangerous)',
-            '🔧 Repair',
+            'Repair',
             'manage_options',
-            'bcc-system-repair',
+            \BCC\Trust\Core\Admin\AdminMenus::REPAIR_SLUG,
             'bcc_trust_render_repair_tab'
         );
     }, 25);
@@ -2594,6 +2615,7 @@ if (is_admin()) {
     // health signals (stale chains, dispute
     // adjudication delays, permanent orphans). Replaces N separate
     // banners with one summary banner + a dedicated page.
+    \BCC\Trust\Core\Admin\AdminMenus::register();
     \BCC\Trust\Core\Admin\NotificationCenter::register();
 
     // Phase 3 deferred items — Wallet audit + Sessions surfaces.
@@ -2601,4 +2623,5 @@ if (is_admin()) {
     // remain on the per-user Moderation page.
     \BCC\Trust\Core\Admin\WalletAuditPage::register();
     \BCC\Trust\Core\Admin\SessionsPage::register();
+    \BCC\Trust\Core\Admin\EmailDigestPage::register();
 }

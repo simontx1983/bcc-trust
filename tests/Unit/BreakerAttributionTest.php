@@ -6,7 +6,7 @@ namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Support\ApiRetry;
 use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
-use BCC\Trust\Onchain\ValueObjects\CosmwasmEnumerationFailure;
+
 use BCC\Trust\Onchain\ValueObjects\ProviderFailureKind;
 use BCC\Trust\Onchain\ValueObjects\ProviderRequestClass;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -503,10 +503,15 @@ final class BreakerAttributionTest extends TestCase
         foreach ($attributed as $site) {
             self::assertStringContainsString('Support/ApiRetry.php', $site);
         }
+        // ⚠ WAS 8, IS 5 (S8). The three `CosmwasmDiscoveryWorker` charge sites
+        // went with the worker. The survivors are ChainRefreshService (3) and
+        // NftEthIndexerWorker (2), both retained. This stays an exact count
+        // rather than a floor: a NEW unattributed domain-level charge is a
+        // decision someone has to make deliberately.
         self::assertCount(
-            8,
+            5,
             $unattributed,
-            "the eight domain-level sites must stay unattributed; got:\n  " . implode("\n  ", $unattributed)
+            "the five domain-level sites must stay unattributed; got:\n  " . implode("\n  ", $unattributed)
         );
         foreach ($unattributed as $site) {
             self::assertStringNotContainsString('Support/ApiRetry.php', $site);
@@ -584,31 +589,42 @@ final class BreakerAttributionTest extends TestCase
     // ── vocabulary integrity ────────────────────────────────────────────
 
     /**
-     * ⚠ THE TWO VOCABULARIES SHARE THREE LITERALS AND MUST NEVER DRIFT.
+     * The breaker vocabulary stays exactly as wide as the charging rule.
      *
-     * {@see CosmwasmEnumerationFailure} names an ENUMERATION OUTCOME (seven
-     * tokens). {@see ProviderFailureKind} names a BREAKER CHARGE (three). They
-     * are deliberately separate — one is richer and domain-specific, the other
-     * is exactly as wide as the charging rule — but where they overlap they
-     * must be the same strings, or one operator surface would say `http_5xx`
-     * and another `http5xx` for the same event.
+     * ⚠ S8 REMOVED THE CROSS-VOCABULARY HALF OF THIS CASE. It used to assert
+     * that `CosmwasmEnumerationFailure`'s seven enumeration tokens and
+     * `ProviderFailureKind`'s three breaker tokens were byte-identical where
+     * they overlapped, so one operator surface could not say `http_5xx` while
+     * another said `http5xx` for the same event.
+     *
+     * There is no second vocabulary any more: `CosmwasmEnumerationFailure`
+     * named the outcomes of chain-wide enumeration and was deleted with it,
+     * along with `ChainCheckpointRepository::recordCwEnumerationFailure()`,
+     * the only thing that ever wrote one. A drift assertion against a deleted
+     * type cannot fail, so it is gone rather than kept green.
+     *
+     * What survives is the half that was never about enumeration: the breaker
+     * vocabulary is exactly three tokens wide and carries no duplicates,
+     * because it is sized to the charging rule and nothing else.
      */
-    public function testTheSharedTokensAreByteIdenticalAcrossBothVocabularies(): void
+    public function testTheBreakerVocabularyIsExactlyAsWideAsTheChargeRule(): void
     {
-        self::assertSame(CosmwasmEnumerationFailure::RATE_LIMITED, ProviderFailureKind::RATE_LIMITED);
-        self::assertSame(CosmwasmEnumerationFailure::HTTP_5XX, ProviderFailureKind::HTTP_5XX);
-        self::assertSame(CosmwasmEnumerationFailure::TRANSPORT, ProviderFailureKind::TRANSPORT);
+        $kinds = ProviderFailureKind::all();
 
-        foreach (ProviderFailureKind::all() as $kind) {
-            self::assertTrue(
-                CosmwasmEnumerationFailure::isValid($kind),
-                "every breaker token must also be a valid enumeration token: {$kind}"
-            );
-        }
+        self::assertNotSame([], $kinds, 'anti-vacuity: the vocabulary must be readable');
+        self::assertCount(3, $kinds);
+        self::assertSame(count($kinds), count(array_unique($kinds)));
 
-        // …and the breaker vocabulary stays exactly as wide as the charge rule.
-        self::assertCount(3, ProviderFailureKind::all());
-        self::assertSame(count(ProviderFailureKind::all()), count(array_unique(ProviderFailureKind::all())));
+        // The three tokens are NAMED, not merely counted: a silent rename
+        // would otherwise pass a pure count check. Sorted, because `all()`
+        // returns them in declaration order and that order is not contract.
+        $sorted = array_map('strval', $kinds);
+        sort($sorted);
+        self::assertSame(
+            ['http_5xx', 'rate_limited', 'transport'],
+            $sorted,
+            'the three breaker tokens are part of the contract, not an implementation detail'
+        );
     }
 
     /** `timeout` and `dns` are never guessed, here as in PR 7.6. */

@@ -320,6 +320,46 @@ final class ManualCollectionIntakeServiceTest extends TestCase
      * The test's intent is unchanged and the assertion is now sharper: the
      * refusal must NOT be the one that means "not an NFT".
      */
+    /**
+     * A 501 REFUSAL PERSISTS NOTHING.
+     *
+     * "This chain has no wasm module" is per-request evidence, and it must
+     * stay that way: it may not become a collection row, and it may not
+     * become capability or checkpoint state. The validation path writes no
+     * such state at all — `CosmosContractProbe` and `ContractValidator`
+     * reference neither the checkpoint repository nor the capability model
+     * nor $wpdb — and this pins the outcome at the seam that would notice.
+     *
+     * It must also NOT be the refusal that means "not an NFT": nobody
+     * examined the contract.
+     */
+    public function testACosmos501RefusesAsUnavailableAndWritesNothing(): void
+    {
+        $this->seedChain(17, 'dungeon', 'cosmos');
+        \BCC\Trust\Onchain\Fetchers\CosmosFetcher::$chainHasNoWasm = true;
+
+        $result = $this->service->add('cosmos', 17, self::COSMOS_CONTRACT, self::OPERATOR);
+
+        self::assertFalse($result['ok']);
+        self::assertSame(ManualCollectionIntakeService::REFUSED_UNAVAILABLE, $result['reason']);
+        self::assertNotSame(
+            ManualCollectionIntakeService::REFUSED_NOT_CW721,
+            $result['reason'],
+            'a chain with no wasm module was never asked about this contract'
+        );
+
+        self::assertSame(
+            [],
+            \BCC\Trust\Onchain\Repositories\CollectionRepository::$added,
+            'a 501 must not create a collection row'
+        );
+        self::assertNotContains(
+            'admin_nftd_collection_added',
+            \BCC\Trust\Core\Security\AuditLogger::actions(),
+            'and must not claim one was added'
+        );
+    }
+
     public function testAnUnanswerableCosmosProbeRefusesWithoutClaimingTheContractIsInvalid(): void
     {
         $this->seedChain(17, 'dungeon', 'cosmos');

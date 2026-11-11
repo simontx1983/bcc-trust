@@ -12,7 +12,7 @@ use BCC\Trust\Onchain\Services\NftCapabilityEditor;
 use BCC\Trust\Onchain\Services\NftDiscoveryControlPlaneSnapshot;
 use BCC\Trust\Onchain\Support\NftChainCapability;
 use BCC\Trust\Onchain\Support\NftDriverRegistry;
-use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
+
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -51,7 +51,7 @@ final class NftCapabilityEditorRenderTest extends TestCase
         \BCC\Trust\Core\Security\AuditLogger::reset();
         ChainRepository::reset();
         ChainNftCapabilityRepository::reset();
-        CosmwasmDiscoveryWorker::reset();
+
 
         $_GET  = [];
         $_POST = [];
@@ -79,7 +79,14 @@ final class NftCapabilityEditorRenderTest extends TestCase
         $this->assertSame([], ChainNftCapabilityRepository::$writes, 'rendering writes no override');
         $this->assertSame([], ChainNftCapabilityRepository::$bumps, 'rendering bumps no generation');
         $this->assertSame([], ChainRepository::$capabilityWrites, 'rendering writes no capability');
-        $this->assertSame(0, CosmwasmDiscoveryWorker::$passes, 'rendering starts no discovery');
+        // ⚠ S8 DROPPED THE `CosmwasmDiscoveryWorker::$passes` CHECK HERE.
+        // It asserted "no discovery ran", and after S8 there is no discovery
+        // that could run — the class is deleted. Keeping it would be an
+        // assertion that passes because its subject cannot exist.
+        //
+        // The two checks that remain are the ones with teeth, and they are
+        // about RETAINED code: a capability edit must construct no provider
+        // budget, and must not touch the CosmWasm opt-in column.
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -222,7 +229,7 @@ final class NftCapabilityEditorRenderTest extends TestCase
         $html = $this->page(['chain' => (string) self::CHAIN_ID]);
 
         // Injective's real drivers.
-        $this->assertStringContainsString(NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION, $html);
+        $this->assertStringContainsString(NftDriverRegistry::DRIVER_CW721_LCD, $html);
         $this->assertStringContainsString(NftDriverRegistry::DRIVER_TALIS_WHITELIST, $html);
         $this->assertStringContainsString(NftDriverRegistry::DRIVER_CW721_LCD, $html);
 
@@ -257,8 +264,8 @@ final class NftCapabilityEditorRenderTest extends TestCase
 
         ChainNftCapabilityRepository::seedRow(
             self::CHAIN_ID,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             false,
             10
         );
@@ -266,8 +273,8 @@ final class NftCapabilityEditorRenderTest extends TestCase
 
         ChainNftCapabilityRepository::seedRow(
             self::CHAIN_ID,
-            NftDriverRegistry::OP_ENUMERATION,
-            NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION,
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD,
             true,
             250
         );
@@ -396,17 +403,25 @@ final class NftCapabilityEditorRenderTest extends TestCase
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  A MEASURED REFUSAL IS NOT OVERRIDDEN BY INTENT
+    //  S5: THE PAGE NO LONGER EXPLAINS A STORED MEASUREMENT
     // ═══════════════════════════════════════════════════════════════════
 
     /**
-     * ⚠️ THE PERMISSION DOES NOT BEAT A MEASUREMENT, AND THE PAGE SAYS SO.
+     * ⚠️ THE "MEASURED CAPABILITY" ROW IS GONE, AND MUST NOT COME BACK.
      *
-     * A Cosmos chain whose wasm module answered 501 keeps the control — it
-     * IS an enumerable family — but the panel labels the measured refusal
-     * prominently, and the backfill stays unavailable.
+     * This case used to assert the opposite: that a Cosmos chain whose wasm
+     * module answered 501 was labelled prominently and that the backfill
+     * control stayed unavailable. Both halves stopped being true —
+     * S4 withdrew the backfill control outright, and S5 removed the
+     * capability rung that refused on the stored measurement — so the row
+     * was deleted rather than left asserting a claim the code no longer
+     * makes.
+     *
+     * Inverted rather than deleted, because the row rendered stale copy that
+     * an operator would have acted on. A test that the sentence is ABSENT is
+     * worth more than no test at all.
      */
-    public function testAMeasuredRefusalIsLabelledAndTheBackfillStaysUnavailable(): void
+    public function testTheStoredMeasurementIsNotExplainedOnThePage(): void
     {
         ChainRepository::seed(self::CHAIN_ID, 'injective', true, true, true);
         \BCC\Trust\Onchain\Repositories\ChainCheckpointRepository::seed(
@@ -416,19 +431,23 @@ final class NftCapabilityEditorRenderTest extends TestCase
 
         $html = $this->page(['chain' => (string) self::CHAIN_ID]);
 
-        $this->assertStringContainsString('no CosmWasm module', $html);
-        $this->assertStringContainsString('will not change that', $html);
+        $this->assertStringNotContainsString('no CosmWasm module', $html);
+        $this->assertStringNotContainsString('Measured capability', $html);
+        $this->assertStringNotContainsString('will not change that', $html);
 
-        // And the capability model still refuses, so the backfill control
-        // is not offered anywhere on the page.
+        // Anti-vacuity: the panel DID render, and rendered the control this
+        // page exists for — so the absences above are about the removed row
+        // rather than about an empty page.
+        $this->assertStringContainsString('Manual discovery permission', $html);
+
+        // And the capability model no longer refuses on the measurement.
         $chain = ChainRepository::getById(self::CHAIN_ID);
         self::assertNotNull($chain);
         $matrix = NftChainCapability::operationMatrix($chain);
         $this->assertSame(
-            NftChainCapability::OP_CHAIN_UNSUPPORTED,
-            $matrix['operations'][NftDriverRegistry::OP_ENUMERATION]['status']
+            NftChainCapability::OP_READY,
+            $matrix['operations'][NftDriverRegistry::OP_VALIDATION]['status']
         );
-        $this->assertFalse(NftChainCapability::isScannable($matrix['verdict']));
         $this->assertRenderChangedNothing();
     }
 
@@ -507,7 +526,13 @@ final class NftCapabilityEditorRenderTest extends TestCase
                 'an editor form must never post to a work-starting route'
             );
         }
-        $this->assertStringNotContainsString(NftDiscoveryPage::ACTION_CW_BACKFILL, $panel);
+        // ⚠ S4 REMOVED a trailing belt-and-braces line here that asserted the
+        // panel did not contain `NftDiscoveryPage::ACTION_CW_BACKFILL`. That
+        // constant is deleted with the backfill route, so the line would not
+        // compile — and the guarantee it guarded is now stronger than it was:
+        // the loop above requires EVERY form action to start `bcc_nft_cap_`,
+        // which no longer has a work-starting route on the page to be confused
+        // with in the first place.
     }
 
     /** Render just the panel, so the assertion is about the editor's own forms. */
@@ -550,7 +575,13 @@ final class NftCapabilityEditorRenderTest extends TestCase
             'only allows an administrator to start one later',
             'can never add a capability',
             'observed here, never edited',
-            'separate, explicit action',
+            // ⚠ Was 'separate, explicit action', which described the CosmWasm
+            // BACKFILL — the page's one provider-spending control. S4
+            // withdrew that route, so the promise named something that can no
+            // longer appear. Re-pointed rather than dropped: the inventory
+            // keeps six entries, and the replacement is the stronger claim
+            // that is now true of the whole page.
+            'spends a provider request',
         ] as $promise) {
             $this->assertStringContainsString($promise, $html, 'the operator copy must state: ' . $promise);
         }

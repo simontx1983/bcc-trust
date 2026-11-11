@@ -38,6 +38,7 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Services\GroupContextResolver;
+use BCC\Trust\Core\Support\RestrictedGroups;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -136,13 +137,32 @@ final class FeedRankingService
      */
     private function buildHotFeed(?string $cursor, int $limit): array
     {
-        $excluded       = $this->reputationRepo->getCautionAndRiskyUserIds();
-        $hidden         = $this->hiddenRepo->getAllHiddenIds();
-        // Anon viewer (id=0) → exclude every non-open group. Restricted-
-        // group resolution happens BEFORE the underlying SQL builds the
-        // exclude IN clause, so empty list short-circuits the LEFT JOIN.
-        $excludedGroups = self::resolveRestrictedGroupIds(0);
+        $excluded = $this->reputationRepo->getCautionAndRiskyUserIds();
+        $hidden   = $this->hiddenRepo->getAllHiddenIds();
 
+        // ⚠ NO RESTRICTED-GROUP LIST IS COMPUTED HERE, DELIBERATELY.
+        //
+        // This used to call `resolveRestrictedGroupIds(0)` and pass the
+        // result as `$excludedGroupIds`. That parameter is a DOCUMENTED
+        // NO-OP in bcc-core — an exclusion passed there filters NOTHING
+        // (see the `@param $excludedGroupIds` entry on
+        // PeepSoActivityRepository::getActivities, and the "live
+        // counterpart" note on `$restrictedGroupIds`). So the call was
+        // dead work on every hot-feed rebuild, and worse, it read as
+        // though a group gate were being applied right here.
+        //
+        // The gate that ACTUALLY protects this read is the per-post
+        // `_bcc_post_visibility = 'public_all'` requirement, which
+        // getActivities applies on every global path where no
+        // `$groupGateMode` is passed — this one. A group-tagged post
+        // reaches the anonymous hot feed only when explicitly marked for
+        // global syndication, which is STRICTER than the
+        // "(non-open groups) - (viewer memberships)" subtraction the
+        // removed comment described: a post in an OPEN group is withheld
+        // too unless it carries `public_all`.
+        //
+        // Passing null makes that the single visible story. Nothing about
+        // what this feed returns changes.
         $payload = $this->activityFeed->getFeed(
             0,
             ActivityFeedService::SCOPE_FOR_YOU,
@@ -151,7 +171,7 @@ final class FeedRankingService
             $excluded === [] ? null : $excluded,
             $hidden === []   ? null : $hidden,
             null,
-            $excludedGroups === [] ? null : $excludedGroups
+            null
         );
 
         // viewerId=0 — anonymous; reaction hydration fills counts but
@@ -182,12 +202,18 @@ final class FeedRankingService
      *     (§O4.1 caution/risky shadow-limit) — IDENTICAL call, no merge.
      *   - same `$hidden` set: $this->hiddenRepo->getAllHiddenIds()
      *     (§K1-C moderation hide) — IDENTICAL call.
-     *   - same restricted-group exclusion computed with `self::resolveRestrictedGroupIds(0)`
-     *     — deliberately the ANONYMOUS posture (viewer id 0), exactly as
-     *     getHotFeed does. We do NOT subtract the real viewer's memberships
-     *     here: doing so would WIDEN the candidate set to include the viewer's
-     *     own gated-group posts, which the public hot feed never shows. The
-     *     tag feed's visible set is thus a strict subset of the hot feed's.
+     *   - same restricted-group posture: NEITHER method computes one, because
+     *     `$excludedGroupIds` is a documented NO-OP in bcc-core. Both used to
+     *     call `self::resolveRestrictedGroupIds(0)` and pass the result; both
+     *     now pass null. ⚠ The parity still holds and still matters — what
+     *     holds it is the `public_all` gate on the next bullet, NOT an
+     *     exclusion list. Neither method may start passing a REAL
+     *     `$restrictedGroupIds`/`$groupGateMode` without the other, or the
+     *     invariant breaks.
+     *   - neither passes the real viewer's memberships, which would WIDEN the
+     *     candidate set to the viewer's own gated-group posts — something the
+     *     public hot feed never shows. The tag feed's visible set is thus a
+     *     strict subset of the hot feed's.
      *   - same global-feed visibility gate: `onlyForGroupId = null` →
      *     PeepSoActivityRepository applies the `public_all` LEFT JOIN gate
      *     (group posts surface only when `_bcc_post_visibility = 'public_all'`;
@@ -215,10 +241,13 @@ final class FeedRankingService
             return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
         }
 
-        // Visibility gates — computed IDENTICALLY to getHotFeed (see docblock).
-        $excluded       = $this->reputationRepo->getCautionAndRiskyUserIds();
-        $hidden         = $this->hiddenRepo->getAllHiddenIds();
-        $excludedGroups = self::resolveRestrictedGroupIds(0);
+        // Visibility gates — computed IDENTICALLY to getHotFeed (see docblock),
+        // which now includes NOT computing a restricted-group list: the
+        // `$excludedGroupIds` parameter below is a no-op in bcc-core, so the
+        // `public_all` gate is what holds the hot-feed parity. Changing one of
+        // the two methods here without the other breaks the stated invariant.
+        $excluded = $this->reputationRepo->getCautionAndRiskyUserIds();
+        $hidden   = $this->hiddenRepo->getAllHiddenIds();
 
         $payload = $this->activityFeed->getFeed(
             $viewerId,
@@ -228,7 +257,7 @@ final class FeedRankingService
             $excluded === [] ? null : $excluded,
             $hidden === []   ? null : $hidden,
             null,
-            $excludedGroups === [] ? null : $excludedGroups,
+            null,
             null,
             $hashtag
         );
@@ -361,6 +390,55 @@ final class FeedRankingService
             $excluded === [] ? null : $excluded,
             $hidden === []   ? null : $hidden,
             $excludedGroups === [] ? null : $excludedGroups
+        );
+
+        $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
+        return $payload;
+    }
+
+    /**
+     * Page stream — the posts written for one validator page. Backs
+     * `GET /bcc/v1/pages/{id}/feed`.
+     *
+     * Shares the author wall's hydration chain and its two user-level
+     * exclusion lists, but NOT its third: the author wall also passes
+     * `resolveRestrictedGroupIds($viewerId)` (the §4.7.x leak gate) and this
+     * path deliberately passes no group exclusion at all.
+     *
+     * ⚠ That is safe by construction, not by oversight, and the construction
+     * is what carries it: `PostsService::createStatus()` refuses a
+     * `target_page_id` together with a `group_id` (asserted by
+     * `PagePostsIntegrationTest::testPageAndGroupTogetherAreRefusedEvenForTheOperator`),
+     * and `stampPageTarget()` is the only writer of `PAGE_TARGET_META`. So a
+     * page-marked post always has `group_id = 0` and can never sit inside a
+     * closed, secret or NFT-gated group. If anything ever stamps that marker
+     * on a group post, this route — `permission_callback => '__return_true'` —
+     * has no second line of defence, so add the group exclusion before
+     * widening who may write the marker.
+     *
+     * The candidate set is keyed on the post marker alone, so a post keeps its
+     * place after its author stops being the page's operator. Confirming the id
+     * is a published validator page is the endpoint's job, before this runs.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    public function getActivityForPage(int $pageId, int $viewerId, ?string $cursor = null, int $limit = 20): array
+    {
+        $excluded = self::mergeExclusions(
+            $this->reputationRepo->getCautionAndRiskyUserIds(),
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
+        );
+
+        $hidden = $this->hiddenRepo->getAllHiddenIds();
+
+        $payload = $this->activityFeed->getActivityForPage(
+            $pageId,
+            $viewerId,
+            $cursor,
+            $limit,
+            $excluded === [] ? null : $excluded,
+            $hidden === []   ? null : $hidden
         );
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
@@ -513,18 +591,13 @@ final class FeedRankingService
      */
     private static function resolveRestrictedGroupIds(int $viewerId): array
     {
-        $nonOpen = PeepSoGroupRepository::getNonOpenGroupIds();
-        if ($nonOpen === []) {
-            return [];
-        }
-        if ($viewerId <= 0) {
-            return $nonOpen;
-        }
-        $myGroups = PeepSoGroupRepository::getUserMemberGroupIds($viewerId, 1000);
-        if ($myGroups === []) {
-            return $nonOpen;
-        }
-        return array_values(array_diff($nonOpen, $myGroups));
+        // Extracted to Support\RestrictedGroups so the profile Blog tab can
+        // ask the same question (§11 — one definition of "restricted", not
+        // two). This method stays as the feed's call-site name; the five
+        // call sites above are untouched. forViewer() is the behaviour that
+        // used to live here, byte for byte, including passing the
+        // repository's default 500 bound explicitly.
+        return RestrictedGroups::forViewer($viewerId);
     }
 
     /**

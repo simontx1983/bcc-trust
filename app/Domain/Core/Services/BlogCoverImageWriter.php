@@ -77,6 +77,180 @@ final class BlogCoverImageWriter
     private const MAX_IMAGE_SIDE = 10_000;
 
     /**
+     * Prefix for the STORED filename. The uploader's own filename is never
+     * used on disk.
+     *
+     * ⚠⚠ THE ORIGINAL FILENAME IS PUBLISHED TWICE, AND BOTH ARE PUBLIC.
+     * `wp_handle_upload()` keeps the caller's base name, so it lands in the
+     * uploads path — i.e. in the attachment's `source_url` — and
+     * `wp_insert_attachment()` below derives `post_title` from that same
+     * base name. Nothing in the plugins restricts `/wp/v2/media`, so core's
+     * defaults expose both. A name like `jane-doe-headshot-final.jpg` is
+     * then a published fact about the uploader.
+     *
+     * Neutralising the name HERE fixes both at once: the title is derived
+     * from the stored basename, so it inherits the neutral name for free
+     * rather than needing its own rule that could drift from this one.
+     */
+    private const STORED_NAME_PREFIX = 'cover-';
+
+    /**
+     * Random BYTES in the stored filename. bin2hex doubles it, so the name
+     * carries 16 hex characters.
+     *
+     * ⚠ Declared as bytes, not as hex characters halved at the call site:
+     * `random_bytes(intdiv(16, 2))` is plain `int`, and random_bytes()
+     * wants `int<1, max>`, so the division form needed a cast to pass
+     * PHPStan level 8. The type system was right — the constant should
+     * mean what the call actually consumes.
+     */
+    private const STORED_NAME_BYTES = 8;
+
+    /**
+     * Canonical extension per accepted MIME. Taken from the DETECTED mime
+     * (file magic), never from the caller's filename — the whole point is
+     * that no caller-supplied byte reaches the stored name.
+     *
+     * @var array<string, string>
+     */
+    private const EXTENSION_BY_MIME = [
+        'image/jpeg' => 'jpg',
+        'image/png'  => 'png',
+        'image/webp' => 'webp',
+        'image/gif'  => 'gif',
+    ];
+
+    /**
+     * MIMEs whose stored bytes are left alone. Everything else is
+     * stripped.
+     *
+     * ⚠⚠ A SKIP LIST, NOT A STRIP LIST, SO AN UNSEEN MIME FAILS CLOSED.
+     * Spelling it the other way round — listing the mimes to strip — reads
+     * identically today, because ALLOWED_MIMES gates upload() to these
+     * four. But it fails OPEN: widen ALLOWED_MIMES later (HEIC is the
+     * obvious candidate, and HEIC is full of EXIF) and the new format
+     * would be stored unstripped, silently, with no test failing. This
+     * direction makes the omission refuse the upload instead.
+     *
+     * ⚠ GIF IS THE ONE DELIBERATE EXCLUSION, and not because GIF is
+     * trusted. Re-encoding an animated GIF through either image editor
+     * FLATTENS IT TO ONE FRAME, so stripping would silently destroy the
+     * upload. GIF also has no EXIF chunk, so the GPS this control exists
+     * for cannot be present. A GIF *can* hold a Comment/XMP extension,
+     * which is NOT stripped — stated here rather than left to be found.
+     *
+     * @var list<string>
+     */
+    private const METADATA_STRIP_SKIP_MIMES = [
+        'image/gif',
+    ];
+
+    /**
+     * The stored filename: a neutral name with no caller-supplied byte.
+     *
+     * Pure, so it is asserted BY VALUE rather than by reading the source.
+     * An unknown mime cannot reach here (upload() checks ALLOWED_MIMES
+     * first) but falls back to `bin` rather than to the caller's
+     * extension, so a future caller cannot reintroduce the leak by
+     * widening the allowlist and forgetting this map.
+     */
+    public static function neutralStoredName(string $mime): string
+    {
+        $ext = self::EXTENSION_BY_MIME[$mime] ?? 'bin';
+
+        return self::STORED_NAME_PREFIX
+            . bin2hex(random_bytes(self::STORED_NAME_BYTES))
+            . '.' . $ext;
+    }
+
+    /**
+     * Whether this MIME's stored bytes must be re-written to drop
+     * embedded metadata. Pure + public so the decision table is asserted
+     * by value; see METADATA_STRIP_MIMES for why GIF is excluded.
+     */
+    public static function metadataStripApplies(string $mime): bool
+    {
+        return !in_array($mime, self::METADATA_STRIP_SKIP_MIMES, true);
+    }
+
+    /**
+     * Rewrite $path so it carries no embedded metadata. Returns false only
+     * when a strip was REQUIRED and could not be completed.
+     *
+     * ⚠⚠ A PLAIN `$editor->save()` IS NOT A STRIP ON IMAGICK. Measured
+     * against WordPress 7.0.2's own editor: `strip_meta()` is called from
+     * exactly one place, `thumbnail_image()` (line 443, gated on the
+     * `image_strip_meta` filter), and `_save()` only calls
+     * `setImageFormat()`. `resize()` additionally returns EARLY when the
+     * target equals the current size, so a no-op resize cannot be used to
+     * reach the strip either. So on an Imagick host a re-save preserves
+     * EXIF — which is why Imagick is driven directly below rather than
+     * through the editor.
+     *
+     * GD has no metadata model at all: decoding to a resource and
+     * re-encoding drops everything, so the editor path is sufficient
+     * there and is the fallback.
+     *
+     * ⚠ The two IO branches are NOT exercised by the unit harness, which
+     * has neither extension loaded. metadataStripApplies() and
+     * neutralStoredName() are; the branch SELECTION is asserted through a
+     * stubbed `wp_get_image_editor`. The Imagick branch needs a staging
+     * check before release — named in the PR rather than implied.
+     */
+    private static function stripEmbeddedMetadata(string $path, string $mime): bool
+    {
+        if (!self::metadataStripApplies($mime)) {
+            return true;
+        }
+
+        // Imagick: the only definitive strip available, and the only one
+        // that covers a file already small enough that no resize happens.
+        if (class_exists('\Imagick')) {
+            try {
+                $image = new \Imagick($path);
+                $image->stripImage();
+                $image->writeImage($path);
+                $image->clear();
+
+                return true;
+            } catch (\Throwable $e) {
+                Logger::warning('[BlogCoverImageWriter] Imagick strip threw', [
+                    'mime'  => $mime,
+                    'error' => $e->getMessage(),
+                ]);
+                // Fall through to the editor rather than failing outright:
+                // a GD re-encode still drops the metadata.
+            }
+        }
+
+        $editor = wp_get_image_editor($path);
+        if (is_wp_error($editor) || !is_object($editor)) {
+            return false;
+        }
+
+        $saved = $editor->save($path, $mime);
+        if (is_wp_error($saved) || !is_array($saved)) {
+            return false;
+        }
+
+        // ⚠⚠ save() MAY WRITE SOMEWHERE ELSE, AND THEN REPORT SUCCESS.
+        // _save() routes its target through
+        // wp_get_image_editor_output_format() — a FILTERABLE mime→extension
+        // map — and falls back to generate_filename() when that comes back
+        // empty. So on a host that maps, say, JPEG to WebP, the re-encode
+        // lands on a NEW file and the unstripped original stays exactly
+        // where we put it. Accepting that as a strip would be a silent
+        // fail-open, which is the one failure mode this control cannot
+        // have. Verified against WordPress's own editor: _save() returns
+        // 'path' => $filename, so the destination is observable.
+        $writtenTo = isset($saved['path']) && is_string($saved['path'])
+            ? $saved['path']
+            : '';
+
+        return $writtenTo === $path;
+    }
+
+    /**
      * Validate + persist a single multipart cover-image upload.
      *
      * `$file` is the loose shape `WP_REST_Request::get_file_params()`
@@ -237,8 +411,14 @@ final class BlogCoverImageWriter
         // wp_handle_upload reads from $_FILES by reference — pass the
         // file struct in the shape PHP gives us (keys + tmp_name path).
         // We've already type-narrowed every used field.
+        // ⚠ NOT $fileName — see STORED_NAME_PREFIX. $fileName is the
+        // caller's own name and is needed ABOVE, because
+        // wp_check_filetype_and_ext() matches the extension against the
+        // bytes; it must not survive past that check.
+        $storedName = self::neutralStoredName($mime);
+
         $fileForWP = [
-            'name'     => $fileName,
+            'name'     => $storedName,
             'type'     => $mime,
             'tmp_name' => $tmpName,
             'size'     => $size,
@@ -283,16 +463,49 @@ final class BlogCoverImageWriter
             ? $moved['type']
             : $mime;
 
+        // ── Strip embedded metadata BEFORE the attachment exists ─────
+        //
+        // ⚠⚠ THE ORDER IS LOAD-BEARING, NOT TIDINESS.
+        // wp_generate_attachment_metadata() below calls
+        // wp_read_image_metadata(), which copies what it finds into
+        // `_wp_attachment_metadata.image_meta`. Stripping first means
+        // there is nothing to copy, so the file AND the postmeta are both
+        // clean from one call. Stripping afterwards would leave the
+        // postmeta copy behind.
+        //
+        // ⚠ WP's image_meta never carried GPS, so the exposure this closes
+        // is the STORED FILE, which is served publicly from uploads/ and
+        // keeps every EXIF tag the camera wrote, GPS included.
+        //
+        // ⛔ FAIL CLOSED. A privacy control that silently no-ops is worse
+        // than one that refuses: the operator would have no way to know
+        // their location rode along. The upload is rejected and the moved
+        // file is removed.
+        if (!self::stripEmbeddedMetadata($savedPath, $savedMime)) {
+            Logger::warning('[BlogCoverImageWriter] metadata strip failed — refusing the upload', [
+                'user_id' => $authorId,
+                'mime'    => $savedMime,
+            ]);
+            @unlink($savedPath);
+            return [
+                'error'   => 'bcc_unavailable',
+                'message' => 'Could not process your image. Try again.',
+            ];
+        }
+
         // ── wp_insert_attachment (WP-native; INSERT into wp_posts) ───
         //
         // post_author = $authorId is the security gate that makes
         // PostsService::createBlog's ownership check accept this
-        // attachment as a cover image later.
+        // attachment as a cover image later. UNCHANGED.
         //
-        // post_title: filename without extension. preg_replace returns
-        // string|null (null on engine error, never in practice for a
-        // pure-string subject), so we fall back to basename() for the
-        // type guarantee.
+        // post_title: stored filename without extension. That name is now
+        // minted by neutralStoredName(), so this carries no caller-supplied
+        // byte — deriving the title from the stored basename keeps the two
+        // in step by construction instead of by a second rule.
+        // preg_replace returns string|null (null on engine error, never in
+        // practice for a pure-string subject), so we fall back to
+        // basename() for the type guarantee.
         $baseName  = basename($savedPath);
         $stripped  = preg_replace('/\.[^.]+$/', '', $baseName);
         $postTitle = is_string($stripped) && $stripped !== '' ? $stripped : $baseName;

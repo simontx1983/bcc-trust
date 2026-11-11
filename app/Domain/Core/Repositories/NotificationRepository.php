@@ -227,7 +227,14 @@ final class NotificationRepository
 
         // Same valid-type scope as countUnreadForUser — the digest must
         // not resurrect rows of retired types the bell list won't show.
-        $types        = \BCC\Trust\Core\Support\NotificationType::ALL;
+        //
+        // ⚠ Less the BELL_ONLY types (delegator-group removal, auto-hide
+        // notice): they are in-app only by requirement, and every other
+        // unread row here goes out in an email.
+        $types = array_values(array_diff(
+            \BCC\Trust\Core\Support\NotificationType::ALL,
+            \BCC\Trust\Core\Support\NotificationType::BELL_ONLY
+        ));
         $placeholders = implode(',', array_fill(0, count($types), '%s'));
 
         $sql = "SELECT " . self::COLUMNS . " FROM `{$table}`"
@@ -254,9 +261,12 @@ final class NotificationRepository
      * caller passes the already-resolved meta key string so this repository
      * does not depend back on the NotificationPrefs Support class.
      *
+     * Keyset-paged: pass the last id of the previous page as $afterUserId.
+     * The digest used to read ONE page of 5000 and silently stop there.
+     *
      * @return list<int>
      */
-    public function findUserIdsByMetaFlag(string $metaKey, int $limit): array
+    public function findUserIdsByMetaFlag(string $metaKey, int $limit, int $afterUserId = 0): array
     {
         if ($metaKey === '' || $limit <= 0) {
             return [];
@@ -267,10 +277,12 @@ final class NotificationRepository
         /** @var list<numeric-string>|null $rows */
         $rows = $wpdb->get_col($wpdb->prepare(
             "SELECT user_id FROM {$wpdb->usermeta}
-              WHERE meta_key = %s AND meta_value = %s
+              WHERE meta_key = %s AND meta_value = %s AND user_id > %d
+              ORDER BY user_id ASC
               LIMIT %d",
             $metaKey,
             '1',
+            max(0, $afterUserId),
             $limit
         ));
 
@@ -285,5 +297,23 @@ final class NotificationRepository
             }
         }
         return $out;
+    }
+
+    /**
+     * How many users have $metaKey = '1'. Admin display only.
+     */
+    public function countUsersByMetaFlag(string $metaKey): int
+    {
+        if ($metaKey === '') {
+            return 0;
+        }
+
+        global $wpdb;
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value = %s",
+            $metaKey,
+            '1'
+        ));
     }
 }

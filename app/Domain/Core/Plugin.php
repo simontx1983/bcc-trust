@@ -102,7 +102,7 @@ final class Plugin
     private ?EdgeRepository $edgeRepository = null;
     public function edgeRepository(): EdgeRepository
     {
-        return $this->edgeRepository ??= new EdgeRepository();
+        return $this->edgeRepository ??= new EdgeRepository($this->voteRepository());
     }
 
     private ?Repositories\PageReadModelRepository $pageReadModelRepository = null;
@@ -1106,7 +1106,8 @@ final class Plugin
     {
         return $this->autoHideService ??= new Services\AutoHideService(
             $this->contentReportRepository(),
-            $this->hiddenActivityRepository()
+            $this->hiddenActivityRepository(),
+            $this->rankCredibilityGate()
         );
     }
 
@@ -1297,13 +1298,36 @@ final class Plugin
         return $this->adminDashboardRepository ??= new Repositories\AdminDashboardRepository();
     }
 
+    private ?Services\Vote\ReviewVisibilityScoreSync $reviewVisibilityScoreSync = null;
+    /** Recalculates a review's page when moderation hides / restores the review. */
+    public function reviewVisibilityScoreSync(): Services\Vote\ReviewVisibilityScoreSync
+    {
+        return $this->reviewVisibilityScoreSync ??= new Services\Vote\ReviewVisibilityScoreSync(
+            $this->voteRepository(),
+            $this->voteService(),
+            $this->edgeRepository()
+        );
+    }
+
+    private ?Services\Vote\VoteRemovalService $voteRemovalService = null;
+    /** The single bulk vote-removal path (moderation, ring invalidation, account deletion). */
+    public function voteRemovalService(): Services\Vote\VoteRemovalService
+    {
+        return $this->voteRemovalService ??= new Services\Vote\VoteRemovalService(
+            $this->voteRepository(),
+            $this->scoreRepository(),
+            $this->userInfoRepository(),
+            $this->voteService()
+        );
+    }
+
     private ?Services\Admin\ModerationService $moderationService = null;
     public function moderationService(): Services\Admin\ModerationService
     {
         return $this->moderationService ??= new Services\Admin\ModerationService(
             $this->scoreRepository(),
             $this->userInfoRepository(),
-            $this->voteRepository()
+            $this->voteRemovalService()
         );
     }
 
@@ -1400,6 +1424,10 @@ final class Plugin
         // Rank Phase 8: once-only member appeal on a misconduct finding
         // (own finding only; §15.5)
         \BCC\Trust\Core\REST\MeFindingAppealEndpoint::register();
+        // Operator dashboard: the viewer's verified validator pages (§4)
+        \BCC\Trust\Core\REST\MeValidatorPagesEndpoint::register();
+        // Shared operator profile editor and per-validator overrides.
+        \BCC\Trust\Onchain\REST\OperatorProfileEndpoint::register();
 
         // V1 contract: paginated Halls catalog + viewer membership (§4.7)
         \BCC\Trust\Core\REST\HallsEndpoint::register();
@@ -1665,8 +1693,8 @@ final class Plugin
         // PeepSoGroupWriter lands eligible holders directly as `member`.
         \BCC\Trust\Onchain\REST\HolderGroupsEndpoint::register();
 
-        // Communities V1: validator/delegator communities — one
-        // auto-provisioned community per claimed validator.
+        // Communities V1: validator/delegator communities — at most one per
+        // validator page, created only by that page's operator.
         //   GET         /me/validator-groups            — joined + eligible_to_join + opted_out
         //   POST        /me/validator-groups/{id}/join  — delegation-verified join
         //   POST|DELETE /me/validator-groups/{id}/leave — leave + record TTL'd opt-out
@@ -1674,6 +1702,10 @@ final class Plugin
         // (fail-closed on an LCD outage); PeepSoGroupWriter lands
         // verified delegators directly as `member`.
         \BCC\Trust\Onchain\REST\ValidatorGroupsEndpoint::register();
+
+        //   POST  /pages/{id}/delegator-group — operator creates the community
+        //   PATCH /pages/{id}/delegator-group — operator edits its minimum
+        \BCC\Trust\Onchain\REST\PageDelegatorGroupEndpoint::register();
 
         // Collection stances — the airdrop-proof demand + scam signals:
         //   GET    /me/collection-stances/panel — held collections + state
@@ -1768,6 +1800,29 @@ final class Plugin
         // model with feed_visible=false (detail) or 403 + unlock_hint
         // (feed sub-route).
         \BCC\Trust\Core\REST\GroupsDetailEndpoint::register();
+        // §4.32.4 announcement READ routes. Registered unconditionally;
+        // the handlers refuse with 404 while bcc_announcements_enabled is
+        // off (§4.32.10). ⚠ Not gated HERE on purpose: a route that is not
+        // registered is invisible to contract-parity-guard, so the guard
+        // could not police the four documented endpoints in either
+        // direction while the switch is off — which is the whole life of
+        // the feature until it ships.
+        \BCC\Trust\Core\REST\AnnouncementsEndpoint::register();
+        // §4.32.13 announcement WRITE routes (A3). Registered unconditionally
+        // for the same reason as the reads above: an unregistered route is
+        // invisible to contract-parity-guard in both directions. Every handler
+        // refuses with 404 while the switch is off, and then again for a
+        // non-operator, so registration grants nothing.
+        \BCC\Trust\Core\REST\AnnouncementWriteEndpoint::register();
+        // A5b — the five §4.32.4 comment routes. Registered unconditionally so
+        // `contract-parity-guard` can police them in both directions; every
+        // handler's first statement is the feature switch, so all five answer
+        // 404 while `bcc_announcements_enabled` is absent.
+        \BCC\Trust\Core\REST\AnnouncementCommentsEndpoint::register();
+        // ⚠ Reconciler arm C (AnnouncementPublicationGuard) is NOT registered
+        // here. It hooks wp-cron and post-status transitions, which are not
+        // REST requests, so it registers at BOOT in bcc-trust.php beside the
+        // CPT. Registering it here is what the cron probe caught.
 
         // V2: Paginated group members (§4.7.7). Same privacy model as
         // §4.7.5 + §4.7.6 — secret-non-member 404s; closed-non-member
@@ -2069,6 +2124,45 @@ final class Plugin
             }
         }, 10, 2);
 
+        // §4.32.8 — announcement feed projection.
+        //
+        // ⚠ Both subscriptions are registered UNCONDITIONALLY, outside the
+        // feature switch, and the handlers decide for themselves:
+        // `handleAnnouncementPublished` refuses while the switch is off
+        // (§4.32.10 stops projection), while `handleAnnouncementArchived`
+        // withdraws REGARDLESS of the switch, because turning a feature off
+        // must never strand a card that was already projected. Registering
+        // conditionally would make the withdrawal depend on the switch state
+        // at boot, which is the opposite of what is wanted.
+        add_action('bcc_announcement_published', function (int $operatorId, int $announcementId): void {
+            try {
+                $this->activityStreamWriter()->handleAnnouncementPublished($operatorId, $announcementId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] activity_stream announcement failed', [
+                    'user_id'         => $operatorId,
+                    'announcement_id' => $announcementId,
+                    'error'           => $e->getMessage(),
+                ]);
+            }
+        }, 10, 2);
+
+        // F-151: `bcc_announcement_withdrawn` (the row left `publish` by any
+        // other path — wp-admin trash/draft, wp_delete_post) withdraws the feed
+        // card exactly like archival. The handler is idempotent and treats a
+        // missing activity as nothing to do.
+        $withdrawAnnouncementCard = function (int $announcementId): void {
+            try {
+                $this->activityStreamWriter()->handleAnnouncementArchived($announcementId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] activity_stream announcement withdraw failed', [
+                    'announcement_id' => $announcementId,
+                    'error'           => $e->getMessage(),
+                ]);
+            }
+        };
+        add_action('bcc_announcement_archived', $withdrawAnnouncementCard, 10, 1);
+        add_action('bcc_announcement_withdrawn', $withdrawAnnouncementCard, 10, 1);
+
         // §D6 PR-A — WP transition_post_status bridge for blog posts.
         //
         // Fires on every WP post status transition; the handler scopes
@@ -2233,6 +2327,21 @@ final class Plugin
                 }
             });
         }, 20, 3);
+
+        // Restore (F-111): the content was judged fine, so no report
+        // against it stands as upheld — reverse the report_upheld credit
+        // of the restored report and of every report the restore moved
+        // off status 1. Reversing a never-ingested id matches zero rows.
+        add_action('bcc_content_restored_by_admin', function ($targetId, $resolverUserId, $reportId, $unupheldIds = []) use ($rankIngest): void {
+            $ids = array_unique(array_merge([(int) $reportId], array_map('intval', (array) $unupheldIds)));
+            $rankIngest(function (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) use ($ids): void {
+                foreach ($ids as $id) {
+                    if ($id > 0) {
+                        $i->reverse('report_upheld', $id, 'content_restored');
+                    }
+                }
+            });
+        }, 20, 4);
 
         // Args: ($reportId, $adminUserId, $action). Reversal is
         // unconditional across undo kinds — reversing an event that was
@@ -2524,6 +2633,19 @@ final class Plugin
         add_action('bcc_rank_decay_warning', function (int $userId): void {
             $this->notificationDispatcher()->onRankDecayWarning($userId);
         }, 30, 1);
+
+        // F-73 — tell the author their post was auto-hidden (bell only;
+        // the dispatcher method self-isolates with try/catch).
+        add_action('bcc_content_auto_hidden', function (int $actId): void {
+            $this->notificationDispatcher()->onContentAutoHidden($actId);
+        }, 30, 1);
+
+        // A moderation-hidden review stops counting toward its page's score
+        // and tallies; restoring it counts again (user decision). Fired by
+        // HiddenActivityRepository on every real hide/unhide.
+        add_action('bcc_trust_activity_visibility_changed', function (int $actId): void {
+            $this->reviewVisibilityScoreSync()->onVisibilityChanged($actId);
+        }, 20, 1);
 
         add_action('bcc_rank_finding_issued', function (int $userId, int $findingId, string $severity): void {
             unset($severity); // copy is severity-neutral by design (no shaming)

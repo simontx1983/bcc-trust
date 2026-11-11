@@ -3,181 +3,329 @@
 declare(strict_types=1);
 
 /**
- * Doubles for running the REAL {@see \BCC\Trust\Onchain\Services\CosmosEndpointTransition::execute()}
- * against the REAL {@see \BCC\Trust\Onchain\Support\OnchainCircuitBreaker}
- * and the REAL {@see \BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy}.
+ * Fakes for the audited Cosmos endpoint switch.
  *
- * ── WHAT IS FAKED, AND WHY ONLY THIS ────────────────────────────────────
- * The claims under test are about ORDER and SCOPE: that the switch takes the
- * worker's lock, clears the old provider's breaker only after the row moved,
- * and records the new endpoint's fingerprint. Those are decided by the
- * transition itself, so it runs for real. The breaker runs for real too,
- * because "the breaker was cleared" is only evidence if the production
- * clearing code produced it.
+ * ── WHAT IS REAL HERE, AND WHY ──────────────────────────────────────────
+ * Only the collaborators that touch a database or a network are faked. The
+ * policy, the deny-by-default descriptor, the review store, the circuit
+ * breaker and the transition itself are the real classes, because every
+ * property worth asserting lives in how they interact:
  *
- * Faked at their production FQNs, and nothing else:
- *   - the chain / family / checkpoint repositories (in-memory rows),
- *   - the identity verifier (no network),
- *   - AdminActionSupport::audit (records the payload).
+ *   - the review store is real, so "a replacement review retires the older
+ *     confirmation" is a property of the code and not of a fixture;
+ *   - the breaker is real (see breaker-real-stubs.php), so "the breaker is not
+ *     cleared when the endpoint cannot be confirmed" is observable;
+ *   - the policy is real, so approval is exact rather than permissive.
  *
- * ⚠ Requires `breaker-real-stubs.php` for the option/transient/cache surface,
- * the faithful non-blocking AdvisoryLock and the counter repository. Nothing
- * here re-declares any of that.
+ * ⚠ `ChainRepository::updateRestUrl()` is faked, and its fake re-implements the
+ * compare-and-swap IN PHP with `===`. That is deliberate: these tests pin the
+ * ORDERING and the RESULT MODEL around the write. Whether the SQL itself is
+ * byte-exact is a question only a database can answer, and
+ * `CosmosEndpointSwitchCasIntegrationTest` answers it on both engines.
  *
- * ⚠ Suites using this MUST run in separate processes: these classes shadow
- * real ones by FQN, so they have to be declared before the autoloader ever
- * sees the real names.
- *
- * @package BCC\Trust\Onchain\Tests\Stubs
+ * @package BCC_Trust
+ * @subpackage Tests
  */
 
 namespace {
-    // Inside the braced global block: a file with braced namespaces may have
-    // no code outside them, and a bare require at the top is a parse error.
-    require_once __DIR__ . '/breaker-real-stubs.php';
 
-    /** In-memory state the fakes read and write. */
+require_once __DIR__ . '/breaker-real-stubs.php';
+
+if (!defined('ABSPATH')) {
+    define('ABSPATH', __DIR__ . '/');
+}
+
+if (!class_exists('BccTransitionWorld', false)) {
     final class BccTransitionWorld
     {
         /** @var array<int, object> */
         public static array $chains = [];
 
-        /** @var array<int, array<int, string|null>> chainId => [codeId => cursor] */
-        public static array $cursors = [];
+        /** @var list<string> every write, in order, for an ordering assertion */
+        public static array $writes = [];
 
-        /** @var array<int, object> */
-        public static array $checkpoints = [];
-
-        /** @var list<array{action: string, type: string, id: int, meta: array<string, mixed>}> */
+        /** @var list<array{action: string, target: int, meta: array<string, mixed>}> */
         public static array $audits = [];
 
-        /** @var list<string> every write, in order — lets a test prove "no write happened" */
-        public static array $writes = [];
+        /** @var int how many times the chains cache was busted */
+        public static int $cacheBusts = 0;
+
+        /**
+         * The `$useCache` argument of every verification, in order.
+         *
+         * ⚠ RECORDED SEPARATELY, NOT APPENDED TO THE `verify(...)` STRING,
+         * which a test matches exactly.
+         *
+         * @var list<bool>
+         */
+        public static array $verifyCacheFlags = [];
 
         public static bool $verifyOk = true;
 
+        public static string $verifyReason = 'network_mismatch';
+
+        /** Force the CAS result: null = simulate it honestly, else return this. */
+        public static ?int $forceCasResult = null;
+
+        /** Make the durable audit row fail, to exercise the follow-up report. */
+        public static bool $auditOk = true;
+
+        /**
+         * ⚠ DISTINCT FROM `$auditOk`. Returning null is a reported failure;
+         * THROWING is an escape that, left uncaught, would take down a request in
+         * which the endpoint may already have moved.
+         */
+        public static bool $auditThrows = false;
+
+        /** Make the post-write read-back unavailable (null row). */
+        public static bool $readBackAvailable = true;
+
+        /** Replace the row the read-back sees, to simulate a superseding write. */
+        public static ?string $readBackRestUrl = null;
+
+        /** Runs after the proof and before the CAS — the race seam. */
+        public static mixed $afterVerify = null;
+
+        /**
+         * ⚠⚠ THE REPOSITORY CACHE, MODELLED ON PURPOSE.
+         *
+         * The real `ChainRepository::getById()` serves from the cached active set
+         * and then from a per-request memo, so within one request it keeps
+         * answering with whatever the FIRST read put there until something calls
+         * `clearCache()`. An earlier version of this double read the live array
+         * every time, which made it impossible to write a failing test for the
+         * post-CAS diagnosis reading a stale row — the bug was invisible here and
+         * only visible in production.
+         *
+         * @var array<int, object|null>
+         */
+        public static array $cacheSnapshot = [];
+
         public static function reset(): void
         {
-            self::$chains      = [];
-            self::$cursors     = [];
-            self::$checkpoints = [];
-            self::$audits      = [];
-            self::$writes      = [];
-            self::$verifyOk    = true;
+            self::$chains            = [];
+            self::$writes            = [];
+            self::$audits            = [];
+            self::$cacheBusts        = 0;
+            self::$verifyCacheFlags  = [];
+            self::$verifyOk          = true;
+            self::$verifyReason      = 'network_mismatch';
+            self::$forceCasResult    = null;
+            self::$auditOk           = true;
+            self::$auditThrows       = false;
+            self::$readBackAvailable = true;
+            self::$readBackRestUrl   = null;
+            self::$afterVerify       = null;
+            self::$cacheSnapshot     = [];
+            \BccBreakerStore::reset();
+            \BccBreakerStore::$deleteTransientFails = false;
+            \BccBreakerStore::$deleteCounterThrows = false;
         }
 
-        public static function seedChain8(string $restUrl, array $cursorCodeIds): void
+        /**
+         * A NEW REQUEST: the caches start cold, the data does not.
+         *
+         * ⚠ THE REVIEW AND THE SWITCH ARE DIFFERENT REQUESTS in production, so the
+         * switch begins with an empty cache and reads the row as it is NOW. Without
+         * this boundary the double would carry the review request's cached row into
+         * the switch and the binding checks could never see the world move — the
+         * opposite error from the one the clone fixed.
+         */
+        public static function newRequest(): void
+        {
+            self::$cacheSnapshot = [];
+        }
+
+        public static function seedChain8(?string $restUrl, string $slug = 'cosmos', int $isActive = 1): void
         {
             self::$chains[8] = (object) [
-                'id'       => '8',
-                'slug'     => 'cosmos',
-                'rest_url' => $restUrl,
-                'rpc_url'  => 'https://rpc.cosmos.directory/cosmoshub',
+                'id'        => '8',
+                'slug'      => $slug,
+                'rest_url'  => $restUrl,
+                'rpc_url'   => 'https://rpc.cosmos.directory/cosmoshub',
+                // The switch gates on this, so a fixture without it would be
+                // refused as `chain_inactive` before anything interesting ran.
+                'is_active' => $isActive,
             ];
-            self::$cursors[8] = [];
-            foreach ($cursorCodeIds as $codeId) {
-                self::$cursors[8][(int) $codeId] = 'opaque-node-minted-key';
-            }
-            self::$checkpoints[8] = (object) ['cw_code_cursor' => null, 'cw_max_code_id' => 742];
         }
     }
+}
+
 }
 
 namespace BCC\Trust\Onchain\Repositories {
+
+if (!class_exists(ChainRepository::class, false)) {
     final class ChainRepository
     {
+        /**
+         * ⚠ STICKY WITHIN A REQUEST, like the real one. The first answer is kept
+         * until `clearCache()` runs — which `updateRestUrl()` does on every
+         * outcome except an affected count of exactly zero.
+         */
         public static function getById(int $id): ?object
         {
-            return isset(\BccTransitionWorld::$chains[$id]) ? clone \BccTransitionWorld::$chains[$id] : null;
-        }
-
-        public static function updateRestUrl(int $chainId, string $restUrl): bool
-        {
-            \BccTransitionWorld::$writes[] = "chain.rest_url={$restUrl}";
-            if (!isset(\BccTransitionWorld::$chains[$chainId])) {
-                return false;
+            if (array_key_exists($id, \BccTransitionWorld::$cacheSnapshot)) {
+                return \BccTransitionWorld::$cacheSnapshot[$id];
             }
-            \BccTransitionWorld::$chains[$chainId]->rest_url = $restUrl;
 
-            return true;
+            $row = self::readThrough($id);
+            // ⚠⚠ A CLONE, NOT THE OBJECT. PHP objects are handles, so storing the
+            // row itself makes this an ALIAS of the live array: a test mutating the
+            // live row would see the change through the "cache" too, and the
+            // staleness being modelled would not exist. The fidelity control in
+            // the test file caught exactly that.
+            \BccTransitionWorld::$cacheSnapshot[$id] = is_object($row) ? clone $row : $row;
+
+            return \BccTransitionWorld::$cacheSnapshot[$id];
         }
-    }
 
-    final class CosmwasmCodeFamilyRepository
-    {
-        /** @return list<int> */
-        public static function openContractCursorCodeIds(int $chainId): array
+        /**
+         * ⚠ ALWAYS LIVE, AND NEVER CACHES WHAT IT READ. This is the whole point of
+         * the method: the post-CAS diagnosis has to see what another request did.
+         */
+        public static function getByIdUncached(int $id): ?object
         {
-            $ids = [];
-            foreach (\BccTransitionWorld::$cursors[$chainId] ?? [] as $codeId => $cursor) {
-                if ($cursor !== null && $cursor !== '') {
-                    $ids[] = (int) $codeId;
+            return self::readThrough($id);
+        }
+
+        private static function readThrough(int $id): ?object
+        {
+            if (!\BccTransitionWorld::$readBackAvailable && \BccTransitionWorld::$writes !== []) {
+                // Only the POST-write read fails; the pre-write reads must
+                // succeed or the test would be measuring the wrong refusal.
+                return null;
+            }
+
+            $row = \BccTransitionWorld::$chains[$id] ?? null;
+            if ($row === null) {
+                return null;
+            }
+
+            if (\BccTransitionWorld::$readBackRestUrl !== null && \BccTransitionWorld::$writes !== []) {
+                $clone = clone $row;
+                $clone->rest_url = \BccTransitionWorld::$readBackRestUrl;
+
+                return $clone;
+            }
+
+            return $row;
+        }
+
+        /**
+         * The compare-and-swap, re-implemented with `===` so the ordering and
+         * result model can be tested without a database.
+         *
+         * @param array{rest_url: string|null, slug: string, is_active: int} $expected
+         */
+        public static function updateRestUrl(int $chainId, string $restUrl, array $expected): int
+        {
+            if (\BccTransitionWorld::$forceCasResult !== null) {
+                $forced = \BccTransitionWorld::$forceCasResult;
+                if ($forced !== 0) {
+                    self::clearCache();
                 }
-            }
-            sort($ids);
-
-            return $ids;
-        }
-
-        public static function clearContractCursors(int $chainId): int
-        {
-            \BccTransitionWorld::$writes[] = 'families.clear_cursors';
-            $n = 0;
-            foreach (\BccTransitionWorld::$cursors[$chainId] ?? [] as $codeId => $cursor) {
-                if ($cursor !== null && $cursor !== '') {
-                    \BccTransitionWorld::$cursors[$chainId][$codeId] = null;
-                    $n++;
+                if ($forced > 0) {
+                    \BccTransitionWorld::$writes[] = 'chain.rest_url=' . $restUrl;
                 }
+
+                return $forced;
             }
 
-            return $n;
+            $row = \BccTransitionWorld::$chains[$chainId] ?? null;
+            if ($row === null) {
+                return 0;
+            }
+
+            $storedRest = $row->rest_url ?? null;
+            $matches = $storedRest === ($expected['rest_url'] ?? null)
+                && (string) ($row->slug ?? '') === (string) $expected['slug']
+                && (int) ($row->is_active ?? 0) === (int) $expected['is_active'];
+
+            if (!$matches) {
+                return 0;
+            }
+
+            $row->rest_url = $restUrl;
+            \BccTransitionWorld::$writes[] = 'chain.rest_url=' . $restUrl;
+            self::clearCache();
+
+            return 1;
         }
 
-        public static function countOpenContractCursors(int $chainId): int
+        public static function clearCache(): void
         {
-            return count(self::openContractCursorCodeIds($chainId));
+            \BccTransitionWorld::$cacheBusts++;
+            \BccTransitionWorld::$cacheSnapshot = [];
         }
     }
+}
 
-    final class ChainCheckpointRepository
+}
+
+namespace BCC\Trust\Core\Security {
+
+if (!class_exists(AuditLogger::class, false)) {
+    final class AuditLogger
     {
-        public static function get(int $chainId): ?object
-        {
-            return \BccTransitionWorld::$checkpoints[$chainId] ?? null;
-        }
+        /** @param array<string, mixed> $meta */
+        public static function logChecked(
+            string $action,
+            ?int $targetId = null,
+            array $meta = [],
+            ?string $targetType = null,
+            ?int $userId = null
+        ): ?int {
+            if (\BccTransitionWorld::$auditThrows) {
+                throw new \RuntimeException('audit exploded');
+            }
 
-        public static function requestCwBackfillRestart(int $chainId, string $reason): bool
-        {
-            \BccTransitionWorld::$writes[] = "checkpoint.restart={$reason}";
+            if (!\BccTransitionWorld::$auditOk) {
+                return null;
+            }
 
-            return true;
+            \BccTransitionWorld::$audits[] = [
+                'action' => $action,
+                'target' => (int) $targetId,
+                'meta'   => $meta,
+            ];
+            \BccTransitionWorld::$writes[] = 'audit.' . $action;
+
+            return count(\BccTransitionWorld::$audits);
         }
     }
+}
+
 }
 
 namespace BCC\Trust\Onchain\Support {
-    /** Identity verification without the network. */
+
+if (!class_exists(CosmosEndpointVerifier::class, false)) {
     final class CosmosEndpointVerifier
     {
-        /** @return array{ok: bool, reason: string, network: string|null, fingerprint: string|null} */
+        /** @return array{ok: bool, reason: string, network: string|null} */
         public static function verify(object $chain, bool $useCache = true): array
         {
-            return \BccTransitionWorld::$verifyOk
-                ? ['ok' => true, 'reason' => 'ok', 'network' => 'cosmoshub-4', 'fingerprint' => null]
-                : ['ok' => false, 'reason' => 'network_mismatch', 'network' => null, 'fingerprint' => null];
+            \BccTransitionWorld::$writes[] = 'verify(' . (string) ($chain->rest_url ?? '') . ')';
+            \BccTransitionWorld::$verifyCacheFlags[] = $useCache;
+
+            if (!\BccTransitionWorld::$verifyOk) {
+                return [
+                    'ok'      => false,
+                    'reason'  => \BccTransitionWorld::$verifyReason,
+                    'network' => null,
+                ];
+            }
+
+            // The race seam: anything that changes the row between the proof
+            // and the swap runs here.
+            if (is_callable(\BccTransitionWorld::$afterVerify)) {
+                (\BccTransitionWorld::$afterVerify)();
+            }
+
+            return ['ok' => true, 'reason' => 'ok', 'network' => 'cosmoshub-4'];
         }
     }
 }
 
-namespace BCC\Trust\Onchain\Admin {
-    /** Records the audit payload instead of writing a row. */
-    final class AdminActionSupport
-    {
-        /** @param array<string, mixed> $meta */
-        public static function audit(string $action, string $targetType, int $targetId, array $meta = []): void
-        {
-            \BccTransitionWorld::$writes[] = "audit.{$action}";
-            \BccTransitionWorld::$audits[] = ['action' => $action, 'type' => $targetType, 'id' => $targetId, 'meta' => $meta];
-        }
-    }
 }

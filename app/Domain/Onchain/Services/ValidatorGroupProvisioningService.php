@@ -1,24 +1,24 @@
 <?php
 /**
- * Validator/delegator community provisioning.
+ * Validator/delegator community creation and its minimum delegation.
  *
- * Mirror of {@see GatedGroupProvisioningService} (the NFT holder-group
- * sweep) for validator communities: one auto-provisioned closed PeepSo
- * group per CLAIMED validator (verified operator claim), titled
- * `Delegators: {moniker}`, OWNED BY THE OPERATOR (moderation has an
- * owner; owners are exempt from the gate + revoke by existing guards).
+ * Mirror of {@see GatedGroupProvisioningService} (the NFT holder-group sweep)
+ * in what it creates: a closed PeepSo group titled `Delegators: {moniker}`,
+ * OWNED BY THE OPERATOR (moderation has an owner; owners are exempt from the
+ * gate + revoke by existing guards).
  *
- * Two entry points, both idempotent:
- *   - provisionForClaim() — fired from the `bcc_page_claimed` event
- *     (entityType='validator', role='operator'); the claim is the
- *     arming act (wallet-signature proven), no delegator-count floor.
- *   - provisionAll()      — daily backfill folded into the EXISTING
- *     `bcc_gated_group_provision` cron handler; walks verified
- *     validator-operator claims so claims that predate this feature
- *     (or an event miss) still get their community.
+ * Different in what starts it. A community exists because the page's operator
+ * asked for one, through {@see \BCC\Trust\Onchain\REST\PageDelegatorGroupEndpoint},
+ * and chose the minimum there. No claim event, cron tick or admin action calls
+ * this class; `DelegatorGroupNotAutomaticTest` holds that in place.
  *
- * V1 cut: non-Cosmos chains are skipped (the join gate requires
- * chain_type='cosmos'); claim revocation does NOT delete the community.
+ * One community per validator PAGE. The gate still verifies one validator, so
+ * on a page bound to several the operator picks which at creation. Both writes
+ * here run under a per-page advisory lock: the "does one exist" read and the
+ * create have to be one step, and an old→new audit needs the old value to still
+ * be current when the new one lands.
+ *
+ * Authorization is the caller's job and is not repeated here.
  *
  * Group creation goes through PeepSoGroup's constructor so PeepSo's
  * member_owner assignment, peepso_action_group_create hook, and
@@ -30,7 +30,7 @@
 namespace BCC\Trust\Onchain\Services;
 
 use BCC\Core\Log\Logger;
-use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Repositories\ValidatorGroupRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 
@@ -40,140 +40,261 @@ if (!defined('ABSPATH')) {
 
 final class ValidatorGroupProvisioningService {
 
+    public const STATUS_CREATED   = 'created';
+    public const STATUS_EXISTS    = 'exists';
+    public const STATUS_UPDATED   = 'updated';
+    public const STATUS_UNCHANGED = 'unchanged';
+    public const STATUS_NO_GROUP  = 'no_group';
+    public const STATUS_BUSY      = 'busy';
+    public const STATUS_ERROR     = 'error';
+
     private const TITLE_PREFIX = 'Delegators: ';
 
-    /** Default min-stake gate in display units — dust-attack gate. */
-    private const DEFAULT_MIN_STAKE = '1';
+    /** Whole-token ceiling on a minimum. */
+    private const MIN_STAKE_CEILING = '1000000000';
 
     /**
-     * Backfill sweep: provision communities for every verified
-     * validator-operator claim that doesn't have one yet. Bounded by
-     * $limit claims per tick; idempotent — re-running creates no
-     * duplicates.
-     *
-     * @return array{created: int, skipped: int, errors: list<string>}
+     * Seconds a second request waits for the page lock. Long enough to outlast
+     * a group create, so the loser of a double-click gets the 409 naming the
+     * group the winner just made rather than a retry prompt.
      */
-    public function provisionAll(int $limit = 200): array {
-        $created = 0;
-        $skipped = 0;
-        $errors  = [];
+    private const LOCK_WAIT_SECONDS = 5;
 
-        $claims = ClaimRepository::listVerifiedValidatorOperatorClaims($limit);
-        if ($claims === []) {
-            return ['created' => 0, 'skipped' => 0, 'errors' => []];
+    /**
+     * A minimum as we store it, or null when it isn't one we accept: a plain
+     * positive decimal string of at most 6 decimal places, not above the ceiling.
+     * Six is not arbitrary: `CosmosFetcher::tokensToDisplay()` reports stake at
+     * 6 places, so a finer minimum could never be compared honestly.
+     *
+     * The comparison is on the digits, never a float, so the ceiling is exact
+     * and `1000000000.000001` can't round its way under it. Trailing fractional
+     * zeros are dropped so `1.50` and `1.5` are the same stored value.
+     *
+     * @param mixed $raw Anything a request body can carry.
+     */
+    public static function parseMinStake($raw): ?string {
+        // \z, not $: `$` would accept a trailing newline.
+        if (!is_string($raw) || preg_match('/\A(0|[1-9][0-9]*)(?:\.([0-9]{1,6}))?\z/', $raw, $m) !== 1) {
+            return null;
         }
 
-        foreach ($claims as $claim) {
-            $result = $this->provisionForClaim((int) $claim->user_id, (int) $claim->entity_id);
-            if ($result['status'] === 'created') {
-                $created++;
-                continue;
-            }
-            if ($result['status'] === 'error') {
-                $errors[] = $result['message'];
-                continue;
-            }
-            // exists / skipped
-            $skipped++;
+        $whole    = $m[1];
+        $fraction = rtrim($m[2] ?? '', '0');
+
+        if ($whole === '0' && $fraction === '') {
+            return null;
         }
 
-        return ['created' => $created, 'skipped' => $skipped, 'errors' => $errors];
+        $ceiling = self::MIN_STAKE_CEILING;
+        if (strlen($whole) > strlen($ceiling)
+            || (strlen($whole) === strlen($ceiling) && strcmp($whole, $ceiling) > 0)
+            || ($whole === $ceiling && $fraction !== '')
+        ) {
+            return null;
+        }
+
+        return $fraction === '' ? $whole : $whole . '.' . $fraction;
     }
 
     /**
-     * Provision the delegator community for one verified operator claim.
-     * Shared by the bcc_page_claimed subscriber, the backfill sweep, and
-     * the admin provision-now action — a community created by any path is
-     * identical.
+     * Create the page's community unless it already has one.
      *
-     * @param int $operatorUserId The claiming operator (becomes group owner).
-     * @param int $validatorId    FK into wp_bcc_onchain_validators.id.
-     * @return array{status: string, group_id: int, message: string}
-     *         status ∈ {created, exists, skipped, error}.
+     * @param int    $operatorUserId The acting operator (becomes group owner).
+     * @param int    $pageId         The validator page.
+     * @param int    $validatorId    A validator bound to that page.
+     * @param string $minStake       Output of {@see parseMinStake()}.
+     * @return array{status: string, group_id: int}
+     *         status ∈ {created, exists, busy, error}.
      */
-    public function provisionForClaim(int $operatorUserId, int $validatorId): array {
-        if ($operatorUserId <= 0 || $validatorId <= 0) {
-            return ['status' => 'skipped', 'group_id' => 0, 'message' => 'Invalid operator or validator id.'];
-        }
-
+    public function createForPage(int $operatorUserId, int $pageId, int $validatorId, string $minStake): array {
         if (!class_exists('\\PeepSoGroup')) {
             \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'peepso_absent');
-            return ['status' => 'error', 'group_id' => 0, 'message' => 'PeepSo Groups inactive.'];
+            return ['status' => self::STATUS_ERROR, 'group_id' => 0];
         }
 
+        $lock = self::lockName($pageId);
+        if (!self::acquire($lock)) {
+            return ['status' => self::STATUS_BUSY, 'group_id' => 0];
+        }
+
+        // ⚠ EXACTLY ONE RELEASE FOR THE ONE ACQUIRE ABOVE. GET_LOCK is
+        // reentrant per session, so an unmatched pair leaks the lock for the
+        // rest of the request. The `finally` covers every return path below.
+        try {
+            $existing = self::groupIdForPage($pageId);
+            if ($existing !== null) {
+                return ['status' => self::STATUS_EXISTS, 'group_id' => $existing];
+            }
+
+            return $this->create($operatorUserId, $pageId, $validatorId, $minStake);
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
+        }
+    }
+
+    /**
+     * Change the minimum on the page's community. Takes effect on the next join
+     * and the next sweep; nothing is removed here.
+     *
+     * @param string $minStake Output of {@see parseMinStake()}.
+     * @return array{status: string, group_id: int}
+     *         status ∈ {updated, unchanged, no_group, busy, error}.
+     */
+    public function updateMinStake(int $actorUserId, int $pageId, string $minStake): array {
+        $lock = self::lockName($pageId);
+        if (!self::acquire($lock)) {
+            return ['status' => self::STATUS_BUSY, 'group_id' => 0];
+        }
+
+        try {
+            $groupId = self::groupIdForPage($pageId);
+            if ($groupId === null) {
+                return ['status' => self::STATUS_NO_GROUP, 'group_id' => 0];
+            }
+
+            $stored  = ValidatorGroupRepository::readMinStake($groupId);
+            $current = self::parseMinStake($stored) ?? $stored;
+            if ($current === $minStake) {
+                return ['status' => self::STATUS_UNCHANGED, 'group_id' => $groupId];
+            }
+
+            if (!ValidatorGroupRepository::writeMinStake($groupId, $minStake)) {
+                Logger::error('[bcc-trust] delegator community minimum was not stored', [
+                    'group_id' => $groupId,
+                    'page_id'  => $pageId,
+                ]);
+                return ['status' => self::STATUS_ERROR, 'group_id' => $groupId];
+            }
+
+            AuditLogger::log('validator_group_min_stake_changed', $groupId, [
+                'page_id'       => $pageId,
+                'old_min_stake' => $current,
+                'new_min_stake' => $minStake,
+            ], 'group', $actorUserId);
+
+            return ['status' => self::STATUS_UPDATED, 'group_id' => $groupId];
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
+        }
+    }
+
+    /**
+     * The page's community, across every validator bound to it.
+     */
+    private static function groupIdForPage(int $pageId): ?int {
+        $ids = [];
+        foreach (ValidatorRepository::findAllByPageId($pageId) as $row) {
+            $ids[] = $row->validator_id;
+        }
+
+        $groups = ValidatorGroupRepository::findGroupIdsForValidators($ids);
+
+        return $groups === [] ? null : min($groups);
+    }
+
+    /**
+     * @return array{status: string, group_id: int}
+     */
+    private function create(int $operatorUserId, int $pageId, int $validatorId, string $minStake): array {
         $validator = ValidatorRepository::getByIdWithChain($validatorId);
         if ($validator === null) {
-            return ['status' => 'error', 'group_id' => 0, 'message' => sprintf('Validator %d not found.', $validatorId)];
-        }
-
-        // V1 cut: the delegation gate requires a Cosmos LCD, so only
-        // cosmos-type chains get a community. Others are skipped, not
-        // errored — the claim itself is fine.
-        if ((string) $validator->chain_type !== 'cosmos') {
-            return ['status' => 'skipped', 'group_id' => 0, 'message' => 'Non-Cosmos chain; delegator communities are Cosmos-only in V1.'];
-        }
-
-        $moniker = trim((string) ($validator->moniker ?? ''));
-        if ($moniker === '') {
-            // Skip until enrichment supplies a moniker — the backfill
-            // sweep retries next tick.
-            return ['status' => 'skipped', 'group_id' => 0, 'message' => 'Validator has no moniker yet; cannot name the community.'];
+            return ['status' => self::STATUS_ERROR, 'group_id' => 0];
         }
 
         $chainId  = (int) $validator->chain_id;
         $operator = strtolower((string) $validator->operator_address);
-        if ($chainId <= 0 || $operator === '') {
-            return ['status' => 'skipped', 'group_id' => 0, 'message' => 'Validator missing chain or operator address.'];
+
+        $name = trim((string) ($validator->moniker ?? ''));
+        if ($name === '') {
+            $post = get_post($pageId);
+            $name = $post instanceof \WP_Post ? trim($post->post_title) : '';
         }
 
-        $existing = ValidatorGroupRepository::findGroupForValidator($chainId, $validatorId);
-        if ($existing !== null) {
-            return ['status' => 'exists', 'group_id' => $existing, 'message' => 'Community already exists.'];
+        if ($chainId <= 0 || $operator === '' || $name === '') {
+            Logger::error('[bcc-trust] delegator community cannot be created from this validator row', [
+                'validator_id' => $validatorId,
+                'page_id'      => $pageId,
+            ]);
+            return ['status' => self::STATUS_ERROR, 'group_id' => 0];
         }
 
-        // The claiming operator must still be a real user — a deleted
-        // account can't own a group.
-        if (!get_userdata($operatorUserId)) {
-            return ['status' => 'skipped', 'group_id' => 0, 'message' => sprintf('Operator user %d no longer exists.', $operatorUserId)];
-        }
-
-        $groupId = $this->createPeepSoGroup($operatorUserId, $moniker);
+        $groupId = $this->createPeepSoGroup($operatorUserId, $name);
         if ($groupId === 0) {
             \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'group_create_failed');
-            return ['status' => 'error', 'group_id' => 0, 'message' => sprintf('PeepSoGroup creation returned 0 for validator %d (%s).', $validatorId, $operator)];
+            return ['status' => self::STATUS_ERROR, 'group_id' => 0];
         }
 
-        /**
-         * Dust-attack gate: minimum delegated stake in display units.
-         * Filterable so a chain-specific threshold can be tuned without
-         * a release; positional args (validatorId, chainId).
-         *
-         * @var string $minStake
-         */
-        $minStake = apply_filters(
-            'bcc_validator_group_min_stake',
-            self::DEFAULT_MIN_STAKE,
-            $validatorId,
-            $chainId
-        );
+        ValidatorGroupRepository::writeGateConfig($groupId, $chainId, $validatorId, $operator, $minStake);
 
-        ValidatorGroupRepository::writeGateConfig(
-            $groupId,
-            $chainId,
-            $validatorId,
-            $operator,
-            (string) $minStake
-        );
+        // Without its gate this would be an ordinary closed group the exists
+        // check can't see, so a retry would make a second. Prove the gate
+        // landed or take the group back out.
+        wp_cache_delete($groupId, 'post_meta');
+        $config = ValidatorGroupRepository::getGateConfig($groupId);
+        if ($config === null || !ValidatorGroupRepository::minStakeIsStored($groupId, $minStake)) {
+            $this->undoCreate($groupId, $operatorUserId, $validatorId);
+            return ['status' => self::STATUS_ERROR, 'group_id' => 0];
+        }
 
-        Logger::info('[bcc-trust] Provisioned delegator community', [
-            'group_id'     => $groupId,
+        AuditLogger::log('validator_group_created', $groupId, [
+            'page_id'      => $pageId,
             'validator_id' => $validatorId,
             'chain_id'     => $chainId,
-            'operator'     => $operator,
+            'min_stake'    => $minStake,
+        ], 'group', $operatorUserId);
+
+        Logger::info('[bcc-trust] Created delegator community', [
+            'group_id'     => $groupId,
+            'page_id'      => $pageId,
+            'validator_id' => $validatorId,
+            'chain_id'     => $chainId,
             'owner_id'     => $operatorUserId,
         ]);
 
-        return ['status' => 'created', 'group_id' => $groupId, 'message' => 'Community created.'];
+        return ['status' => self::STATUS_CREATED, 'group_id' => $groupId];
+    }
+
+    /**
+     * Take back a group whose gate didn't land. Same order and reasons as
+     * GatedGroupProvisioningService::compensate, for the one failure this class
+     * can reach: PeepSo's group delete leaves the member row behind.
+     */
+    private function undoCreate(int $groupId, int $ownerId, int $validatorId): void {
+        ValidatorGroupRepository::deleteGateConfig($groupId);
+
+        if (class_exists('\\PeepSoGroupUser')) {
+            try {
+                (new \PeepSoGroupUser($groupId, $ownerId))->member_leave();
+            } catch (\Throwable $e) {
+                Logger::warning('[bcc-trust] delegator community owner row not removed', [
+                    'group_id' => $groupId,
+                    'error'    => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $deleted = wp_delete_post($groupId, true);
+
+        \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'group_create_failed');
+        Logger::error('[bcc-trust] delegator community gate did not land; group removed', [
+            'group_id'     => $groupId,
+            'validator_id' => $validatorId,
+            'deleted'      => (bool) $deleted,
+        ]);
+    }
+
+    private static function lockName(int $pageId): string {
+        return 'bcc_delegator_group:' . $pageId;
+    }
+
+    /**
+     * Fails CLOSED when bcc-core's AdvisoryLock primitive is unavailable: the
+     * check-then-create never runs unlocked. NULL-vs-0 handling lives inside
+     * AdvisoryLock::acquire; both are false here.
+     */
+    private static function acquire(string $lock): bool {
+        return class_exists('\\BCC\\Core\\DB\\AdvisoryLock')
+            && \BCC\Core\DB\AdvisoryLock::acquire($lock, self::LOCK_WAIT_SECONDS);
     }
 
     /**
@@ -182,16 +303,11 @@ final class ValidatorGroupProvisioningService {
      * Deliberate mirror of GatedGroupProvisioningService::createPeepSoGroup
      * (private there; the title/description/owner semantics differ).
      */
-    private function createPeepSoGroup(int $ownerId, string $moniker): int {
-        $title = self::TITLE_PREFIX . $moniker;
-
+    private function createPeepSoGroup(int $ownerId, string $name): int {
         $data = [
             'owner_id'    => $ownerId,
-            'name'        => $title,
-            'description' => sprintf(
-                'Delegation-verified community for %s delegators. Auto-managed.',
-                $moniker
-            ),
+            'name'        => self::TITLE_PREFIX . $name,
+            'description' => sprintf('Delegation-verified community for %s delegators.', $name),
             'meta' => [
                 'privacy'                     => 1, // PeepSoGroupPrivacy::PRIVACY_CLOSED
                 'is_joinable'                 => true,
@@ -209,8 +325,8 @@ final class ValidatorGroupProvisioningService {
             return $id > 0 ? $id : 0;
         } catch (\Throwable $e) {
             Logger::error('[bcc-trust] PeepSoGroup constructor threw (delegator community)', [
-                'moniker' => $moniker,
-                'error'   => $e->getMessage(),
+                'name'  => $name,
+                'error' => $e->getMessage(),
             ]);
             return 0;
         }

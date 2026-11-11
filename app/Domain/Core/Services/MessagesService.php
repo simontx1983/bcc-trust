@@ -7,7 +7,8 @@
  *     conversation graph)
  *   - bcc-core PeepSoMessageWriter (only write path that hits
  *     peepso_message_* + the peepso-message CPT)
- *   - bcc-core PeepSoBlockRepository (mutual-block gate)
+ *   - bcc-core PeepSoBlockRepository (the mutual-block SEND gate, and
+ *     separately the one-directional READ treatment below)
  *   - peepso-messages PeepSoChatModel (chat_enabled + chat_friends_only
  *     primitives — exposed via MyMessagesPrefsEndpoint)
  *   - peepso-friends PeepSoFriendsModel (are_friends gate)
@@ -23,6 +24,47 @@
  *      returns false → bcc_forbidden
  *   5. PeepSoBlockRepository::isMutuallyBlocked(sender, recipient) →
  *      bcc_not_found (404, info-leak shielded; never reveals the block)
+ *
+ * Read-side blocked-sender treatment (#122, policy (b) "hide-on-read"):
+ *   A message whose author THE VIEWER HAS BLOCKED is annotated
+ *   `sender_blocked_by_viewer` and dropped from the unread counts. It is
+ *   still delivered, still visible to every other participant, and the
+ *   sender is never told — this is a display and notification
+ *   treatment, NOT a security boundary.
+ *
+ *   ⚠ The predicate is ONE-DIRECTIONAL and viewer-relative: "the
+ *   viewer blocked the author", never `isMutuallyBlocked`. "The sender
+ *   blocked me" must not hide that sender's message FROM me.
+ *
+ *   ⚠ NEITHER the inbox preview NOR the thread body carries the real
+ *   text for a blocked sender. The thread originally did — the client
+ *   was to collapse it — but that left the text in the browser whether
+ *   the viewer revealed it or not, so the decision became "fetch only
+ *   when tapped".
+ *
+ *   ⚠ The blocker also gets NO EMAIL and NO LIVE PING. Both are
+ *   per-recipient vetoes scoped to one send. ⚠ Their "allow" values are
+ *   OPPOSITE — the mail filter returns the recipient id, the metadata
+ *   filter returns the incoming `$check` (null) — see each factory.
+ *   ⚠ Nothing suppresses SSE, because PeepSo's SSE trigger returns at
+ *   its first statement and fires for nobody; the live signal it really
+ *   uses is the `peepso_should_get_chats` user option.
+ *
+ *   ⚠ `revealMessageBody` is therefore the ONLY path that returns a
+ *   blocked sender's text, and it does so on an explicit per-message
+ *   request. It is deliberately NOT a block check: it returns the body
+ *   whether or not the sender is blocked, because it is the viewer
+ *   asking for one specific message they can already see the metadata
+ *   of. Gating it on the block would make it useless the moment the
+ *   viewer unblocked someone, and would leak the block state through a
+ *   status code.
+ *
+ *   ⚠ None of this touches a write gate. The existing 1-on-1
+ *   mutual-block re-check in `sendToExistingConversation` is unchanged,
+ *   and a blocked user's group reply is still delivered — option (c)
+ *   ("prevent group reply") was considered and rejected on #122, because
+ *   refusing the write tells the blocked user they are blocked and costs
+ *   the other participants a message.
  *
  * Recipient-facing gates 3–5 are applied by the ONE policy evaluator
  * (`evaluatePolicy`) under a named MessagingPolicy context — the
@@ -99,6 +141,24 @@ final class MessagesService
     /** Last-message preview cap on the inbox list (chars after strip). */
     private const PREVIEW_MAX_CHARS = 200;
 
+    /**
+     * What the inbox preview AND the thread body say instead of the real
+     * text when the viewer has blocked the sender (#122).
+     *
+     * ⚠ One constant for both surfaces on purpose. The frontend matches
+     * these exact words, and two strings that had to agree would be two
+     * strings that could drift.
+     *
+     * ⚠ Substituted SERVER-SIDE. Sending the real preview and hiding it
+     * in the client would put the text the viewer asked not to see into
+     * the payload, which is not hiding it.
+     *
+     * ⚠ Operator-facing copy, so it is deliberately flat: it states a
+     * fact about the viewer's own earlier action and asks for nothing.
+     * No count, no elapsed time, no suggestion to reconsider.
+     */
+    private const BLOCKED_PREVIEW_PLACEHOLDER = 'Message from someone you have blocked';
+
     public function __construct(
         private readonly UserMiniRepository $userMiniRepo
     ) {
@@ -158,6 +218,28 @@ final class MessagesService
         }
         $userViews = $this->resolveUserMinisById(array_keys($authorIds));
 
+        // #122: which of the LAST-MESSAGE authors has this viewer
+        // blocked? One bounded query for the page.
+        //
+        // ⚠ Scoped to last-message authors (<= INBOX_PER_PAGE_MAX, 50),
+        // NOT to $authorIds. That also holds every participant of every
+        // conversation on the page, which at 50 conversations can exceed
+        // getBlockedSet's 500-candidate cap and silently truncate — and
+        // the inbox preview is the only thing that needs this.
+        $lastAuthorIds = [];
+        foreach ($rows as $r) {
+            $lastAuthorIds[(int) $r['last_msg_author_id']] = true;
+        }
+        // ⚠ FAIL CLOSED. `null` means the block read FAILED, not that
+        // nobody is blocked. `[]` would show every sender's text, which
+        // is the exact disclosure this feature exists to prevent, so an
+        // unreadable block table withholds EVERY preview instead. Ugly
+        // on a DB error, safe, and self-correcting on the next request.
+        // `$lastAuthorIds` is already keyed `[authorId => true]`, so it IS the
+        // "everyone is blocked" set — minus the viewer; see the helper.
+        $blockedSet = PeepSoBlockRepository::getBlockedSetOrUnknown($viewerId, array_keys($lastAuthorIds))
+            ?? self::withholdAllExceptViewer($lastAuthorIds, $viewerId);
+
         $items = [];
         foreach ($rows as $r) {
             $rootId       = (int) $r['root_msg_id'];
@@ -169,12 +251,7 @@ final class MessagesService
                 'is_group'       => (bool) $r['is_group'],
                 'participants'   => self::resolveUserMinis($participants, $userViews),
                 'peer'           => $peerId !== null ? ($userViews[$peerId] ?? null) : null,
-                'last_message'   => [
-                    'id'          => (int) $r['last_msg_id'],
-                    'author'      => $userViews[(int) $r['last_msg_author_id']] ?? null,
-                    'preview'     => self::previewBody((string) $r['last_msg_content']),
-                    'posted_at'   => self::isoFromMysql((string) $r['last_msg_posted_at']),
-                ],
+                'last_message'   => self::shapeInboxLastMessage($r, $userViews, $blockedSet),
                 'unread_count'   => $unreadByRoot[$rootId] ?? 0,
                 'last_activity'  => $r['last_activity'] !== null
                     ? self::isoFromMysql((string) $r['last_activity'])
@@ -344,6 +421,24 @@ final class MessagesService
             $authorIds[] = (int) $r['author_id'];
         }
         $userViews = $this->resolveUserMinisById(array_values(array_unique($authorIds)));
+
+        // #122: which of THIS PAGE's message authors has the viewer
+        // blocked? Scoped to the page's authors (<= THREAD_PER_PAGE_MAX,
+        // 100), well inside getBlockedSet's 500-candidate cap.
+        $pageAuthorIds = [];
+        foreach ($rows as $r) {
+            $pageAuthorIds[(int) $r['author_id']] = true;
+        }
+        // ⚠ FAIL CLOSED. `null` means the block read FAILED, not that
+        // nobody is blocked. `[]` would show every sender's text, which
+        // is the exact disclosure this feature exists to prevent, so an
+        // unreadable block table withholds EVERY preview instead. Ugly
+        // on a DB error, safe, and self-correcting on the next request.
+        // `$pageAuthorIds` is already keyed `[authorId => true]`, so it IS the
+        // "everyone is blocked" set — minus the viewer; see the helper.
+        $blockedSet = PeepSoBlockRepository::getBlockedSetOrUnknown($viewerId, array_keys($pageAuthorIds))
+            ?? self::withholdAllExceptViewer($pageAuthorIds, $viewerId);
+
         $peerId = self::resolvePeerId(
             $participants,
             $viewerId,
@@ -352,13 +447,7 @@ final class MessagesService
 
         $items = [];
         foreach ($rows as $r) {
-            $items[] = [
-                'id'                => (int) $r['id'],
-                'author'            => $userViews[(int) $r['author_id']] ?? null,
-                'body'              => (string) $r['body'],
-                'posted_at'         => self::isoFromMysql((string) $r['posted_at']),
-                'is_inline_notice'  => $r['post_type'] === 'peepso-message-notic',
-            ];
+            $items[] = self::shapeThreadMessageRow($r, $userViews, $blockedSet);
         }
 
         // After serving the page, mark this conversation viewed so the
@@ -659,13 +748,27 @@ final class MessagesService
             MessagingPolicy::NORMAL_DM,
             $viewerId,
             $recipientId,
-            'Recipient not found.'
+            'Recipient not found.',
+            // ⚠ WRITE path: refuse with a retryable 503 if the block
+            // table cannot be read. See evaluatePolicy().
+            true
         );
         if ($gate !== null) {
             return ['error' => $gate['error'], 'message' => $gate['message']];
         }
 
-        $result = PeepSoMessageWriter::sendNewMessage($viewerId, $recipientId, $body);
+        // #122: no email AND no live chat-ping to a recipient who has
+        // blocked this sender. Both vetoes are scoped to this one send.
+        $veto     = self::blockedRecipientMailVeto($viewerId);
+        $pingVeto = self::blockedRecipientChatPingVeto($viewerId);
+        add_filter('peepso_mailqueue_allowed', $veto, 99);
+        add_filter('update_user_metadata', $pingVeto, 99, 3);
+        try {
+            $result = PeepSoMessageWriter::sendNewMessage($viewerId, $recipientId, $body);
+        } finally {
+            remove_filter('update_user_metadata', $pingVeto, 99);
+            remove_filter('peepso_mailqueue_allowed', $veto, 99);
+        }
         if ($result === null) {
             return ['error' => 'bcc_unavailable', 'message' => 'Could not send your message.'];
         }
@@ -704,14 +807,31 @@ final class MessagesService
                 MessagingPolicy::NORMAL_DM,
                 $viewerId,
                 $peerId,
-                'Conversation not found.'
+                'Conversation not found.',
+                // ⚠ WRITE path: refuse with a retryable 503 if the block
+                // table cannot be read. See evaluatePolicy().
+                true
             );
             if ($gate !== null) {
                 return ['error' => $gate['error'], 'message' => $gate['message']];
             }
         }
 
-        $messageId = PeepSoMessageWriter::sendInConversation($viewerId, $rootMsgId, $body);
+        // #122: no email to any participant who has blocked this
+        // sender. PeepSo fans the notification out per recipient inside
+        // the writer, so a per-recipient veto is the only seam that can
+        // tell them apart — which is exactly why this is a group-thread
+        // fix and not a 1-on-1 one.
+        $veto     = self::blockedRecipientMailVeto($viewerId);
+        $pingVeto = self::blockedRecipientChatPingVeto($viewerId);
+        add_filter('peepso_mailqueue_allowed', $veto, 99);
+        add_filter('update_user_metadata', $pingVeto, 99, 3);
+        try {
+            $messageId = PeepSoMessageWriter::sendInConversation($viewerId, $rootMsgId, $body);
+        } finally {
+            remove_filter('update_user_metadata', $pingVeto, 99);
+            remove_filter('peepso_mailqueue_allowed', $veto, 99);
+        }
         if ($messageId <= 0) {
             return ['error' => 'bcc_unavailable', 'message' => 'Could not send your message.'];
         }
@@ -752,12 +872,142 @@ final class MessagesService
         return ['ok' => true];
     }
 
+    /**
+     * The real body of ONE message in a conversation the viewer
+     * participates in — the explicit tap-to-reveal fetch behind the
+     * substituted thread body (#122).
+     *
+     * Reuses the same primitives `getThread` gates on, in the same
+     * order, plus two: the message's own root conversation must be the
+     * conversation asked for, AND the viewer must actually have a
+     * recipient row for it. Nothing here is new machinery.
+     *
+     * ⚠⚠ THE GOVERNING INVARIANT: a reveal returns no more than the
+     * thread read would have returned for this viewer. That is why the
+     * recipient check exists and why it is shaped exactly like
+     * `findMessagesInConversation`'s own predicate — including the
+     * absence of an `mrec_deleted` filter, which the thread read also
+     * omits. Too loose discloses a message PeepSo never delivered
+     * (notably one sent AFTER the other party blocked the viewer:
+     * `add_message` builds recipient rows through a participants query
+     * that LEFT JOINs `peepso_blocks` in both directions, so the
+     * blocked side gets no row at all). Too strict produces a message
+     * the viewer can read in the thread but cannot reveal.
+     *
+     * ⚠⚠ EVERY refusal is the SAME 404 with the SAME message. "You are
+     * not a participant", "that message is not in this conversation",
+     * "that message was never sent to you" and "no such message" must be
+     * indistinguishable, or the route becomes an oracle for probing
+     * which message ids exist and which conversations a stranger
+     * belongs to. That is why there is one `notFound` local and every
+     * branch returns it.
+     *
+     * ⚠ It does NOT mark anything read. `getThread` deliberately marks
+     * the conversation viewed as a side effect of serving a page;
+     * revealing one message is not reading the thread, and making it
+     * clear the badge would let a reveal silently dismiss unread
+     * messages the viewer never saw.
+     *
+     * ⚠ It does NOT consult the block. See the class docblock: gating
+     * on the block would leak block state through a status code and
+     * would break the moment the viewer unblocked someone.
+     *
+     * @return array{id: int, body: string}|array{error: string, message: string}
+     */
+    public function revealMessageBody(int $viewerId, int $rootMsgId, int $messageId): array
+    {
+        if ($viewerId <= 0) {
+            return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
+        }
+
+        // One refusal, used by every failure branch below.
+        $notFound = ['error' => 'bcc_not_found', 'message' => 'Conversation not found.'];
+
+        if ($messageId <= 0) {
+            return $notFound;
+        }
+
+        $rootMsgId = PeepSoMessageRepository::findRootConversationId($rootMsgId);
+        if ($rootMsgId <= 0) {
+            return $notFound;
+        }
+        if (!PeepSoMessageRepository::userIsParticipant($viewerId, $rootMsgId)) {
+            return $notFound;
+        }
+
+        // The message must belong to THIS conversation. Resolving the
+        // message's own root and comparing is what makes a cross-thread
+        // id a 404 rather than a disclosure.
+        if (PeepSoMessageRepository::findRootConversationId($messageId) !== $rootMsgId) {
+            return $notFound;
+        }
+
+        // ⚠⚠ THE FOURTH GATE, and the one review found missing.
+        // Participation is NOT the same as having been SENT this
+        // message: `getThread` is RECIPIENT-scoped, so a participant
+        // who has no recipient row for a message never saw it in the
+        // thread and must not be able to reveal it. This is deliberately
+        // ANDed with the conversation check above rather than replacing
+        // it — the primitive asks only "was this message sent to this
+        // viewer", with no conversation in the predicate, so on its own
+        // it would let a message the viewer received in ANOTHER
+        // conversation be fetched through this one's id.
+        if (!PeepSoMessageRepository::viewerReceivedMessage($viewerId, $messageId)) {
+            return $notFound;
+        }
+
+        $post = get_post($messageId);
+        if (!$post instanceof \WP_Post) {
+            return $notFound;
+        }
+        // Same predicates the thread read applies, so a draft, a trashed
+        // row or a non-message post type cannot be revealed.
+        if (!in_array($post->post_type, ['peepso-message', 'peepso-message-notic'], true)) {
+            return $notFound;
+        }
+        if ($post->post_status !== 'publish') {
+            return $notFound;
+        }
+
+        return [
+            'id'   => (int) $post->ID,
+            'body' => (string) $post->post_content,
+        ];
+    }
+
     public function getUnreadCount(int $viewerId): int
     {
         if ($viewerId <= 0) {
             return 0;
         }
         return PeepSoMessageRepository::getUnreadConversationCountForUser($viewerId);
+    }
+
+    /**
+     * The "everyone is blocked" set used when the block read FAILS.
+     *
+     * ⚠⚠ THE VIEWER MUST BE REMOVED. The author-id maps are built from
+     * MESSAGE AUTHORS, and in any conversation the viewer has replied to
+     * they author some of those messages — so a naive "treat every
+     * author as blocked" fallback makes THE VIEWER'S OWN TEXT render as
+     * "Message from someone you have blocked", with
+     * `sender_blocked_by_viewer: true` against themselves. Withholding a
+     * blocked sender's words is the feature; withholding the viewer's
+     * own is just a bug.
+     *
+     * ⚠ It is also a set the real probe CANNOT RETURN:
+     * `getBlockedSetOrUnknown` filters `$id !== $blockerId`, so the
+     * viewer never appears in a successful result. A fallback including
+     * them would be strictly MORE inclusive than any real answer, which
+     * is the tell that it was wrong rather than merely untidy.
+     *
+     * @param array<int, true> $authorIds
+     * @return array<int, true>
+     */
+    private static function withholdAllExceptViewer(array $authorIds, int $viewerId): array
+    {
+        unset($authorIds[$viewerId]);
+        return $authorIds;
     }
 
     // ── Read eligibility (card view-models) ─────────────────────────────
@@ -802,7 +1052,25 @@ final class MessagesService
             return self::eligibilityDeny(null, 'messaging_unavailable');
         }
 
-        $gate = self::evaluatePolicy(MessagingPolicy::NORMAL_DM, $viewerId, $recipientId);
+        // ⚠ `refuseOnUnknownBlock: true` makes an UNREADABLE block table
+        // answer `reason_code: 'unavailable'` with `unlock_hint: null`
+        // instead of silently reporting "you may message this person"
+        // and then 503-ing on submit. The existing `eligibilityDeny`
+        // line already produces exactly that shape, so no mapping is
+        // added here.
+        //
+        // ⚠⚠ THIS MUST STAY IN STEP WITH `canMessageMany()` BELOW. They
+        // answer the same question on different surfaces (profile vs
+        // card lists), and a viewer seeing "unavailable" on one and a
+        // live Message button on the other is worse than either being
+        // wrong consistently. A test asserts the two payloads are
+        // IDENTICAL for the same pair.
+        $gate = self::evaluatePolicy(
+            MessagingPolicy::NORMAL_DM,
+            $viewerId,
+            $recipientId,
+            refuseOnUnknownBlock: true
+        );
         if ($gate !== null) {
             return self::eligibilityDeny($gate['unlock_hint'], $gate['reason_code']);
         }
@@ -860,21 +1128,49 @@ final class MessagesService
      * The recipient-side gate for a one-time first-claim backlog
      * delivery: under VALIDATOR_FIRST_CLAIM_RELEASE the operator's
      * chat_enabled and friends_only are bypassed, but a mutual block
-     * still shields. True when the message must be suppressed for a
-     * block.
+     * still shields.
      *
      * The delivery worker calls THIS rather than checking the block
      * itself, so what "the one-time bypass" enforces lives in exactly
      * one place (the policy evaluator) — the worker and the policy
-     * definition cannot drift on it.
+     * definition cannot drift on it. That property is preserved: the
+     * worker still routes through this method and never touches
+     * `PeepSoBlockRepository`.
+     *
+     * ⚠⚠ TRI-STATE, AND THE THIRD CASE IS THE WHOLE POINT (F-99):
+     *
+     *     true   suppress — a block really does shield this delivery
+     *     false  release  — definitely not blocked
+     *     null   DEFER    — the block table could not be read
+     *
+     * It used to return a plain bool, which collapsed null into
+     * "release": a transient DB fault during the sweep would DELIVER a
+     * queued first-claim message to an operator who had blocked the
+     * sender. Failing the other way is just as wrong, because the
+     * worker's suppression is TERMINAL ("never delivered, never
+     * retried") — so a blip would permanently destroy a legitimate
+     * message. Neither direction is acceptable, which is why the caller
+     * is told to DEFER instead of being handed a guess.
+     *
+     * @return bool|null null = could not determine; the caller must
+     *                   neither release nor suppress.
      */
-    public static function firstClaimReleaseBlocked(int $senderId, int $operatorId): bool
+    public static function firstClaimReleaseBlocked(int $senderId, int $operatorId): ?bool
     {
-        return self::evaluatePolicy(
+        $gate = self::evaluatePolicy(
             MessagingPolicy::VALIDATOR_FIRST_CLAIM_RELEASE,
             $senderId,
-            $operatorId
-        ) !== null;
+            $operatorId,
+            refuseOnUnknownBlock: true
+        );
+
+        if ($gate === null) {
+            return false;
+        }
+        if (($gate['error'] ?? '') === 'bcc_unavailable') {
+            return null;
+        }
+        return true;
     }
 
     /**
@@ -915,7 +1211,31 @@ final class MessagesService
         // Prime recipient usermeta so chatEnabled/chatFriendsOnly are
         // cache hits (same trick PageCardPrefetcher uses for owners).
         cache_users($ids);
-        $blocked = \BCC\Core\Repositories\PeepSoBlockRepository::getMutuallyBlockedSet($viewerId, $ids);
+        // ⚠ `null` means the block table could not be READ — not that
+        // nobody is blocked. `[]` would hand every candidate a live
+        // Message button that 503s on submit (the write gate refuses on
+        // the same unknown), so the whole batch answers "unavailable"
+        // instead.
+        //
+        // ⚠ A UNIFORM answer leaks nothing about any individual pair,
+        // which is why one payload for every id is safe here. It is also
+        // the existing house shape on this method — the anonymous and
+        // sender-gate branches above both `array_fill_keys` a single
+        // payload.
+        //
+        // ⚠⚠ `'unavailable'` is deliberately a DIFFERENT code from the
+        // `messaging_unavailable` that block / !userExists / !chatEnabled
+        // all share below (the §4.19 info-leak shield). That shield hides
+        // WHICH of those three applies; this code says "we could not
+        // tell", which is a fact about the request rather than about the
+        // pair, so it reveals nothing the shield protects.
+        $blocked = \BCC\Core\Repositories\PeepSoBlockRepository::getMutuallyBlockedSetOrUnknown(
+            $viewerId,
+            $ids
+        );
+        if ($blocked === null) {
+            return array_fill_keys($ids, self::eligibilityDeny(null, 'unavailable'));
+        }
 
         /** @var array<int, true>|null $friendIds lazily fetched */
         $friendIds = null;
@@ -995,11 +1315,39 @@ final class MessagesService
         string $context,
         int $senderId,
         int $recipientId,
-        string $shieldMessage = 'Recipient not found.'
+        string $shieldMessage = 'Recipient not found.',
+        bool $refuseOnUnknownBlock = false
     ): ?array {
+        // ⚠ `isMutuallyBlockedOrUnknown` is the EITHER-DIRECTION probe
+        // despite the name — true when A blocked B *or* B blocked A.
+        $blockState = PeepSoBlockRepository::isMutuallyBlockedOrUnknown($senderId, $recipientId);
+
+        // ⚠⚠ UNKNOWN IS HANDLED PER CALLER, NOT HERE, AND THAT IS
+        // DELIBERATE. `$refuseOnUnknownBlock` is passed true by the two
+        // WRITE paths only, so an unreadable block table refuses a send
+        // with a RETRYABLE 503 rather than admitting it. The READ paths
+        // leave it false and so behave EXACTLY as before this change.
+        //
+        // Why the reads are not switched at the same time: `canMessage`
+        // comes through here, but `canMessageMany` checks blocks via its
+        // own batch `getMutuallyBlockedSet` and does NOT. Flipping only
+        // this one would make the single and batch reads of the same
+        // question disagree for the same viewer and recipient, which is
+        // worse than both being wrong consistently. They are changed
+        // together in the follow-up, in lockstep.
+        if ($blockState === null && $refuseOnUnknownBlock) {
+            return [
+                'error'       => 'bcc_unavailable',
+                'message'     => 'Messaging is temporarily unavailable. Please try again.',
+                'gate'        => 'block_read_failed',
+                'reason_code' => 'unavailable',
+                'unlock_hint' => null,
+            ];
+        }
+
         // Mutual-block shield — enforced in EVERY context (404, never
         // reveals the block).
-        if (PeepSoBlockRepository::isMutuallyBlocked($senderId, $recipientId)) {
+        if ($blockState === true) {
             return [
                 'error'       => 'bcc_not_found',
                 'message'     => $shieldMessage,
@@ -1165,6 +1513,233 @@ final class MessagesService
      * which can carry filtered HTML / shortcodes; previews want plain
      * text.
      */
+    /**
+     * One thread message, for `getThread`.
+     *
+     * ⚠ `body` IS SUBSTITUTED when the sender is blocked, and that is a
+     * reversal of the first #122 decision, recorded here because the
+     * reasoning changed rather than the code being wrong before.
+     *
+     * The original shape sent the real text and let the client collapse
+     * it. That keeps tap-to-reveal free of a round trip, but it also
+     * means the text the viewer asked not to see is sitting in their
+     * browser whether they reveal it or not. The decision became "fetch
+     * only when tapped": the thread carries the placeholder, and
+     * `revealMessageBody` is the one path that returns the real text, on
+     * an explicit request for one message.
+     *
+     * ⚠ So the real body must appear NOWHERE in a thread response for a
+     * blocked sender — not in `body`, not in any sibling key. The test
+     * asserts that over the serialised row rather than over `body`
+     * alone.
+     *
+     * @param array<string, mixed> $r
+     * @param array<int, UserMini> $userViews
+     * @param array<int, true>     $blockedSet
+     * @return array{
+     *     id: int,
+     *     author: UserMini|null,
+     *     body: string,
+     *     posted_at: string,
+     *     is_inline_notice: bool,
+     *     sender_blocked_by_viewer: bool
+     * }
+     */
+    private static function shapeThreadMessageRow(array $r, array $userViews, array $blockedSet): array
+    {
+        $authorId = (int) $r['author_id'];
+
+        return [
+            'id'                       => (int) $r['id'],
+            'author'                   => $userViews[$authorId] ?? null,
+            'body'                     => isset($blockedSet[$authorId])
+                ? self::BLOCKED_PREVIEW_PLACEHOLDER
+                : (string) $r['body'],
+            'posted_at'                => self::isoFromMysql((string) $r['posted_at']),
+            'is_inline_notice'         => $r['post_type'] === 'peepso-message-notic',
+            'sender_blocked_by_viewer' => isset($blockedSet[$authorId]),
+        ];
+    }
+
+    /**
+     * The `last_message` block of one inbox row.
+     *
+     * ⚠ This is the ONE place the real text is withheld, and it is
+     * withheld rather than hidden: `previewBody` is not called at all for
+     * a blocked sender, so the message text never enters the payload. An
+     * inbox row carries no reveal affordance, which is why the inbox and
+     * the thread differ.
+     *
+     * @param array<string, mixed> $r
+     * @param array<int, UserMini> $userViews
+     * @param array<int, true>     $blockedSet
+     * @return array{
+     *     id: int,
+     *     author: UserMini|null,
+     *     preview: string,
+     *     posted_at: string,
+     *     sender_blocked_by_viewer: bool
+     * }
+     */
+    private static function shapeInboxLastMessage(array $r, array $userViews, array $blockedSet): array
+    {
+        $authorId = (int) $r['last_msg_author_id'];
+        $blocked  = isset($blockedSet[$authorId]);
+
+        return [
+            'id'                       => (int) $r['last_msg_id'],
+            'author'                   => $userViews[$authorId] ?? null,
+            'preview'                  => $blocked
+                ? self::BLOCKED_PREVIEW_PLACEHOLDER
+                : self::previewBody((string) $r['last_msg_content']),
+            'posted_at'                => self::isoFromMysql((string) $r['last_msg_posted_at']),
+            'sender_blocked_by_viewer' => $blocked,
+        ];
+    }
+
+    /**
+     * PeepSo's own supported veto point for a per-message email, scoped
+     * to ONE send by add-around-the-write / remove-in-`finally`.
+     *
+     * ⚠ It must be registered around the write and never globally. The
+     * hook in `peepso/classes/mailqueue.php` is
+     * `apply_filters('peepso_mailqueue_allowed', $user_id, TRUE)` — the
+     * filtered VALUE is the recipient and the sender is not passed at
+     * all, so the only way to answer "has this recipient blocked the
+     * sender" is to close over the sender.
+     *
+     * ⚠ It returns the ORIGINAL `$user_id` to allow, not `true`. PeepSo
+     * consumes the value as `if (!apply_filters(...)) return FALSE;`, so
+     * truthiness is what decides — but replacing a user id with `true`
+     * for every allowed recipient would corrupt the value for any filter
+     * later in the chain. The pre-existing precedent in
+     * ValidatorMsgQueueWorker returns a bare `false` because it vetoes
+     * EVERY recipient of that send; this one is per-recipient and must
+     * not.
+     *
+     * @return \Closure(mixed): mixed
+     */
+    private static function blockedRecipientMailVeto(int $senderId): \Closure
+    {
+        return static function ($mailRecipientId) use ($senderId) {
+            $recipientId = (int) $mailRecipientId;
+            // ⚠ FAIL CLOSED: `!== false` suppresses on true AND on null
+            // ("could not tell"). Suppressing one notification on a DB
+            // error costs a recipient one email/ping for one send;
+            // letting it through emails and pings someone who blocked
+            // this sender about a message PeepSo will not even deliver
+            // to them. The cheap direction is the safe one here.
+            // ⚠ THE GUARD MUST SHORT-CIRCUIT. Hoisting the probe above
+            // `$recipientId > 0` made it run for a non-user recipient
+            // (id 0) and cost a query the existing tests correctly
+            // forbid — they caught it, which is why the whole suite is
+            // run and not just the new file.
+            if ($recipientId > 0
+                && PeepSoBlockRepository::isBlockingOrUnknown($recipientId, $senderId) !== false) {
+                return false;
+            }
+            return $mailRecipientId;
+        };
+    }
+
+    /**
+     * Per-recipient veto of PeepSo's live "you have new chats" ping
+     * (#122), through WordPress's own `update_user_metadata`
+     * short-circuit.
+     *
+     * ⚠⚠ THIS VETO'S "ALLOW" VALUE IS THE OPPOSITE OF THE MAIL ONE,
+     * and getting it wrong is silent and site-wide.
+     * `peepso_mailqueue_allowed` filters the RECIPIENT ID, so allowing
+     * means returning that id. `update_metadata` short-circuits on ANY
+     * non-null return (`if (null !== $check) return (bool) $check;`), so
+     * allowing means returning the INCOMING `$check` — normally null.
+     * Returning `true` here would make every user-meta write in the
+     * process report success without writing anything, for the duration
+     * of one send. Two vetoes, two polarities, one feature.
+     *
+     * ⚠ `$check` is returned rather than a literal `null` so an earlier
+     * filter in the chain keeps its decision; this veto only ever adds a
+     * refusal, never overrides someone else's.
+     *
+     * ⚠ `accepted_args` MUST be 3. `add_filter` defaults it to 1, and
+     * with 1 the callback never receives `$object_id` or `$meta_key` —
+     * it would then either fatal on PHP 8 or, with defaults, match every
+     * meta key for every user. That is the same footgun as
+     * `pre_wp_mail`'s two-argument signature.
+     *
+     * ⚠ The key is matched by ANCHORED PATTERN rather than by building
+     * `$wpdb->get_blog_prefix() . 'peepso_should_get_chats'`, because
+     * §1 / arch-guardrails forbid `$wpdb` outside the repository layer
+     * and a new waiver for a string prefix would be the wrong trade. The
+     * pattern is strictly better anyway: it also matches a multisite
+     * prefix (`wp_3_…`), which a hardcoded `wp_` would miss.
+     *
+     * ⚠ The head is `([a-z0-9]+_)*`, not `[a-z0-9_]*`. The looser form
+     * also matched `evilpeepso_should_get_chats` — any key merely
+     * ENDING in the literal — because the head could absorb bare
+     * letters. Requiring each head segment to end in `_` means only a
+     * real table prefix can precede it.
+     *
+     * ⚠⚠ It carries `/i`, and the reason is MySQL rather than PHP.
+     * PeepSo READS the flag with `get_user_option`, which resolves
+     * through the user-meta cache — a PHP array lookup, so a
+     * differently-cased stored key would never be read, and on the read
+     * side `/i` would buy nothing. But this veto sits on the WRITE, and
+     * `update_metadata()` chooses between update and insert with a
+     * direct `SELECT ... WHERE meta_key = %s`. `wp_usermeta.meta_key` is
+     * `utf8mb4_unicode_520_ci` here (measured), so a write keyed
+     * `PeepSo_should_get_chats` finds the CANONICAL lowercase row and
+     * updates it — setting the real flag. Without `/i` that write
+     * passes the veto and the suppression fails silently.
+     *
+     * ⚠ The tightening above survives it: `/i` loosens the head
+     * segments' case, not the requirement that each end in `_`, so
+     * `evilpeepso_should_get_chats` is still not a match. Both
+     * directions are asserted.
+     *
+     * ⚠ `peepso_should_get_chats_delay` is deliberately OUT of scope —
+     * the pattern is `$`-anchored. Its only writer passes
+     * `get_current_user_id()`: it is the viewer's own polling interval,
+     * never a recipient's, so it is not part of the send fan-out.
+     *
+     * ⚠ What this suppresses is NOT SSE. `PeepSoSSEEvents::trigger()`
+     * returns at its first statement ("SSE is not working yet"), so
+     * every SSE call site is already a no-op. The live signal PeepSo
+     * actually uses is this user option, polled by chat.js.
+     *
+     * @return \Closure(mixed, mixed, mixed): mixed
+     */
+    private static function blockedRecipientChatPingVeto(int $senderId): \Closure
+    {
+        return static function ($check, $objectId, $metaKey) use ($senderId) {
+            // Only PeepSo's chat-ping flag, under any table prefix.
+            if (!is_string($metaKey) || preg_match('/^([a-z0-9]+_)*peepso_should_get_chats$/i', $metaKey) !== 1) {
+                return $check;
+            }
+
+            $recipientId = (int) $objectId;
+            // ⚠ FAIL CLOSED: `!== false` suppresses on true AND on null
+            // ("could not tell"). Suppressing one notification on a DB
+            // error costs a recipient one email/ping for one send;
+            // letting it through emails and pings someone who blocked
+            // this sender about a message PeepSo will not even deliver
+            // to them. The cheap direction is the safe one here.
+            // ⚠ THE GUARD MUST SHORT-CIRCUIT. Hoisting the probe above
+            // `$recipientId > 0` made it run for a non-user recipient
+            // (id 0) and cost a query the existing tests correctly
+            // forbid — they caught it, which is why the whole suite is
+            // run and not just the new file.
+            if ($recipientId > 0
+                && PeepSoBlockRepository::isBlockingOrUnknown($recipientId, $senderId) !== false) {
+                // Short-circuit: the write does not happen, so the
+                // blocker's client is never told to refetch.
+                return false;
+            }
+
+            return $check;
+        };
+    }
+
     private static function previewBody(string $body): string
     {
         $stripped = wp_strip_all_tags($body, true);

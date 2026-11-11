@@ -264,55 +264,16 @@ final class CollectionMetadataApplicationErrorTest extends TestCase
         self::assertSame([], \BccWire::$sleeps);
     }
 
-    // ── 4. the request authorizer (how a budget meters the pair) ────────
+    // ── 4. the request authorizer: REMOVED IN S8 ────────────────────────
+    //
+    // Three cases here metered `fetchContractInfo()`'s up-to-two wire
+    // requests through a `$authorizeRequest` callback. Its only metered
+    // caller was discovery emission, which charged a ProviderRequestBudget
+    // before each request; that caller is deleted, every surviving caller
+    // passed null, so S8 removed the parameter and the guard it fed.
 
-    public function testDecliningTheSecondRequestStopsAfterTheFirst(): void
-    {
-        \BccWire::$always = self::refusal(CosmwasmClassifier::PROBE_CONTRACT_INFO);
-        $allowed = 1;
 
-        $info = $this->fetcher()->fetchContractInfo(self::CONTRACT, static function () use (&$allowed): bool {
-            if ($allowed <= 0) {
-                return false;
-            }
-            $allowed--;
 
-            return true;
-        });
-
-        self::assertNull($info);
-        self::assertCount(1, \BccWire::$urls, 'the fallback was never asked for');
-        self::assertSame(0, $this->charges());
-    }
-
-    public function testDecliningEveryRequestAsksForNothing(): void
-    {
-        \BccWire::$always = self::refusal(CosmwasmClassifier::PROBE_CONTRACT_INFO);
-
-        $info = $this->fetcher()->fetchContractInfo(self::CONTRACT, static fn (): bool => false);
-
-        self::assertNull($info);
-        self::assertSame([], \BccWire::$urls, 'no budget, no requests');
-        self::assertSame(0, $this->charges());
-    }
-
-    public function testTheAuthorizerIsConsultedOncePerRequestNotOncePerPair(): void
-    {
-        \BccWire::$queue = [
-            self::refusal(CosmwasmClassifier::PROBE_CONTRACT_INFO),
-            self::refusal(CosmwasmClassifier::PROBE_COLLECTION_INFO),
-        ];
-        $asked = 0;
-
-        $this->fetcher()->fetchContractInfo(self::CONTRACT, static function () use (&$asked): bool {
-            $asked++;
-
-            return true;
-        });
-
-        self::assertSame(2, $asked, 'two requests, two authorizations — the budget can count them separately');
-        self::assertCount(2, \BccWire::$urls);
-    }
 
     // ── 5. attribution is never fabricated ─────────────────────────────
 

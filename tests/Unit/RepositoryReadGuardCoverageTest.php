@@ -5,8 +5,6 @@ declare(strict_types=1);
 namespace BCC\Trust\Onchain\Tests\Unit;
 
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
-use BCC\Trust\Onchain\Repositories\CosmwasmCodeFamilyRepository;
-use BCC\Trust\Onchain\Repositories\CosmwasmContractRepository;
 use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
 use PHPUnit\Framework\Attributes\CoversNothing;
 use PHPUnit\Framework\TestCase;
@@ -42,11 +40,18 @@ use ReflectionMethod;
 #[CoversNothing]
 final class RepositoryReadGuardCoverageTest extends TestCase
 {
-    /** Every repository that uses {@see GuardsReadFailures}. */
+    /**
+     * Every repository that uses {@see GuardsReadFailures}.
+     *
+     * ⚠ S8 REMOVED TWO ENTRIES: `CosmwasmCodeFamilyRepository` and
+     * `CosmwasmContractRepository` are deleted files, so their rows here —
+     * and in both policy lists below — would assert a guard on code that no
+     * longer exists. The checkpoint repository is the surviving user of the
+     * trait, and `test_every_read_in_a_guarded_repository_is_guarded()` carries a
+     * denominator that fails if the sweep goes empty.
+     */
     private const GUARDED_REPOSITORIES = [
         ChainCheckpointRepository::class,
-        CosmwasmCodeFamilyRepository::class,
-        CosmwasmContractRepository::class,
     ];
 
     /** The `$wpdb` calls that return data and can silently return nothing. */
@@ -65,22 +70,21 @@ final class RepositoryReadGuardCoverageTest extends TestCase
      */
     private const MUST_FAIL_CLOSED = [
         ChainCheckpointRepository::class => [
-            // The panel's per-chain state. Empty renders as "every chain
-            // idle, never scanned".
-            'readAll',
-        ],
-        CosmwasmCodeFamilyRepository::class => [
-            'countsByChainAndClassification',
-            'pendingCountsByChain',
-            'findManyForChains',
-        ],
-        CosmwasmContractRepository::class => [
-            'inventoryByChain',
-            'findManyForChains',
-            // Confirms an operator hide/unhide actually reached the
-            // scanner cache; "could not read" must not read as "nothing
-            // to sync".
-            'deniedFlag',
+            // ⚠ WAS `readAll`, IS `addCuUsage` (S9a) — AND THIS IS A BETTER
+            // PIN, NOT A SUBSTITUTE FOR A LOST ONE.
+            //
+            // `readAll` was listed because it fed the scanner panel, where an
+            // empty result rendered as "every chain idle, never scanned". S4
+            // deleted that panel and S9a folded `readAll` into `getAll()`, so
+            // the entry named a method that no longer exists.
+            //
+            // `addCuUsage` is the read that genuinely must not fail quietly,
+            // and it is retained production code on the EVM indexer's hot
+            // path: it reads the day's accumulated Alchemy CU before adding
+            // to it. A silent failure there reads as "nothing spent today",
+            // which would let the worker spend the daily budget again — so it
+            // uses `guardReadOrThrow()` and must keep doing so.
+            'addCuUsage',
         ],
     ];
 
@@ -95,18 +99,19 @@ final class RepositoryReadGuardCoverageTest extends TestCase
      */
     private const MUST_FAIL_SAFE = [
         ChainCheckpointRepository::class => [
+            // One chain's row, read on every indexer tick.
             'get',
-            'nextCwDiscoveryChain',
-        ],
-        CosmwasmCodeFamilyRepository::class => [
-            'findPendingClassification',
-            'findEnumerable',
-            'findDueForMetadataCheck',
-        ],
-        CosmwasmContractRepository::class => [
-            'knownMap',
-            'findPendingClassification',
-            'findEmittable',
+            // ⚠ `nextCwDiscoveryChain` LEFT THIS LIST IN S9a: it was the
+            // scanner's chain-rotation read and went callerless when S8
+            // deleted the scanner, so S9a removed it with the other eleven
+            // `cw_*` methods.
+            //
+            // `getAll` replaces it rather than leaving the list a single
+            // entry. It is the same shape of read — a listing whose failure
+            // must degrade to "nothing to report" instead of throwing inside
+            // cron — and S9a folded the old `readAll` into it, so it is now
+            // the one listing this class has.
+            'getAll',
         ],
     ];
 
@@ -137,10 +142,21 @@ final class RepositoryReadGuardCoverageTest extends TestCase
             }
         }
 
+        // ⚠ 15 → 4 (S8) → 3 (S9a). Neither drop is a weakening of taste;
+        // both track a shrinking denominator exactly.
+        //
+        // S8: the threshold spanned THREE repositories and two were deleted,
+        // leaving `ChainCheckpointRepository` with five read-bearing methods
+        // (get, readAll, recordSuccess, addCuUsage, nextCwDiscoveryChain).
+        //
+        // S9a: `nextCwDiscoveryChain` went with the scanner, and `readAll`
+        // was folded into `getAll`, leaving FOUR (get, getAll, recordSuccess,
+        // addCuUsage). So 3 is the largest value that still fails if the
+        // sweep stops finding them, which is the only job this number has.
         self::assertGreaterThan(
-            15,
+            3,
             $inspected,
-            'the sweep found implausibly few reads — the repositories were probably restructured out from under it'
+            'the sweep found implausibly few reads — the repository was probably restructured out from under it'
         );
     }
 

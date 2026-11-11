@@ -653,16 +653,26 @@ final class AttestationService
                 // later wallet aging, reverse revokes, or cohort changes
                 // do NOT retroactively reweight this row.
                 $walletAgeMult   = $this->walletAgeWeighter->weightFor($attestorUserId);
-                $reciprocityMult = $this->reciprocityResolver->weightFor(
+                // ⚠ Detection and weight effect are now SEPARATE. The
+                // observation is recorded either way; the multiplier is
+                // baseline for ordinary reciprocity. One reverse-lookup:
+                // isReciprocal() reads, multiplierFor() is pure.
+                $isReciprocal    = $this->reciprocityResolver->isReciprocal(
                     $attestorUserId,
                     $targetKind,
                     $targetId
                 );
-                $cohortOverlapMult = $this->cohortOverlapDampener->weightFor(
+                $reciprocityMult = ReciprocityPenaltyResolver::multiplierFor($isReciprocal);
+                // ⚠ Detection and weight effect are SEPARATE here too. The
+                // ratio is measured and recorded either way; the multiplier
+                // is baseline. Same two reads as before: overlapRatio()
+                // reads, the two helpers are pure.
+                $cohortOverlapRatio = $this->cohortOverlapDampener->overlapRatio(
                     $attestorUserId,
                     $targetKind,
                     $targetId
                 );
+                $cohortOverlapMult = CohortOverlapDampener::multiplierFor($cohortOverlapRatio);
                 $weightAtTime = self::DEFAULT_WEIGHT
                     * $walletAgeMult
                     * $reciprocityMult
@@ -697,7 +707,21 @@ final class AttestationService
                         'weight_at_time'       => $weightAtTime,
                         'wallet_age_mult'      => $walletAgeMult,
                         'reciprocity_mult'     => $reciprocityMult,
+                        // ⚠ The OBSERVATION. `reciprocity_mult` used to
+                        // carry this implicitly by being 0.50; at baseline
+                        // it no longer distinguishes, so the fact is
+                        // recorded explicitly rather than lost.
+                        'reciprocity_detected' => $isReciprocal,
                         'cohort_overlap_mult'  => $cohortOverlapMult,
+                        // ⚠ The OBSERVATION. `cohort_overlap_mult` used to
+                        // carry this implicitly by being 0.80; at baseline
+                        // it no longer distinguishes, so the measured ratio
+                        // and the threshold verdict are recorded explicitly
+                        // rather than lost. NULL ratio means the question
+                        // did not apply (card target, self, empty cohort) —
+                        // distinct from a measured 0.0.
+                        'cohort_overlap_ratio'    => $cohortOverlapRatio,
+                        'cohort_overlap_detected' => CohortOverlapDampener::isHighOverlap($cohortOverlapRatio),
                     ],
                     'attestation',
                     $attestorUserId

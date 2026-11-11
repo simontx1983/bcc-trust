@@ -19,6 +19,8 @@
 
 namespace BCC\Trust\Rank\Admin;
 
+use BCC\Trust\Core\Admin\AdminMenus;
+
 use BCC\Trust\Rank\Services\FindingsService;
 
 if (!defined('ABSPATH')) {
@@ -38,7 +40,7 @@ class FindingsAdmin
     public static function register_menu(): void
     {
         add_submenu_page(
-            'bcc-trust-dashboard',
+            AdminMenus::MODERATION,
             __('Rank Findings', 'bcc-trust'),
             __('Rank Findings', 'bcc-trust'),
             'manage_options',

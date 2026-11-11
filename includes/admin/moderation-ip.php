@@ -35,7 +35,7 @@ function bcc_trust_render_ip_moderation( $ip ) {
     <div class="wrap bcc-admin-wrap">
         <h1>IP Investigation: <code><?php echo esc_html( $ip ); ?></code>
             <?php if ( $is_whitelisted ): ?>
-                <span style="background:#4caf50;color:#fff;font-size:13px;padding:3px 10px;border-radius:3px;margin-left:8px;">✓ Whitelisted</span>
+                <span style="background:var(--bcc-success);color:#fff;font-size:13px;padding:3px 10px;border-radius:3px;margin-left:8px;">✓ Whitelisted</span>
             <?php endif; ?>
         </h1>
 
@@ -74,7 +74,7 @@ function bcc_trust_render_ip_moderation( $ip ) {
                 ] as $label => $val ): ?>
                     <div style="text-align:center;">
                         <div style="font-size:30px;font-weight:bold;"><?php echo esc_html($val); ?></div>
-                        <div style="color:#666;font-size:12px;"><?php echo esc_html( $label ); ?></div>
+                        <div style="color:var(--bcc-text-secondary);font-size:12px;"><?php echo esc_html( $label ); ?></div>
                     </div>
                 <?php endforeach; ?>
             </div>
@@ -122,14 +122,14 @@ function bcc_trust_render_ip_moderation( $ip ) {
                             <td><?php echo intval($fp->device_count); ?></td>
                             <td>
                                 <div style="display:flex;align-items:center;gap:6px;">
-                                    <div style="width:50px;height:6px;background:#eee;border-radius:3px;overflow:hidden;">
-                                        <div style="width:<?php echo esc_attr(intval($fp->max_automation)); ?>%;height:100%;background:#f44336;"></div>
+                                    <div style="width:50px;height:6px;background:var(--bcc-bg-code);border-radius:3px;overflow:hidden;">
+                                        <div style="width:<?php echo esc_attr(intval($fp->max_automation)); ?>%;height:100%;background:var(--bcc-danger);"></div>
                                     </div>
                                     <?php echo intval($fp->max_automation); ?>%
                                     <?php if ( $fp->max_automation >= $automation_high ): ?>
-                                        <span style="color:#f44336;font-size:11px;">HIGH</span>
+                                        <span style="color:var(--bcc-danger);font-size:11px;">HIGH</span>
                                     <?php elseif ( $fp->max_automation >= $automation_medium ): ?>
-                                        <span style="color:#ff9800;font-size:11px;">MED</span>
+                                        <span style="color:var(--bcc-warning);font-size:11px;">MED</span>
                                     <?php endif; ?>
                                 </div>
                             </td>

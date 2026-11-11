@@ -29,6 +29,8 @@ namespace BCC\Trust\Core\REST;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\ProfileAccess;
+use BCC\Trust\Core\Support\PublicAllPolicy;
 use BCC\Trust\Core\Support\UserSlugResolver;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\GroupType;
@@ -79,6 +81,14 @@ final class UserGroupsEndpoint
             return ApiResponse::error('bcc_not_found', 'User not found.', 404);
         }
 
+        // §F-02 profile-wide gate. This route already narrows the GROUP
+        // list by the viewer's own access, but that is a per-group
+        // decision — it does not stop a stranger confirming which groups
+        // an "only me" profile belongs to via the public ones.
+        if (!ProfileAccess::canViewProfile($targetId)) {
+            return ProfileAccess::forbidden();
+        }
+
         $viewerId = get_current_user_id();
         $isSelf   = ($viewerId > 0 && $viewerId === $targetId);
 
@@ -115,6 +125,18 @@ final class UserGroupsEndpoint
             }
         }
 
+        // Posting capability, for the §D6 blog-editor group picker. One
+        // batched membership read, in the same spirit as the enrichment
+        // above — the alternative is a per-group status query, which on a
+        // 200-group profile is 200 extra reads.
+        //
+        // Self only. For anyone else's profile the question is not just
+        // unanswerable but meaningless: the picker asks "where may I post",
+        // and a viewer is never offered a composer on another member's tab.
+        $postingStatusByGroup = $isSelf
+            ? $this->loadPostingStatuses($viewerId, $visibleIds)
+            : [];
+
         $items = [];
         foreach ($visibleContexts as $groupId => $ctx) {
             $display = $displays[$groupId] ?? null;
@@ -124,7 +146,8 @@ final class UserGroupsEndpoint
                 $isSelf,
                 $holderEligibility[$groupId] ?? null,
                 $chainSlugByGroup[$groupId] ?? null,
-                $trustMinByGroup[$groupId] ?? null
+                $trustMinByGroup[$groupId] ?? null,
+                $postingStatusByGroup[$groupId] ?? null
             );
         }
 
@@ -283,7 +306,8 @@ final class UserGroupsEndpoint
         bool $isSelf,
         ?array $holderEligibility,
         ?string $chainTag,
-        ?int $trustMin
+        ?int $trustMin,
+        ?string $memberStatus = null
     ): array {
         $route = $this->routeKeyForType($ctx->type);
 
@@ -306,8 +330,9 @@ final class UserGroupsEndpoint
                 'leave' => ['url' => self::REST_BASE . '/' . $route . '/' . $ctx->groupId . '/leave'],
             ],
             'permissions'  => [
-                'can_join'  => $this->canJoin($ctx, $isSelf, $holderEligibility),
-                'can_leave' => $this->canLeave($isSelf),
+                'can_join'      => $this->canJoin($ctx, $isSelf, $holderEligibility),
+                'can_leave'     => $this->canLeave($isSelf),
+                'can_post_blog' => $this->canPostBlog($isSelf, $memberStatus),
             ],
         ];
     }
@@ -408,6 +433,85 @@ final class UserGroupsEndpoint
             'unlock_hint' => null,
             'reason_code' => null,
         ];
+    }
+
+    /**
+     * May the viewer publish a long-form blog into this group?
+     *
+     * ⚠ THIS IS NOT "IS A MEMBER". The membership read filters
+     * `gm_user_status LIKE 'member%'`, which ADMITS `member_readonly` — a
+     * status that reads but cannot contribute. So row presence says yes to
+     * a read-only member, and a picker built on presence would list the
+     * group, let the author write the whole blog, and have the create call
+     * refuse it. The decision has to read the ROLE and compare it against
+     * the posting-capable set.
+     *
+     * {@see PublicAllPolicy::POSTING_CAPABLE_STATUSES} is the SAME constant
+     * `GroupsService::viewerCanAuthorInGroup()` uses, deliberately: these
+     * two must never drift, and a test pins that they agree — including
+     * `member_readonly` → false. Reused rather than restated, per §11.
+     *
+     * Shape matches its siblings — `{allowed, unlock_hint, reason_code}`,
+     * all three keys — rather than being a bare boolean, so the frontend
+     * reads every permission on this item the same way and can branch on a
+     * code instead of parsing prose.
+     *
+     * `allowed: false` with `reason_code: not_self` on ANOTHER member's
+     * profile means "not applicable" rather than "refused" — the picker
+     * only ever asks this of the viewer's own listing.
+     *
+     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
+     */
+    private function canPostBlog(bool $isSelf, ?string $memberStatus): array
+    {
+        if (!$isSelf) {
+            return ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'not_self'];
+        }
+
+        if ($memberStatus === null) {
+            // Listed but no active membership row came back — including the
+            // case where the batched read FAILED, which yields no rows and
+            // so lands here. Refusing is the closed direction.
+            return ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'not_member'];
+        }
+
+        if (in_array($memberStatus, PublicAllPolicy::POSTING_CAPABLE_STATUSES, true)) {
+            return ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
+        }
+
+        return [
+            'allowed'     => false,
+            'unlock_hint' => 'Read-only members cannot post in this group.',
+            'reason_code' => 'read_only_member',
+        ];
+    }
+
+    /**
+     * The viewer's membership ROLE per group, in one batched read.
+     *
+     * Reads `user_status` from `findUserMemberships`, which carries it
+     * precisely so this decision does not become a per-group query. A
+     * failed read returns no rows, so every group lands on
+     * `$memberStatus === null` and {@see canPostBlog} refuses — closed.
+     *
+     * @param list<int> $groupIds
+     * @return array<int, string>
+     */
+    private function loadPostingStatuses(int $viewerId, array $groupIds): array
+    {
+        if ($viewerId <= 0 || $groupIds === []) {
+            return [];
+        }
+
+        $out = [];
+        foreach (PeepSoGroupRepository::findUserMemberships($viewerId, $groupIds) as $groupId => $row) {
+            $status = isset($row->user_status) ? (string) $row->user_status : '';
+            if ($status !== '') {
+                $out[(int) $groupId] = $status;
+            }
+        }
+
+        return $out;
     }
 
     /**

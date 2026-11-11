@@ -42,6 +42,7 @@ class FraudDetector {
     private static ?UserInfoRepository $userInfoRepo = null;
     private static ?FraudAnalysisRepository $fraudAnalysisRepo = null;
     private static ?VoteRepository $voteRepo = null;
+    private static ?\BCC\Trust\Core\Repositories\PatternRepository $patternRepo = null;
     private static ?AuditLogRepository $auditLogRepo = null;
 
     private static function userInfoRepo(): UserInfoRepository {
@@ -56,17 +57,32 @@ class FraudDetector {
         return self::$voteRepo ??= \BCC\Trust\Core\Plugin::instance()->voteRepository();
     }
 
+    private static function patternRepo(): \BCC\Trust\Core\Repositories\PatternRepository {
+        return self::$patternRepo ??= \BCC\Trust\Core\Plugin::instance()->patternRepository();
+    }
+
     private static function auditLogRepo(): AuditLogRepository {
         // AuditLogRepository has no Plugin singleton accessor yet.
         return self::$auditLogRepo ??= new AuditLogRepository();
     }
 
     /**
-     * Detect rapid voting using config thresholds
+     * Rapid voting: more than BCC_TRUST_RAPID_VOTE_LIMIT votes CAST within
+     * the last BCC_TRUST_RAPID_VOTE_WINDOW minutes.
+     *
+     * F-102: this used to count audit-log rows with action 'vote_up' /
+     * 'vote_down' — actions nothing writes — so it was always 0 and both the
+     * VoteService gate and the +30 `rapid_voting` fraud signal were dead.
+     * It now counts the votes table itself (every status, so a burst that is
+     * immediately retracted still counts). No new writes.
      */
     public static function detectRapidVoting(int $userId): bool {
 
-        $count = self::auditLogRepo()->countRecentVoteActions($userId, BCC_TRUST_RAPID_VOTE_WINDOW);
+        // created_at is written with current_time('mysql') (site-local), so
+        // the cutoff is computed in the same frame.
+        $since = gmdate('Y-m-d H:i:s', (int) current_time('timestamp') - BCC_TRUST_RAPID_VOTE_WINDOW * 60);
+
+        $count = self::voteRepo()->countByVoterSince($userId, $since, false);
 
         return $count > BCC_TRUST_RAPID_VOTE_LIMIT;
     }
@@ -183,25 +199,72 @@ class FraudDetector {
             ];
         }
 
+        // ── CONSISTENCY OBSERVATION, NOT A FRAUD SIGNAL ───────────────
+        //
+        // The rule: >= BCC_TRUST_UNIFORM_VOTE_MIN (10) votes in 7 days, and
+        // more than 90% positive OR less than 10% positive.
+        //
+        // What that establishes is that a member's ratings are CONSISTENT.
+        // Consistency is exactly what an honest rater with consistent
+        // experience produces, so the rule cannot separate the two cases it
+        // most needs to:
+        //
+        //   a satisfied customer who rated 30 good trades  -> 100% positive
+        //   a sock puppet who upvoted 30 for one cartel    -> 100% positive
+        //
+        // Both were measured at +20 with isolated fixtures; they are
+        // INDISTINGUISHABLE to this rule, because it has no input that
+        // could tell them apart.
+        //
+        // ⚠ It also penalised the consumer-protection case. Someone who
+        // only flags poor work — 12 bad jobs out of 13 — lands at 7.7%
+        // positive and scored +20 for it. That is the member behaviour this
+        // product most wants.
+        //
+        // So the points are removed. The trigger and the `details` entry are
+        // RETAINED: they are the durable record, and `details` is what
+        // `confidence` is computed from, so dropping it would silently move
+        // confidence for every consistent rater.
+        //
+        // ⚠ NOT changed: the thresholds. Raising the sample floor or
+        // widening the band would be a new arbitrary number in place of an
+        // old one, and would still not distinguish the two cases above.
         if (self::detectUniformVoting($userId)) {
             $results['triggers'][] = 'uniform_voting';
-            $results['score'] += 20;
             $results['details']['uniform_voting'] = true;
             $results['signals'][] = [
                 'type'        => 'uniform_voting',
-                'points'      => 20,
-                'description' => 'Suspiciously consistent vote pattern (all up or all down)',
+                'points'      => 0,
+                'punitive'    => false,
+                'description' => 'Consistent rating pattern — nearly all positive or nearly all negative (observation only, adds no fraud points)',
             ];
         }
 
+        // ── RELATIONSHIP OBSERVATION, NOT A FRAUD SIGNAL ──────────────
+        //
+        // This is the PAIRWISE reciprocity check: countMutualVotePages()
+        // > BCC_TRUST_RING_MIN_MUTUAL, i.e. two people who have each voted
+        // on four or more of each other's pages. No ring, no third member,
+        // no strength gate and no dependence on the ring cache — so unlike
+        // `in_vote_ring` below it has always applied on every host.
+        //
+        // It used to add 25 points. It no longer adds any, because two
+        // tradespeople who have repeatedly used each other's services are
+        // the ordinary case in this product's population, and the rule has
+        // no input that could separate them from a manufactured pair.
+        //
+        // The trigger and the `details` entry are RETAINED deliberately:
+        // they are the durable record of the observation, and `details` is
+        // what `confidence` is computed from, so dropping it would silently
+        // move confidence for every observed pair.
         if (self::detectVoteRing($userId)) {
             $results['triggers'][] = 'vote_ring';
-            $results['score'] += 25;
             $results['details']['vote_ring'] = true;
             $results['signals'][] = [
                 'type'        => 'vote_ring',
-                'points'      => 25,
-                'description' => 'Mutual vote-exchange pattern detected with another user',
+                'points'      => 0,
+                'punitive'    => false,
+                'description' => 'Mutual vote-exchange relationship with another member (observation only — adds no fraud points)',
             ];
         }
 
@@ -385,17 +448,34 @@ class FraudDetector {
             // Fallback: compute only when no cached results are available
             $rings = $trustGraph->detectVoteRings( BCC_TRUST_RING_MIN_SIZE );
         }
+        // ── RELATIONSHIP OBSERVATION, NOT A FRAUD SIGNAL ──────────────
+        //
+        // Ring membership used to add 40 points. It no longer adds any.
+        //
+        // The detection rule separates RECIPROCAL structure from
+        // non-reciprocal structure. It does not separate legitimate
+        // reciprocity from manufactured reciprocity, because it has no
+        // input that could: a six-person hall where everyone has used
+        // everyone scores 48.0 against a threshold of 5.0, on exactly the
+        // same terms as six sock puppets. The rule is in fact most lenient
+        // toward the newest accounts, whose vote weight is too low to clear
+        // the strength gate — the opposite of the risk profile it is meant
+        // to describe.
+        //
+        // Trigger and `details` are RETAINED: they are the durable record,
+        // and `ring_size` + `ring_strength` are two of the data points that
+        // `confidence` is computed from.
         foreach ($rings as $ring) {
             if (in_array($userId, $ring['users'])) {
                 $results['triggers'][] = 'in_vote_ring';
-                $results['score'] += 40;
                 $results['details']['ring_size'] = $ring['size'];
                 $results['details']['ring_strength'] = $ring['strength'];
                 $results['signals'][] = [
                     'type'        => 'in_vote_ring',
-                    'points'      => 40,
+                    'points'      => 0,
+                    'punitive'    => false,
                     'description' => sprintf(
-                        'User is part of a vote ring with %d members (strength: %.2f)',
+                        'Member of a mutually-connected group of %d (connection strength: %.2f) — observation only, adds no fraud points',
                         $ring['size'],
                         $ring['strength']
                     ),
@@ -637,33 +717,94 @@ class FraudDetector {
 
             // Low diversity: these accounts vote on fewer than 3 other pages combined.
             if ($otherPageVotes < 3) {
-                // Store fraud signal for all participants.
-                $fraudRepo = self::fraudAnalysisRepo();
-                $pageOwnerId = \BCC\Trust\Core\Services\PeepSoPageResolver::getOwnerId($pageId);
+                // ── UNCORROBORATED OBSERVATION, NOT A FRAUD FINDING ────
+                //
+                // What this rule actually measures: five or more accounts
+                // registered within a 7-day window voted on one page, and
+                // between them have voted on fewer than three other pages.
+                //
+                // That conjunction is the signature of successful
+                // word-of-mouth onboarding. A sparky tells four colleagues
+                // about BCC; they sign up the same week, back the person who
+                // introduced them, and have not got round to anything else
+                // yet. It fires. Meanwhile a motivated ring defeats it
+                // trivially by voting on three unrelated pages — so the rule
+                // is lenient toward exactly the accounts that warrant
+                // scrutiny, and sharp against a cohort's first week.
+                //
+                // It used to do two punitive things. Both are removed:
+                //
+                //   1. +15 fraud_score PER VOTER, with peak_fraud_score
+                //      bumped atomically and the HIGH-crossing fan-out —
+                //      i.e. vote-weight discount, rate limits, and at 60 the
+                //      attestation and rank gates. On honest newcomers who
+                //      already carry brand_new_account / unverified_email /
+                //      very_low_trust, +15 could reach the gate from
+                //      ordinary newness plus one fan-in event.
+                //
+                //   2. ⚠ A fraud_analysis row at min(100, 40 + 5n) — 65 at
+                //      the rule's own 5-voter threshold, i.e. HIGH — written
+                //      against THE PAGE OWNER. The person who was voted on,
+                //      the supposed beneficiary of the coordination, got the
+                //      allegation on their moderation screen.
+                //
+                // What remains is a system-level observation with no member
+                // attributed, plus the audit row. Same posture as the ring
+                // detectors after #314.
+                $voterCount = count($recentVoters);
 
-                $fraudRepo->storeAnalysisWithAutoRisk(
-                    $pageOwnerId > 0 ? $pageOwnerId : $voterId,
-                    min(100, 40 + count($recentVoters) * 5),
-                    ['fan_in_coordination'],
-                    [
-                        'page_id'       => $pageId,
-                        'voter_count'   => count($recentVoters),
-                        'spread_days'   => round($spreadDays, 1),
-                        'other_pages'   => $otherPageVotes,
-                        'voter_ids'     => $voterIds,
-                    ]
-                );
+                // ⚠ user_id 0 — a SYSTEM-LEVEL pattern, deliberately not
+                // attributed to the page owner or to any voter. tab-ml.php
+                // gates both the member link and the "Investigate" button on
+                // `if ($p->user_id)`, so this renders with nobody named and
+                // no action offered. The member ids live in pattern_data for
+                // an operator who opens the row, not as a subject of it.
+                try {
+                    self::patternRepo()->storePattern(
+                        0,
+                        'fan_in_coordination',
+                        [
+                            'page_id'     => $pageId,
+                            'voter_count' => $voterCount,
+                            'spread_days' => round($spreadDays, 1),
+                            'other_pages' => $otherPageVotes,
+                            'voter_ids'   => $voterIds,
+                            // Recorded so a reader cannot mistake the row
+                            // for a finding, and so the absent corroboration
+                            // is explicit rather than implied.
+                            'punitive'      => false,
+                            'corroborated'  => false,
+                            'evidence_note' => 'registration proximity and low vote diversity only — '
+                                . 'account proximity alone is not corroborated manipulation',
+                        ],
+                        // No strength is computed by this rule, so no
+                        // confidence is asserted. See the ring-detector
+                        // precedent: 0.0 means "none computed", not
+                        // "measured as weak".
+                        0.0,
+                        date('Y-m-d H:i:s', strtotime('+30 days'))
+                    );
+                } catch (\Exception $e) {
+                    \BCC\Core\Log\Logger::error(
+                        '[bcc-trust] fan_in_coordination pattern insert failed: ',
+                        ['detail' => $e->getMessage()]
+                    );
+                }
 
                 AuditLogger::log('fan_in_coordination_detected', $pageId, [
-                    'voter_count' => count($recentVoters),
+                    'voter_count' => $voterCount,
                     'spread_days' => round($spreadDays, 1),
                     'voter_ids'   => $voterIds,
                 ], 'page', $voterId);
 
-                // Increment fraud score for each participating voter.
-                foreach ($voterIds as $uid) {
-                    self::userInfoRepo()->incrementFraudScore($uid, 15, 'fan_in_coordination');
-                }
+                \BCC\Core\Log\Logger::info(
+                    '[bcc-trust] fan_in_coordination detected (soft-flag)',
+                    [
+                        'page_id'     => $pageId,
+                        'voter_count' => $voterCount,
+                        'spread_days' => round($spreadDays, 1),
+                    ]
+                );
 
                 // Mark this page as already processed for the next hour.
                 set_transient($dedupKey, 1, HOUR_IN_SECONDS);

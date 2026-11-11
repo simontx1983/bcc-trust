@@ -54,6 +54,7 @@ use BCC\Core\PeepSo\PeepSoReactionWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\GroupInteractionGate;
+use BCC\Trust\Core\Support\NoReactionsGate;
 use BCC\Trust\Core\Support\ReactionGrammarRegistry;
 use BCC\Trust\Core\Support\ReactionStateComposer;
 use WP_REST_Request;
@@ -145,6 +146,14 @@ final class ReactionsEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Invalid feed_id.', 400);
         }
 
+        // No engagement of any kind on an announcement (§4.32.15). Runs
+        // before the group gate because it is a property of the CONTENT,
+        // not of the viewer, and the answer is the same for everyone.
+        $noReactions = NoReactionsGate::check($actId);
+        if ($noReactions !== null) {
+            return $noReactions;
+        }
+
         $gateError = GroupInteractionGate::check($userId, $actId);
         if ($gateError !== null) {
             return $gateError;
@@ -210,6 +219,14 @@ final class ReactionsEndpoint
         $actId = self::parseFeedId((string) $request->get_param('feed_id'));
         if ($actId === null) {
             return ApiResponse::error('bcc_invalid_request', 'Invalid feed_id.', 400);
+        }
+
+        // No engagement of any kind on an announcement (§4.32.15). Runs
+        // before the group gate because it is a property of the CONTENT,
+        // not of the viewer, and the answer is the same for everyone.
+        $noReactions = NoReactionsGate::check($actId);
+        if ($noReactions !== null) {
+            return $noReactions;
         }
 
         $gateError = GroupInteractionGate::check($userId, $actId);

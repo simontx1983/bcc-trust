@@ -126,6 +126,37 @@ final class NotificationType
     public const HOLDER_COMMUNITY_LIVE              = 'bcc_holder_community_live';
 
     /**
+     * The revoke sweep removed this member from a delegator community because
+     * it could no longer confirm they meet the minimum. Bell only: no push, and
+     * NotificationRepository keeps it out of the weekly digest email. Fired only
+     * after a real removal. The row's external_id is the group, and
+     * NotificationViewService renders the notice and link from it at read time.
+     */
+    public const DELEGATOR_GROUP_REMOVED            = 'bcc_delegator_group_removed';
+
+    /**
+     * F-73 — the author's own post was hidden AUTOMATICALLY (the
+     * credible-report threshold), so they are not left guessing why it
+     * vanished. Self-notification (actor = the author). Bell only: no
+     * push and kept out of the email digest (BELL_ONLY). The copy names
+     * no reporter, no count and no threshold. external_id/act_id = the
+     * hidden activity.
+     */
+    public const CONTENT_AUTO_HIDDEN                = 'bcc_content_auto_hidden';
+
+    /**
+     * Types that are delivered in-app ONLY: NotificationRepository's
+     * weekly email digest excludes them. Push is opt-in per dispatch
+     * (pushDispatcher->enqueue), and none of these dispatch one.
+     *
+     * @var list<string>
+     */
+    public const BELL_ONLY = [
+        self::DELEGATOR_GROUP_REMOVED,
+        self::CONTENT_AUTO_HIDDEN,
+    ];
+
+    /**
      * Whitelist of valid type slugs. Used by the read-side validation
      * (NotificationViewService) to reject corrupt rows rather than
      * surface garbage to the frontend.
@@ -159,6 +190,8 @@ final class NotificationType
         self::ATTESTATION_REAFFIRMED,
         self::DIVERGENCE_STATE_WARNING,
         self::HOLDER_COMMUNITY_LIVE,
+        self::DELEGATOR_GROUP_REMOVED,
+        self::CONTENT_AUTO_HIDDEN,
     ];
 
     public static function isValid(string $type): bool

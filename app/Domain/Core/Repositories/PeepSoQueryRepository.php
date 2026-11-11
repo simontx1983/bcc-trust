@@ -155,29 +155,6 @@ final class PeepSoQueryRepository
     }
 
     /**
-     * Get page categories from peepso_page_categories.
-     *
-     * @return object[] Array of objects with term_id property.
-     * @phpstan-return list<object{term_id: int|numeric-string}>
-     */
-    public static function getPageCategories(int $pageId): array
-    {
-        global $wpdb;
-        $table = $wpdb->prefix . 'peepso_page_categories';
-
-        if (!self::tableExists($table)) {
-            return [];
-        }
-
-        return $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT pm_cat_id AS term_id FROM {$table} WHERE pm_page_id = %d",
-                $pageId
-            )
-        ) ?: [];
-    }
-
-    /**
      * Count filled PeepSo user profile fields for a user.
      *
      * Queries wp_usermeta for peepso_user_field_* keys with non-empty

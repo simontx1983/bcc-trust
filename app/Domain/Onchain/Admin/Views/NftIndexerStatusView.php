@@ -145,10 +145,10 @@ final class NftIndexerStatusView
                         <td><?php echo $head; ?></td>
                         <td><?php echo $lag; ?></td>
                         <td><?php echo $cuUsed; ?> / <?php echo $dailyBudget; ?></td>
-                        <td<?php echo $callsHot ? ' style="color:#b32d2e;font-weight:bold;"' : ''; ?>>
+                        <td<?php echo $callsHot ? ' style="color:var(--bcc-danger);font-weight:bold;"' : ''; ?>>
                             <?php echo $callsCount; ?> / <?php echo $callsCap; ?>
                         </td>
-                        <td<?php echo $progHasRegression ? ' style="color:#b32d2e;font-weight:bold;"' : ''; ?>>
+                        <td<?php echo $progHasRegression ? ' style="color:var(--bcc-danger);font-weight:bold;"' : ''; ?>>
                             <?php
                             // Sparkline: ↑ advance, — stagnant, ↓ regression.
                             // 4 arrows for 5-entry history (4 deltas). Insufficient
@@ -156,17 +156,17 @@ final class NftIndexerStatusView
                             // accumulate. Pure presentation of the same `deltas`
                             // the snapshot reads; no recomputation here.
                             if ($progSamples === 0) {
-                                echo '<span style="color:#999;font-size:11px;">no data</span>';
+                                echo '<span style="color:var(--bcc-text-muted);font-size:11px;">no data</span>';
                             } else {
                                 $glyphs = [];
                                 foreach ($progDeltas as $d) {
-                                    if ($d > 0)      { $glyphs[] = '<span style="color:#46b450;">&uarr;</span>'; }
-                                    elseif ($d < 0)  { $glyphs[] = '<span style="color:#b32d2e;font-weight:bold;">&darr;</span>'; }
-                                    else             { $glyphs[] = '<span style="color:#999;">&mdash;</span>'; }
+                                    if ($d > 0)      { $glyphs[] = '<span style="color:var(--bcc-success);">&uarr;</span>'; }
+                                    elseif ($d < 0)  { $glyphs[] = '<span style="color:var(--bcc-danger);font-weight:bold;">&darr;</span>'; }
+                                    else             { $glyphs[] = '<span style="color:var(--bcc-text-muted);">&mdash;</span>'; }
                                 }
                                 echo '<span style="font-family:monospace;">' . implode(' ', $glyphs) . '</span>';
                                 if ($progSamples < ChainCheckpointRepository::MAX_PROGRESSION_ENTRIES) {
-                                    echo '<span style="color:#999;font-size:10px;margin-left:6px;">(' . (int) $progSamples . '/' . (int) ChainCheckpointRepository::MAX_PROGRESSION_ENTRIES . ')</span>';
+                                    echo '<span style="color:var(--bcc-text-muted);font-size:10px;margin-left:6px;">(' . (int) $progSamples . '/' . (int) ChainCheckpointRepository::MAX_PROGRESSION_ENTRIES . ')</span>';
                                 }
                             }
                             ?>
@@ -284,7 +284,7 @@ final class NftIndexerStatusView
                 <?php endif; ?>
 
                 <?php if ($summary['regression_chains'] !== []): ?>
-                    <span style="color:#b32d2e;font-weight:bold;" title="Backward progression — last_processed_block went DOWN. Correctness anomaly."><strong>↓ Regression:</strong> <?php echo (int) count($summary['regression_chains']); ?></span>
+                    <span style="color:var(--bcc-danger);font-weight:bold;" title="Backward progression — last_processed_block went DOWN. Correctness anomaly."><strong>↓ Regression:</strong> <?php echo (int) count($summary['regression_chains']); ?></span>
                 <?php endif; ?>
 
                 <?php if ($summary['fake_healthy_chains'] !== []): ?>
@@ -306,7 +306,7 @@ final class NftIndexerStatusView
                 ?>
                     <span style="color:<?php echo esc_attr($hfColor); ?>;font-weight:bold;" title="Solana ingestion has not received a Helius delivery for this long."><strong>Solana silent:</strong> <?php echo esc_html($hfLabel); ?></span>
                 <?php elseif ($hfState === 'never_delivered'): ?>
-                    <span style="color:#9b6c00;" title="Helius webhook is provisioned but no deliveries yet — verify configuration."><strong>Solana ingestion:</strong> never delivered</span>
+                    <span style="color:var(--bcc-warning);" title="Helius webhook is provisioned but no deliveries yet — verify configuration."><strong>Solana ingestion:</strong> never delivered</span>
                 <?php endif; ?>
 
                 <?php if ($summary['dedupe_overgrown']): ?>
@@ -314,7 +314,7 @@ final class NftIndexerStatusView
                 <?php endif; ?>
 
                 <?php if ($summary['v1_fetch_failure_chains'] !== []): ?>
-                    <span style="color:#9b6c00;" title="V1 ownership discovery (Alchemy NFT API) failing on one or more chains. See V1 Discovery panel below."><strong>V1 failures:</strong> <?php echo (int) count($summary['v1_fetch_failure_chains']); ?></span>
+                    <span style="color:var(--bcc-warning);" title="V1 ownership discovery (Alchemy NFT API) failing on one or more chains. See V1 Discovery panel below."><strong>V1 failures:</strong> <?php echo (int) count($summary['v1_fetch_failure_chains']); ?></span>
                 <?php endif; ?>
             </div>
 
@@ -325,7 +325,7 @@ final class NftIndexerStatusView
                     <?php endforeach; ?>
                 </ul>
             <?php else: ?>
-                <p style="margin:8px 0 0 0;color:#646970;font-size:12px;">
+                <p style="margin:8px 0 0 0;color:var(--bcc-text-muted);font-size:12px;">
                     No outstanding issues. Block-walking and holdings writes are flowing for active chains.
                 </p>
             <?php endif; ?>
@@ -382,16 +382,16 @@ final class NftIndexerStatusView
                     $lastErr  = $row['last_error'];
                     $lastAt   = $row['last_error_at'];
                 ?>
-                <tr<?php echo $hot ? ' style="background:#fff8e5;"' : ''; ?>>
+                <tr<?php echo $hot ? ' style="background:var(--bcc-warning-bg);"' : ''; ?>>
                     <td><strong><?php echo esc_html($row['slug']); ?></strong></td>
                     <td><?php echo $attempts; ?></td>
-                    <td<?php echo $hot ? ' style="color:#b32d2e;font-weight:bold;"' : ''; ?>><?php echo $failures; ?></td>
-                    <td<?php echo $hot ? ' style="color:#b32d2e;font-weight:bold;"' : ''; ?>>
+                    <td<?php echo $hot ? ' style="color:var(--bcc-danger);font-weight:bold;"' : ''; ?>><?php echo $failures; ?></td>
+                    <td<?php echo $hot ? ' style="color:var(--bcc-danger);font-weight:bold;"' : ''; ?>>
                         <?php
                         if ($attempts === 0) {
-                            echo '<small style="color:#999;">no samples</small>';
+                            echo '<small style="color:var(--bcc-text-muted);">no samples</small>';
                         } elseif ($attempts < $minSamples) {
-                            printf('<small style="color:#999;">%d%% (insufficient samples)</small>', (int) round($rate * 100));
+                            printf('<small style="color:var(--bcc-text-muted);">%d%% (insufficient samples)</small>', (int) round($rate * 100));
                         } else {
                             printf('%d%%', (int) round($rate * 100));
                         }
@@ -399,10 +399,10 @@ final class NftIndexerStatusView
                     </td>
                     <td>
                         <?php if ($lastErr === null || $lastAt === null): ?>
-                            <small style="color:#999;">—</small>
+                            <small style="color:var(--bcc-text-muted);">—</small>
                         <?php else: ?>
                             <small><?php echo esc_html($lastErr); ?></small>
-                            <br><small style="color:#999;">at <?php echo esc_html(gmdate('c', $lastAt)); ?></small>
+                            <br><small style="color:var(--bcc-text-muted);">at <?php echo esc_html(gmdate('c', $lastAt)); ?></small>
                         <?php endif; ?>
                     </td>
                 </tr>
@@ -438,8 +438,8 @@ final class NftIndexerStatusView
             <code>wp-config.php</code> before provisioning:
         </p>
         <ul style="margin-left:1.5em">
-            <li><code>BCC_HELIUS_API_KEY</code> — <?php echo $apiKeyDefined ? '<strong style="color:green">defined</strong>' : '<strong style="color:#c00">missing</strong>'; ?></li>
-            <li><code>BCC_HELIUS_WEBHOOK_SECRET</code> — <?php echo $secretDefined ? '<strong style="color:green">defined</strong>' : '<strong style="color:#c00">missing</strong>'; ?></li>
+            <li><code>BCC_HELIUS_API_KEY</code> — <?php echo $apiKeyDefined ? '<strong style="color:green">defined</strong>' : '<strong style="color:var(--bcc-danger)">missing</strong>'; ?></li>
+            <li><code>BCC_HELIUS_WEBHOOK_SECRET</code> — <?php echo $secretDefined ? '<strong style="color:green">defined</strong>' : '<strong style="color:var(--bcc-danger)">missing</strong>'; ?></li>
         </ul>
 
         <table class="widefat striped" style="max-width:900px">
@@ -455,7 +455,7 @@ final class NftIndexerStatusView
                 <tr><th>Local managed count (helius_managed = 1)</th>
                     <td><?php echo (int) $status['local_managed_count']; ?></td></tr>
                 <tr><th>Dedupe table size</th>
-                    <td><?php echo $dedupeRows; ?> / <?php echo $dedupeAlarm; ?> <?php if ($dedupeRows > $dedupeAlarm): ?><strong style="color:#c00">OVERGROWN — sweep cron may have stalled</strong><?php endif; ?></td></tr>
+                    <td><?php echo $dedupeRows; ?> / <?php echo $dedupeAlarm; ?> <?php if ($dedupeRows > $dedupeAlarm): ?><strong style="color:var(--bcc-danger)">OVERGROWN — sweep cron may have stalled</strong><?php endif; ?></td></tr>
                 <tr><th>Counters (since last reset)</th>
                     <td>
                         deliveries new: <strong><?php echo $newCount; ?></strong> ·
@@ -471,7 +471,7 @@ final class NftIndexerStatusView
                         if ($fState === 'not_provisioned') {
                             echo '<em>webhook not provisioned</em>';
                         } elseif ($fState === 'never_delivered') {
-                            echo '<strong style="color:#9b6c00;">never — webhook provisioned but no deliveries yet</strong>';
+                            echo '<strong style="color:var(--bcc-warning);">never — webhook provisioned but no deliveries yet</strong>';
                         } else {
                             $color = $fState === 'red' ? '#b32d2e' : ($fState === 'yellow' ? '#9b6c00' : '#46b450');
                             $atIso = $fAt !== null ? gmdate('c', (int) $fAt) : '?';
@@ -479,9 +479,9 @@ final class NftIndexerStatusView
                             echo '<strong style="color:' . esc_attr($color) . ';">' . esc_html($ageStr) . ' ago</strong> ';
                             echo '<small>(' . esc_html($atIso) . ')</small>';
                             if ($fState === 'yellow') {
-                                echo ' <small style="color:#9b6c00;">— could be a quiet window OR a stalled webhook; see top-card issue line</small>';
+                                echo ' <small style="color:var(--bcc-warning);">— could be a quiet window OR a stalled webhook; see top-card issue line</small>';
                             } elseif ($fState === 'red') {
-                                echo ' <small style="color:#b32d2e;">— Solana ingestion is offline; see top-card issue line</small>';
+                                echo ' <small style="color:var(--bcc-danger);">— Solana ingestion is offline; see top-card issue line</small>';
                             }
                         }
                         ?>
@@ -643,6 +643,10 @@ final class NftIndexerStatusView
                     <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_HELIUS_RESYNC); ?>">
                     <?php wp_nonce_field(self::ACTION_HELIUS_RESYNC); ?>
                     <button type="submit" class="button">Resync addresses from wallet_links</button>
+                    <label style="margin-left:8px">
+                        <input type="checkbox" name="allow_shrink" value="1">
+                        Allow a large shrink (I have confirmed a mass unlink)
+                    </label>
                 </form>
                 <small style="margin-left:8px">Rebuilds the remote address list from the canonical local table. Use after <code>helius_managed</code> drift.</small>
             <?php endif; ?>
@@ -743,10 +747,34 @@ final class NftIndexerStatusView
 
     /**
      * Create the shared Helius webhook. Mutates EXTERNAL provider state.
+     *
+     * ── WHY requirePost() IS NOT OPTIONAL HERE ──────────────────────────
+     * `admin-post.php` dispatches `admin_post_{action}` for GET as well as
+     * POST — it reads the action out of `$_REQUEST`, and
+     * `check_admin_referer()` reads `$_REQUEST['_wpnonce']`. Several
+     * handlers in this tree are inert on GET only by accident, because they
+     * happen to read a required argument out of `$_POST`. This one reads
+     * NOTHING from the request, so nothing stopped a GET carrying a valid
+     * nonce from running to completion and creating a billable external
+     * webhook — from a replayed URL, a prefetch, a link preview or an
+     * `<img src>`. The method is checked BEFORE the nonce so a GET is
+     * refused on its method (405) rather than on its arguments.
+     *
+     * ── AND WHY THE NONCE SCOPE IS LEFT ALONE ───────────────────────────
+     * The shared webhook is a SITE SINGLETON: one
+     * `bcc_helius_shared_webhook_id` option,
+     * `provisionSharedWebhook()` no-ops and returns the existing id when it
+     * is already set, and `HeliusWebhookEndpoint::callbackUrl()` takes no
+     * parameters. There is no id to bind to, so an `<action>_<id>` target
+     * would be invented rather than discovered. Page-wide is correct here —
+     * contrast `ACTION_RUN . '_' . $chainId` and
+     * `ACTION_SET_STATE . '_' . $chainId . '_' . $newState` in this same
+     * file, where the operator really is authorising one named row.
      */
     public static function handleHeliusProvision(): void
     {
         AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
         AdminActionSupport::requireNonce(self::ACTION_HELIUS_PROVISION);
 
         try {
@@ -768,14 +796,25 @@ final class NftIndexerStatusView
     /**
      * Repoint the shared Helius webhook's address list. Mutates EXTERNAL
      * provider state. Idempotent — reports a no-op when already in sync.
+     *
+     * Same reasoning as {@see handleHeliusProvision()}: it reads nothing
+     * from the request, so only an explicit method gate keeps a GET from
+     * PATCHing the live webhook's address list. Idempotence limits the
+     * damage; it does not make the request authorised. The singleton nonce
+     * scope is likewise left as it is.
      */
     public static function handleHeliusResync(): void
     {
         AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
         AdminActionSupport::requireNonce(self::ACTION_HELIUS_RESYNC);
 
+        // The shrink-floor override: only an explicit, posted "1" (the nonce
+        // above already proved this POST came from the form).
+        $allowShrink = isset($_POST['allow_shrink']) && sanitize_text_field(wp_unslash((string) $_POST['allow_shrink'])) === '1';
+
         try {
-            $stats = HeliusSubscriptionManager::resyncFromWalletLinks();
+            $stats = HeliusSubscriptionManager::resyncFromWalletLinks($allowShrink);
         } catch (\Throwable $e) {
             $ref = AdminActionSupport::failure($e, 'admin_helius_resync_failed', 'helius_webhook');
             self::redirect('helius_resync_failed', 0, $ref);
@@ -786,12 +825,28 @@ final class NftIndexerStatusView
             self::redirect('helius_resync_failed', 0);
         }
 
+        if (($stats['refused'] ?? '') === 'shrink') {
+            AdminActionSupport::audit(
+                'admin_helius_resync_refused_shrink',
+                'helius_webhook',
+                null,
+                ['remote_count' => (int) $stats['remote_count'], 'local_count' => (int) $stats['local_count']]
+            );
+            AdminActionSupport::redirect([
+                'page'           => SettingsPage::PAGE_SLUG,
+                'tab'            => 'nft',
+                'bcc_nft_result' => 'helius_resync_refused_shrink',
+                'bcc_remote'     => (int) $stats['remote_count'],
+                'bcc_local'      => (int) $stats['local_count'],
+            ]);
+        }
+
         $applied = (bool) $stats['applied'];
         AdminActionSupport::audit(
             $applied ? 'admin_helius_addresses_resynced' : 'admin_helius_resync_noop',
             'helius_webhook',
             null,
-            ['remote_count' => (int) $stats['remote_count'], 'local_count' => (int) $stats['local_count']]
+            ['remote_count' => (int) $stats['remote_count'], 'local_count' => (int) $stats['local_count'], 'allow_shrink' => $allowShrink]
         );
 
         AdminActionSupport::redirect([
@@ -896,6 +951,16 @@ final class NftIndexerStatusView
             $notices[$result] = ['updated', sprintf(
                 'Resync %s. Remote: %d addresses · Local: %d addresses.',
                 $result === 'helius_resynced' ? 'applied' : 'no-op (already in sync)',
+                $remote,
+                $local
+            )];
+        }
+
+        if ($result === 'helius_resync_refused_shrink') {
+            $remote = isset($_GET['bcc_remote']) ? (int) $_GET['bcc_remote'] : 0;
+            $local  = isset($_GET['bcc_local']) ? (int) $_GET['bcc_local'] : 0;
+            $notices[$result] = ['error', sprintf(
+                'Resync refused: it would shrink the remote list from %d to %d addresses. If that is expected (a confirmed mass unlink), tick "Allow a large shrink" and resync again.',
                 $remote,
                 $local
             )];

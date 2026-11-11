@@ -8,6 +8,7 @@ use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
 use BCC\Trust\Onchain\Repositories\ChainNftCapabilityRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Support\NftChainCapability;
+use BCC\Trust\Onchain\Support\NftDriverRegistry;
 use BCC\Trust\Onchain\ValueObjects\ChainNftCapabilityOverrides;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
@@ -423,18 +424,24 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
         $table = ChainNftCapabilityRepository::table();
         $chain = self::fullyPermittedCosmosChain();
 
-        // 1. Operator disables the chain's only enumeration driver.
+        // ⚠ S7: asserted through `operationMatrix()` rather than the removed
+        // chain-level `forChain()`/`verdict()`. The per-operation status is
+        // the stronger assertion — it NAMES the operation whose driver was
+        // disabled, where the verdict only summarised one of them.
+        $op = NftDriverRegistry::OP_VALIDATION;
+
+        // 1. Operator disables the chain's only driver for that operation.
         $wpdb->query($wpdb->prepare(
             'INSERT INTO `' . $table . '` (chain_id, operation, driver_key, enabled, priority, updated_at)
              VALUES (%d, %s, %s, 0, 10, NOW())',
             (int) $chain->id,
-            'enumeration',
-            'cosmwasm_enumeration'
+            NftDriverRegistry::OP_VALIDATION,
+            NftDriverRegistry::DRIVER_CW721_LCD
         ));
 
         self::assertSame(
-            NftChainCapability::NO_ENUMERATION_DRIVER,
-            NftChainCapability::forChain($chain),
+            NftChainCapability::OP_DISABLED,
+            NftChainCapability::operationMatrix($chain)['operations'][$op]['status'],
             'the operator disable must take effect while the store is readable'
         );
 
@@ -442,24 +449,34 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
         $wpdb->query('RENAME TABLE `' . $table . '` TO `' . $table . '_gone`');
 
         try {
-            $verdict = NftChainCapability::forChain($chain);
+            $matrix = NftChainCapability::operationMatrix($chain);
 
-            // 3 + 4.
+            // 3 + 4. A failed read is "we cannot say", not "no overrides" —
+            // the fail-OPEN this test exists to prevent would report the
+            // registry default and silently re-enable the disabled driver.
             self::assertFalse(
-                NftChainCapability::isScannable($verdict),
-                'an unreadable override store must never yield SCANNABLE'
+                $matrix['overrides_available'],
+                'an unreadable override store must report itself unavailable'
             );
             self::assertSame(
-                NftChainCapability::UNKNOWN,
-                $verdict,
-                'a failed override read is "we cannot say", not "no overrides"'
+                NftChainCapability::OP_UNKNOWN,
+                $matrix['operations'][$op]['status'],
+                'a failed override read must not resolve to a confident status'
+            );
+            self::assertNotSame(
+                NftChainCapability::OP_READY,
+                $matrix['operations'][$op]['status'],
+                'and must never read as ready'
             );
         } finally {
             $wpdb->query('RENAME TABLE `' . $table . '_gone` TO `' . $table . '`');
         }
 
         // And the disable is still in force once the store returns.
-        self::assertSame(NftChainCapability::NO_ENUMERATION_DRIVER, NftChainCapability::forChain($chain));
+        self::assertSame(
+            NftChainCapability::OP_DISABLED,
+            NftChainCapability::operationMatrix($chain)['operations'][$op]['status']
+        );
     }
 
     public function testUnreadableOverrideStoreReportsUnavailableNotEmpty(): void
@@ -523,10 +540,18 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
         self::assertFalse($result->isAvailable(), 'an overflowing set must not be applied');
         self::assertSame(ChainNftCapabilityOverrides::REASON_OVERFLOW, $result->reason());
 
-        self::assertFalse(
-            NftChainCapability::isScannable(NftChainCapability::forChain($chain)),
-            'an overflowing override set must never yield SCANNABLE'
-        );
+        // ⚠ S7: via the matrix, since the chain-level verdict is gone. Every
+        // operation must read UNKNOWN — an overflowing set is not a partial
+        // set, so no row may resolve confidently from it.
+        $matrix = NftChainCapability::operationMatrix($chain);
+        self::assertFalse($matrix['overrides_available']);
+        foreach ($matrix['operations'] as $operation => $row) {
+            self::assertSame(
+                NftChainCapability::OP_UNKNOWN,
+                $row['status'],
+                $operation . ' must not resolve from an overflowing override set'
+            );
+        }
     }
 
     /** Exactly at the ceiling is fine — only PAST it is truncation. */
@@ -594,57 +619,33 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
         self::assertCount(1, $result->rows());
     }
 
-    // ── The CosmWasm measurement is scoped to Cosmos ────────────────────
-
-    /**
-     * A Cosmos chain measured at HTTP 501 is CHAIN_UNSUPPORTED.
-     */
-    public function testCosmosChainWithMeasured501IsChainUnsupported(): void
-    {
-        $chain = self::fullyPermittedCosmosChain();
-        self::markCwUnsupported((int) $chain->id);
-
-        self::assertSame(NftChainCapability::CHAIN_UNSUPPORTED, NftChainCapability::forChain($chain));
-    }
-
-    /**
-     * AN EVM OR SOLANA CHAIN CARRYING A STALE `cw_discovery_state` IS NOT.
-     *
-     * `cw_discovery_state` lives on `wp_bcc_chain_checkpoints`, a row shared
-     * with the EVM indexer's own `state` column, so a non-Cosmos chain can
-     * carry a `cw_*` value that means nothing there. Reading it would answer
-     * "this chain has no wasm module" — true, irrelevant, and it would MASK
-     * the real reason an EVM scan is refused: no provider sells chain-wide
-     * EVM enumeration.
-     *
-     * @param string $slug
-     */
-    #[\PHPUnit\Framework\Attributes\DataProvider('nonCosmosChains')]
-    public function testNonCosmosChainIgnoresAStaleCosmWasmState(string $slug): void
-    {
-        $chain = self::fullyPermittedChain($slug);
-        self::markCwUnsupported((int) $chain->id);
-
-        $verdict = NftChainCapability::forChain($chain);
-
-        self::assertNotSame(
-            NftChainCapability::CHAIN_UNSUPPORTED,
-            $verdict,
-            "{$slug} must not be classified by a CosmWasm measurement"
-        );
-        self::assertSame(
-            NftChainCapability::NO_ENUMERATION_DRIVER,
-            $verdict,
-            'the honest reason is that no driver can enumerate this family'
-        );
-    }
-
-    /** @return array<string, array{0: string}> */
-    public static function nonCosmosChains(): array
-    {
-        return ['evm' => ['ethereum'], 'solana' => ['solana']];
-    }
-
+    // ── S5's "THE STORED MEASUREMENT IS NOT READ" CASES: REMOVED (S9b) ──
+    //
+    // Three cases lived here and they were good ones. They wrote a genuine
+    // `cw_discovery_state = 'unsupported'` to `wp_bcc_chain_checkpoints` and
+    // asserted that EVERY per-operation capability status and reason was
+    // byte-identical before and after — the end-to-end proof that S5 had
+    // really severed the capability model from the stored measurement. A
+    // fourth asserted the write had landed, so the equality could not pass by
+    // comparing two no-ops. One covered a non-Cosmos row, where a stale
+    // `cw_*` value means nothing and must not mask the real reason.
+    //
+    // ⚠ S9b DROPPED THE COLUMN, so there is no stored measurement to write.
+    // These are not cases that merely became redundant — they became
+    // IMPOSSIBLE TO EXPRESS: their fixture step was an UPDATE against
+    // `cw_discovery_state`, which no longer exists on the table.
+    //
+    // Keeping them would have meant asserting that a value nothing can store
+    // changes nothing, which is exactly the vacuous shape this suite refuses
+    // elsewhere. The successor guarantee — that the projection does not name
+    // the column at all — is pinned by
+    // `ChainsCapabilityColumnAnchorIntegrationTest` and
+    // `ChainCheckpointRetiredColumnsIntegrationTest`, both of which run
+    // against a real engine with the columns present AND dropped.
+    //
+    // The 19 cases below are untouched: they cover the two RETAINED
+    // capability columns, the override table and its unique key, projection
+    // caching, and the fail-closed override reads.
     // ── Helpers ─────────────────────────────────────────────────────────
 
     /** A chain row with both capability columns set to 1, freshly projected. */
@@ -670,15 +671,7 @@ final class ChainNftCapabilityMigrationIntegrationTest extends TestCase
         return self::fullyPermittedChain('cosmos');
     }
 
-    /** Record the measured HTTP 501 on a chain's checkpoint row. */
-    private static function markCwUnsupported(int $chainId): void
-    {
-        ChainCheckpointRepository::ensureExists($chainId);
-        ChainCheckpointRepository::setCwDiscoveryState(
-            $chainId,
-            ChainCheckpointRepository::CW_STATE_UNSUPPORTED
-        );
-    }
+
 
     /**
      * Nothing else about a chain changes because these columns exist.

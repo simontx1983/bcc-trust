@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
+use BCC\Trust\Onchain\Support\AlchemyCredential;
 use BCC\Trust\Onchain\Support\AlchemyEndpoint;
 use BCC\Trust\Onchain\Support\EndpointDescriptor;
 use BCC\Trust\Onchain\Support\HeliusEndpoint;
@@ -564,8 +565,8 @@ final class NftProviderReadinessTest extends TestCase
         $withRest    = self::chain('cosmos', 'cosmos', '', 'https://rest.example');
         $withoutRest = self::chain('cosmos', 'cosmos', 'https://rpc.example', '');
 
-        self::assertTrue(NftProviderReadiness::isReady($withRest, NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION));
-        self::assertFalse(NftProviderReadiness::isReady($withoutRest, NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION));
+        self::assertTrue(NftProviderReadiness::isReady($withRest, NftDriverRegistry::DRIVER_CW721_LCD));
+        self::assertFalse(NftProviderReadiness::isReady($withoutRest, NftDriverRegistry::DRIVER_CW721_LCD));
     }
 
     /** Whitespace is not an endpoint. */
@@ -574,7 +575,7 @@ final class NftProviderReadinessTest extends TestCase
         self::assertFalse(
             NftProviderReadiness::isReady(
                 self::chain('cosmos', 'cosmos', '', '   '),
-                NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION
+                NftDriverRegistry::DRIVER_CW721_LCD
             )
         );
     }
@@ -595,7 +596,7 @@ final class NftProviderReadinessTest extends TestCase
 
         self::assertFalse(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_EVM_RPC));
         self::assertFalse(NftProviderReadiness::isReady($cosmos, NftDriverRegistry::DRIVER_ALCHEMY_NFT));
-        self::assertFalse(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_COSMWASM_ENUMERATION));
+        self::assertFalse(NftProviderReadiness::isReady($solana, NftDriverRegistry::DRIVER_CW721_LCD));
     }
 
     #[DataProvider('unknownDriverKeys')]
@@ -654,5 +655,158 @@ final class NftProviderReadinessTest extends TestCase
 
         self::assertSame([], NftProviderReadiness::readyDrivers($chain, []));
         self::assertSame([], NftProviderReadiness::readinessMap($chain, []));
+    }
+
+    // ── #273: DRIVER_EVM_RPC readiness vs what the fetcher can do ──────────
+    //
+    // `isReady()` gated this driver on `rpc_url !== ''` while its only
+    // consumer, `EvmFetcher::ethCallResult()`, resolves through
+    // `AlchemyCredential::jsonRpcUrlFor()` and refuses a KEYLESS ALCHEMY
+    // TEMPLATE with `kind => credentials_missing`. A template is non-empty, so
+    // five seeded chains reported READY while every `eth_call` against them
+    // was a guaranteed 401. The disagreement survived because nothing compared
+    // the two — which is what these cases now do.
+
+    /**
+     * The agreement itself, per seeded chain, with the expected answer stated
+     * so this cannot pass as a tautology.
+     */
+    #[DataProvider('seededEvmChains')]
+    public function testEvmRpcReadinessAgreesWithTheResolverTheFetcherUses(
+        string $slug,
+        string $rpcUrl,
+        bool $expectedReady
+    ): void {
+        $chain = self::chain('evm', $slug, $rpcUrl);
+
+        $resolves = AlchemyCredential::jsonRpcUrlFor($chain) !== null;
+        $ready    = NftProviderReadiness::isReady($chain, NftDriverRegistry::DRIVER_EVM_RPC);
+
+        self::assertSame(
+            $expectedReady,
+            $resolves,
+            $slug . ': jsonRpcUrlFor() must ' . ($expectedReady ? 'resolve' : 'refuse')
+                . ' this seeded endpoint'
+        );
+
+        self::assertSame(
+            $resolves,
+            $ready,
+            $slug . ': readiness and the fetcher\'s own resolver must agree. They are '
+                . 'the same question — "can an eth_call succeed on this chain?" — and two '
+                . 'definitions of it is how the panel came to say READY for a chain whose '
+                . 'every call returned credentials_missing (#273).'
+        );
+    }
+
+    /**
+     * ⚠ The fixture above is hand-written, so it can drift from what the
+     * installer actually seeds. This reads `schema-chains.php` and requires
+     * the two to match exactly — otherwise the agreement proved above would be
+     * about endpoints no install has.
+     */
+    public function testTheSeededFixtureMatchesSchemaChains(): void
+    {
+        $schema = (string) file_get_contents(
+            dirname(__DIR__, 2) . '/includes/database/schema-chains.php'
+        );
+        self::assertNotSame('', $schema, 'anti-vacuity: schema-chains.php must be readable');
+
+        preg_match_all("/'rpc_url'\s*=>\s*'([^']*)'/", $schema, $matches);
+        $seeded = array_values(array_unique(array_filter($matches[1])));
+
+        self::assertGreaterThanOrEqual(
+            7,
+            count($seeded),
+            'anti-vacuity: the seed scan must find the seeded rpc_url values (found '
+                . count($seeded) . ')'
+        );
+
+        $fixture = array_column(self::seededEvmChains(), 1);
+
+        foreach ($fixture as $url) {
+            self::assertContains(
+                $url,
+                $seeded,
+                'the fixture names an endpoint schema-chains.php does not seed: ' . $url
+            );
+        }
+
+        // And the other direction, restricted to the EVM seeds this case owns:
+        // an eighth EVM chain added to the installer must not slip past these
+        // assertions unnoticed.
+        foreach ($seeded as $url) {
+            if (str_contains($url, 'g.alchemy.com')) {
+                self::assertContains(
+                    $url,
+                    $fixture,
+                    'schema-chains.php seeds an Alchemy endpoint this fixture does not '
+                        . 'cover, so #273\'s agreement is unproven for it: ' . $url
+                );
+            }
+        }
+    }
+
+    /**
+     * The sharp pair, and the reason the old condition looked right: a real
+     * public node must stay ready with no Alchemy key at all.
+     */
+    public function testAKeylessTemplateIsNotReadyButAPublicNodeIs(): void
+    {
+        $template = self::chain('evm', 'ethereum', 'https://eth-mainnet.g.alchemy.com/v2/');
+        $public   = self::chain('evm', 'avalanche', 'https://api.avax.network/ext/bc/C/rpc');
+
+        self::assertFalse(
+            NftProviderReadiness::isReady($template, NftDriverRegistry::DRIVER_EVM_RPC),
+            'a keyless Alchemy template cannot serve eth_call — it is a guaranteed 401'
+        );
+
+        self::assertTrue(
+            NftProviderReadiness::isReady($public, NftDriverRegistry::DRIVER_EVM_RPC),
+            'eth_call is standard JSON-RPC, so a real public node keeps ERC-721 gating '
+                . 'with no Alchemy key. Losing this is the regression to watch for.'
+        );
+    }
+
+    /**
+     * The link between the two sides, asserted at source: the fetcher must
+     * keep resolving through the shared resolver rather than re-deriving the
+     * endpoint, or the agreement proved above stops meaning anything.
+     */
+    public function testTheFetcherStillRefusesOnTheSharedResolver(): void
+    {
+        $src = (string) file_get_contents(
+            dirname(__DIR__, 2) . '/app/Domain/Onchain/Fetchers/EvmFetcher.php'
+        );
+        self::assertNotSame('', $src, 'anti-vacuity: EvmFetcher.php must be readable');
+
+        self::assertStringContainsString(
+            'return AlchemyCredential::jsonRpcUrlFor($this->chain);',
+            $src,
+            'EvmFetcher::jsonRpcUrl() must delegate to the shared resolver'
+        );
+
+        self::assertStringContainsString(
+            "'kind' => 'credentials_missing'",
+            $src,
+            'the refusal this readiness arm now mirrors must still exist'
+        );
+    }
+
+    /** @return list<array{0: string, 1: string, 2: bool}> */
+    public static function seededEvmChains(): array
+    {
+        // Expectations hold with BCC_ALCHEMY_API_KEY UNDEFINED, which is this
+        // class's state in a fresh child process and the state of a fresh
+        // install. A keyed row would resolve and flip the first five to true.
+        return [
+            ['ethereum',  'https://eth-mainnet.g.alchemy.com/v2/',     false],
+            ['polygon',   'https://polygon-mainnet.g.alchemy.com/v2/', false],
+            ['arbitrum',  'https://arb-mainnet.g.alchemy.com/v2/',     false],
+            ['optimism',  'https://opt-mainnet.g.alchemy.com/v2/',     false],
+            ['base',      'https://base-mainnet.g.alchemy.com/v2/',    false],
+            ['avalanche', 'https://api.avax.network/ext/bc/C/rpc',     true],
+            ['bsc',       'https://bsc-dataseed.binance.org',          true],
+        ];
     }
 }

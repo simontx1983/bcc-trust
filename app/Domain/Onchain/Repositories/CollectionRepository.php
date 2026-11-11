@@ -135,7 +135,9 @@ if (!defined('ABSPATH')) {
  *     explorer_url: string|null,
  *     chain_description: string|null,
  *     chain_description_state: string|null,
- *     chain_description_source: string|null
+ *     chain_description_source: string|null,
+ *     metadata_state: string,
+ *     metadata_checked_at: string|null
  * }
  *
  * @phpstan-type CollectionCountByChain object{
@@ -814,66 +816,6 @@ final class CollectionRepository
     }
 
     /**
-     * Get top collections filtered by chain type (evm, solana, cosmos).
-     * Each chain type is ranked independently — no cross-chain mixing.
-     *
-     * @param string $chainType One of: 'evm', 'solana', 'cosmos'.
-     * @return array{items: list<CollectionWithChain>, total: int, pages: int}
-     */
-    public static function getTopCollectionsByChainType(
-        string $chainType,
-        int $page = 1,
-        int $perPage = 20,
-        string $orderBy = 'total_volume'
-    ): array {
-        global $wpdb;
-        $table  = self::table();
-        $chains = ChainRepository::table();
-
-        $allowedOrder = ['total_volume', 'floor_price', 'unique_holders', 'total_supply'];
-        if (!in_array($orderBy, $allowedOrder, true)) {
-            $orderBy = 'total_volume';
-        }
-
-        $offset = ($page - 1) * $perPage;
-
-        $countSql = $wpdb->prepare(
-            "SELECT COUNT(*)
-             FROM {$table} c
-             JOIN {$chains} ch ON ch.id = c.chain_id
-             WHERE ch.chain_type = %s",
-            $chainType
-        );
-
-        $mainSql = $wpdb->prepare(
-            "SELECT c.id, c.wallet_link_id, c.contract_address, c.chain_id, c.collection_name,
-                    c.token_standard, c.total_supply, c.floor_price, c.floor_currency,
-                    c.unique_holders, c.total_volume, c.listed_percentage, c.royalty_percentage,
-                    c.metadata_storage, c.image_url, c.show_on_profile, c.fetched_at, c.expires_at,
-                    ch.slug AS chain_slug, ch.name AS chain_name, ch.explorer_url, ch.native_token
-             FROM {$table} c
-             JOIN {$chains} ch ON ch.id = c.chain_id
-             WHERE ch.chain_type = %s
-             ORDER BY c.{$orderBy} DESC
-             LIMIT %d OFFSET %d",
-            $chainType,
-            $perPage,
-            $offset
-        );
-
-        $total = (int) $wpdb->get_var($countSql);
-        // LIMIT %d OFFSET %d is in the $mainSql prepared above.
-        /** @var list<CollectionWithChain>|null $items */
-        $items = $wpdb->get_results($mainSql);
-
-        return [
-            'items' => $items ?: [],
-            'total' => $total,
-            'pages' => $perPage > 0 ? (int) ceil($total / $perPage) : 0,
-        ];
-    }
-
-    /**
      * @param bool $includeHidden If true, returns all collections regardless of show_on_profile.
      *                            Used by the page owner's dashboard. Public views pass false.
      * @return array{items: list<CollectionWithChain>, total: int, pages: int}
@@ -997,6 +939,70 @@ final class CollectionRepository
             ['%d']
         );
     }
+    /**
+     * One collection, with everything the admin DETAIL view shows.
+     *
+     * ── WHY A SEPARATE READ ─────────────────────────────────────────────
+     * `getByIdWithChain()` is the handlers' read and deliberately carries
+     * identity, verification and provisioning only — widening it would
+     * change what a dozen mutation paths load. `listForAdminState()` has
+     * the right columns but is a LIST query bound to a tab predicate, and a
+     * detail view addressed by id must not inherit a tab: a row the current
+     * tab does not contain is still a row an operator can hold a link to.
+     *
+     * So this selects exactly the detail view's columns, by id, with no tab
+     * and no filter. READ-ONLY; it contacts no provider and writes nothing.
+     *
+     * ⚠ A THREE-WAY ANSWER, because the view says something different for
+     * each:
+     *   - object → found
+     *   - null   → provably absent (no such id)
+     *   - throws → the read did not run, so NOTHING is known
+     * A missing row and an unreadable table must never render the same, or
+     * a database fault reads as a deleted collection. The fail-closed arm
+     * reuses {@see GuardsReadFailures::guardReadOrThrow()} rather than
+     * re-deriving the `last_error` check.
+     *
+     * @throws RepositoryReadFailure when the read could not be performed
+     */
+    public static function findForAdminDetail(int $collectionId): ?object
+    {
+        if ($collectionId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT c.id, c.contract_address, c.canonical_identifier, c.chain_id,
+                    c.collection_name, c.collection_symbol, c.token_standard,
+                    c.total_supply, c.unique_holders, c.image_url, c.marketplace_url,
+                    c.is_verified, c.source, c.show_on_profile,
+                    c.provisioning_state, c.provisioning_requested_at,
+                    c.provisioning_requested_by, c.provisioning_failure_code,
+                    c.fetched_at, c.expires_at,
+                    c.metadata_state, c.metadata_checked_at,
+                    c.chain_description, c.chain_description_state,
+                    c.chain_description_source,
+                    ch.slug AS chain_slug, ch.name AS chain_name,
+                    ch.chain_type, ch.explorer_url
+               FROM {$table} c
+          LEFT JOIN {$chains} ch ON ch.id = c.chain_id
+              WHERE c.id = %d
+              LIMIT 1",
+            $collectionId
+        ));
+
+        // ⚠ `get_row()` returns null BOTH for no-such-row and for a failed
+        // query, so this has to run on the null path too — otherwise an
+        // unreadable table is indistinguishable from a deleted collection.
+        self::guardReadOrThrow('findForAdminDetail');
+
+        return $row;
+    }
+
 
     /**
      * Load a collection with chain metadata. Used by ClaimService.
@@ -2417,16 +2423,25 @@ final class CollectionRepository
      * @param int         $perPage       clamped to 1..100
      * @param string|null $chainSlug     optional chain filter
      * @param string|null $tokenStandard optional standard filter
+     * @param string|null $search        free-text term; see below
      * @return array{items: list<CollectionAdminStateRow>, total: int, pages: int, available: bool}
      *         `available` is false when the read failed — the caller must
      *         render "unavailable", never an empty or partial tab.
+     *
+     * ── THE SEARCH TERM NARROWS, NEVER WIDENS ───────────────────────────
+     * `$search` is matched against the collection NAME, the contract address
+     * and the canonical identifier, and is ANDed with the tab predicate — so
+     * no term can surface a row the tab would not have shown. An
+     * all-whitespace term is treated as ABSENT rather than as a term that
+     * matches everything.
      */
     public static function listForAdminState(
         string $tab,
         int $page = 1,
         int $perPage = 50,
         ?string $chainSlug = null,
-        ?string $tokenStandard = null
+        ?string $tokenStandard = null,
+        ?string $search = null
     ): array {
         global $wpdb;
 
@@ -2461,6 +2476,39 @@ final class CollectionRepository
         if ($tokenStandard !== null && $tokenStandard !== '') {
             $conditions[] = 'c.token_standard = %s';
             $params[]     = $tokenStandard;
+        }
+
+        // ── FREE-TEXT SEARCH ────────────────────────────────────────────
+        //
+        // ⚠ `esc_like()` FIRST, then the wildcards. The other way round
+        // escapes the `%` we just added and the term matches nothing — and
+        // an operator searching `50%` would otherwise have their own `%`
+        // read as a wildcard.
+        //
+        // ⚠ Matched against three columns because an operator arrives with
+        // whichever one they have: a name from a report, a contract address
+        // from a block explorer, or the canonical identifier from a gate.
+        // `canonical_identifier` is NULLable, so it needs its own IS NOT
+        // NULL — a NULL never satisfies LIKE and would silently drop rows
+        // from an OR chain that looked like it covered them.
+        //
+        // The comparison is deliberately the column's own collation
+        // (case-insensitive), so searching `apes` finds `Steel City Apes`.
+        // That is a DISPLAY search, not an identity lookup: nothing here
+        // decides what a row IS. The identity rule stays in
+        // NftCollectionIdentifier, where a Solana mint is compared
+        // byte-exact.
+        $term = $search === null ? '' : trim($search);
+        if ($term !== '') {
+            $like         = '%' . $wpdb->esc_like($term) . '%';
+            $conditions[] = '('
+                . 'c.collection_name LIKE %s'
+                . ' OR c.contract_address LIKE %s'
+                . ' OR (c.canonical_identifier IS NOT NULL AND c.canonical_identifier LIKE %s)'
+                . ')';
+            $params[] = $like;
+            $params[] = $like;
+            $params[] = $like;
         }
 
         $whereSql = 'WHERE ' . implode(' AND ', $conditions);
@@ -2511,7 +2559,20 @@ final class CollectionRepository
                     -- read HERE and only here. The admin review screen is its
                     -- only reader, so these three columns exist to be shown to
                     -- an administrator — never serialized to a public payload.
-                    c.chain_description, c.chain_description_state, c.chain_description_source
+                    c.chain_description, c.chain_description_state, c.chain_description_source,
+                    -- See docs/database-schema.md. Both are COMPUTED on
+                    -- intake and scoped per chain family; no caller supplies
+                    -- them. Surfaced in the admin review table since the
+                    -- search/review slice.
+                    -- WARNING: prose in an SQL comment must not contain the
+                    -- f-r-o-m keyword followed by a word. wpdb::query()
+                    -- resolves the table name by regex-matching the first
+                    -- such pair in the query TEXT, comments included, so a
+                    -- stray phrase here can get the whole query rejected.
+                    -- PreparedSqlCommentPlaceholderTest caught precisely
+                    -- that in this comment first draft. Placeholders are
+                    -- banned here for the same reason.
+                    c.metadata_state, c.metadata_checked_at
                FROM {$table} c
           LEFT JOIN {$chains} ch ON ch.id = c.chain_id
                {$whereSql}

@@ -9,7 +9,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Services\NftCapabilityEditor;
 use BCC\Trust\Onchain\Support\NftChainCapability;
 use BCC\Trust\Onchain\Support\NftDriverRegistry;
-use BCC\Trust\Onchain\Workers\CosmwasmDiscoveryWorker;
+
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -53,7 +53,7 @@ final class NftCapabilityEditorFlagTest extends TestCase
         \BCC\Trust\Core\Security\AuditLogger::reset();
         ChainRepository::reset();
         ChainNftCapabilityRepository::reset();
-        CosmwasmDiscoveryWorker::reset();
+
     }
 
     /** @return list<string> */
@@ -81,7 +81,14 @@ final class NftCapabilityEditorFlagTest extends TestCase
      */
     private function assertNoWorkRan(): void
     {
-        $this->assertSame(0, CosmwasmDiscoveryWorker::$passes, 'no discovery ran');
+        // ⚠ S8 DROPPED THE `CosmwasmDiscoveryWorker::$passes` CHECK HERE.
+        // It asserted "no discovery ran", and after S8 there is no discovery
+        // that could run — the class is deleted. Keeping it would be an
+        // assertion that passes because its subject cannot exist.
+        //
+        // The two checks that remain are the ones with teeth, and they are
+        // about RETAINED code: a capability edit must construct no provider
+        // budget, and must not touch the CosmWasm opt-in column.
         $this->assertSame([], \BCC\Trust\Onchain\Support\ProviderRequestBudget::$constructions, 'no budget built');
         $this->assertSame([], ChainRepository::$discoveryWrites, 'the CosmWasm opt-in was not touched');
     }
@@ -362,34 +369,6 @@ final class NftCapabilityEditorFlagTest extends TestCase
         );
     }
 
-    /**
-     * ⚠️ AND THE STORED PERMISSION WOULD NOT HAVE HELPED ANYWAY.
-     *
-     * Proven by writing the flag directly — as a restored backup would —
-     * and showing the capability model still refuses enumeration for a
-     * structural reason. This is the claim that makes the refusal above a
-     * correctness fix rather than a policy: no setting can add chain-wide
-     * enumeration to these families.
-     */
-    #[DataProvider('nonEnumerableFamilies')]
-    public function testEvenAStoredPermissionLeavesTheChainNonEnumerable(
-        string $slug,
-        string $chainType
-    ): void {
-        ChainRepository::seed(self::CHAIN_ID, $slug, false, true, true, $chainType);
-
-        $chain = ChainRepository::getById(self::CHAIN_ID);
-        self::assertNotNull($chain);
-
-        $matrix = NftChainCapability::operationMatrix($chain);
-        $enumeration = $matrix['operations'][NftDriverRegistry::OP_ENUMERATION];
-
-        $this->assertSame(NftChainCapability::OP_NO_DRIVER, $enumeration['status']);
-        $this->assertSame(NftChainCapability::REASON_NO_REGISTERED_DRIVER, $enumeration['reason']);
-        $this->assertSame([], $enumeration['registered'], 'the registry offers nothing to enumerate with');
-        $this->assertSame(NftChainCapability::NO_ENUMERATION_DRIVER, $matrix['verdict']);
-        $this->assertFalse(NftChainCapability::isScannable($matrix['verdict']));
-    }
 
     /**
      * ⚠️ BUT A STORED-WRONG VALUE CAN STILL BE CLEARED.

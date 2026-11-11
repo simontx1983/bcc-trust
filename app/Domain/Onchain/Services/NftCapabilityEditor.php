@@ -300,10 +300,18 @@ final class NftCapabilityEditor
      * still cannot mean anything, is a worse answer than the true one.
      *
      * ── AND IT STILL STARTS NOTHING ─────────────────────────────────────
-     * A measured Cosmos chain with no wasm module can hold this permission
-     * and remains unscannable; the backfill control stays unavailable
-     * because {@see NftChainCapability} answers `CHAIN_UNSUPPORTED` before
-     * it ever reaches a permission. Intent never overrides a measurement.
+     * This permission authorises submitting ONE contract through manual
+     * intake. It schedules nothing, no cron reads it, and the chain-wide
+     * scanner surface no longer exists to be re-armed.
+     *
+     * ⚠ What refuses a contract on a Cosmos chain with no wasm module is now
+     * PER-REQUEST evidence, not a stored measurement: S5 removed the
+     * `CHAIN_UNSUPPORTED` rung that used to refuse such a chain before it
+     * reached a permission. Granting this permission on such a chain is
+     * therefore permitted and harmless — each submitted contract is still
+     * refused at validation time, and refused as UNAVAILABLE ("could not
+     * validate") rather than as "not an NFT". That boundary is pinned by
+     * `CosmosNoWasmModuleIsNeverNotAnNftTest`.
      */
     public static function enableManualDiscovery(int $chainId): string
     {

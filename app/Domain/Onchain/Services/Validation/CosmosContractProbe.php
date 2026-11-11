@@ -83,7 +83,14 @@ final class CosmosContractProbe
         // ⚠ Checked BEFORE the classifier. The classifier reasons about a
         // contract's answers; a chain with no wasm module produced none, and
         // handing it a set of failures would let it reach `not_cw721`.
-        if ($this->anyProbeSaysChainHasNoWasm($outcomes)) {
+        //
+        // The HTTP status is asked FIRST, because it is the only operand that
+        // is a fact rather than a wording. The outcome-shape check behind it
+        // is kept as a fallback for a gateway that says "not implemented"
+        // under some other status — it is weaker, not wrong.
+        if ($this->fetcher->chainHasNoWasmFor($contract)
+            || $this->anyProbeSaysChainHasNoWasm($outcomes)
+        ) {
             return ContractValidationVerdict::unavailable([
                 ContractValidationVerdict::EV_CHAIN_HAS_NO_WASM,
             ]);
@@ -200,6 +207,17 @@ final class CosmosContractProbe
     }
 
     /**
+     * FALLBACK ONLY. The authoritative signal is the HTTP status, which
+     * {@see \BCC\Trust\Onchain\Fetchers\CosmosFetcher::chainHasNoWasmFor()}
+     * carries; this reads what survives in the outcome shape.
+     *
+     * ⚠ Both arms below are weaker than the status, and the first is
+     * unreachable in production: `errorKindFromMessage()` maps every status
+     * >= 500 to KIND_NODE_ERROR, so no production path emits
+     * `not_implemented` as a kind. It is retained because the excerpt arm
+     * depends on the gateway's choice of words, and dropping both would make
+     * a 501 detectable only where the status survives.
+     *
      * @param list<array{probe: string, ok: bool, kind: string, excerpt: string}> $outcomes
      */
     private function anyProbeSaysChainHasNoWasm(array $outcomes): bool

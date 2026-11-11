@@ -60,6 +60,121 @@ final class CosmosNoWasmModuleIsNeverNotAnNftTest extends TestCase
         };
     }
 
+    // ── HTTP 501 is the authoritative signal ──────────────────
+
+    /**
+     * THE PRODUCTION SHAPE, AND THE REGRESSION THIS CLOSES.
+     *
+     * A real 501 reaches the probe as KIND_NODE_ERROR carrying whatever
+     * excerpt the gateway chose: errorKindFromMessage() maps every status
+     * >= 500 to that kind, and probeKind() discards the status. So before the
+     * HTTP side-channel existed this set was indistinguishable from an outage
+     * and resolved to provider_error - correct about safety, wrong about why.
+     *
+     * The excerpt deliberately does NOT contain "not implemented": that is the
+     * gateway's wording to choose, and the point is that we no longer depend
+     * on it.
+     */
+    public function testAnHttp501IsNoWasmEvenWhenTheKindAndExcerptDoNotSaySo(): void
+    {
+        $fetcher = new class extends FakeCosmosFetcherForValidation {
+            public function probeCw721(string $contract): array
+            {
+                $this->chainHasNoWasm = true;   // the status the fetcher observed
+
+                return [
+                    ['probe' => CosmwasmClassifier::PROBE_NUM_TOKENS, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_NODE_ERROR, 'excerpt' => 'unknown query path'],
+                    ['probe' => CosmwasmClassifier::PROBE_CONTRACT_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_NODE_ERROR, 'excerpt' => 'unknown query path'],
+                    ['probe' => CosmwasmClassifier::PROBE_COLLECTION_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_NODE_ERROR, 'excerpt' => 'unknown query path'],
+                ];
+            }
+        };
+
+        $verdict = (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $verdict->state());
+        self::assertNotSame(ContractValidationVerdict::INVALID, $verdict->state());
+        self::assertFalse($verdict->mayPersist());
+        self::assertTrue(
+            $verdict->hasEvidence(ContractValidationVerdict::EV_CHAIN_HAS_NO_WASM),
+            'a 501 must be reported as "this chain has no wasm module", not as an outage'
+        );
+    }
+
+    /** No metadata read - the chain was never asked about a contract. */
+    public function testAnHttp501AttemptsNoMetadataRead(): void
+    {
+        $fetcher = new class extends FakeCosmosFetcherForValidation {
+            public function probeCw721(string $contract): array
+            {
+                $this->chainHasNoWasm = true;
+
+                return [
+                    ['probe' => CosmwasmClassifier::PROBE_NUM_TOKENS, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_NODE_ERROR, 'excerpt' => ''],
+                ];
+            }
+        };
+
+        (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertSame(0, $fetcher->contractInfoCalls);
+    }
+
+    /**
+     * The probe must not INVENT a no-wasm verdict when the fetcher reports no
+     * 501: an outage stays a provider error.
+     *
+     * ⚠ This pins the probe CONSUMING the signal, not the 501 threshold
+     * itself — the fake sets the flag directly, so widening the fetcher to
+     * >= 500 would not fail here. That threshold is pinned at the wire, by
+     * CosmosFetcherWasmWireTest::testAnOrdinaryBadGatewayDoesNotMarkTheChain.
+     */
+    public function testAnOrdinaryBadGatewayIsAProviderErrorNotNoWasm(): void
+    {
+        $fetcher = new class extends FakeCosmosFetcherForValidation {
+            public function probeCw721(string $contract): array
+            {
+                // chainHasNoWasm stays false: the fetcher saw 502, not 501.
+                return [
+                    ['probe' => CosmwasmClassifier::PROBE_NUM_TOKENS, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_NODE_ERROR, 'excerpt' => 'bad gateway'],
+                    ['probe' => CosmwasmClassifier::PROBE_CONTRACT_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_NODE_ERROR, 'excerpt' => 'bad gateway'],
+                    ['probe' => CosmwasmClassifier::PROBE_COLLECTION_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_NODE_ERROR, 'excerpt' => 'bad gateway'],
+                ];
+            }
+        };
+
+        $verdict = (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $verdict->state());
+        self::assertFalse(
+            $verdict->hasEvidence(ContractValidationVerdict::EV_CHAIN_HAS_NO_WASM),
+            'an outage is not a statement about the chain'
+        );
+        self::assertTrue($verdict->hasEvidence(ContractValidationVerdict::EV_PROVIDER_ERROR));
+    }
+
+    /** The status outranks a decisive contract refusal, as the kind arm already does. */
+    public function testTheStatusWinsOverADecisiveContractRefusal(): void
+    {
+        $fetcher = new class extends FakeCosmosFetcherForValidation {
+            public function probeCw721(string $contract): array
+            {
+                $this->chainHasNoWasm = true;
+
+                return [
+                    ['probe' => CosmwasmClassifier::PROBE_NUM_TOKENS, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_QUERY_UNSUPPORTED, 'excerpt' => 'unknown variant'],
+                    ['probe' => CosmwasmClassifier::PROBE_CONTRACT_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_QUERY_UNSUPPORTED, 'excerpt' => 'unknown variant'],
+                    ['probe' => CosmwasmClassifier::PROBE_COLLECTION_INFO, 'ok' => false, 'kind' => CosmwasmClassifier::KIND_QUERY_UNSUPPORTED, 'excerpt' => 'unknown variant'],
+                ];
+            }
+        };
+
+        $verdict = (new CosmosContractProbe($fetcher))->validate(self::CONTRACT, $this->budget());
+
+        self::assertSame(ContractValidationVerdict::UNAVAILABLE, $verdict->state());
+        self::assertTrue($verdict->hasEvidence(ContractValidationVerdict::EV_CHAIN_HAS_NO_WASM));
+    }
+
     // ── The gate ────────────────────────────────────────────────────────
 
     public function testAChainWithNoWasmModuleIsUnavailableNotInvalid(): void
@@ -302,6 +417,12 @@ class FakeCosmosFetcherForValidation extends \BCC\Trust\Onchain\Fetchers\CosmosF
 
     public ?int $numTokens = null;
 
+    /**
+     * Mirrors the real fetcher's HTTP-501 side-channel. Set true to stand in
+     * for a chain whose wasm endpoints answer 501.
+     */
+    public bool $chainHasNoWasm = false;
+
     public function __construct()
     {
         // Deliberately does NOT call parent::__construct(): these tests never
@@ -318,6 +439,11 @@ class FakeCosmosFetcherForValidation extends \BCC\Trust\Onchain\Fetchers\CosmosF
         $this->contractInfoCalls++;
 
         return $this->contractInfo;
+    }
+
+    public function chainHasNoWasmFor(string $contract): bool
+    {
+        return $this->chainHasNoWasm;
     }
 
     public function numTokensCountFor(string $contract): ?int

@@ -432,13 +432,6 @@ final class WalletAuthController
 
     public function walletLogin(WP_REST_Request $request): WP_REST_Response
     {
-        // Same brute-force-resistance argument as /auth/login: throttle
-        // BEFORE the CPU-bound signature verification, otherwise an
-        // attacker can pin a CPU at the verify rate.
-        if (!\BCC\Core\Security\Throttle::allow('wallet_login', AuthSupport::WALLET_LOGIN_RATE_LIMIT, 60)) {
-            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
-        }
-
         $walletAddress = (string) $request->get_param('wallet_address');
         $signature     = wp_strip_all_tags(wp_unslash((string) $request->get_param('signature')));
         $extraParam    = $request->get_param('extra');
@@ -463,6 +456,28 @@ final class WalletAuthController
         $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getById((int) ($challenge['chain_id'] ?? 0));
         if ($chain === null) {
             return ApiResponse::error('bcc_invalid_request', 'Chain not found.', 400);
+        }
+
+        // Throttle per WALLET (+ a route-wide ceiling), still BEFORE the
+        // CPU-bound signature verification (F-123). Not per IP: this route is
+        // called server-side by the frontend, so every request shares one IP
+        // and a per-IP bucket let anyone lock out all wallet logins. Placed
+        // AFTER the nonce consume on purpose: only a request carrying a
+        // server-issued nonce for this address counts against its bucket, so
+        // a bare junk request costs the attacker nothing against it. This
+        // RAISES the cost of draining a victim's bucket, it does not prevent
+        // it: the anonymous /auth/wallet-nonce issues a nonce for any address
+        // (per-IP throttled), so an attacker rotating IPs can still mint
+        // nonces for a victim's address and spend that wallet's 5/min.
+        // Lower-casing makes case-distinct base58/SS58 addresses share a
+        // bucket: fail-closed (stricter), never looser.
+        if (!AuthSupport::allowIdentityAttempt(
+            'wallet_login',
+            (string) $chain->id . "\n" . strtolower($walletAddress),
+            AuthSupport::WALLET_LOGIN_RATE_LIMIT,
+            AuthSupport::WALLET_LOGIN_GLOBAL_LIMIT
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
 
         $challengeMessage = (string) ($challenge['message'] ?? '');
@@ -735,10 +750,16 @@ final class WalletAuthController
         $userIdInt = (int) $userId;
         update_user_meta($userIdInt, HandleService::META_HANDLE, $handle);
 
-        // Wallet-signup users authenticate via cryptographic signature —
-        // email is a placeholder or optional. Mark as verified so they
-        // are never blocked by the email-verification gate in login().
-        update_user_meta($userIdInt, AuthSupport::META_EMAIL_VERIFIED, '1');
+        // The email is NOT verified: it is either a placeholder or an address
+        // the caller typed, and a wallet signature proves nothing about who
+        // owns that inbox. Never '1' here — OAuth sign-in links by email only
+        // into a '1' account, so marking an unproven address verified let an
+        // attacker sign up with a victim's address and receive the victim's
+        // later Google sign-in. '0' does not affect this user: they sign in
+        // with their wallet, not the password gate in login(). The
+        // verification email (real addresses only) is sent once the wallet
+        // link below commits — see startWalletSignupEmailVerification().
+        update_user_meta($userIdInt, AuthSupport::META_EMAIL_VERIFIED, '0');
 
         // Link the wallet via the canonical write contract. If this
         // fails (concurrent signup race claimed the same wallet between
@@ -774,6 +795,10 @@ final class WalletAuthController
         // verifyAndLink, so listeners don't need to care which path the
         // link came from.
         do_action('bcc_wallet_verified', $userIdInt, (string) $chain->slug, $walletAddress);
+
+        // The account is now committed (the link-race rollback above can no
+        // longer delete it), so it is safe to mail.
+        AuthSupport::startWalletSignupEmailVerification($userIdInt, $email);
 
         wp_set_current_user($userIdInt);
         wp_set_auth_cookie($userIdInt, true);

@@ -69,6 +69,8 @@ final class NotificationPrefs
         NotificationType::ATTESTATION_REAFFIRMED,
         NotificationType::DIVERGENCE_STATE_WARNING,
         NotificationType::HOLDER_COMMUNITY_LIVE,
+        NotificationType::DELEGATOR_GROUP_REMOVED,
+        NotificationType::CONTENT_AUTO_HIDDEN,
     ];
 
     /**
@@ -129,6 +131,8 @@ final class NotificationPrefs
         'bell_bcc_attestation_reaffirmed'                    => true,
         'bell_bcc_divergence_state_warning'                  => true,
         'bell_bcc_holder_community_live'                     => true,
+        'bell_bcc_delegator_group_removed'                   => true,
+        'bell_bcc_content_auto_hidden'                       => true,
         'push_master'                                        => false,
         'push_event_review'                                  => true,
         'push_event_dispute_outcome'                         => true,
@@ -339,13 +343,21 @@ final class NotificationPrefs
      *   the weekly digest cron to enumerate recipients without scanning
      *   the full users table.
      */
-    public static function findEmailDigestOptIns(int $limit = 5000): array
+    public static function findEmailDigestOptIns(int $limit = 5000, int $afterUserId = 0): array
     {
         $key = self::META_PREFIX . 'email_digest';
 
         return \BCC\Trust\Core\Plugin::instance()
             ->notificationRepository()
-            ->findUserIdsByMetaFlag($key, $limit);
+            ->findUserIdsByMetaFlag($key, $limit, $afterUserId);
+    }
+
+    /** Opted-in member count, for the admin Email Digest page. */
+    public static function countEmailDigestOptIns(): int
+    {
+        return \BCC\Trust\Core\Plugin::instance()
+            ->notificationRepository()
+            ->countUsersByMetaFlag(self::META_PREFIX . 'email_digest');
     }
 
     /**

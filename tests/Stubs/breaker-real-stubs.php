@@ -39,6 +39,24 @@ if (!defined('DAY_IN_SECONDS')) {
 /** The two independent stores, plus a spy on the advisory lock. */
 final class BccBreakerStore
 {
+    /**
+     * Make `delete_transient()` refuse.
+     *
+     * The endpoint review treats a failed delete as "I could not claim
+     * this", which must stop the switch BEFORE any provider call. Without
+     * a switch here that branch is unreachable and the assertion vacuous.
+     */
+    public static bool $deleteTransientFails = false;
+
+    /**
+     * Make the breaker counter delete THROW.
+     *
+     * The only way `forgetForEndpointChange()` can fail rather than merely
+     * report "nothing to clear" — and the switch must report that as a
+     * follow-up failure WITHOUT implying the endpoint did not change.
+     */
+    public static bool $deleteCounterThrows = false;
+
     /** @var array<string, mixed> the wp_options table (no expiry) */
     public static array $options = [];
 
@@ -132,6 +150,27 @@ if (!function_exists('wp_cache_delete')) {
         return true;
     }
 }
+if (!function_exists('wp_salt')) {
+    /**
+     * The review store keys its fingerprint on a site salt. Fixed here so a
+     * fingerprint computed in one request matches one computed in the next,
+     * which is the property the review relies on.
+     */
+    function wp_salt(string $scheme = 'auth'): string
+    {
+        return 'bcc-test-salt-' . $scheme;
+    }
+}
+if (!function_exists('wp_generate_password')) {
+    /** Distinct per call, so a REPLACEMENT review gets a different id. */
+    function wp_generate_password(int $length = 12, bool $special = true, bool $extra = false): string
+    {
+        static $n = 0;
+        $n++;
+
+        return substr(str_repeat('r' . $n . 'x', $length), 0, $length);
+    }
+}
 if (!function_exists('get_transient')) {
     function get_transient(string $key)
     {
@@ -149,6 +188,10 @@ if (!function_exists('set_transient')) {
 if (!function_exists('delete_transient')) {
     function delete_transient(string $key): bool
     {
+        if (BccBreakerStore::$deleteTransientFails) {
+            return false;
+        }
+
         unset(BccBreakerStore::$transients[$key]);
 
         return true;
@@ -255,6 +298,10 @@ namespace BCC\Trust\Onchain\Repositories {
 
         public static function deleteCounter(string $optionName): void
         {
+            if (\BccBreakerStore::$deleteCounterThrows) {
+                throw new \RuntimeException('counter delete failed');
+            }
+
             unset(\BccBreakerStore::$options[$optionName]);
         }
     }

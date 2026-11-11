@@ -63,6 +63,24 @@ define('BCC_TRUST_UNIFORM_VOTE_THRESHOLD', 0.9);
 define('BCC_TRUST_UNIFORM_VOTE_MIN', 10);
 define('BCC_TRUST_VOTE_CHANGE_LIMIT', 5);
 
+// Fan-in pre-gate window (F-105, user decision): a young account (< 30 days)
+// is refused when the page has had the fan-in threshold (15, filterable via
+// bcc_trust_fan_in_pre_gate_threshold) distinct voters within this many
+// MINUTES — a burst, not ordinary popularity.
+define('BCC_TRUST_FAN_IN_PRE_GATE_WINDOW_MINUTES', 5);
+
+// ======================================================
+// SHARED-DEVICE PENALTY (F-103)
+// ======================================================
+// A given shared device / server fingerprint adds to an account's
+// fraud_score at most ONCE per window (it used to add on EVERY vote, so two
+// accounts behind one laptop were blocked from voting after ~3 votes), and
+// the total all shared-device signals may add within a window is capped.
+// Values confirmed by the user 2026-11-11 (via main agent): once per pair per
+// 30 days, at most 20 points in total.
+define('BCC_TRUST_DEVICE_SHARING_WINDOW_DAYS', 30);
+define('BCC_TRUST_DEVICE_SHARING_MAX_POINTS', 20);
+
 // ======================================================
 // VOTE RING DETECTION
 // ======================================================

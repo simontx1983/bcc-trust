@@ -16,6 +16,9 @@ jobs:
   php:
     name: PHP — PHPStan L8 · PHPUnit · guardrails
     runs-on: ubuntu-latest
+    # Composer's script timeout is off (process-timeout 0), so cap the job
+    # here instead of GitHub's 360-minute default.
+    timeout-minutes: 30
     # Checked out INTO the WordPress plugins layout so arch-guardrails.sh
     # resolves its sibling-plugin paths (scripts/../../<plugin>).
     defaults:
@@ -38,27 +41,67 @@ jobs:
         with:
           php-version: '8.2'
           # gmp is required by simplito/elliptic-php (on-chain crypto).
-          extensions: gmp, mbstring, intl
+          #
+          # ⚠ imagick is here for ONE suite, and its absence does not fail
+          # that suite — it SKIPS it. CoverImageMetadataStripBehaviourTest is the
+          # only place the cover-image EXIF/GPS strip is proven to remove
+          # BYTES rather than merely to have been attempted, and the Imagick
+          # branch is the only one reachable without loading WordPress. Drop
+          # this extension and the privacy control silently stops being
+          # tested, which is why the step below re-runs that suite with
+          # --fail-on-skipped.
+          extensions: gmp, mbstring, intl, imagick
           tools: composer:v2
           coverage: none
 
-      # ⚠ BEFORE `composer update`, and deliberately so. The committed vendor/ is
-      # what the deploy rsyncs to staging and production; `composer update` would
-      # regenerate the classmap in the runner and the guard would then pass over
+      # ⚠ BEFORE `composer install`, and deliberately so. The committed vendor/ is
+      # what the deploy rsyncs to staging and production; installing first would
+      # rewrite the classmap in the runner and the guard would then pass over
       # freshly written files instead of the ones this commit actually ships.
       - name: Composer classmap parity (committed vendor, pre-install)
         run: php scripts/composer-classmap-guard.php
 
-      # composer.lock is gitignored in this repo (production vendor/ is committed,
-      # dev deps restored on demand), so resolve from composer.json.
+      # ⚠ `install`, NOT `update` — changed in #191, and the distinction is the
+      # whole point of that issue. composer.lock is now COMMITTED, so `install`
+      # reproduces exactly the set the deploy ships. `update` re-resolved on
+      # every run, which is how CI came to be testing guzzle 7.16.1 and
+      # brick/math 1.0.0 while production ran 7.10.0 and 0.17.1 — drift that
+      # nothing reported, because neither side ever looked at the other.
+      #
+      # If this step ever fails with "lock file is not up to date", the fix is
+      # to run `composer update` locally and commit the lock as its own change.
+      # Do NOT switch this back to `update` to make it green.
       - name: Install dependencies
-        run: composer update --no-interaction --no-progress --prefer-dist
+        run: composer install --no-interaction --no-progress --prefer-dist
 
       - name: PHPStan (level 8)
         run: composer phpstan
 
       - name: Unit tests
         run: composer test
+
+      # ⚠⚠ A SKIPPED TEST READS AS A PASSING TEST. The EXIF-strip suite
+      # skips itself when imagick is absent — correct on a developer machine,
+      # wrong here, because this job is the only place that strip is proven to
+      # remove BYTES rather than merely to have been attempted.
+      #
+      # TWO flags, closing two DIFFERENT false greens, both measured:
+      #
+      #   --fail-on-skipped          without imagick the suite prints
+      #                              "OK, but some tests were skipped!" and
+      #                              exits 0. Measured: plain 0, flagged 1.
+      #   --fail-on-empty-test-suite a --filter that matches NOTHING prints
+      #                              "No tests executed!" and also exits 0,
+      #                              so renaming or deleting the class would
+      #                              silently retire this guard. Measured:
+      #                              bogus filter 0 plain, 1 flagged.
+      #
+      # Neither flag substitutes for the other: a real filter with no imagick
+      # still exits 0 under --fail-on-empty-test-suite alone.
+      - name: Cover-image EXIF strip actually ran (not skipped, not vanished)
+        run: |
+          vendor/bin/phpunit --filter CoverImageMetadataStripBehaviourTest \
+            --fail-on-skipped --fail-on-empty-test-suite
 
       - name: Architecture guardrails (incl. PHP syntax)
         run: bash scripts/arch-guardrails.sh bcc-trust
@@ -186,6 +229,9 @@ jobs:
   integration:
     name: PHP integration (MySQL)
     runs-on: ubuntu-latest
+    # Composer's script timeout is off (process-timeout 0), so cap the job
+    # here instead of GitHub's 360-minute default.
+    timeout-minutes: 30
     services:
       mysql:
         image: mysql:8.0
@@ -224,8 +270,9 @@ jobs:
           extensions: gmp, mbstring, mysqli
           tools: composer:v2
           coverage: none
+      # `install`, not `update` — see the note in the php job above (#191).
       - name: Install dependencies
-        run: composer update --no-interaction --no-progress --prefer-dist
+        run: composer install --no-interaction --no-progress --prefer-dist
       - name: Integration tests (real $wpdb vs MySQL)
         run: composer test:integration
 
@@ -239,6 +286,9 @@ jobs:
   integration-mariadb:
     name: PHP integration (MariaDB 11.8 — production engine)
     runs-on: ubuntu-latest
+    # Composer's script timeout is off (process-timeout 0), so cap the job
+    # here instead of GitHub's 360-minute default.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: app/public/wp-content/plugins/bcc-trust
@@ -287,8 +337,9 @@ jobs:
           extensions: gmp, mbstring, mysqli
           tools: composer:v2
           coverage: none
+      # `install`, not `update` — see the note in the php job above (#191).
       - name: Install dependencies
-        run: composer update --no-interaction --no-progress --prefer-dist
+        run: composer install --no-interaction --no-progress --prefer-dist
       - name: Integration tests — MariaDB compatibility group
         run: |
           vendor/bin/phpunit -c phpunit-integration.xml.dist --group mariadb \

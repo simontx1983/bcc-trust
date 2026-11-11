@@ -44,8 +44,20 @@ namespace BCC\Trust\Onchain\Repositories {
             /** Drops the config immediately after writing, to fail the re-read. */
             public static bool $postconditionFails = false;
 
+            /**
+             * @var int how many times the existence read ran
+             *
+             * ⚠ Counted so "the lock is taken BEFORE the existence check" is
+             * assertable. A lock placed AFTER this read leaves the #368 TOCTOU
+             * window exactly as wide while every outcome still looks correct,
+             * so the outcome assertions alone cannot catch it.
+             */
+            public static int $lookups = 0;
+
             public static function findGroupForCollection(int $chainId, string $contract): ?int
             {
+                self::$lookups++;
+
                 return self::$groups[$chainId . '|' . $contract] ?? null;
             }
 
@@ -104,6 +116,7 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$configs = [];
                 self::$writeRefuses = false;
                 self::$postconditionFails = false;
+                self::$lookups = 0;
             }
         }
     }
@@ -128,14 +141,39 @@ namespace {
             /** Makes `new PeepSoGroup(null, …)` yield a 0-id group. */
             public static bool $createReturnsZero = false;
 
+            /**
+             * Make the PeepSo constructor THROW rather than return a 0-id
+             * group. The two are different failure shapes and only this one
+             * exercises the `finally` that releases the advisory lock (#368).
+             */
+            public static bool $throwOnCreate = false;
+
             /** Set false by the ONE test that needs PeepSo to look absent. */
             public static bool $classAvailable = true;
 
             /** Makes the residue check report the post as still present. */
             public static bool $postSurvivesCompensation = false;
 
+            /**
+             * F-160: PeepSo's membership ledger, "userId:groupId" => status.
+             * The fake create writes the CURRENT user as member_owner, as
+             * the real one does; member_leave() removes the row.
+             *
+             * @var array<string, string>
+             */
+            public static array $memberships = [];
+
+            /** @var list<int> the current user at each create */
+            public static array $creatorIds = [];
+
+            /** Makes a create return an id but write no owner row. */
+            public static bool $createSkipsOwnerRow = false;
+
             public static function reset(): void
             {
+                self::$memberships = [];
+                self::$creatorIds = [];
+                self::$createSkipsOwnerRow = false;
                 self::$created = 0;
                 self::$deleted = 0;
                 self::$memberLeaves = 0;
@@ -144,6 +182,7 @@ namespace {
                 self::$lastOwnerId = 0;
                 self::$imageDirRemoved = false;
                 self::$createReturnsZero = false;
+                self::$throwOnCreate = false;
                 self::$classAvailable = true;
                 self::$postSurvivesCompensation = false;
             }
@@ -203,6 +242,33 @@ namespace {
         /** @param mixed ...$args */
         function do_action(string $hook, ...$args): void {}
     }
+
+    if (!function_exists('wp_set_current_user')) {
+        /** Moves the identity get_current_user_id() reports, as WP does. */
+        function wp_set_current_user($id, string $name = ''): object
+        {
+            \BccAdminTestState::$userId = (int) $id;
+            return (object) ['ID' => (int) $id];
+        }
+    }
+}
+
+namespace BCC\Core\Repositories {
+
+    if (!class_exists(PeepSoGroupRepository::class, false)) {
+        /** Reads the fake PeepSo ledger, as the real one reads peepso_group_members. */
+        final class PeepSoGroupRepository
+        {
+            public static function getMembershipStatus(int $userId, int $groupId): ?string
+            {
+                if ($userId <= 0 || $groupId <= 0) {
+                    return null;
+                }
+
+                return \BccPeepSoSpy::$memberships[$userId . ':' . $groupId] ?? null;
+            }
+        }
+    }
 }
 
 namespace BCC\Core\Observability {
@@ -240,6 +306,103 @@ namespace BCC\Trust\Onchain\Services {
         function is_dir(string $path): bool
         {
             return $path !== '';
+        }
+    }
+}
+
+namespace BCC\Core\DB {
+
+    if (!class_exists(AdvisoryLock::class, false)) {
+        /**
+         * A SPY over the MySQL advisory lock, with REAL mutual exclusion.
+         *
+         * ⚠ THIS STUB IS NOT OPTIONAL FOR THESE SUITES. Since #368,
+         * `GatedGroupProvisioningService::provisionOne()` acquires a
+         * per-collection lock and FAILS CLOSED when the primitive is absent —
+         * so without this class every provision in these suites returns
+         * `busy` and creates nothing. That is the correct production
+         * behaviour (an unlockable create is the duplicate the lock exists to
+         * stop), which is exactly why the fixture has to supply the lock
+         * rather than the service being made lenient for tests.
+         *
+         * `acquire()` genuinely refuses a name already held, so contention can
+         * be driven from one process. Every acquire and release is recorded in
+         * order, so "the lock was released" is OBSERVED rather than inferred.
+         *
+         * ⚠ IT DOES NOT MODEL WAITING. Real `GET_LOCK(name, 5)` blocks for up
+         * to five seconds before refusing, which is what usually turns a
+         * double-submit into `exists` rather than `busy`. That is a property
+         * of MySQL and of `LOCK_WAIT_SECONDS`; this fixture pins only the two
+         * outcomes the service controls — refused-and-created-nothing, and
+         * released-on-every-path.
+         *
+         * Shape deliberately identical to the one in `hall-provision-stubs.php`
+         * so a reader comparing the two locks compares behaviour, not harness.
+         */
+        final class AdvisoryLock
+        {
+            /** Global override: false makes every acquisition fail. */
+            public static bool $acquirable = true;
+
+            /** @var array<string, bool> name => held */
+            public static array $held = [];
+
+            /** @var list<string> every acquire attempt, in order */
+            public static array $acquired = [];
+
+            /** @var list<string> every release call, in order */
+            public static array $released = [];
+
+            /**
+             * @var list<int> the timeout each acquire asked for
+             *
+             * Recorded because a non-zero wait is load-bearing behaviour, not
+             * a detail: it is what turns an ordinary double-submit into
+             * `exists` instead of `busy`. A mutation to 0 would still pass
+             * every outcome assertion.
+             */
+            public static array $timeouts = [];
+
+            /**
+             * Runs once a lock is GRANTED, before acquire() returns — models
+             * the lock winner completing its work while this caller waited
+             * out the lock (F-161: the loser then holds a stale pre-lock row).
+             *
+             * @var (callable(string): void)|null
+             */
+            public static $onAcquire = null;
+
+            public static function reset(): void
+            {
+                self::$acquirable = true;
+                self::$held       = [];
+                self::$acquired   = [];
+                self::$released   = [];
+                self::$timeouts   = [];
+                self::$onAcquire  = null;
+            }
+
+            public static function acquire(string $key, int $timeout = 0): bool
+            {
+                self::$acquired[] = $key;
+                self::$timeouts[] = $timeout;
+
+                if (!self::$acquirable || isset(self::$held[$key])) {
+                    return false;
+                }
+                self::$held[$key] = true;
+                if (self::$onAcquire !== null) {
+                    (self::$onAcquire)($key);
+                }
+
+                return true;
+            }
+
+            public static function release(string $key): void
+            {
+                self::$released[] = $key;
+                unset(self::$held[$key]);
+            }
         }
     }
 }

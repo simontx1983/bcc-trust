@@ -59,6 +59,7 @@
 namespace BCC\Trust\Onchain\Services;
 
 use BCC\Core\Log\Logger;
+use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
@@ -116,6 +117,25 @@ final class GatedGroupProvisioningService {
     public const ERROR_ROW_UNREADABLE   = 'provisioning_row_unreadable';
 
     /**
+     * Another run held this collection's provisioning lock for longer than
+     * {@see LOCK_WAIT_SECONDS}. Nothing was created, and nothing is wrong.
+     */
+    public const FAIL_LOCK_CONTENDED = 'gated_group_provision_contended';
+
+    /**
+     * Seconds a second run waits for the per-collection lock before giving up.
+     *
+     * Not zero, deliberately, and the same five as the Hall lock. The common
+     * case is a double submit or the daily cron overlapping an admin press,
+     * and five seconds comfortably outlasts one group create — so the loser
+     * WAITS, then runs the existence check INSIDE the lock, sees the community
+     * the winner just made, and gets `exists`. That is the honest answer and
+     * the useful one. `busy` is for the rare case where the winner is still
+     * working after five seconds.
+     */
+    private const LOCK_WAIT_SECONDS = 5;
+
+    /**
      * Process collections with RECORDED INTENT, in bounded batches.
      *
      * ── WHY THIS IS NOT `provisionAll()` ANY MORE ───────────────────────
@@ -129,23 +149,40 @@ final class GatedGroupProvisioningService {
      * with no cursor, which meant the daily sweep re-read the same first 200
      * rows forever and anything past id-rank 200 was never reached.
      *
-     * @return array{created: int, skipped: int, failed: int, errors: list<string>,
-     *               available: bool}
+     * @return array{created: int, skipped: int, failed: int, contended: int,
+     *               errors: list<string>, available: bool}
      *         `available` is false when a provisioning read FAILED. It is
      *         the difference between "the queue is empty" and "the queue
      *         could not be asked", and the caller must not report the
      *         second as a clean run.
+     *
+     *         ⚠ `contended` is its own counter and NOT folded into `skipped`.
+     *         `skipped` means "nothing to do for this row" — already
+     *         provisioned, never requested, gone. A contended row is the
+     *         opposite: there IS work, somebody else is doing it right now,
+     *         and the row stays `requested` so the next tick picks it up.
+     *         Counting it as skipped would be the same laundering the
+     *         `unavailable` arm below exists to prevent, and it would make a
+     *         sweep that provisioned nothing at all read as a clean pass.
      */
     public function processRequested(int $limit = 200): array {
-        $created = 0;
-        $skipped = 0;
-        $failed  = 0;
-        $errors  = [];
+        $created   = 0;
+        $skipped   = 0;
+        $failed    = 0;
+        $contended = 0;
+        $errors    = [];
 
         if (!class_exists('\\PeepSoGroup')) {
             $errors[] = 'PeepSoGroup class not available; PeepSo Groups inactive?';
             \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'peepso_absent');
-            return ['created' => 0, 'skipped' => 0, 'failed' => 0, 'errors' => $errors, 'available' => true];
+            return [
+                'created'   => 0,
+                'skipped'   => 0,
+                'failed'    => 0,
+                'contended' => 0,
+                'errors'    => $errors,
+                'available' => true,
+            ];
         }
 
         $limit     = max(1, min(200, $limit));
@@ -184,6 +221,7 @@ final class GatedGroupProvisioningService {
                     'created'   => $created,
                     'skipped'   => $skipped,
                     'failed'    => $failed,
+                    'contended' => $contended,
                     'errors'    => $errors,
                     'available' => false,
                 ];
@@ -269,22 +307,49 @@ final class GatedGroupProvisioningService {
                             'created'    => $created,
                             'skipped'    => $skipped,
                             'failed'     => $failed,
+                            'contended'  => $contended,
                         ]);
 
                         return [
                             'created'   => $created,
                             'skipped'   => $skipped,
                             'failed'    => $failed,
+                            'contended' => $contended,
                             'errors'    => $errors,
                             'available' => false,
                         ];
+
+                    // ⚠ A contended row is NOT skipped, NOT failed and NOT
+                    // created, and it gets its own arm for the same reason the
+                    // `unavailable` arm above has one: `default: $skipped++`
+                    // would launder it into "nothing to do for this one".
+                    //
+                    // It is not an error either, so it does NOT go into
+                    // `$errors` — a peer provisioning the same collection is
+                    // normal, and the admin sweep must not report it as a
+                    // problem. The row stays `requested`, so the next tick
+                    // retries it and the work is not lost.
+                    //
+                    // The sweep CONTINUES. Contention is per collection, so
+                    // one busy row says nothing about the next one. See #368.
+                    case 'busy':
+                        $contended++;
+                        break;
+
                     default:
                         $skipped++;
                 }
             }
         }
 
-        return ['created' => $created, 'skipped' => $skipped, 'failed' => $failed, 'errors' => $errors, 'available' => true];
+        return [
+            'created'   => $created,
+            'skipped'   => $skipped,
+            'failed'    => $failed,
+            'contended' => $contended,
+            'errors'    => $errors,
+            'available' => true,
+        ];
     }
 
     /**
@@ -303,10 +368,13 @@ final class GatedGroupProvisioningService {
      *               failure_record: string,
      *               failure_recorded: bool, audit_degraded: bool}
      *         status ∈ {created, exists, skipped, failed, unconfirmed,
-     *         unavailable}. `unconfirmed` means a community exists but
+     *         unavailable, busy}. `unconfirmed` means a community exists but
      *         recording that could not be committed — nothing was created or
      *         removed. `unavailable` means the database did not answer: we
-     *         learned NOTHING about this collection, and said so.
+     *         learned NOTHING about this collection, and said so. `busy`
+     *         means another run held this collection's provisioning lock:
+     *         nothing was created, nothing is wrong, the row stays
+     *         `requested`, and the next attempt will pick it up (#368).
      */
     public function provisionOne(int $collectionId): array {
         if (!class_exists('\\PeepSoGroup')) {
@@ -400,6 +468,101 @@ final class GatedGroupProvisioningService {
         }
         $canonical = $identity->canonical();
 
+        // ── THE CRITICAL SECTION, AND WHY IT STARTS HERE ────────────────
+        // Every gate above creates nothing, so none of them needs the lock --
+        // and holding one across a refusal would let a stream of malformed or
+        // unverified rows contend with a real provision.
+        //
+        // Everything BELOW is check-then-create. `findGroupForCollection()` is
+        // a bounded SELECT and the gate config is five plain `wp_postmeta`
+        // rows with NO UNIQUE INDEX behind them, so the database cannot reject
+        // a second community for one collection. Two overlapping runs could
+        // both read "no community for this collection" and both go on to call
+        // `createPeepSoGroup()`. See #368.
+        //
+        // ⚠ The realistic outcome was a TRANSIENT duplicate, not a permanent
+        // one: `setProvisioningState()` is a genuine compare-and-swap, so the
+        // loser's transaction throws and `compensate()` tears its group down.
+        // That is why this is a lock and not an incident. It is still worth
+        // locking, because `compensate()` returns bool -- if it fails, the
+        // stray group PERSISTS with its gate meta already deleted -- and
+        // because preventing the race is testable while relying on the
+        // loser's cleanup routes the correctness argument through the error
+        // handler.
+        //
+        // ⚠ PER COLLECTION, not global. The daily cron drains a queue one row
+        // at a time through this method, so a global lock would serialize the
+        // whole sweep behind a single slow create. Only the pair that could
+        // collide is serialized.
+        //
+        // ⚠⚠ NO DEADLOCK WITH compensate(). Checked rather than assumed: there
+        // is no lock primitive anywhere else in this class, `TransactionManager`
+        // takes none, and `fail()`, `reconcileExistingCommunity()` and
+        // `compensate()` are all reached only from inside this critical
+        // section. So the advisory lock is always acquired BEFORE any DB
+        // transaction, by every caller, and nothing inside waits on a lock the
+        // holder holds. Compensation running inside the lock is a bonus: a
+        // peer cannot start creating while a duplicate is being torn down.
+        $lock = self::lockName($collectionId);
+        if (!self::acquire($lock)) {
+            return $this->contended($collectionId, $chainId);
+        }
+
+        // ⚠ EXACTLY ONE RELEASE FOR THE ONE ACQUIRE ABOVE, and OUTSIDE the
+        // transaction. MySQL's GET_LOCK is reentrant per session, so an
+        // unmatched pair leaks the lock for the rest of the request; and
+        // RELEASE_LOCK is NOT transactional, so releasing inside the
+        // `TransactionManager::run()` callback would drop it early and a
+        // rollback would not restore it. The `finally` covers every return
+        // path below and anything thrown out of the create -- which matters,
+        // because that path reaches PeepSo, `wp_insert_post()` and an uploads
+        // mkdir, any of which can throw.
+        try {
+            return $this->provisionOneLocked(
+                $collectionId,
+                $chainId,
+                $chainFamily,
+                $canonical,
+                $name,
+                $row
+            );
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
+        }
+    }
+
+    /**
+     * Provision one collection's community WITH THE PER-COLLECTION LOCK
+     * ALREADY HELD.
+     *
+     * Private and lock-dependent on purpose: the existence check and the
+     * create have to sit inside one critical section, so there is no entry
+     * point that performs the second without the first.
+     *
+     * ⚠ `$row` carries the IMPORTED SHAPE, not a bare `object`. Declaring it
+     * loosely compiles and passes every test, and PHPStan then rejects three
+     * things at once: handing it to `reconcileExistingCommunity()`, which
+     * declares the shape, and the two `provisioning_requested_*` reads below.
+     * The shape is named once in `CollectionRepository` and imported at the
+     * top of this class; extracting a method must carry it through rather
+     * than widening it.
+     *
+     * @param CollectionProvisioningRow $row the provisioning row read and
+     *                                       gated by {@see provisionOne()}
+     *
+     * @return array{status: string, group_id: int, message: string,
+     *               error?: string, failure_code?: string|null,
+     *               failure_record: string,
+     *               failure_recorded: bool, audit_degraded: bool}
+     */
+    private function provisionOneLocked(
+        int $collectionId,
+        int $chainId,
+        string $chainFamily,
+        string $canonical,
+        string $name,
+        object $row
+    ): array {
         // ── Gate 4: idempotency ─────────────────────────────────────────
         // Only a PUBLISHED holder group counts (PR 6 tightened this lookup),
         // so a trashed or compensated group cannot masquerade as an existing
@@ -430,6 +593,11 @@ final class GatedGroupProvisioningService {
         }
 
         // ── Create. NOT transactional; compensated below. ───────────────
+        // Who RAN this — 0 under the daily cron, or an admin acting on
+        // someone else's request. Read before the create, which runs as the
+        // requester for the constructor alone (F-160).
+        $actingUserId = get_current_user_id();
+
         $groupId = $this->createPeepSoGroup($ownerId, $name);
         if ($groupId === 0) {
             \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'group_create_failed');
@@ -437,10 +605,36 @@ final class GatedGroupProvisioningService {
                 'Community creation failed; see the bcc-trust error log.', 0);
         }
 
+        // ── F-160: the requester must hold member_owner, read back ──────
+        // Asked of PeepSo's membership ledger, not inferred from the create
+        // returning an id. A failed read returns null, so an unconfirmable
+        // ownership fails closed exactly like a wrong one.
+        $ownerStatus = PeepSoGroupRepository::getMembershipStatus($ownerId, $groupId);
+        if ($ownerStatus !== 'member_owner') {
+            Logger::error('[bcc-trust] holder group created without the requester as owner; compensating', [
+                'collection_id' => $collectionId,
+                'group_id'      => $groupId,
+                'owner_id'      => $ownerId,
+                'owner_status'  => $ownerStatus,
+            ]);
+
+            $this->invalidateGroupCaches($groupId);
+            $auditOk = $this->compensate($groupId, $collectionId, $ownerId, $chainId);
+            \BCC\Core\Observability\DegradationMetrics::record('gated_group_provision', 'group_create_failed');
+
+            return $this->fail(
+                $collectionId,
+                ProvisioningFailureCode::GROUP_CREATE_FAILED,
+                'Community creation was rolled back; its owner could not be set.',
+                0,
+                $auditOk === false
+            );
+        }
+
         // ── Finalize: gate meta + state + checked audit, atomically ─────
         try {
             TransactionManager::run(function () use (
-                $groupId, $chainId, $chainFamily, $canonical, $collectionId, $ownerId, $row
+                $groupId, $chainId, $chainFamily, $canonical, $collectionId, $ownerId, $row, $actingUserId
             ) {
                 $wrote = GatedGroupRepository::writeGateConfig(
                     $groupId, $chainId, $chainFamily, $canonical,
@@ -480,6 +674,7 @@ final class GatedGroupProvisioningService {
                         'chain_family'     => $chainFamily,
                         'group_id'         => $groupId,
                         'operator_user_id' => $ownerId,
+                        'acting_user_id'   => $actingUserId,
                         'previous_state'   => ProvisioningState::REQUESTED,
                         'new_state'        => ProvisioningState::PROVISIONED,
                     ],
@@ -594,6 +789,78 @@ final class GatedGroupProvisioningService {
      * operator reading the trail knows an e-mail exists for a community that
      * does not.
      */
+    /**
+     * The per-collection advisory lock name.
+     *
+     * Keyed by collection, not by chain and not globally: two administrators
+     * provisioning two different collections must not block each other, and
+     * the daily sweep must not hold one lock across a whole queue drain.
+     */
+    private static function lockName(int $collectionId): string
+    {
+        return 'bcc_gated_group_provision:' . $collectionId;
+    }
+
+    /**
+     * Claim the per-collection lock, or FAIL CLOSED.
+     *
+     * A false return means "do not create anything". That direction is the
+     * only safe one: a failed acquisition means either a peer is already
+     * provisioning this collection, or we cannot serialize at all — and
+     * creating unlocked in either case is exactly the duplicate this exists
+     * to stop.
+     *
+     * ⚠ The two cases are logged differently because only one of them is a
+     * defect. `AdvisoryLock::acquire()` already distinguishes a driver error
+     * (GET_LOCK returned NULL) from a peer holding the lock and logs it, so
+     * the only case this method has to report itself is the primitive being
+     * absent entirely — which is a wiring fault, not contention.
+     */
+    private static function acquire(string $lock): bool
+    {
+        if (!class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
+            Logger::error('[bcc-trust] Community provisioning cannot be serialized: AdvisoryLock is unavailable', [
+                'lock' => $lock,
+            ]);
+
+            return false;
+        }
+
+        return \BCC\Core\DB\AdvisoryLock::acquire($lock, self::LOCK_WAIT_SECONDS);
+    }
+
+    /**
+     * Another run holds this collection's lock. Nothing was created.
+     *
+     * ⚠ NOT a failure, and deliberately not routed through {@see fail()}:
+     * `fail()` writes a failure record and an audit row, and there is nothing
+     * to record — no decision was taken about this collection, and the row
+     * stays `requested` so the next tick retries it. Recording a `failed`
+     * state here would also make the row ineligible on that retry.
+     *
+     * @return array{status: string, group_id: int, message: string,
+     *               failure_code: string, failure_record: string,
+     *               failure_recorded: bool, audit_degraded: bool}
+     */
+    private function contended(int $collectionId, int $chainId): array
+    {
+        Logger::info('[bcc-trust] Community provisioning skipped: another run holds this collection', [
+            'collection_id' => $collectionId,
+            'chain_id'      => $chainId,
+            'operator'      => get_current_user_id(),
+        ]);
+
+        return [
+            'status'           => 'busy',
+            'group_id'         => 0,
+            'message'          => 'Another provisioning run for this collection is already going; nothing was created.',
+            'failure_code'     => self::FAIL_LOCK_CONTENDED,
+            'failure_record'   => self::RECORD_NOT_APPLICABLE,
+            'failure_recorded' => false,
+            'audit_degraded'   => false,
+        ];
+    }
+
     private function compensate(int $groupId, int $collectionId, int $ownerId, int $chainId): bool
     {
         $notes = [];
@@ -913,6 +1180,31 @@ final class GatedGroupProvisioningService {
         string $canonical,
         object $row
     ): array {
+        // F-161: `$row` was read BEFORE the per-collection lock. A run that
+        // waited out the lock enters here with that stale row while the
+        // winner has already created the community AND moved the row to
+        // provisioned. Re-read under the lock: if the winner finished, this
+        // run's correct answer is `exists`, exactly as the class docblock
+        // promises the loser — not an `unconfirmed` from a requested →
+        // provisioned compare-and-swap that can no longer match (which used
+        // to write a provision_failed audit row for a correctly provisioned
+        // collection and count it as a sweep failure).
+        $fresh = CollectionRepository::readProvisioningRow($collectionId);
+        if ($fresh['available']
+            && $fresh['row'] !== null
+            && (string) $fresh['row']->provisioning_state === ProvisioningState::PROVISIONED
+        ) {
+            return [
+                'status'           => 'exists',
+                'group_id'         => $groupId,
+                'message'          => 'Community already exists.',
+                'failure_code'     => null,
+                'failure_record'   => self::RECORD_NOT_APPLICABLE,
+                'failure_recorded' => false,
+                'audit_degraded'   => false,
+            ];
+        }
+
         $requestedBy = (int) $row->provisioning_requested_by ?: null;
         $requestedAt = $row->provisioning_requested_at !== null
             ? (string) $row->provisioning_requested_at
@@ -1084,7 +1376,19 @@ final class GatedGroupProvisioningService {
             ],
         ];
 
+        // F-160: `owner_id` sets only post_author. PeepSo's create() makes
+        // the CURRENT user `member_owner` — the admin who happened to press
+        // the button, or user 0 under the daily cron, where it writes a
+        // gm_user_id = 0 owner row nobody can ever act as. So the requester
+        // is made the current user for the constructor alone, and the
+        // previous identity is restored on every path, including a throw.
+        $previousUserId = get_current_user_id();
+        $swapped        = $previousUserId !== $ownerId;
+
         try {
+            if ($swapped) {
+                wp_set_current_user($ownerId);
+            }
             /** @phpstan-ignore-next-line — PeepSo classes are runtime-only. */
             $group = new \PeepSoGroup(null, $data);
             /** @phpstan-ignore-next-line */
@@ -1096,6 +1400,10 @@ final class GatedGroupProvisioningService {
                 'error'      => $e->getMessage(),
             ]);
             return 0;
+        } finally {
+            if ($swapped) {
+                wp_set_current_user($previousUserId);
+            }
         }
     }
 }

@@ -36,6 +36,8 @@ if (!defined('ABSPATH')) {
 
 final class GatedGroupRepository {
 
+    use GuardsReadFailures;
+
     public const META_KIND       = '_bcc_group_kind';
     public const META_CHAIN_ID   = '_bcc_gate_chain_id';
     public const META_CONTRACT   = '_bcc_gate_contract_address';
@@ -43,6 +45,13 @@ final class GatedGroupRepository {
     public const META_COLLECTION = '_bcc_gate_collection_id';
 
     public const KIND_HOLDERS = 'holders';
+
+    /**
+     * Defensive bound for {@see findGroupsForCollections()}. The only
+     * caller pages at 100; past this the answer is truncated rather than
+     * the query being unbounded.
+     */
+    public const MAX_COLLECTION_LOOKUP = 200;
 
     /**
      * Reverse lookup: find the gated group for a (chain, contract) pair.
@@ -131,6 +140,246 @@ final class GatedGroupRepository {
             'peepso-group',
             'publish'
         ));
+
+        return $row !== null ? (int) $row : null;
+    }
+
+    /**
+     * SET-BASED form of {@see findGroupForCollection()}: resolve MANY
+     * (chain, contract) pairs in ONE query instead of one query each.
+     *
+     * ── WHY THIS EXISTS ─────────────────────────────────────────────────
+     * `VerifyCollectionsPage` renders up to 100 rows and called
+     * `findGroupForCollection()` inside the loop, so a full page issued up
+     * to 100 of these — plus a member count and a permalink each. The
+     * comment above that loop claimed the N+1 "is gone", which was true
+     * only of community EXISTENCE (projected by `listForAdminState()`);
+     * resolving the group, its member count and its permalink stayed
+     * per-row.
+     *
+     * ⚠⚠ THE IDENTITY RULE IS THE SAME ONE, DELIBERATELY. This matches on
+     * `_bcc_gate_contract_address` after `NftCollectionIdentifier` has
+     * canonicalised the value per chain family, and compares it under
+     * `utf8mb4_bin`. Both halves are load-bearing and are explained at
+     * length on `findGroupForCollection()`: folding a Solana mint, or
+     * letting `wp_postmeta`'s case-insensitive collation do the comparison,
+     * resolves two different base58 keys to one gate.
+     *
+     * ⚠ It would be tempting to batch on `_bcc_gate_collection_id`, the
+     * authoritative link, which is a plain integer `IN (...)`. That is NOT
+     * done here: a legacy gate carrying a contract address but no
+     * collection-id meta resolves today and would stop resolving, which
+     * changes what the page displays. The authoritative key has its own
+     * accessor for callers that need it.
+     *
+     * Keyed by the CALLER'S array key so the caller never has to
+     * canonicalise anything itself — the rule stays in one place.
+     *
+     * A read failure returns an empty map, which renders exactly as a
+     * single failed lookup already did: the caller shows "community
+     * present, identity unresolved" rather than claiming none exists.
+     *
+     * @param array<array-key, array{chain_id:int, contract:string}> $pairs
+     * @return array<array-key, int> caller key => group post ID; absent when unresolved
+     */
+    public static function findGroupsForCollections(array $pairs): array {
+        if ($pairs === []) {
+            return [];
+        }
+
+        // Bounded: the only caller pages at 100. The cap is defensive, and
+        // a caller that exceeds it gets a truncated answer rather than an
+        // unbounded query.
+        if (count($pairs) > self::MAX_COLLECTION_LOOKUP) {
+            $pairs = array_slice($pairs, 0, self::MAX_COLLECTION_LOOKUP, true);
+        }
+
+        // ── Resolve families for DISTINCT chains, not per pair ──────────
+        // This is the step that would otherwise reintroduce the N+1 one
+        // layer down: canonicalisation needs the chain family, and
+        // `getById()` is per chain. Deduping first bounds it by the number
+        // of distinct chains on the page, which is bounded by the chains
+        // table and independent of the row count.
+        $families = [];
+        foreach ($pairs as $pair) {
+            $chainId = (int) ($pair['chain_id'] ?? 0);
+            if ($chainId > 0 && !array_key_exists($chainId, $families)) {
+                $chain = ChainRepository::getById($chainId);
+                $families[$chainId] = $chain === null ? '' : (string) ($chain->chain_type ?? '');
+            }
+        }
+
+        // ── Canonicalise, and remember which caller keys want each pair ──
+        /** @var array<string, list<array-key>> $keysByPair */
+        $keysByPair = [];
+        /** @var list<array{chain_id:int, canonical:string}> $lookups */
+        $lookups    = [];
+        foreach ($pairs as $callerKey => $pair) {
+            $chainId  = (int) ($pair['chain_id'] ?? 0);
+            $contract = (string) ($pair['contract'] ?? '');
+            if ($chainId <= 0 || $contract === '') {
+                continue;
+            }
+
+            $identity = \BCC\Trust\Onchain\Support\NftCollectionIdentifier::canonicalize(
+                $families[$chainId] ?? '',
+                $contract
+            );
+            if (!$identity->isAccepted()) {
+                // Same as the single lookup: a value that is not a valid
+                // identity on this chain matches nothing, so it is omitted
+                // rather than queried.
+                continue;
+            }
+
+            $canonical = $identity->canonical();
+            $pairKey   = $chainId . '|' . $canonical;
+            if (!isset($keysByPair[$pairKey])) {
+                $keysByPair[$pairKey] = [];
+                $lookups[] = ['chain_id' => $chainId, 'canonical' => $canonical];
+            }
+            $keysByPair[$pairKey][] = $callerKey;
+        }
+
+        if ($lookups === []) {
+            return [];
+        }
+
+        global $wpdb;
+
+        $ors  = [];
+        $args = [
+            self::META_CHAIN_ID,
+            self::META_KIND,
+            self::KIND_HOLDERS,
+            self::META_CONTRACT,
+            'peepso-group',
+            'publish',
+        ];
+        foreach ($lookups as $lookup) {
+            $ors[]  = '(pm_chain.meta_value = %d AND pm_contract.meta_value COLLATE utf8mb4_bin = %s)';
+            $args[] = $lookup['chain_id'];
+            $args[] = $lookup['canonical'];
+        }
+        $args[] = count($lookups);
+
+        // ⚠ `ORDER BY pm_chain.post_id ASC` plus first-wins makes this at
+        // least as deterministic as the single lookup's bare `LIMIT 1`,
+        // which had no ordering at all. Every production gate is unique per
+        // collection, so no row's displayed value depends on the choice.
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT pm_chain.post_id       AS group_id,
+                    pm_chain.meta_value    AS chain_id,
+                    pm_contract.meta_value AS contract
+               FROM {$wpdb->postmeta} pm_chain
+          INNER JOIN {$wpdb->postmeta} pm_kind     ON pm_kind.post_id     = pm_chain.post_id
+          INNER JOIN {$wpdb->postmeta} pm_contract ON pm_contract.post_id = pm_chain.post_id
+          INNER JOIN {$wpdb->posts}    p           ON p.ID                = pm_chain.post_id
+              WHERE pm_chain.meta_key    = %s
+                AND pm_kind.meta_key     = %s
+                AND pm_kind.meta_value   = %s
+                AND pm_contract.meta_key = %s
+                AND p.post_type          = %s
+                AND p.post_status        = %s
+                AND (" . implode(' OR ', $ors) . ")
+           ORDER BY pm_chain.post_id ASC
+              LIMIT %d",
+            ...$args
+        ));
+
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            $pairKey = (int) $row->chain_id . '|' . (string) $row->contract;
+            foreach ($keysByPair[$pairKey] ?? [] as $callerKey) {
+                if (!isset($out[$callerKey])) {
+                    $out[$callerKey] = (int) $row->group_id;
+                }
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Reverse lookup on the AUTHORITATIVE link: find the published gated
+     * group for a collection ROW ID. Returns the WP post ID, or null only
+     * when there provably is no such group. Bounded LIMIT 1.
+     *
+     * ── WHY THIS EXISTS ALONGSIDE findGroupForCollection() ──────────────
+     * `_bcc_gate_collection_id` is the identity (see the class docblock).
+     * `findGroupForCollection()` matches on `_bcc_gate_contract_address`,
+     * which is legacy/display, and to do that it has to canonicalise a
+     * string first — so it answers null for a value that is not a valid
+     * identity on its chain. For a DISPLAY caller that is harmless. For a
+     * caller asking "is it safe to destroy this row?" it is the wrong
+     * answer in the dangerous direction: the eight production Solana gates
+     * stored a marketplace SYMBOL there, which canonicalises to nothing, so
+     * the lookup returns null WITHOUT RUNNING A QUERY and a live community
+     * reads as absent.
+     *
+     * Keying on the row id removes the string from the question entirely —
+     * no family lookup, no canonicalisation, nothing to fail.
+     *
+     * ── IT IS THE SAME RULE AS THE ADMIN LISTING ────────────────────────
+     * The predicate below is {@see CollectionStateClassifier::sqlHasCommunity()}
+     * narrowed to one id: `_bcc_gate_collection_id` = the row id, joined to
+     * `_bcc_group_kind = 'holders'` and to a PUBLISHED `peepso-group`. A
+     * trashed or draft group is not a live community, exactly as PR 6
+     * decided. They are deliberately two expressions of one rule, so an
+     * integration test cross-checks them rather than trusting the comment.
+     *
+     * ── AND IT FAILS CLOSED ─────────────────────────────────────────────
+     * `get_var()` hands back null for "no row" AND for "the query did not
+     * run", and this method's answer gates a delete. So the read is
+     * guarded: a failed read throws instead of returning a null that the
+     * caller would read as permission. Null from here means ONE thing.
+     *
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function findPublishedGroupIdForCollectionId(int $collectionId): ?int {
+        if ($collectionId <= 0) {
+            // A bad id is a substantive answer, not a fault: no row can
+            // have it, so no group can point at it.
+            return null;
+        }
+
+        global $wpdb;
+
+        // `meta_value` is a string column holding a decimal integer, and a
+        // `%d` bind compares '79' = 79 correctly. This mirrors how
+        // sqlHasCommunity() compares `pm_coll.meta_value = c.id` and how
+        // findGroupForCollection() above binds the chain id, so all three
+        // agree. No COLLATE clause is needed or wanted here — unlike the
+        // contract lookup, this comparison is numeric, so the case
+        // sensitivity of wp_postmeta's collation cannot affect it.
+        $row = $wpdb->get_var($wpdb->prepare(
+            "SELECT pm_coll.post_id
+               FROM {$wpdb->postmeta} pm_coll
+          INNER JOIN {$wpdb->postmeta} pm_kind ON pm_kind.post_id = pm_coll.post_id
+          INNER JOIN {$wpdb->posts}    p       ON p.ID            = pm_coll.post_id
+              WHERE pm_coll.meta_key   = %s
+                AND pm_coll.meta_value = %d
+                AND pm_kind.meta_key   = %s
+                AND pm_kind.meta_value = %s
+                AND p.post_type        = %s
+                AND p.post_status      = %s
+              LIMIT 1",
+            self::META_COLLECTION,
+            $collectionId,
+            self::META_KIND,
+            self::KIND_HOLDERS,
+            'peepso-group',
+            'publish'
+        ));
+
+        // ⚠ Order matters: guard BEFORE interpreting the result, so a
+        // failed read can never be cast to null and handed back.
+        self::guardReadOrThrow(__FUNCTION__);
 
         return $row !== null ? (int) $row : null;
     }

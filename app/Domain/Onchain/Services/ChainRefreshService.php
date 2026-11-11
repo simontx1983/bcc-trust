@@ -112,6 +112,261 @@ class ChainRefreshService
      * Acquire a MySQL advisory lock for a cron job.
      * Advisory locks are cross-request and don't require persistent object cache.
      */
+    /**
+     * One run's TOTAL scan budget for validator placeholder minting,
+     * shared across every healthy chain.
+     *
+     * ⚠ ValidatorPageMinter::MAX_PER_INVOCATION is clamped PER CALL, so
+     * dispatching per chain without a shared budget would permit 500 x N
+     * pages in one run. This is the run-wide ceiling.
+     */
+    private const MINT_SCAN_BUDGET = 500;
+
+    /**
+     * Dead-validator marking is OFF unless this option is explicitly on.
+     *
+     * ⚠ A SECOND, INDEPENDENT GATE. $hasPartialFetch already defers dead
+     * marking on a degraded run, but that gate was also the only thing
+     * holding back a GLOBAL UPDATE that would flip 51 production rows the
+     * moment detection was corrected. Fixing a measurement must not be the
+     * trigger for a destructive write, so the two are now separable: this
+     * switch stays off until someone turns it on deliberately.
+     *
+     * ⚠ Closed truthy allowlist, NOT a (bool) cast - the house pattern from
+     * AnnouncementFeature. Casting the strings off and false both yield TRUE,
+     * so a cast would arm a destructive sweep on a value meaning the opposite.
+     */
+    private const DEAD_MARKING_OPTION = 'bcc_onchain_dead_marking_enabled';
+
+    /** @var list<bool|int|string> */
+    private const DEAD_MARKING_TRUTHY = [true, 1, '1'];
+
+    /**
+     * How long a clean-fetch baseline authorizes MINTING.
+     *
+     * ⚠⚠ THIS BOUND DOES NOT TOUCH DETECTION, and an earlier
+     * version of it did. Gating the relative test on freshness read as the
+     * conservative direction and was the exact opposite: see baselineTotal().
+     * Past this age a chain still indexes and is still measured against its
+     * last clean total; it simply may not create pages until a fresh clean
+     * fetch re-establishes the baseline.
+     * ⚠ A LITERAL, not 7 * DAY_IN_SECONDS. A class-constant initialiser
+     * is evaluated on first ACCESS, and an unqualified constant resolves in
+     * this NAMESPACE before falling back to global - so the WP constant form
+     * loads fine and then fatals the moment detection reads it, anywhere WP
+     * is not fully booted. 604800 = 7 days.
+     */
+    private const BASELINE_MAX_AGE = 604800;
+
+    /**
+     * Largest baseline treated as a SMALL chain by the relative test.
+     *
+     * ⛔⛔ THE RELATIVE TEST IS TWO-TIERED, AND BOTH TIERS ACT.
+     * At or below this ceiling a drop must exceed 50% to count; above it the
+     * ordinary 70% rule applies. An earlier version of this change exempted
+     * small baselines from the ratio ENTIRELY, which fixed one bug and opened
+     * its mirror image - see below.
+     *
+     * ⚠ WHY A RATIO ALONE IS WRONG DOWN HERE. This file's own comments name
+     * kujira as legitimately returning 8, and at a baseline of 8 a return of 5
+     * is a 37.5% drop - so the 70% rule flagged it. Losing 3 of 8 is an
+     * ordinary week on a small chain, and the flag was PERMANENT: a partial run
+     * never advances the baseline, so the chain reported partial on every later
+     * run, its minting stopped at once, and the run-wide $hasPartialFetch was
+     * pinned true. The only exit was the manual procedure in
+     * docs/validator-baseline-recovery.md.
+     *
+     * ⚠⚠ AND WHY AN OUTRIGHT EXEMPTION IS ALSO WRONG. With the ratio simply
+     * switched off below the ceiling, EVERY truncation became invisible:
+     * measured through the real predicate, a baseline of 8 returning 1 - an 88%
+     * loss - read clean, and no floor covers it (floor A needs over 200 stored,
+     * floor B needs a first index). The 50% tier is what closes that without
+     * bringing back the false positive.
+     *
+     * Measured at baseline 8: returning 7, 6, 5 or 4 is clean; returning 3, 2
+     * or 1 is partial. The boundary sits between a 50% and a 63% loss.
+     *
+     * ⚠ THE RESIDUAL HOLE, STATED: at a baseline of 2 a drop to 1 is exactly
+     * 50% and stays clean, and a baseline of 1 can never be flagged by ratio at
+     * all. That is accepted - one validator of noise on a two-validator chain
+     * is not evidence of truncation.
+     *
+     * ⚠ BOTH NUMBERS ARE JUDGEMENTS, NOT MEASUREMENTS. 10 mirrors the guard
+     * `main` carried on the old rule (`$knownCount > 10 && ...`); 50% is chosen
+     * to sit above the 37.5% case the comments call ordinary. Small-chain
+     * run-to-run variance has NOT been measured, because kujira's fetch has
+     * returned empty since its last stats entry on 2026-08-03, so there is no
+     * recent variance data for any small chain to calibrate against.
+     *
+     * ⛔⛔ WITHOUT THIS, AN ORDINARY FLUCTUATION PINS A SMALL CHAIN
+     * PARTIAL FOREVER. A ratio is meaningless on a handful of validators:
+     * this file's own comments name kujira as legitimately returning 8, and
+     * at a baseline of 8 a return of 5 is a 37.5% drop - so it tripped the
+     * relative test. Losing 3 of 8 is an ordinary week on a small chain.
+     *
+     * ⚠ AND THE CONSEQUENCE WAS PERMANENT, not transient. A partial run
+     * never advances the baseline, so the chain reports partial on EVERY
+     * later run, its placeholder minting stops at once, and the run-wide
+     * $hasPartialFetch is pinned true - which would block
+     * markDeadValidators() for every chain if the switch were ever armed.
+     * The only exit is the manual procedure in
+     * docs/validator-baseline-recovery.md.
+     *
+     * 10 mirrors the guard `main` carried on the old rule
+     * (`$knownCount > 10 && ...`), which this change had dropped. It is
+     * deliberately a floor on the BASELINE and not on knownCount, because
+     * knownCount only grows and is the number the whole change exists to
+     * stop depending on.
+     *
+     * ⚠ THE COST, STATED: a small chain's truncation is not detectable by
+     * ratio at all. Nine of ten validators disappearing from a ten-validator
+     * chain reads clean, because no floor applies either - floor A needs
+     * over 200 stored and floor B needs a first index. That was `main`'s
+     * behaviour for the whole life of this code and it is not made worse
+     * here; what IS fixed is the false permanent flag.
+     */
+    private const SMALL_BASELINE_MAX = 10;
+
+    /**
+     * Is this fetch partial? The whole detection rule, in one testable place.
+     *
+     * Rule 1, the relative test: a drop past 30% from the last CLEAN total.
+     *
+     * ⛔⛔⛔ AGE IS NOT A PARAMETER, AND MUST NEVER BECOME ONE. An
+     * earlier version gated this on baseline freshness. That reads as the
+     * conservative direction and is the opposite of it: for most chain shapes
+     * this is the ONLY applicable rule - floor A needs more than 200 stored
+     * rows AND fewer than 50 returned, floor B needs a first index - so
+     * switching it off means "clean". A chain truncated for seven days was
+     * then declared healthy and its truncated count written back as the new
+     * baseline: truncation normalising itself on a timer. Age governs MINTING
+     * only; see baselineAge().
+     *
+     * ⚠ A MISSING baseline must not set partial by itself. The baseline
+     * is only written on a clean run, so a rule that read no-baseline as
+     * partial could never let one be written - a permanent deadlock, and the
+     * exact shape of the bug being fixed. With no baseline the relative test
+     * is simply not applied and the floors decide alone.
+     *
+     * ⚠ INTEGER ARITHMETIC, not (int) ($baseline * 0.7). 180 * 0.7 is
+     * 125.99999999999998 in IEEE754, so the cast truncated to 125 and the
+     * cutoff sat one BELOW the intended 70% at some baselines. Cross-
+     * multiplying is exact at every value.
+     *
+     * Rules 2 and 3, the absolute floors: always applied, need no baseline,
+     * and they are what catch a catastrophic index and the slow erosion the
+     * run-to-run comparison cannot see.
+     */
+    private static function isPartialFetch(
+        int $returnedCount,
+        int $knownCount,
+        int $baseline
+    ): bool {
+        // ⚠ TWO TIERS, AND THE SPLIT IS PART OF THE RULE: see
+        // SMALL_BASELINE_MAX. Integer arithmetic on both, deliberately -
+        // (int) ($baseline * 0.7) sits one BELOW 70% for 180 and that
+        // off-by-one was a real defect here.
+        //
+        // ⚠ `$baseline > 0` ON THE SMALL TIER IS EXPLICIT, NOT LOAD-BEARING,
+        // and a mutation control is what established the difference: deleting
+        // it SURVIVED the whole suite. It cannot change a reachable result,
+        // because `$returnedCount * 2 < 0` is unsatisfiable for a count that
+        // is never negative, and baselineTotal() clamps the baseline to >= 0.
+        // It is kept because 'an absent baseline compares against nothing' is
+        // worth saying out loud rather than leaving to the arithmetic - but it
+        // is an EQUIVALENT MUTANT, so no test can kill it and none pretends to.
+        $largeChainDrop = $baseline > self::SMALL_BASELINE_MAX
+            && ($returnedCount * 10) < ($baseline * 7);
+
+        $smallChainDrop = $baseline > 0
+            && $baseline <= self::SMALL_BASELINE_MAX
+            && ($returnedCount * 2) < $baseline;
+
+        $relativeDrop = $largeChainDrop || $smallChainDrop;
+
+        $absoluteFloor = ($knownCount > 200 && $returnedCount < 50)
+            || ($knownCount === 0 && $returnedCount > 0 && $returnedCount < 30);
+
+        return $relativeDrop || $absoluteFloor;
+    }
+
+    /**
+     * The comparable total from a chain's prior stats entry, and NOTHING
+     * about its age.
+     *
+     * ⛔⛔⛔ DETECTION USES THIS WHATEVER ITS AGE. An earlier
+     * version gated the relative test on freshness. That reads as the
+     * conservative direction and is the opposite of it: for most chain shapes
+     * the relative test is the ONLY applicable rule, because floor A needs
+     * more than 200 stored rows AND fewer than 50 returned, and floor B needs
+     * a first index. Ignoring the relative test therefore means "clean" - so a
+     * chain truncated for a week was declared healthy and its truncated count
+     * was written back as the new baseline. Age may withhold MINTING; it may
+     * never relax DETECTION.
+     *
+     * @param array<string, mixed> $prevEntry
+     */
+    private static function baselineTotal(array $prevEntry): int
+    {
+        $raw = $prevEntry['last_good_total'] ?? null;
+        if (!is_int($raw) && !is_string($raw)) {
+            return 0;
+        }
+
+        $total = (int) $raw;
+
+        return $total > 0 ? $total : 0;
+    }
+
+    /**
+     * Age of the baseline in seconds, or NULL when it cannot be trusted.
+     *
+     * ⚠⚠⚠ strtotime() FAILS OPEN ON A BARE TIMEZONE. Measured on
+     * PHP 8.2.30: strtotime(' UTC') returns NOW. The previous spelling was
+     * strtotime((string) $raw . ' UTC'), so an empty string - or false, which
+     * (string) renders empty - produced a baseline that was PERMANENTLY fresh
+     * on every run, bypassing the staleness refusal completely.
+     *
+     * So parse strictly against the one format current_time('mysql', true)
+     * emits, require an exact round-trip (createFromFormat tolerates trailing
+     * junk and rolls impossible dates over), and refuse a FUTURE stamp - a
+     * negative age satisfies "<= BASELINE_MAX_AGE" and would read as fresh.
+     *
+     * @param array<string, mixed> $prevEntry
+     */
+    private static function baselineAge(array $prevEntry, int $now): ?int
+    {
+        $raw = $prevEntry['last_good_at'] ?? null;
+        if (!is_string($raw) || $raw === '') {
+            return null;
+        }
+
+        $at = \DateTimeImmutable::createFromFormat(
+            'Y-m-d H:i:s',
+            $raw,
+            new \DateTimeZone('UTC')
+        );
+        if ($at === false || $at->format('Y-m-d H:i:s') !== $raw) {
+            return null;
+        }
+
+        $age = $now - $at->getTimestamp();
+
+        return $age >= 0 ? $age : null;
+    }
+
+    private static function deadMarkingEnabled(): bool
+    {
+        $raw = get_option(self::DEAD_MARKING_OPTION, false);
+        foreach (self::DEAD_MARKING_TRUTHY as $on) {
+            if ($raw === $on) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static function acquireLock(string $job): bool
     {
         $acquired = \BCC\Core\DB\AdvisoryLock::acquire(self::LOCK_GROUP . ':' . $job, 0);
@@ -127,6 +382,96 @@ class ChainRefreshService
     private static function releaseLock(string $job): void
     {
         \BCC\Core\DB\AdvisoryLock::release(self::LOCK_GROUP . ':' . $job);
+    }
+
+    /**
+     * Compose one chain's stats entry, baseline persistence included.
+     *
+     * ⛔⛔ EXTRACTED SO THE WRITE PATH CAN BE EXECUTED, NOT ONLY READ.
+     * An independent review found that carry-forward and clean-only advance -
+     * the only two statements in this change that mutate persistent state -
+     * were pinned by STRING PRESENCE alone, and named two mutants that pass
+     * the whole suite: emptying the carry-forward bodies, and moving them
+     * BELOW the advance. The first restores the truncation ratchet this
+     * change exists to remove; the second freezes the baseline at its
+     * first-ever value, so every chain's minting is withheld once that stamp
+     * ages past BASELINE_MAX_AGE. Both are now killed behaviourally by
+     * PartialFetchBaselineTest's across-runs cases, which call THIS method.
+     *
+     * ⚠⚠ THE ORDER OF THE TWO BLOCKS IS LOAD-BEARING, not stylistic.
+     * Carry forward FIRST, so a run that came back partial keeps the last
+     * clean reference; advance ONLY on a clean fetch, so the newer value
+     * wins. Reversed, the carried value overwrites the fresh one and the
+     * baseline never moves again.
+     *
+     * ⚠ Nothing here is new behaviour. This is the same sequence that ran
+     * inline in index_validators(), moved verbatim so a test can drive it.
+     *
+     * @param  array{total: int, new: int, updated: int, unchanged: int, refreshed: int} $stats
+     * @param  array<string, mixed> $prevEntry this chain's previous entry, or [].
+     * @return array<string, mixed>
+     */
+    private static function composeStatsEntry(
+        array $stats,
+        array $prevEntry,
+        string $chainName,
+        int $returnedCount,
+        bool $isPartialFetch
+    ): array {
+        $entry = array_merge($stats, [
+            'chain'     => $chainName,
+            'timestamp' => current_time('mysql', true),
+            'partial'   => $isPartialFetch,
+        ]);
+
+        // ⚠ CARRY THE BASELINE FORWARD EXPLICITLY. array_merge above is
+        // built from $stats, which has no last_good_* keys, so without
+        // this the baseline would be DROPPED on every run and the
+        // relative test would never have anything to compare against.
+        //
+        // ⛔⛔ AND IT CARRIES THROUGH THE READERS, NOT THROUGH A CAST.
+        // A review found the writer and the reader disagreeing here.
+        // baselineTotal() REFUSES anything that is not int|string, but this
+        // block used to persist `(int) $prevEntry['last_good_total']`
+        // unconditionally - and measured on PHP 8.2, (int) [1,2] === 1,
+        // (int) 1.9 === 1 and (int) true === 1. So a malformed value was
+        // LAUNDERED INTO A BASELINE OF 1: detection ignored it as 0 while
+        // the writer persisted 1, and 1 is > 0, so on the next run it
+        // AUTHORIZED MINTING - off a baseline no relative test can ever
+        // trip, since returned * 10 < 7 needs returned < 1.
+        //
+        // Reading it back through baselineTotal() makes the two agree by
+        // construction: a value detection would ignore is not persisted
+        // either, so the chain has NO baseline and minting is withheld.
+        // That is the fail-closed direction.
+        $carriedTotal = self::baselineTotal($prevEntry);
+        if ($carriedTotal > 0) {
+            $entry['last_good_total'] = $carriedTotal;
+        }
+
+        // ⚠ Same rule for the stamp. baselineAge() requires a non-empty
+        // string, so only that is carried, and verbatim. (string) false
+        // gave '' and (string) [] both raised a conversion notice and gave
+        // 'Array' - unreadable values the WRITER invented. Whether the
+        // string parses stays baselineAge()'s decision; an unparseable one
+        // already fails closed by reading as not-fresh.
+        $carriedAt = $prevEntry['last_good_at'] ?? null;
+        if (is_string($carriedAt) && $carriedAt !== '') {
+            $entry['last_good_at'] = $carriedAt;
+        }
+
+        // ⛔ THE BASELINE ADVANCES ONLY ON A CLEAN FETCH. This is the
+        // whole point: `total` above is written on every non-empty
+        // fetch including a partial one, so it cannot serve as the
+        // reference. last_good_total is the count from a fetch that
+        // passed detection, which is what truncation must be measured
+        // against.
+        if (!$isPartialFetch) {
+            $entry['last_good_total'] = $returnedCount;
+            $entry['last_good_at']    = current_time('mysql', true);
+        }
+
+        return $entry;
     }
 
     // ── Validator Indexing (bulk — all validators per chain) ────────────────
@@ -158,6 +503,26 @@ class ChainRefreshService
             );
 
             $hasPartialFetch = false;
+
+            // ⚠ PER-CHAIN, DELIBERATELY SEPARATE FROM $hasPartialFetch.
+            // $hasPartialFetch is run-wide and stays that way, because
+            // markDeadValidators() is a GLOBAL UPDATE with no chain_id
+            // predicate — one truncated chain can make another chain's live
+            // validators look absent, so that gate must see the whole run.
+            // Page creation is the opposite shape: it acts on PRESENCE, so a
+            // truncated fetch elsewhere can only mint a page LATER, never
+            // wrongly. Hence a per-chain list for minting only.
+            $healthyChainFetches = [];
+
+            // ⚠ ONE SNAPSHOT, TAKEN BEFORE ANY CHAIN IN THIS RUN IS WRITTEN.
+            // The baseline each chain is judged against must be the value from
+            // a PREVIOUS run. Re-reading the option inside the loop would let a
+            // chain compare itself against an entry this same run had already
+            // rewritten.
+            $priorStats = get_option('bcc_onchain_indexer_stats', []);
+            if (!is_array($priorStats)) {
+                $priorStats = [];
+            }
 
             foreach ($chains as $chain) {
                 $chainId = (int) $chain->id;
@@ -195,28 +560,114 @@ class ChainRefreshService
                     if (!empty($validators)) {
                         $returnedCount = count($validators);
 
-                        // Detect partial fetch: if we got significantly fewer
-                        // validators than previously known for this chain, the
-                        // RPC likely returned a truncated result (timeout, pagination).
-                        // In that case, do NOT treat missing validators as gone.
+                        // ⚠⚠ THE RELATIVE TEST NO LONGER USES THE STORED ROW COUNT.
+                        //
+                        // It used COUNT(*) over every row ever stored for the chain.
+                        // A validator that LEAVES the bonded set keeps its row and
+                        // keeps status = active, so that count only grows while the
+                        // fetch stays flat - and the chain reports partial for ever.
+                        // Measured on production 2026-11-02: cosmos stored 317
+                        // active and the chain returned 180; osmosis 93 against 30.
+                        // Five chains were permanently partial, and 52 Skipped
+                        // markDeadValidators log lines record the deadlock - the
+                        // sweep that would have reconciled those rows was itself
+                        // blocked by them.
+                        //
+                        // ⛔ AND indexer_stats[slug][total] CANNOT BE THE BASELINE.
+                        // It is written below on EVERY non-empty fetch, partial or
+                        // not, so comparing against it would let one truncated run
+                        // become the new normal - a ratchet in which truncation
+                        // normalises itself. Cosmos shows it: partial=true with
+                        // total=180, which compared against itself reads healthy.
+                        //
+                        // So the relative test compares against last_good_total,
+                        // written below ONLY on a clean fetch.
                         $chainCounts = ValidatorRepository::getCountsByChain();
                         $knownCount  = isset($chainCounts[$chainId]) ? (int) $chainCounts[$chainId]->cnt : 0;
-                        // Three detection rules (any triggers):
-                        // 1. Relative: got < 70% of known validators (gradual truncation)
-                        // 2. Absolute floor: known > 200 but got < 50 (catastrophic truncation)
-                        // 3. First-run floor: no baseline yet and got < 30 — most
-                        //    bonded sets have >= 30 validators, so this is almost
-                        //    always a truncated first index, not a real small set.
-                        //    Marks the run as partial so markDeadValidators is
-                        //    deferred until a subsequent run establishes a baseline.
-                        $isPartialFetch = ($knownCount > 10 && $returnedCount < (int) ($knownCount * 0.7))
-                            || ($knownCount > 200 && $returnedCount < 50)
-                            || ($knownCount === 0 && $returnedCount > 0 && $returnedCount < 30);
+
+                        $prevEntry   = isset($priorStats[$chain->slug]) && is_array($priorStats[$chain->slug])
+                            ? $priorStats[$chain->slug]
+                            : [];
+                        $baseline      = self::baselineTotal($prevEntry);
+                        $baselineAge   = self::baselineAge($prevEntry, time());
+                        $baselineFresh = $baselineAge !== null
+                            && $baselineAge <= self::BASELINE_MAX_AGE;
+
+                        // ⚠⚠ TWO DIFFERENT QUESTIONS, HELD APART ON PURPOSE.
+                        // Can this baseline DETECT a drop is answered by its
+                        // EXISTENCE alone. Can it AUTHORIZE new pages is answered by
+                        // its existence AND its age. Conflating them was the defect:
+                        // one flag did both jobs, so an aged baseline silently
+                        // stopped detecting.
+                        $mintBaselineVerified = $baseline > 0 && $baselineFresh;
+
+                        // ⚠ A MISSING baseline must not set partial BY ITSELF.
+                        // The baseline is only written on a clean run, so a rule that
+                        // read no-baseline as partial could never let one be written -
+                        // a permanent deadlock, and the exact shape of the bug being
+                        // fixed. With no baseline the relative test is simply NOT
+                        // APPLIED and the chain must clear the absolute floors alone.
+                        //
+                        // ⛔⛔ AGE IS NOT CONSULTED HERE, AND MUST NOT BE. An
+                        // earlier version had $baselineUsable on this very line, and
+                        // it re-created the ratchet this change exists to remove.
+                        // Worked through with cosmos real numbers: baseline 318, the
+                        // chain truncates to 180, correctly flagged partial, and
+                        // last_good_at is never refreshed because the write below is
+                        // gated on a clean verdict. Seven days later the age bound
+                        // expires, the relative test switches OFF, and no floor
+                        // applies - floor A needs fewer than 50 returned, floor B
+                        // needs a first index - so the chain is declared CLEAN and 180
+                        // is written back as the new baseline. Detection is anchored
+                        // to the truncated value for good, the partial flag clears,
+                        // and the evidence is destroyed. A sustained truncation was
+                        // forgiven on a timer.
+                        //
+                        // A week-old baseline is less PRECISE; it is no less
+                        // indicative of an 80% drop. So age withholds MINTING and
+                        // never forgives a drop. ⚠ The cost is real and accepted:
+                        // a genuine SUDDEN decline past the threshold keeps a chain
+                        // flagged until an operator clears its last_good_total. That
+                        // is the visible, non-destructive direction - minting pauses,
+                        // nothing is written - and is preferred to silent self-
+                        // forgiveness. A GRADUAL genuine decline needs no
+                        // intervention: each step under 30% passes, so the baseline
+                        // walks down with the chain.
+                        // ⚠ The predicate lives in isPartialFetch() so the suite can
+                        // EXECUTE it. It used to be inline here and the tests drove a
+                        // local copy, which meant a mutation to this logic could not
+                        // fail any behavioural test - only a string match on the
+                        // source. That is how the age gate went unnoticed.
+                        $isPartialFetch = self::isPartialFetch(
+                            $returnedCount,
+                            $knownCount,
+                            $baseline
+                        );
 
                         if ($isPartialFetch) {
+                            // ⚠ REPORT THE NUMBER THE RULE ACTUALLY COMPARED.
+                            // This logged $knownCount as "expected ~N", which is no
+                            // longer the comparison basis - the relative test compares
+                            // against the BASELINE. A chain returning 100 with 300
+                            // stored and a baseline of 500 was reported as "expected
+                            // ~300" while the rule had compared against 500. Clearing
+                            // last_good_total is the operator's only remedy for a
+                            // sustained flag, so the log has to name it. Both numbers
+                            // appear: the baseline drives the relative test, the
+                            // stored count drives floor A.
+                            //
+                            // ⚠⚠ AND THE SKIP IS RUN-WIDE, NOT PER-CHAIN.
+                            // $hasPartialFetch is a single run-wide flag and
+                            // markDeadValidators() has no chain_id, so ONE partial
+                            // chain withholds the sweep for EVERY chain. The old
+                            // wording sent an operator looking for a per-chain skip
+                            // that does not exist.
                             \BCC\Core\Log\Logger::warning(sprintf(
-                                '[Onchain] Partial fetch detected for %s: got %d, expected ~%d. Skipping dead-validator marking for this chain.',
-                                $chain->name, $returnedCount, $knownCount
+                                '[Onchain] Partial fetch detected for %s: got %d against baseline %s (stored %d). Dead-validator marking is skipped for the WHOLE RUN.',
+                                $chain->name,
+                                $returnedCount,
+                                $baseline > 0 ? (string) $baseline : 'absent',
+                                $knownCount
                             ));
                             $hasPartialFetch = true;
                         }
@@ -225,11 +676,20 @@ class ChainRefreshService
 
                         // Persist per-chain stats for the admin dashboard.
                         $allStats = get_option('bcc_onchain_indexer_stats', []);
-                        $allStats[$chain->slug] = array_merge($stats, [
-                            'chain'     => $chain->name,
-                            'timestamp' => current_time('mysql', true),
-                            'partial'   => $isPartialFetch,
-                        ]);
+                        if (!is_array($allStats)) {
+                            $allStats = [];
+                        }
+                        // ⚠ Baseline persistence lives in composeStatsEntry() so it can
+                        // be EXECUTED by a test rather than only matched as text.
+                        $entry = self::composeStatsEntry(
+                            $stats,
+                            $prevEntry,
+                            $chain->name,
+                            $returnedCount,
+                            $isPartialFetch
+                        );
+
+                        $allStats[$chain->slug] = $entry;
                         update_option('bcc_onchain_indexer_stats', $allStats, false);
 
                         \BCC\Core\Log\Logger::info(sprintf(
@@ -241,6 +701,99 @@ class ChainRefreshService
 
                         if (!$isPartialFetch) {
                             OnchainCircuitBreaker::recordSuccess($chainId);
+
+                            // ⚠⚠ PAGE CREATION ALSO REQUIRES A VERIFIED BASELINE.
+                            //
+                            // A clean verdict is NOT on its own evidence that this
+                            // fetch was complete. Where the baseline is missing or
+                            // stale the relative test did not run, and the absolute
+                            // floors are narrow and CONDITIONAL - floor A only applies
+                            // when more than 200 rows are stored, floor B only on a
+                            // first index. Measured 2026-11-02: jackal returned 24 of
+                            // 53 stored, juno 25 of 44, osmosis 30 of 96, and NEITHER
+                            // FLOOR APPLIES TO ANY OF THEM. They are not verified
+                            // healthy; they are simply uncovered by any rule.
+                            //
+                            // The floors cannot just be tightened: kujira legitimately
+                            // returns 8 validators and dungeon 19, so an unconditional
+                            // floor at 30 or 50 would permanently flag real chains.
+                            //
+                            // So minting requires the count to be REPEATABLE: a
+                            // baseline from an earlier fetch that itself passed
+                            // detection, and a current fetch that agrees with it.
+                            //
+                            // ⚠⚠ REPEATABLE IS NOT COMPLETE, and the difference
+                            // matters. Two fetches that agree are two observations of
+                            // the SAME thing, which may be the same truncation - a
+                            // pagination page-size cap or a fixed first page satisfies
+                            // the comparison trivially, and nothing here can tell that
+                            // apart from a real count. What the baseline does buy is
+                            // narrower and still worth having: a count that has never
+                            // been corroborated by a second fetch cannot create pages,
+                            // and detection is anchored to a count that once passed
+                            // rather than to a stored total that only grows. A
+                            // truncated first fetch can still become a baseline; it
+                            // just cannot mint pages on the strength of being its own
+                            // reference.
+                            //
+                            // ⛔ Indexing is deliberately NOT withheld: the baseline is
+                            // only written on a clean run, so blocking the index would
+                            // stop any baseline ever forming - the deadlock this whole
+                            // change exists to remove.
+                            if (!$mintBaselineVerified) {
+                                \BCC\Core\Log\Logger::info(sprintf(
+                                    '[Onchain] %s indexed and clean, but page creation is withheld: no verified baseline yet (got %d, baseline %s). A later run will mint once a baseline is established.',
+                                    $chain->name,
+                                    $returnedCount,
+                                    $baseline <= 0
+                                        ? 'absent'
+                                        : ($baselineAge === null ? 'unreadable' : 'stale')
+                                ));
+                            }
+
+                            // ⚠ THE ONLY PLACE A CHAIN IS DECLARED HEALTHY, and it is
+                            // the site that already proves it this run. Anything that
+                            // `continue`s earlier (breaker resting, no driver, no
+                            // validator feature), returned empty, or threw never
+                            // reaches here — so it is absent from the list and FAILS
+                            // CLOSED by construction rather than by a check.
+                            //
+                            // ⛔ Never source this from bcc_onchain_indexer_stats:
+                            // that option PERSISTS ACROSS RUNS and is months stale for
+                            // several chains, so it would report a chain last indexed
+                            // in June as healthy.
+                            // ⚠ AN EXACT ALLOWLIST, NOT JUST THE CHAIN ID. A healthy
+                            // chain proves the FETCH was good; it does not prove any
+                            // particular stored row is still in the set. Eligibility
+                            // reads `wallet_link_id IS NULL` + no page meta and never
+                            // consults currency, and `status` cannot stand in for it:
+                            // measured 2026-11-02, 149 of 693 staging candidates were
+                            // absent from their chain's latest complete fetch and all
+                            // 149 still read 'active', 56 unseen for over 90 days.
+                            //
+                            // `fetched_at` cannot answer it either — bulkUpsert only
+                            // refreshes it when a row is new, changed, or already >6h
+                            // stale, so a row present in this fetch may carry a stamp
+                            // 6h old and be indistinguishable from one that was absent.
+                            //
+                            // So the allowlist is built from the addresses THIS fetch
+                            // actually returned. An empty list means mint none.
+                            $fetchedAddresses = [];
+                            foreach ($validators as $fetched) {
+                                $address = is_array($fetched)
+                                    ? (string) ($fetched['operator_address'] ?? '')
+                                    : (string) ($fetched->operator_address ?? '');
+                                if ($address !== '') {
+                                    $fetchedAddresses[] = $address;
+                                }
+                            }
+
+                            if ($mintBaselineVerified) {
+                                $healthyChainFetches[$chainId] = ValidatorRepository::idsForOperatorAddresses(
+                                    $chainId,
+                                    $fetchedAddresses
+                                );
+                            }
                         }
                     } else {
                         // Empty result from an active chain is suspicious
@@ -260,7 +813,13 @@ class ChainRefreshService
                         }
                         \BCC\Core\Log\Logger::warning('[Onchain] Validator index returned empty for ' . $chain->name);
                     }
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
+                    // ⚠ F-66: THROWABLE, NOT Exception. A TypeError or
+                    // ValueError from one chain's malformed provider answer (a
+                    // non-array item, bccomp() on a non-numeric amount) is an
+                    // Error, not an Exception. It used to escape this catch and
+                    // the loop with it, so every chain after it went unindexed.
+                    // It is now this chain's partial fetch, like any other.
                     $hasPartialFetch = true;
 
                     // ⚠ THIS CATCH SPANS MORE THAN ONE PROVIDER REQUEST — the
@@ -282,24 +841,48 @@ class ChainRefreshService
             // in 30+ days and have exhausted retry attempts — they're gone.
             // Skip if ANY chain had a partial/failed fetch to prevent marking
             // validators dead due to transient RPC issues.
-            if (!$hasPartialFetch) {
+            // ⚠ TWO GATES, AND BOTH MUST PASS. The run-wide partial flag is
+            // unchanged. The switch is new and defaults OFF, so correcting
+            // partial-fetch detection cannot by itself start marking validators
+            // inactive: before this, a chain that stopped reporting partial would
+            // immediately expose a GLOBAL UPDATE with no chain_id predicate, and
+            // 51 production rows were in range.
+            //
+            // ℹ Turning the switch on is a separate, deliberate decision and
+            // needs its own review: the sweep requires enrichment_attempts >= 10,
+            // so it does NOT reconcile validators that simply left the bonded set
+            // (those sit at 0 attempts). It is not the tool for that problem.
+            if (!$hasPartialFetch && self::deadMarkingEnabled()) {
                 EnrichmentScheduler::markDeadValidators();
-            } else {
+            } elseif ($hasPartialFetch) {
                 \BCC\Core\Log\Logger::info('[Onchain] Skipped markDeadValidators — partial fetch detected in this run.');
+            } else {
+                \BCC\Core\Log\Logger::info('[Onchain] Skipped markDeadValidators — run was clean but the dead-marking switch is off.');
             }
 
             // Mint placeholder peepso-page posts for any newly-indexed
             // validators that don't have one yet, so they surface in
             // /directory?kind=validator with the WANTED claim CTA.
-            // Capped per invocation and idempotent — re-running is a no-op
-            // once the placeholders exist. Skipped on partial fetch to
-            // avoid minting pages for a chain whose indexer just hiccuped.
-            if (!$hasPartialFetch) {
+            // Idempotent — re-running is a no-op once the placeholders exist.
+            //
+            // ⚠ SCOPED TO CHAINS PROVEN HEALTHY IN **THIS** RUN, not gated on
+            // $hasPartialFetch. Previously one unhealthy chain blocked page
+            // creation for all fourteen, which is why 228 validators across 9
+            // chains had no page while only 5 chains were actually degraded.
+            // A truncated fetch cannot invent a validator, so minting for a
+            // validator that demonstrably EXISTS is safe regardless of another
+            // chain's health; the worst case is that a page appears a run late.
+            //
+            // ⛔ markDeadValidators() above is UNCHANGED and still gated on the
+            // run-wide $hasPartialFetch. It acts on ABSENCE and its UPDATE has
+            // no chain_id predicate, so it must keep seeing the whole run.
+            if ($healthyChainFetches !== []) {
                 try {
-                    $mintResult = ValidatorPageMinter::mintMissing(null, false);
+                    $mintResult = self::mintForHealthyChains($healthyChainFetches, self::MINT_SCAN_BUDGET);
                     if ($mintResult['minted'] > 0 || $mintResult['errors'] > 0) {
                         \BCC\Core\Log\Logger::info(sprintf(
-                            '[Onchain] Validator placeholder pages — scanned=%d, minted=%d, errors=%d',
+                            '[Onchain] Validator placeholder pages — chains=%d, scanned=%d, minted=%d, errors=%d',
+                            $mintResult['chains'],
                             $mintResult['scanned'],
                             $mintResult['minted'],
                             $mintResult['errors']
@@ -323,6 +906,133 @@ class ChainRefreshService
      * retry/backoff, staggered scheduling, and Redis-based overlap prevention.
      * This method is just the cron entry point.
      */
+    /**
+     * Mint placeholder pages for the given chains under ONE shared budget.
+     *
+     * ⚠ The budget is decremented by SCANNED, not minted. `scanned` is what
+     * bounds the work: a chain whose rows all already have pages reports
+     * minted=0 while still scanning, so decrementing by `minted` would let it
+     * burn unbounded scans and starve the chains after it.
+     *
+     * ⚠ Each chain is passed its OWN id. Never null — null means every chain,
+     * which is exactly the all-or-nothing behaviour this replaces.
+     *
+     * $minter exists so the budget arithmetic is testable without a database;
+     * production always uses the default.
+     *
+     * ⚠ Keyed by chain id, VALUE is that chain's exact allowlist of validator
+     * ids from this run's fetch. An empty allowlist is forwarded as `[]`, which
+     * mintMissing() treats as MINT NONE — never as 'no filter'.
+     *
+     * @param array<int, list<int>> $chainFetches
+     * @param (callable(int, int, list<int>): array{scanned:int,minted:int,skipped:int,errors:int})|null $minter
+     * @return array{chains:int,scanned:int,minted:int,skipped:int,errors:int}
+     */
+    private static function mintForHealthyChains(
+        array $chainFetches,
+        int $budget,
+        ?callable $minter = null
+    ): array {
+        // ⚠ Re-keyed to a true list of ints before it crosses the boundary.
+        // mintMissing() distinguishes [] from null, so the shape matters: a
+        // gappy or string-keyed array would still be non-empty and would skip
+        // the fail-closed branch while composing a malformed IN list.
+        // ⭐ THE ALLOWLIST IS PROOF OF CHAIN HEALTH, NOT THE SCOPE OF MINTING.
+        //
+        // A placeholder page is a durable, claimable identity for a validator
+        // we have ever seen on a chain we track. It is NOT a statement that
+        // the validator is in the set today. Scoping minting to the addresses
+        // this run returned conflated the two, and the measurable consequence
+        // was that the only validators left without a page were exactly those
+        // that had left the set before they were ever minted: measured on
+        // production 2026-11-04, 90 pageless rows, ZERO of them present in
+        // their chain's last clean fetch, 51 labelled `inactive` and 39 still
+        // labelled `active`.
+        //
+        // So a chain that proved healthy in THIS run mints for every pageless
+        // row it owns. The scope stays per-chain because
+        // findMissingPlaceholderPage() takes $chainId, and that query has no
+        // `status` predicate — it never did; fetch membership was the only
+        // gate, injected from here.
+        //
+        // Claimability is unaffected in either direction: ClaimService matches
+        // a wallet to `operator_address` by comparing bech32-decoded bytes and
+        // consults neither `status` nor the bonded set, and
+        // getByIdWithChain() applies no status filter.
+        //
+        // ⛔ AN EMPTY ALLOWLIST STILL MEANS MINT NONE. That is a chain whose
+        // returned addresses matched no stored row — the fail-closed case —
+        // and widening THAT to the whole chain would mint off a fetch nothing
+        // corroborates. The empty list is forwarded verbatim so
+        // ValidatorPageMinter's own [] guard refuses before any SQL.
+        $minter ??= static function (int $chainId, int $max, array $allowlist): array {
+            /** @var list<int> $ids */
+            $ids = array_values(array_map(static fn ($id): int => (int) $id, $allowlist));
+
+            return ValidatorPageMinter::mintMissing($chainId, false, $max, self::mintScopeFor($ids));
+        };
+
+        $totals = ['chains' => 0, 'scanned' => 0, 'minted' => 0, 'skipped' => 0, 'errors' => 0];
+
+        foreach ($chainFetches as $chainId => $allowlist) {
+            if ($budget <= 0) {
+                break;
+            }
+
+            $result = $minter((int) $chainId, $budget, array_values((array) $allowlist));
+
+            $totals['chains']++;
+            $totals['scanned'] += (int) ($result['scanned'] ?? 0);
+            $totals['minted']  += (int) ($result['minted'] ?? 0);
+            $totals['skipped'] += (int) ($result['skipped'] ?? 0);
+            $totals['errors']  += (int) ($result['errors'] ?? 0);
+
+            // ⚠ A minter that reports scanning nothing must still not loop
+            // forever across chains; the foreach bounds that. But guard the
+            // budget against a negative drift so `<= 0` stays meaningful.
+            $budget -= max(0, (int) ($result['scanned'] ?? 0));
+        }
+
+        return $totals;
+    }
+
+    /**
+     * Minting scope for a chain that has ALREADY proved healthy in this run.
+     *
+     * Extracted so the decision is testable on its own. The previous version
+     * lived inline in the production minter closure, and the suite could only
+     * assert its SPELLING — a text assertion that stayed green when the
+     * behaviour was changed underneath it. This method is asserted by value.
+     *
+     * ⭐ Returning null widens minting from "the addresses this run returned"
+     * to "every pageless row this chain owns", which is what makes a page a
+     * durable identity rather than a statement about current set membership.
+     * findMissingPlaceholderPage() still scopes by $chainId and still excludes
+     * rows that have a page, are claimed, or sit on a chain with no
+     * bcc_chains row — and it has never had a `status` predicate, so an
+     * `inactive` validator is eligible by construction once the fetch-scoped
+     * allowlist is lifted.
+     *
+     * ⛔ [] is returned UNCHANGED, not widened. An allowlist that resolved to
+     * nothing means this chain's returned addresses matched no stored row:
+     * the fail-closed case. ValidatorPageMinter refuses an empty list before
+     * composing any SQL, and that refusal must survive.
+     *
+     * ⚠ This method does NOT decide whether the chain is healthy. That gate is
+     * upstream: $healthyChainFetches is populated only inside the
+     * !$isPartialFetch branch and only when $mintBaselineVerified, so a chain
+     * with a failing provider or an absent/stale baseline never reaches here.
+     *
+     * @param list<int> $ids Validator ids resolved from this run's fetch.
+     * @return list<int>|null  An empty list means mint none; null means every
+     *                        pageless row on the chain.
+     */
+    private static function mintScopeFor(array $ids): ?array
+    {
+        return $ids === [] ? [] : null;
+    }
+
+
     public static function refresh_validators(): void
     {
         $stats = EnrichmentScheduler::run();
@@ -428,7 +1138,10 @@ class ChainRefreshService
                         // loop on wallets with deleted collections or failing chain APIs.
                         CollectionRepository::backoffRow((int) $row->id);
                     }
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
+                    // ⚠ F-66: Throwable, so one row's Error (TypeError /
+                    // ValueError) backs off THAT row instead of aborting the
+                    // rest of the batch.
                     OnchainCircuitBreaker::recordFailure((int) $row->chain_id);
                     \BCC\Core\Log\Logger::error('[Onchain] Collection ' . $row->contract_address . ' refresh failed: ' . $e->getMessage());
                     CollectionRepository::backoffRow((int) $row->id);

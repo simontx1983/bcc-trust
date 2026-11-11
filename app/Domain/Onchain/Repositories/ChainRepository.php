@@ -45,7 +45,7 @@ if (!defined('ABSPATH')) {
  *     description: string|null,
  *     is_testnet: string,
  *     is_active: string,
- *     cosmwasm_nft_discovery_enabled: string,
+
  *     bcc_supports_nft_collections: string,
  *     manual_collection_discovery_enabled: string,
  *     created_at: string
@@ -54,8 +54,7 @@ if (!defined('ABSPATH')) {
 final class ChainRepository
 {
     /** @var string Explicit column list — must match schema-chains.php
-     *  (CREATE TABLE + the description ALTER + the
-     *  cosmwasm_nft_discovery_enabled ALTER + the NFT capability ALTERs)
+     *  (CREATE TABLE + the description ALTER + the NFT capability ALTERs)
      *  + schema-blog-chain-tags.php's ALTER (color).
      *
      *  `bcc_supports_nft_collections` and `manual_collection_discovery_enabled`
@@ -65,11 +64,31 @@ final class ChainRepository
      *  fail-closed answer, and a completely SILENT one. Dropping either
      *  column from this projection would therefore make every chain
      *  permanently un-scannable with no error anywhere. Pinned by
-     *  ChainNftCapabilityMigrationIntegrationTest. */
+     *  ChainNftCapabilityMigrationIntegrationTest.
+     *
+     *  ⚠ `cosmwasm_nft_discovery_enabled` LEFT THIS LIST IN S9a AND THE
+     *  COLUMN WAS DROPPED IN S9b. It was the per-chain opt-in for the
+     *  chain-wide CosmWasm scanner. S8 deleted its only writer
+     *  (`setCosmwasmNftDiscoveryEnabled`) and every reader; a
+     *  comment-stripped sweep over `app/`, `includes/` and the bootstrap
+     *  finds no `->cosmwasm_nft_discovery_enabled` anywhere.
+     *
+     *  The ORDER was the safety argument, and it is worth keeping on the
+     *  record: removed from the SELECT in S9a while the column stayed, and
+     *  only then dropped in S9b. Reversed, a projection naming a dropped
+     *  column fails, this class caches an error sentinel, and the symptom is
+     *  every chain reporting UNKNOWN with nothing in the log.
+     *
+     *  ⚠ `bcc_onchain_add_chains_cosmwasm_discovery_column()` WAS DELETED IN
+     *  THE SAME COMMIT AS THE DROP, and it had to be. It re-added the column
+     *  on every schema pass, and the schema pass runs on the SAME first
+     *  request as `bcc_trust_drop_scanner_schema()` — so leaving it would
+     *  have put the column straight back inside that request. Pinned by
+     *  ScannerSchemaDropIntegrationTest::testNothingReAddsTheDroppedColumnOrTables. */
     private const COLUMNS = 'id, slug, name, chain_type, chain_id_hex, rpc_url, rest_url,
                  explorer_url, native_token, decimals, bech32_prefix, icon_url, color,
                  marketplace_template, description, is_testnet, is_active,
-                 cosmwasm_nft_discovery_enabled, bcc_supports_nft_collections,
+                 bcc_supports_nft_collections,
                  manual_collection_discovery_enabled, created_at';
 
     /** @var string Object-cache / transient group. */
@@ -120,6 +139,48 @@ final class ChainRepository
      *  once per item. Stores misses (null) too. Request-scoped only — no
      *  shared-cache writes, so the CACHE INVARIANT is untouched. */
     private static array $byIdMemo = [];
+
+    /**
+     * One chain, read STRAIGHT FROM THE DATABASE. No cache, no memo, no writes.
+     *
+     * ⚠⚠ THIS EXISTS FOR DIAGNOSING A LOST RACE, AND THE CACHE WOULD DEFEAT IT.
+     * {@see getById()} serves from the cached active set and then from a
+     * per-request memo, so inside one request it answers with whatever the first
+     * read put there. That is correct for ordinary reads and useless for the one
+     * question an atomic write failure raises — "what does the row say NOW, given
+     * that my predicate just failed to match it?" — because another request is
+     * exactly who changed it.
+     *
+     * ⚠ IT DELIBERATELY DOES NOT POPULATE `$byIdMemo`. A diagnostic read is not a
+     * read anyone else asked for, and seeding the memo from it would hand the rest
+     * of the request a row fetched for a different purpose.
+     *
+     * ⚠ AND IT DOES NOT BUST THE SHARED CACHE. The alternative — `clearCache()`
+     * then `getById()` — would answer the same question by throwing away a cache
+     * entry that is still valid for every other reader, to learn something only
+     * this method needs.
+     *
+     * Bounded: explicit columns (no `SELECT *`), primary key, `LIMIT 1`.
+     *
+     * @return ChainRow|null
+     */
+    public static function getByIdUncached(int $chainId): ?object
+    {
+        if ($chainId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        /** @var ChainRow|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT " . self::COLUMNS . " FROM {$table} WHERE id = %d LIMIT 1",
+            $chainId
+        ));
+
+        return $row;
+    }
 
     /** @return ChainRow|null */
     public static function getById(int $chainId): ?object
@@ -433,68 +494,93 @@ final class ChainRepository
      * Validation of WHICH urls are acceptable belongs to
      * {@see \BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy}; a
      * repository enforces shape, not policy.
+     *
+     * ── IT IS A COMPARE-AND-SWAP, NOT A BLIND UPDATE ────────────────────
+     * The write carries the state the operator reviewed, so the row moves only
+     * if it is still that row. This replaced a reviewed-digest scheme, and it
+     * is stronger for the one thing it guards — there is no recompute-then-write
+     * window at all — and NARROWER: it guards this row, not the world. Anything
+     * else the caller depends on has to be bound here too, which is why `slug`
+     * and `is_active` are predicates and not merely re-read.
+     *
+     * ⚠⚠⚠ THE COMPARISONS ARE BINARY, AND `COLLATE utf8mb4_bin` IS NOT ENOUGH.
+     * This table is created with `$wpdb->get_charset_collate()`, so `rest_url`
+     * and `slug` compare case-INSENSITIVELY. Forcing `utf8mb4_bin` fixes the
+     * case half and leaves the other: every MySQL collation except the UCA
+     * 9.0.0 (`utf8mb4_0900_*`) family — `utf8mb4_bin` included — is PAD SPACE,
+     * so TRAILING SPACES ARE IGNORED in comparison. Casting to BINARY compares
+     * byte-wise with no padding, which is the only form that makes
+     * `https://host ` and `https://host` different values.
+     * `CAST(x AS BINARY)` rather than the `BINARY x` operator, which is
+     * deprecated from MySQL 8.0.27. Proven on both engines by
+     * `CosmosEndpointSwitchCasIntegrationTest`, not by assertion.
+     *
+     * ⚠ `rest_url` IS NULLABLE, so a NULL incumbent needs `IS NULL`: an `=`
+     * predicate can never match it, and a chain sitting on a NULL endpoint is
+     * precisely the one most in need of repair. `<=>` is not used because
+     * `wpdb::prepare()` binds a PHP null as the empty string.
+     *
+     * No index concern — the row is already selected by primary key.
+     *
+     * @param array{rest_url: string|null, slug: string, is_active: int} $expected the reviewed state
+     * @return int 1 when the row moved, 0 when a predicate did not match
+     *             (nothing changed), -1 on a database error (the write did not
+     *             report success and MAY OR MAY NOT have applied)
      */
-    public static function updateRestUrl(int $chainId, string $restUrl): bool
+    public static function updateRestUrl(int $chainId, string $restUrl, array $expected): int
     {
         if ($chainId <= 0 || trim($restUrl) === '') {
-            return false;
+            return 0;
         }
 
         global $wpdb;
         $table = self::table();
 
-        $result = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table} SET rest_url = %s WHERE id = %d LIMIT 1",
-            $restUrl,
-            $chainId
-        ));
+        $expectedRestUrl = $expected['rest_url'] ?? null;
 
-        self::clearCache();
+        $incumbent = $expectedRestUrl === null
+            ? 'rest_url IS NULL'
+            : 'CAST(rest_url AS BINARY) = CAST(%s AS BINARY)';
 
-        return $result !== false;
-    }
+        $sql = "UPDATE {$table}
+                   SET rest_url = %s
+                 WHERE id = %d
+                   AND {$incumbent}
+                   AND CAST(slug AS BINARY) = CAST(%s AS BINARY)
+                   AND is_active = %d
+                 LIMIT 1";
 
-    /**
-     * Turn the per-chain CosmWasm NFT-discovery opt-in on or off.
-     *
-     * THE ONLY WRITE PATH for `cosmwasm_nft_discovery_enabled`, and it
-     * busts the chains cache as part of the write rather than leaving that
-     * to the caller. That is not politeness — {@see getActive()} serves the
-     * scanner's eligibility read from a 5-minute object-cache/transient
-     * pair, so a toggle that did not invalidate would leave the worker
-     * scanning a just-disabled chain (or ignoring a just-enabled one) for
-     * up to the whole TTL, with the admin screen showing the new value the
-     * entire time. Putting the invalidation here means no future caller can
-     * forget it.
-     *
-     * Bounded to a single row by primary key. Touches exactly one column —
-     * an operator flipping discovery must never be able to disturb chain
-     * identity, RPC config or `is_active`.
-     *
-     * @return bool true when the UPDATE executed without a DB error.
-     */
-    public static function setCosmwasmNftDiscoveryEnabled(int $chainId, bool $enabled): bool
-    {
-        if ($chainId <= 0) {
-            return false;
+        $args = [$restUrl, $chainId];
+        if ($expectedRestUrl !== null) {
+            $args[] = $expectedRestUrl;
+        }
+        $args[] = (string) $expected['slug'];
+        $args[] = (int) $expected['is_active'];
+
+        $result = $wpdb->query($wpdb->prepare($sql, ...$args));
+
+        if ($result === false) {
+            // ⚠ The cache is busted anyway. A statement that errored may still
+            // have applied, and a cache holding the previous endpoint after a
+            // write that might have landed is the worse of the two wrongs.
+            self::clearCache();
+
+            return -1;
         }
 
-        global $wpdb;
-        $table = self::table();
+        $affected = (int) $result;
 
-        $result = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table}
-                SET cosmwasm_nft_discovery_enabled = %d
-              WHERE id = %d
-              LIMIT 1",
-            $enabled ? 1 : 0,
-            $chainId
-        ));
+        // Only an affected count of exactly zero proves nothing changed, so
+        // only that case may keep the cache. Every other outcome busts it,
+        // including the paths where the caller's read-back or follow-ups
+        // later fail — the row has moved and no reader may keep the old host.
+        if ($affected !== 0) {
+            self::clearCache();
+        }
 
-        self::clearCache();
-
-        return $result !== false;
+        return $affected;
     }
+
 
     // ── The NFT capability columns ───────────────────────────────────────
     //

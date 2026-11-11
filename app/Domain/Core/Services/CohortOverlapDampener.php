@@ -75,11 +75,50 @@ final class CohortOverlapDampener
     public const OVERLAP_THRESHOLD = 0.50;
 
     /**
-     * §6.3 — dampened multiplier when threshold crossed. Picked at
-     * 0.80 per plan; mirrors the §J.4 +30% diversity bonus we're
-     * neutralizing (1.0 / 1.3 ≈ 0.77, rounded to 0.80 for legibility).
+     * ⚠⚠ WAS 0.80. NOW BASELINE — COHORT DENSITY IS NOT PENALISED.
+     *
+     * The old value was documented as "mirrors the §J.4 +30% diversity
+     * bonus we're neutralizing (1.0 / 1.3 ≈ 0.77, rounded to 0.80)". Two
+     * things were wrong with that in practice.
+     *
+     * 1. ⚠ IT NEUTRALIZED NOTHING IN THE CASES IT HIT HARDEST. The 1.3x
+     *    diversity bonus lives in AttestationScoreSynthesis and is gated on
+     *    the TARGET having at least BCC_ATTEST_DIVERSITY_MIN_SOURCES
+     *    distinct sources. This multiplier was applied unconditionally at
+     *    CAST time. So where the bonus did not apply — a target with only
+     *    one or two backers — the 0.80 was not an offset, it was a flat 20%
+     *    penalty with nothing to offset. Measured: two casts at 0.80 on a
+     *    two-source target synthesise to 1.60 instead of 2.00.
+     *
+     * 2. ⚠ WHAT IT MEASURES IS COMMUNITY DENSITY, NOT INDEPENDENCE OF
+     *    JUDGMENT, and it has no input that could measure the latter.
+     *    Every ordinary close-knit shape was dampened by isolated fixture:
+     *
+     *      6-person hall, everyone has used everyone   ratio 0.80  x0.80
+     *      family business, 3 relatives + a new member ratio 1.00  x0.80
+     *      trade crew of 4 backing the gaffer          ratio 1.00  x0.80
+     *      specialist, all 4 prior in one discipline   ratio 1.00  x0.80
+     *      5 sock puppets backing each other           ratio 0.80  x0.80
+     *
+     *    The sock puppets scored the SAME as the hall.
+     *
+     * 3. ⚠⚠ AND IT WAS TRIVIAL TO EVADE. The denominator is the ATTESTOR'S
+     *    OWN cohort size, so a ring that pads its cohort with unrelated
+     *    targets dilutes the ratio away: 3 overlapping of 24 prior = 0.13,
+     *    NOT dampened. Meanwhile an honest member's SECOND-EVER vouch, with
+     *    one prior target who happens to back the same person, is ratio
+     *    1.00 and dampened. That is the inverse of the risk profile.
+     *
+     * ⚠ NOT DONE: no graduated curve, no minimum-cohort floor, no new
+     * ratio. Each would replace one arbitrary number with another and would
+     * still be measuring density. The threshold is left exactly where it
+     * was and only the consequence is removed.
+     *
+     * ⚠ The constant is retained rather than deleted so there is exactly
+     * ONE place to re-enable a weight effect from, if an evidence-led
+     * dampener is ever agreed.
      */
-    public const DAMPENED_MULTIPLIER = 0.80;
+    public const DAMPENED_MULTIPLIER = 1.00;
 
     /** No-dampening case — passed through unchanged into weight_at_time. */
     public const NO_DAMPENING = 1.00;
@@ -97,15 +136,31 @@ final class CohortOverlapDampener
      * @param int    $targetId       The target id.
      * @return float A multiplier in {DAMPENED_MULTIPLIER, NO_DAMPENING}.
      */
-    public function weightFor(int $attestorUserId, string $targetKind, int $targetId): float
+    /**
+     * The measured overlap ratio, or NULL where overlap is not defined.
+     *
+     * ⚠ This is the OBSERVATION, and it is retained on purpose. Before this
+     * change the only durable record that a cast was cohort-dampened was the
+     * `cohort_overlap_mult: 0.80` value in its audit row. With the
+     * multiplier at baseline that value no longer distinguishes anything, so
+     * the ratio itself is surfaced and audited. Removing a penalty must not
+     * also delete the evidence.
+     *
+     * NULL means the question does not apply: a card target (no attestor
+     * cohort exists), a self/non-positive pair, or an attestor with no prior
+     * casts. Those are distinct from a measured 0.0.
+     *
+     * Exactly the same TWO repository reads as before — no extra query.
+     */
+    public function overlapRatio(int $attestorUserId, string $targetKind, int $targetId): ?float
     {
         // Cards have no attestor cohort — overlap is structurally
         // undefined. Only user→user pairs are cohort-comparable.
         if ($targetKind !== 'user_profile') {
-            return self::NO_DAMPENING;
+            return null;
         }
         if ($attestorUserId <= 0 || $targetId <= 0 || $attestorUserId === $targetId) {
-            return self::NO_DAMPENING;
+            return null;
         }
 
         $attestorCohortSize = $this->repo->countDistinctTargetsByAttestor(
@@ -115,18 +170,51 @@ final class CohortOverlapDampener
         if ($attestorCohortSize <= 0) {
             // No prior attestations to overlap against — first-ever
             // cast can't be a cluster vector by construction.
-            return self::NO_DAMPENING;
+            return null;
         }
 
         $intersectionSize = $this->repo->countOverlapBetweenAttestorAndTarget(
             $attestorUserId,
             $targetId
         );
-        $overlapRatio = $intersectionSize / $attestorCohortSize;
 
-        if ($overlapRatio >= self::OVERLAP_THRESHOLD) {
-            return self::DAMPENED_MULTIPLIER;
-        }
-        return self::NO_DAMPENING;
+        return $intersectionSize / $attestorCohortSize;
+    }
+
+    /**
+     * Does this cast cross the overlap threshold? DETECTION ONLY — carries
+     * no consequence. The threshold is unchanged.
+     */
+    public static function isHighOverlap(?float $ratio): bool
+    {
+        return $ratio !== null && $ratio >= self::OVERLAP_THRESHOLD;
+    }
+
+    /**
+     * The weight effect of a known ratio, without re-reading.
+     *
+     * ⚠ Exists so the caller can audit the observation AND apply the
+     * multiplier from a SINGLE pair of reads. Calling overlapRatio() and
+     * weightFor() in sequence would double the DB work inside the
+     * transaction-locked region.
+     */
+    public static function multiplierFor(?float $ratio): float
+    {
+        return self::isHighOverlap($ratio) ? self::DAMPENED_MULTIPLIER : self::NO_DAMPENING;
+    }
+
+    /**
+     * Resolve the cohort-overlap multiplier for the given cast.
+     *
+     * ⚠ Now returns BASELINE in every case — see DAMPENED_MULTIPLIER.
+     * Kept as the §6.3 contract surface and as the single mapping from
+     * "high overlap" to "weight effect", so a future evidence-led dampener
+     * has one place to live.
+     */
+    public function weightFor(int $attestorUserId, string $targetKind, int $targetId): float
+    {
+        return self::multiplierFor(
+            $this->overlapRatio($attestorUserId, $targetKind, $targetId)
+        );
     }
 }

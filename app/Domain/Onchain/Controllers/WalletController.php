@@ -5,7 +5,9 @@ namespace BCC\Trust\Onchain\Controllers;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\AccountRecoveryService;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
+use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\JwtToken;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
 use BCC\Trust\Onchain\Repositories\NftSelectionRepository;
@@ -38,6 +40,21 @@ if (!defined('ABSPATH')) {
  */
 class WalletController
 {
+    /**
+     * Option switch: does unlinking a wallet revoke the account's OTHER
+     * Bearer sessions? Defaults OFF.
+     *
+     * Revocation kills every session minted before the unlink — including a
+     * wallet-login session held by whoever controls that wallet, which is the
+     * point (an account owner removing a wallet someone else linked). But it
+     * also kills the CALLER's session unless the client stores the fresh
+     * token this route returns. So: the token is ALWAYS returned (a client
+     * can adopt it any time), and an operator turns revocation ON only once
+     * the frontend that stores it is in production:
+     *   wp option update bcc_unlink_revokes_sessions 1
+     */
+    public const UNLINK_REVOKES_SESSIONS_OPTION = 'bcc_unlink_revokes_sessions';
+
     /**
      * Boot hooks.
      */
@@ -132,6 +149,11 @@ class WalletController
      * clause, so passing a foreign wallet_link_id is a no-op (returns
      * `removed: false`). We don't 404 in that case because it would
      * leak whether `:id` exists for someone else.
+     *
+     * A true removal of the caller's own wallet also returns a fresh Bearer
+     * token (`token`, `expires_in`, `token_type`) — and, when the
+     * UNLINK_REVOKES_SESSIONS_OPTION switch is ON, revokes every earlier one.
+     * Clients must store the returned token.
      */
     public static function rest_unlink_wallet(\WP_REST_Request $req): \WP_REST_Response
     {
@@ -178,7 +200,8 @@ class WalletController
             }
         }
 
-        $removed = WalletRepository::delete($walletLinkId, $userId);
+        $removed    = WalletRepository::delete($walletLinkId, $userId);
+        $freshToken = null;
 
         // Audit only on a true state transition (own-wallet deletion) — a
         // double-tap unlink against an already-gone row yields removed=false
@@ -218,15 +241,37 @@ class WalletController
             // walletAddress); the wallet_links row being already gone is
             // the expected, documented state for them.
             do_action('bcc_wallet_disconnected', $userId, $chainSlug, $walletAddress);
+
+            // Sessions: with the switch ON, revoke every Bearer token minted
+            // before this unlink — so a wallet-login session for the removed
+            // wallet dies with the link (a NEW wallet-login cannot reach this
+            // account either: findUserIdByAddress no longer finds the row).
+            // Revoke FIRST, then mint: the fresh token carries the bumped
+            // version and is the caller's working session. The token is
+            // returned whether or not the switch is ON (see the constant).
+            if ((bool) get_option(self::UNLINK_REVOKES_SESSIONS_OPTION, false)) {
+                JwtToken::revokeAllForUser($userId);
+            }
+            $freshToken = JwtToken::encode(
+                $userId,
+                (string) get_user_meta($userId, HandleService::META_HANDLE, true)
+            );
         }
 
         // Idempotent: removed=false on a foreign or already-deleted id
-        // lets a double-tap unlink succeed without confusing the UI.
-        $resp = ApiResponse::ok([
+        // lets a double-tap unlink succeed without confusing the UI. Only a
+        // true removal of the caller's own wallet carries a fresh token.
+        $payload = [
             'ok'      => true,
             'id'      => $walletLinkId,
             'removed' => $removed,
-        ]);
+        ];
+        if ($freshToken !== null) {
+            $payload['token']      = $freshToken;
+            $payload['expires_in'] = JwtToken::TTL_SECONDS;
+            $payload['token_type'] = 'Bearer';
+        }
+        $resp = ApiResponse::ok($payload);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
     }
@@ -257,7 +302,10 @@ class WalletController
     public static function rest_list_chains(\WP_REST_Request $req): \WP_REST_Response
     {
         if (!\BCC\Core\Security\Throttle::allow('list_chains', 30, 60)) {
-            return new \WP_REST_Response(['message' => 'Too many requests.'], 429);
+            // Canonical error shape (contract §4 GET /chains: bcc_rate_limited 429).
+            // A bare { message } body has no `code`, so Envelope used to wrap it
+            // as a SUCCESS envelope carrying HTTP 429.
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
         $chains = ChainRepository::getActive();

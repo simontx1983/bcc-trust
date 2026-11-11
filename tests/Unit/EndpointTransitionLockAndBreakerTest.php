@@ -4,232 +4,892 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
+use BCC\Trust\Onchain\Services\CosmosEndpointReview;
 use BCC\Trust\Onchain\Services\CosmosEndpointTransition;
-use BCC\Trust\Onchain\Support\OnchainCircuitBreaker;
-use BCC\Trust\Onchain\ValueObjects\CosmosEndpointPolicy;
-use BCC\Trust\Onchain\ValueObjects\ProviderFailureKind;
-use BCC\Trust\Onchain\ValueObjects\ProviderRequestClass;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 /**
- * THE THREE GAPS THE FIRST STAGING SWITCH EXPOSED, EACH PINNED.
+ * The audited Cosmos endpoint switch: ordering, bindings and the result model.
  *
- * The switch merged in #251 ran correctly on staging on 2026-09-11 — but only
- * because the operator's script compensated for it. The shipped `execute()`:
+ * ── WHAT THIS FILE IS FOR, AND WHAT IT IS NOT ───────────────────────────
+ * It pins the SEQUENCE and the REPORTING: which lock is taken, that the review
+ * is claimed before anything is contacted, that a binding mismatch refuses
+ * before a write, and — the part most easily got wrong — that once the
+ * compare-and-swap has affected a row, no outcome is ever reported as though
+ * nothing happened.
  *
- *   1. took NO LOCK, so a discovery worker could write a cursor between the
- *      digest check and the clear;
- *   2. made NO BREAKER CALL, so a counter, open state and attribution earned
- *      by the replaced provider would keep counting against the new one;
- *   3. recorded NO FINGERPRINT for the endpoint it moved to.
- *
- * Staging was safe only because its breaker happened to be closed and empty
- * that day. The button must not depend on that.
- *
- * ⚠ The transition, the policy and the breaker all run for REAL. Only the
- * persistence edges are faked, so "the breaker was cleared" is evidence the
- * production clearing code produced — not a recorder saying it was asked.
+ * It does NOT pin whether the CAS's SQL comparison is byte-exact. The fake
+ * repository compares with `===`, which is the right call: byte-exactness is a
+ * property of a collation and a cast, and only a database can answer it. That
+ * is {@see \BCC\Trust\Tests\Integration\CosmosEndpointSwitchCasIntegrationTest},
+ * which runs on MySQL and on production-engine MariaDB because the two disagree
+ * about trailing spaces.
  */
 #[CoversClass(CosmosEndpointTransition::class)]
-#[CoversClass(OnchainCircuitBreaker::class)]
+#[CoversClass(CosmosEndpointReview::class)]
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
 final class EndpointTransitionLockAndBreakerTest extends TestCase
 {
-    private const OLD  = 'https://rest.cosmos.directory/cosmoshub';
-    private const NEW  = 'https://cosmos-api.polkachu.com';
-    private const LOCK = 'bcc_cosmwasm_chain_8';
+    private const CHAIN = 8;
+    private const OPERATOR = 7;
+
+    private const INCUMBENT = 'https://rest.cosmos.directory/cosmoshub';
+    private const TARGET    = 'https://cosmos-api.polkachu.com';
 
     protected function setUp(): void
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/endpoint-transition-stubs.php';
 
-        \BccBreakerStore::reset();
         \BccTransitionWorld::reset();
-        \BccTransitionWorld::seedChain8(self::OLD, [416, 434]);
+        \BccTransitionWorld::seedChain8(self::INCUMBENT);
     }
 
-    private function reviewedDigest(): string
+    /** Mint a review and return its id. */
+    private function review(string $target = self::TARGET): string
     {
-        $plan = CosmosEndpointTransition::plan(8, self::NEW);
-        self::assertTrue($plan['ok'], 'test precondition: the plan must be ready');
+        $r = CosmosEndpointTransition::review(self::CHAIN, $target, self::OPERATOR);
+        self::assertTrue($r['ok'], 'test precondition: the review must be accepted — got ' . $r['reason']);
 
-        return $plan['digest'];
+        return $r['review_id'];
     }
 
-    /** Give chain 8 a breaker record earned by the OLD endpoint. */
-    private function seedOldProviderBreaker(): void
+    /** @return array{ok: bool, reason: string, verified_network: string|null, failed_followups: list<string>} */
+    private function switchIt(?string $reviewId = null, int $chainId = self::CHAIN): array
     {
-        $oldFp = (string) CosmosEndpointPolicy::fingerprint('cosmos', self::OLD);
-        for ($i = 0; $i < 6; $i++) {
-            OnchainCircuitBreaker::recordFailure(
-                8,
-                ProviderFailureKind::HTTP_5XX,
-                ProviderRequestClass::STANDARD_REQUEST,
-                $oldFp
-            );
+        $id = $reviewId ?? $this->review();
+
+        // ⚠ The switch is a SEPARATE REQUEST from the review, so it starts with a
+        // cold cache. See `BccTransitionWorld::newRequest()`.
+        \BccTransitionWorld::newRequest();
+
+        return CosmosEndpointTransition::execute($chainId, $id, self::OPERATOR);
+    }
+
+    private function storedRestUrl(): ?string
+    {
+        return \BccTransitionWorld::$chains[self::CHAIN]->rest_url ?? null;
+    }
+
+    /** Did the switch contact the provider at all? */
+    private function verified(): bool
+    {
+        foreach (\BccTransitionWorld::$writes as $w) {
+            if (str_starts_with($w, 'verify(')) {
+                return true;
+            }
         }
-        self::assertSame('http_5xx', OnchainCircuitBreaker::attribution(8)['kind'], 'precondition: old state present');
-        self::assertNotNull(\BccBreakerStore::counter(8), 'precondition: counter present');
+
+        return false;
     }
 
-    // ── 1. the lock ─────────────────────────────────────────────────────
-
-    public function testExecuteTakesTheWorkersOwnLock(): void
+    private function endpointWrites(): int
     {
-        CosmosEndpointTransition::execute(8, self::NEW, $this->reviewedDigest(), 1);
+        $n = 0;
+        foreach (\BccTransitionWorld::$writes as $w) {
+            if (str_starts_with($w, 'chain.rest_url=')) {
+                $n++;
+            }
+        }
 
-        self::assertContains(
-            self::LOCK,
+        return $n;
+    }
+
+    // ── The lock ────────────────────────────────────────────────────────
+
+    public function testItTakesItsOwnLockAndNotTheScanners(): void
+    {
+        $this->switchIt();
+
+        self::assertContains('bcc_cosmos_endpoint_8', \BccBreakerStore::$lockAttempts);
+        self::assertNotContains(
+            'bcc_cosmwasm_chain_8',
             \BccBreakerStore::$lockAttempts,
-            'execute() must contend for the SAME lock the discovery worker takes'
+            'the switch must not borrow the discovery worker\'s lock'
         );
-    }
-
-    /** A worker mid-pass holds the lock: refuse, change nothing, leave its lock alone. */
-    public function testExecuteRefusesWhenTheWorkerHoldsTheLock(): void
-    {
-        $digest = $this->reviewedDigest();
-        \BccBreakerStore::$locks[self::LOCK] = true; // a worker is walking chain 8
-
-        $result = CosmosEndpointTransition::execute(8, self::NEW, $digest, 1);
-
-        self::assertFalse($result['ok']);
-        self::assertSame('lock_contended', $result['reason']);
-        self::assertSame([], \BccTransitionWorld::$writes, 'a contended switch must write nothing');
-        self::assertSame(self::OLD, \BccTransitionWorld::$chains[8]->rest_url);
-        self::assertTrue(
-            \BccBreakerStore::$locks[self::LOCK] ?? false,
-            'the worker\'s lock must be left exactly as the worker holds it'
-        );
-    }
-
-    public function testTheLockIsReleasedAfterASuccessfulSwitch(): void
-    {
-        $result = CosmosEndpointTransition::execute(8, self::NEW, $this->reviewedDigest(), 1);
-
-        self::assertTrue($result['ok'], 'reason=' . $result['reason']);
-        self::assertArrayNotHasKey(self::LOCK, \BccBreakerStore::$locks, 'lock must be released');
-    }
-
-    /** `finally` must release on the refusal paths too, or the worker is locked out forever. */
-    public function testTheLockIsReleasedAfterARefusal(): void
-    {
-        $result = CosmosEndpointTransition::execute(8, self::NEW, 'not-the-reviewed-digest', 1);
-
-        self::assertSame('plan_stale', $result['reason']);
-        self::assertSame([], \BccTransitionWorld::$writes);
-        self::assertArrayNotHasKey(self::LOCK, \BccBreakerStore::$locks, 'a refusal must still release');
-    }
-
-    // ── 2. the breaker ──────────────────────────────────────────────────
-
-    public function testASuccessfulSwitchClearsTheOldProvidersBreaker(): void
-    {
-        $this->seedOldProviderBreaker();
-        $digest = $this->reviewedDigest();
-
-        $result = CosmosEndpointTransition::execute(8, self::NEW, $digest, 1);
-
-        self::assertTrue($result['ok'], 'reason=' . $result['reason']);
-        self::assertSame(OnchainCircuitBreaker::PHASE_CLOSED, OnchainCircuitBreaker::phase(8));
-        self::assertNull(\BccBreakerStore::counter(8), 'the old counter must not keep counting against the new provider');
-        $attribution = OnchainCircuitBreaker::attribution(8);
-        self::assertNull($attribution['kind'], 'the old provider\'s failure must not describe the new one');
-        self::assertNull($attribution['request_class']);
-        self::assertNull($attribution['endpoint_fp']);
     }
 
     /**
-     * ⚠ THE REASON THIS IS NOT recordSuccess(). Clearing must not write a
-     * last-success timestamp: nobody has contacted the new endpoint yet, and
-     * the stale-chain detector reads that option.
+     * THE DECOUPLING PROOF. A peer holding the scanner's lock must not block a
+     * switch, or the two are still coupled however the constant is spelled.
      */
-    public function testClearingTheBreakerDoesNotFakeASuccess(): void
+    public function testAPeerHoldingTheScannerLockDoesNotBlockTheSwitch(): void
     {
-        $this->seedOldProviderBreaker();
-        $before = \BccBreakerStore::$options['bcc_onchain_last_success_8'] ?? null;
+        \BccBreakerStore::$locks['bcc_cosmwasm_chain_8'] = true;
 
-        CosmosEndpointTransition::execute(8, self::NEW, $this->reviewedDigest(), 1);
+        $result = $this->switchIt();
 
-        self::assertSame(
-            $before,
-            \BccBreakerStore::$options['bcc_onchain_last_success_8'] ?? null,
-            'a switch must not record a success that never happened'
+        self::assertTrue($result['ok'], 'the scanner lock is nothing to do with this any more');
+        self::assertSame(self::TARGET, $this->storedRestUrl());
+    }
+
+    public function testAContendedLockRefusesAndWritesNothing(): void
+    {
+        $reviewId = $this->review();
+        \BccBreakerStore::$locks['bcc_cosmos_endpoint_8'] = true;
+
+        $result = $this->switchIt($reviewId);
+
+        self::assertFalse($result['ok']);
+        self::assertSame('lock_contended', $result['reason']);
+        self::assertSame(0, $this->endpointWrites());
+        self::assertFalse($this->verified());
+    }
+
+    public function testTheLockIsReleasedOnSuccessAndOnRefusal(): void
+    {
+        $this->switchIt();
+        self::assertArrayNotHasKey(
+            'bcc_cosmos_endpoint_8',
+            \BccBreakerStore::$locks,
+            'released after a successful switch'
+        );
+
+        // The first switch moved the chain, so put it back: a second review
+        // of the same target would otherwise be refused as already_current.
+        \BccTransitionWorld::reset();
+        \BccTransitionWorld::seedChain8(self::INCUMBENT);
+        \BccTransitionWorld::$verifyOk = false;
+        $this->switchIt();
+        self::assertArrayNotHasKey(
+            'bcc_cosmos_endpoint_8',
+            \BccBreakerStore::$locks,
+            'released on a refusal too - the finally covers every exit'
         );
     }
 
-    /** A refused switch leaves the breaker exactly as it was. */
-    public function testARefusedSwitchDoesNotTouchTheBreaker(): void
+    // ── The review, and replay ──────────────────────────────────────────
+
+    /**
+     * ⚠ A REPLACEMENT REVIEW RETIRES THE OLDER CONFIRMATION — even though the
+     * chain and the target are identical, which is exactly the case a binding
+     * on chain and target alone would miss.
+     */
+    public function testAReplacementReviewInvalidatesTheOlderConfirmation(): void
     {
-        $this->seedOldProviderBreaker();
-        $counterBefore = \BccBreakerStore::counter(8);
-        \BccTransitionWorld::$verifyOk = false; // destination fails identity
+        $first  = $this->review();
+        $second = $this->review();
+        self::assertNotSame($first, $second, 'precondition: a replacement mints a new id');
 
-        $result = CosmosEndpointTransition::execute(8, self::NEW, $this->reviewedDigest(), 1);
+        $stale = $this->switchIt($first);
 
+        self::assertFalse($stale['ok']);
+        self::assertSame('review_token_invalid', $stale['reason']);
+        self::assertSame(0, $this->endpointWrites());
+        self::assertFalse($this->verified(), 'a retired confirmation must not reach the provider');
+
+        self::assertTrue($this->switchIt($second)['ok'], 'the current confirmation still works');
+    }
+
+    /** Replay cannot verify twice and cannot write twice. */
+    public function testAReplayedConfirmationNeitherVerifiesNorWritesAgain(): void
+    {
+        $reviewId = $this->review();
+        self::assertTrue($this->switchIt($reviewId)['ok']);
+
+        $writesAfterFirst = \BccTransitionWorld::$writes;
+
+        $replay = $this->switchIt($reviewId);
+
+        self::assertFalse($replay['ok']);
+        self::assertSame('review_token_invalid', $replay['reason']);
+        self::assertSame(
+            $writesAfterFirst,
+            \BccTransitionWorld::$writes,
+            'a replay must add no write and no provider call of any kind'
+        );
+    }
+
+    /**
+     * ⚠ CONSUMPTION IS CHECKED BEFORE THE PROVIDER IS CONTACTED. If the claim
+     * cannot be made, a second arrival could still make it — so this must cost
+     * zero provider calls and zero writes.
+     */
+    public function testAFailedConsumptionStopsBeforeAnyProviderCallOrWrite(): void
+    {
+        $reviewId = $this->review();
+        \BccBreakerStore::$deleteTransientFails = true;
+
+        $result = $this->switchIt($reviewId);
+
+        self::assertFalse($result['ok']);
+        self::assertSame('review_consume_failed', $result['reason']);
+        self::assertFalse($this->verified(), 'the claim failed, so nothing may be contacted');
+        self::assertSame(0, $this->endpointWrites());
+        self::assertSame([], \BccTransitionWorld::$audits);
+    }
+
+    public function testAConfirmationForAnotherChainIsRefused(): void
+    {
+        $reviewId = $this->review();
+
+        $result = CosmosEndpointTransition::execute(99, $reviewId, self::OPERATOR);
+
+        self::assertFalse($result['ok']);
+        self::assertSame('review_chain_mismatch', $result['reason']);
+        self::assertSame(0, $this->endpointWrites());
+    }
+
+    public function testAnotherOperatorsConfirmationIsNotUsable(): void
+    {
+        $reviewId = $this->review();
+
+        $result = CosmosEndpointTransition::execute(self::CHAIN, $reviewId, 99);
+
+        self::assertFalse($result['ok']);
+        self::assertSame('review_token_invalid', $result['reason']);
+        self::assertSame(0, $this->endpointWrites());
+    }
+
+    // ── Bindings ────────────────────────────────────────────────────────
+
+    public function testAChangedIncumbentRefusesWithoutWriting(): void
+    {
+        $reviewId = $this->review();
+        \BccTransitionWorld::$chains[self::CHAIN]->rest_url = 'https://cosmos-api.polkachu.com/';
+
+        $result = $this->switchIt($reviewId);
+
+        self::assertFalse($result['ok']);
+        self::assertSame('from_mismatch', $result['reason']);
+        self::assertSame(0, $this->endpointWrites());
+        self::assertFalse($this->verified());
+    }
+
+    /**
+     * @return list<array{0: string, 1: mixed}>
+     */
+    public static function identityFields(): array
+    {
+        return [
+            'slug'      => ['slug', 'osmosis'],
+            'is_active' => ['is_active', 0],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('identityFields')]
+    public function testAChangedIdentityRefusesWithoutWriting(string $field, mixed $value): void
+    {
+        $reviewId = $this->review();
+        \BccTransitionWorld::$chains[self::CHAIN]->{$field} = $value;
+
+        $result = $this->switchIt($reviewId);
+
+        self::assertFalse($result['ok']);
+        self::assertSame(0, $this->endpointWrites(), 'nothing may be written on a moved identity');
+        self::assertFalse($this->verified());
+        self::assertSame([], \BccTransitionWorld::$audits);
+    }
+
+    /**
+     * ⚠ THE RACE. Identity changes AFTER the proof and BEFORE the swap — the
+     * window the lock cannot close, because nothing else takes this lock.
+     * The write predicate is what refuses.
+     */
+    public function testAnIdentityChangeBetweenProofAndWriteIsRefusedByTheWrite(): void
+    {
+        $reviewId = $this->review();
+        \BccTransitionWorld::$afterVerify = static function (): void {
+            \BccTransitionWorld::$chains[8]->slug = 'osmosis';
+        };
+
+        $result = $this->switchIt($reviewId);
+
+        self::assertFalse($result['ok']);
+        self::assertSame('identity_changed', $result['reason']);
+        self::assertTrue($this->verified(), 'precondition: the proof was made before the race');
+        self::assertSame(0, $this->endpointWrites(), 'the write must refuse a moved identity');
+        self::assertSame(self::INCUMBENT, $this->storedRestUrl());
+        self::assertSame([], \BccTransitionWorld::$audits);
+    }
+
+    // ── Proof before write ──────────────────────────────────────────────
+
+    public function testAFailedProofWritesNothingAndAuditsNothing(): void
+    {
+        \BccTransitionWorld::$verifyOk = false;
+
+        $result = $this->switchIt();
+
+        self::assertFalse($result['ok']);
         self::assertSame('target_network_mismatch', $result['reason']);
-        self::assertSame($counterBefore, \BccBreakerStore::counter(8));
-        self::assertSame('http_5xx', OnchainCircuitBreaker::attribution(8)['kind']);
-        self::assertSame(self::OLD, \BccTransitionWorld::$chains[8]->rest_url, 'unverified host must not be written');
+        self::assertSame(self::INCUMBENT, $this->storedRestUrl());
+        self::assertSame([], \BccTransitionWorld::$audits);
+        self::assertSame(0, \BccTransitionWorld::$cacheBusts);
     }
 
-    public function testForgetReportsWhetherAnythingWasCleared(): void
+    /**
+     * ⚠ THE PROOF IS MADE NOW, NOT SERVED FROM AN EARLIER ONE.
+     *
+     * `CosmosEndpointVerifier::verify()` caches a success per endpoint
+     * fingerprint and consults that cache BY DEFAULT. On this path the cache
+     * is bypassed deliberately: a recorded proof says the host answered
+     * correctly at some past moment, and what authorises repointing a chain is
+     * that it answers correctly NOW. A `true` here would let an operator switch
+     * to a host that has since failed, for as long as the transient lived.
+     *
+     * The argument is asserted rather than read off the source line, because
+     * the default is the unsafe value and a dropped argument would be silent.
+     */
+    public function testTheProofBypassesTheCacheSoAnEarlierProofCannotStandIn(): void
     {
-        self::assertFalse(OnchainCircuitBreaker::forgetForEndpointChange(8), 'nothing to clear');
+        $this->switchIt();
 
-        $this->seedOldProviderBreaker();
-        self::assertTrue(OnchainCircuitBreaker::forgetForEndpointChange(8), 'old state was cleared');
-        self::assertFalse(OnchainCircuitBreaker::forgetForEndpointChange(8), 'idempotent');
+        self::assertSame(
+            [false],
+            \BccTransitionWorld::$verifyCacheFlags,
+            'exactly one verification, and it must not be allowed to use the cache'
+        );
     }
 
-    public function testForgetRejectsANonsenseChainId(): void
+    /**
+     * ANTI-VACUITY for the test above. The recorder captures `true` when `true`
+     * is what it is given — so `[false]` is a measurement of the call the
+     * service makes, not an artefact of a recorder that can only say `false`.
+     */
+    public function testTheCacheFlagRecorderWouldCaptureACachedProof(): void
     {
-        self::assertFalse(OnchainCircuitBreaker::forgetForEndpointChange(0));
-        self::assertFalse(OnchainCircuitBreaker::forgetForEndpointChange(-3));
+        \BccTransitionWorld::$verifyCacheFlags = [];
+
+        // The fake's own default is the UNSAFE value, which is the point.
+        \BCC\Trust\Onchain\Support\CosmosEndpointVerifier::verify((object) [
+            'id' => 8, 'slug' => 'cosmos', 'rest_url' => self::TARGET,
+        ]);
+
+        self::assertSame([true], \BccTransitionWorld::$verifyCacheFlags);
     }
 
-    // ── 3. the fingerprint ──────────────────────────────────────────────
-
-    public function testTheAuditRecordsTheNewEndpointFingerprint(): void
+    public function testTheProofHappensBeforeTheWrite(): void
     {
-        $this->seedOldProviderBreaker();
+        $this->switchIt();
 
-        CosmosEndpointTransition::execute(8, self::NEW, $this->reviewedDigest(), 1);
+        $order = array_values(array_filter(
+            \BccTransitionWorld::$writes,
+            static fn(string $w): bool => str_starts_with($w, 'verify(') || str_starts_with($w, 'chain.rest_url=')
+        ));
 
+        self::assertSame(
+            ['verify(' . self::TARGET . ')', 'chain.rest_url=' . self::TARGET],
+            $order,
+            'the destination is proven before the row moves, never after'
+        );
+    }
+
+    // ── The result model after the swap ─────────────────────────────────
+
+    public function testASuccessfulSwitchClearsTheBreakerAuditsAndBustsTheCache(): void
+    {
+        $result = $this->switchIt();
+
+        self::assertTrue($result['ok']);
+        self::assertSame('switched', $result['reason']);
+        self::assertSame([], $result['failed_followups']);
+        self::assertSame(self::TARGET, $this->storedRestUrl());
+        self::assertGreaterThan(0, \BccTransitionWorld::$cacheBusts);
+        self::assertCount(1, \BccTransitionWorld::$audits);
+        self::assertSame('switched', \BccTransitionWorld::$audits[0]['meta']['outcome']);
+    }
+
+    /**
+     * ⚠ FALSE FROM THE BREAKER IS A FACT, NOT A FAILURE. On a healthy chain
+     * there is nothing to clear, and reporting that as a failed follow-up would
+     * warn the operator on every ordinary switch.
+     */
+    public function testNothingToClearIsNotReportedAsAFailure(): void
+    {
+        $result = $this->switchIt();
+
+        self::assertSame('switched', $result['reason']);
+        self::assertSame([], $result['failed_followups']);
+    }
+
+    /**
+     * ⚠ THE ENDPOINT CHANGED. A read-back that cannot be performed does not
+     * turn a completed write into "nothing happened" — and the breaker is left
+     * alone, because we cannot say which host the chain is now on.
+     */
+    public function testAnUnreadableReadBackReportsSwitchedUnconfirmedAndSpareTheBreaker(): void
+    {
+        \BccTransitionWorld::$readBackAvailable = false;
+
+        $result = $this->switchIt();
+
+        self::assertTrue($result['ok']);
+        self::assertSame('switched_unconfirmed', $result['reason']);
+        self::assertGreaterThan(0, \BccTransitionWorld::$cacheBusts, 'the cache is busted even unconfirmed');
+        self::assertCount(1, \BccTransitionWorld::$audits, 'a write that happened is always recorded');
+        self::assertSame('switched_unconfirmed', \BccTransitionWorld::$audits[0]['meta']['outcome']);
+        // ⚠ THE KEY MUST EXIST. Written `?? null` this passed while the audit
+        // row carried no `breaker_cleared` at all — which it did not, for the
+        // whole of this branch's life, though the design requires it and the
+        // service's own comment claimed it. A vacuous assertion hid a real gap.
+        $meta = \BccTransitionWorld::$audits[0]['meta'];
+        self::assertSame(
+            'not_attempted',
+            $meta['breaker_cleared'],
+            'the breaker must not be touched for an endpoint we cannot confirm'
+        );
+    }
+
+    public function testASupersedingWriteIsReportedAsSuchAndSparesTheBreaker(): void
+    {
+        \BccTransitionWorld::$readBackRestUrl = 'https://rest.cosmos.directory/cosmoshub';
+
+        $result = $this->switchIt();
+
+        self::assertTrue($result['ok']);
+        self::assertSame('switched_then_superseded', $result['reason']);
         self::assertCount(1, \BccTransitionWorld::$audits);
         $meta = \BccTransitionWorld::$audits[0]['meta'];
         self::assertSame(
-            CosmosEndpointPolicy::fingerprint('cosmos', self::NEW),
-            $meta['endpoint_fp'] ?? null,
-            'the audit must name the complete identity the chain now answers to'
+            'not_attempted',
+            $meta['breaker_cleared'],
+            'a superseded endpoint is not confirmed either'
         );
-        self::assertTrue(CosmosEndpointPolicy::isFingerprint((string) $meta['endpoint_fp']));
-        self::assertTrue($meta['breaker_cleared'] ?? null, 'breaker_cleared must be recorded as a fact');
     }
 
-    public function testBreakerClearedIsFalseWhenThereWasNothingToClear(): void
+    public function testAFailedAuditIsReportedWithoutHidingTheWrite(): void
     {
-        CosmosEndpointTransition::execute(8, self::NEW, $this->reviewedDigest(), 1);
+        \BccTransitionWorld::$auditOk = false;
 
-        self::assertFalse(\BccTransitionWorld::$audits[0]['meta']['breaker_cleared'] ?? null);
+        $result = $this->switchIt();
+
+        self::assertTrue($result['ok'], 'the endpoint DID change');
+        self::assertSame('switched_followups_failed', $result['reason']);
+        self::assertSame(['audit'], $result['failed_followups']);
+        self::assertSame(self::TARGET, $this->storedRestUrl());
     }
 
-    // ── order ───────────────────────────────────────────────────────────
-
-    /** The row moves, the cursors clear, THEN the audit — nothing out of order. */
-    public function testWritesHappenInTheIntendedOrder(): void
+    public function testAnErroredWriteIsUnconfirmedNotNothingHappened(): void
     {
-        CosmosEndpointTransition::execute(8, self::NEW, $this->reviewedDigest(), 1);
+        \BccTransitionWorld::$forceCasResult = -1;
+
+        $result = $this->switchIt();
+
+        self::assertFalse($result['ok']);
+        self::assertSame('write_unconfirmed', $result['reason']);
+        self::assertGreaterThan(
+            0,
+            \BccTransitionWorld::$cacheBusts,
+            'a write that may have applied must not leave the cache holding the old host'
+        );
+    }
+
+    public function testAZeroRowWriteReportsNothingChanged(): void
+    {
+        \BccTransitionWorld::$forceCasResult = 0;
+
+        $result = $this->switchIt();
+
+        self::assertFalse($result['ok']);
+        self::assertSame('from_mismatch', $result['reason']);
+        self::assertSame(0, \BccTransitionWorld::$cacheBusts, 'nothing changed, so nothing to invalidate');
+        self::assertSame([], \BccTransitionWorld::$audits);
+    }
+
+    /**
+     * ⚠⚠⚠ THE INVARIANT THIS WHOLE FILE EXISTS FOR.
+     *
+     * Once the compare-and-swap has affected a row the switch has happened, and
+     * no reason reported from that point may be one that means "nothing
+     * changed". Enumerated rather than spot-checked, so a new post-write branch
+     * cannot quietly reuse a pre-write reason.
+     */
+    public function testNoPostWriteOutcomeEverReportsThatNothingChanged(): void
+    {
+        $nothingChanged = [
+            'from_mismatch', 'identity_changed', 'review_token_invalid',
+            'review_chain_mismatch', 'review_consume_failed', 'lock_contended',
+            'already_current', 'not_governed', 'chain_inactive', 'invalid_chain',
+            'target_malformed', 'target_not_approved', 'target_unreachable',
+            'target_identity_unreadable', 'target_network_mismatch', 'missing_input',
+        ];
+
+        $cases = [
+            'clean'      => static function (): void {},
+            'audit fails' => static function (): void {
+                \BccTransitionWorld::$auditOk = false;
+            },
+            'read-back unavailable' => static function (): void {
+                \BccTransitionWorld::$readBackAvailable = false;
+            },
+            'superseded' => static function (): void {
+                \BccTransitionWorld::$readBackRestUrl = 'https://rest.cosmos.directory/cosmoshub';
+            },
+        ];
+
+        foreach ($cases as $label => $arrange) {
+            \BccTransitionWorld::reset();
+            \BccTransitionWorld::seedChain8(self::INCUMBENT);
+            $arrange();
+
+            $result = $this->switchIt();
+
+            self::assertSame(1, $this->endpointWrites(), "{$label}: precondition — the write landed");
+            self::assertNotContains(
+                $result['reason'],
+                $nothingChanged,
+                "{$label}: the endpoint changed, so '{$result['reason']}' must not be a no-change reason"
+            );
+            self::assertTrue($result['ok'], "{$label}: a completed write is not a failure");
+        }
+    }
+
+    // ── The audit row ───────────────────────────────────────────────────
+
+    public function testTheAuditCarriesHostsRolesAndNetworkAndNoCursorFields(): void
+    {
+        $this->switchIt();
+
+        $meta = \BccTransitionWorld::$audits[0]['meta'];
+
+        self::assertSame(self::TARGET, $meta['to']);
+        self::assertSame(self::INCUMBENT, $meta['from']);
+        self::assertSame('cosmoshub-4', $meta['verified_network']);
+        self::assertArrayHasKey('endpoint_fp', $meta);
+        self::assertArrayHasKey('to_role', $meta);
+        self::assertSame(self::OPERATOR, $meta['actor']);
+
+        // ⚠ RECORDED ON A CONFIRMED SWITCH. Design §7.8 #37 lists
+        // `breaker_cleared` among the fields the row must carry, and a confirmed
+        // switch always has an answer — false when there was nothing to clear.
+        self::assertSame(
+            'nothing_to_clear',
+            $meta['breaker_cleared'],
+            'a confirmed switch on a healthy chain records that there was nothing to clear'
+        );
+
+        foreach (['cleared_families', 'code_cursor_cleared', 'watermark_kept'] as $gone) {
+            self::assertArrayNotHasKey($gone, $meta, "the scanner field '{$gone}' must be gone");
+        }
+    }
+
+    /** The fingerprint of the incumbent must never travel in the audit row. */
+    public function testTheAuditNeverCarriesTheReviewFingerprint(): void
+    {
+        $fp = CosmosEndpointReview::fingerprint(self::INCUMBENT);
+        $this->switchIt();
+
+        $encoded = (string) json_encode(\BccTransitionWorld::$audits[0]['meta']);
+        self::assertStringNotContainsString($fp, $encoded);
+    }
+
+    // ── Follow-up failures, singly and together ─────────────────
+
+    /**
+     * A breaker clear that THROWS is a failure (unlike a false return, which
+     * merely means there was nothing to clear). It must be reported without
+     * implying the endpoint did not move.
+     */
+    public function testABreakerExceptionIsReportedWithoutHidingTheWrite(): void
+    {
+        \BccBreakerStore::$deleteCounterThrows = true;
+
+        $result = $this->switchIt();
+
+        self::assertTrue($result['ok'], 'the endpoint DID change');
+        self::assertSame('switched_followups_failed', $result['reason']);
+        self::assertSame(['breaker'], $result['failed_followups']);
+        self::assertSame(self::TARGET, $this->storedRestUrl());
+        self::assertCount(1, \BccTransitionWorld::$audits, 'the write is still recorded');
+    }
+
+    /** Both failing names BOTH. Neither may hide the other. */
+    public function testBreakerAndAuditFailingTogetherAreBothReported(): void
+    {
+        \BccBreakerStore::$deleteCounterThrows = true;
+        \BccTransitionWorld::$auditOk = false;
+
+        $result = $this->switchIt();
+
+        self::assertTrue($result['ok']);
+        self::assertSame('switched_followups_failed', $result['reason']);
+        self::assertSame(
+            ['breaker', 'audit'],
+            $result['failed_followups'],
+            'a combined failure must name both halves, in a stable order'
+        );
+        self::assertSame(self::TARGET, $this->storedRestUrl());
+    }
+
+    /**
+     * ⚠ THE LOG IS THE TRACE WHEN THE DURABLE ROW IS NOT.
+     *
+     * An audit failure on a completed write must still leave an accurate
+     * record somewhere, or a real endpoint change becomes invisible.
+     */
+    public function testAFailedAuditStillLeavesALogTraceOfTheWrite(): void
+    {
+        \BccTransitionWorld::$auditOk = false;
+
+        $this->switchIt();
+
+        $log = implode(' | ', \BccBreakerStore::$log);
+        self::assertStringContainsString(
+            'audit row was not written',
+            $log,
+            'a write that happened and was not recorded must say so in the log'
+        );
+    }
+
+    /**
+     * Read-back failure keeps an accurate trace AND names the uncertainty, so
+     * a later reader is not told the chain is confirmably on the new host.
+     */
+    public function testAnUnconfirmedSwitchRecordsItsUncertaintyRatherThanAHappyOutcome(): void
+    {
+        \BccTransitionWorld::$readBackAvailable = false;
+
+        $this->switchIt();
+
+        self::assertCount(1, \BccTransitionWorld::$audits);
+        $meta = \BccTransitionWorld::$audits[0]['meta'];
+        self::assertSame('switched_unconfirmed', $meta['outcome']);
+        self::assertSame(self::TARGET, $meta['to'], 'the trace names what was written');
+        self::assertSame(
+            'not_attempted',
+            $meta['breaker_cleared'],
+            'unconfirmed state is left alone, and the row says so in those words'
+        );
+    }
+
+    // ── Replay totals (SEQUENTIAL — not a concurrency test) ──────────
+
+    /**
+     * ⚠ AT MOST ONE VERIFICATION AND ONE WRITE, however many arrivals.
+     *
+     * ⚠⚠ THE FOUR ARRIVALS BELOW ARE SEQUENTIAL, IN ONE PROCESS. Nothing
+     * interleaves: each call returns before the next begins. So what is proved
+     * here is REPLAY — a confirmation already spent buys nothing a second,
+     * third or fourth time — and NOT that two racing sessions are serialised.
+     *
+     * The racing case is argued rather than executed, and the three parts of
+     * the argument are named here so the gap stays visible:
+     *   - the single-use review: `consume()` deletes before any outbound call,
+     *     so a second arrival has nothing left to spend;
+     *   - the lock, asserted above by name, acquisition and release against a
+     *     fake — `lock_contended` is simulated by making the fake refuse, not
+     *     by genuinely contending;
+     *   - the CAS predicate, exercised against a real engine in
+     *     `CosmosEndpointSwitchCasIntegrationTest`, which likewise presses
+     *     twice in sequence rather than from two connections.
+     *
+     * A genuine concurrency test needs two sessions on two connections, so
+     * that MySQL `GET_LOCK` actually contends. THAT IS NOT IN THIS SUITE.
+     */
+    public function testManyArrivalsWithOneReviewProduceOneVerificationAndOneWrite(): void
+    {
+        $reviewId = $this->review();
+
+        $accepted = 0;
+        for ($i = 0; $i < 4; $i++) {
+            if ($this->switchIt($reviewId)['ok']) {
+                $accepted++;
+            }
+        }
+
+        self::assertSame(1, $accepted, 'exactly one arrival may succeed');
+        self::assertSame(1, $this->endpointWrites(), 'and exactly one write may land');
+
+        $verifications = 0;
+        foreach (\BccTransitionWorld::$writes as $w) {
+            if (str_starts_with($w, 'verify(')) {
+                $verifications++;
+            }
+        }
+        self::assertSame(1, $verifications, 'and the provider is contacted at most once');
+    }
+
+    /**
+     * The replacement case, stated as a total rather than a single refusal: a
+     * second review plus a stale confirmation must still yield one write.
+     */
+    public function testAReplacementReviewStillYieldsAtMostOneWrite(): void
+    {
+        $first  = $this->review();
+        $second = $this->review();
+
+        $this->switchIt($first);
+        $this->switchIt($second);
+        $this->switchIt($first);
+
+        self::assertSame(1, $this->endpointWrites());
+    }
+
+    // ══ Regressions for the review findings ══════════════════════
+
+    /**
+     * ⚠⚠ THE UNCERTAIN WRITE IS THE ONE THAT MOST NEEDS RECORDING.
+     *
+     * `updateRestUrl()` returns -1 when the statement did not report success,
+     * which does NOT mean it did not apply — and the cache has already been
+     * busted for exactly that reason. An earlier revision returned here without
+     * auditing, making this the one path where the endpoint could change with no
+     * durable record.
+     */
+    public function testAnUncertainWriteIsStillAudited(): void
+    {
+        \BccTransitionWorld::$forceCasResult = -1;
+
+        $result = $this->switchIt();
+
+        self::assertFalse($result['ok'], 'nothing is PROVEN');
+        self::assertSame('write_unconfirmed', $result['reason']);
+
+        self::assertCount(
+            1,
+            \BccTransitionWorld::$audits,
+            'a write that may have applied must leave a durable record'
+        );
+
+        $meta = \BccTransitionWorld::$audits[0]['meta'];
+        self::assertSame('write_unconfirmed', $meta['outcome'], 'and the row names the uncertainty');
+        self::assertSame(self::TARGET, $meta['to'], 'and what was attempted');
+        self::assertSame(
+            'not_attempted',
+            $meta['breaker_cleared'],
+            'the breaker is left alone: we cannot say which host the chain is on'
+        );
+    }
+
+    /**
+     * ANTI-VACUITY for the test above: the audit row must not claim the switch
+     * happened. `switched` and `write_unconfirmed` are different facts.
+     */
+    public function testAnUncertainWriteNeverRecordsItAsASuccessfulSwitch(): void
+    {
+        \BccTransitionWorld::$forceCasResult = -1;
+        $this->switchIt();
+
+        $meta = \BccTransitionWorld::$audits[0]['meta'];
+        self::assertNotSame('switched', $meta['outcome']);
+        self::assertStringNotContainsString(
+            'nothing_to_clear',
+            (string) $meta['breaker_cleared'],
+            'nothing may imply the breaker was dealt with'
+        );
+    }
+
+    /**
+     * ⚠⚠ A FAILED BREAKER CLEAR IS NOT "NOT ATTEMPTED".
+     *
+     * Both leave the breaker uncleared, and an earlier revision recorded both as
+     * `null` — so a clear that THREW was indistinguishable in the durable row
+     * from one that was deliberately never tried.
+     */
+    public function testAFailedBreakerClearIsRecordedAsFailedNotAsNotAttempted(): void
+    {
+        \BccBreakerStore::$deleteCounterThrows = true;
+
+        $result = $this->switchIt();
+
+        self::assertSame(['breaker'], $result['failed_followups'], 'still reported as a failure');
+
+        $meta = \BccTransitionWorld::$audits[0]['meta'];
+        self::assertSame(
+            'failed',
+            $meta['breaker_cleared'],
+            'a clear that threw is `failed`, never `not_attempted`'
+        );
+    }
+
+    /** The combined case must still name BOTH, with the breaker state intact. */
+    public function testACombinedBreakerAndAuditFailureKeepsBothFacts(): void
+    {
+        \BccBreakerStore::$deleteCounterThrows = true;
+        \BccTransitionWorld::$auditOk = false;
+
+        $result = $this->switchIt();
+
+        self::assertSame(['breaker', 'audit'], $result['failed_followups']);
+        self::assertSame('switched_followups_failed', $result['reason']);
+    }
+
+    /**
+     * ⚠⚠ A THROWING AUDIT MUST NOT UNDO A COMPLETED SWITCH. It becomes a
+     * reported follow-up failure, not an exception escaping into the handler
+     * after the row has already moved.
+     */
+    public function testAThrowingAuditBecomesAFollowUpFailureNotAnEscape(): void
+    {
+        \BccTransitionWorld::$auditThrows = true;
+
+        $result = $this->switchIt();
+
+        self::assertTrue($result['ok'], 'the endpoint DID change');
+        self::assertSame('switched_followups_failed', $result['reason']);
+        self::assertSame(['audit'], $result['failed_followups']);
+        self::assertSame(self::TARGET, $this->storedRestUrl());
+    }
+
+    /**
+     * ⚠⚠ THE POST-CAS DIAGNOSIS MUST SEE WHAT ANOTHER REQUEST DID.
+     *
+     * The racer renames the chain after this request has already read it. The
+     * CAS then matches nothing, and the diagnosis has to say WHICH predicate
+     * lost. Served from the cache it would compare the row against itself and
+     * always answer `from_mismatch` — telling the operator the endpoint moved
+     * when it did not.
+     */
+    public function testAConcurrentIdentityChangeIsDiagnosedAndNotReportedAsAMovedEndpoint(): void
+    {
+        \BccTransitionWorld::$forceCasResult = 0;
+        \BccTransitionWorld::$afterVerify = static function (): void {
+            // Another request renames the chain. The cache still holds the old row.
+            \BccTransitionWorld::$chains[8]->slug = 'renamed-by-a-racer';
+        };
+
+        $result = $this->switchIt();
 
         self::assertSame(
-            ['chain.rest_url=' . self::NEW, 'families.clear_cursors', 'audit.admin_cosmos_endpoint_switch'],
-            \BccTransitionWorld::$writes
+            'identity_changed',
+            $result['reason'],
+            'the identity predicate lost, and the refusal must say so'
         );
-        self::assertSame([416 => null, 434 => null], \BccTransitionWorld::$cursors[8]);
+        self::assertSame([], \BccTransitionWorld::$audits, 'a pre-write refusal audits nothing');
+    }
+
+    /**
+     * FIDELITY CONTROL for the test above. If the double did not model the
+     * repository cache, that test would pass against a repository in which the
+     * bug cannot exist. This asserts the cache really is sticky and that the
+     * uncached read really does bypass it.
+     */
+    public function testTheDoubleModelsAStickyCacheOrTheDiagnosisTestProvesNothing(): void
+    {
+        $live = \BCC\Trust\Onchain\Repositories\ChainRepository::getById(8);
+        self::assertSame('cosmos', (string) $live->slug, 'the first read is the seeded slug');
+
+        \BccTransitionWorld::$chains[8]->slug = 'renamed-by-a-racer';
+
+        self::assertSame(
+            'cosmos',
+            (string) \BCC\Trust\Onchain\Repositories\ChainRepository::getById(8)->slug,
+            'getById() must still answer from the cache — that is the bug\'s habitat'
+        );
+        self::assertSame(
+            'renamed-by-a-racer',
+            (string) \BCC\Trust\Onchain\Repositories\ChainRepository::getByIdUncached(8)->slug,
+            'and getByIdUncached() must see the racer\'s write'
+        );
+    }
+
+    /** The plan must not hand callers the raw, tainted incumbent at all. */
+    public function testThePlanDoesNotCarryTheRawIncumbent(): void
+    {
+        \BccTransitionWorld::seedChain8('https://admin:hunter2@rest.cosmos.directory/cosmoshub?k=v');
+
+        $plan = CosmosEndpointTransition::plan(8, self::TARGET);
+
+        self::assertArrayNotHasKey('incumbent_raw', $plan, 'a dead field carrying a credential');
+        self::assertStringNotContainsString(
+            'hunter2',
+            (string) json_encode($plan),
+            'nothing in the plan may carry the secret'
+        );
     }
 }
