@@ -689,6 +689,40 @@ class ScoreRepository {
     }
 
     /**
+     * Flag many pages for the recalculation cron in chunked UPDATEs.
+     *
+     * Bulk counterpart of flagForRecalculation() for paths that change many
+     * pages' votes at once (VoteRemovalService). Throws on a DB error so the
+     * enclosing transaction rolls back rather than leaving removed votes
+     * behind unflagged pages.
+     *
+     * @param list<int> $pageIds
+     * @throws RepositoryException
+     */
+    public function flagPagesForRecalculation(array $pageIds): void {
+        global $wpdb;
+
+        $ids = [];
+        foreach ($pageIds as $id) {
+            $i = (int) $id;
+            if ($i > 0) {
+                $ids[$i] = $i;
+            }
+        }
+
+        foreach (array_chunk(array_values($ids), 500) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '%d'));
+            $result = $wpdb->query($wpdb->prepare(
+                "UPDATE {$this->table} SET recalculate_required = 1 WHERE page_id IN ({$placeholders})",
+                ...$chunk
+            ));
+            if ($result === false) {
+                throw new RepositoryException('ScoreRepository::flagPagesForRecalculation failed: ' . $wpdb->last_error);
+            }
+        }
+    }
+
+    /**
      * Flag all pages owned by a user for deferred score recalculation.
      *
      * Issues a single atomic UPDATE instead of N per-page queries.
