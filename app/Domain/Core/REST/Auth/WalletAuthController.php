@@ -432,13 +432,6 @@ final class WalletAuthController
 
     public function walletLogin(WP_REST_Request $request): WP_REST_Response
     {
-        // Same brute-force-resistance argument as /auth/login: throttle
-        // BEFORE the CPU-bound signature verification, otherwise an
-        // attacker can pin a CPU at the verify rate.
-        if (!\BCC\Core\Security\Throttle::allow('wallet_login', AuthSupport::WALLET_LOGIN_RATE_LIMIT, 60)) {
-            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
-        }
-
         $walletAddress = (string) $request->get_param('wallet_address');
         $signature     = wp_strip_all_tags(wp_unslash((string) $request->get_param('signature')));
         $extraParam    = $request->get_param('extra');
@@ -463,6 +456,25 @@ final class WalletAuthController
         $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getById((int) ($challenge['chain_id'] ?? 0));
         if ($chain === null) {
             return ApiResponse::error('bcc_invalid_request', 'Chain not found.', 400);
+        }
+
+        // Throttle per WALLET (+ a route-wide ceiling), still BEFORE the
+        // CPU-bound signature verification (F-123). Not per IP: this route is
+        // called server-side by the frontend, so every request shares one IP
+        // and a per-IP bucket let anyone lock out all wallet logins. Placed
+        // AFTER the nonce consume on purpose: only a request carrying a
+        // server-issued nonce for this address counts against its bucket —
+        // nonces are issued to the browser per real client IP
+        // (/auth/wallet-nonce) — so junk requests cannot drain a victim's
+        // bucket. Lower-casing makes case-distinct base58/SS58 addresses
+        // share a bucket: fail-closed (stricter), never looser.
+        if (!AuthSupport::allowIdentityAttempt(
+            'wallet_login',
+            (string) $chain->id . "\n" . strtolower($walletAddress),
+            AuthSupport::WALLET_LOGIN_RATE_LIMIT,
+            AuthSupport::WALLET_LOGIN_GLOBAL_LIMIT
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
 
         $challengeMessage = (string) ($challenge['message'] ?? '');

@@ -215,10 +215,6 @@ final class OAuthController
      */
     public function oauthLogin(WP_REST_Request $request): WP_REST_Response
     {
-        if (!\BCC\Core\Security\Throttle::allow('oauth_login', AuthSupport::OAUTH_LOGIN_RATE_LIMIT, 60)) {
-            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429);
-        }
-
         // Server-to-server secret — only the NextAuth backend (which already
         // verified the Google/Twitter token) may reach this. Closes the
         // pre-auth account-takeover; see oauthBridgeGate().
@@ -237,6 +233,20 @@ final class OAuthController
         }
         if ($providerId === '') {
             return ApiResponse::error('bcc_invalid_request', 'provider_id is required.', 400);
+        }
+
+        // Throttle per PROVIDER IDENTITY (+ a route-wide ceiling), AFTER the
+        // HMAC bridge gate (F-131): unsigned junk never touches a bucket, and
+        // every signed call is a completed provider sign-in. Not per IP —
+        // every call comes from the frontend server's single IP, so a per-IP
+        // bucket was shared by every Google/X sign-in.
+        if (!AuthSupport::allowIdentityAttempt(
+            'oauth_login',
+            $provider . "\n" . $providerId,
+            AuthSupport::OAUTH_LOGIN_RATE_LIMIT,
+            AuthSupport::OAUTH_LOGIN_GLOBAL_LIMIT
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429);
         }
 
         // Is the forwarded email one the PROVIDER verified? Only when the
