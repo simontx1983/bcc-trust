@@ -156,7 +156,7 @@ final class NftHoldingsIndexerPlanTest extends TestCase
         ]);
 
         self::assertCount(1, $out['deletes']);
-        self::assertSame(['wallet_link_id' => self::LINK_A, 'contract' => self::C721, 'token_id' => '1', 'block' => 250], $out['deletes'][0]);
+        self::assertSame(['wallet_link_id' => self::LINK_A, 'contract' => self::C721, 'token_id' => '1', 'block' => 250, 'chain_id' => self::CHAIN, 'confirmed_at' => '2026-01-01 00:00:00', 'token_standard' => 'ERC-721'], $out['deletes'][0]);
         self::assertSame(250, $out['upserts'][0]['last_seen_block'], 'the receiver row carries the same block');
     }
 

@@ -1688,6 +1688,10 @@ add_action('plugins_loaded', function (): void {
     // Prune quarantined bonus entries (>14 days or >100 rows) on daily refresh.
     add_action('bcc_onchain_daily_refresh', [\BCC\Trust\Onchain\Services\BonusRetryService::class, 'pruneQuarantine'], 20);
 
+    // F-65 part B: prune old balance-0 holdings tombstones (bounded; see
+    // NftHoldingsRepository::pruneTombstones() for the lateness bound).
+    add_action('bcc_onchain_daily_refresh', [\BCC\Trust\Onchain\Repositories\NftHoldingsRepository::class, 'pruneTombstones'], 30);
+
     // Domain event hooks.
     add_action('bcc_onchain_claim_verified', [\BCC\Trust\Onchain\Services\BonusService::class, 'applyClaimBonus'], 10, 4);
 
