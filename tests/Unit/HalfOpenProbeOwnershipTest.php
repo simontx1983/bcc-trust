@@ -110,8 +110,16 @@ final class HalfOpenProbeOwnershipTest extends TestCase
         self::assertNotSame([], $sites, 'anti-vacuity: the mutating check must still exist somewhere');
         self::assertSame(
             [
-                'Domain/Onchain/Support/ApiRetry.php:200',
-                'Domain/Onchain/Support/ApiRetry.php:599',
+                // ⚠ LINE-PINNED, so ANY edit above a claim site moves these
+                // two numbers and fails this file — as F-156(b) did. The
+                // invariant being guarded is "exactly two claim sites, both in
+                // ApiRetry"; the lines are incidental to it. Left pinned
+                // rather than relaxed here because loosening someone else's
+                // guard is not this change's call, but a reader updating them
+                // should check the enclosing METHODS are still request() and
+                // getBatchSameHost() rather than just pasting the new numbers.
+                'Domain/Onchain/Support/ApiRetry.php:306',
+                'Domain/Onchain/Support/ApiRetry.php:758',
             ],
             $sites,
             "the half-open probe has exactly one owner — ApiRetry. Found:\n  " . implode("\n  ", $sites)

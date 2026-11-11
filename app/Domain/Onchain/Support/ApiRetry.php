@@ -84,7 +84,59 @@ final class ApiRetry
     const DEFAULT_BACKOFF_BASE  = 2;      // seconds
     const DEFAULT_BACKOFF_MAX   = 30;     // seconds
     const DEFAULT_429_FALLBACK  = 15;     // seconds if no Retry-After header
-    const BACKOFF_MULTIPLIER    = 2.5;    // 2s → 5s → 12.5s → 30s (capped)
+    const BACKOFF_MULTIPLIER    = 2.5;
+
+    /**
+     * Hard cap on EVERY backoff sleep — and the constant that actually
+     * governs the schedule.
+     *
+     * ⚠⚠ IT WAS AN UNNAMED `3` IN TWO PLACES, AND THAT IS WHY THE COMMENT
+     * ABOVE USED TO LIE. `BACKOFF_MULTIPLIER` carried the trailing comment
+     * `2s → 5s → 12.5s → 30s (capped)`, which is wrong twice over: the
+     * formula is `BASE * attempt ** 2.5`, so it computes 2 → 11 → 30 (not
+     * geometric), and this cap then flattens it to 2 → 3 → 3 before any of
+     * that is reached. Two different readers derived two different wrong
+     * budgets from that comment before it was corrected.
+     *
+     * ⇒ So the schedule is no longer described in prose at all. It is
+     * computed by {@see backoffDelay()} and summed by
+     * {@see worstCaseSleepTotal()}, both public and both asserted by
+     * {@see \BCC\Trust\Onchain\Tests\Unit\ApiRetryDeadlineTest}, so a
+     * change to any constant here moves the tests rather than leaving a
+     * sentence behind to be believed.
+     *
+     * ⚠ A CONSEQUENCE WORTH KNOWING: with this cap in force
+     * {@see DEFAULT_BACKOFF_MAX} and most of {@see BACKOFF_MULTIPLIER} are
+     * UNREACHABLE — nothing can observe them. "There is a 30s backoff
+     * ceiling" is a reassuring detail that does not apply.
+     */
+    const BACKOFF_SLEEP_CAP     = 3;      // seconds
+
+    /**
+     * Floor on an attempt once a deadline has capped it: the smallest
+     * remaining budget worth spending an attempt on.
+     *
+     * Two uses, both needed. A retry is not STARTED unless this much time
+     * is left after its sleep ({@see retryFitsDeadline()}), and an attempt
+     * that IS started never gets a timeout below this
+     * ({@see capTimeoutToDeadline()}).
+     *
+     * ⚠ WHY A FLOOR AT ALL. Without one, a deadline with 1s left would
+     * still start an attempt with a 1s timeout — which against an RPC
+     * endpoint is not a request, it is a formality that burns the last of
+     * the budget and can still earn the chain a breaker charge. 5s is the
+     * smallest timeout any call site in this tree uses (KeybaseLogoResolver,
+     * on a logo fetch), so it is the tree's own lower bound on "a timeout
+     * someone thought was viable" rather than a number invented here.
+     */
+    const MIN_ATTEMPT_BUDGET    = 5;      // seconds
+
+    /**
+     * WordPress's own default `timeout` for `wp_remote_*`, used only as the
+     * fallback when deriving a default deadline. Every call site in this
+     * tree sets `timeout` explicitly, so nothing currently relies on it.
+     */
+    const WP_DEFAULT_TIMEOUT    = 5;      // seconds
 
     /**
      * Execute an HTTP request with automatic retry on transient failures.
@@ -92,6 +144,29 @@ final class ApiRetry
      * @param callable $fn        Must return a WP HTTP response array or WP_Error.
      *                            Signature: fn(): array|WP_Error
      * @param array<string, mixed> $options   {
+     *     @type int    $deadline_at   OPTIONAL. An ABSOLUTE unix instant after
+     *                                 which no further attempt is started.
+     *                                 Absent (the default for a direct
+     *                                 {@see request()} caller) = no deadline,
+     *                                 i.e. today's behaviour exactly.
+     *                                 {@see get()} / {@see post()} supply one
+     *                                 derived from the caller's own timeout,
+     *                                 so their behaviour is unchanged too —
+     *                                 see the note on {@see get()}.
+     *
+     *                                 ⚠⚠ AN INSTANT, NOT A DURATION, AND THE
+     *                                 DISTINCTION IS THE WHOLE POINT. A
+     *                                 duration bounds ONE logical request;
+     *                                 the paths that need bounding issue
+     *                                 SEVERAL per user request — the
+     *                                 delegations gate walks up to
+     *                                 `DELEGATIONS_MAX_PAGES` (5) pages, and
+     *                                 the Cosmos NFT-piece route asks for
+     *                                 metadata and then for the owner. Handing
+     *                                 each call "20 seconds" bounds each call
+     *                                 and multiplies by the page count; one
+     *                                 shared instant bounds the WALK, which is
+     *                                 what the user is waiting on.
      *     @type int    $max_retries   Max retry attempts (default 3).
      *     @type string $label         Human-readable label for logging (e.g. "Cosmos LCD /validators").
      *     @type int    $chain_id      Chain ID for circuit breaker integration.
@@ -165,6 +240,11 @@ final class ApiRetry
         $label      = $options['label'] ?? 'API call';
         $chainId    = (int) ($options['chain_id'] ?? 0);
 
+        // An absolute instant, or 0 for "no deadline" — which is the default
+        // and is today's behaviour exactly. See the parameter docs for why
+        // this is an instant rather than a duration.
+        $deadlineAt = (int) ($options['deadline_at'] ?? 0);
+
         $isApplicationError = isset($options['application_error']) && is_callable($options['application_error'])
             ? $options['application_error']
             : null;
@@ -197,6 +277,32 @@ final class ApiRetry
             : null;
 
         // Circuit breaker: check before attempting
+        // ⚠⚠ DEADLINE CHECKED BEFORE THE BREAKER, AND THAT ORDER MATTERS.
+        // `isOpen()` is the MUTATING reader — it CLAIMS the single HALF-OPEN
+        // probe slot. Refusing after it would strand that slot on a request
+        // that never calls out, which is precisely the failure #265 removed
+        // from the four outer preflights. Nothing has been claimed yet here,
+        // so returning is free.
+        //
+        // ⚠ AND IT DOES NOT CHARGE THE BREAKER. No attempt is made, so no
+        // provider has been consulted and there is nothing to blame: the
+        // budget ran out upstream of this request. Charging here would let a
+        // tight deadline manufacture failures against a healthy chain and
+        // open its breaker — the fabricated-diagnosis mistake PR 7.8 removed.
+        if (!self::hasAttemptBudget($deadlineAt)) {
+            self::log(sprintf(
+                'DEADLINE ALREADY SPENT %s — no attempt made (needed %ds, had %ds)',
+                $label,
+                self::MIN_ATTEMPT_BUDGET,
+                max(0, $deadlineAt - time())
+            ));
+
+            return new \WP_Error(
+                'deadline_exceeded',
+                "Deadline reached before any attempt for {$label}"
+            );
+        }
+
         if ($chainId > 0 && OnchainCircuitBreaker::isOpen($chainId)) {
             self::log("BLOCKED by circuit breaker: {$label} (chain {$chainId})");
             $receipt?->recordBlockedByOpenBreaker();
@@ -385,18 +491,25 @@ final class ApiRetry
                     //
                     // Retryable: exhaust attempts before returning the failure.
                     if ($attempt < $maxRetries) {
-                        $attempt++;
-                        $delay = min(
-                            self::DEFAULT_BACKOFF_MAX,
-                            (int) (self::DEFAULT_BACKOFF_BASE * ($attempt ** self::BACKOFF_MULTIPLIER))
-                        );
-                        // Cap cron-context sleep at 3s so we cannot exceed typical
-                        // per-job budgets even at max_retries=3.
-                        $delay = min($delay, 3);
-                        if ($delay > 0) {
-                            sleep($delay);
+                        $delay = self::backoffDelay($attempt + 1);
+
+                        // ⚠ CHECKED BEFORE `$attempt++`, DELIBERATELY. Falling
+                        // through lands on the exhaustion settle below, whose
+                        // log reads `$attempt + 1` — incrementing first would
+                        // make it name an attempt that never ran.
+                        if (self::retryFitsDeadline($deadlineAt, $delay)) {
+                            $attempt++;
+                            if ($delay > 0) {
+                                sleep($delay);
+                            }
+                            continue;
                         }
-                        continue;
+
+                        self::log(sprintf(
+                            'DEADLINE %s — stopping after attempt %d/%d (%ds backoff + %ds floor exceeds the %ds left)',
+                            $label, $attempt + 1, $maxRetries + 1,
+                            $delay, self::MIN_ATTEMPT_BUDGET, max(0, $deadlineAt - time())
+                        ));
                     }
 
                     // Attempts exhausted on a 5xx — the logical request has
@@ -434,16 +547,22 @@ final class ApiRetry
             // ⚠ NOT CHARGED HERE — same reasoning as the 5xx branch above.
             // Retryable: exhaust attempts before returning the failure.
             if ($attempt < $maxRetries) {
-                $attempt++;
-                $delay = min(
-                    self::DEFAULT_BACKOFF_MAX,
-                    (int) (self::DEFAULT_BACKOFF_BASE * ($attempt ** self::BACKOFF_MULTIPLIER))
-                );
-                $delay = min($delay, 3);
-                if ($delay > 0) {
-                    sleep($delay);
+                $delay = self::backoffDelay($attempt + 1);
+
+                // Same order as the 5xx branch above, for the same reason.
+                if (self::retryFitsDeadline($deadlineAt, $delay)) {
+                    $attempt++;
+                    if ($delay > 0) {
+                        sleep($delay);
+                    }
+                    continue;
                 }
-                continue;
+
+                self::log(sprintf(
+                    'DEADLINE %s — stopping after attempt %d/%d (%ds backoff + %ds floor exceeds the %ds left)',
+                    $label, $attempt + 1, $maxRetries + 1,
+                    $delay, self::MIN_ATTEMPT_BUDGET, max(0, $deadlineAt - time())
+                ));
             }
 
             // Attempts exhausted on a transport error — one charge for the
@@ -475,6 +594,40 @@ final class ApiRetry
     }
 
     /**
+     * The deadline these two convenience wrappers hand to {@see request()}:
+     * the caller's own, or the honest worst case.
+     *
+     * ⭐ THE DEFAULT IS WHAT KEEPS THIS PR BEHAVIOUR-PRESERVING across all
+     * two dozen existing call sites. `now + worstCaseSeconds()` is, by
+     * construction, at or beyond the longest run that was previously
+     * possible, so no existing caller can reach it. The deadline only bites
+     * where a caller asked for one.
+     *
+     * ⚠ It is still worth defaulting rather than leaving it at 0: with a
+     * default in place, {@see capTimeoutToDeadline()} and the retry checks
+     * are exercised on every single request instead of only on the two paths
+     * that opt in — so a bug in them surfaces in ordinary traffic and in the
+     * whole existing suite, not just in the new tests.
+     *
+     * @param array<string, mixed> $options
+     * @param array<string, mixed> $secured
+     */
+    private static function resolveDeadline(array $options, array $secured): int
+    {
+        if (isset($options['deadline_at'])) {
+            return (int) $options['deadline_at'];
+        }
+
+        $maxRetries = (int) ($options['max_retries'] ?? self::DEFAULT_MAX_RETRIES);
+
+        // Every call site in this tree sets `timeout` explicitly; the
+        // fallback mirrors WordPress's own default for the one that forgets.
+        $timeout = (int) ($secured['timeout'] ?? self::WP_DEFAULT_TIMEOUT);
+
+        return time() + self::worstCaseSeconds($maxRetries, $timeout);
+    }
+
+    /**
      * Convenience: wp_remote_get with retry + SSRF hardening.
      *
      * SSRF defence (private-IP blocking, DNS pinning, metadata blocklist) is
@@ -494,8 +647,11 @@ final class ApiRetry
             return $secured;
         }
 
+        $deadlineAt = self::resolveDeadline($options, $secured);
+        $options['deadline_at'] = $deadlineAt;
+
         return self::request(
-            fn() => wp_remote_get($url, $secured),
+            fn() => wp_remote_get($url, self::capTimeoutToDeadline($secured, $deadlineAt)),
             $options
         );
     }
@@ -517,8 +673,11 @@ final class ApiRetry
             return $secured;
         }
 
+        $deadlineAt = self::resolveDeadline($options, $secured);
+        $options['deadline_at'] = $deadlineAt;
+
         return self::request(
-            fn() => wp_remote_post($url, $secured),
+            fn() => wp_remote_post($url, self::capTimeoutToDeadline($secured, $deadlineAt)),
             $options
         );
     }
@@ -603,6 +762,31 @@ final class ApiRetry
             return self::failEveryBatchIndex($urls, $err);
         }
 
+        // ⚠ NO RETRY LOOP HERE, so there is no retry for a deadline to
+        // trim — the only lever is the wave's own timeout, and the only
+        // refusal is "there is not even time for one wave". Neither of the
+        // two paths threaded in this PR reaches the batch, but the gallery
+        // cold path that does is itself run under a user request (see the
+        // method docs), so a deadline arriving here is not hypothetical.
+        $deadlineAt = (int) ($options['deadline_at'] ?? 0);
+
+        if (!self::hasAttemptBudget($deadlineAt)) {
+            self::log(sprintf(
+                'DEADLINE ALREADY SPENT %s — batch of %d not attempted',
+                $label,
+                count($urls)
+            ));
+
+            // Not charged, for the same reason as the single path: no host
+            // was contacted, so no host has failed.
+            return self::failEveryBatchIndex(
+                $urls,
+                new \WP_Error('deadline_exceeded', "Deadline reached before the batch for {$label}")
+            );
+        }
+
+        $args = self::capTimeoutToDeadline($args, $deadlineAt);
+
         try {
             $results = \BCC\Core\Http\SafeHttpClient::getBatchSameHost($urls, $args);
 
@@ -650,6 +834,134 @@ final class ApiRetry
     }
 
     // ── Internal ────────────────────────────────────────────────────────────
+
+    /**
+     * The backoff sleep before attempt number `$attemptNumber`, in seconds.
+     *
+     * ⭐ PUBLIC AND COMPUTED ON PURPOSE. This used to be two copies of the
+     * same expression inside the retry loop, described by a trailing comment
+     * on {@see BACKOFF_MULTIPLIER} that disagreed with both of them. One
+     * function, asserted by its tests, cannot drift from itself.
+     *
+     * At the shipped constants the real schedule is `2, 3, 3` — the formula
+     * yields 2, 11, 30 and {@see BACKOFF_SLEEP_CAP} flattens the tail.
+     *
+     * @param int $attemptNumber 1-based: the sleep BEFORE this retry.
+     */
+    public static function backoffDelay(int $attemptNumber): int
+    {
+        $delay = min(
+            self::DEFAULT_BACKOFF_MAX,
+            (int) (self::DEFAULT_BACKOFF_BASE * ($attemptNumber ** self::BACKOFF_MULTIPLIER))
+        );
+
+        // Cap cron-context sleep so we cannot exceed typical per-job budgets
+        // even at max_retries=3.
+        return (int) min($delay, self::BACKOFF_SLEEP_CAP);
+    }
+
+    /**
+     * Total time this class can spend ASLEEP for one logical request.
+     *
+     * `$maxRetries` retries means `$maxRetries` sleeps — one before each —
+     * so at the default 3 this is `2 + 3 + 3 = 8`. Used to derive the
+     * default deadline in {@see get()} / {@see post()}, which is why it is
+     * computed rather than written down: a default that disagreed with the
+     * real schedule would fire on healthy traffic.
+     */
+    public static function worstCaseSleepTotal(int $maxRetries): int
+    {
+        $total = 0;
+        for ($i = 1; $i <= $maxRetries; $i++) {
+            $total += self::backoffDelay($i);
+        }
+
+        return $total;
+    }
+
+    /**
+     * The honest worst case for one logical request: every attempt timing
+     * out, plus every backoff between them.
+     *
+     * ⭐ THIS IS WHAT MAKES THE DEADLINE ADDITIVE. {@see get()} and
+     * {@see post()} default `deadline_at` to `now + this`, so for every
+     * existing call site the deadline sits at or beyond the longest run that
+     * was ever possible and therefore cannot fire. A caller that wants a
+     * real bound passes its own instant; nobody else changes behaviour.
+     *
+     * ⚠ `$maxRetries + 1` attempts, not `$maxRetries`. The loop is
+     * `$attempt = 0; while ($attempt <= $maxRetries)`, which is 1 + retries
+     * executions — the arithmetic that got mis-stated twice while this was
+     * being written.
+     */
+    public static function worstCaseSeconds(int $maxRetries, int $timeout): int
+    {
+        return ($maxRetries + 1) * $timeout + self::worstCaseSleepTotal($maxRetries);
+    }
+
+    /**
+     * Is there room to START an attempt at all?
+     *
+     * `$deadlineAt <= 0` means no deadline is in force, which is the default
+     * everywhere and must answer TRUE.
+     */
+    private static function hasAttemptBudget(int $deadlineAt): bool
+    {
+        if ($deadlineAt <= 0) {
+            return true;
+        }
+
+        return ($deadlineAt - time()) >= self::MIN_ATTEMPT_BUDGET;
+    }
+
+    /**
+     * Is there room for another attempt AFTER sleeping `$delay` seconds?
+     *
+     * The sleep is counted, not just the attempt: a 3s backoff with 4s left
+     * leaves 1s, and a 1s attempt is the formality {@see MIN_ATTEMPT_BUDGET}
+     * exists to refuse.
+     */
+    private static function retryFitsDeadline(int $deadlineAt, int $delay): bool
+    {
+        if ($deadlineAt <= 0) {
+            return true;
+        }
+
+        return ($deadlineAt - (time() + $delay)) >= self::MIN_ATTEMPT_BUDGET;
+    }
+
+    /**
+     * Shrink an attempt's `timeout` to what is left of the budget.
+     *
+     * ⚠⚠ WITHOUT THIS THE DEADLINE WOULD BE ADVISORY. The checks above
+     * decide whether to START an attempt; nothing stops the attempt they
+     * admitted from running its own full timeout past the deadline. On the
+     * NFT-piece route that is a 30s Solana timeout against a 35s budget, so
+     * the overshoot would be most of the bound.
+     *
+     * ⚠ Applied per attempt INSIDE the closure, not once to `$secured`:
+     * each attempt has less budget than the last. `prepareArgs()` is still
+     * called once outside the loop, so the DNS pin it establishes is
+     * untouched — only `timeout` is rewritten here.
+     *
+     * @param array<string, mixed> $args
+     * @return array<string, mixed>
+     */
+    private static function capTimeoutToDeadline(array $args, int $deadlineAt): array
+    {
+        if ($deadlineAt <= 0) {
+            return $args;
+        }
+
+        $remaining = $deadlineAt - time();
+        $timeout   = (int) ($args['timeout'] ?? self::WP_DEFAULT_TIMEOUT);
+
+        if ($remaining < $timeout) {
+            $args['timeout'] = max(self::MIN_ATTEMPT_BUDGET, $remaining);
+        }
+
+        return $args;
+    }
 
     /**
      * Settle ONE logical request as a failure: exactly one breaker charge.

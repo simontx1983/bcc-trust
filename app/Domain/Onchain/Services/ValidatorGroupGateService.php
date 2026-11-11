@@ -33,6 +33,29 @@ if (!defined('ABSPATH')) {
 
 final class ValidatorGroupGateService {
 
+    /**
+     * F-156 — total upstream budget for ONE join attempt, in seconds.
+     *
+     * A synchronous, user-facing bound: the user is holding a request open
+     * while the LCD is walked. It covers the WHOLE eligibility check, not
+     * one call — see where it is converted to an instant below.
+     *
+     * ⚠ 20s IS NOT A TRIM OF THE RETRY TAIL; IT IS SHORTER THAN ONE
+     * UNBOUNDED CALL. Cosmos's per-attempt timeout is 15s, so this budget
+     * buys one full attempt and then whatever is left (ApiRetry shrinks the
+     * next attempt's timeout to the remaining budget and refuses to start
+     * one below {@see \BCC\Trust\Onchain\Support\ApiRetry::MIN_ATTEMPT_BUDGET}).
+     * That is deliberate, and it is what "bounded" has to mean when a single
+     * timeout is most of the budget. The alternative is not "4 attempts,
+     * sooner" — it is the 68s-per-call, multi-page, multi-wallet walk this
+     * replaces.
+     *
+     * ⚠ Safe because the gate FAILS CLOSED: running out of budget reaches
+     * the user as the same retryable `verify_unavailable` an LCD outage
+     * already produced. It cannot admit anyone, and it cannot remove anyone.
+     */
+    private const JOIN_GATE_DEADLINE = 20;
+
     public function __construct(
         private readonly NftGroupGateService $optOuts,
         private readonly DelegationEligibilityService $eligibility,
@@ -87,7 +110,18 @@ final class ValidatorGroupGateService {
         // Three-outcome verdict. JOIN fails CLOSED: on UNKNOWN (LCD
         // outage) we refuse to add the user — we can't prove they
         // delegate. They retry once the LCD recovers.
-        $verdict = $this->eligibility->verdictFor($userId, $config);
+        //
+        // ⚠⚠ F-156: AND NOW BOUNDED IN TIME TOO, not just in outcome.
+        // Unbounded, this walk runs up to `DELEGATIONS_MAX_PAGES` pages per
+        // verified wallet at 68s a page. The budget is converted to an
+        // INSTANT here so it bounds that whole fan-out rather than each call
+        // inside it; see JOIN_GATE_DEADLINE for why 20s, and
+        // verdictsForUser() for why nothing downstream defaults it.
+        $verdict = $this->eligibility->verdictFor(
+            $userId,
+            $config,
+            time() + self::JOIN_GATE_DEADLINE
+        );
         if ($verdict->isUnknown()) {
             return JoinResult::verifyUnavailable($minWire);
         }
