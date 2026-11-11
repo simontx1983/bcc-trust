@@ -65,12 +65,35 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
                 }
                 $GLOBALS['__bcc_ms']['suspended'][] = $userId;
             }
+            public function unsuspendUser(int $userId): void
+            {
+                $GLOBALS['__bcc_ms']['unsuspended'][] = $userId;
+            }
+            /** @param int[] $userIds @return int[] */
+            public function getSuspendedUserIds(array $userIds): array
+            {
+                return array_values(array_intersect($userIds, $GLOBALS['__bcc_ms']['already'] ?? []));
+            }
+            public function notifySuspensionChanged(int $userId): void
+            {
+                // F-114: record WHETHER the flush ran inside the transaction.
+                $GLOBALS['__bcc_ms']['notified'][] = [$userId, \BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()];
+            }
+            public function updateFraudFields(int $userId, int $fraudScore, string $riskLevel, int $behaviorScore): void
+            {
+                $GLOBALS['__bcc_ms']['fraud_fields'][$userId] = [$fraudScore, $riskLevel, $behaviorScore];
+            }
         };
         $suspensions = new class extends SuspensionRepository {
             public function __construct()
             {
             }
             public function create(int $userId, int $suspendedBy, string $reason, string $notes = '', int $fraudScoreAtTime = 0): int
+            {
+                $GLOBALS['__bcc_ms']['created'][$userId] = [$reason, $notes];
+                return 1;
+            }
+            public function closeActive(int $userId, int $unsuspendedBy): int
             {
                 return 1;
             }
@@ -182,5 +205,80 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
 
         self::assertFalse($result['success']);
         self::assertTrue(JwtToken::decode($token)['ok'], 'no suspension landed, so the session must not be killed');
+        self::assertSame([], $GLOBALS['__bcc_ms']['notified'] ?? [], 'a rolled-back change flushes and fans out nothing');
+    }
+
+    // ── F-114 ──────────────────────────────────────────────────────────
+
+    /** The caches are flushed AFTER the commit, on every suspend/unsuspend path. */
+    public function testEverySuspensionChangeFlushesAfterTheCommitNotInsideIt(): void
+    {
+        $GLOBALS['__bcc_ms']['rows'] += [self::UID => true, 4201 => true, 4301 => true];
+
+        ob_start();
+        $this->service()->suspendUser(self::UID);
+        $this->service()->unsuspendUser(self::UID);
+        ob_end_clean();
+        self::runAdminHandler(fn () => $this->service()->handleRingAction([4201], 'suspend_all'));
+        self::runAdminHandler(fn () => $this->service()->handleBulkAction([4301], 'suspend'));
+        self::runAdminHandler(fn () => $this->service()->handleBulkAction([4301], 'unsuspend'));
+
+        self::assertSame(
+            [[self::UID, false], [self::UID, false], [4201, false], [4301, false], [4301, false]],
+            $GLOBALS['__bcc_ms']['notified'] ?? [],
+            'one flush per change, each outside the transaction'
+        );
+    }
+
+    public function testNoSuspendPathSuspendsTheActingAdminAnAdministratorOrTheAlreadySuspended(): void
+    {
+        // get_current_user_id() is 1 in this world.
+        $GLOBALS['__bcc_ms']['admins']  = [4402];
+        $GLOBALS['__bcc_ms']['already'] = [4403];
+        $GLOBALS['__bcc_ms']['rows']   += [1 => true, 4401 => true, 4402 => true, 4403 => true];
+
+        foreach ([1 => 'yourself', 4402 => 'administrator', 4403 => 'already suspended'] as $uid => $says) {
+            ob_start();
+            $result = $this->service()->suspendUser($uid);
+            ob_end_clean();
+            self::assertFalse($result['success'], 'single suspend of ' . $uid);
+            self::assertStringContainsString($says, $result['message']);
+        }
+
+        self::runAdminHandler(fn () => $this->service()->handleBulkAction([1, 4401, 4402, 4403], 'suspend'));
+        self::assertSame(['bulk' => 1, 'bulk_skipped' => 3], $GLOBALS['__bcc_ms']['query']);
+
+        self::runAdminHandler(fn () => $this->service()->handleRingAction([1, 4402, 4403], 'suspend_all', 'r'));
+        self::assertSame(['tab' => 'rings', 'ring_msg' => 'suspended_0_skipped_3'], $GLOBALS['__bcc_ms']['query']);
+
+        self::assertSame([4401], $GLOBALS['__bcc_ms']['suspended'], 'only the ordinary member was suspended, once');
+        self::assertSame(
+            [1 => 'self', 4402 => 'admin', 4403 => 'already_suspended'],
+            $GLOBALS['__bcc_ms']['transients']['bcc_trust_suspend_skips_1'] ?? null,
+            'who was skipped, and why, is kept for the next page view'
+        );
+    }
+
+    public function testTheRingSuspensionKeepsTheAdminsReason(): void
+    {
+        $GLOBALS['__bcc_ms']['rows'][4501] = true;
+
+        self::runAdminHandler(fn () => $this->service()->handleRingAction([4501], 'suspend_all', 'Coordinated upvotes on page 77'));
+
+        self::assertSame(['vote_ring', 'Coordinated upvotes on page 77'], $GLOBALS['__bcc_ms']['created'][4501]);
+    }
+
+    public function testBulkReanalyzeRecomputesAndPersistsLikeTheSingleAction(): void
+    {
+        $GLOBALS['__bcc_ms']['fd_fail'] = [4602];
+
+        self::runAdminHandler(fn () => $this->service()->handleBulkAction([4601, 4602, 4603], 'reanalyze'));
+
+        self::assertSame(
+            [4601 => [41, 'medium', 7], 4603 => [43, 'medium', 7]],
+            $GLOBALS['__bcc_ms']['fraud_fields'] ?? [],
+            'each user\'s fraud fields are written; the failure is skipped'
+        );
+        self::assertSame(['bulk' => 2, 'bulk_skipped' => 0], $GLOBALS['__bcc_ms']['query'], 'only real successes are counted');
     }
 }
