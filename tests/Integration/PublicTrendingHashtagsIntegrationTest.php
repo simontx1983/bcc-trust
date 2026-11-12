@@ -152,6 +152,19 @@ final class PublicTrendingHashtagsIntegrationTest extends TestCase
         self::assertSame(1,self::ourTrending()[self::PLAIN] ?? null, 'a post with any non-public activity row is not counted');
     }
 
+    /** A post carrying its group and visibility meta TWICE is still one post (no join fan-out inside the SUM). */
+    public function testDuplicateGroupAndVisibilityMetaCountThePostOnce(): void
+    {
+        global $wpdb;
+
+        $postId = $this->post('#' . self::PLAIN . ' with duplicated meta', group: self::SECRET_GROUP + 1, visibility: 'public_all');
+        foreach ([['peepso_group_id', (string) (self::SECRET_GROUP + 2)], ['_bcc_post_visibility', 'public_all']] as [$key, $value]) {
+            self::assertNotFalse($wpdb->insert($wpdb->postmeta, ['post_id' => $postId, 'meta_key' => $key, 'meta_value' => $value]), $wpdb->last_error);
+        }
+
+        self::assertSame(2, self::ourTrending()[self::PLAIN] ?? null, 'the NBSP post + this one, once: not 1 + 2×2 join rows');
+    }
+
     // ── fixtures ───────────────────────────────────────────────────────
 
     private function post(
