@@ -92,7 +92,7 @@ final class CardWatchersService
         if ($post->post_type !== 'peepso-page'
             || $post->post_status !== 'publish'
             || ($cardKind !== ''
-                && PageTypeMap::kindForPageType((string) get_post_meta($pageId, '_bcc_page_type', true)) !== $cardKind)
+                && PageTypeMap::kindForStoredPageType((string) get_post_meta($pageId, '_bcc_page_type', true)) !== $cardKind)
         ) {
             return self::emptyPage($offset, $limit);
         }

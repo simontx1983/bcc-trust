@@ -85,6 +85,22 @@ final class CardWatchersProfileGateTest extends TestCase
         self::assertNotNull(self::watchers());
     }
 
+    /** A legacy page with no `_bcc_page_type` is a project page (the card layer's '' → 'builder' default). */
+    public function testAnUntypedPageIsAProjectPage(): void
+    {
+        $GLOBALS['__bcc_cw']['meta'][self::PAGE] = '';
+
+        $result = self::watchers('project');
+        self::assertNotNull($result);
+        self::assertSame([self::OWNER], $GLOBALS['__bcc_cw']['follower_reads'], 'project_card on an untyped page lists the watchers');
+
+        $GLOBALS['__bcc_cw']['follower_reads'] = [];
+        $result = self::watchers('validator');
+        self::assertNotNull($result);
+        self::assertSame([], $result['items']);
+        self::assertSame([], $GLOBALS['__bcc_cw']['follower_reads'], 'validator_card on an untyped page is an empty page');
+    }
+
     /** @return iterable<string, array{0: object, 1: string}> */
     public static function notAnEntityPage(): iterable
     {
