@@ -267,6 +267,42 @@ final class ClaimRevokeIntegrationTest extends TestCase
         self::assertSame('verified', $this->claimStatus($mirror));
     }
 
+    // ── F-14 PR B1 ────────────────────────────────────────────────────
+
+    public function testRevokeReturnsEveryBoundPage(): void
+    {
+        // Wallet leg AND placeholder leg: both pages' read models resync.
+        $v = $this->validator($this->linkWallet(self::PAGE_V));
+        self::assertTrue(update_post_meta(self::PAGE_PH, '_bcc_onchain_validator_id', (string) $v));
+        $claim = $this->claim(self::USER, 'validator', $v, 'operator');
+
+        $r = ClaimRepository::revoke($claim);
+
+        $bound = $r['bound_page_ids'];
+        sort($bound);
+        self::assertSame([self::PAGE_V, self::PAGE_PH], $bound);
+        self::assertSame([], $r['mirror_page_ids'], 'no mirror rows existed');
+    }
+
+    public function testRevokeRefusesToRunInsideATransactionManagerTransaction(): void
+    {
+        // Its own START TRANSACTION would implicitly COMMIT the outer one.
+        $v     = $this->validator($this->linkWallet(self::PAGE_V));
+        $claim = $this->claim(self::USER, 'validator', $v, 'operator');
+
+        try {
+            \BCC\Trust\Core\Security\TransactionManager::run(static function () use ($claim): void {
+                ClaimRepository::revoke($claim);
+            });
+            self::fail('revoke() inside TransactionManager::run must be refused');
+        } catch (\LogicException $e) {
+            self::assertStringContainsString('TransactionManager', $e->getMessage());
+        }
+
+        self::assertSame('verified', $this->claimStatus($claim), 'refused before any write');
+        self::assertFalse(\BCC\Trust\Core\Security\TransactionManager::isInRunTransaction());
+    }
+
     // ── F-89 ──────────────────────────────────────────────────────────
 
     public function testFindManyByIdsReturnsVerifiedClaimsOnly(): void
