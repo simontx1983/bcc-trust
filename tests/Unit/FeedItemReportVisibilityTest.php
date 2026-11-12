@@ -50,6 +50,19 @@ final class FeedItemReportVisibilityTest extends TestCase
         if (!\class_exists('BCC\\Core\\Feed\\FeedItemNormalizer', false)) {
             require_once dirname(__DIR__, 2) . '/../bcc-core/src/Feed/FeedItemNormalizer.php';
         }
+        // The syndication gate the group rule now consults DIRECTLY, because
+        // bcc-core #111 defers it to this layer. REAL class, like the two
+        // above, so this suite fails if the gate's own logic ever changes.
+        if (!\class_exists('BCC\\Core\\Feed\\GroupSyndicationGate', false)) {
+            require_once dirname(__DIR__, 2) . '/../bcc-core/src/Feed/GroupSyndicationGate.php';
+        }
+        require_once __DIR__ . '/../Stubs/nonopen-groups-seed.php';
+        // Default: NO group is non-open, the pre-F-23 shape bcc-core's own
+        // tests pin. So the matrix below exercises the GROUP gate, and the
+        // syndication question is seeded explicitly by the tests that are
+        // about it. ⚠ Without this the real code would fall through to a
+        // $wpdb double that cannot answer its JOIN.
+        \bcc_test_seed_nonopen_groups([]);
         $GLOBALS['__bcc_halls_gate_fixture'] = [];
 
         global $wpdb;
@@ -252,13 +265,113 @@ final class FeedItemReportVisibilityTest extends TestCase
         self::assertTrue($this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => self::POST]));
     }
 
-    /** A globally syndicated post is visible to anyone, as in the feed. */
-    public function testHydratedPublicAllPostIsVisibleToAnyone(): void
+    /**
+     * A `public_all` post syndicates to anyone WHILE ITS GROUP IS STILL
+     * OPEN — the default seed says no group is non-open, which is that
+     * state.
+     *
+     * ⚠ The name is deliberately specific. An earlier version of this test
+     * was called "...IsVisibleToAnyone" and asserted exactly this with a
+     * SECRET group fixture, which made it read as "public_all is a free
+     * pass". It is not, and the pair below is the proof.
+     */
+    public function testHydratedPublicAllPostSyndicatesWhileTheGroupIsOpen(): void
     {
-        $this->group(self::PRIVACY['secret']);
+        $this->group(self::PRIVACY['open']);
         $this->post(['peepso_group_id' => (string) self::GROUP, '_bcc_post_visibility' => 'public_all']);
 
         self::assertTrue($this->gate()->canSeeHydratedItem(0, ['external_id' => self::POST]));
+    }
+
+    // ── the syndication gate (MED-HIGH review finding) ──────────────
+    //
+    // ⚠⚠ WHY THIS GROUP OF TESTS EXISTS. `groupRuleAllows()` used to
+    // short-circuit on `public_all`, which was safe ONLY because bcc-core's
+    // `isVisibleGlobally()` had already applied the GroupSyndicationGate
+    // upstream. Passing `deferGroupVisibilityToCaller: true` skips that
+    // whole branch, so the shortcut would have left the gate running
+    // NOWHERE — a post made `public_all` while its group was OPEN would
+    // stay permalink-reachable by anonymous visitors after the group went
+    // SECRET.
+    //
+    // These seed the non-open set, which is what "the group has since
+    // closed" means to the gate.
+
+    /**
+     * ⭐⭐ THE LEAK, pinned. Made `public_all` while open, group now
+     * non-open: an anonymous visitor and a signed-in non-member both get
+     * nothing.
+     */
+    public function testOpenThenSecretPublicAllIsRefusedToOutsiders(): void
+    {
+        $this->group(self::PRIVACY['secret']);
+        $this->post(['peepso_group_id' => (string) self::GROUP, '_bcc_post_visibility' => 'public_all']);
+        \bcc_test_seed_nonopen_groups([self::GROUP]);
+
+        self::assertFalse(
+            $this->gate()->canSeeHydratedItem(0, ['external_id' => self::POST]),
+            'anonymous must not reach a post whose group has gone secret'
+        );
+        self::assertFalse(
+            $this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => self::POST]),
+            'a signed-in non-member must not either'
+        );
+    }
+
+    /**
+     * ⭐ And the other half: a MEMBER still reads their own group's post.
+     * The syndication refusal falls through to the group's gate rather
+     * than ending the question, which is why this is not a regression for
+     * the people the room is for.
+     */
+    public function testOpenThenSecretPublicAllIsStillVisibleToAMember(): void
+    {
+        $this->group(self::PRIVACY['secret']);
+        $this->post(['peepso_group_id' => (string) self::GROUP, '_bcc_post_visibility' => 'public_all']);
+        \bcc_test_seed_nonopen_groups([self::GROUP]);
+        $this->wpdb()->members[self::VIEWER . ':' . self::GROUP] = 'member';
+
+        self::assertTrue($this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => self::POST]));
+    }
+
+    /**
+     * A post DELIBERATELY made `public_all` while the group was already
+     * non-open keeps syndicating whatever the group does later — the
+     * `madeWhileNonOpen` branch. Mirrors bcc-core; without it this change
+     * would silently retract deliberate syndications.
+     */
+    public function testADeliberateNonOpenSyndicationKeepsWorking(): void
+    {
+        $this->group(self::PRIVACY['secret']);
+        $this->post([
+            'peepso_group_id'                  => (string) self::GROUP,
+            '_bcc_post_visibility'             => 'public_all',
+            '_bcc_post_group_privacy_at_post'  => '2',
+        ]);
+        \bcc_test_seed_nonopen_groups([self::GROUP]);
+
+        self::assertTrue($this->gate()->canSeeHydratedItem(0, ['external_id' => self::POST]));
+    }
+
+    /**
+     * ⚠ THE SAME FIX LANDS ON `canSee()`, the report/reaction path, because
+     * both entry points share `groupRuleAllows()`. Before this, a
+     * non-member could report a post in a group that had gone secret just
+     * because it carried `public_all`.
+     */
+    public function testTheReportPathAlsoHonoursTheSyndicationGate(): void
+    {
+        $this->group(self::PRIVACY['secret']);
+        $this->post(['peepso_group_id' => (string) self::GROUP, '_bcc_post_visibility' => 'public_all']);
+        \bcc_test_seed_nonopen_groups([self::GROUP]);
+
+        self::assertFalse($this->gate()->canSee(self::VIEWER, $this->activity()));
+
+        $this->wpdb()->members[self::VIEWER . ':' . self::GROUP] = 'member';
+        self::assertTrue(
+            $this->gate()->canSee(self::VIEWER, $this->activity()),
+            'a member can still report their own group\'s post'
+        );
     }
 
     /** A post with no group marker is a global-feed post: visible. */
