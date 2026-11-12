@@ -294,16 +294,16 @@ final class ValidatorGroupsEndpoint
         // PeepSoGroupWriter::leave returns true for the no-existing-row
         // idempotent case too, and audit rows are only written on real
         // transitions (destructive-mutation-hardening invariant).
-        $wasMember = PeepSoGroupRepository::getMembershipStatus($userId, $groupId) !== null;
+        // The same fail-closed read decides the refusal: operator-owner →
+        // 403, a failed read → 503 (GroupLeaveGuard).
+        [$refusal, $status] = \BCC\Trust\Core\Support\GroupLeaveGuard::precheck($userId, $groupId);
+        if ($refusal !== null) {
+            return $refusal;
+        }
+        $wasMember = $status !== null;
 
-        $left = \BCC\Core\PeepSo\PeepSoGroupWriter::leave($userId, $groupId);
-        if (!$left) {
-            // Most likely cause: caller is the operator-owner.
-            return ApiResponse::error(
-                'bcc_permission_denied',
-                'Owners cannot leave their own community. Hand off ownership or delete the group first.',
-                403
-            );
+        if (!\BCC\Core\PeepSo\PeepSoGroupWriter::leave($userId, $groupId)) {
+            return \BCC\Trust\Core\Support\GroupLeaveGuard::unavailable();
         }
 
         if ($wasMember) {

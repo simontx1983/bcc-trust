@@ -359,18 +359,18 @@ final class MyGroupsEndpoint
         // no-existing-row-to-delete cases. Determine the actual state
         // transition BEFORE the writer call so the audit log captures only
         // real leaves, not idempotent re-attempts on a non-membership.
-        $wasMember = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatus(
-            $userId,
-            $groupId
-        ) !== null;
+        // The same fail-closed read also decides the refusal: owner → 403,
+        // a failed read → 503 (GroupLeaveGuard).
+        [$refusal, $status] = \BCC\Trust\Core\Support\GroupLeaveGuard::precheck($userId, $groupId);
+        if ($refusal !== null) {
+            return $refusal;
+        }
+        $wasMember = $status !== null;
 
-        $left = \BCC\Core\PeepSo\PeepSoGroupWriter::leave($userId, $groupId);
-        if (!$left) {
-            return ApiResponse::error(
-                'bcc_permission_denied',
-                'Owners cannot leave their own community. Hand off ownership or delete the group first.',
-                403
-            );
+        // A non-owner's false is a busy lock, a failed write or PeepSo
+        // absent — never "you are the owner".
+        if (!\BCC\Core\PeepSo\PeepSoGroupWriter::leave($userId, $groupId)) {
+            return \BCC\Trust\Core\Support\GroupLeaveGuard::unavailable();
         }
 
         // Audit only on the member → non-member transition. Disambiguated

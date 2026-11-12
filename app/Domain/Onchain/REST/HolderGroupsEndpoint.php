@@ -367,15 +367,14 @@ final class HolderGroupsEndpoint
             );
         }
 
-        $left = \BCC\Core\PeepSo\PeepSoGroupWriter::leave($userId, $groupId);
-        if (!$left) {
-            // Most likely cause: caller is the group owner.
-            // PeepSoGroupWriter refuses to leave a group ownerless.
-            return ApiResponse::error(
-                'bcc_permission_denied',
-                'Owners cannot leave their own community. Hand off ownership or delete the group first.',
-                403
-            );
+        // Owner → 403, failed read → 503, read BEFORE the write
+        // (GroupLeaveGuard); a non-owner's false is never "you are the owner".
+        [$refusal] = \BCC\Trust\Core\Support\GroupLeaveGuard::precheck($userId, $groupId);
+        if ($refusal !== null) {
+            return $refusal;
+        }
+        if (!\BCC\Core\PeepSo\PeepSoGroupWriter::leave($userId, $groupId)) {
+            return \BCC\Trust\Core\Support\GroupLeaveGuard::unavailable();
         }
 
         OnchainPlugin::instance()->nftGroupGateService()->recordOptOut($userId, $groupId);
