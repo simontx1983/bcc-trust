@@ -877,8 +877,9 @@ final class UserViewService
      * for a non-owner viewer it is DROPPED rather than shown. Previously
      * such a group was listed unconditionally.
      *
-     * The OWNER's own view is deliberately byte-identical to before -
-     * no filter, and no resolver call at all.
+     * The OWNER's own view is deliberately unfiltered. Without $withRoles
+     * it makes no resolver call at all; with them, one batched call
+     * supplies each row's `type`.
      *
      * $withRoles (the full profile only): each row also carries the
      * member's `role` / `role_label` in that group (GroupRole, the roster's
@@ -888,7 +889,7 @@ final class UserViewService
      * are null, so a profile never reveals who moderates a closed group. A
      * failed status read is null too, never a guessed role.
      *
-     * @return list<array{id: int, slug: string, name: string, is_primary: bool, role?: string|null, role_label?: string|null}>
+     * @return list<array{id: int, slug: string, name: string, is_primary: bool, role?: string|null, role_label?: string|null, type?: string|null}>
      */
     private function resolveHalls(int $userId, int $viewerId, bool $withRoles = false): array
     {
@@ -941,6 +942,12 @@ final class UserViewService
         $viewerStatuses = ($withRoles && !$isSelf && $viewerId > 0)
             ? PeepSoGroupRepository::findUserMembershipStatuses($viewerId, $myGroupIds)
             : null;
+        // The row's group kind (hall | user | system | nft | validator), so
+        // a client can tell a Hall from any other group. The owner's own
+        // view resolved no contexts above; one batched call here.
+        if ($withRoles && $contexts === []) {
+            $contexts = Plugin::instance()->groupContextResolver()->forManyGroups($myGroupIds);
+        }
 
         $items = [];
         foreach ($myGroupIds as $groupId) {
@@ -962,6 +969,7 @@ final class UserViewService
                 }
                 $item['role']       = $role;
                 $item['role_label'] = $role !== null ? \BCC\Trust\Core\Support\GroupRole::label($role) : null;
+                $item['type']       = isset($contexts[$groupId]) ? $contexts[$groupId]->type->value : null;
             }
             $items[] = $item;
         }

@@ -168,6 +168,25 @@ final class ProfileHallRoleTest extends TestCase
 
         self::assertSame([], $GLOBALS['__bcc_phr']['status_reads']);
         self::assertArrayNotHasKey('role', $halls[self::OPEN]);
+        self::assertArrayNotHasKey('type', $halls[self::OPEN]);
+    }
+
+    /**
+     * `halls` carries every group the viewer may see, not only Halls; the
+     * row's `type` lets a client tell them apart without guessing from a
+     * name or slug — on the owner's view and anyone else's.
+     */
+    public function testEveryRowSaysWhatKindOfGroupItIs(): void
+    {
+        $expected = [self::OPEN => 'user', self::HALL => 'hall', self::CLOSED => 'user', self::SECRET => 'user'];
+
+        foreach ([self::MEMBER, self::VIEWER, 0] as $viewer) {
+            self::assertSame(
+                $expected,
+                array_map(static fn (array $r): ?string => $r['type'] ?? null, self::halls($viewer)),
+                "viewer {$viewer}"
+            );
+        }
     }
 
     /**
