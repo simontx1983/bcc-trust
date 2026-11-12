@@ -83,36 +83,42 @@ final class GatedGroupCollectionIdLookupIntegrationTest extends TestCase
     /**
      * Create a group post pointing at $collectionId via the AUTHORITATIVE
      * meta key, with a controllable post_status / kind.
+     *
+     * The post id is POST_BASE + $collectionId + $idOffset. A second group
+     * on the same collection needs a non-zero offset, or its INSERT hits the
+     * first one's primary key. Every insert asserts it wrote a row, so a
+     * collision fails here instead of leaving the test checking one group.
      */
     private function seedGroup(
         int $collectionId,
         string $status = 'publish',
         string $kind = 'holders',
-        string $type = 'peepso-group'
+        string $type = 'peepso-group',
+        int $idOffset = 0
     ): int {
         $wpdb   = $GLOBALS['wpdb'];
-        $postId = self::POST_BASE + $collectionId;
+        $postId = self::POST_BASE + $collectionId + $idOffset;
 
-        $wpdb->query($wpdb->prepare(
+        $this->assertSame(1, $wpdb->query($wpdb->prepare(
             "INSERT INTO `{$wpdb->posts}` (ID, post_title, post_type, post_status)
              VALUES (%d, %s, %s, %s)",
             $postId,
             'Holders ' . $collectionId,
             $type,
             $status
-        ));
-        $wpdb->query($wpdb->prepare(
+        )), "seed post {$postId}: " . $wpdb->last_error);
+        $this->assertSame(1, $wpdb->query($wpdb->prepare(
             "INSERT INTO `{$wpdb->postmeta}` (post_id, meta_key, meta_value) VALUES (%d, %s, %s)",
             $postId,
             GatedGroupRepository::META_KIND,
             $kind
-        ));
-        $wpdb->query($wpdb->prepare(
+        )), "seed kind meta {$postId}: " . $wpdb->last_error);
+        $this->assertSame(1, $wpdb->query($wpdb->prepare(
             "INSERT INTO `{$wpdb->postmeta}` (post_id, meta_key, meta_value) VALUES (%d, %s, %s)",
             $postId,
             GatedGroupRepository::META_COLLECTION,
             (string) $collectionId
-        ));
+        )), "seed collection meta {$postId}: " . $wpdb->last_error);
 
         return $postId;
     }
@@ -193,8 +199,11 @@ final class GatedGroupCollectionIdLookupIntegrationTest extends TestCase
     public function testTheDeleteGatePrefersThePublishedGroup(): void
     {
         $cid       = $this->seedCollection('0x' . str_repeat('9', 40), '0x' . str_repeat('9', 40));
-        $this->seedGroup($cid, 'trash');
-        $published = $this->seedGroup($cid, 'publish');
+        // The trash group gets the LOWER id, so `p.ID ASC` alone would pick
+        // it: only the status preference can return the published one.
+        $trash     = $this->seedGroup($cid, 'trash');
+        $published = $this->seedGroup($cid, 'publish', 'holders', 'peepso-group', 5000);
+        $this->assertLessThan($published, $trash);
 
         $this->assertSame(
             ['id' => $published, 'status' => 'publish'],
