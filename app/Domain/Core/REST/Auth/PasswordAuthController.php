@@ -312,14 +312,21 @@ final class PasswordAuthController
         // Accept either an email address or a handle on the same field.
         // Detect which by shape: a real email always contains '@' + a
         // valid domain per is_email(); anything else is treated as a
-        // handle and mapped through the same u_<handle> login convention
-        // signup() uses (a leading '@' is stripped defensively, since
-        // handles are always displayed with one in the UI).
+        // handle (a leading '@' is stripped defensively, since handles are
+        // always displayed with one in the UI).
+        //
+        // F-280: a handle resolves through the member's CURRENT bcc_handle,
+        // never through the u_<handle> login. The login is minted from the
+        // handle at SIGNUP and never changes, so after a rename it named
+        // the OLD handle: the new handle could not sign in, and a member
+        // who later took the old handle would resolve to the renamed
+        // member's account. A retired handle never signs in, and a handle
+        // two members hold resolves to nobody (HandleService::currentOwner).
         if (is_email($identifier)) {
             $user = get_user_by('email', sanitize_email($identifier));
         } else {
-            $handle = ltrim(strtolower($identifier), '@');
-            $user   = get_user_by('login', AuthSupport::deriveLogin($handle));
+            $ownerId = HandleService::currentOwner(ltrim(strtolower($identifier), '@'));
+            $user    = $ownerId !== null ? get_userdata($ownerId) : false;
         }
 
         // Generic error for "not found" and "wrong password" alike —
