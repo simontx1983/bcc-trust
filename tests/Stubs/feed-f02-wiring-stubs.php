@@ -192,6 +192,7 @@ namespace BCC\Core\Feed {
             ?array $viewerFriendIds = null,
             bool $enforcePostVisibility = false
         ): ?array {
+            $GLOBALS['__bcc_f02feed']['excluded']['getActivityById'] = $excludedAuthorIds;
             unset($actId, $excludedAuthorIds, $excludedActIds);
             \bcc_f02feed_record('getActivityById', $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
@@ -217,6 +218,7 @@ namespace BCC\Core\Feed {
             ?array $viewerFriendIds = null,
             bool $enforcePostVisibility = false
         ): array {
+            $GLOBALS['__bcc_f02feed']['excluded']['getActivityForAuthor'] = $excludedAuthorIds;
             unset($authorId, $cursor, $limit, $excludedAuthorIds, $excludedActIds, $excludedGroupIds);
             \bcc_f02feed_record('getActivityForAuthor', $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
@@ -234,6 +236,7 @@ namespace BCC\Core\Feed {
             ?array $viewerFriendIds = null,
             bool $enforcePostVisibility = false
         ): array {
+            $GLOBALS['__bcc_f02feed']['excluded']['getActivityForPage'] = $excludedAuthorIds;
             unset($pageId, $cursor, $limit, $excludedAuthorIds, $excludedActIds);
             \bcc_f02feed_record('getActivityForPage', $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
@@ -277,7 +280,7 @@ namespace BCC\Trust\Core\Repositories {
         /** @return list<int> */
         public function getCautionAndRiskyUserIds(): array
         {
-            return [];
+            return $GLOBALS['__bcc_f02feed']['caution'] ?? [];
         }
     }
 

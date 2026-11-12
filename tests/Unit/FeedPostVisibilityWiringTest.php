@@ -256,6 +256,51 @@ final class FeedPostVisibilityWiringTest extends TestCase
         self::assertNull($GLOBALS['__bcc_f02feed']['excluded']['getFeed:tag'] ?? null);
     }
 
+    // ── F-269: an author always sees their own posts ─────────────────
+
+    /** @return array<string, array{0: string, 1: string}> surface => [invoke label, recorded label] */
+    public static function ownPostSurfaces(): array
+    {
+        return [
+            'personalized feed' => ['getFeed:for_you', 'getFeed:for_you'],
+            'permalink'         => ['getActivityById', 'getActivityById'],
+            'author wall'       => ['getActivityForAuthor', 'getActivityForAuthor'],
+            'page stream'       => ['getActivityForPage', 'getActivityForPage'],
+            'tag feed'          => ['tag', 'getFeed:tag'],
+            'plain group room'  => ['group', 'getFeed:group'],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('ownPostSurfaces')]
+    public function testAFlaggedViewerIsNotShadowLimitedFromTheirOwnPosts(string $surface, string $recorded): void
+    {
+        $GLOBALS['__bcc_f02feed']['caution'] = [self::VIEWER, self::AUTHOR];
+
+        if ($surface === 'tag') {
+            $this->service()->getTagFeed(self::VIEWER, 'solana');
+        } elseif ($surface === 'group') {
+            $this->service()->getGroupFeed(self::VIEWER, 1138);
+        } else {
+            $this->invokeSurface($surface, self::VIEWER);
+        }
+
+        $excluded = $GLOBALS['__bcc_f02feed']['excluded'][$recorded] ?? null;
+        self::assertIsArray($excluded);
+        self::assertNotContains(self::VIEWER, $excluded, 'the viewer sees their own posts');
+        self::assertContains(self::AUTHOR, $excluded, 'other flagged authors stay shadow-limited');
+    }
+
+    /** Control: the shared anonymous hot feed keeps the whole list. */
+    public function testTheAnonymousHotFeedKeepsTheWholeCautionList(): void
+    {
+        $GLOBALS['__bcc_f02feed']['caution'] = [self::VIEWER, self::AUTHOR];
+
+        $this->service()->getHotFeed(null, FeedRankingService::HOT_WARM_LIMIT, self::VIEWER);
+
+        $excluded = $GLOBALS['__bcc_f02feed']['excluded']['getFeed:for_you'] ?? null;
+        self::assertSame([self::VIEWER, self::AUTHOR], $excluded);
+    }
+
     // ── the carve-out, asserted as a decision ───────────────────────
 
     /**

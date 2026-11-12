@@ -281,6 +281,8 @@ final class FeedRankingService
      *     (§O4.1 caution/risky shadow-limit) — IDENTICAL call, PLUS the
      *     viewer's mutual blocks (F-297). Extra exclusions only NARROW, so
      *     the subset relation holds; the hot feed has no viewer to block for.
+     *     MINUS the viewer themself (F-269: an author always sees their own
+     *     posts) — the same own-posts widening noted for §F-02 below.
      *   - same `$hidden` set: $this->hiddenRepo->getAllHiddenIds()
      *     (§K1-C moderation hide) — IDENTICAL call.
      *   - same restricted-group posture: NEITHER method computes one, because
@@ -349,7 +351,7 @@ final class FeedRankingService
         // longer reads back as an empty page (the exact filter below used to
         // be the only block filter on this surface).
         $excluded = self::mergeExclusions(
-            $this->reputationRepo->getCautionAndRiskyUserIds(),
+            $this->cautionListExceptViewer($viewerId),
             $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
             $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
         );
@@ -422,7 +424,7 @@ final class FeedRankingService
     public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20): array
     {
         $excluded = self::mergeExclusions(
-            $this->reputationRepo->getCautionAndRiskyUserIds(),
+            $this->cautionListExceptViewer($viewerId),
             // §K1 mutual-invisibility: hide both directions of any
             // block this viewer is part of. Users this viewer blocks
             // disappear from the feed; users who blocked this viewer
@@ -504,7 +506,7 @@ final class FeedRankingService
     public function getActivityById(int $actId, int $viewerId): ?array
     {
         $excluded = self::mergeExclusions(
-            $this->reputationRepo->getCautionAndRiskyUserIds(),
+            $this->cautionListExceptViewer($viewerId),
             $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
             $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
         );
@@ -632,7 +634,7 @@ final class FeedRankingService
     public function getActivityForAuthor(int $authorId, int $viewerId, ?string $cursor = null, int $limit = 20): array
     {
         $excluded = self::mergeExclusions(
-            $this->reputationRepo->getCautionAndRiskyUserIds(),
+            $this->cautionListExceptViewer($viewerId),
             $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
             $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
         );
@@ -702,7 +704,7 @@ final class FeedRankingService
     public function getActivityForPage(int $pageId, int $viewerId, ?string $cursor = null, int $limit = 20): array
     {
         $excluded = self::mergeExclusions(
-            $this->reputationRepo->getCautionAndRiskyUserIds(),
+            $this->cautionListExceptViewer($viewerId),
             $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
             $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
         );
@@ -803,7 +805,7 @@ final class FeedRankingService
         $excluded = $isNftGroup
             ? $blockExclusions
             : self::mergeExclusions(
-                $this->reputationRepo->getCautionAndRiskyUserIds(),
+                $this->cautionListExceptViewer($viewerId),
                 $blockExclusions
             );
 
@@ -1160,5 +1162,30 @@ final class FeedRankingService
             }
         }
         return array_keys($set);
+    }
+
+    /**
+     * The §O4.1 caution/risky shadow-limit list, WITHOUT the viewer.
+     *
+     * F-269 (user decision 2026-11-12): an author ALWAYS sees their own
+     * posts, even while flagged; everyone else still doesn't. The shadow
+     * limit is about reach, and hiding a flagged author's posts from the
+     * author too read as "my post vanished" (the NFT-group carve-out in
+     * getGroupFeed() exists for the same reason). Used by every per-viewer
+     * surface; the anonymous hot feed has no viewer and keeps the full list.
+     *
+     * @return list<int>
+     */
+    private function cautionListExceptViewer(int $viewerId): array
+    {
+        $ids = $this->reputationRepo->getCautionAndRiskyUserIds();
+        if ($viewerId <= 0) {
+            return $ids;
+        }
+
+        return array_values(array_filter(
+            $ids,
+            static fn ($id): bool => (int) $id !== $viewerId
+        ));
     }
 }
