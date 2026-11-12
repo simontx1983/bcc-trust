@@ -293,22 +293,6 @@ final class PasswordAuthController
             return ApiResponse::error('bcc_invalid_request', 'Email/handle and password are required.', 422);
         }
 
-        // Per-identifier throttle — the IP bucket above can't see a
-        // distributed brute-force (many IPs, one account). Keyed by a hash
-        // of the normalized identifier so it applies whether or not the
-        // account exists (no account-enumeration oracle) and fires before the
-        // CPU-bound bcrypt compare. See AuthSupport::LOGIN_ACCOUNT_RATE_* for
-        // the limit rationale + the targeted-lockout tradeoff.
-        $identifierKey = 'bcc_throttle_login_account_' . hash('sha256', strtolower($identifier));
-        if (!\BCC\Core\Security\Throttle::allow(
-            'login_account',
-            AuthSupport::LOGIN_ACCOUNT_RATE_LIMIT,
-            AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
-            $identifierKey
-        )) {
-            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
-        }
-
         // Accept either an email address or a handle on the same field.
         // Detect which by shape: a real email always contains '@' + a
         // valid domain per is_email(); anything else is treated as a
@@ -327,6 +311,33 @@ final class PasswordAuthController
         } else {
             $ownerId = HandleService::currentOwner(ltrim(strtolower($identifier), '@'));
             $user    = $ownerId !== null ? get_userdata($ownerId) : false;
+        }
+
+        // Per-account throttles (F-281), still before the CPU-bound bcrypt
+        // compare. Keyed on the resolved account, so every way of naming it
+        // shares one budget; an unknown identifier gets a bucket of its own
+        // all the same (no enumeration oracle). Two buckets: this network's
+        // share, so a stranger elsewhere can't lock the owner out, and an
+        // account-wide ceiling for a guess spread over many networks. See
+        // AuthSupport::LOGIN_ACCOUNT_*.
+        $accountKey = $user !== false
+            ? 'user:' . (int) $user->ID
+            : 'id:' . hash('sha256', is_email($identifier)
+                ? strtolower(sanitize_email($identifier))
+                : ltrim(strtolower($identifier), '@'));
+        $network = \BCC\Trust\Core\Security\RateLimiter::normalizeIpToSubnet(\BCC\Core\Security\Throttle::clientIp());
+        if (!\BCC\Core\Security\Throttle::allow(
+            'login_account_net',
+            AuthSupport::LOGIN_ACCOUNT_RATE_LIMIT,
+            AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
+            'bcc_throttle_login_account_net_' . hash('sha256', $accountKey . '|' . $network)
+        ) || !\BCC\Core\Security\Throttle::allow(
+            'login_account',
+            AuthSupport::LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT,
+            AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
+            'bcc_throttle_login_account_' . hash('sha256', $accountKey)
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
 
         // Generic error for "not found" and "wrong password" alike —

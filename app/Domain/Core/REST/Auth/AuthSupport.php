@@ -74,19 +74,29 @@ final class AuthSupport
     /** Anon-IP-keyed throttle for login. Same budget as signup — login is the obvious brute-force target. */
     public const LOGIN_RATE_LIMIT = 5;
     /**
-     * Per-identifier login throttle (defense-in-depth vs distributed
-     * brute-force from many IPs against ONE account, which the IP bucket
-     * can't see). Keyed by a hash of the submitted identifier — so it fires
-     * the same whether or not the account exists (no enumeration oracle).
-     * Deliberately generous over a longer window: a legitimate user never
-     * makes 20 attempts in 15 minutes, while sustained probing of a single
-     * identifier is capped. Tradeoff: a determined attacker can trip this to
-     * briefly (one window) lock a targeted identifier — accepted because
-     * password login also requires the mandatory email OTP, so this only
-     * bounds password-probing rate, not account access.
+     * Per-ACCOUNT login throttles (defense-in-depth vs brute force against
+     * ONE account, which the per-IP `login` bucket can't see), both over
+     * LOGIN_ACCOUNT_RATE_WINDOW and counted before the bcrypt compare. Keyed
+     * on the RESOLVED account (so `@alice`, `alice` and her email share one
+     * budget), or on a hash of the normalized identifier when nothing
+     * resolves — the same either way, so no enumeration oracle.
+     *
+     * F-281: the budget used to be one bucket per identifier, account-wide,
+     * so anyone who knew a public handle could keep its owner locked out of
+     * password sign-in (about 1.4 requests a minute, under the per-IP limit).
+     * Now:
+     *   - LOGIN_ACCOUNT_RATE_LIMIT per (account, client network: IPv4 /24,
+     *     IPv6 /48): a stranger elsewhere exhausts only their own network's
+     *     budget, never the owner's;
+     *   - LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT per account across all networks:
+     *     the cap on a distributed guess (many networks, one account). Ten
+     *     times the per-network budget, so locking an owner out now takes
+     *     a botnet spread over 10+ networks sustained for the whole window.
+     * A legitimate member never makes 20 attempts in 15 minutes.
      */
-    public const LOGIN_ACCOUNT_RATE_LIMIT  = 20;
-    public const LOGIN_ACCOUNT_RATE_WINDOW = 900;
+    public const LOGIN_ACCOUNT_RATE_LIMIT        = 20;
+    public const LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT = 200;
+    public const LOGIN_ACCOUNT_RATE_WINDOW       = 900;
     /** Anon-IP-keyed throttle for the public wallet-nonce route. Same budget as the authed nonce. */
     public const WALLET_NONCE_RATE_LIMIT = 10;
     /** Per-WALLET (chain + address) throttle for wallet-login, per minute (F-123; was per IP). */
