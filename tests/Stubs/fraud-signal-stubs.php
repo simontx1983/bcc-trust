@@ -345,6 +345,12 @@ namespace BCC\Trust\Core\Repositories {
                 return $activeOnly ? 0 : W::$rapidVotes;
             }
 
+            /** F-208: the analysis reads the fail-closed variant; same answer here. */
+            public function countByVoterSinceOrFail(int $voterId, string $sinceMysql, bool $activeOnly = true): int
+            {
+                return $this->countByVoterSince($voterId, $sinceMysql, $activeOnly);
+            }
+
             public function getVoteTypeStats(int $userId, int $days): ?object
             {
                 return W::$voteTypeStats;
@@ -386,6 +392,12 @@ namespace BCC\Trust\Core\Repositories {
             public function countDistinctUsersForIp(string $ipBinary, int $userId, int $hours): int
             {
                 return W::$distinctUsersForIp;
+            }
+
+            /** F-208: the analysis reads the fail-closed variant; same answer here. */
+            public function countDistinctUsersForIpOrFail(string $ipBinary, int $userId, int $hours): int
+            {
+                return $this->countDistinctUsersForIp($ipBinary, $userId, $hours);
             }
 
             public function getLastIpForUser(int $userId): ?string

@@ -249,12 +249,36 @@ class AuditLogRepository {
      * @return int
      */
     public function countDistinctUsersForIp( string $ipBinary, int $excludeUserId, int $days ): int {
+        return $this->countUsersOnNetwork( $ipBinary, $excludeUserId, $days, false );
+    }
+
+    /**
+     * countDistinctUsersForIp(), but a FAILED read throws instead of
+     * counting 0.
+     *
+     * For the post-vote fraud analysis (F-208), where 0 means "no other
+     * accounts on this network" and is stored as the fraud score. The
+     * new-account vote gate keeps the fail-open variant on purpose: a
+     * database blip must never block a vote.
+     *
+     * @throws RepositoryReadFailure when the read failed
+     */
+    public function countDistinctUsersForIpOrFail( string $ipBinary, int $excludeUserId, int $days ): int {
+        return $this->countUsersOnNetwork( $ipBinary, $excludeUserId, $days, true );
+    }
+
+    /**
+     * One query, two failure policies.
+     *
+     * @throws RepositoryReadFailure when $failClosed and the read failed
+     */
+    private function countUsersOnNetwork( string $ipBinary, int $excludeUserId, int $days, bool $failClosed ): int {
         global $wpdb;
 
         if ( strlen( $ipBinary ) === 16 ) {
             $prefix = substr( $ipBinary, 0, 8 );
-            return (int) $wpdb->get_var( $wpdb->prepare(
-                "SELECT COUNT(DISTINCT user_id)
+            $sql    = $wpdb->prepare(
+                "SELECT COUNT(DISTINCT user_id) AS n
                  FROM {$this->table}
                  WHERE ip_address BETWEEN %s AND %s
                  AND user_id != %d
@@ -264,20 +288,24 @@ class AuditLogRepository {
                 $prefix . str_repeat( "\xff", 8 ),
                 $excludeUserId,
                 $days
-            ) );
+            );
+        } else {
+            $sql = $wpdb->prepare(
+                "SELECT COUNT(DISTINCT user_id) AS n
+                 FROM {$this->table}
+                 WHERE ip_address = %s
+                 AND user_id != %d
+                 AND user_id IS NOT NULL
+                 AND created_at > (UTC_TIMESTAMP() - INTERVAL %d DAY)",
+                $ipBinary,
+                $excludeUserId,
+                $days
+            );
         }
 
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(DISTINCT user_id)
-             FROM {$this->table}
-             WHERE ip_address = %s
-             AND user_id != %d
-             AND user_id IS NOT NULL
-             AND created_at > (UTC_TIMESTAMP() - INTERVAL %d DAY)",
-            $ipBinary,
-            $excludeUserId,
-            $days
-        ) );
+        $rows = self::runRead( $sql, 'countDistinctUsersForIp', $failClosed );
+
+        return isset( $rows[0]->n ) ? (int) $rows[0]->n : 0;
     }
 
     /**
@@ -285,11 +313,14 @@ class AuditLogRepository {
      *
      * @param int $userId
      * @return string|null Binary IP or null.
+     * @throws RepositoryReadFailure when the read failed (F-208). One
+     *         caller, the post-vote fraud analysis, where null means "no IP
+     *         on record" and skips the multi-account signal.
      */
     public function getLastIpForUser( int $userId ): ?string {
         global $wpdb;
 
-        $ipBinary = $wpdb->get_var( $wpdb->prepare(
+        $rows = self::runRead( $wpdb->prepare(
             "SELECT ip_address
              FROM {$this->table}
              WHERE user_id = %d
@@ -297,9 +328,11 @@ class AuditLogRepository {
              ORDER BY created_at DESC
              LIMIT 1",
             $userId
-        ) );
+        ), __FUNCTION__, true );
 
-        return $ipBinary ?: null;
+        $ipBinary = isset( $rows[0]->ip_address ) ? (string) $rows[0]->ip_address : '';
+
+        return $ipBinary !== '' ? $ipBinary : null;
     }
 
     /**

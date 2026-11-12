@@ -1428,30 +1428,47 @@ class VoteRepository {
      * (Re-casting a retracted vote resets its created_at, so it counts too.)
      */
     public function countByVoterSince( int $voterId, string $sinceMysql, bool $activeOnly = true ): int {
+        return $this->countVoterRowsSince( $voterId, $sinceMysql, $activeOnly, false );
+    }
+
+    /**
+     * countByVoterSince(), but a FAILED read throws instead of counting 0.
+     *
+     * For the post-vote fraud analysis (F-208), where 0 means "not rapid
+     * voting" and is stored as the user's fraud score. The vote-request gate
+     * keeps the fail-open variant on purpose: a database blip must never
+     * block a vote.
+     *
+     * @throws RepositoryReadFailure when the read failed
+     */
+    public function countByVoterSinceOrFail( int $voterId, string $sinceMysql, bool $activeOnly = true ): int {
+        return $this->countVoterRowsSince( $voterId, $sinceMysql, $activeOnly, true );
+    }
+
+    /**
+     * One query, two failure policies.
+     *
+     * @throws RepositoryReadFailure when $failClosed and the read failed
+     */
+    private function countVoterRowsSince( int $voterId, string $sinceMysql, bool $activeOnly, bool $failClosed ): int {
         if ($voterId <= 0 || $sinceMysql === '') {
             return 0;
         }
 
         global $wpdb;
 
-        if ( ! $activeOnly ) {
-            return (int) $wpdb->get_var( $wpdb->prepare(
-                "SELECT COUNT(*) FROM {$this->table}
-                 WHERE voter_user_id = %d
-                   AND created_at   >= %s",
-                $voterId,
-                $sinceMysql
-            ) );
-        }
+        $statusClause = $activeOnly ? 'AND status = 1' : '';
 
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM {$this->table}
+        $rows = self::runRead( $wpdb->prepare(
+            "SELECT COUNT(*) AS n FROM {$this->table}
              WHERE voter_user_id = %d
-               AND status        = 1
+               {$statusClause}
                AND created_at   >= %s",
             $voterId,
             $sinceMysql
-        ) );
+        ), 'countByVoterSince', $failClosed );
+
+        return isset( $rows[0]->n ) ? (int) $rows[0]->n : 0;
     }
 
     /**
@@ -2052,12 +2069,15 @@ class VoteRepository {
      * @param int $userId
      * @param int $minutes
      * @return int
+     * @throws RepositoryReadFailure when the read failed (F-208). One
+     *         caller, the post-vote fraud analysis, where 0 means "no
+     *         flip-flopping" and is stored as the fraud score.
      */
     public function countVoteChanges( int $userId, int $minutes = 30 ): int {
         global $wpdb;
 
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*)
+        $rows = self::runRead( $wpdb->prepare(
+            "SELECT COUNT(*) AS n
              FROM {$this->table} v1
              JOIN {$this->table} v2 ON v1.page_id = v2.page_id
              WHERE v1.voter_user_id = %d
@@ -2071,7 +2091,9 @@ class VoteRepository {
             $userId,
             $userId,
             $minutes
-        ) );
+        ), __FUNCTION__, true );
+
+        return isset( $rows[0]->n ) ? (int) $rows[0]->n : 0;
     }
 
     /**

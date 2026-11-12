@@ -627,7 +627,9 @@ class DeviceFingerprinter {
      * }
      */
     public function getAggregatedFingerprintData(int $userId): array {
-        $fingerprints = $this->getUserFingerprints($userId);
+        // ...OrFail (F-208): this bundle feeds the STORED fraud score, where
+        // an empty list from a failed read would drop the device signal.
+        $fingerprints = $this->fpRepo->getUserFingerprintsOrFail($userId);
 
         $fpHashes   = array_map(fn($fp) => $fp->fingerprint, $fingerprints);
         $userCounts = $this->getFingerprintUserCounts($fpHashes);
