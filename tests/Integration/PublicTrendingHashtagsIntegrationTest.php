@@ -92,6 +92,10 @@ final class PublicTrendingHashtagsIntegrationTest extends TestCase
         global $wpdb;
         delete_transient(PeepSoHashtagRepository::PUBLIC_CACHE_KEY);
         $this->removeFeedActivities();
+        foreach ($this->seededGroups as $groupId) {
+            $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->postmeta} WHERE post_id = %d", $groupId));
+            $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->posts} WHERE ID = %d", $groupId));
+        }
         foreach ($this->seededTags as $tag) {
             $wpdb->delete($wpdb->prefix . 'peepso_hashtags', ['ht_name' => $tag]);
         }
@@ -165,7 +169,56 @@ final class PublicTrendingHashtagsIntegrationTest extends TestCase
         self::assertSame(2, self::ourTrending()[self::PLAIN] ?? null, 'the NBSP post + this one, once: not 1 + 2×2 join rows');
     }
 
+    /**
+     * F-23 / Gate 12 (the narrow rule, GroupSyndicationGate): in a group that
+     * is NOW secret, a public_all post made while it was open is not counted,
+     * nor is one with no record; one made public_all while the group was
+     * ALREADY non-open still counts.
+     */
+    public function testANowSecretGroupDropsItsOldPostsButKeepsDeliberateSyndication(): void
+    {
+        $group = $this->seedGroup('2');
+
+        $this->post('#' . self::PLAIN . ' made while the group was open', group: $group, visibility: 'public_all', privacyAtPost: '0');
+        $this->post('#' . self::PLAIN . ' written before the record existed', group: $group, visibility: 'public_all');
+        $this->post('#' . self::PLAIN . ' made public_all while already secret', group: $group, visibility: 'public_all', privacyAtPost: '2');
+
+        self::assertSame(2, self::ourTrending()[self::PLAIN] ?? null, 'the NBSP post + the deliberate one; the other two are not counted');
+    }
+
+    /**
+     * The feed's range ladder: an effective level below 10 is public. Both
+     * the post's act_access AND the author's profile level must be below 10
+     * for the stricter-of-the-two to land there; `= 10` dropped this post.
+     */
+    public function testAnEffectiveLevelBelowTenIsPublic(): void
+    {
+        $author = $this->nextId++;
+        $this->seedUser($author, 5);
+        $this->post('#' . self::PLAIN . ' stray levels below 10', author: $author, access: 5);
+
+        self::assertSame(2, self::ourTrending()[self::PLAIN] ?? null);
+    }
+
     // ── fixtures ───────────────────────────────────────────────────────
+
+    /** @var list<int> */
+    private array $seededGroups = [];
+
+    /** A `peepso-group` post with the given `peepso_group_privacy` (what the strict non-open lookup reads). */
+    private function seedGroup(string $privacy): int
+    {
+        global $wpdb;
+
+        $groupId = $this->nextId++;
+        if ((int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->posts} WHERE ID = %d", $groupId)) > 0) {
+            self::markTestSkipped("{$wpdb->posts}.ID={$groupId} already exists; refusing to overwrite a real row");
+        }
+        self::assertNotFalse($wpdb->insert($wpdb->posts, ['ID' => $groupId, 'post_type' => 'peepso-group', 'post_status' => 'publish']), $wpdb->last_error);
+        self::assertNotFalse($wpdb->insert($wpdb->postmeta, ['post_id' => $groupId, 'meta_key' => 'peepso_group_privacy', 'meta_value' => $privacy]), $wpdb->last_error);
+        $this->seededGroups[] = $groupId;
+        return $groupId;
+    }
 
     private function post(
         string $content,
@@ -173,7 +226,8 @@ final class PublicTrendingHashtagsIntegrationTest extends TestCase
         int $access = 10,
         int $group = 0,
         ?string $visibility = null,
-        string $status = 'publish'
+        string $status = 'publish',
+        ?string $privacyAtPost = null
     ): int {
         global $wpdb;
 
@@ -184,6 +238,9 @@ final class PublicTrendingHashtagsIntegrationTest extends TestCase
 
         if ($group > 0) {
             self::assertNotFalse($wpdb->insert($wpdb->postmeta, ['post_id' => $postId, 'meta_key' => 'peepso_group_id', 'meta_value' => (string) $group]), $wpdb->last_error);
+        }
+        if ($privacyAtPost !== null) {
+            self::assertNotFalse($wpdb->insert($wpdb->postmeta, ['post_id' => $postId, 'meta_key' => '_bcc_post_group_privacy_at_post', 'meta_value' => $privacyAtPost]), $wpdb->last_error);
         }
         if ($visibility !== null) {
             self::assertNotFalse($wpdb->insert($wpdb->postmeta, ['post_id' => $postId, 'meta_key' => '_bcc_post_visibility', 'meta_value' => $visibility]), $wpdb->last_error);
