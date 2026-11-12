@@ -72,6 +72,16 @@ final class NftGroupRevokeService
     private const MEMBER_PAGE_SIZE = 100;
 
     /**
+     * F-69: one sweep at a time. Two overlapping ticks (a slow tick still
+     * running when the next cron fires, or a manual run beside the cron)
+     * read the same members, both revoke them, and both write the audit
+     * row — duplicated audit history. Session-scoped MySQL advisory lock,
+     * the same primitive gated-group provisioning uses; non-blocking, so
+     * the overlapping tick skips instead of queueing.
+     */
+    public const SWEEP_LOCK = 'bcc_gated_group_revoke_sweep';
+
+    /**
      * TRUE only for the brief window around a system-initiated
      * PeepSoGroupWriter::leave() in this sweep. The
      * peepso_action_group_user_delete listener (bcc-trust.php) reads this
@@ -108,9 +118,54 @@ final class NftGroupRevokeService
      *     many members as were removed;
      *   - `skipped_reasons` counts skips by bounded reason code.
      *
-     * @return array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool}
+     * F-69: the whole tick runs under SWEEP_LOCK. When another tick holds
+     * it, this one does nothing and reports `skipped_overlap: true`. When
+     * the lock primitive itself is missing it also does nothing (fail
+     * closed: an unserialized sweep is the bug) and logs an error.
+     *
+     * @return array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool, skipped_overlap: bool}
      */
     public function sweep(): array
+    {
+        if (!class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] Holder-group revoke sweep cannot be serialized: AdvisoryLock is unavailable', [
+                'lock' => self::SWEEP_LOCK,
+            ]);
+            return self::emptyStats(true);
+        }
+        if (!\BCC\Core\DB\AdvisoryLock::acquire(self::SWEEP_LOCK, 0)) {
+            return self::emptyStats(true); // Another tick is running — never overlap.
+        }
+
+        try {
+            return $this->runSweep();
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release(self::SWEEP_LOCK);
+        }
+    }
+
+    /**
+     * @return array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool, skipped_overlap: bool}
+     */
+    private static function emptyStats(bool $skippedOverlap): array
+    {
+        return [
+            'checked'           => 0,
+            'revoked'           => 0,
+            'skipped_unknown'   => 0,
+            'groups_touched'    => 0,
+            'skipped_reasons'   => [],
+            'stopped_on_budget' => false,
+            'skipped_overlap'   => $skippedOverlap,
+        ];
+    }
+
+    /**
+     * The tick itself; only ever called under SWEEP_LOCK by sweep().
+     *
+     * @return array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool, skipped_overlap: bool}
+     */
+    private function runSweep(): array
     {
         $batchCap = (int) apply_filters('bcc_gated_group_revoke_batch_size', self::SWEEP_BATCH_SIZE);
         if ($batchCap < 1) {
@@ -118,14 +173,7 @@ final class NftGroupRevokeService
         }
 
         $groupIds = GatedGroupRepository::listAllGatedGroupIds();
-        $stats = [
-            'checked'           => 0,
-            'revoked'           => 0,
-            'skipped_unknown'   => 0,
-            'groups_touched'    => 0,
-            'skipped_reasons'   => [],
-            'stopped_on_budget' => false,
-        ];
+        $stats    = self::emptyStats(false);
         if ($groupIds === []) {
             return $stats;
         }
