@@ -321,11 +321,13 @@ normally is not.
       and pass it on stdin, or from a `0600` file you delete afterwards:
 
       ```sh
-      read -rs K; grep -cFf - error_log <<<"$K"; unset K
+      read -rs K; [ -n "$K" ] && grep -cFf - error_log <<<"$K"; unset K
       ```
 
       (bash; `-F` fixed string, `-c` count only, `-f -` the pattern from stdin —
-      the here-string feeds it without the key ever becoming an argument.)
+      the here-string feeds it without the key ever becoming an argument. The
+      `[ -n "$K" ]` guard matters: an EMPTY fixed-string pattern matches every
+      line, so a mistyped empty read would report the whole log as a "leak".)
 - [ ] One bounded live call per launch chain succeeds (an existing read path — do
       **not** create a collection or call `addManual()`).
 - [ ] The superseded key no longer authenticates. If the rotation was performed with
