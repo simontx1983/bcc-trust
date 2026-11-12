@@ -107,6 +107,12 @@ final class ProfileAccess
     public const REASON_PRIVATE = 'profile_private';
 
     /**
+     * user_meta key behind "Show my groups on my profile" (F-270).
+     * ⚠ Absent = ON; see {@see showsGroupsOnProfile()}.
+     */
+    public const META_SHOW_GROUPS = 'bcc_show_groups_on_profile';
+
+    /**
      * Largest id set {@see filterVisible} will judge in one call.
      *
      * A list page is a few dozen rows, so this is a defensive bound on
@@ -350,6 +356,88 @@ final class ProfileAccess
         }
 
         return 40;
+    }
+
+    /**
+     * "Show my groups on my profile" (F-270).
+     *
+     * ⚠ ABSENT MEANS ON. The decision was to default to today's
+     * behaviour, so a member who has never touched the setting keeps
+     * their groups listed; only an explicit falsey value hides them.
+     * That makes this the one profile-privacy read in this class whose
+     * default is PERMISSIVE, which is why it says so loudly.
+     *
+     * The companion rules - secret groups never shown to non-members,
+     * holder/delegator groups shown to signed-in viewers only - do NOT
+     * depend on this flag and are applied regardless. Consult this only
+     * through {@see ProfileGroupVisibility::filter()}, which owns all of
+     * them; a surface reading this flag on its own would reimplement
+     * half the policy.
+     */
+    public static function showsGroupsOnProfile(int $ownerId): bool
+    {
+        if ($ownerId <= 0) {
+            return false;
+        }
+
+        $raw = get_user_meta($ownerId, self::META_SHOW_GROUPS, true);
+        if (!is_string($raw) || $raw === '') {
+            return true;
+        }
+
+        return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    /**
+     * §F-02 per-post visibility arguments for ONE viewer-specific read.
+     *
+     * The two values bcc-core's feed reader needs, returned as a pair on
+     * purpose: the friend-id list (the level-30 rung) and the enforce
+     * switch are useless apart, and a surface that wired up one without
+     * the other would gate silently wrong rather than fail.
+     *
+     * It lives HERE rather than in the feed service because there are two
+     * callers (`FeedRankingService` and `BlogService`) and §11 forbids the
+     * second one re-deriving it — and because the admin exemption below is
+     * the other half of the same decision.
+     *
+     * ⚠ THE ENFORCE FLAG IS HOW AN ADMIN READ IS EXPRESSED. bcc-core's
+     * repository holds no capability check by design (policy in a
+     * repository would be policy in the wrong layer), so
+     * `enforcePostVisibility = false` IS the exemption. Taking it through
+     * {@see viewerIsExemptFromVisibility()} is what keeps the posts half
+     * of F-02 agreeing with the profile half about who an admin is.
+     *
+     * ⚠ THE FRIEND LIST IS EMPTY IN PRODUCTION TODAY, on every call.
+     * peepso-friends is not installed, so `PeepSoFriendGate` returns `[]`
+     * from its `class_exists('PeepSoFriendsModel')` guard and the level-30
+     * rung resolves to "the author alone". That is the same fact the
+     * contract records for `default_post_audience`: `friends` honestly
+     * reports a stored setting that currently behaves as "only me". Two
+     * consequences worth knowing before trusting this code — level 30 is
+     * NOT exercised in production, so a defect in that rung would stay
+     * invisible until peepso-friends is installed; and installing it
+     * would retroactively WIDEN the posts already written at level 30.
+     *
+     * ⚠ The exemption reads the CURRENT user, not `$viewerId`. Every
+     * caller is a request path whose `$viewerId` came from the same
+     * place, so they agree — but a caller that passes a viewer id it did
+     * not get from the request would gate for one identity and exempt on
+     * another. A globally cached, viewer-independent payload must not
+     * call this at all; it passes `true` directly.
+     *
+     * @return array{0: list<int>|null, 1: bool} [friend ids or null, enforce]
+     */
+    public static function postVisibilityArgs(int $viewerId): array
+    {
+        $friendIds = $viewerId > 0
+            ? PeepSoFriendGate::viewerFriendIdList($viewerId)
+            : [];
+
+        return [
+            $friendIds === [] ? null : $friendIds,
+            !self::viewerIsExemptFromVisibility(),
+        ];
     }
 
     /**

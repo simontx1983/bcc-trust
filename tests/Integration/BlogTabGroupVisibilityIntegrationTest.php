@@ -587,6 +587,18 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
             act_comment_object_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
             PRIMARY KEY (act_id)
         ) DEFAULT CHARSET=utf8mb4";
+        // ⚠ Required by §F-02: the per-post visibility gate LEFT JOINs this
+        // table to read each author's profile level. The join is LEFT, so an
+        // author with no row reads as level 10 (public) and these fixtures
+        // behave exactly as before — but a MISSING TABLE is a SQL error, and
+        // a failed query returns an empty result set, so every blog-tab
+        // assertion would fail in a way that reads like a visibility bug
+        // rather than a missing fixture.
+        $statements[] = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}peepso_users (
+            usr_id BIGINT UNSIGNED NOT NULL,
+            usr_profile_acc TINYINT NOT NULL DEFAULT 10,
+            PRIMARY KEY (usr_id)
+        ) DEFAULT CHARSET=utf8mb4";
         $statements[] = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}peepso_group_members (
             gm_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             gm_group_id BIGINT UNSIGNED NOT NULL DEFAULT 0,

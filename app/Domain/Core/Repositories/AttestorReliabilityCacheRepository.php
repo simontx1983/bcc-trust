@@ -249,8 +249,9 @@ final class AttestorReliabilityCacheRepository
         }
 
         if (wp_using_ext_object_cache()) {
-            $gen    = wp_cache_get('reliability_gen_' . $userId, self::CACHE_GROUP);
-            $result = $gen !== false ? (int) $gen : 0;
+            // Seeds an evicted key from the clock, never 0 (F-87 pattern).
+            // The wp_options counter below doesn't evict and stays as is.
+            $result = \BCC\Trust\Core\Support\CacheGeneration::get('reliability_gen_' . $userId, self::CACHE_GROUP);
             $this->generationCache[$userId] = $result;
             return $result;
         }
@@ -277,11 +278,7 @@ final class AttestorReliabilityCacheRepository
         unset($this->generationCache[$userId]);
 
         if (wp_using_ext_object_cache()) {
-            $key    = 'reliability_gen_' . $userId;
-            $result = wp_cache_incr($key, 1, self::CACHE_GROUP);
-            if ($result === false) {
-                wp_cache_set($key, 1, self::CACHE_GROUP, 3600);
-            }
+            \BCC\Trust\Core\Support\CacheGeneration::bump('reliability_gen_' . $userId, self::CACHE_GROUP);
             return;
         }
 

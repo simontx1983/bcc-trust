@@ -41,6 +41,14 @@ namespace BCC\Trust\Core\Services {
         {
         }
     }
+    // F-253: AccountRecoveryService::markHasPassword() writes here.
+    if (!function_exists('BCC\\Trust\\Core\\Services\\update_user_meta')) {
+        function update_user_meta($userId, $key, $value)
+        {
+            $GLOBALS['__bcc_user_meta'][(int) $userId][$key] = $value;
+            return true;
+        }
+    }
 }
 
 namespace BCC\Trust\Core\Support {

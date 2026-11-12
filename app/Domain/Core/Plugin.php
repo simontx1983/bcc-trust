@@ -984,6 +984,16 @@ final class Plugin
     }
 
     private ?Repositories\PageFollowRepository $pageFollowRepository = null;
+    private ?Services\ViewerWatchResolver $viewerWatchResolver = null;
+    /** F-255: per-card "is the viewer watching this?" for any watchlist size. */
+    public function viewerWatchResolver(): Services\ViewerWatchResolver
+    {
+        return $this->viewerWatchResolver ??= new Services\ViewerWatchResolver(
+            $this->watchingRepository(),
+            $this->pageFollowRepository()
+        );
+    }
+
     public function pageFollowRepository(): Repositories\PageFollowRepository
     {
         return $this->pageFollowRepository ??= new Repositories\PageFollowRepository();
@@ -2376,6 +2386,20 @@ final class Plugin
             $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
                 $i->reverse('post', (int) $postId, $mode === 'owner' ? 'author_self_delete' : 'admin_removed'));
         }, 20, 4);
+
+        // F-277: drop a just-deleted post from the cached anon hot-feed
+        // first page now, not at the next warm tick / TTL. Best-effort: the
+        // delete has already committed, so a failure here is logged only.
+        add_action('bcc_post_deleted', function ($viewerId, $actId): void {
+            try {
+                $this->feedRankingService()->forgetDeletedPost((int) $actId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] hot-feed refresh after delete failed', [
+                    'act_id' => (int) $actId,
+                    'error'  => $e->getMessage(),
+                ]);
+            }
+        }, 30, 2);
 
         // Comment deletion — same farming loop as posts, same fix. The
         // only BCC deletion chokepoint is CommentService::deleteComment

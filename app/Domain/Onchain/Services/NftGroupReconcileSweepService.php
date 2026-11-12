@@ -69,7 +69,7 @@ final class NftGroupReconcileSweepService
     /**
      * Run one bounded, rotated reconcile tick under SWEEP_LOCK.
      *
-     * @return array{checked: int, users_touched: int, joins_total: int, errored: int, skipped_overlap: bool}
+     * @return array{checked: int, users_touched: int, joins_total: int, errored: int, skipped_overlap: bool, lock_unavailable: bool}
      */
     public function sweep(): array
     {
@@ -77,7 +77,9 @@ final class NftGroupReconcileSweepService
             \BCC\Core\Log\Logger::error('[bcc-trust] Holder-group reconcile sweep cannot be serialized: AdvisoryLock is unavailable', [
                 'lock' => self::SWEEP_LOCK,
             ]);
-            return self::emptyStats(true);
+            // Skipped like an overlap, but flagged so the admin page states
+            // the real reason instead of "another sweep was running".
+            return self::emptyStats(true, true);
         }
         if (!\BCC\Core\DB\AdvisoryLock::acquire(self::SWEEP_LOCK, 0)) {
             return self::emptyStats(true); // Another tick is running — never overlap.
@@ -91,15 +93,22 @@ final class NftGroupReconcileSweepService
     }
 
     /**
-     * @return array{checked: int, users_touched: int, joins_total: int, errored: int, skipped_overlap: bool}
+     * @return array{checked: int, users_touched: int, joins_total: int, errored: int, skipped_overlap: bool, lock_unavailable: bool}
      */
-    private static function emptyStats(bool $skippedOverlap): array
+    private static function emptyStats(bool $skippedOverlap, bool $lockUnavailable = false): array
     {
-        return ['checked' => 0, 'users_touched' => 0, 'joins_total' => 0, 'errored' => 0, 'skipped_overlap' => $skippedOverlap];
+        return [
+            'checked'          => 0,
+            'users_touched'    => 0,
+            'joins_total'      => 0,
+            'errored'          => 0,
+            'skipped_overlap'  => $skippedOverlap,
+            'lock_unavailable' => $lockUnavailable,
+        ];
     }
 
     /**
-     * @return array{checked: int, users_touched: int, joins_total: int, errored: int, skipped_overlap: bool}
+     * @return array{checked: int, users_touched: int, joins_total: int, errored: int, skipped_overlap: bool, lock_unavailable: bool}
      */
     private function runSweep(): array
     {

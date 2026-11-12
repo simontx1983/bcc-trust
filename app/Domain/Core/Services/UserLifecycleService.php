@@ -60,6 +60,10 @@ class UserLifecycleService
         // wp-admin / PeepSo-profile password-CHANGE path is handled by the
         // hash diff in onProfileUpdate below.
         add_action('after_password_reset', [$this, 'onPasswordReset'], 10, 1);
+        // F-253: wp_set_password() — the in-app change and core
+        // reset_password() both go through it — means the member now knows
+        // their password. (The wp-admin edit is the hash diff below.)
+        add_action('wp_set_password', [$this, 'onPasswordSet'], 10, 2);
         add_action('wp_login', [$this, 'onLogin'], 10, 2);
         add_action('peepso_page_created', [$this, 'onPageCreated']);
         add_action('before_delete_post', [$this, 'onPageDelete'], 10, 1);
@@ -108,6 +112,7 @@ class UserLifecycleService
                 && $fresh->user_pass !== $oldUserData->user_pass
             ) {
                 JwtToken::revokeAllForUser($userId);
+                AccountRecoveryService::markHasPassword($userId);
             }
         }
 
@@ -132,6 +137,17 @@ class UserLifecycleService
         if ($user instanceof \WP_User) {
             JwtToken::revokeAllForUser((int) $user->ID);
         }
+    }
+
+    /**
+     * WP `wp_set_password` (WP 6.2+) — ($password, $user_id). F-253: a set
+     * password is one the member knows, so the settings forms stop treating
+     * the account as wallet-only. The plaintext is never touched.
+     */
+    public function onPasswordSet(mixed $password, mixed $userId): void
+    {
+        unset($password);
+        AccountRecoveryService::markHasPassword((int) $userId);
     }
 
     /**

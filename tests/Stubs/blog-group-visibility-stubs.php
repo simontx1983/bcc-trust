@@ -73,18 +73,33 @@ namespace BCC\Core\Repositories {
                 ?array $restrictedGroupIds = null,
                 ?string $groupGateMode = null,
                 ?array $viewerMemberGroupIds = null,
-                int $viewerId = 0
+                int $viewerId = 0,
+                // §F-02 per-post visibility, present so this stub still
+                // matches the real signature. BlogService passes these two
+                // BY NAME, and a stub missing them makes every test in
+                // this file ERROR with "Unknown named parameter" instead
+                // of failing an assertion — which is how the whole class
+                // went red when the gate was wired.
+                //
+                // Recorded, because the group gate and the profile gate
+                // STACK and a reader here benefits from seeing both, but
+                // nothing in this file asserts on them:
+                // BlogTabPostVisibilityWiringTest owns that.
+                ?array $viewerFriendIds = null,
+                bool $enforcePostVisibility = false
             ): array {
                 self::$calls[] = [
-                    'authorIds'            => $authorIds,
-                    'moduleIds'            => $moduleIds,
-                    'limit'                => $limit,
-                    'onlyForGroupId'       => $onlyForGroupId,
-                    'excludedGroupIds'     => $excludedGroupIds,
-                    'restrictedGroupIds'   => $restrictedGroupIds,
-                    'groupGateMode'        => $groupGateMode,
-                    'viewerMemberGroupIds' => $viewerMemberGroupIds,
-                    'viewerId'             => $viewerId,
+                    'authorIds'             => $authorIds,
+                    'moduleIds'             => $moduleIds,
+                    'limit'                 => $limit,
+                    'onlyForGroupId'        => $onlyForGroupId,
+                    'excludedGroupIds'      => $excludedGroupIds,
+                    'restrictedGroupIds'    => $restrictedGroupIds,
+                    'groupGateMode'         => $groupGateMode,
+                    'viewerMemberGroupIds'  => $viewerMemberGroupIds,
+                    'viewerId'              => $viewerId,
+                    'viewerFriendIds'       => $viewerFriendIds,
+                    'enforcePostVisibility' => $enforcePostVisibility,
                 ];
 
                 return self::$rows;

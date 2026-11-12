@@ -55,6 +55,10 @@ require_once __DIR__ . '/schema-attestor-reliability-cache.php';
 // Post-shortcode permalink sidecar — act_id → 8-letter code behind
 // /u/{handle}/post/{code}. Includes a one-time option-guarded dev backfill.
 require_once __DIR__ . '/schema-post-shortcodes.php';
+// F-324 post analytics (REACH half) — per (post, UTC day, source) counters
+// plus the 48-hour dedupe guard that makes `unique_viewers` meaningful.
+require_once __DIR__ . '/schema-post-reach-daily.php';
+require_once __DIR__ . '/schema-post-view-dedupe.php';
 // Rank redesign Phase 1 data planes — explicit-login day buckets +
 // daily trust-tier qualification history (approved plan 2026-07-31).
 require_once __DIR__ . '/schema-login-days.php';
@@ -226,6 +230,14 @@ function bcc_trust_create_tables() {
         bcc_trust_create_tier_days_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Tier days table created', []);
     }
+    if (function_exists('bcc_trust_create_post_reach_daily_table')) {
+        bcc_trust_create_post_reach_daily_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Post reach daily table created', []);
+    }
+    if (function_exists('bcc_trust_create_post_view_dedupe_table')) {
+        bcc_trust_create_post_view_dedupe_table();
+        \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Post view dedupe table created', []);
+    }
     if (function_exists('bcc_trust_create_rank_events_table')) {
         bcc_trust_create_rank_events_table();
         \BCC\Core\Log\Logger::info('[bcc-trust] BCC Trust: Rank events table created', []);
@@ -370,6 +382,9 @@ function bcc_trust_verify_all_tables() {
         // Rank redesign Phase 1 data planes
         'bcc_trust_login_days',
         'bcc_trust_tier_days',
+        // F-324 post analytics (REACH)
+        'bcc_trust_post_reach_daily',
+        'bcc_trust_post_view_dedupe',
         // Rank redesign Phase 4 evidence ledger (shadow)
         'bcc_trust_rank_events',
         'bcc_trust_cluster_findings',

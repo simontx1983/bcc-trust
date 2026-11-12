@@ -441,6 +441,15 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_display_name_placeholders_backfilled_v3',
                 'callback'    => 'bcc_trust_backfill_display_name_placeholders',
             ],
+            // F-280: members who renamed before a rename retired the old
+            // handle get their ORIGINAL handle (from the u_<handle> login)
+            // recorded as retired, so its old /u/ links resolve again and
+            // nobody else can take it. See retire-renamed-original-handles.php.
+            [
+                'id'          => 'retire_renamed_original_handles_v1',
+                'done_option' => 'bcc_trust_renamed_original_handles_retired',
+                'callback'    => 'bcc_trust_retire_renamed_original_handles',
+            ],
         ];
     }
 

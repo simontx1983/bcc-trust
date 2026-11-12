@@ -143,6 +143,12 @@ final class MemberCardPrefetcher
                 : [];
         }
 
+        // F-255: the viewer's watch (follow) handle per member card — one
+        // bounded IN() for the page. Same key the page-card bundle uses.
+        $map['viewer_watches'] = $viewerId > 0 && $idList !== []
+            ? \BCC\Trust\Core\Plugin::instance()->viewerWatchResolver()->forMembers($viewerId, $idList)
+            : [];
+
         return $map;
     }
 }

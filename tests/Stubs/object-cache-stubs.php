@@ -76,6 +76,19 @@ namespace {
         }
     }
 
+    if (!function_exists('wp_cache_add')) {
+        /** @param mixed $value Set-if-absent (Redis SET NX). */
+        function wp_cache_add(string $key, $value, string $group = '', int $ttl = 0): bool
+        {
+            $k = $group . ':' . $key;
+            if (array_key_exists($k, \BccTestPersistentCache::$store)) {
+                return false;
+            }
+            \BccTestPersistentCache::$store[$k] = $value;
+            return true;
+        }
+    }
+
     if (!function_exists('wp_cache_delete')) {
         function wp_cache_delete(string $key, string $group = ''): bool
         {

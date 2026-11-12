@@ -216,7 +216,9 @@ final class GroupsService
             $isNftHolder,
             $isOwner,
             $trustGateMin,
-            is_string($validatorStats['min_stake_display'] ?? null) ? $validatorStats['min_stake_display'] : null
+            is_string($validatorStats['min_stake_display'] ?? null) ? $validatorStats['min_stake_display'] : null,
+            // F-271: a ban is a moderator removal; never offer Join.
+            !$isMember && $this->membershipStatus($viewerId, $groupId) === 'banned'
         );
 
         $feedVisible    = $permissions['can_read_feed']['allowed'];
@@ -751,9 +753,10 @@ final class GroupsService
         bool $isNftHolder,
         bool $isOwner = false,
         int $trustGateMin = 0,
-        ?string $validatorMinStakeDisplay = null
+        ?string $validatorMinStakeDisplay = null,
+        bool $isBanned = false
     ): array {
-        $canJoin     = $this->resolveCanJoin($ctx, $viewerId, $isMember, $isNftHolder, $trustGateMin, $validatorMinStakeDisplay);
+        $canJoin     = $this->resolveCanJoin($ctx, $viewerId, $isMember, $isNftHolder, $trustGateMin, $validatorMinStakeDisplay, $isBanned);
         $canLeave    = $this->resolveCanLeave($viewerId, $isMember, $isOwner);
         $canReadFeed = $this->resolveCanReadFeed($ctx, $viewerId, $isMember);
 
@@ -773,7 +776,8 @@ final class GroupsService
         bool $isMember,
         bool $isNftHolder,
         int $trustGateMin = 0,
-        ?string $validatorMinStakeDisplay = null
+        ?string $validatorMinStakeDisplay = null,
+        bool $isBanned = false
     ): array {
         if ($viewerId <= 0) {
             return [
@@ -788,6 +792,17 @@ final class GroupsService
                 'allowed'     => false,
                 'unlock_hint' => null,
                 'reason_code' => 'already_member',
+            ];
+        }
+
+        // F-271: a PeepSo ban (a moderator removal). Every join door refuses
+        // it, so the button must not be offered. Above every type branch:
+        // holding the NFT or the delegation does not lift a ban.
+        if ($isBanned) {
+            return [
+                'allowed'     => false,
+                'unlock_hint' => 'A moderator removed you from this community.',
+                'reason_code' => 'removed',
             ];
         }
 

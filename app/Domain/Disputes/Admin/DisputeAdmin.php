@@ -394,6 +394,9 @@ class DisputeAdmin
         }
         $table->display();
         echo '</form>';
+        // F-308: the row action forms, OUTSIDE the GET form above. Nested
+        // inside it, the first one was dropped by the HTML parser.
+        $table->renderRowForms();
         echo '</div>';
     }
 

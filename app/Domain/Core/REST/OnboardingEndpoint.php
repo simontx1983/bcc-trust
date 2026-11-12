@@ -219,9 +219,33 @@ final class OnboardingEndpoint
             return ApiResponse::error('bcc_rate_limited', 'Too many handle changes. Try again later.', 429);
         }
 
+        // F-280: the outgoing handle becomes this member's RETIRED handle,
+        // written BEFORE the new one (the order rotate-login-handles.php
+        // uses), so there is no moment when it is neither held nor
+        // reserved. Old /u/<old> links and @old mentions then keep
+        // resolving to this member (UserSlugResolver), and nobody else can
+        // take the handle. Not written twice: renaming back and forth must
+        // not pile up rows. If the write fails the rename does not happen,
+        // or the old handle would be up for grabs with links still on it.
+        if ($current !== '') {
+            /** @var list<string> $retired */
+            $retired = (array) get_user_meta($userId, HandleService::META_HANDLE_RETIRED, false);
+            if (!in_array($current, $retired, true)
+                && add_user_meta($userId, HandleService::META_HANDLE_RETIRED, $current, false) === false
+            ) {
+                return ApiResponse::error('bcc_internal_error', 'Could not change your handle. Please try again.', 500);
+            }
+        }
+
         $now = time();
         update_user_meta($userId, HandleService::META_HANDLE, $handle);
         update_user_meta($userId, HandleService::META_HANDLE_LAST_CHANGED, $now);
+
+        // Reclaiming one of this member's OWN retired handles
+        // (HandleService::isAvailable allows it): it is current again, so
+        // drop the retired row, AFTER the write, so links never stop
+        // resolving. A no-op when $handle was never retired.
+        delete_user_meta($userId, HandleService::META_HANDLE_RETIRED, $handle);
 
         Logger::audit('handle_changed', [
             'user_id'        => $userId,
