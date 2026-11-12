@@ -165,6 +165,24 @@ final class BulkActionPostOnlyIntegrationTest extends TestCase
         self::assertStringContainsString("check_admin_referer( 'bcc_trust_bulk_action' )", $src);
     }
 
+    public function testTheCapabilityAndNonceGatesComeBeforeTheAction(): void
+    {
+        // F-96: present is not enough. A capability or nonce check moved
+        // below handleBulkAction() still "contains" the token, but runs
+        // after the users were already changed.
+        $src = $this->hookSource();
+
+        $cap    = strpos($src, "current_user_can( 'manage_options' )");
+        $nonce  = strpos($src, "check_admin_referer( 'bcc_trust_bulk_action' )");
+        $action = strpos($src, 'handleBulkAction');
+
+        self::assertNotFalse($cap);
+        self::assertNotFalse($nonce);
+        self::assertNotFalse($action);
+        self::assertLessThan($action, $cap, 'the capability gate must precede the action');
+        self::assertLessThan($action, $nonce, 'the nonce gate must precede the action');
+    }
+
     public function testTheArrayParseSurvivedTheChange(): void
     {
         // ⚠ The whole point of tracing the submitter first: the gate must not

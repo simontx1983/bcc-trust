@@ -177,6 +177,62 @@ final class AnnouncementPublicationGuardTest extends TestCase
         self::assertStringContainsString('Authority::decide(', $code);
     }
 
+    /** The comment-stripped body of one guard method, bounded by the next. */
+    private static function method(string $name): string
+    {
+        $code  = self::code(self::GUARD);
+        $start = strpos($code, 'function ' . $name . '(');
+        self::assertIsInt($start, $name . '() is gone from the guard');
+        $end = strpos($code, 'function ', $start + 10);
+        self::assertIsInt($end, 'a following method bounds the slice');
+
+        return substr($code, $start, $end - $start);
+    }
+
+    /**
+     * F-96: the marker write and the published event only happen on the
+     * AUTHORIZED branch. Each of these tokens is already asserted to exist;
+     * this pins their order, so moving affirm() or the do_action above the
+     * stillAuthorized() check (or below the block) fails.
+     *
+     * @return iterable<string, array{string, string}>
+     */
+    public static function authorizedOnlyWork(): iterable
+    {
+        yield 'scheduled promotion writes the marker' => ['vetoScheduledPublication', 'self::affirm('];
+        yield 'transition fires the published event'  => ['onTransition', "do_action('bcc_announcement_published'"];
+    }
+
+    #[DataProvider('authorizedOnlyWork')]
+    public function testTheWorkSitsBehindTheAuthorityCheck(string $method, string $work): void
+    {
+        $body = self::method($method);
+
+        $gate  = strpos($body, 'if (self::stillAuthorized(');
+        $act   = strpos($body, $work);
+        $block = strpos($body, 'self::block(');
+
+        self::assertIsInt($gate, $method . ': the authority check');
+        self::assertIsInt($act, $method . ': the work');
+        self::assertIsInt($block, $method . ': the refusal');
+        self::assertLessThan($act, $gate, $method . ': the authority check must come first');
+        self::assertLessThan($block, $act, $method . ': the work is the authorized branch, before the refusal');
+    }
+
+    /** stillAuthorized() answers from the authority's decision, not a default. */
+    public function testStillAuthorizedAnswersFromTheDecision(): void
+    {
+        $body = self::method('stillAuthorized');
+
+        $decide = strpos($body, 'Authority::decide(');
+        $answer = strpos($body, '=== Authority::DECISION_OPERATOR');
+
+        self::assertIsInt($decide);
+        self::assertIsInt($answer);
+        self::assertLessThan($answer, $decide, 'the decision is read before it is compared');
+        self::assertStringNotContainsString('return true;', $body, 'no path is authorized without the decision');
+    }
+
     /** An unreadable authority answer is not permission. */
     public function testAnUnreadableAuthorityAnswerFailsClosed(): void
     {
