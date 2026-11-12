@@ -1091,15 +1091,27 @@ class ClaimRepository {
      *
      * Idempotent: a claim that is not (or no longer) verified is a no-op.
      *
-     * @return array{revoked: bool, user_id: int, entity_type: string, entity_id: int, claim_role: string, mirror_page_ids: list<int>}
+     * ⚠ NEVER call this inside TransactionManager::run(). It opens its own
+     * transaction, and a START TRANSACTION inside an open one implicitly
+     * COMMITS the outer one. That is refused up front (F-14 PR B1).
+     *
+     * `bound_page_ids` are every page bound to the claim's entity; the
+     * caller resyncs their read model (`has_verified_claim`).
+     *
+     * @return array{revoked: bool, user_id: int, entity_type: string, entity_id: int, claim_role: string, mirror_page_ids: list<int>, bound_page_ids: list<int>}
      * @throws RepositoryReadFailure on a failed read
      * @throws \RuntimeException on a failed transaction or write
+     * @throws \LogicException when called inside a TransactionManager run
      */
     public static function revoke(int $claimId): array
     {
         global $wpdb;
         $table = self::table();
-        $none  = ['revoked' => false, 'user_id' => 0, 'entity_type' => '', 'entity_id' => 0, 'claim_role' => '', 'mirror_page_ids' => []];
+        $none  = ['revoked' => false, 'user_id' => 0, 'entity_type' => '', 'entity_id' => 0, 'claim_role' => '', 'mirror_page_ids' => [], 'bound_page_ids' => []];
+
+        if (\BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()) {
+            throw new \LogicException('ClaimRepository::revoke() must not run inside a TransactionManager transaction');
+        }
 
         if ($claimId <= 0) {
             return $none;
@@ -1129,9 +1141,10 @@ class ClaimRepository {
             $entityType = (string) $claim->entity_type;
             $entityId   = (int) $claim->entity_id;
 
-            $mirrorIds  = [];
+            $mirrorIds   = [];
             $mirrorPages = [];
-            foreach (self::boundPageIds($entityType, $entityId) as $pageId) {
+            $boundPages  = self::boundPageIds($entityType, $entityId);
+            foreach ($boundPages as $pageId) {
                 if (self::otherVerifiedClaimBoundToPage($userId, $claimId, $pageId)) {
                     continue; // the user still holds this page through another claim
                 }
@@ -1174,6 +1187,7 @@ class ClaimRepository {
                 'entity_id'       => $entityId,
                 'claim_role'      => (string) $claim->claim_role,
                 'mirror_page_ids' => array_values(array_unique($mirrorPages)),
+                'bound_page_ids'  => $boundPages,
             ];
         } catch (\Throwable $e) {
             $wpdb->query('ROLLBACK');
