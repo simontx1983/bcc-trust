@@ -71,12 +71,14 @@ final class RateLimitRepository
         //       courtesy of the LAST_INSERT_ID(expr) call above)
         //   0 = no change (shouldn't happen for ODKU, but treat as failure)
         if ($result === 1) {
-            // Fresh insert: write the companion _transient_timeout_* row so
-            // WP's native transient-expiry path also reaps these keys. The
-            // bcc-core bcc_core_rl_cleanup cron already covers this range,
-            // but the companion row gives us belt-and-suspenders GC
-            // (expired-read auto-delete via get_transient + WP core GC).
-            self::writeTransientTimeoutCompanion($optionKey, $freshValue);
+            // Fresh insert: the count is exactly 1. No _transient_timeout_*
+            // companion row is written (F-126). It was meant as backup GC, but
+            // nothing ever reads these keys through get_transient(), and WP's
+            // delete_expired_transients() only reaps a main row and its
+            // timeout row as a PAIR, so once bcc-core's cleanup cron removed
+            // the main row the companion was never deleted by anyone. The
+            // cron (bcc_core_rl_cleanup → RateLimitRowCleanup) is the GC path,
+            // and it also sweeps companions already written.
             return 1;
         }
 
@@ -93,53 +95,6 @@ final class RateLimitRepository
         }
 
         return $newCount;
-    }
-
-    /**
-     * Write the _transient_timeout_* companion row used by WP's native
-     * transient GC. Silent no-op when $optionKey is not a _transient_*
-     * row (the rate limiter's key format always is, but callers may pass
-     * bare keys in future). Best-effort — failure is logged but never
-     * propagated since the primary counter INSERT has already succeeded
-     * and the bcc-core cleanup cron is the authoritative GC path.
-     */
-    private static function writeTransientTimeoutCompanion(string $optionKey, string $freshValue): void
-    {
-        global $wpdb;
-
-        $prefix = '_transient_';
-        if (strncmp($optionKey, $prefix, strlen($prefix)) !== 0) {
-            return;
-        }
-
-        // Parse expires from the "count|expires" freshValue. The counter
-        // INSERT just committed this same value, so on failure to parse
-        // we simply skip — the bcc-core range cleanup still reaps these.
-        $parts     = explode('|', $freshValue, 2);
-        $expiresAt = isset($parts[1]) ? (int) $parts[1] : 0;
-        if ($expiresAt <= 0) {
-            return;
-        }
-
-        // Transient name is the key without the _transient_ prefix.
-        // Companion row name is _transient_timeout_{name}.
-        $transientName = substr($optionKey, strlen($prefix));
-        $timeoutKey    = '_transient_timeout_' . $transientName;
-
-        $result = $wpdb->query($wpdb->prepare(
-            "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload)
-             VALUES (%s, %s, 'no')",
-            $timeoutKey,
-            (string) $expiresAt
-        ));
-
-        if ($result === false && class_exists('\\BCC\\Core\\Log\\Logger')) {
-            \BCC\Core\Log\Logger::error('[bcc-trust] rate_limit_timeout_companion_failed', [
-                'bucket_key'  => $optionKey,
-                'timeout_key' => $timeoutKey,
-                'db_error'    => $wpdb->last_error,
-            ]);
-        }
     }
 
     /**

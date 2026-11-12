@@ -248,7 +248,7 @@ class RateLimiter {
             $allowed = $allowedByUser && $allowedByIp;
             $slidingKey = $allowedByUser ? $ipKey : $userKey;
         } else {
-            // Normalize IP to /24 (IPv4) or /64 (IPv6) subnet to bound
+            // Normalize IP to /24 (IPv4) or /48 (IPv6) subnet to bound
             // key cardinality and prevent DB growth from rotating IPs.
             $subnet = self::normalizeIpToSubnet($ip);
             $slidingKey = "{$action}_anon_{$subnet}";
@@ -450,6 +450,11 @@ class RateLimiter {
      * Normalize an IP to its subnet to bound key cardinality.
      * IPv4 → /24, IPv6 → /48. Invalid → returned as-is.
      *
+     * IPv4-mapped IPv6 (::ffff:a.b.c.d, what a dual-stack socket reports for
+     * an IPv4 peer) keys on that IPv4's /24 (F-126). Masked as IPv6 its first
+     * 6 bytes are zero, so every such client shared ONE bucket ("::").
+     * bcc-core's Throttle normalizes the same way.
+     *
      * IPv6 uses /48 (not /64) because a /48 is the standard end-site
      * allocation (RFC 6177). Normalizing to /64 lets an attacker on a
      * single ISP customer allocation hop across /64 subnets and get a
@@ -465,8 +470,12 @@ class RateLimiter {
 
         if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
             $packed = inet_pton($ip);
-            if ($packed === false) {
+            if ($packed === false || strlen($packed) !== 16) {
                 return $ip;
+            }
+            if (substr($packed, 0, 12) === str_repeat("\0", 10) . "\xff\xff") {
+                $v4 = inet_ntop(substr($packed, 12, 4));
+                return $v4 === false ? $ip : self::normalizeIpToSubnet($v4);
             }
             // Zero out bytes 7-16 (the host + subnet-ID part of a /48).
             $masked = substr($packed, 0, 6) . str_repeat("\0", 10);
