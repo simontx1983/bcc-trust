@@ -852,8 +852,12 @@ final class CollectionRepository
              JOIN {$wallets} w ON w.id = c.wallet_link_id
              JOIN {$chains} ch ON ch.id = c.chain_id
              WHERE w.post_id = %d{$visibilityFilter}
-             ORDER BY c.{$orderBy} DESC
+             ORDER BY c.{$orderBy} DESC, c.id DESC
              LIMIT %d OFFSET %d",
+            // F-143: `c.id DESC` is the unique tiebreak (as in
+            // listForAdminVerification / listForAdminState). Collections tied
+            // on the sort column (e.g. many with no volume) otherwise came
+            // back in no fixed order and skipped or repeated across pages.
             $postId, $perPage, $offset
         ));
 
@@ -1919,6 +1923,8 @@ final class CollectionRepository
         global $wpdb;
         $table = self::table();
 
+        // F-101: a failed read used to cache an empty map ("0 collections on
+        // every chain") for an hour. It now answers empty for this call only.
         try {
             /** @var list<CollectionCountByChain> $rows */
             $rows = self::runRead(
@@ -1930,11 +1936,7 @@ final class CollectionRepository
                 __FUNCTION__,
                 true
             );
-        } catch (RepositoryReadFailure $e) {
-            // F-101 class: a failed read is NOT "no collections on any chain".
-            // Answer empty for this request (callers are display surfaces)
-            // but never CACHE it — the old code stored the empty map for an
-            // hour, so one blip blanked every chain's count until expiry.
+        } catch (RepositoryReadFailure) {
             return [];
         }
 

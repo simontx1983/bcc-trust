@@ -110,7 +110,7 @@ final class NftSelectionController
     public static function rest_list(\WP_REST_Request $req): \WP_REST_Response
     {
         $userId = get_current_user_id();
-        $items  = NftSelectionRepository::getForUser($userId);
+        $items  = NftSelectionService::presentSelections(NftSelectionRepository::getForUser($userId));
         return ApiResponse::ok([
             'items' => $items,
         ]);

@@ -958,7 +958,9 @@ final class ValidatorRepository
         }
         $orderColumn = $orderColumns[$orderBy];
 
-        $orderDir = ($orderBy === 'voting_power_rank' || $orderBy === 'commission_rate') ? 'ASC' : 'DESC';
+        // Rank, commission and chain name read naturally low-to-high / A-Z;
+        // the stake-like metrics read high-to-low.
+        $orderDir = in_array($orderBy, ['voting_power_rank', 'commission_rate', 'chain_name'], true) ? 'ASC' : 'DESC';
         $offset   = ($page - 1) * $perPage;
 
         $total = (int) $wpdb->get_var($wpdb->prepare(

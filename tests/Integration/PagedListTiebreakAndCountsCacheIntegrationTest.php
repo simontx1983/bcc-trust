@@ -128,6 +128,32 @@ final class PagedListTiebreakAndCountsCacheIntegrationTest extends TestCase
         self::assertCount(3, $result['items'], 'it used to error on v.chain_name and return an empty page');
     }
 
+    /** #536 review Info: the chain_name sort reads A→Z, not Z→A. */
+    public function testTheChainNameSortIsAscending(): void
+    {
+        $wpdb = $GLOBALS['wpdb'];
+        $this->seedTiedValidators(1); // on cosmos
+        $other = ChainRepository::resolveIdAnyState('ethereum');
+        self::assertIsInt($other, 'a second seeded chain');
+        $link = (int) $wpdb->get_var($wpdb->prepare('SELECT id FROM `' . WalletRepository::table() . '` WHERE post_id = %d', self::POST));
+        $wpdb->query($wpdb->prepare(
+            'INSERT INTO `' . ValidatorRepository::table() . '` (wallet_link_id, operator_address, chain_id, total_stake, expires_at) VALUES (%d, %s, %d, 1, UTC_TIMESTAMP())',
+            $link, 'f143valeth', $other
+        ));
+        self::assertSame('', $wpdb->last_error, 'fixture: second-chain validator');
+
+        $names = array_map(
+            static fn (object $r): string => (string) $r->chain_name,
+            ValidatorRepository::getForProject(self::POST, 1, 8, 'chain_name')['items']
+        );
+        $sorted = $names;
+        sort($sorted, SORT_STRING | SORT_FLAG_CASE);
+
+        self::assertCount(2, $names);
+        self::assertNotSame($names[0], $names[1], 'fixture: two different chain names');
+        self::assertSame($sorted, $names, 'chain names come back A→Z');
+    }
+
     // ── getCountsByChain: never cache a failed read ─────────────────────
 
     public function testAFailedValidatorCountsReadIsNotCached(): void

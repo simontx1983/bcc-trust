@@ -18,6 +18,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 use Exception;
 use BCC\Trust\Core\Exceptions\RepositoryException;
 use BCC\Trust\Core\Security\TransactionManager;
+use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 
 /**
  * Row shape returned by bcc_trust_votes reads. Numeric columns are returned
@@ -147,6 +149,8 @@ use BCC\Trust\Core\Security\TransactionManager;
  */
 class VoteRepository {
 
+    use GuardsReadFailures;
+
     /** Explicit column list for bcc_trust_votes table. */
     private const COLUMNS = 'id, voter_user_id, page_id, category_id, vote_type, weight, vested_weight, fraud_score_at_vote, vesting_stage, vesting_started_at, fully_vested_at, weight_corrected_at, reason, explanation, status, ip_address, created_at, updated_at';
 
@@ -254,12 +258,18 @@ class VoteRepository {
         }
 
         global $wpdb;
-        $row = $wpdb->get_row(
-            $wpdb->prepare(
+        // F-101: a failed read used to be cached as "no such vote" ('') for
+        // CACHE_TTL. It now reads as null for this call only.
+        try {
+            $rows = self::runRead((string) $wpdb->prepare(
                 "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE id = %d",
                 $voteId
-            )
-        );
+            ), __FUNCTION__, true);
+        } catch (RepositoryReadFailure) {
+            return null;
+        }
+        /** @var VoteRow|null $row */
+        $row = $rows[0] ?? null;
 
         wp_cache_set($cacheKey, $row ?: '', self::CACHE_GROUP, self::CACHE_TTL);
         return $row;
@@ -1440,6 +1450,22 @@ class VoteRepository {
      * @phpstan-return VotePageStatsRow
      */
     public function getPageStats( int $pageId ): object {
+        try {
+            return $this->getPageStatsOrFail( $pageId );
+        } catch ( RepositoryReadFailure ) {
+            // Display fail-open: zero stats for this call, NOT cached (F-101).
+            return self::emptyPageStats();
+        }
+    }
+
+    /**
+     * getPageStats() for WRITE paths (RepairService rewrites total_score
+     * from these): a failed read THROWS instead of reading as "no votes".
+     *
+     * @phpstan-return VotePageStatsRow
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public function getPageStatsOrFail( int $pageId ): object {
         $cacheKey = "page_vote_stats_{$pageId}";
         $cached   = wp_cache_get( $cacheKey, 'bcc_trust_votes' );
 
@@ -1449,7 +1475,9 @@ class VoteRepository {
 
         global $wpdb;
 
-        $stats = $wpdb->get_row( $wpdb->prepare(
+        // F-101: a failed read used to fall into the "no row" branch below
+        // and cache zero stats for 60s; runRead() throws before that.
+        $rows = self::runRead( (string) $wpdb->prepare(
             "SELECT
                 COUNT(*) as total_votes,
                 SUM(CASE WHEN vote_type > 0 THEN weight ELSE 0 END) as total_positive_weight,
@@ -1463,23 +1491,30 @@ class VoteRepository {
                AND v.status  = 1
                AND " . $this->hiddenReviewExclusion('v'),
             $pageId
-        ) );
+        ), 'getPageStats', true );
 
+        /** @var VotePageStatsRow|null $stats */
+        $stats = $rows[0] ?? null;
         if ( ! $stats ) {
-            $stats = (object) [
-                'total_votes'           => 0,
-                'total_positive_weight' => 0,
-                'total_negative_weight' => 0,
-                'unique_voters'         => 0,
-                'last_vote_at'          => null,
-                'avg_upvote_weight'     => 0,
-                'avg_downvote_weight'   => 0,
-            ];
+            $stats = self::emptyPageStats();
         }
 
         wp_cache_set( $cacheKey, $stats, 'bcc_trust_votes', 60 );
 
         return $stats;
+    }
+
+    /** @phpstan-return VotePageStatsRow */
+    private static function emptyPageStats(): object {
+        return (object) [
+            'total_votes'           => 0,
+            'total_positive_weight' => 0,
+            'total_negative_weight' => 0,
+            'unique_voters'         => 0,
+            'last_vote_at'          => null,
+            'avg_upvote_weight'     => 0,
+            'avg_downvote_weight'   => 0,
+        ];
     }
 
     /**

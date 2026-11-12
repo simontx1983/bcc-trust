@@ -161,15 +161,9 @@ final class MentionOverlayService
             return null;
         }
 
-        $handleRaw = get_user_meta($userId, 'bcc_handle', true);
-        $handle = is_string($handleRaw) && $handleRaw !== ''
-            ? $handleRaw
-            : (string) $user->user_login;
-
-        $displayName = (string) $user->display_name;
-        if ($displayName === '') {
-            $displayName = (string) $user->user_login;
-        }
+        $identity    = \BCC\Trust\Core\Support\PublicIdentity::forUser($user);
+        $handle      = $identity['handle'];
+        $displayName = $identity['display_name'];
 
         // Cached seam (honors the avatar-change bust hook; the media
         // cache also collapses repeat mentions of the same user within

@@ -95,9 +95,12 @@ final class FeedHydrationPipeline
         $items = $this->hydrateAuthorBadges($items);
         $items = $this->hydrateAuthorRanks($items);
         $items = $this->hydrateAuthorVouch($items, $viewerId);
-        $items = $this->hydrateSocialProofReactors($items);
+        $items = $this->hydrateSocialProofReactors($items, $viewerId);
         $items = self::hydrateViewerPermissions($items, $viewerId);
         $items = $this->hydrateGroupContexts($items, $viewerId);
+        // F-90: after group contexts (it reads the `group` block), same rule
+        // as the comment-count gate below.
+        $items = $this->gateReactionSignals($items, $viewerId);
         $items = self::hydratePageContexts($items);
         $items = $this->hydrateCommentCounts($items, $viewerId);
         // Links stage runs LAST — after hydrateAuthorBadges/Ranks, so
@@ -999,7 +1002,7 @@ final class FeedHydrationPipeline
      * @param list<array<string, mixed>> $items
      * @return list<array<string, mixed>>
      */
-    private function hydrateSocialProofReactors(array $items): array
+    private function hydrateSocialProofReactors(array $items, int $viewerId): array
     {
         if ($items === []) {
             return [];
@@ -1046,6 +1049,28 @@ final class FeedHydrationPipeline
         }
         $reactorUserIds = array_keys($userIdSet);
 
+        // ⚠ F-90: faces never show a SUSPENDED member, or one the viewer has
+        // blocked or is blocked by (both directions, as the feed's author
+        // filter does). Either read failing drops EVERY face on the page:
+        // faces are decoration, so showing none is the safe answer, and the
+        // headline count is unaffected.
+        $excluded = self::excludedReactorIds($reactorUserIds, $viewerId);
+        if ($excluded === null) {
+            return $items;
+        }
+        if ($excluded !== []) {
+            $reactorUserIds = array_values(array_diff($reactorUserIds, array_keys($excluded)));
+            foreach ($reactorsByAct as $actId => $uids) {
+                $reactorsByAct[$actId] = array_values(array_filter(
+                    $uids,
+                    static fn (int $uid): bool => !isset($excluded[$uid])
+                ));
+            }
+            if ($reactorUserIds === []) {
+                return $items;
+            }
+        }
+
         $identityByUser = self::hydrateReactorIdentities($reactorUserIds);
 
         $hydrated = [];
@@ -1086,6 +1111,46 @@ final class FeedHydrationPipeline
         return $hydrated;
     }
 
+    /** Same probe size as FeedRankingService's author block filter. */
+    private const REACTOR_BLOCK_PROBE_CHUNK = 100;
+
+    /**
+     * Reactors to leave off the faces (F-90): suspended members, and for a
+     * signed-in viewer anyone they have blocked or who blocked them. NULL
+     * means a read FAILED and nothing can be trusted, so the caller drops
+     * every face. A failed block read is never cached (PeepSoBlockRepository
+     * reports null instead, the F-99 rule).
+     *
+     * @param list<int> $reactorIds
+     * @return array<int, true>|null
+     */
+    private static function excludedReactorIds(array $reactorIds, int $viewerId): ?array
+    {
+        $excluded = [];
+
+        $suspended = \BCC\Trust\Core\Plugin::instance()->userInfoRepository()->suspendedAmongOrUnknown($reactorIds);
+        if ($suspended === null) {
+            return null;
+        }
+        foreach ($suspended as $id) {
+            $excluded[$id] = true;
+        }
+
+        if ($viewerId > 0) {
+            foreach (array_chunk($reactorIds, self::REACTOR_BLOCK_PROBE_CHUNK) as $chunk) {
+                $blocked = \BCC\Core\Repositories\PeepSoBlockRepository::getMutuallyBlockedSetOrUnknown($viewerId, $chunk);
+                if ($blocked === null) {
+                    return null;
+                }
+                foreach ($blocked as $id => $_) {
+                    $excluded[(int) $id] = true;
+                }
+            }
+        }
+
+        return $excluded;
+    }
+
     /**
      * Batch-hydrate reactor identity (handle/display_name/avatar_url)
      * from a list of user_ids. Single get_users() roundtrip + one
@@ -1120,14 +1185,8 @@ final class FeedHydrationPipeline
             if ($id <= 0) {
                 continue;
             }
-            $handleMeta = get_user_meta($id, 'bcc_handle', true);
-            $handle = is_string($handleMeta) && $handleMeta !== ''
-                ? $handleMeta
-                : (string) $u->user_login;
-
-            $displayName = is_string($u->display_name) && $u->display_name !== ''
-                ? $u->display_name
-                : (string) $u->user_login;
+            $handle      = \BCC\Trust\Core\Support\PublicIdentity::handle($id, get_user_meta($id, 'bcc_handle', true));
+            $displayName = \BCC\Trust\Core\Support\PublicIdentity::displayName($u->display_name, $u->user_login, $handle);
 
             // Cached, shared seam (§11). get_avatar_url() here runs through
             // PeepSo's get_avatar_url filter, which constructs a PeepSoUser
@@ -1375,6 +1434,128 @@ final class FeedHydrationPipeline
     // ──────────────────────────────────────────────────────────────────
 
     /**
+     * external_ids of the page's GROUP items whose group the viewer cannot
+     * read: anonymous, no membership row, or a status outside
+     * CommentService::READ_ALLOWED_STATUSES. It reads the `group` block that
+     * hydrateGroupContexts attaches, so it is only meaningful after that step.
+     * The single rule behind both the comment-count gate and the reaction
+     * gate (F-90).
+     *
+     * One getMembershipStatus query per DISTINCT (viewer, group), memoized on
+     * the instance, rather than per item: a group-heavy page repeats the same
+     * pair across many items, and both gates ask. Pages cap at 50 items;
+     * distinct groups are far fewer.
+     *
+     * Rejected alternatives (leak-gate correctness): the bulk
+     * findUserMemberships matches gm_user_status LIKE 'member%', which would
+     * silently admit any future member_* status the exact
+     * READ_ALLOWED_STATUSES whitelist rejects — wrong tool for a leak gate.
+     * FeedRankingService's restricted-group set is a different predicate
+     * (non-open minus active memberships, anon posture on the hot path), not
+     * READ_ALLOWED semantics.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return array<int, true> external_id => true
+     */
+    private function unreadableGroupExternalIds(array $items, int $viewerId): array
+    {
+        $gated = [];
+        foreach ($items as $item) {
+            $groupId = isset($item['group']) && is_array($item['group'])
+                ? (int) ($item['group']['id'] ?? 0)
+                : 0;
+            if ($groupId <= 0) {
+                continue;
+            }
+            $eid = (int) ($item['external_id'] ?? 0);
+            if ($eid <= 0) {
+                continue;
+            }
+            if ($viewerId <= 0) {
+                $gated[$eid] = true;
+                continue;
+            }
+            // array_key_exists, not ??: a present null status ("no
+            // membership row") is a valid memoized answer.
+            $key = $viewerId . ':' . $groupId;
+            if (!array_key_exists($key, $this->groupStatusMemo)) {
+                $this->groupStatusMemo[$key] = PeepSoGroupRepository::getMembershipStatus($viewerId, $groupId);
+            }
+            $status = $this->groupStatusMemo[$key];
+            if ($status === null
+                || !in_array($status, CommentService::READ_ALLOWED_STATUSES, true)
+            ) {
+                $gated[$eid] = true;
+            }
+        }
+
+        return $gated;
+    }
+
+    /** @var array<string, string|null> "viewerId:groupId" => gm_user_status (null = no row) */
+    private array $groupStatusMemo = [];
+
+    /**
+     * ⚠ F-90: reaction signals on a group item the viewer cannot read are
+     * NEUTRALISED, exactly like comment_count. The reaction counts, the
+     * Stoke heat and count, the "X and 3 others reacted" headline and the
+     * reactor faces are all engagement signal on content the viewer is not
+     * a member of. A teaser lets a non-member know the post exists, but not
+     * how it is being received, or by whom.
+     *
+     * Neutral = what an unreacted post shows: every grammar count 0,
+     * `heat_stage` 1, `stoke_count` 0, no headline, no faces. The viewer's
+     * OWN `viewer_reaction` / `viewer_has_stoked` are left alone (it is their
+     * own act). The keys and shapes are kept, so the wire contract is
+     * unchanged; a kind with no Stoke fields keeps having none.
+     *
+     * Must run AFTER hydrateGroupContexts (it reads the `group` block).
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private function gateReactionSignals(array $items, int $viewerId): array
+    {
+        $gated = $this->unreadableGroupExternalIds($items, $viewerId);
+        if ($gated === []) {
+            return $items;
+        }
+
+        $out = [];
+        foreach ($items as $item) {
+            $eid = (int) ($item['external_id'] ?? 0);
+            if ($eid <= 0 || !isset($gated[$eid])) {
+                $out[] = $item;
+                continue;
+            }
+
+            if (is_array($item['reactions'] ?? null)) {
+                $reactions = $item['reactions'];
+                $counts    = $reactions['counts'] ?? [];
+                if (is_array($counts)) {
+                    $reactions['counts'] = ReactionGrammarMap::countsForWire(array_fill_keys(array_keys($counts), 0));
+                }
+                if (array_key_exists('heat_stage', $reactions)) {
+                    $reactions['heat_stage'] = 1;
+                }
+                if (array_key_exists('stoke_count', $reactions)) {
+                    $reactions['stoke_count'] = 0;
+                }
+                $item['reactions'] = $reactions;
+            }
+
+            if (is_array($item['social_proof'] ?? null)) {
+                $item['social_proof']['headline'] = null;
+                unset($item['social_proof']['recent_reactors']);
+            }
+
+            $out[] = $item;
+        }
+
+        return $out;
+    }
+
+    /**
      * Attach `comment_count: int` to every feed item via one batched
      * COUNT(*) GROUP BY across all parent posts on the page.
      *
@@ -1413,52 +1594,7 @@ final class FeedHydrationPipeline
             return [];
         }
 
-        // Build the gated-skip set: external_ids the viewer must NOT
-        // see comment counts for. One getMembershipStatus query per
-        // DISTINCT gated group (memoized) rather than per gated item —
-        // a group-heavy page repeats the same (viewer, group) pair across
-        // many items. Pages cap at 50 items; distinct groups are far
-        // fewer, so this collapses up to ~50 sequential uncached SELECTs
-        // to one per group.
-        //
-        // Rejected alternatives (leak-gate correctness): the bulk
-        // findUserMemberships matches gm_user_status LIKE 'member%', which
-        // would silently admit any future member_* status the exact
-        // READ_ALLOWED_STATUSES whitelist rejects — wrong tool for a leak
-        // gate. FeedRankingService's restricted-group set is a different
-        // predicate (non-open minus active memberships, anon posture on
-        // the hot path), not READ_ALLOWED semantics.
-        //
-        // @var array<int, string|null> $statusByGroup  per-distinct-group memo
-        $statusByGroup = [];
-        $gatedSkip = [];
-        foreach ($items as $item) {
-            $groupId = isset($item['group']) && is_array($item['group'])
-                ? (int) ($item['group']['id'] ?? 0)
-                : 0;
-            if ($groupId <= 0) {
-                continue;
-            }
-            $eid = (int) ($item['external_id'] ?? 0);
-            if ($eid <= 0) {
-                continue;
-            }
-            if ($viewerId <= 0) {
-                $gatedSkip[$eid] = true;
-                continue;
-            }
-            // array_key_exists, not ??: a present null status ("no
-            // membership row") is a valid memoized answer.
-            if (!array_key_exists($groupId, $statusByGroup)) {
-                $statusByGroup[$groupId] = PeepSoGroupRepository::getMembershipStatus($viewerId, $groupId);
-            }
-            $status = $statusByGroup[$groupId];
-            if ($status === null
-                || !in_array($status, CommentService::READ_ALLOWED_STATUSES, true)
-            ) {
-                $gatedSkip[$eid] = true;
-            }
-        }
+        $gatedSkip = $this->unreadableGroupExternalIds($items, $viewerId);
 
         $extIds = [];
         foreach ($items as $item) {

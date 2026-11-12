@@ -54,7 +54,8 @@ if (!defined('BCC_DISPUTES_MAX_REOPEN_ATTEMPTS')) {
 /**
  * Schema version — derived from the content hash of every
  * includes/database/schema-*.php file. Any edit to a schema definition
- * automatically triggers dbDelta on the next request.
+ * automatically triggers dbDelta on the next request; since F-151a an
+ * edit to comments or whitespace alone does not.
  *
  * Computed live on every request via md5_file() of each schema file.
  * Reads ~30 small files (<10KB each) from disk; warm OS-cache cost is
@@ -67,34 +68,13 @@ if (!defined('BCC_DISPUTES_MAX_REOPEN_ATTEMPTS')) {
  * chains cache with an ERROR_SENTINEL. Live-computation removes that
  * failure class entirely. Per-deploy md5 thrash is ~1ms; we keep it.
  */
-define('BCC_TRUST_SCHEMA_VERSION', (static function (): string {
-    $files = glob(__DIR__ . '/includes/database/schema-*.php') ?: [];
-
-    // Two repositories self-install their own DDL (inline CREATE TABLE +
-    // dbDelta) OUTSIDE includes/database/ — DisputeRepository::install() and
-    // SignalRepository::install_own_table(). Fold their file hashes in too,
-    // or an edit to their schema wouldn't change this version and the
-    // migration gate would early-return and never re-run their dbDelta.
-    foreach ([
-        __DIR__ . '/app/Domain/Disputes/Repositories/DisputeRepository.php',
-        __DIR__ . '/app/Domain/Onchain/Repositories/SignalRepository.php',
-    ] as $selfInstaller) {
-        if (is_file($selfInstaller)) {
-            $files[] = $selfInstaller;
-        }
-    }
-
-    if (!$files) {
-        return '0000000000';
-    }
-    sort($files);
-
-    $input = '';
-    foreach ($files as $file) {
-        $input .= basename($file) . ':' . md5_file($file) . "\n";
-    }
-    return substr(md5($input), 0, 10);
-})());
+// F-151a: the inputs are unchanged (every schema-*.php plus the two
+// self-installing repositories, DisputeRepository and SignalRepository),
+// but each is hashed with comments stripped and inter-token whitespace
+// collapsed, so a comment-only edit no longer fires dbDelta everywhere.
+// SQL lives in strings, which are hashed verbatim. See the file below.
+require_once __DIR__ . '/includes/database/compute-schema-version.php';
+define('BCC_TRUST_SCHEMA_VERSION', bcc_trust_compute_schema_version(__DIR__));
 
 // Best-effort cleanup of the old version-cache option. Harmless to call
 // when the option doesn't exist; eventually-removed once every site has
@@ -572,6 +552,14 @@ function bcc_onchain_ensure_schema(): bool {
 add_action('plugins_loaded', function (): void {
     $stored = get_option('bcc_trust_schema_version', '');
     if ($stored === BCC_TRUST_SCHEMA_VERSION) {
+        return;
+    }
+
+    // F-151b: a pass at THIS version failed within the last hour — don't
+    // re-run ~200 installer queries on every request until it clears.
+    if (function_exists('bcc_trust_schema_retry_backed_off')
+        && bcc_trust_schema_retry_backed_off(BCC_TRUST_SCHEMA_VERSION)
+    ) {
         return;
     }
 
@@ -1618,6 +1606,13 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
 // Registered at file load (top-level) so the filter is in place by the
 // time PeepSo's UserSearch fires — before any REST or AJAX request.
 \BCC\Trust\Core\Support\PrivacySettings::registerSearchFilter();
+
+// §F-182: drop suspended members out of PeepSo-driven user listings, so
+// the member directory cannot list someone whose profile answers 403.
+// ⚠ Top-level for the same reason as the line above and the publication
+// guard further up: inside registerRoutes() this would hook only during a
+// REST request, and any non-REST listing would keep showing them.
+\BCC\Trust\Core\Support\ProfileAccess::registerListingFilter();
 
 /*
 |--------------------------------------------------------------------------

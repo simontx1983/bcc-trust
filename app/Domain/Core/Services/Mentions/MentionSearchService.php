@@ -138,15 +138,9 @@ final class MentionSearchService
             return null;
         }
 
-        $handleRaw = get_user_meta($userId, 'bcc_handle', true);
-        $handle = is_string($handleRaw) && $handleRaw !== ''
-            ? $handleRaw
-            : (string) $user->user_login;
-
-        $displayName = (string) $user->display_name;
-        if ($displayName === '') {
-            $displayName = (string) $user->user_login;
-        }
+        $identity    = \BCC\Trust\Core\Support\PublicIdentity::forUser($user);
+        $handle      = $identity['handle'];
+        $displayName = $identity['display_name'];
 
         return [
             'user_id'      => $userId,

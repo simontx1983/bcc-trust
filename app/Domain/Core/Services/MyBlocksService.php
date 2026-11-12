@@ -108,16 +108,9 @@ final class MyBlocksService
      */
     private static function shapeRow(int $userId, object $row, string $avatarUrl): array
     {
-        // Prefer bcc_handle, fall back to user_login. Same precedence
-        // UserViewService uses everywhere else.
-        $handleRaw = get_user_meta($userId, 'bcc_handle', true);
-        $handle    = is_string($handleRaw) && $handleRaw !== ''
-            ? $handleRaw
-            : (is_string($row->user_login) ? $row->user_login : '');
-
-        $displayName = is_string($row->display_name) && $row->display_name !== ''
-            ? $row->display_name
-            : (is_string($row->user_login) ? $row->user_login : '');
+        // Prefer bcc_handle; PublicIdentity never falls back to user_login.
+        $handle      = \BCC\Trust\Core\Support\PublicIdentity::handle($userId, get_user_meta($userId, 'bcc_handle', true));
+        $displayName = \BCC\Trust\Core\Support\PublicIdentity::displayName($row->display_name, $row->user_login, $handle);
 
         return [
             'user_id'      => $userId,

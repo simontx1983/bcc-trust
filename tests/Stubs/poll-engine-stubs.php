@@ -295,6 +295,24 @@ class StubClusterFindingsRepository extends ClusterFindingsRepository
     {
         return $this->suspected;
     }
+
+    /** @var list<object> ClusterFindingRow-shaped rows that have been REVERSED */
+    public array $reversed = [];
+
+    /** @var list<list<int>> every id list representativesByIds() was asked for */
+    public array $representativeLookups = [];
+
+    public function representativesByIds(array $findingIds): array
+    {
+        $this->representativeLookups[] = $findingIds;
+        $map = [];
+        foreach (array_merge($this->confirmed, $this->suspected, $this->reversed) as $finding) {
+            if (in_array((int) $finding->id, $findingIds, true)) {
+                $map[(int) $finding->id] = (int) $finding->representative_user_id;
+            }
+        }
+        return $map;
+    }
 }
 
 class TestPollService extends PollService
