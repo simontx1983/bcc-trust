@@ -890,6 +890,9 @@ class VoteRepository {
      *                     bcc_trust_confidence_min_voter_age_days old (default 7).
      *                     Used by calculateConfidenceScore's diversity term so
      *                     24-hour-old sockpuppets cannot inflate confidence tier.
+     * @throws RepositoryReadFailure when the read did not run. Never
+     *                     returns a zero row for a failed read: the
+     *                     recalc would save it as the page's score.
      *
      * @phpstan-return VoteAggregateRow
      */
@@ -911,9 +914,11 @@ class VoteRepository {
      *     "the". check_safe_collation() then failed and the query was rejected
      *     with "Could not perform query because it contains invalid data".
      *
-     * Either one alone yields an empty result, which the `if (!$result)` guard
-     * below converts into a zero row — indistinguishable from "this page has no
-     * votes". Keep the SQL prose-free; document it here instead.
+     * Either one alone yielded an empty result, which an `if (!$result)` guard
+     * used to convert into a zero row — indistinguishable from "this page has
+     * no votes". A failed read now throws (runRead, fail-closed), but the
+     * query would still never run, so keep the SQL prose-free; document it
+     * here instead.
      *
      * ── voter maturity (confidence-diversity term) ──
      * Fresh accounts (age < N days) are left out of the mature_unique_voters
@@ -970,7 +975,7 @@ class VoteRepository {
         }
 
         // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $result = $wpdb->get_row( $wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT
                 COALESCE(SUM(CASE WHEN d.vote_type > 0  THEN d.eff_weight ELSE 0 END), 0) AS positive_score,
                 COALESCE(SUM(CASE WHEN d.vote_type <= 0 THEN d.eff_weight ELSE 0 END), 0) AS negative_score,
@@ -1029,20 +1034,28 @@ class VoteRepository {
             $decayMin,      // decay: GREATEST floor
             $decayDays,     // decay: divisor for linear interpolation
             $pageId         // WHERE page_id
-        ) );
+        );
         // phpcs:enable WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 
-        // $wpdb->get_row always returns an object or null; guarantee object.
-        if ( ! $result ) {
-            return (object) [
-                'positive_score'       => 0.0,
-                'negative_score'       => 0.0,
-                'vote_count'           => 0,
-                'unique_voters'        => 0,
-                'mature_unique_voters' => 0,
-                'last_vote_at'         => null,
-            ];
+        // FAIL-CLOSED. This read feeds recalculateScore(), which SAVES what
+        // it returns. The old get_row() + `if (!$result)` turned a failed
+        // read (lock-wait timeout, dropped connection, a refused prepare())
+        // into an all-zero row, and the recalc then wrote positive = negative
+        // = 0 over the page's real score and cleared its recalc flag. A
+        // failed read now throws RepositoryReadFailure: the recalc
+        // transaction rolls back, the stored score stays, and the caller
+        // re-flags the page. runRead() also catches wpdb's early-return
+        // failures that leave last_error empty (see GuardsReadFailures).
+        $rows = self::runRead((string) $sql, __FUNCTION__, true);
+
+        // An aggregate with no GROUP BY yields exactly one row, even over
+        // zero votes. No row means the result is not this query's.
+        if (!isset($rows[0])) {
+            throw new RepositoryReadFailure(static::class, __FUNCTION__, 'aggregate returned no row');
         }
+
+        /** @var VoteAggregateRow $result */
+        $result = $rows[0];
 
         return $result;
     }
