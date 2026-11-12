@@ -34,6 +34,21 @@ if ( ! defined( 'ABSPATH' ) ) {
 class VoteJobDispatcher {
 
     /**
+     * Delayed retry of the post-vote FRAUD stage only (F-107).
+     *
+     * Trust-graph and stats sub-tasks recover through their recurring
+     * sweeps; fraud analysis has none, so a failure inside it (a deadlock,
+     * a DB blip) used to be logged and then lost for good — the voter's
+     * fraud_score never reflected that vote. It is now retried with
+     * exponential backoff: 5, 10, 20, 40, 80 minutes. Re-running is safe:
+     * VoteFraudAnalyzer::run() re-checks that the vote is still active and
+     * recomputes the score from live signals.
+     */
+    public const FRAUD_RETRY_HOOK         = 'bcc_trust_async_fraud_analysis_retry';
+    public const FRAUD_RETRY_MAX_ATTEMPTS = 5;
+    private const FRAUD_RETRY_BASE_DELAY  = 300;
+
+    /**
      * Schedule all post-commit async jobs for a committed vote.
      *
      * Enqueues a SINGLE composite job that internally dispatches all
@@ -83,6 +98,69 @@ class VoteJobDispatcher {
                         'error'   => $e->getMessage(),
                     ] );
                 }
+                // The one sub-task with no recurring sweep gets a retry.
+                if ( $hook === VoteFraudAnalyzer::HOOK ) {
+                    self::scheduleFraudRetry( $voteId, 1 );
+                }
+            }
+        }
+    }
+
+    /**
+     * Retry handler for a failed post-vote fraud analysis (F-107).
+     *
+     * Registered in Plugin::registerAsyncJobs with 2 accepted args.
+     */
+    public static function handleFraudRetry( int $voteId, int $attempt ): void {
+        try {
+            do_action( VoteFraudAnalyzer::HOOK, $voteId );
+            return;
+        } catch ( \Throwable $e ) {
+            // Same metric as the first failure (no new DegradationMetric
+            // event, so the bcc-core subsystem map and its docs stay as is).
+            if ( class_exists( '\\BCC\\Core\\Observability\\DegradationMetrics' ) ) {
+                \BCC\Core\Observability\DegradationMetrics::record( 'post_commit_task', 'vote_subtask_failed' );
+            }
+            $exhausted = $attempt >= self::FRAUD_RETRY_MAX_ATTEMPTS;
+            if ( class_exists( '\\BCC\\Core\\Log\\Logger' ) ) {
+                \BCC\Core\Log\Logger::error(
+                    $exhausted
+                        ? '[BCC Trust] Post-vote fraud analysis failed; retries EXHAUSTED, this vote will not be analysed'
+                        : '[BCC Trust] Post-vote fraud analysis retry failed; rescheduling',
+                    [
+                        'vote_id' => $voteId,
+                        'attempt' => $attempt,
+                        'error'   => $e->getMessage(),
+                    ]
+                );
+            }
+            if ( ! $exhausted ) {
+                self::scheduleFraudRetry( $voteId, $attempt + 1 );
+            }
+        }
+    }
+
+    /**
+     * Schedule retry number $attempt (1-based) after its backoff delay.
+     * A failed schedule is recorded exactly like a failed first dispatch.
+     */
+    private static function scheduleFraudRetry( int $voteId, int $attempt ): void {
+        $runAt = time() + self::FRAUD_RETRY_BASE_DELAY * ( 2 ** ( $attempt - 1 ) );
+        $args  = [ $voteId, $attempt ];
+
+        $scheduled = function_exists( 'as_schedule_single_action' )
+            ? (bool) as_schedule_single_action( $runAt, self::FRAUD_RETRY_HOOK, $args )
+            : wp_schedule_single_event( $runAt, self::FRAUD_RETRY_HOOK, $args ) !== false;
+
+        if ( ! $scheduled ) {
+            if ( class_exists( '\\BCC\\Core\\Observability\\DegradationMetrics' ) ) {
+                \BCC\Core\Observability\DegradationMetrics::record( 'cron_dispatch', 'vote_job_dispatcher' );
+            }
+            if ( class_exists( '\\BCC\\Core\\Log\\Logger' ) ) {
+                \BCC\Core\Log\Logger::error( '[bcc-trust] fraud analysis retry could not be scheduled', [
+                    'vote_id' => $voteId,
+                    'attempt' => $attempt,
+                ] );
             }
         }
     }
