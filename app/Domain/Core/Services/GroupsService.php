@@ -162,8 +162,15 @@ final class GroupsService
             ? $this->viewerIsGroupOwner($viewerId, $groupId)
             : false;
 
+        // F-272: the viewer's pending state (requested / invited), if any.
+        $rawStatus = $this->membershipStatus($viewerId, $groupId);
+        $isInvited = !$isMember && $rawStatus === PeepSoGroupRepository::PENDING_INVITE;
+
         // ── §S defense-in-depth gate #1: secret group, non-member → 404 ──
-        if ($ctx->privacy === PeepSoPrivacy::Secret && !$isMember) {
+        // The one exception is the group's own invitee (F-272): the
+        // invitation already told them it exists, and they need the page to
+        // accept. They still read no feed or roster (see below).
+        if ($ctx->privacy === PeepSoPrivacy::Secret && !$isMember && !$isInvited) {
             return null;
         }
 
@@ -216,11 +223,33 @@ final class GroupsService
             $isNftHolder,
             $isOwner,
             $trustGateMin,
-            is_string($validatorStats['min_stake_display'] ?? null) ? $validatorStats['min_stake_display'] : null
+            is_string($validatorStats['min_stake_display'] ?? null) ? $validatorStats['min_stake_display'] : null,
+            // F-271: a ban is a moderator removal; never offer Join.
+            !$isMember && $this->membershipStatus($viewerId, $groupId) === 'banned'
         );
+
+        // A secret group's invitee sees the page, never its posts: the feed
+        // route still 404s every secret non-member (gateGroupFeed).
+        if ($ctx->privacy === PeepSoPrivacy::Secret && !$isMember) {
+            $permissions['can_read_feed'] = [
+                'allowed'     => false,
+                'unlock_hint' => 'Accept the invitation to read this community.',
+                'reason_code' => 'not_member',
+            ];
+        }
+        $permissions['can_request_join'] = $this->resolveCanRequestJoin($ctx, $viewerId, $isMember, $rawStatus, $groupId);
 
         $feedVisible    = $permissions['can_read_feed']['allowed'];
         $membersVisible = $this->resolveMembersVisible($ctx, $isMember);
+
+        // Owners/managers see how many requests wait on them; everyone
+        // else gets null (no disclosure of the queue size).
+        $pendingRequestCount = null;
+        if ($ctx->privacy === PeepSoPrivacy::Closed
+            && $ctx->type !== GroupType::Nft && $ctx->type !== GroupType::Hall && $ctx->type !== GroupType::Validator
+            && GroupJoinRequestService::isGroupAdmin($viewerId, $groupId)) {
+            $pendingRequestCount = PeepSoGroupRepository::countPendingMembers($groupId, PeepSoGroupRepository::PENDING_REQUEST);
+        }
 
         // Public-all fields for the group composer + owner control:
         //  - `can_use_public_all` (per-viewer) gates the composer's "PUBLIC"
@@ -303,6 +332,7 @@ final class GroupsService
             'can_use_public_all'           => $canUsePublicAll,
             'can_manage_public_all_policy' => $canManagePublicAll,
             'public_all_members_enabled'   => $publicAllMembersEnabled,
+            'pending_request_count'        => $pendingRequestCount,
             // Same key vocabulary as the create-response on POST /me/groups
             // (MyGroupsEndpoint::postCreate) — `trust_min` is the canonical
             // signal that the group is reputation-gated (privacy === "open"
@@ -592,7 +622,7 @@ final class GroupsService
      *   - viewer authed, not active member  → {is_member: false, joined_at: null}
      *   - viewer authed, active member      → {is_member: true, joined_at: <iso>}
      *
-     * @return array{is_member: bool, joined_at: string|null}|null
+     * @return array{is_member: bool, joined_at: string|null, status: string}|null
      */
     private function renderViewerMembership(int $viewerId, int $groupId): ?array
     {
@@ -603,15 +633,24 @@ final class GroupsService
         $rows = PeepSoGroupRepository::findUserMemberships($viewerId, [$groupId]);
         $row  = $rows[$groupId] ?? null;
         if ($row === null) {
+            // F-272: requested (pending_admin) / invited (pending_user) /
+            // none. A banned row reads as "none" — no disclosure here.
+            $raw = $this->membershipStatus($viewerId, $groupId);
             return [
                 'is_member' => false,
                 'joined_at' => null,
+                'status'    => match ($raw) {
+                    PeepSoGroupRepository::PENDING_REQUEST => 'requested',
+                    PeepSoGroupRepository::PENDING_INVITE  => 'invited',
+                    default                                => 'none',
+                },
             ];
         }
 
         return [
             'is_member' => true,
             'joined_at' => self::joinedAtIso($row),
+            'status'    => 'member',
         ];
     }
 
@@ -751,9 +790,10 @@ final class GroupsService
         bool $isNftHolder,
         bool $isOwner = false,
         int $trustGateMin = 0,
-        ?string $validatorMinStakeDisplay = null
+        ?string $validatorMinStakeDisplay = null,
+        bool $isBanned = false
     ): array {
-        $canJoin     = $this->resolveCanJoin($ctx, $viewerId, $isMember, $isNftHolder, $trustGateMin, $validatorMinStakeDisplay);
+        $canJoin     = $this->resolveCanJoin($ctx, $viewerId, $isMember, $isNftHolder, $trustGateMin, $validatorMinStakeDisplay, $isBanned);
         $canLeave    = $this->resolveCanLeave($viewerId, $isMember, $isOwner);
         $canReadFeed = $this->resolveCanReadFeed($ctx, $viewerId, $isMember);
 
@@ -773,7 +813,8 @@ final class GroupsService
         bool $isMember,
         bool $isNftHolder,
         int $trustGateMin = 0,
-        ?string $validatorMinStakeDisplay = null
+        ?string $validatorMinStakeDisplay = null,
+        bool $isBanned = false
     ): array {
         if ($viewerId <= 0) {
             return [
@@ -788,6 +829,17 @@ final class GroupsService
                 'allowed'     => false,
                 'unlock_hint' => null,
                 'reason_code' => 'already_member',
+            ];
+        }
+
+        // F-271: a PeepSo ban (a moderator removal). Every join door refuses
+        // it, so the button must not be offered. Above every type branch:
+        // holding the NFT or the delegation does not lift a ban.
+        if ($isBanned) {
+            return [
+                'allowed'     => false,
+                'unlock_hint' => 'A moderator removed you from this community.',
+                'reason_code' => 'removed',
             ];
         }
 
@@ -869,6 +921,46 @@ final class GroupsService
             'unlock_hint' => null,
             'reason_code' => null,
         ];
+    }
+
+    /**
+     * F-272 — may this viewer ask to join (closed plain groups only)?
+     * Mirrors GroupJoinRequestService::requestJoin's gates so the button and
+     * the server reject cannot drift.
+     *
+     * reason_code ∈ auth_required | already_member | not_applicable |
+     * already_requested | invited | not_eligible | cooldown
+     *
+     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
+     */
+    private function resolveCanRequestJoin(GroupContext $ctx, int $viewerId, bool $isMember, ?string $rawStatus, int $groupId): array
+    {
+        $deny = static fn (string $code, ?string $hint = null): array =>
+            ['allowed' => false, 'unlock_hint' => $hint, 'reason_code' => $code];
+
+        if ($viewerId <= 0) {
+            return $deny('auth_required', 'Sign in to ask to join.');
+        }
+        if ($isMember) {
+            return $deny('already_member');
+        }
+        if ($ctx->privacy !== PeepSoPrivacy::Closed
+            || $ctx->type === GroupType::Nft || $ctx->type === GroupType::Hall || $ctx->type === GroupType::Validator) {
+            return $deny('not_applicable');
+        }
+        if ($rawStatus === PeepSoGroupRepository::PENDING_REQUEST) {
+            return $deny('already_requested', 'Your request is waiting on the owner or a manager.');
+        }
+        if ($rawStatus === PeepSoGroupRepository::PENDING_INVITE) {
+            return $deny('invited', 'You have an invitation to this community.');
+        }
+        if ($rawStatus === 'banned' || !\BCC\Core\Permissions\Permissions::is_not_suspended($viewerId, false)) {
+            return $deny('not_eligible');
+        }
+        if (Plugin::instance()->groupJoinRequestService()->inDenyCooldown($viewerId, $groupId)) {
+            return $deny('cooldown', "You can't ask to join this community again yet.");
+        }
+        return ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
     }
 
     /**

@@ -21,6 +21,9 @@ use PHPUnit\Framework\TestCase;
  *   the login, else member-{id}. Idempotent (a second run finds nothing).
  * - display_name_placeholders_v3: display_name = user_login is rewritten
  *   to the handle, and to 'Member <id>' when the handle is the login.
+ * - retire_renamed_original_handles_v1 (F-280): a member whose login is
+ *   u_<X> but whose handle is no longer X gets X recorded as retired,
+ *   unless someone else holds or retired X, or X is not a valid handle.
  * - UserSlugResolver / HandleService: an exact retired handle resolves to
  *   its member and is never available again; an arbitrary login with no
  *   retired record does NOT resolve through the retired path.
@@ -46,6 +49,7 @@ final class LoginHandleRotationIntegrationTest extends TestCase
         require_once dirname(__DIR__, 2) . '/includes/database/migration-runner.php';
         require_once dirname(__DIR__, 2) . '/includes/database/backfill-canonical-handles.php';
         require_once dirname(__DIR__, 2) . '/includes/database/rotate-login-handles.php';
+        require_once dirname(__DIR__, 2) . '/includes/database/retire-renamed-original-handles.php';
         require_once dirname(__DIR__, 2) . '/includes/database/backfill-display-name-placeholders.php';
 
         $wpdb->query(
@@ -83,6 +87,12 @@ final class LoginHandleRotationIntegrationTest extends TestCase
             function get_user_meta(int $userId, string $key = '', bool $single = false)
             {
                 global $wpdb;
+                if (!$single) {
+                    return $wpdb->get_col($wpdb->prepare(
+                        "SELECT meta_value FROM {$wpdb->usermeta} WHERE user_id = %d AND meta_key = %s ORDER BY umeta_id",
+                        $userId, $key
+                    ));
+                }
                 $v = $wpdb->get_var($wpdb->prepare(
                     "SELECT meta_value FROM {$wpdb->usermeta} WHERE user_id = %d AND meta_key = %s ORDER BY umeta_id LIMIT 1",
                     $userId, $key
@@ -106,12 +116,14 @@ final class LoginHandleRotationIntegrationTest extends TestCase
                 return $wpdb->insert_id;
             }
             // Only the shape the code under test uses: exact meta_key +
-            // meta_value, fields=ID, number.
+            // meta_value, fields=ID, number, exclude.
             function get_users(array $args = []): array
             {
                 global $wpdb;
+                $exclude = array_map('intval', (array) ($args['exclude'] ?? []));
+                $notIn   = $exclude === [] ? '' : ' AND user_id NOT IN (' . implode(',', $exclude) . ')';
                 $sql = $wpdb->prepare(
-                    "SELECT DISTINCT user_id FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value = %s ORDER BY user_id LIMIT %d",
+                    "SELECT DISTINCT user_id FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value = %s{$notIn} ORDER BY user_id LIMIT %d",
                     (string) ($args['meta_key'] ?? ''),
                     (string) ($args['meta_value'] ?? ''),
                     (int) ($args['number'] ?? 100)
@@ -122,8 +134,23 @@ final class LoginHandleRotationIntegrationTest extends TestCase
             function get_userdata(int $id)
             {
                 global $wpdb;
-                $row = $wpdb->get_row($wpdb->prepare("SELECT ID FROM {$wpdb->users} WHERE ID = %d", $id));
+                $row = $wpdb->get_row($wpdb->prepare("SELECT ID, user_login FROM {$wpdb->users} WHERE ID = %d", $id));
                 return $row === null ? false : $row;
+            }
+            function username_exists(string $login)
+            {
+                global $wpdb;
+                $id = $wpdb->get_var($wpdb->prepare("SELECT ID FROM {$wpdb->users} WHERE user_login = %s", $login));
+                return $id === null ? false : (int) $id;
+            }
+            function delete_user_meta(int $userId, string $key, $value = ''): bool
+            {
+                global $wpdb;
+                $where = ['user_id' => $userId, 'meta_key' => $key];
+                if ($value !== '') {
+                    $where['meta_value'] = (string) $value;
+                }
+                return (bool) $wpdb->delete($wpdb->usermeta, $where);
             }
             function sanitize_title(string $s): string
             {
@@ -291,5 +318,78 @@ final class LoginHandleRotationIntegrationTest extends TestCase
 
         global $wpdb;
         self::assertSame('Member 8', (string) $wpdb->get_var("SELECT display_name FROM {$wpdb->users} WHERE ID = 8"));
+    }
+
+    // ── F-280: retire the original handle of a pre-fix rename ───────────
+
+    public function testARenamedMembersOriginalHandleIsRetired(): void
+    {
+        self::user(4, 'u_dave', 'Dave', 'davey');   // signed up as dave, renamed to davey
+
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_retire_renamed_original_handles());
+
+        self::assertSame(4, HandleService::retiredOwner('dave'));
+        self::assertSame(4, UserSlugResolver::resolve('dave'), 'old /u/dave links resolve again');
+        $svc = new HandleService();
+        self::assertFalse($svc->isAvailable('dave'), 'nobody else may take it');
+        self::assertFalse($svc->isAvailable('dave', 9));
+        self::assertTrue($svc->isAvailable('dave', 4), 'its owner may reclaim it');
+    }
+
+    public function testTheBackfillIsIdempotent(): void
+    {
+        global $wpdb;
+        self::user(4, 'u_dave', 'Dave', 'davey');
+
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_retire_renamed_original_handles());
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_retire_renamed_original_handles());
+
+        self::assertSame('1', (string) $wpdb->get_var(
+            "SELECT COUNT(*) FROM {$wpdb->usermeta} WHERE meta_key = 'bcc_handle_retired'"
+        ));
+    }
+
+    public function testAnOriginalHandleSomeoneNowHoldsStaysTheirs(): void
+    {
+        self::user(4, 'u_dave', 'Dave', 'davey');
+        self::user(5, 'u_erin', 'Erin', 'dave');    // took 'dave' after the rename
+
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_retire_renamed_original_handles());
+
+        self::assertNull(HandleService::retiredOwner('dave'));
+        self::assertSame(5, UserSlugResolver::resolve('dave'));
+        self::assertSame(5, HandleService::retiredOwner('erin'), 'erin herself renamed away from erin');
+    }
+
+    public function testOnlyRenamedSignupLoginsAreTouched(): void
+    {
+        global $wpdb;
+        self::user(6, 'u_fay', 'Fay', 'fay');        // never renamed
+        self::user(7, 'gus', 'Gus', 'gus-two');      // not a signup login (no u_ prefix)
+        self::user(8, 'u_x', 'X', 'xavier');         // 'x' is not a valid handle
+        self::user(9, 'uzhang', 'Zhang', 'zhang');   // 'u' + letters, not the u_ prefix
+
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_retire_renamed_original_handles());
+
+        self::assertSame('0', (string) $wpdb->get_var(
+            "SELECT COUNT(*) FROM {$wpdb->usermeta} WHERE meta_key = 'bcc_handle_retired'"
+        ));
+    }
+
+    public function testTheBackfillPagesPastAFullBatch(): void
+    {
+        global $wpdb;
+        // More rows than one batch (100), each skipped or retired, so the
+        // keyset cursor has to move past skipped rows that still match.
+        for ($id = 100; $id < 230; $id++) {
+            self::user($id, 'u_m' . $id, 'M', 'renamed' . $id);
+        }
+
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_retire_renamed_original_handles());
+
+        self::assertSame('130', (string) $wpdb->get_var(
+            "SELECT COUNT(*) FROM {$wpdb->usermeta} WHERE meta_key = 'bcc_handle_retired'"
+        ));
+        self::assertSame(229, HandleService::retiredOwner('m229'));
     }
 }

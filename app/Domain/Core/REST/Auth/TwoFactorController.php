@@ -112,7 +112,7 @@ final class TwoFactorController
         if (!\BCC\Core\Security\Throttle::allow(
             '2fa_attempt',
             AuthSupport::TWO_FA_MAX_FAILURES,
-            AuthSupport::TWO_FA_CHALLENGE_TTL,
+            AuthSupport::TWO_FA_ATTEMPT_WINDOW,
             '2fa_attempt:' . $userId . ':' . $challengeKey
         )) {
             AuthSupport::burn2faOtp($challengeToken);
@@ -135,7 +135,7 @@ final class TwoFactorController
             if (!\BCC\Core\Security\Throttle::allow(
                 '2fa_fail',
                 AuthSupport::TWO_FA_MAX_FAILURES - 1,
-                AuthSupport::TWO_FA_CHALLENGE_TTL,
+                AuthSupport::TWO_FA_ATTEMPT_WINDOW,
                 $failKey
             )) {
                 AuthSupport::burn2faOtp($challengeToken);
@@ -166,7 +166,7 @@ final class TwoFactorController
         wp_set_current_user($userId);
         wp_set_auth_cookie($userId, true);
 
-        $token = JwtToken::encode($userId, $handle);
+        $token = JwtToken::encodeNewSession($userId, $handle);
 
         Logger::audit('user_login', [
             'user_id' => $userId,
@@ -183,6 +183,9 @@ final class TwoFactorController
             'expires_in'       => AuthSupport::JWT_TTL_SECONDS,
             'token_type'       => 'Bearer',
             'in_good_standing' => AuthSupport::resolveInGoodStanding($userId),
+            // F-305: a suspended member signs in READ-ONLY; the client shows
+            // the suspension notice from this flag. Every write gate refuses.
+            'suspended'        => AuthSupport::resolveSuspended($userId),
         ]);
         $response->header('Cache-Control', 'no-store');
 
@@ -192,9 +195,16 @@ final class TwoFactorController
     /**
      * POST /auth/2fa/resend — send a fresh 2FA OTP for an in-progress challenge.
      *
-     * Validates the challenge token without consuming it. Always returns
-     * ok=true regardless of whether the token is valid (anti-enumeration).
-     * Rate-limited per IP (3/min) to prevent email-bomb abuse.
+     * Validates the challenge token without consuming it. Rate-limited per
+     * IP (3/min) to prevent email-bomb abuse; the limit runs first.
+     *
+     * F-292: an ENDED challenge (expired, superseded by a newer login, burned
+     * by too many wrong codes, or older than TWO_FA_CHALLENGE_MAX_AGE) answers
+     * the same `bcc_invalid_2fa_token` 401 as verify, which the client routes
+     * back to sign-in. It used to answer ok=true and send nothing. There is
+     * nothing to enumerate: the token is a 256-bit bearer secret. A live
+     * challenge is re-armed for one code lifetime so the new code can be
+     * used (a late resend used to mail a code that then failed).
      */
     public function twoFaResend(WP_REST_Request $request): WP_REST_Response
     {
@@ -205,17 +215,20 @@ final class TwoFactorController
         $challengeToken = sanitize_text_field((string) $request->get_param('challenge_token'));
 
         $userId = $challengeToken !== '' ? AuthSupport::peek2faChallenge($challengeToken) : null;
-        if ($userId !== null) {
-            $user = get_userdata($userId);
-            if ($user instanceof \WP_User) {
-                $otpCode = AuthSupport::generateOtp();
-                // Re-binds a fresh code to the SAME (still-current) challenge.
-                // The attempt counter is per challenge, so a resend does not
-                // grant extra guesses.
-                AuthSupport::store2faOtp($challengeToken, $otpCode);
-                AuthMailer::send2faCode($userId, (string) $user->user_email, $otpCode);
-            }
+        $user   = $userId !== null ? get_userdata($userId) : false;
+        if ($userId === null
+            || !($user instanceof \WP_User)
+            || !AuthSupport::rearm2faChallenge($challengeToken, $userId)
+        ) {
+            return ApiResponse::error('bcc_invalid_2fa_token', 'This session has expired. Please sign in again.', 401);
         }
+
+        $otpCode = AuthSupport::generateOtp();
+        // Re-binds a fresh code to the SAME (still-current) challenge. The
+        // wrong-code counters are per challenge and outlive it, so a resend
+        // does not grant extra guesses.
+        AuthSupport::store2faOtp($challengeToken, $otpCode);
+        AuthMailer::send2faCode($userId, (string) $user->user_email, $otpCode);
 
         $response = ApiResponse::ok(['ok' => true]);
         $response->header('Cache-Control', 'no-store');

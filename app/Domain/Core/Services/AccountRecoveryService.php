@@ -77,4 +77,62 @@ final class AccountRecoveryService
             && is_email($email) !== false
             && !self::isPlaceholderEmail($email);
     }
+
+    /**
+     * F-253: '1' when the member knows their password, '0' when the account
+     * was minted with a random, never-shown one (wallet and OAuth signup).
+     * Written at signup; flipped to '1' whenever a password is actually set
+     * (reset, in-app change, wp-admin edit — UserLifecycleService).
+     */
+    public const META_HAS_PASSWORD = 'bcc_has_password';
+
+    /**
+     * Does the member have a password they know? Drives which confirmation
+     * the settings forms show (password field, or "sign with your wallet").
+     *
+     *   true  — they set one (password signup, or any later set/reset)
+     *   false — never: a wallet/OAuth signup that has not set one, or an
+     *           older wallet signup still on its placeholder email (no
+     *           reset could ever have reached it)
+     *   null  — unknown: an account from before F-253 with a real email
+     *           (a password signup, or an OAuth signup — can't be told
+     *           apart). The client offers both confirmations.
+     */
+    public static function hasPassword(int $userId): ?bool
+    {
+        if ($userId <= 0) {
+            return null;
+        }
+
+        $flag = (string) get_user_meta($userId, self::META_HAS_PASSWORD, true);
+        if ($flag === '1') {
+            return true;
+        }
+        if ($flag === '0') {
+            return false;
+        }
+
+        $user = get_userdata($userId);
+        if ($user instanceof \WP_User && self::isPlaceholderEmail((string) $user->user_email)) {
+            return false;
+        }
+
+        return null;
+    }
+
+    /**
+     * F-253: the wallet_links id of the wallet the account was CREATED with,
+     * written by POST /auth/wallet-signup once that link commits — and
+     * nowhere else. Its exact link row: a relink (a new row) is not it, and
+     * an OAuth / password account never has one. Read by
+     * AccountCredentialCheck's signup-wallet exception.
+     */
+    public const META_SIGNUP_WALLET_LINK = 'bcc_signup_wallet_link';
+
+    public static function markHasPassword(int $userId): void
+    {
+        if ($userId > 0) {
+            update_user_meta($userId, self::META_HAS_PASSWORD, '1');
+        }
+    }
 }

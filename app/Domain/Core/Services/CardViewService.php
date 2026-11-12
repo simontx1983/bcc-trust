@@ -132,8 +132,18 @@ final class CardViewService
         private readonly AttestationService $attestationService,
         private readonly NewEntityReputationVelocityCap $newEntityVelocityCap,
         private readonly DivergenceStateClassifier $divergenceClassifier,
-        private readonly UserViewService $userViewService
+        private readonly UserViewService $userViewService,
+        private ?ViewerWatchResolver $viewerWatchResolver = null
     ) {
+    }
+
+    /**
+     * F-255: built lazily (no Plugin.php wiring change, and suites that
+     * construct this class without it keep working); injected by tests.
+     */
+    private function viewerWatches(): ViewerWatchResolver
+    {
+        return $this->viewerWatchResolver ??= \BCC\Trust\Core\Plugin::instance()->viewerWatchResolver();
     }
 
     /**
@@ -253,6 +263,18 @@ final class CardViewService
             $viewerHasReviewed = $this->voteService->hasUserVotedPage($pageId, $viewerId);
         }
 
+        // F-255: the viewer's watch on THIS card, so the button never has
+        // to find it in the first page of /me/watching (there is no cap on
+        // how many things a member watches). Batched by the prefetcher;
+        // one resolve on the single-card path.
+        if ($viewerId <= 0) {
+            $viewerWatch = null;
+        } elseif ($prefetched !== null && isset($prefetched['viewer_watches'])) {
+            $viewerWatch = $prefetched['viewer_watches'][$pageId] ?? null;
+        } else {
+            $viewerWatch = $this->viewerWatches()->forPages($viewerId, [$pageId])[$pageId] ?? null;
+        }
+
         if ($prefetched !== null && isset($prefetched['endorse_eligibility'])) {
             // Anon viewers get an empty prefetch map; the single-page
             // fallback short-circuits to the auth_required shape with
@@ -350,6 +372,8 @@ final class CardViewService
             $name = self::preferMoniker($moniker, $name);
         }
 
+        $claimTarget = self::resolveClaimTarget($kind, $pageId, $isClaimed, $validatorRows);
+
         $card = [
             'id'                  => $pageId,
             'name'                => $name,
@@ -386,6 +410,13 @@ final class CardViewService
             // "WRITE A REVIEW" → "REMOVE YOUR REVIEW" CTA swap.
             // Always false for anonymous viewers.
             'viewer_has_reviewed' => $viewerHasReviewed,
+            // F-255 — is the viewer watching this card, and the handle
+            // `DELETE /me/watching/:follow_id[?source=page]` takes. The
+            // source of truth for every watch button; never derive it from
+            // a page of /me/watching. null / false for anonymous viewers
+            // and for the viewer's own card.
+            'viewer_is_watching'  => $viewerWatch !== null,
+            'viewer_watch'        => $viewerWatch,
             // §V1.5 — true when the current viewer has already vouched for
             // this page (= holds an active vouch attestation on it).
             // Drives the entity-page vouch button's idle → "REMOVE" CTA
@@ -410,7 +441,7 @@ final class CardViewService
             // to drive the four-step modal. Server resolves these from
             // the page id (per §A2/§L5 — frontend never derives). Null
             // for already-claimed pages or non-validator kinds.
-            'claim_target'        => self::resolveClaimTarget($kind, $pageId, $isClaimed, $validatorRows),
+            'claim_target'        => $claimTarget,
             // §K3 — chains an operator runs on. Null for single-chain
             // pages (the common case) so the frontend doesn't render
             // a dead one-tab strip. Validator-only in V1.5; creator
@@ -458,7 +489,12 @@ final class CardViewService
                 $cardTargetKind,
                 $pageId,
                 $messagingState['can_message']
-            ),
+            ) + [
+                // F-301: whether THIS viewer may claim the page. The claim
+                // CTA rendered on claim_target alone, so a suspended member
+                // was offered a claim the write always refuses (F-109).
+                'can_claim' => self::resolveCanClaim($viewerId, $claimTarget !== null),
+            ],
             // STUB: social_proof composition deferred (§O4). Field is
             // ALWAYS emitted (nullable) per the contract.
             'social_proof'        => null,
@@ -763,6 +799,16 @@ final class CardViewService
             $viewerHasReviewed = $this->voteService->hasUserVotedPage($selfPageId, $viewerId);
         }
 
+        // F-255: the viewer's watch (follow) of this member — see the page
+        // card branch.
+        if ($viewerId <= 0) {
+            $viewerWatch = null;
+        } elseif ($prefetched !== null && isset($prefetched['viewer_watches'])) {
+            $viewerWatch = $prefetched['viewer_watches'][$userId] ?? null;
+        } else {
+            $viewerWatch = $this->viewerWatches()->forMembers($viewerId, [$userId])[$userId] ?? null;
+        }
+
         return [
             'id'                  => $userId,
             'name'                => \BCC\Trust\Core\Support\PublicIdentity::visibleName($userId, $user->display_name, $user->user_login, $resolvedHandle, $viewerId),
@@ -792,6 +838,13 @@ final class CardViewService
             // has the viewer reviewed this member (vote on the
             // self-page)? Drives the REMOVE-YOUR-REVIEW branch.
             'viewer_has_reviewed' => $viewerHasReviewed,
+            // F-255 — is the viewer watching this card, and the handle
+            // `DELETE /me/watching/:follow_id[?source=page]` takes. The
+            // source of truth for every watch button; never derive it from
+            // a page of /me/watching. null / false for anonymous viewers
+            // and for the viewer's own card.
+            'viewer_is_watching'  => $viewerWatch !== null,
+            'viewer_watch'        => $viewerWatch,
             // v1.49 — the self-page id member reviews live on. This is
             // the id the FE passes to DELETE /me/reviews/:id; the FE
             // must never derive ID_BASE itself (§L5). The WRITE path
@@ -2247,6 +2300,32 @@ final class CardViewService
             // not_applicable a non-owner gets so the FE can message
             // "no contestable downvotes" vs hide the control entirely.
             return self::deny(null, 'no_contestable_downvote');
+        }
+        return self::allow();
+    }
+
+    /**
+     * §4.4 can_claim (F-301) — page cards only. Mirrors the claim write's
+     * viewer gates (POST /pages/:id/claim): signed in, and not suspended
+     * (admin bypass off, F-109). Whether the page is claimable at all is
+     * `claim_target` (null → `not_applicable`). The wallet proof and the
+     * page binding are checked by the write itself, never predicted here.
+     *
+     * An UNKNOWN suspension state (null) is allowed: display only, the
+     * write gate fails closed on its own.
+     *
+     * @return Permission
+     */
+    private static function resolveCanClaim(int $viewerId, bool $hasClaimTarget): array
+    {
+        if (!$hasClaimTarget) {
+            return self::deny(null, 'not_applicable');
+        }
+        if ($viewerId <= 0) {
+            return self::deny('Sign in to claim this page.', 'signin_required');
+        }
+        if (\BCC\Core\Permissions\Permissions::suspensionState($viewerId, false) === true) {
+            return self::deny('Your account is suspended, so you cannot claim pages.', 'suspended');
         }
         return self::allow();
     }

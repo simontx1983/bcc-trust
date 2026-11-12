@@ -882,7 +882,12 @@ final class NftHoldingsRepository
                     $touchedWallets[$linkId] = true;
                 }
             }
-            $wpdb->query('COMMIT');
+            // A failed COMMIT persisted nothing. Throw, so the worker does
+            // not advance its checkpoint past rows that were never written
+            // and the indexer does not announce holdings as lost (F-278).
+            if ($wpdb->query('COMMIT') === false) {
+                throw new \RuntimeException('COMMIT failed');
+            }
         } catch (\Throwable $e) {
             $wpdb->query('ROLLBACK');
             throw new \RuntimeException('NftHoldingsRepository::ingestBatch failed: ' . $e->getMessage(), 0, $e);

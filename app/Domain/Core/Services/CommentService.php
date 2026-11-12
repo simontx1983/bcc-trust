@@ -109,6 +109,35 @@ final class CommentService
     }
 
     /**
+     * F-274: the reasons PeepSo's add_comment() refuses that will not change
+     * on a retry, checked with PeepSo's OWN rules in the same order:
+     *
+     *   1. the post's `peepso_disable_comments` meta → "turned off";
+     *   2. `PeepSo::check_permissions($owner, PERM_COMMENT, $author)`: the
+     *      owner's block list and comment privacy → a generic "can't comment
+     *      here" that does not say which (a block must not be confirmed).
+     *
+     * Null when neither applies (or PeepSo is not loaded; the write then
+     * runs and refuses on its own, as before).
+     *
+     * @return array{error: string, message: string}|null
+     */
+    private static function permanentCommentRefusal(int $parentPostId, int $ownerId, int $authorId): ?array
+    {
+        if (!empty(get_post_meta($parentPostId, 'peepso_disable_comments', true))) {
+            return ['error' => 'bcc_forbidden', 'message' => 'Comments are turned off for this post.'];
+        }
+        if (class_exists('PeepSo')
+            && $ownerId > 0
+            && \PeepSo::check_permissions($ownerId, \PeepSo::PERM_COMMENT, $authorId) === false
+        ) {
+            return ['error' => 'bcc_forbidden', 'message' => "You can't comment on this post."];
+        }
+
+        return null;
+    }
+
+    /**
      * F-47: the "can this viewer see this post at all" rule, shared with
      * content reports and the feeds ({@see FeedItemReportVisibility::canSee()}).
      * Injected by tests; built lazily in production (no Plugin.php wiring
@@ -397,6 +426,15 @@ final class CommentService
             );
         }
 
+        // F-274: PeepSo's PERMANENT refusals, answered as what they are and
+        // BEFORE the burst seatbelt below, so retrying a "no" never spends a
+        // throttle slot. They used to surface only as add_comment() → FALSE,
+        // mapped to 503 "Try again".
+        $refusal = self::permanentCommentRefusal($parentPostId, (int) $parent->act_owner_id, $authorId);
+        if ($refusal !== null) {
+            return $refusal;
+        }
+
         // Burst seatbelt — same rationale as PostsService::createStatus.
         // Tight enough to clip accidental flood / double-submit / scripted
         // burst; loose enough that humans never hit it. NOT a primary
@@ -448,12 +486,11 @@ final class CommentService
 
         $newCommentPostId = PeepSoCommentWriter::addComment($parentPostId, $authorId, $trimmed, $parentModuleId, $hasMedia);
         if ($newCommentPostId <= 0) {
-            // PeepSo refused the write — could be:
-            //   - parent's `peepso_disable_comments` meta is set
-            //   - parent owner blocked the commenter
-            //   - content stripped to empty by PeepSo's sanitizer
-            // All three surface to the user as "can't comment here";
-            // the distinction is observability (Logger), not UX.
+            // PeepSo refused the write. The permanent refusals (comments
+            // turned off, PERM_COMMENT incl. the owner's block list) were
+            // answered above (F-274), so what is left is the parent's
+            // activity row vanishing between our read and PeepSo's (a race)
+            // or a write failure: genuinely worth a retry.
             Logger::info('[CommentService] PeepSo refused comment write', [
                 'parent_act_id'  => $actId,
                 'parent_post_id' => $parentPostId,

@@ -294,7 +294,7 @@ control 19 "Budget exhaustion mapped to NOT_OWNED" "$HOLDINGS" \
   "testATickThatRunsOutOfBudgetResumesOnTheFirstUnevaluatedMember"
 
 control 20 "Listing evaluates joined and opted-out groups again" "$LISTING" \
-  "s = s.replace('            if (isset(\$memberships[\$cfg->groupId]) || \$gateService->isOptOutActive(\$userId, \$cfg->groupId)) {\n                continue;\n            }\n            \$identity', '            \$identity')" \
+  "s = s.replace('            if (isset(\$memberships[\$cfg->groupId])\n                || isset(\$banned[\$cfg->groupId])\n                || \$gateService->isOptOutActive(\$userId, \$cfg->groupId)\n            ) {\n                continue;\n            }\n            \$identity', '            \$identity')" \
   "testTheListingNeverAsksAboutGroupsTheViewerAlreadyJoined|testTheListingNeverAsksAboutGroupsTheViewerOptedOutOf" \
   -
 

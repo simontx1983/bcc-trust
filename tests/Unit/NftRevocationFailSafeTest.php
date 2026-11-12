@@ -689,6 +689,26 @@ final class NftRevocationFailSafeTest extends TestCase
         );
     }
 
+    /**
+     * F-278: a holding-lost re-check holds SWEEP_LOCK briefly. The sweep
+     * waits it out instead of skipping its whole tick; the re-check never
+     * waits (it retries instead), so it cannot stall behind a long tick.
+     */
+    public function testTheSweepWaitsOutAShortHolderAndTheRecheckNeverWaits(): void
+    {
+        $this->revocableMember();
+        $service = new NftGroupRevokeService();
+
+        $service->sweep();
+        $service->recheckMember(self::USER, self::GROUP);
+
+        self::assertSame(
+            [NftGroupRevokeService::SWEEP_LOCK_WAIT, 0],
+            \BCC\Core\DB\AdvisoryLock::$waits
+        );
+        self::assertGreaterThan(20, NftGroupRevokeService::SWEEP_LOCK_WAIT, 'longer than the SURFACE_REVOKE runtime cap a re-check can hold the lock for');
+    }
+
     public function testTheLockIsReleasedWhenTheSweepThrows(): void
     {
         $this->revocableMember();

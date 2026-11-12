@@ -33,16 +33,13 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\REST;
 
-use BCC\Core\Crypto\WalletVerifier;
 use BCC\Core\Security\Throttle;
-use BCC\Core\Wallet\WalletIdentityService;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Services\AccountRecoveryService;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Services\AuthMailer;
 use BCC\Trust\Core\Services\PendingEmailService;
 use BCC\Trust\Core\Support\ApiResponse;
-use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -107,37 +104,17 @@ final class RecoveryEmailEndpoint
             return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429);
         }
 
-        $walletAddress = wp_strip_all_tags(wp_unslash((string) $request->get_param('wallet_address')));
-        $chainSlug     = strtolower(trim((string) $request->get_param('chain_slug')));
-        $signature     = wp_strip_all_tags(wp_unslash((string) $request->get_param('signature')));
-        $extraParam    = $request->get_param('extra');
-        $extra         = is_array($extraParam) ? $extraParam : [];
-        $emailRaw      = trim((string) $request->get_param('email'));
-
-        if ($walletAddress === '' || $chainSlug === '' || $signature === '') {
-            return ApiResponse::error('bcc_invalid_request', 'wallet_address, chain_slug and signature are required.', 400);
+        // F-253 (#16): this endpoint attaches a FIRST real email to an account
+        // stuck on its wallet-signup placeholder. Once a real email exists,
+        // changing it is PATCH /me/account/email: the audited change that
+        // also signs out other sessions, and accepts the same wallet proof.
+        if (AccountRecoveryService::hasRecoveryEmail($userId)) {
+            return self::alreadyHasEmail();
         }
 
-        $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getBySlug($chainSlug);
-        if ($chain === null) {
-            return ApiResponse::error('bcc_invalid_request', 'Unknown chain.', 400);
-        }
-        $chainId = (int) $chain->id;
-
-        // Ownership + verified: the proving wallet must be the caller's OWN,
-        // verified wallet. An unverified or foreign wallet cannot authorize
-        // recovery.
-        $linkId = WalletRepository::findIdByUserChainAddress($userId, $chainId, $walletAddress);
-        if ($linkId <= 0) {
-            return ApiResponse::error('bcc_invalid_request', 'That wallet is not linked to your account.', 400);
-        }
-        $link = WalletRepository::getById($linkId);
-        if ($link === null || empty($link->verified_at)) {
-            return ApiResponse::error('bcc_invalid_request', 'That wallet is not verified.', 400);
-        }
-
-        // Validate the new email BEFORE consuming the nonce so a cheap reject
-        // doesn't burn the user's challenge.
+        // Validate the new email BEFORE the wallet proof consumes the nonce,
+        // so a cheap reject doesn't burn the user's challenge.
+        $emailRaw = trim((string) $request->get_param('email'));
         if ($emailRaw === '') {
             return ApiResponse::error('bcc_invalid_request', 'A recovery email is required.', 422);
         }
@@ -153,28 +130,24 @@ final class RecoveryEmailEndpoint
             return ApiResponse::error('bcc_conflict', 'That email is already in use.', 409);
         }
 
-        // Point of no return for the nonce: atomic consume, then verify the
-        // signature against the SERVER-stored challenge message (never the
-        // caller's input).
-        $challenge = WalletIdentityService::consumeChallenge($userId, $walletAddress);
-        if ($challenge === null) {
-            return ApiResponse::error('bcc_invalid_request', 'Challenge not found or expired. Please request a new nonce.', 400);
+        // Prove control of one of the caller's own verified wallets (shared
+        // with the account-change confirmations, F-253). The recovery flow
+        // signs the ordinary "verify your wallet" challenge from
+        // GET /auth/nonce, as it always has.
+        // This route only attaches a FIRST real email (guard above), so the
+        // signup wallet may prove it right after sign-up (F-253 exception).
+        $proofError = AccountCredentialCheck::verifyOwnWallet($request, $userId, AccountCredentialCheck::PURPOSE_VERIFY, true);
+        if ($proofError !== null) {
+            return $proofError;
         }
-        $message = (string) ($challenge['message'] ?? '');
-        if ($message === '') {
-            return ApiResponse::error('bcc_internal_error', 'Challenge malformed.', 500);
-        }
-
-        if (!WalletVerifier::verify((string) $chain->chain_type, $message, $signature, $walletAddress, $extra)) {
-            return ApiResponse::error('bcc_signature_invalid', 'Signature verification failed.', 401);
-        }
+        $chainSlug = strtolower(trim((string) $request->get_param('chain_slug')));
 
         // Stage the pending email + OTP hash in a single transient. user_email
         // is NOT touched until the OTP is confirmed (verify-before-promote).
         $otp = PendingEmailService::stage($userId, $email, PendingEmailService::PURPOSE_RECOVERY);
 
         AuthMailer::sendRecoveryEmailOtp($email, $otp);
-        AuditLogger::log('recovery_email_requested', $userId, ['chain' => (string) $chain->slug], 'user', $userId);
+        AuditLogger::log('recovery_email_requested', $userId, ['chain' => $chainSlug], 'user', $userId);
 
         $resp = ApiResponse::ok([
             'ok'           => true,
@@ -205,6 +178,12 @@ final class RecoveryEmailEndpoint
         $code = trim((string) $request->get_param('code'));
         if ($code === '') {
             return ApiResponse::error('bcc_invalid_request', 'Verification code is required.', 422);
+        }
+
+        // F-253 (#16): a recovery staged while the account had only its
+        // placeholder can't overwrite a real email set since.
+        if (AccountRecoveryService::hasRecoveryEmail($userId)) {
+            return self::alreadyHasEmail();
         }
 
         // Verify-before-promote (PendingEmailService): a wrong code leaves the
@@ -241,5 +220,14 @@ final class RecoveryEmailEndpoint
         $resp = ApiResponse::ok(['ok' => true, 'email' => $pendingEmail]);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
+    }
+
+    private static function alreadyHasEmail(): WP_REST_Response
+    {
+        return ApiResponse::error(
+            'bcc_conflict',
+            'Your account already has an email address. Change it in your account settings instead.',
+            409
+        );
     }
 }

@@ -30,7 +30,7 @@ declare(strict_types=1);
  *     allow_hide_user_from_user_listing, plus the
  *     `peepso_user_search_args` hook BCC's
  *     PrivacySettings::filterPeepSoSearchArgs attaches for
- *     bcc_privacy_discovery_optout.
+ *     hide_from_search (= discovery_optout since F-257).
  *
  * Output shape (`MentionCandidate`):
  *
