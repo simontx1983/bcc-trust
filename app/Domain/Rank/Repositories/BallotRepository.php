@@ -68,6 +68,8 @@ if (!defined('ABSPATH')) {
  */
 class BallotRepository
 {
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+
     /** Cache group for per-poll ballot generation counters (§5). */
     private const CACHE_GROUP = 'bcc_rank_ballots';
 
@@ -172,14 +174,23 @@ class BallotRepository
 
         global $wpdb;
 
+        // F-101: a failed read used to be cached as 'none' (no active
+        // ballot) for CACHE_TTL: the cast gate let the voter through and
+        // change/withdraw said "no active ballot". It now reads as null for
+        // this call only (uniq_active_ballot still refuses a duplicate cast).
+        try {
+            $rows = self::runRead((string) $wpdb->prepare(
+                'SELECT ' . self::COLUMNS . " FROM {$this->table}
+                  WHERE poll_id = %d AND voter_user_id = %d AND status = 'active'
+                  LIMIT 1",
+                $pollId,
+                $voterId
+            ), __FUNCTION__, true);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+            return null;
+        }
         /** @var BallotRow|null $row */
-        $row = $wpdb->get_row($wpdb->prepare(
-            'SELECT ' . self::COLUMNS . " FROM {$this->table}
-              WHERE poll_id = %d AND voter_user_id = %d AND status = 'active'
-              LIMIT 1",
-            $pollId,
-            $voterId
-        ));
+        $row = $rows[0] ?? null;
 
         wp_cache_set($cacheKey, $row ?? 'none', self::CACHE_GROUP, self::CACHE_TTL);
 

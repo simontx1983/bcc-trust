@@ -18,6 +18,8 @@ namespace BCC\Trust\Core\Repositories;
 use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Exceptions\RepositoryException;
 use BCC\Trust\Core\Repositories\WalletSignalRepository;
+use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -58,6 +60,8 @@ if (!defined('ABSPATH')) {
  */
 class PageReadModelRepository
 {
+    use GuardsReadFailures;
+
     /** @var string Object-cache group. */
     private const CACHE_GROUP = 'bcc_page_rm';
 
@@ -106,10 +110,18 @@ class PageReadModelRepository
         }
 
         global $wpdb;
-        $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE page_id = %d",
-            $pageId
-        ));
+        // F-101: a failed read used to be cached as "not projected" ('') for
+        // CACHE_TTL; it now reads as null for this call only.
+        try {
+            $rows = self::runRead((string) $wpdb->prepare(
+                "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE page_id = %d",
+                $pageId
+            ), __FUNCTION__, true);
+        } catch (RepositoryReadFailure) {
+            return null;
+        }
+        /** @phpstan-var PageReadModelRow|null $row */
+        $row = $rows[0] ?? null;
 
         wp_cache_set('rm_' . $pageId, $row ?: '', self::CACHE_GROUP, self::CACHE_TTL);
 
@@ -133,10 +145,18 @@ class PageReadModelRepository
         $pageIds      = array_map('intval', array_unique($pageIds));
         $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
 
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE page_id IN ({$placeholders})",
-            $pageIds
-        ));
+        // F-101: get_results() returns [] on a failed query, and every
+        // requested page was then negative-cached below as "not projected"
+        // for CACHE_TTL. A failed read now returns [] and caches nothing.
+        try {
+            /** @var list<PageReadModelRow> $rows */
+            $rows = self::runRead((string) $wpdb->prepare(
+                "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE page_id IN ({$placeholders})",
+                $pageIds
+            ), __FUNCTION__, true);
+        } catch (RepositoryReadFailure) {
+            return [];
+        }
 
         $indexed = [];
         foreach ($rows as $row) {
@@ -190,8 +210,20 @@ class PageReadModelRepository
             return (bool) $cached;
         }
 
-        global $wpdb;
-        $count = (int) $wpdb->get_var("SELECT EXISTS (SELECT 1 FROM {$this->table} LIMIT 1)");
+        // F-101: a failed read used to cache 0 ("empty read model") for an
+        // hour, sending every list to the legacy aggregation and showing no
+        // scores. It now answers false for this call only (the legacy path
+        // is correct, just heavier) and the next call retries.
+        try {
+            $rows = self::runRead(
+                "SELECT EXISTS (SELECT 1 FROM {$this->table} LIMIT 1) AS has_data",
+                __FUNCTION__,
+                true
+            );
+        } catch (RepositoryReadFailure) {
+            return false;
+        }
+        $count = (int) ($rows[0]->has_data ?? 0);
 
         wp_cache_set('rm_has_data', $count, self::CACHE_GROUP, 3600);
 
