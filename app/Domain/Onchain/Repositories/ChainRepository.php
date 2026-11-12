@@ -53,6 +53,8 @@ if (!defined('ABSPATH')) {
  */
 final class ChainRepository
 {
+    use GuardsReadFailures;
+
     /** @var string Explicit column list — must match schema-chains.php
      *  (CREATE TABLE + the description ALTER + the NFT capability ALTERs)
      *  + schema-blog-chain-tags.php's ALTER (color).
@@ -370,19 +372,24 @@ final class ChainRepository
         global $wpdb;
         $table = self::table();
 
-        /** @var list<ChainRow>|null $rows */
-        $rows = $wpdb->get_results(
-            "SELECT " . self::COLUMNS . " FROM {$table} WHERE is_active = 1 ORDER BY chain_type ASC, name ASC LIMIT 200"
-        );
-        // Capture the error string immediately — $wpdb->last_error is connection-global
-        // state; any unrelated query that runs before we check it would clobber it.
-        $lastError = (string) $wpdb->last_error;
-
-        // Discriminate DB failure ($rows === null + last_error) from "zero active chains"
-        // ($rows === [] with no error). Caching an empty list for 5 minutes after a
-        // transient DB error would break every downstream chain lookup (wallet verify,
-        // fetcher init) until the cache expires — that's a silent outage, not degradation.
-        if (!is_array($rows)) {
+        // Discriminate DB failure from "zero active chains". Caching an empty
+        // list for 5 minutes after a transient DB error would break every
+        // downstream chain lookup (wallet verify, fetcher init) until the cache
+        // expires — that's a silent outage, not degradation.
+        //
+        // ⚠ F-101: this used to test `!is_array($rows)`, but real wpdb's
+        // get_results() returns [] (not null) on a SQL error — flush() resets
+        // last_result first — so the failure branch never ran and a failed
+        // read WAS cached (object cache + transient) as "no chains". runRead()
+        // checks query() === false and last_error, and logs the failure.
+        try {
+            /** @var list<ChainRow> $rows */
+            $rows = self::runRead(
+                "SELECT " . self::COLUMNS . " FROM {$table} WHERE is_active = 1 ORDER BY chain_type ASC, name ASC LIMIT 200",
+                __FUNCTION__,
+                true
+            );
+        } catch (RepositoryReadFailure) {
             // Short negative cache: subsequent hits within ~5-8 seconds skip both
             // the DB query and the log line. Prevents thundering-herd and log
             // floods during transient outages. We deliberately do NOT write the
@@ -390,10 +397,6 @@ final class ChainRepository
             // propagate "no chains" to other workers via shared transient storage.
             // (See CACHE INVARIANT at top of class.)
             wp_cache_set('active_all', self::ERROR_SENTINEL, self::CACHE_GROUP, self::errorSentinelTtl());
-
-            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
-                \BCC\Core\Log\Logger::error('[ChainRepository] getAllCached DB error: ' . ($lastError !== '' ? $lastError : 'query returned null'));
-            }
             return [];
         }
 

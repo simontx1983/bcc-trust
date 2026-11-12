@@ -27,6 +27,8 @@ if (!defined('ABSPATH')) {
  */
 final class HeliusSeenSignaturesRepository
 {
+    use GuardsReadFailures;
+
     public const MAX_ROWS         = 10000;
     public const ALARM_THRESHOLD  = 12000;
     public const MAX_AGE_SECONDS  = 3600;
@@ -150,10 +152,21 @@ final class HeliusSeenSignaturesRepository
 
         // 2. Compute remaining without a re-COUNT(*) when the cached
         // size is fresh. Cache miss falls back to a true COUNT(*).
+        //
+        // ⚠ F-101: a FAILED COUNT(*) used to read as 0 and be PERSISTED
+        // below. The option has no TTL and later sweeps only re-COUNT when
+        // the estimate is over the cap, so a stored 0 switched the overflow
+        // cap off for good. A failed count now trims nothing and persists
+        // nothing; the next sweep counts again.
+        $persist      = true;
         $cachedBefore = (int) get_option(self::SIZE_OPTION, -1);
-        $remaining = $cachedBefore >= 0
-            ? max(0, $cachedBefore - $deletedAge)
-            : (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
+        if ($cachedBefore >= 0) {
+            $remaining = max(0, $cachedBefore - $deletedAge);
+        } else {
+            $counted   = self::countRows();
+            $persist   = $counted !== null;
+            $remaining = $counted ?? 0;
+        }
 
         $deletedOverflow = 0;
 
@@ -166,9 +179,13 @@ final class HeliusSeenSignaturesRepository
             // replay window for any evicted sig. Pay the COUNT(*) ONLY when
             // the cached estimate claims we're over the cap (rare), so the
             // common non-overflow path stays count-free.
-            $actual = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
+            $actual = self::countRows();
 
-            if ($actual > $maxRows) {
+            if ($actual === null) {
+                // Cannot size the trim without a real count: delete nothing,
+                // and leave the stored estimate for the next sweep (F-101).
+                $persist = false;
+            } elseif ($actual > $maxRows) {
                 $excess = $actual - $maxRows;
 
                 // SQL: DELETE FROM ... ORDER BY seen_at ASC LIMIT %d
@@ -199,7 +216,9 @@ final class HeliusSeenSignaturesRepository
             }
         }
 
-        update_option(self::SIZE_OPTION, $remaining, false);
+        if ($persist) {
+            update_option(self::SIZE_OPTION, $remaining, false);
+        }
 
         return [
             'deleted_age'      => $deletedAge,
@@ -215,9 +234,24 @@ final class HeliusSeenSignaturesRepository
             return $cached;
         }
 
-        global $wpdb;
-        $count = (int) $wpdb->get_var("SELECT COUNT(*) FROM " . self::table());
+        $count = self::countRows();
+        if ($count === null) {
+            // F-101: answer 0 for this call, but never persist a failed
+            // count (the option has no TTL).
+            return 0;
+        }
         update_option(self::SIZE_OPTION, $count, false);
         return $count;
+    }
+
+    /** COUNT(*) of the table, or NULL when the read did not run (logged). */
+    private static function countRows(): ?int
+    {
+        try {
+            $rows = self::runRead('SELECT COUNT(*) AS n FROM ' . self::table(), __FUNCTION__, true);
+        } catch (RepositoryReadFailure) {
+            return null;
+        }
+        return (int) ($rows[0]->n ?? 0);
     }
 }
