@@ -380,13 +380,20 @@ if (!function_exists('current_time')) {
      */
     function current_time(string $type, int|bool $gmt = 0)
     {
+        // F-87: opt-in site UTC offset (seconds), the way core applies
+        // gmt_offset — PHP's default zone stays UTC, as WordPress pins it,
+        // and only the "site-local" answers move. Unset = 0, so every suite
+        // written before it sees the same values as before.
+        $offset = $gmt ? 0 : (int) ($GLOBALS['__bcc_test_site_utc_offset'] ?? 0);
         if ($type === 'timestamp' || $type === 'U') {
-            return time();
+            return time() + ($type === 'timestamp' ? $offset : 0);
         }
         if ($type === 'Y-m-d') {
-            return $gmt ? gmdate('Y-m-d') : date('Y-m-d');
+            return $offset !== 0 ? gmdate('Y-m-d', time() + $offset) : ($gmt ? gmdate('Y-m-d') : date('Y-m-d'));
         }
-        return $gmt ? gmdate('Y-m-d H:i:s') : date('Y-m-d H:i:s');
+        return $offset !== 0
+            ? gmdate('Y-m-d H:i:s', time() + $offset)
+            : ($gmt ? gmdate('Y-m-d H:i:s') : date('Y-m-d H:i:s'));
     }
 }
 
@@ -626,7 +633,13 @@ if (!function_exists('wp_cache_get')) {
             return false;   // see wp_cache_add() for why this hook exists
         }
         if (!isset($GLOBALS['__bcc_test_object_cache'][$group][$key])) {
-            return false;
+            // F-87: opt-in Redis semantics. Redis Object Cache's increment()
+            // is INCRBY, which CREATES a missing key at the offset instead of
+            // failing. Core's fallback (the default here) returns false.
+            if (empty($GLOBALS['__bcc_test_object_cache_incr_creates'])) {
+                return false;
+            }
+            $GLOBALS['__bcc_test_object_cache'][$group][$key] = 0;
         }
         return $GLOBALS['__bcc_test_object_cache'][$group][$key] += $offset;
     }

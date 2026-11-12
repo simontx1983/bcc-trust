@@ -17,6 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 use Exception;
 use BCC\Trust\Core\Exceptions\RepositoryException;
+use BCC\Trust\Core\Support\SiteClock;
 use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
@@ -917,8 +918,9 @@ class VoteRepository {
      *
      * ── voter maturity (confidence-diversity term) ──
      * Fresh accounts (age < N days) are left out of the mature_unique_voters
-     * distinct count. user_registered is in site-local time, same frame as
-     * NOW(), so the comparison carries no timezone drift.
+     * distinct count. user_registered is WordPress core's UTC column (it was
+     * documented here as site-local and compared with the DB session's NOW()),
+     * so its cutoff is bound from gmdate() (F-87 L3).
      *
      * ── vesting-aware weight ──
      * Sums vested_weight — the value VoteWriter applied to the score,
@@ -951,6 +953,8 @@ class VoteRepository {
      *
      * ── time decay ──
      * The final CASE applies the linear decay described in the docblock above.
+     * Vote age is measured from a bound site-local "now" — created_at's frame —
+     * not UTC_TIMESTAMP(), which is off by the site's UTC offset (F-87 L3).
      *
      * Guarded by tests/Unit/PreparedSqlCommentPlaceholderTest.php.
      */
@@ -962,6 +966,7 @@ class VoteRepository {
         $fraudFloor    = $this->fraudFloor;
         $decayDays     = $this->decayDays;
         $decayMin      = $this->decayMin;
+        $nowLocal      = SiteClock::now();
 
         /** @var int $minVoterAgeDays */
         $minVoterAgeDays = (int) apply_filters('bcc_trust_confidence_min_voter_age_days', 7);
@@ -985,7 +990,7 @@ class VoteRepository {
                     v.created_at,
                     CASE
                         WHEN u.user_registered IS NOT NULL
-                         AND u.user_registered <= DATE_SUB(NOW(), INTERVAL %d DAY)
+                         AND u.user_registered <= %s
                           THEN 1
                         ELSE 0
                     END AS is_mature,
@@ -1004,9 +1009,9 @@ class VoteRepository {
                                   1.0)
                       END
                     * CASE
-                        WHEN TIMESTAMPDIFF(SECOND, v.created_at, UTC_TIMESTAMP()) / 86400.0 > %d
+                        WHEN TIMESTAMPDIFF(SECOND, v.created_at, %s) / 86400.0 > %d
                           THEN %f
-                        ELSE GREATEST(%f, 1.0 - TIMESTAMPDIFF(SECOND, v.created_at, UTC_TIMESTAMP()) / (86400.0 * %d))
+                        ELSE GREATEST(%f, 1.0 - TIMESTAMPDIFF(SECOND, v.created_at, %s) / (86400.0 * %d))
                       END
                     AS eff_weight
                 FROM {$this->table} v
@@ -1016,7 +1021,7 @@ class VoteRepository {
                   AND v.status  = 1
                   AND " . $this->hiddenReviewExclusion('v') . "
              ) d",
-            $minVoterAgeDays, // maturity: INTERVAL %d DAY for user_registered cutoff
+            gmdate('Y-m-d H:i:s', time() - $minVoterAgeDays * 86400), // maturity: user_registered (UTC) cutoff
             $fraudMedium,   // fraud: current <= threshold → no discount
             $fraudFloor,    // fraud: GREATEST floor (current factor)
             $fraudMedium,   // fraud: original > threshold (>= branch)
@@ -1024,9 +1029,11 @@ class VoteRepository {
             $fraudFloor,    // fraud: GREATEST floor (current factor, ELSE branch)
             $fraudMedium,   // fraud: original > threshold (ELSE branch)
             $fraudFloor,    // fraud: GREATEST floor (original factor, ELSE branch)
+            $nowLocal,      // decay: vote age measured to site-local now
             $decayDays,     // decay: beyond threshold → min
             $decayMin,      // decay: min factor (beyond threshold)
             $decayMin,      // decay: GREATEST floor
+            $nowLocal,      // decay: vote age measured to site-local now
             $decayDays,     // decay: divisor for linear interpolation
             $pageId         // WHERE page_id
         ) );
@@ -1643,19 +1650,23 @@ class VoteRepository {
         // state cannot make this loop spin forever inside the cron tick.
         $maxIterations = 20;
         $total         = 0;
+        $nowLocal      = SiteClock::now();
 
         for ($i = 0; $i < $maxIterations; $i++) {
             $affected = $wpdb->query(
                 $wpdb->prepare(
                     "DELETE FROM {$this->table}
-                     WHERE (status = %d AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY))
-                        OR (status = %d AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY))
+                     WHERE (status = %d AND updated_at < DATE_SUB(%s, INTERVAL %d DAY))
+                        OR (status = %d AND updated_at < DATE_SUB(%s, INTERVAL %d DAY))
                      LIMIT %d",
+                    // F-87 L3: updated_at is site-local; UTC_TIMESTAMP() is not.
                     self::STATUS_REMOVED,
+                    $nowLocal,
                     $this->cleanupDays,
                     // Moderation removals stay restorable for the full
                     // window, independent of the retraction retention.
                     self::STATUS_MODERATION_REMOVED,
+                    $nowLocal,
                     self::MODERATION_RESTORE_WINDOW_DAYS,
                     $batchSize
                 )
@@ -2063,8 +2074,9 @@ class VoteRepository {
              FROM {$this->table}
              WHERE voter_user_id = %d
              AND status = 1
-             AND created_at > (UTC_TIMESTAMP() - INTERVAL %d DAY)",
+             AND created_at > (%s - INTERVAL %d DAY)",
             $userId,
+            SiteClock::now(), // F-87 L3: created_at is site-local
             $days
         ) );
     }
@@ -2091,11 +2103,12 @@ class VoteRepository {
              AND v1.id != v2.id
              AND v1.vote_type != v2.vote_type
              AND v2.created_at > v1.created_at
-             AND v2.created_at > (UTC_TIMESTAMP() - INTERVAL %d MINUTE)
+             AND v2.created_at > (%s - INTERVAL %d MINUTE)
              AND v1.status = 1
              AND v2.status = 1",
             $userId,
             $userId,
+            SiteClock::now(), // F-87 L3: created_at is site-local
             $minutes
         ), __FUNCTION__, true );
 
@@ -2150,9 +2163,10 @@ class VoteRepository {
              LEFT JOIN {$userInfoTable} ui ON v.voter_user_id = ui.user_id
              WHERE v.page_id = %d
                AND v.status = 1
-               AND v.created_at >= DATE_SUB(NOW(), INTERVAL %d DAY)
+               AND v.created_at >= DATE_SUB(%s, INTERVAL %d DAY)
              GROUP BY v.voter_user_id",
             $pageId,
+            SiteClock::now(), // F-87 L3: created_at is site-local, not the DB clock
             $days
         ) );
     }
@@ -2574,8 +2588,9 @@ class VoteRepository {
              WHERE page_id = %d
                AND vote_type = -1
                AND status = 1
-               AND created_at >= DATE_SUB(NOW(), {$intervalSql})",
+               AND created_at >= DATE_SUB(%s, {$intervalSql})",
             $pageId,
+            SiteClock::now(), // F-87 L3: created_at is site-local, not the DB clock
             $magnitude
         ));
     }

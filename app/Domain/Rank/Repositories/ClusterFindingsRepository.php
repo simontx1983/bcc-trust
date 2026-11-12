@@ -51,6 +51,18 @@ class ClusterFindingsRepository
 
     private string $table;
 
+    /**
+     * Bumped on every successful create() / reverse() in THIS process, so a
+     * per-process memo of the active set (IndependenceResolver) can tell it
+     * is stale (F-87 L4).
+     */
+    private static int $writeVersion = 0;
+
+    public static function writeVersion(): int
+    {
+        return self::$writeVersion;
+    }
+
     public function __construct()
     {
         $this->table = TableRegistry::clusterFindings();
@@ -115,7 +127,12 @@ class ClusterFindingsRepository
             ['%s', '%s', '%d', '%s', '%s', '%f', '%d', '%s', '%s']
         );
 
-        return $result === false ? 0 : (int) $wpdb->insert_id;
+        if ($result === false) {
+            return 0;
+        }
+        self::$writeVersion++;
+
+        return (int) $wpdb->insert_id;
     }
 
     /**
@@ -135,7 +152,12 @@ class ClusterFindingsRepository
             $findingId
         ));
 
-        return $result !== false && (int) $result > 0;
+        $reversed = $result !== false && (int) $result > 0;
+        if ($reversed) {
+            self::$writeVersion++;
+        }
+
+        return $reversed;
     }
 
     /**
