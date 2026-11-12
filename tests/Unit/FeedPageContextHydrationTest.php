@@ -20,6 +20,17 @@ namespace BCC\Trust\Core\Tests\Unit {
         public string $postmeta = 'wp_postmeta';
         public string $prefix   = 'wp_';
 
+        /**
+         * ⚠ DECLARED, NOT LEFT TO PHP. Real `wpdb` has this property, and
+         * `PageDiscoveryRepository::findPublishedByIds()` now clears it
+         * before its read (F-216). Without the declaration PHP 8.2 creates
+         * it dynamically and emits
+         * "Creation of dynamic property … ::$last_error is deprecated" —
+         * which is a FATAL in PHP 9, so the double has to model the real
+         * object rather than rely on a behaviour that is going away.
+         */
+        public string $last_error = '';
+
         public int $reads = 0;
 
         /** @var list<string> */
