@@ -25,14 +25,14 @@ jobs:
       run:
         working-directory: app/public/wp-content/plugins/bcc-trust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: app/public/wp-content/plugins/bcc-trust
 
       # bcc-trust's phpstan.neon scans ../bcc-core/src for cross-plugin type
       # resolution (ServiceLocator, DB helpers, logging). Check out the public
       # sibling into the WP layout so the path resolves.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: simontx1983/bcc-core
           path: app/public/wp-content/plugins/bcc-core
@@ -268,14 +268,14 @@ jobs:
       BCC_TEST_DB_PASS: root
       BCC_TEST_DB_NAME: bcc_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: app/public/wp-content/plugins/bcc-trust
 
       # The integration bootstrap requires bcc-core's DB.php (table-name
       # resolution for the claims/validators/collections/wallet_links
       # schemas) — same adjacent checkout the phpstan job uses.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: simontx1983/bcc-core
           path: app/public/wp-content/plugins/bcc-core
@@ -323,10 +323,10 @@ jobs:
       BCC_TEST_DB_PASS: root
       BCC_TEST_DB_NAME: bcc_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: app/public/wp-content/plugins/bcc-trust
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: simontx1983/bcc-core
           path: app/public/wp-content/plugins/bcc-core
@@ -378,10 +378,10 @@ jobs:
       # instead of passing with the integration controls never run.
       REQUIRE_DB: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: app/public/wp-content/plugins/bcc-trust
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: simontx1983/bcc-core
           path: app/public/wp-content/plugins/bcc-core
@@ -419,11 +419,11 @@ jobs:
       BCC_TEST_DB_PASS: root
       BCC_TEST_DB_NAME: bcc_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: app/public/wp-content/plugins/bcc-trust
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: simontx1983/bcc-core
           path: app/public/wp-content/plugins/bcc-core
