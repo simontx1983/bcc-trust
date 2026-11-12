@@ -114,7 +114,8 @@ final class ReviewBodyHydrator
             $pageId     = (int) ($vote->page_id ?? 0);
 
             if (MemberSelfPageService::isSelfPage($pageId)) {
-                $member = $members[MemberSelfPageService::ownerOfSelfPage($pageId)] ?? null;
+                $ownerId = MemberSelfPageService::ownerOfSelfPage($pageId);
+                $member  = $members[$ownerId] ?? null;
                 // Only bcc_handle is safe to project publicly — when the
                 // member has none, emit '' and the frontend suppresses
                 // the link (never fall back to user_login).
@@ -123,7 +124,15 @@ final class ReviewBodyHydrator
                     'text'        => $explanation,
                     'page_id'     => $pageId,
                     'page_handle' => $member !== null && $member['handle'] !== null ? $member['handle'] : '',
-                    'page_name'   => $member !== null ? $member['display_name'] : '',
+                    // F-28: honours "Hide my real name" (never the login).
+                    'page_name'   => $member !== null
+                        ? \BCC\Trust\Core\Support\PublicIdentity::visibleName(
+                            (int) $ownerId,
+                            $member['display_name'],
+                            $member['user_login'],
+                            $member['handle'] ?? ''
+                        )
+                        : '',
                     'page_kind'   => 'member',
                 ];
                 continue;

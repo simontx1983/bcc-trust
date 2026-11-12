@@ -498,7 +498,10 @@ final class AnnouncementCommentService
         }
 
         try {
-            $summary = \BCC\Trust\Core\Plugin::instance()->userViewService()->getSummary($userId, $userId);
+            // F-28: viewer 0, NOT the author. Passing the author as the viewer
+            // made getSummary treat every reader as the author themselves,
+            // so a hidden real name was always shown. 0 masks it for everyone.
+            $summary = \BCC\Trust\Core\Plugin::instance()->userViewService()->getSummary($userId, 0);
         } catch (\Throwable $e) {
             Logger::warning('[AnnouncementCommentService] author lookup failed', [
                 'user_id' => $userId,

@@ -88,6 +88,7 @@ final class RealNameHiddenEverywhereTest extends TestCase
             'mention picker'     => ['app/Domain/Core/Services/Mentions/MentionSearchService.php', 'forUser($user)'],
             'attestations'       => ['app/Domain/Core/Services/AttestationService.php', 'forUser($user)'],
             'card search member' => ['app/Domain/Core/REST/CardsSearchEndpoint.php', 'visibleName('],
+            'review body member' => ['app/Domain/Core/Services/Feed/ReviewBodyHydrator.php', 'visibleName('],
         ];
     }
 
@@ -132,5 +133,25 @@ final class RealNameHiddenEverywhereTest extends TestCase
             "/'search_columns' => \['display_name'\],.*?'meta_query'\s*=>\s*\[.*?bcc_privacy_real_name_hidden.*?NOT EXISTS.*?bcc_privacy_real_name_hidden.*?'!='/s",
             $src
         );
+    }
+    /**
+     * getSummary($id, $id) passes the member as their own viewer, which
+     * always shows the hidden real name (review finding on #592:
+     * AnnouncementCommentService's author block). No caller may do that.
+     */
+    public function testNoSurfaceResolvesAMemberAsTheirOwnViewer(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $it   = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root . '/app'));
+        foreach ($it as $file) {
+            if (!$file->isFile() || $file->getExtension() !== 'php') {
+                continue;
+            }
+            self::assertDoesNotMatchRegularExpression(
+                '/getSummary\(\s*(\$\w+)\s*,\s*\1\s*\)/',
+                (string) file_get_contents($file->getPathname()),
+                basename($file->getPathname()) . ' resolves a member as their own viewer'
+            );
+        }
     }
 }
