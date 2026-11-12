@@ -852,8 +852,12 @@ final class CollectionRepository
              JOIN {$wallets} w ON w.id = c.wallet_link_id
              JOIN {$chains} ch ON ch.id = c.chain_id
              WHERE w.post_id = %d{$visibilityFilter}
-             ORDER BY c.{$orderBy} DESC
+             ORDER BY c.{$orderBy} DESC, c.id DESC
              LIMIT %d OFFSET %d",
+            // F-143: `c.id DESC` is the unique tiebreak (as in
+            // listForAdminVerification / listForAdminState). Collections tied
+            // on the sort column (e.g. many with no volume) otherwise came
+            // back in no fixed order and skipped or repeated across pages.
             $postId, $perPage, $offset
         ));
 
