@@ -49,6 +49,27 @@ final class GroupContext {
         return $this->type === GroupType::Nft;
     }
 
+    /**
+     * Does membership here disclose an ON-CHAIN FINANCIAL POSITION?
+     *
+     * True for NFT-holder groups (the member holds a qualifying NFT on a
+     * named chain) and for validator/delegator communities (the member
+     * delegates stake to a named validator). Both are money facts about
+     * a person, not merely social ones, which is why profile surfaces
+     * treat them more strictly than an ordinary group - see
+     * {@see \BCC\Trust\Core\Support\ProfileGroupVisibility}, where
+     * they are withheld from anonymous readers.
+     *
+     * ⚠ Deliberately a NAMED predicate rather than an inline
+     * `type === Nft || type === Validator` at each call site: when a
+     * third on-chain group kind is added, this is the one place that has
+     * to learn about it.
+     */
+    public function disclosesOnchainPosition(): bool {
+        return $this->type === GroupType::Nft
+            || $this->type === GroupType::Validator;
+    }
+
     public function withMemberCount(int $count): self {
         return new self(
             $this->groupId,

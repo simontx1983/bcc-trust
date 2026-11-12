@@ -144,6 +144,8 @@ namespace {
             public string $user_login;
             public string $display_name;
             public string $user_pass = 'stub-hash';
+            /** GMT DATETIME, from the fixture's 'registered' (unix time) when set. */
+            public string $user_registered = '';
 
             public function __construct(int $id, string $email, string $login, string $display)
             {
@@ -288,7 +290,14 @@ namespace {
         function get_userdata($id)
         {
             $u = $GLOBALS['__bcc_ph']['users'][(int) $id] ?? null;
-            return $u === null ? false : new \WP_User((int) $id, $u['email'], $u['login'], $u['display']);
+            if ($u === null) {
+                return false;
+            }
+            $user = new \WP_User((int) $id, $u['email'], $u['login'], $u['display']);
+            if (isset($u['registered'])) {
+                $user->user_registered = gmdate('Y-m-d H:i:s', (int) $u['registered']);
+            }
+            return $user;
         }
     }
     if (!function_exists('get_users')) {

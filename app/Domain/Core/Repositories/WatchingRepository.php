@@ -500,6 +500,65 @@ final class WatchingRepository
     }
 
     /**
+     * F-255: which of `$followeeIds` the viewer is watching (an ACTIVE
+     * PeepSo follow, the same predicate as the watchlist), as
+     * followee user id => follow id (uf_id, the id `DELETE /me/watching`
+     * takes).
+     *
+     * This is how a card or profile knows "am I watching this?" without
+     * the client paging the whole watchlist: one bounded IN() per page of
+     * cards, however many follows the viewer has. Chunked so a long id
+     * list never builds an oversized IN().
+     *
+     * A failed read logs (runRead) and answers with what was read so far:
+     * the flag degrades to "not watching" for those ids, which a click
+     * then corrects (`already_watching`), rather than failing the page.
+     *
+     * @param list<int> $followeeIds
+     * @return array<int, int> followee user id => uf_id
+     */
+    public function findActiveFollowIdsForFollowees(int $viewerId, array $followeeIds): array
+    {
+        $ids = [];
+        foreach ($followeeIds as $id) {
+            $id = (int) $id;
+            if ($id > 0 && $id !== $viewerId) {
+                $ids[$id] = true;
+            }
+        }
+        if ($viewerId <= 0 || $ids === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $follows = $wpdb->prefix . 'peepso_user_followers';
+
+        $out = [];
+        foreach (array_chunk(array_keys($ids), self::FOLLOWEE_CHUNK) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '%d'));
+            /** @var list<object{followee_id: int|numeric-string, uf_id: int|numeric-string}> $rows */
+            $rows = self::runRead($wpdb->prepare(
+                "SELECT uf_passive_user_id AS followee_id, uf_id
+                   FROM {$follows}
+                  WHERE uf_active_user_id = %d
+                    AND uf_passive_user_id IN ({$placeholders})
+                    AND " . self::ACTIVE_FOLLOW . "
+                  LIMIT %d",
+                $viewerId,
+                ...array_merge($chunk, [count($chunk)])
+            ), __FUNCTION__, false);
+            foreach ($rows as $row) {
+                $out[(int) $row->followee_id] = (int) $row->uf_id;
+            }
+        }
+
+        return $out;
+    }
+
+    /** IN() chunk for findActiveFollowIdsForFollowees(). */
+    private const FOLLOWEE_CHUNK = 200;
+
+    /**
      * Total count for the same predicate set as findItemsForUser.
      * Single COUNT(*) on the active-follows table — no joins.
      * Drives `pagination.total` / `pagination.total_pages`.

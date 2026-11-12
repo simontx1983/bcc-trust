@@ -231,6 +231,76 @@ final class FeedPostVisibilityWiringTest extends TestCase
         self::assertSame([self::FRIEND], $call['friends']);
     }
 
+    // ── F-297: the tag feed pre-filters blocks in SQL, like /feed ────
+
+    public function testTheTagFeedExcludesTheViewersBlocksInSql(): void
+    {
+        $GLOBALS['__bcc_f02feed']['blocked']  = [501];
+        $GLOBALS['__bcc_f02feed']['blockers'] = [502];
+
+        $this->service()->getTagFeed(self::VIEWER, 'solana');
+
+        $excluded = $GLOBALS['__bcc_f02feed']['excluded']['getFeed:tag'] ?? null;
+        self::assertIsArray($excluded, 'the tag feed must forward an author exclusion');
+        self::assertContains(501, $excluded, 'someone the viewer blocked');
+        self::assertContains(502, $excluded, 'someone who blocked the viewer');
+    }
+
+    /** Control: the anonymous tag feed has no viewer, so no block list. */
+    public function testTheAnonymousTagFeedForwardsNoBlockList(): void
+    {
+        $GLOBALS['__bcc_f02feed']['blocked'] = [501];
+
+        $this->service()->getTagFeed(0, 'solana');
+
+        self::assertNull($GLOBALS['__bcc_f02feed']['excluded']['getFeed:tag'] ?? null);
+    }
+
+    // ── F-269: an author always sees their own posts ─────────────────
+
+    /** @return array<string, array{0: string, 1: string}> surface => [invoke label, recorded label] */
+    public static function ownPostSurfaces(): array
+    {
+        return [
+            'personalized feed' => ['getFeed:for_you', 'getFeed:for_you'],
+            'permalink'         => ['getActivityById', 'getActivityById'],
+            'author wall'       => ['getActivityForAuthor', 'getActivityForAuthor'],
+            'page stream'       => ['getActivityForPage', 'getActivityForPage'],
+            'tag feed'          => ['tag', 'getFeed:tag'],
+            'plain group room'  => ['group', 'getFeed:group'],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('ownPostSurfaces')]
+    public function testAFlaggedViewerIsNotShadowLimitedFromTheirOwnPosts(string $surface, string $recorded): void
+    {
+        $GLOBALS['__bcc_f02feed']['caution'] = [self::VIEWER, self::AUTHOR];
+
+        if ($surface === 'tag') {
+            $this->service()->getTagFeed(self::VIEWER, 'solana');
+        } elseif ($surface === 'group') {
+            $this->service()->getGroupFeed(self::VIEWER, 1138);
+        } else {
+            $this->invokeSurface($surface, self::VIEWER);
+        }
+
+        $excluded = $GLOBALS['__bcc_f02feed']['excluded'][$recorded] ?? null;
+        self::assertIsArray($excluded);
+        self::assertNotContains(self::VIEWER, $excluded, 'the viewer sees their own posts');
+        self::assertContains(self::AUTHOR, $excluded, 'other flagged authors stay shadow-limited');
+    }
+
+    /** Control: the shared anonymous hot feed keeps the whole list. */
+    public function testTheAnonymousHotFeedKeepsTheWholeCautionList(): void
+    {
+        $GLOBALS['__bcc_f02feed']['caution'] = [self::VIEWER, self::AUTHOR];
+
+        $this->service()->getHotFeed(null, FeedRankingService::HOT_WARM_LIMIT, self::VIEWER);
+
+        $excluded = $GLOBALS['__bcc_f02feed']['excluded']['getFeed:for_you'] ?? null;
+        self::assertSame([self::VIEWER, self::AUTHOR], $excluded);
+    }
+
     // ── the carve-out, asserted as a decision ───────────────────────
 
     /**

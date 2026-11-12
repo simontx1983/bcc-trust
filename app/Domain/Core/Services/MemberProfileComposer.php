@@ -160,6 +160,18 @@ final class MemberProfileComposer
         // ── Add user_id alias — frontend reads it; contract uses id.
         $base['user_id'] = isset($base['id']) ? (int) $base['id'] : $userId;
 
+        // ── F-255: is the viewer watching (following) this member, and the
+        //   handle to unwatch with. Read from the batch primed above, so
+        //   the profile's watch button is right however many members the
+        //   viewer follows (it used to be derived from the first 50 rows
+        //   of /me/watching). false / null for anon and for one's own
+        //   profile.
+        /** @var array{follow_id: int, source: 'peepso'|'page'}|null $viewerWatch */
+        $viewerWatch = is_array($prefetched['viewer_watches'] ?? null)
+            ? ($prefetched['viewer_watches'][$userId] ?? null)
+            : null;
+        $base += \BCC\Trust\Core\Services\ViewerWatchResolver::fields($viewerWatch);
+
         // ── §J.6 viewer_attestation — does the viewer currently have a
         //   vouch / stand_behind cast against THIS operator? Drives the
         //   FE AttestationActionCluster's cast-state copy ("VOUCHED" /
@@ -485,6 +497,9 @@ final class MemberProfileComposer
             // real here — the remove affordance keeps working even when
             // the live card resolver fails.
             'viewer_has_reviewed' => false,
+            // F-255: same degraded posture — no viewer, no watch state.
+            'viewer_is_watching'  => false,
+            'viewer_watch'        => null,
             'review_target_id'    => MemberSelfPageService::selfPageId($userId),
             'crest'               => [
                 'initials'         => self::initials($name),

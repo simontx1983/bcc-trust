@@ -499,7 +499,14 @@ final class PagePostsIntegrationTest extends TestCase
         ]);
         self::assertNotFalse($ok, 'score fixture: ' . $wpdb->last_error);
 
+        // Anyone else (anonymous here: no block list can explain an empty
+        // page) does not see the flagged author's post.
+        $GLOBALS['__bcc_current_user'] = 0;
         self::assertSame([], $this->ids($this->feed(self::PAGE_A)));
+
+        // F-269 (user decision 2026-11-12): the author always sees their own.
+        $GLOBALS['__bcc_current_user'] = self::OPERATOR;
+        self::assertCount(1, $this->ids($this->feed(self::PAGE_A)), 'the flagged author still sees their own post');
     }
 
     // ── the card ────────────────────────────────────────────────────────

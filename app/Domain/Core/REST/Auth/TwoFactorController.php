@@ -166,7 +166,7 @@ final class TwoFactorController
         wp_set_current_user($userId);
         wp_set_auth_cookie($userId, true);
 
-        $token = JwtToken::encode($userId, $handle);
+        $token = JwtToken::encodeNewSession($userId, $handle);
 
         Logger::audit('user_login', [
             'user_id' => $userId,
