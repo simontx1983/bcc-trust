@@ -176,4 +176,29 @@ final class EnvelopeMetaTest extends TestCase
         self::assertSame('60', $r->get_headers()['Retry-After'] ?? null);
         self::assertSame('30', $r->get_headers()['X-RateLimit-Limit'] ?? null);
     }
+
+    /**
+     * F-333 / F-294: a 429 that set its OWN Retry-After (the 7-day handle
+     * cooldown) is not a throttle denial. lastDenial() then describes an
+     * earlier throttle call in the request, and must not overwrite the
+     * real wait or add a contradicting retry_after_seconds.
+     */
+    public function testA429WithItsOwnRetryAfterKeepsItsOwnWait(): void
+    {
+        // A recorded denial from some earlier throttle call (60 s window).
+        $GLOBALS['__bcc_envelope_meta_throttle'] = ['allow' => false];
+        \BCC\Core\Security\Throttle::allow('me_write', 120, 60);
+
+        $resp = ApiResponse::error('bcc_rate_limited', 'Handle can only be changed once every 7 days.', 429, [
+            'next_change_at' => '2026-11-19T10:00:00Z',
+        ]);
+        $resp->header('Retry-After', '561600');
+
+        $r = Envelope::wrap($resp, new \WP_REST_Server(), new \WP_REST_Request('/bcc/v1/me/handle', 'PATCH'));
+        self::assertInstanceOf(\WP_REST_Response::class, $r);
+
+        self::assertSame('561600', $r->get_headers()['Retry-After'] ?? null);
+        $body = self::body($r);
+        self::assertSame(['next_change_at' => '2026-11-19T10:00:00Z'], $body['error']['data'] ?? null);
+    }
 }

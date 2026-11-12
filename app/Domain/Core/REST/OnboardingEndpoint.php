@@ -180,10 +180,13 @@ final class OnboardingEndpoint
         // they're locked out anyway.
         $expiresAt = $handleService->cooldownExpiresAt($userId);
         if ($expiresAt !== null) {
+            // `next_change_at` (F-333): the client error object does not
+            // surface headers, so the date rides in the body too.
             $resp = ApiResponse::error(
                 'bcc_rate_limited',
                 'Handle can only be changed once every 7 days.',
-                429
+                429,
+                ['next_change_at' => $handleService->nextChangeAt($userId)]
             );
             $resp->header('Retry-After', (string) max(0, $expiresAt - time()));
             return $resp;

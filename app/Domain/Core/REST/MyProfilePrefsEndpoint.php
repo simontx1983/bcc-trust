@@ -383,7 +383,8 @@ final class MyProfilePrefsEndpoint
      *   show_groups_on_profile: bool,
      *   mentor_opt_in: bool,
      *   mentor_listed: bool,
-     *   mentor_eligibility_reason: string|null
+     *   mentor_eligibility_reason: string|null,
+     *   handle_next_change_at: string|null
      * }
      */
     private static function readAll(int $userId): array
@@ -431,6 +432,10 @@ final class MyProfilePrefsEndpoint
             'mentor_opt_in'             => $mentor['opted_in'],
             'mentor_listed'             => $mentor['listed'],
             'mentor_eligibility_reason' => $mentor['reason'],
+            // F-333: read-only. When the owner may next change their
+            // handle (ISO-8601 UTC), or null when they can change it now,
+            // so the handle form can say so before a submit.
+            'handle_next_change_at'     => \BCC\Trust\Core\Plugin::instance()->handleService()->nextChangeAt($userId),
         ];
     }
 
