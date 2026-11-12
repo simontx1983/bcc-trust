@@ -473,8 +473,25 @@ class FraudDetector {
         // CronService stores results via wp_cache_set('ring_results', ..., 'bcc_trust_admin').
         $rings = wp_cache_get('ring_results', 'bcc_trust_admin');
         if ( ! is_array( $rings ) ) {
-            // Fallback: compute only when no cached results are available
-            $rings = $trustGraph->detectVoteRings( BCC_TRUST_RING_MIN_SIZE );
+            // Fallback: compute only when no cached results are available.
+            //
+            // F-234: the edge read behind this is fail-closed (F-209) and
+            // can throw on a cold cache. Ring membership is a 0-POINT
+            // observation (below), so a failed read must not abort the
+            // whole analysis and leave every SCORING signal unstored: treat
+            // rings as UNKNOWN for this run and skip the block. No `details`
+            // key is added, so `confidence` reads as "not in a ring".
+            // detectVoteRings() itself still caches nothing and moves no
+            // cursor on failure.
+            try {
+                $rings = $trustGraph->detectVoteRings( BCC_TRUST_RING_MIN_SIZE );
+            } catch ( \BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e ) {
+                \BCC\Core\Log\Logger::warning(
+                    '[bcc-trust] analyzeFraud: ring read failed, ring observation skipped for this run',
+                    [ 'user_id' => $userId, 'detail' => $e->getMessage() ]
+                );
+                $rings = [];
+            }
         }
         // ── RELATIONSHIP OBSERVATION, NOT A FRAUD SIGNAL ──────────────
         //
