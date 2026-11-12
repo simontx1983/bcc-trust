@@ -27,9 +27,12 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Feed\FeedItemNormalizer;
 use BCC\Core\Log\Logger;
 use BCC\Core\Repositories\PeepSoActivityRepository;
+use BCC\Trust\Core\Announcements\AnnouncementModerationPolicy;
+use BCC\Trust\Core\Announcements\AnnouncementVisibility;
 use BCC\Trust\Core\Repositories\ContentReportRepository;
 use BCC\Trust\Core\Repositories\GifRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
+use BCC\Trust\Core\Repositories\PeepSoActivityWriter;
 use BCC\Trust\Core\Repositories\PostShortcodeRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Support\CardUrlMap;
@@ -86,12 +89,18 @@ final class ModerationQueueService
     private const UNDO_TRANSIENT_PREFIX = 'bcc_mod_undo_';
     private const UNDO_TTL_SECONDS      = 30;
 
+    /** F-307 — administrator takedown of announcements. */
+    private readonly AnnouncementModerationService $announcements;
+
     public function __construct(
         private readonly ContentReportRepository $reportRepo,
         private readonly HiddenActivityRepository $hiddenRepo,
         private readonly PostShortcodeRepository $shortcodeRepo,
-        private readonly GifRepository $gifRepo
+        private readonly GifRepository $gifRepo,
+        ?AnnouncementModerationService $announcements = null
     ) {
+        $this->announcements = $announcements
+            ?? new AnnouncementModerationService($hiddenRepo, new PeepSoActivityWriter());
     }
 
     /**
@@ -350,6 +359,17 @@ final class ModerationQueueService
 
         $targetKind = (string) $report->target_kind;
         $targetId   = (int) $report->target_id;
+
+        // F-307 — a report filed against an announcement itself, and one
+        // filed against its feed projection (feed_item, module 205), are the
+        // SAME notice. Both take the takedown path, so the two report paths
+        // cannot diverge. Before, an announcement report was force-dismissed
+        // whatever the admin chose, and a projection report hid the feed
+        // copy only while the notice stayed up everywhere else.
+        $announcementId = $this->announcementIdFor($targetKind, $targetId);
+        if ($announcementId > 0) {
+            return $this->resolveAnnouncement($reportId, $targetKind, $targetId, $announcementId, $action, $resolverUserId);
+        }
 
         if ($targetKind !== 'feed_item' || $targetId <= 0) {
             // V1 only knows feed_item targets — extend here when more
@@ -610,6 +630,234 @@ final class ModerationQueueService
     }
 
     /**
+     * F-307 — the announcement a report is about, or 0. Kind 'announcement'
+     * carries the notice id; a 'feed_item' report on the notice's projection
+     * carries its activity, whose external id is the notice.
+     */
+    private function announcementIdFor(string $targetKind, int $targetId): int
+    {
+        if ($targetId <= 0) {
+            return 0;
+        }
+        if ($targetKind === 'announcement') {
+            return AnnouncementModerationService::isAnnouncement($targetId) ? $targetId : 0;
+        }
+        if ($targetKind !== 'feed_item') {
+            return 0;
+        }
+        if (PeepSoActivityRepository::getModuleIdByActId($targetId) !== AnnouncementModerationPolicy::ANNOUNCEMENT_MODULE_ID) {
+            return 0;
+        }
+        $activity = PeepSoActivityRepository::getById($targetId);
+        $postId   = $activity !== null && isset($activity->act_external_id) ? (int) $activity->act_external_id : 0;
+        return AnnouncementModerationService::isAnnouncement($postId) ? $postId : 0;
+    }
+
+    /**
+     * Every report target that names this notice: the notice itself and,
+     * when it has one, its feed projection.
+     *
+     * @return list<array{0: string, 1: int}>
+     */
+    private function announcementTargets(int $announcementId): array
+    {
+        $targets = [['announcement', $announcementId]];
+        $actId   = $this->announcements->projectedActId($announcementId);
+        if ($actId > 0) {
+            $targets[] = ['feed_item', $actId];
+        }
+        return $targets;
+    }
+
+    /**
+     * Report ids in $status across every target naming the notice, minus
+     * the clicked report.
+     *
+     * @return list<int>
+     */
+    private function announcementReportIds(int $announcementId, int $status, int $exceptReportId): array
+    {
+        $ids = [];
+        foreach ($this->announcementTargets($announcementId) as [$kind, $id]) {
+            foreach ($this->reportRepo->listIdsForTargetByStatus($kind, $id, $status) as $rid) {
+                if ($rid !== $exceptReportId) {
+                    $ids[$rid] = true;
+                }
+            }
+        }
+        return array_keys($ids);
+    }
+
+    /**
+     * F-307 — hide / restore / dismiss for a report about an announcement.
+     * Same report semantics as a feed post (F-306 hide upholds every pending
+     * report on the notice; F-73 restore closes them all as not upheld), with
+     * the visibility half done by AnnouncementModerationService. Auto-hide
+     * never reaches here: AnnouncementModerationPolicy still excludes it.
+     *
+     * @return array{
+     *   ok: true,
+     *   report_id: int,
+     *   action: string,
+     *   currently_hidden: bool,
+     *   undo: array{token: string, expires_at: string, ttl_seconds: int}|null
+     * }|array{error: string, message: string}
+     */
+    private function resolveAnnouncement(
+        int $reportId,
+        string $targetKind,
+        int $targetId,
+        int $announcementId,
+        string $action,
+        int $resolverUserId
+    ): array {
+        if ($action === self::ACTION_HIDE) {
+            $wasAlreadyHidden = $this->announcements->isHidden($announcementId);
+            if (!$this->announcements->hide($announcementId, $resolverUserId, $reportId)) {
+                return ['error' => 'bcc_unavailable', 'message' => 'Could not take the announcement down.'];
+            }
+            $this->reportRepo->updateStatus($reportId, self::STATUS_RESOLVED, $resolverUserId);
+            $upheldIds = $this->announcementReportIds($announcementId, self::STATUS_PENDING, $reportId);
+            $this->reportRepo->transitionStatus($upheldIds, self::STATUS_PENDING, self::STATUS_RESOLVED, $resolverUserId);
+            AuditLogger::log(
+                'admin_hide_announcement',
+                $reportId,
+                [
+                    'announcement_id'   => $announcementId,
+                    'target_kind'       => $targetKind,
+                    'target_id'         => $targetId,
+                    'already_hidden'    => $wasAlreadyHidden,
+                    'upheld_report_ids' => $upheldIds,
+                ],
+                'content_report',
+                $resolverUserId
+            );
+            // Rank: the reporters' report_upheld credit (same listener as posts).
+            do_action('bcc_content_hidden_by_admin', $targetId, $resolverUserId, $reportId, $upheldIds);
+
+            $undo = $this->issueUndoToken(
+                $reportId,
+                $resolverUserId,
+                self::ACTION_HIDE,
+                self::STATUS_RESOLVED,
+                true,
+                $targetId,
+                null,
+                null,
+                null,
+                [],
+                [],
+                $upheldIds,
+                $wasAlreadyHidden,
+                $announcementId
+            );
+
+            return [
+                'ok'               => true,
+                'report_id'        => $reportId,
+                'action'           => self::ACTION_HIDE,
+                'currently_hidden' => true,
+                'undo'             => $undo,
+            ];
+        }
+
+        if ($action === self::ACTION_RESTORE) {
+            if (!$this->announcements->isHidden($announcementId)) {
+                // Honest refusal: nothing was taken down, so nothing is
+                // restored and the report is left as it is.
+                return ['error' => 'bcc_invalid_request', 'message' => 'This announcement is not taken down, so there is nothing to restore.'];
+            }
+            $priorHider  = (int) get_post_meta($announcementId, AnnouncementVisibility::META_MODERATION_HIDDEN_BY, true);
+            $priorReport = (int) get_post_meta($announcementId, AnnouncementVisibility::META_MODERATION_HIDDEN_REPORT, true);
+
+            $unupheldIds      = $this->announcementReportIds($announcementId, self::STATUS_RESOLVED, $reportId);
+            $closedPendingIds = $this->announcementReportIds($announcementId, self::STATUS_PENDING, $reportId);
+            if (!$this->announcements->restore($announcementId, $resolverUserId)) {
+                return ['error' => 'bcc_unavailable', 'message' => 'Could not restore the announcement.'];
+            }
+            $this->reportRepo->transitionStatus($unupheldIds, self::STATUS_RESOLVED, self::STATUS_DISMISSED, $resolverUserId);
+            $this->reportRepo->transitionStatus($closedPendingIds, self::STATUS_PENDING, self::STATUS_DISMISSED, $resolverUserId);
+            $this->reportRepo->updateStatus($reportId, self::STATUS_DISMISSED, $resolverUserId);
+            AuditLogger::log(
+                'admin_restore_announcement',
+                $reportId,
+                [
+                    'announcement_id'           => $announcementId,
+                    'target_kind'               => $targetKind,
+                    'target_id'                 => $targetId,
+                    'unupheld_report_ids'       => $unupheldIds,
+                    'closed_pending_report_ids' => $closedPendingIds,
+                ],
+                'content_report',
+                $resolverUserId
+            );
+            do_action('bcc_content_restored_by_admin', $targetId, $resolverUserId, $reportId, $unupheldIds);
+
+            $undo = $this->issueUndoToken(
+                $reportId,
+                $resolverUserId,
+                self::ACTION_RESTORE,
+                self::STATUS_DISMISSED,
+                false,
+                $targetId,
+                $priorHider,
+                AnnouncementModerationService::REASON_TAKEDOWN,
+                $priorReport,
+                $unupheldIds,
+                $closedPendingIds,
+                [],
+                false,
+                $announcementId
+            );
+
+            return [
+                'ok'               => true,
+                'report_id'        => $reportId,
+                'action'           => self::ACTION_RESTORE,
+                'currently_hidden' => false,
+                'undo'             => $undo,
+            ];
+        }
+
+        // Dismiss — the notice is left as it is; only this report closes.
+        $this->reportRepo->updateStatus($reportId, self::STATUS_DISMISSED, $resolverUserId);
+        AuditLogger::log(
+            'admin_dismiss_report',
+            $reportId,
+            ['target_id' => $targetId, 'announcement_id' => $announcementId],
+            'content_report',
+            $resolverUserId
+        );
+        do_action('bcc_content_report_dismissed', $reportId, $resolverUserId);
+        $hiddenNow = $this->announcements->isHidden($announcementId);
+
+        $undo = $this->issueUndoToken(
+            $reportId,
+            $resolverUserId,
+            self::ACTION_DISMISS,
+            self::STATUS_DISMISSED,
+            $hiddenNow,
+            $targetId,
+            null,
+            null,
+            null,
+            [],
+            [],
+            [],
+            false,
+            $announcementId
+        );
+
+        return [
+            'ok'               => true,
+            'report_id'        => $reportId,
+            'action'           => self::ACTION_DISMISS,
+            'currently_hidden' => $hiddenNow,
+            'undo'             => $undo,
+        ];
+    }
+
+    /**
      * Reverse a moderation action issued in the last UNDO_TTL_SECONDS.
      *
      * MUST FAIL CLOSED on any uncertainty (see class-level constants
@@ -669,7 +917,12 @@ final class ModerationQueueService
         $expectedHidden     = (bool) ($undo['expected_currently_hidden'] ?? false);
         $currentStatus      = (int) $report->status;
         $targetId           = (int) $report->target_id;
-        $currentlyHiddenNow = $targetId > 0 && $this->hiddenRepo->exists($targetId);
+        // F-307 — an announcement token checks (and reverses) the takedown,
+        // never the hidden-activity row of an unrelated id.
+        $announcementId     = (int) ($undo['announcement_id'] ?? 0);
+        $currentlyHiddenNow = $announcementId > 0
+            ? $this->announcements->isHidden($announcementId)
+            : ($targetId > 0 && $this->hiddenRepo->exists($targetId));
 
         if ($currentStatus !== $expectedStatus || $currentlyHiddenNow !== $expectedHidden) {
             AuditLogger::log(
@@ -704,7 +957,11 @@ final class ModerationQueueService
             $wasAlreadyHidden = (bool) ($undo['was_already_hidden'] ?? false);
             $upheldIds        = self::idList($undo['upheld_report_ids'] ?? []);
             if (!$wasAlreadyHidden) {
-                $this->hiddenRepo->remove($targetId);
+                if ($announcementId > 0) {
+                    $this->announcements->restore($announcementId, $adminUserId);
+                } else {
+                    $this->hiddenRepo->remove($targetId);
+                }
             }
             $this->reportRepo->transitionStatus($upheldIds, self::STATUS_RESOLVED, self::STATUS_PENDING, $adminUserId);
             $this->reportRepo->setPending($reportId);
@@ -725,7 +982,9 @@ final class ModerationQueueService
                 'ok'               => true,
                 'report_id'        => $reportId,
                 'undone_action'    => self::ACTION_HIDE,
-                'currently_hidden' => $wasAlreadyHidden && $this->hiddenRepo->exists($targetId),
+                'currently_hidden' => $wasAlreadyHidden && ($announcementId > 0
+                    ? $this->announcements->isHidden($announcementId)
+                    : $this->hiddenRepo->exists($targetId)),
             ];
         }
 
@@ -781,7 +1040,10 @@ final class ModerationQueueService
             $closedPendingIds = self::idList($undo['closed_pending_report_ids'] ?? []);
 
             $rehidden = false;
-            if ($priorReason !== null) {
+            if ($priorReason !== null && $announcementId > 0) {
+                // F-307 — put the takedown back, under the original admin.
+                $rehidden = $this->announcements->hide($announcementId, $priorHider, $priorRelated);
+            } elseif ($priorReason !== null) {
                 $rehidden = $this->hiddenRepo->add(
                     $targetId,
                     $priorHider,
@@ -793,7 +1055,11 @@ final class ModerationQueueService
             // F-73 — reopen the pending reports the restore closed, and end
             // the re-hide cooldown it started.
             $this->reportRepo->transitionStatus($closedPendingIds, self::STATUS_DISMISSED, self::STATUS_PENDING, $adminUserId);
-            AutoHideService::clearRehideCooldown($targetId);
+            if ($announcementId === 0) {
+                // Feed posts only: the cooldown is keyed by activity id, and
+                // announcements are never auto-hidden (F-307).
+                AutoHideService::clearRehideCooldown($targetId);
+            }
             $this->reportRepo->setPending($reportId);
             AuditLogger::log(
                 'admin_undo_restore',
@@ -842,6 +1108,8 @@ final class ModerationQueueService
      *        the hide moved from status 0 to 1, returned to 0 on undo
      * @param bool $wasAlreadyHidden hide only (F-306) — the post was hidden
      *        before this hide, so undo must leave the hide in place
+     * @param int $announcementId F-307 — the notice an announcement report is
+     *        about (0 for a feed post); undo then acts on its takedown
      * @return array{token: string, expires_at: string, ttl_seconds: int}|null
      */
     private function issueUndoToken(
@@ -857,7 +1125,8 @@ final class ModerationQueueService
         array $unupheldReportIds = [],
         array $closedPendingReportIds = [],
         array $upheldReportIds = [],
-        bool $wasAlreadyHidden = false
+        bool $wasAlreadyHidden = false,
+        int $announcementId = 0
     ): ?array {
         // 32 hex chars = 128 bits of randomness. wp_generate_password
         // with special_chars=false yields [A-Za-z0-9]; bin2hex(random_bytes(16))
@@ -888,6 +1157,7 @@ final class ModerationQueueService
             'closed_pending_report_ids' => $closedPendingReportIds,
             'upheld_report_ids'         => $upheldReportIds,
             'was_already_hidden'        => $wasAlreadyHidden,
+            'announcement_id'           => $announcementId,
             'issued_at'                 => $now,
         ];
 
@@ -1019,6 +1289,26 @@ final class ModerationQueueService
             $reporterId = (int) $row->reporter_user_id;
             $actId      = (int) $row->target_id;
             $statusInt  = (int) $row->status;
+
+            // F-307 — a report on the notice itself: show the notice (title,
+            // text, link) and its takedown state. Before, the row read
+            // "TARGET · DELETED" and its hidden flag was looked up in the
+            // feed-activity set by the notice's post id — a different id
+            // space.
+            if ((string) $row->target_kind === 'announcement') {
+                $items[] = [
+                    'id'              => (int) $row->id,
+                    'status'          => $statusInt,
+                    'status_label'    => self::statusLabel($statusInt),
+                    'reason_code'     => (string) $row->reason_code,
+                    'comment'         => is_string($row->comment) ? $row->comment : '',
+                    'created_at'      => self::toIso8601((string) $row->created_at),
+                    'reporter'        => $users[$reporterId] ?? self::fallbackUser($reporterId),
+                    'target'          => self::shapeAnnouncementTarget($actId),
+                    'currently_hidden'=> $this->announcements->isHidden($actId),
+                ];
+                continue;
+            }
 
             $activity     = $activities[$actId] ?? null;
             $authorId     = $activity !== null && isset($activity->act_user_id) ? (int) $activity->act_user_id : 0;
@@ -1174,6 +1464,47 @@ final class ModerationQueueService
             }
         }
 
+        return $base;
+    }
+
+    /**
+     * F-307 — the queue's target block for a report on an announcement:
+     * title and text as the preview, the canonical permalink, the author.
+     * A notice that no longer exists keeps the empty base (degraded beats
+     * broken), the same as a vanished feed post.
+     *
+     * @return array<string, mixed>
+     */
+    private static function shapeAnnouncementTarget(int $announcementId): array
+    {
+        $base = [
+            'target_kind' => 'announcement',
+            'target_id'   => $announcementId,
+            'preview'     => '',
+            'post_kind'   => null,
+            'post_url'    => '',
+            'author_id'   => null,
+            'posted_at'   => null,
+        ];
+        if (!AnnouncementModerationService::isAnnouncement($announcementId)) {
+            return $base;
+        }
+        $post = get_post($announcementId);
+        if (!$post instanceof \WP_Post) {
+            return $base;
+        }
+        $title = trim(wp_strip_all_tags((string) $post->post_title));
+        $text  = trim(wp_strip_all_tags((string) $post->post_content));
+        $page  = $post->post_parent > 0 ? get_post((int) $post->post_parent) : null;
+        $slug  = $page instanceof \WP_Post ? (string) $page->post_name : '';
+
+        $base['preview']   = self::truncate(trim($title . ($title !== '' && $text !== '' ? ' — ' : '') . $text), 240);
+        $base['post_kind'] = 'announcement';
+        $base['post_url']  = $slug !== '' ? AnnouncementViewService::permalinkFor($slug, $announcementId) : '';
+        $base['author_id'] = (int) $post->post_author > 0 ? (int) $post->post_author : null;
+        $base['posted_at'] = $post->post_date_gmt !== '0000-00-00 00:00:00'
+            ? self::toIso8601((string) $post->post_date_gmt)
+            : null;
         return $base;
     }
 

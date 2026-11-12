@@ -169,6 +169,18 @@ final class NotificationType
     public const GROUP_INVITED                      = 'bcc_group_invited';
 
     /**
+     * F-307 — an administrator took the author's announcement down.
+     * Self-notification, bell only. external_id = the announcement.
+     */
+    public const ANNOUNCEMENT_HIDDEN                = 'bcc_announcement_hidden';
+
+    /**
+     * F-307 — an administrator restored the author's announcement after a
+     * takedown. Self-notification, bell only. external_id = the announcement.
+     */
+    public const ANNOUNCEMENT_RESTORED              = 'bcc_announcement_restored';
+
+    /**
      * Types that are delivered in-app ONLY: NotificationRepository's
      * weekly email digest excludes them. Push is opt-in per dispatch
      * (pushDispatcher->enqueue), and none of these dispatch one.
@@ -182,6 +194,8 @@ final class NotificationType
         self::GROUP_JOIN_REQUESTED,
         self::GROUP_JOIN_APPROVED,
         self::GROUP_INVITED,
+        self::ANNOUNCEMENT_HIDDEN,
+        self::ANNOUNCEMENT_RESTORED,
     ];
 
     /**
@@ -224,6 +238,8 @@ final class NotificationType
         self::GROUP_JOIN_REQUESTED,
         self::GROUP_JOIN_APPROVED,
         self::GROUP_INVITED,
+        self::ANNOUNCEMENT_HIDDEN,
+        self::ANNOUNCEMENT_RESTORED,
     ];
 
     public static function isValid(string $type): bool

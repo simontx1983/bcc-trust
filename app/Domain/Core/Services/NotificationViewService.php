@@ -306,6 +306,10 @@ final class NotificationViewService
             NotificationType::GROUP_JOIN_REQUESTED,
             NotificationType::GROUP_JOIN_APPROVED,
             NotificationType::GROUP_INVITED => self::resolveCommunityLink($externalId),
+            // F-307: a taken-down notice 404s for everyone but its owner's
+            // manage view, so neither notice deep-links to it.
+            NotificationType::ANNOUNCEMENT_HIDDEN   => '/',
+            NotificationType::ANNOUNCEMENT_RESTORED => '/',
             default                       => '/',
         };
     }

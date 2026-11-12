@@ -1135,7 +1135,18 @@ final class Plugin
             $this->contentReportRepository(),
             $this->hiddenActivityRepository(),
             $this->postShortcodeRepository(),
-            $this->gifRepository()
+            $this->gifRepository(),
+            $this->announcementModerationService()
+        );
+    }
+
+    private ?Services\AnnouncementModerationService $announcementModerationService = null;
+    /** F-307 — administrator takedown of announcements. */
+    public function announcementModerationService(): Services\AnnouncementModerationService
+    {
+        return $this->announcementModerationService ??= new Services\AnnouncementModerationService(
+            $this->hiddenActivityRepository(),
+            $this->peepSoActivityWriter()
         );
     }
 
@@ -2683,6 +2694,15 @@ final class Plugin
         // methods self-isolate with try/catch. A reversal routes to the
         // dedicated restoration notice; other reconsiderations to the
         // appeal-outcome notice — one bell per event, never both.
+        // F-307 — tell the author when an administrator takes their
+        // announcement down, and when it is restored. Bell only.
+        add_action('bcc_announcement_moderation_hidden', function (int $announcementId): void {
+            $this->notificationDispatcher()->onAnnouncementModerated($announcementId, true);
+        }, 30, 1);
+        add_action('bcc_announcement_moderation_restored', function (int $announcementId): void {
+            $this->notificationDispatcher()->onAnnouncementModerated($announcementId, false);
+        }, 30, 1);
+
         add_action('bcc_rank_recovery_started', function (int $userId, string $deadline): void {
             $this->notificationDispatcher()->onRankRecoveryStarted($userId, $deadline);
         }, 30, 2);
