@@ -131,6 +131,22 @@ class PolkadotFetcher implements FetcherInterface
                 'page'       => $page,
             ], $outcome);
 
+            // F-68: a page that FAILED (transport error, non-200, Subscan
+            // error code, missing key) is not the end of the list. apiPost()
+            // returns null for every one of those, and the loop used to read
+            // that as "no more validators" and index a truncated set as if
+            // it were complete. Throw instead, so the run fails: both callers
+            // catch it (ChainRefreshService marks the chain a partial fetch,
+            // skips its write and the dead-validator sweep; the admin refresh
+            // reports a failure).
+            if ($data === null) {
+                throw new \RuntimeException(sprintf(
+                    'Polkadot validator page %d failed (%d validators fetched before it); refusing to index a truncated list.',
+                    $page,
+                    count($validators)
+                ));
+            }
+
             $list = $data['list'] ?? [];
             if (empty($list)) {
                 break;
@@ -571,10 +587,13 @@ class PolkadotFetcher implements FetcherInterface
      * Make a POST request to the Subscan API.
      * Requires BCC_SUBSCAN_API_KEY defined in wp-config.php.
      *
+     * Returns null on ANY failure; callers must not read null as "empty".
+     * Protected (not private) only as a test seam for the paging loop.
+     *
      * @param array<string, mixed> $body
      * @return array<string, mixed>|null
      */
-    private function apiPost(string $path, array $body, ?ProviderOutcomeReceipt $outcome = null): ?array
+    protected function apiPost(string $path, array $body, ?ProviderOutcomeReceipt $outcome = null): ?array
     {
         $apiKey = defined('BCC_SUBSCAN_API_KEY') ? BCC_SUBSCAN_API_KEY : '';
 
