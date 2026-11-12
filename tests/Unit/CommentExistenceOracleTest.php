@@ -63,17 +63,25 @@ final class CommentExistenceOracleTest extends TestCase
     }
 
     /** @param list<int> $visibleActIds */
-    private static function service(array $visibleActIds, ?CommentRepository $repo = null): CommentService
+    private static function service(array $visibleActIds, ?CommentRepository $repo = null, bool $live = true): CommentService
     {
-        $visibility = new class ($visibleActIds) extends FeedItemReportVisibility {
+        $visibility = new class ($visibleActIds, $live) extends FeedItemReportVisibility {
             /** @param list<int> $visible */
-            public function __construct(private array $visible)
+            public function __construct(private array $visible, private bool $live)
             {
             }
 
             public function canSee(int $viewerId, object $activity): bool
             {
                 return in_array((int) $activity->act_id, $this->visible, true);
+            }
+
+            // F-265: whether the parent post is still published and not
+            // moderation-hidden (the real rule is pinned in
+            // RemovedPostLivenessIntegrationTest + FeedItemReportVisibilityTest).
+            public function isLive(object $activity): bool
+            {
+                return $this->live;
             }
         };
 
@@ -113,6 +121,49 @@ final class CommentExistenceOracleTest extends TestCase
         self::assertSame(
             ['error' => 'bcc_forbidden', 'message' => 'You do not have access to this discussion.'],
             $result
+        );
+    }
+
+    // ── F-265: a deleted or moderation-hidden post has no thread ─────
+
+    public function testARemovedPostListsLikeAMissingOneEvenForAViewerWhoCouldSeeIt(): void
+    {
+        // A member: the membership gate would let them read.
+        CommentDeleteFakes::$memberships[self::VIEWER][self::GROUP_ID] = 'member';
+
+        $removed = self::service([self::PARENT_ACT], live: false)
+            ->listByFeedId('feed_' . self::PARENT_ACT, self::VIEWER, 'oldest', null, 20);
+
+        self::assertSame(self::NOT_FOUND_POST, $removed);
+    }
+
+    public function testARemovedPostListsLikeAMissingOneForAnonymousViewers(): void
+    {
+        unset(CommentDeleteFakes::$postMeta[self::PARENT_POST]['peepso_group_id']); // an open post
+
+        $removed = self::service([self::PARENT_ACT], live: false)
+            ->listByFeedId('feed_' . self::PARENT_ACT, 0, 'oldest', null, 20);
+
+        self::assertSame(self::NOT_FOUND_POST, $removed);
+    }
+
+    public function testNobodyCanCommentOnARemovedPost(): void
+    {
+        $removed = self::service([self::PARENT_ACT], live: false)
+            ->createComment('feed_' . self::PARENT_ACT, self::VIEWER, 'still here?');
+
+        self::assertSame(self::NOT_FOUND_POST, $removed);
+    }
+
+    /** Control: the same create on a LIVE post gets past the liveness check to the membership gate. */
+    public function testALivePostReachesTheMembershipGateOnCreate(): void
+    {
+        $live = self::service([self::PARENT_ACT])
+            ->createComment('feed_' . self::PARENT_ACT, self::VIEWER, 'hello');
+
+        self::assertSame(
+            ['error' => 'bcc_forbidden', 'message' => 'You do not have permission to comment here.'],
+            $live
         );
     }
 

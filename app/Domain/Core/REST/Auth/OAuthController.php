@@ -310,7 +310,7 @@ final class OAuthController
                 );
             }
 
-            $token = JwtToken::encode($userId, $handle);
+            $token = JwtToken::encodeNewSession($userId, $handle);
 
             do_action('bcc_user_login', $userId, $handle);
 
@@ -326,6 +326,9 @@ final class OAuthController
                 'expires_in'       => AuthSupport::JWT_TTL_SECONDS,
                 'token_type'       => 'Bearer',
                 'in_good_standing' => AuthSupport::resolveInGoodStanding($userId),
+                // F-305: a suspended member signs in READ-ONLY; the client shows
+                // the suspension notice from this flag. Every write gate refuses.
+                'suspended'        => AuthSupport::resolveSuspended($userId),
             ]);
             $response->header('Cache-Control', 'no-store');
             return $response;
@@ -454,7 +457,11 @@ final class OAuthController
             // Core saves meta_input BEFORE firing user_register, so the
             // handle-assignment hook in Plugin.php sees the chosen handle
             // and leaves it alone.
-            'meta_input'   => [HandleService::META_HANDLE => $handle],
+            'meta_input'   => [
+                HandleService::META_HANDLE => $handle,
+                // F-253: the password above is random and never shown.
+                \BCC\Trust\Core\Services\AccountRecoveryService::META_HAS_PASSWORD => '0',
+            ],
         ]);
 
         if (is_wp_error($userId)) {
@@ -492,7 +499,7 @@ final class OAuthController
         // Consume the provider_token only after the user row is committed.
         AuthSupport::consumeOauthProviderToken($providerToken);
 
-        $token = JwtToken::encode($userIdInt, $handle);
+        $token = JwtToken::encodeNewSession($userIdInt, $handle);
 
         Logger::audit('user_signup', [
             'user_id'  => $userIdInt,
@@ -529,6 +536,9 @@ final class OAuthController
             'expires_in'       => AuthSupport::JWT_TTL_SECONDS,
             'token_type'       => 'Bearer',
             'in_good_standing' => AuthSupport::resolveInGoodStanding($userIdInt),
+            // F-305: a suspended member signs in READ-ONLY; the client shows
+            // the suspension notice from this flag. Every write gate refuses.
+            'suspended'        => AuthSupport::resolveSuspended($userIdInt),
         ], 201);
         $response->header('Cache-Control', 'no-store');
         return $response;

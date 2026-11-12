@@ -55,7 +55,8 @@ if (!defined('ABSPATH')) {
  *   act_id: int|numeric-string,
  *   comment_post_id: int|numeric-string,
  *   author_id: int|numeric-string,
- *   parent_post_id: int|numeric-string
+ *   parent_post_id: int|numeric-string,
+ *   parent_act_id?: int|numeric-string
  * }
  */
 final class CommentRepository
@@ -422,6 +423,9 @@ final class CommentRepository
      * parent_post_id (= act_comment_object_id, the parent post's
      * wp_posts.ID) for the comment-stoke group gate, which must resolve
      * membership off the PARENT post, not the comment's own wp_post.
+     * parent_act_id is the parent post's activity (PeepSo keys it by
+     * act_comment_object_id + act_comment_module_id), 0 when unresolvable;
+     * GroupInteractionGate uses it for the moderation-hidden check (F-265).
      *
      * Returns null when the act_id doesn't resolve to a published
      * comment row (already trashed, never existed, or points at a
@@ -442,9 +446,13 @@ final class CommentRepository
             "SELECT a.act_id,
                     a.act_external_id       AS comment_post_id,
                     a.act_comment_object_id AS parent_post_id,
-                    p.post_author           AS author_id
+                    p.post_author           AS author_id,
+                    COALESCE(pa.act_id, 0)  AS parent_act_id
                FROM {$activities} a
                INNER JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
+               LEFT JOIN {$activities} pa
+                      ON pa.act_external_id = a.act_comment_object_id
+                     AND pa.act_module_id   = a.act_comment_module_id
               WHERE a.act_id = %d
                 AND a.act_comment_object_id > 0
                 AND p.post_status = 'publish'

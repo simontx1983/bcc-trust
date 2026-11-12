@@ -357,9 +357,13 @@ namespace BCC\Core\DB {
             /** @var list<string> "acquire:<key>" / "release:<key>", in order */
             public static array $calls = [];
 
+            /** @var list<int> the wait each acquire asked for, in order */
+            public static array $waits = [];
+
             public static function acquire(string $key, int $timeout = 0): bool
             {
                 self::$calls[] = 'acquire:' . $key;
+                self::$waits[] = $timeout;
                 return !in_array($key, self::$heldElsewhere, true);
             }
 
@@ -372,6 +376,7 @@ namespace BCC\Core\DB {
             {
                 self::$heldElsewhere = [];
                 self::$calls         = [];
+                self::$waits         = [];
             }
         }
     }
@@ -545,6 +550,34 @@ namespace BCC\Core\Repositories {
             public static function findManyByIds(array $groupIds): array
             {
                 return [];
+            }
+
+            /** F-271: the join gate's ban check. Banned rows carry role 'banned'. */
+            public static function getMembershipStatus(int $userId, int $groupId): ?string
+            {
+                foreach (\BccRevokeWorld::$members[$groupId] ?? [] as $row) {
+                    if ((int) $row->user_id === $userId) {
+                        return (string) $row->role;
+                    }
+                }
+                return null;
+            }
+
+            /**
+             * F-271: discovery's banned set.
+             *
+             * @param int[] $groupIds
+             * @return list<int>
+             */
+            public static function findUserBannedGroupIds(int $userId, array $groupIds): array
+            {
+                $out = [];
+                foreach ($groupIds as $gid) {
+                    if (self::getMembershipStatus($userId, (int) $gid) === 'banned') {
+                        $out[] = (int) $gid;
+                    }
+                }
+                return $out;
             }
         }
     }

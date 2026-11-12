@@ -58,15 +58,82 @@ final class GroupInteractionGate
      */
     public static function check(int $userId, int $actId): ?WP_REST_Response
     {
+        $postId = self::resolveLiveTarget($actId);
+        if ($postId === null) {
+            return self::notFound();
+        }
+
+        return self::checkPost($userId, $postId);
+    }
+
+    /**
+     * The gate for the COMMENT routes (comment stoke, comment helpful-mark),
+     * which take a comment act id and answer "Comment not found." for
+     * anything they cannot act on.
+     *
+     * Order: the act must be a published comment; then it must be LIVE
+     * (F-265: not hidden itself, and its parent post published and not
+     * moderation-hidden, via {@see resolveLiveTarget()}); then the parent
+     * post's membership gate ({@see checkPost()}). Every refusal before the
+     * membership step is the route's own unknown-comment 404, so a removed
+     * thread and a secret group's comment both read as a comment that does
+     * not exist.
+     */
+    public static function checkComment(int $userId, int $commentActId): ?WP_REST_Response
+    {
+        $notFound = self::notFound(self::NOT_FOUND_COMMENT);
+        if ($commentActId <= 0 || Plugin::instance()->commentRepository()->getCommentMeta($commentActId) === null) {
+            return $notFound;
+        }
+        $parentPostId = self::resolveLiveTarget($commentActId);
+        if ($parentPostId === null) {
+            return $notFound;
+        }
+
+        return self::checkPost($userId, $parentPostId, self::NOT_FOUND_COMMENT);
+    }
+
+    private const NOT_FOUND_COMMENT = 'Comment not found.';
+
+    /**
+     * The wp_post that gates an interaction with `$actId`, or NULL when the
+     * act is not something anyone may still interact with: unknown, off the
+     * feed allowlist, or NOT LIVE (F-265).
+     *
+     * Not live = the post (or, for a comment, its parent post) is trashed or
+     * unpublished, or is moderation-hidden, or the comment itself is hidden.
+     * Such a post is gone from every feed and its permalink 404s, so a
+     * reaction, stoke or helpful-mark on it, and the bell that would follow,
+     * must be refused the same way. The rule is
+     * {@see FeedItemReportVisibility::isLiveWith()}, shared with the comment
+     * routes and NotificationDispatcher.
+     *
+     * Membership is NOT checked here ({@see checkPost()} does that), so a
+     * caller with no viewer (a notification) can use it as-is.
+     */
+    public static function resolveLiveTarget(int $actId): ?int
+    {
+        if ($actId <= 0) {
+            return null;
+        }
+        $hidden = Plugin::instance()->hiddenActivityRepository();
+
         $comment = Plugin::instance()->commentRepository()->getCommentMeta($actId);
         if ($comment !== null) {
             $parentPostId = (int) $comment->parent_post_id;
             // A comment hanging off a trashed/draft parent is not reachable
-            // on any feed, so it is "not found" too.
+            // on any feed, so it is "not found" too. (getCommentMeta only
+            // answers for a PUBLISHED comment.)
             if ($parentPostId <= 0 || get_post_status($parentPostId) !== 'publish') {
-                return self::notFound();
+                return null;
             }
-            return self::checkPost($userId, $parentPostId);
+            // F-265: nor one under a moderation-hidden parent, nor a hidden
+            // comment. 0 = parent act not resolvable: nothing to look up.
+            $parentActId = (int) ($comment->parent_act_id ?? 0);
+            if (($parentActId > 0 && $hidden->exists($parentActId)) || $hidden->exists($actId)) {
+                return null;
+            }
+            return $parentPostId;
         }
 
         $row = PeepSoActivityRepository::getById(
@@ -74,19 +141,22 @@ final class GroupInteractionGate
             \BCC\Core\Feed\FeedItemNormalizer::publicFeedModuleIds()
         );
         if ($row === null) {
-            return self::notFound();
+            return null;
         }
         $postId = (int) $row->act_external_id;
         if ($postId <= 0) {
-            return self::notFound();
+            return null;
         }
         if (get_post_type($postId) === self::COMMENT_POST_TYPE) {
             // A comment act getCommentMeta() could not resolve to a
             // published parent. Never gate it on its own post row.
-            return self::notFound();
+            return null;
+        }
+        if (!\BCC\Trust\Core\Services\FeedItemReportVisibility::isLiveWith($row, $hidden)) {
+            return null;
         }
 
-        return self::checkPost($userId, $postId);
+        return $postId;
     }
 
     private const NOT_FOUND_POST = 'Post not found.';

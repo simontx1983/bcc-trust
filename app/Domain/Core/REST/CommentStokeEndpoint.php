@@ -113,16 +113,13 @@ final class CommentStokeEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Invalid comment id.', 400);
         }
 
-        // Resolve the comment → its parent post, and gate on the parent's
-        // group membership (the comment row carries no peepso_group_id).
-        $meta = Plugin::instance()->commentRepository()->getCommentMeta($commentActId);
-        if ($meta === null) {
-            return ApiResponse::error('bcc_not_found', 'Comment not found.', 404);
-        }
-
-        // Same message as the unknown-comment 404 above, so a comment in a
-        // secret group is indistinguishable from one that does not exist.
-        $gateError = GroupInteractionGate::checkPost($userId, (int) $meta->parent_post_id, 'Comment not found.');
+        // Resolve the comment → its parent post: the comment must be live
+        // (F-265: not hidden, under a published, unhidden post), then the
+        // parent's group membership gates it (the comment row carries no
+        // peepso_group_id). Every refusal before membership is the same
+        // "Comment not found." 404, so a comment in a secret group or a
+        // removed thread is indistinguishable from one that does not exist.
+        $gateError = GroupInteractionGate::checkComment($userId, $commentActId);
         if ($gateError !== null) {
             return $gateError;
         }

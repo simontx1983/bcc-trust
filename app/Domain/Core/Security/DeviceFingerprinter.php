@@ -36,26 +36,58 @@ class DeviceFingerprinter {
     private int $cleanupDays;
 
     /**
+     * Keyed one-way hash over an arbitrary message — the single keyed-HMAC
+     * primitive for this plugin.
+     *
+     * `hashIp()` below delegates here, and so does F-324's viewer dedupe,
+     * which needs a different MESSAGE (a per-day salt plus its subject) but
+     * exactly the same key handling and exactly the same refusal below.
+     * Promoted to one method rather than letting a second site re-derive
+     * the construction.
+     *
+     * ⚠⚠ FAILS CLOSED, and that is the load-bearing part. Plugin activation
+     * is gated on BCC_ENCRYPTION_KEY (bcc-trust.php, bootstrap.php), so
+     * reaching here without it means state is unsafe: this returns null
+     * rather than degrading to AUTH_SALT (which rotates under key rotation)
+     * or, worst, a hardcoded literal. An UNKEYED digest of a low-entropy
+     * message is a confirmation oracle — anyone could recompute it from a
+     * guess and confirm a hit. That is precisely the defect AuthSupport
+     * documents having already been fixed once in this codebase, and with a
+     * membership on the order of a hundred, a user-id message space is
+     * trivially enumerable. The secret, not the digest length, is the
+     * defence.
+     *
+     * @param string $message The value to hash. Callers that need domain
+     *                        separation (e.g. a per-day salt) must build it
+     *                        into the message themselves.
+     * @param string $context Caller name, used only in the failure log so an
+     *                        operator can see which path was unkeyed.
+     * @return string|null 64-char lowercase hex, or null when no key.
+     */
+    public static function keyedHash(string $message, string $context = 'keyedHash'): ?string {
+        if (defined('BCC_ENCRYPTION_KEY') && \BCC_ENCRYPTION_KEY) {
+            return hash_hmac('sha256', $message, \BCC_ENCRYPTION_KEY);
+        }
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] ' . $context . ' called without BCC_ENCRYPTION_KEY — returning null');
+        }
+        return null;
+    }
+
+    /**
      * Hash an IP address for privacy-safe storage (GDPR).
      * Uses a keyed HMAC so the same IP produces a consistent hash within
      * this installation, but the raw IP cannot be recovered.
+     *
+     * Delegates to keyedHash(); the `'hashIp'` context keeps the failure log
+     * line byte-identical to what this method emitted before the extraction,
+     * so an operator grep for it still matches.
      */
     private static function hashIp(string $ip): ?string {
         if (!$ip || $ip === '0.0.0.0') {
             return null;
         }
-        // Plugin activation is gated on BCC_ENCRYPTION_KEY (see
-        // bcc-trust.php and bootstrap.php). If we reach
-        // here without it, state is unsafe — fail closed rather than
-        // silently degrade to AUTH_SALT (which rotates under key
-        // rotation) or, worst, a hardcoded literal.
-        if (defined('BCC_ENCRYPTION_KEY') && \BCC_ENCRYPTION_KEY) {
-            return hash_hmac('sha256', $ip, \BCC_ENCRYPTION_KEY);
-        }
-        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
-            \BCC\Core\Log\Logger::error('[bcc-trust] hashIp called without BCC_ENCRYPTION_KEY — returning null');
-        }
-        return null;
+        return self::keyedHash($ip, 'hashIp');
     }
 
     /**

@@ -4,6 +4,7 @@
  *
  * Subprocess-only. Records side effects in $GLOBALS['__bcc_ph']:
  *   audit       list<string>  AuditLogger::log event names
+ *   audit_meta  array<string, array<string, mixed>>  last meta per event
  *   canary      list<string>  AccountSecurityMailer calls ("emailChanged:old>new", …)
  *   current_user int          get_current_user_id()
  *   passwords   array<int, string>  wp_check_password() plain-text fixture
@@ -19,6 +20,7 @@ namespace BCC\Trust\Core\Security {
             public static function log(string $event, int $objectId, array $meta = [], string $type = '', int $actor = 0): void
             {
                 $GLOBALS['__bcc_ph']['audit'][] = $event;
+                $GLOBALS['__bcc_ph']['audit_meta'][$event] = $meta;
             }
         }
     }
@@ -46,6 +48,11 @@ namespace BCC\Trust\Core\Services {
             public static function sessionsRevokedAll(int $userId): void
             {
                 $GLOBALS['__bcc_ph']['canary'][] = 'sessionsRevokedAll:' . $userId;
+            }
+
+            public static function accountDeleted(string $email, string $displayName): void
+            {
+                $GLOBALS['__bcc_ph']['canary'][] = 'accountDeleted:' . $email;
             }
         }
     }

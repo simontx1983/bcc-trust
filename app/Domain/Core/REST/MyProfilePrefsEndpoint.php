@@ -15,6 +15,7 @@
  *     "hide_online":            bool,
  *     "hide_from_search":       bool,
  *     "default_post_audience":  "public" | "members" | "friends" | "private",
+ *     "show_groups_on_profile": bool,
  *     "mentor_opt_in":          bool
  *   }
  *
@@ -60,6 +61,15 @@
  *                               itself overwrites this on every post — this
  *                               setting lets the user manually nudge the
  *                               default forward.
+ *   - show_groups_on_profile → `bcc_show_groups_on_profile` user_meta,
+ *                             "1"/"0". ⚠ ABSENT MEANS ON (F-270): the
+ *                             default preserves today's behaviour, so an
+ *                             untouched account keeps listing its groups.
+ *                             ⚠ It governs only the TOGGLEABLE part of the
+ *                             policy. Secret groups are never shown to
+ *                             non-members, and holder/delegator groups are
+ *                             shown to signed-in viewers only, whatever
+ *                             this says — see ProfileGroupVisibility.
  *   - mentor_opt_in          → `bcc_mentor_opt_in` user_meta, "1"/"0"
  *                               (Rank Phase 7 §21.4, via
  *                               MentorListingService). Opting in needs NO
@@ -86,6 +96,7 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Repositories\DbWriteCheck;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\ProfileAccess;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -288,9 +299,10 @@ final class MyProfilePrefsEndpoint
         // Boolean flags: any value is accepted (FILTER_VALIDATE_BOOLEAN), so
         // they cannot fail validation.
         foreach ([
-            'hide_birthday_year' => 'peepso_hide_birthday_year',
-            'hide_online'        => 'peepso_hide_online_status',
-            'hide_from_search'   => 'peepso_is_hide_profile_from_user_listing',
+            'hide_birthday_year'     => 'peepso_hide_birthday_year',
+            'hide_online'            => 'peepso_hide_online_status',
+            'hide_from_search'       => 'peepso_is_hide_profile_from_user_listing',
+            'show_groups_on_profile' => ProfileAccess::META_SHOW_GROUPS,
         ] as $param => $metaKey) {
             $raw = $request->get_param($param);
             if ($raw !== null) {
@@ -368,6 +380,7 @@ final class MyProfilePrefsEndpoint
      *   hide_online: bool,
      *   hide_from_search: bool,
      *   default_post_audience: string,
+     *   show_groups_on_profile: bool,
      *   mentor_opt_in: bool,
      *   mentor_listed: bool,
      *   mentor_eligibility_reason: string|null
@@ -412,6 +425,9 @@ final class MyProfilePrefsEndpoint
                 self::POST_AUDIENCE_TOKENS,
                 'members' // PeepSo's safest default for posts
             ),
+            // ⚠ default TRUE, unlike every other flag here — see the
+            // header note and ProfileAccess::showsGroupsOnProfile().
+            'show_groups_on_profile'    => self::flag($userId, ProfileAccess::META_SHOW_GROUPS, true),
             'mentor_opt_in'             => $mentor['opted_in'],
             'mentor_listed'             => $mentor['listed'],
             'mentor_eligibility_reason' => $mentor['reason'],
@@ -457,6 +473,7 @@ final class MyProfilePrefsEndpoint
         'peepso_hide_birthday_year'                => 'hide_birthday_year',
         'peepso_hide_online_status'                => 'hide_online',
         'peepso_is_hide_profile_from_user_listing' => 'hide_from_search',
+        ProfileAccess::META_SHOW_GROUPS            => 'show_groups_on_profile',
     ];
 
     /**
