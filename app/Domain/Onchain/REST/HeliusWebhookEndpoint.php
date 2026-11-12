@@ -193,8 +193,25 @@ final class HeliusWebhookEndpoint
             if ($signature === '') {
                 continue;
             }
-            // Replay protection. markSeen returns false on duplicate.
-            if (!HeliusSeenSignaturesRepository::markSeen($signature)) {
+            // Replay protection. markSeen returns false on duplicate, and
+            // NULL when the dedupe write failed (F-67).
+            $seen = HeliusSeenSignaturesRepository::markSeen($signature);
+            if ($seen === null) {
+                // Unknown is NOT "already seen". Skipping it as a replay
+                // lost the transaction for good (always-200, no Solana
+                // walker). Fail closed for the whole delivery: ingest
+                // nothing, and reopen the signatures this delivery already
+                // marked — exactly the failed-ingest path below — so a
+                // redelivery is processed rather than refused.
+                \BCC\Core\Log\Logger::error('[HeliusWebhookEndpoint] dedupe write failed — delivery not ingested; signatures reopened for redelivery', [
+                    'transactions'  => count($transactions),
+                    'marked_before' => count($markedThisDelivery),
+                ]);
+                self::reopenDedupe($markedThisDelivery);
+                $allEvents = [];
+                break;
+            }
+            if ($seen === false) {
                 $totalReplays++;
                 self::bumpCounter('seen_total');
                 // Surface dedup-skipped events on /system/health alongside
@@ -232,21 +249,7 @@ final class HeliusWebhookEndpoint
                 // markSeen rows (committed above) would refuse the resend
                 // as a replay — permanent loss, since Solana has no polling
                 // walker. Always-200 posture is unchanged (below).
-                if ($markedThisDelivery !== []) {
-                    $deleted = HeliusSeenSignaturesRepository::deleteSignatures($markedThisDelivery);
-                    if ($deleted === null || $deleted < count($markedThisDelivery)) {
-                        // The batch is lost AND its signatures stay marked,
-                        // so Helius's retry will be refused. Manual replay
-                        // needed — surface loudly.
-                        \BCC\Core\Log\Logger::error('[HeliusWebhookEndpoint] unmark after failed ingest incomplete — dedup NOT reopened; batch requires manual replay', [
-                            'expected' => count($markedThisDelivery),
-                            'deleted'  => $deleted,
-                        ]);
-                        \BCC\Core\Observability\DegradationMetrics::record('helius_dedup', 'unmark_failed');
-                    } else {
-                        \BCC\Core\Observability\DegradationMetrics::record('helius_dedup', 'ingest_failed_unmarked');
-                    }
-                }
+                self::reopenDedupe($markedThisDelivery);
             }
         }
 
@@ -273,6 +276,38 @@ final class HeliusWebhookEndpoint
     }
 
     // ── Internal helpers ────────────────────────────────────────────
+
+    /**
+     * Reopen dedupe for the signatures THIS delivery marked, so a redelivery
+     * is processed instead of refused as a replay. Shared by the two
+     * "nothing was ingested" paths: a failed ingest, and (F-67) a failed
+     * dedupe write part-way through the batch.
+     *
+     * @param list<string> $markedThisDelivery
+     */
+    private static function reopenDedupe(array $markedThisDelivery): void
+    {
+        if ($markedThisDelivery === []) {
+            // Nothing marked yet, so nothing to reopen — but the batch was
+            // still not ingested. Count it on the same "reopened" event.
+            \BCC\Core\Observability\DegradationMetrics::record('helius_dedup', 'ingest_failed_unmarked');
+            return;
+        }
+
+        $deleted = HeliusSeenSignaturesRepository::deleteSignatures($markedThisDelivery);
+        if ($deleted === null || $deleted < count($markedThisDelivery)) {
+            // The batch is lost AND its signatures stay marked, so Helius's
+            // retry will be refused. Manual replay needed — surface loudly.
+            \BCC\Core\Log\Logger::error('[HeliusWebhookEndpoint] unmark after failed ingest incomplete — dedup NOT reopened; batch requires manual replay', [
+                'expected' => count($markedThisDelivery),
+                'deleted'  => $deleted,
+            ]);
+            \BCC\Core\Observability\DegradationMetrics::record('helius_dedup', 'unmark_failed');
+            return;
+        }
+
+        \BCC\Core\Observability\DegradationMetrics::record('helius_dedup', 'ingest_failed_unmarked');
+    }
 
     private static function ok(): WP_REST_Response
     {

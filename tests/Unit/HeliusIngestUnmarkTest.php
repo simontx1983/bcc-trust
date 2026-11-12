@@ -45,6 +45,7 @@ final class HeliusIngestUnmarkTest extends TestCase
             'deleted_args'  => [],
             'ingest_calls'  => 0,
             'metrics'       => [],
+            'fail_on'       => [],
         ];
     }
 
@@ -96,6 +97,55 @@ final class HeliusIngestUnmarkTest extends TestCase
         self::assertSame(1, $f['ingest_calls']);
         self::assertSame([], $f['deleted_args']);
         self::assertSame([], $f['metrics']);
+    }
+
+    /**
+     * F-67: a dedupe write that fails part-way through a delivery is NOT a
+     * replay. The delivery is not ingested at all, and the signatures it had
+     * already marked are reopened, so a redelivery is processed instead of
+     * refused. Before, the failed signature was skipped as "already seen"
+     * and the rest of the batch was ingested without it: that transaction's
+     * events were lost for good.
+     */
+    public function testADedupeWriteFailureIngestsNothingAndReopensThisDelivery(): void
+    {
+        $f = &$GLOBALS['__bcc_helius_fixture'];
+        $f['fail_on']['sig-b'] = true;
+        $f['delete_result']    = 1;
+
+        $resp = HeliusWebhookEndpoint::handle(self::request(['sig-a', 'sig-b', 'sig-c']));
+
+        self::assertSame(200, $resp->get_status(), 'the always-200 posture is unchanged');
+        self::assertSame(0, $f['ingest_calls'], 'nothing is ingested from a delivery whose dedupe failed');
+        self::assertSame([['sig-a']], $f['deleted_args'], 'only what this delivery marked is reopened');
+        self::assertNotContains('sig-c', $f['marked'], 'the batch stops at the failure');
+        self::assertContains(['helius_dedup', 'ingest_failed_unmarked'], $f['metrics']);
+        self::assertNotContains(['helius_dedup', 'replay_skipped'], $f['metrics'], 'a failure is never counted as a replay');
+    }
+
+    public function testADedupeFailureOnTheFirstSignatureMarksAndIngestsNothing(): void
+    {
+        $f = &$GLOBALS['__bcc_helius_fixture'];
+        $f['fail_on']['sig-a'] = true;
+
+        HeliusWebhookEndpoint::handle(self::request(['sig-a', 'sig-b']));
+
+        self::assertSame(0, $f['ingest_calls']);
+        self::assertSame([], $f['marked']);
+        self::assertSame([], $f['deleted_args'], 'nothing to reopen');
+        self::assertContains(['helius_dedup', 'ingest_failed_unmarked'], $f['metrics']);
+    }
+
+    public function testADedupeFailureWhoseReopenFailsIsReportedAsUnmarkFailed(): void
+    {
+        $f = &$GLOBALS['__bcc_helius_fixture'];
+        $f['fail_on']['sig-b'] = true;
+        $f['delete_result']    = null;
+
+        HeliusWebhookEndpoint::handle(self::request(['sig-a', 'sig-b']));
+
+        self::assertSame(0, $f['ingest_calls']);
+        self::assertContains(['helius_dedup', 'unmark_failed'], $f['metrics']);
     }
 
     public function testAllReplayDeliveryNeverIngestsOrUnmarks(): void
