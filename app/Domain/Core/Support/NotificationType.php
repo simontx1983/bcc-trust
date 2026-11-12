@@ -154,6 +154,21 @@ final class NotificationType
     public const CLAIM_BADGE_REMOVED                = 'bcc_claim_badge_removed';
 
     /**
+     * F-272 — closed/secret group membership requests and invitations.
+     * Bell only (no push, kept out of the digest). external_id is the
+     * group; NotificationViewService links the row to the group at read
+     * time. A denied request, a declined/revoked invitation and a
+     * cancelled request notify nobody (D2: a deny is silent).
+     *
+     *   GROUP_JOIN_REQUESTED → each owner/manager; actor = the requester
+     *   GROUP_JOIN_APPROVED  → the requester;      actor = the approver
+     *   GROUP_INVITED        → the invitee;        actor = the inviter
+     */
+    public const GROUP_JOIN_REQUESTED               = 'bcc_group_join_requested';
+    public const GROUP_JOIN_APPROVED                = 'bcc_group_join_approved';
+    public const GROUP_INVITED                      = 'bcc_group_invited';
+
+    /**
      * Types that are delivered in-app ONLY: NotificationRepository's
      * weekly email digest excludes them. Push is opt-in per dispatch
      * (pushDispatcher->enqueue), and none of these dispatch one.
@@ -164,6 +179,9 @@ final class NotificationType
         self::DELEGATOR_GROUP_REMOVED,
         self::CONTENT_AUTO_HIDDEN,
         self::CLAIM_BADGE_REMOVED,
+        self::GROUP_JOIN_REQUESTED,
+        self::GROUP_JOIN_APPROVED,
+        self::GROUP_INVITED,
     ];
 
     /**
@@ -203,6 +221,9 @@ final class NotificationType
         self::DELEGATOR_GROUP_REMOVED,
         self::CONTENT_AUTO_HIDDEN,
         self::CLAIM_BADGE_REMOVED,
+        self::GROUP_JOIN_REQUESTED,
+        self::GROUP_JOIN_APPROVED,
+        self::GROUP_INVITED,
     ];
 
     public static function isValid(string $type): bool
