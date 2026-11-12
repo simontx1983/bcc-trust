@@ -164,7 +164,7 @@ namespace BCC\Core\Feed {
             bool $enforcePostVisibility = false
         ): array {
             unset(
-                $cursor, $limit, $excludedAuthorIds, $excludedActIds,
+                $cursor, $limit, $excludedActIds,
                 $excludedGroupIds, $groupVisibilityIn, $hallFeed
             );
 
@@ -174,6 +174,9 @@ namespace BCC\Core\Feed {
             $label = $onlyForGroupId !== null && $onlyForGroupId > 0
                 ? 'getFeed:group'
                 : ($hashtag !== null ? 'getFeed:tag' : 'getFeed:' . $scope);
+
+            // F-297: the SQL author exclusion each surface forwards.
+            $GLOBALS['__bcc_f02feed']['excluded'][$label] = $excludedAuthorIds;
 
             \bcc_f02feed_record($label, $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
@@ -189,6 +192,7 @@ namespace BCC\Core\Feed {
             ?array $viewerFriendIds = null,
             bool $enforcePostVisibility = false
         ): ?array {
+            $GLOBALS['__bcc_f02feed']['excluded']['getActivityById'] = $excludedAuthorIds;
             unset($actId, $excludedAuthorIds, $excludedActIds);
             \bcc_f02feed_record('getActivityById', $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
@@ -214,6 +218,7 @@ namespace BCC\Core\Feed {
             ?array $viewerFriendIds = null,
             bool $enforcePostVisibility = false
         ): array {
+            $GLOBALS['__bcc_f02feed']['excluded']['getActivityForAuthor'] = $excludedAuthorIds;
             unset($authorId, $cursor, $limit, $excludedAuthorIds, $excludedActIds, $excludedGroupIds);
             \bcc_f02feed_record('getActivityForAuthor', $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
@@ -231,6 +236,7 @@ namespace BCC\Core\Feed {
             ?array $viewerFriendIds = null,
             bool $enforcePostVisibility = false
         ): array {
+            $GLOBALS['__bcc_f02feed']['excluded']['getActivityForPage'] = $excludedAuthorIds;
             unset($pageId, $cursor, $limit, $excludedAuthorIds, $excludedActIds);
             \bcc_f02feed_record('getActivityForPage', $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
@@ -247,7 +253,7 @@ namespace BCC\Core\Repositories {
         {
             unset($userId);
 
-            return [];
+            return $GLOBALS['__bcc_f02feed']['blocked'] ?? [];
         }
 
         /** @return list<int> */
@@ -255,7 +261,7 @@ namespace BCC\Core\Repositories {
         {
             unset($userId);
 
-            return [];
+            return $GLOBALS['__bcc_f02feed']['blockers'] ?? [];
         }
 
         /** @return array<int, true>|null */
@@ -274,7 +280,7 @@ namespace BCC\Trust\Core\Repositories {
         /** @return list<int> */
         public function getCautionAndRiskyUserIds(): array
         {
-            return [];
+            return $GLOBALS['__bcc_f02feed']['caution'] ?? [];
         }
     }
 
