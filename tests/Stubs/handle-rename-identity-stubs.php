@@ -45,7 +45,6 @@ namespace {
         }
     }
 
-    /** @return list<string> */
     /** @return list<mixed> */
     function bcc_hri_values(int $userId, string $key): array
     {

@@ -320,12 +320,13 @@ final class PasswordAuthController
         // Login throttles (F-281), still before the CPU-bound bcrypt compare.
         // See AuthSupport::LOGIN_ACCOUNT_*.
         //  - This network's budget for what was TYPED (normalized), so a
-        //    stranger elsewhere can't lock the owner out — and a handle and an
-        //    email never share it, so a 429 can't link them to one account.
-        //  - An account-wide ceiling on the RESOLVED account (an unknown
-        //    identifier: on what was typed) against a guess spread over many
-        //    networks, which networks the account recently signed in from
-        //    skip: the owner at home is never locked out by it.
+        //    stranger elsewhere can't lock the owner out.
+        //  - A ceiling for what was TYPED across all networks, against a
+        //    guess spread over many networks; networks the account recently
+        //    signed in from skip it, so the owner at home is never locked out.
+        //  Both are keyed on the typed text, NOT the resolved account: a
+        //  bucket shared by a handle and an email would make a 429 reveal
+        //  that the two are one account (see AuthSupport::LOGIN_ACCOUNT_*).
         $typedKey = 'id:' . hash('sha256', is_email($identifier)
             ? strtolower(sanitize_email($identifier))
             : ltrim(strtolower($identifier), '@'));
@@ -343,7 +344,7 @@ final class PasswordAuthController
             'login_account',
             AuthSupport::LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT,
             AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
-            'bcc_throttle_login_account_' . hash('sha256', $user !== false ? 'user:' . (int) $user->ID : $typedKey)
+            'bcc_throttle_login_account_' . hash('sha256', $typedKey)
         )) {
             return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }

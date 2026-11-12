@@ -25,7 +25,8 @@ use PHPUnit\Framework\TestCase;
  *   - a handle and an email never share a budget, so a 429 can't link a
  *     guessed email to a public handle;
  *   - networks the owner signed in from lately skip the account ceiling;
- *   - an account-wide ceiling caps a guess spread over many networks;
+ *   - a ceiling per typed identifier caps a guess spread over many
+ *     networks — and can't link a handle to an email either;
  *   - an unknown identifier is throttled the same way and answers 401.
  *
  * Subprocess-only; setUp() loads the stubs before anything autoloads.
@@ -120,6 +121,18 @@ final class LoginLockoutPerNetworkTest extends TestCase
                 self::attempt('alice', 'guess', '192.0.' . $n . '.1');
             }
         }
+    }
+
+    public function testTheCeilingCannotLinkAHandleToAnEmailEither(): void
+    {
+        // The same probe, one level up: exhaust the ceiling through the
+        // public handle across many networks, then try a guessed email from
+        // a fresh, untrusted network. It answers like an unknown email.
+        self::hitTheCeilingFromElsewhere();
+        self::assertSame(429, self::attempt('alice', 'guess', '100.64.1.1'), 'the handle is at its ceiling');
+
+        self::assertSame(401, self::attempt('alice@example.test', 'guess', '100.64.2.1'));
+        self::assertSame(401, self::attempt('nobody@example.test', 'guess', '100.64.3.1'));
     }
 
     public function testANetworkTheOwnerSignedInFromSkipsTheCeiling(): void

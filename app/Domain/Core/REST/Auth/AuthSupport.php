@@ -85,19 +85,26 @@ final class AuthSupport
      * per-IP limit). Now:
      *   - LOGIN_ACCOUNT_RATE_LIMIT per (normalized TYPED identifier, client
      *     network: IPv4 /24, IPv6 /48). A stranger elsewhere exhausts only
-     *     their own network's budget. Keyed on what was typed, not on the
-     *     account it resolves to: a shared bucket would let a 429 reveal
-     *     that a guessed email and a public handle are the same account.
-     *   - LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT per RESOLVED account across all
-     *     networks (an unknown identifier: per normalized identifier) — the
-     *     cap on a guess spread over many networks. Networks the account
-     *     has SIGNED IN from lately (TRUSTED_LOGIN_NETWORKS_*) are exempt,
-     *     so even a botnet that hits the ceiling can't lock the owner out
-     *     at home.
+     *     their own network's budget.
+     *   - LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT per normalized TYPED identifier
+     *     across all networks — the cap on a guess spread over many
+     *     networks. The handle and the email each get it, so one account's
+     *     total is about twice this. Networks the account has SIGNED IN from
+     *     lately (TRUSTED_LOGIN_NETWORKS_*) skip it, so even a botnet that
+     *     hits the ceiling can't lock the owner out at home.
+     *
+     * ⚠ Both buckets are keyed on what was TYPED, never on the account it
+     * resolves to — do not "simplify" this. A bucket shared by the handle
+     * and the email is an enumeration oracle: exhaust it through the public
+     * handle, then one attempt with a guessed email answers 429 if the email
+     * is that account's and 401 if not. (The first fix keyed only the
+     * network bucket on the typed text; review found the same probe on the
+     * account-wide ceiling, across ~10 networks.) With both keyed on the
+     * typed text, a guessed email answers exactly like an unknown one.
      * A legitimate member never makes 20 attempts in 15 minutes.
      */
     public const LOGIN_ACCOUNT_RATE_LIMIT        = 20;
-    public const LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT = 200;
+    public const LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT = 100;
     public const LOGIN_ACCOUNT_RATE_WINDOW       = 900;
 
     /** User meta: { sha256(network) => last successful sign-in } (F-281). */
@@ -123,12 +130,21 @@ final class AuthSupport
         if ($userId <= 0) {
             return;
         }
-        $now  = time();
-        $list = self::trustedLoginNetworks($userId);
-        $list[hash('sha256', self::loginNetwork())] = $now;
-        $list = array_filter($list, static fn (int $ts): bool => $ts >= $now - self::TRUSTED_LOGIN_NETWORKS_TTL);
-        arsort($list);
-        update_user_meta($userId, self::META_TRUSTED_LOGIN_NETWORKS, array_slice($list, 0, self::TRUSTED_LOGIN_NETWORKS_MAX, true));
+        try {
+            $now  = time();
+            $list = self::trustedLoginNetworks($userId);
+            $list[hash('sha256', self::loginNetwork())] = $now;
+            $list = array_filter($list, static fn (int $ts): bool => $ts >= $now - self::TRUSTED_LOGIN_NETWORKS_TTL);
+            arsort($list);
+            update_user_meta($userId, self::META_TRUSTED_LOGIN_NETWORKS, array_slice($list, 0, self::TRUSTED_LOGIN_NETWORKS_MAX, true));
+        } catch (\Throwable $e) {
+            // The sign-in already succeeded; losing the record only means
+            // this network keeps counting against the ceiling.
+            \BCC\Core\Log\Logger::warning('[bcc-trust] trusted login network not recorded', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+        }
     }
 
     /** Has this account signed in from $network within the TTL? */
