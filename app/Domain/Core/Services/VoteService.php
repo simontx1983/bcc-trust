@@ -459,13 +459,17 @@ class VoteService {
             // Step 2: reverse score delta for each category (after vote locks are held)
             // Only decrement unique_voters on the FIRST category to prevent
             // over-decrementing when a voter has rows across multiple categories.
+            //
+            // F-83: reverse vested_weight — the velocity-capped amount
+            // VoteWriter actually applied (and the value recalc sums) — not
+            // the raw `weight` column, which over-reverses a capped vote.
             $isFirst = true;
             foreach ($lockedVotes as $locked) {
                 $catId = (int) ($locked->category_id ?? 0);
                 $this->scoreRepo->reverseVoteDelta(
                     $pageId,
                     $catId,
-                    (float) $locked->weight,
+                    (float) $locked->vested_weight,
                     (int) $locked->vote_type === 1,
                     $isFirst  // only decrement unique_voters once
                 );

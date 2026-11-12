@@ -152,6 +152,8 @@ namespace BCC\Trust\Core {
          * production fail-closed reads do: RepositoryReadFailure.
          */
         public static bool $ringReadFails = false;
+        /** F-234: when true, TrustGraph::detectVoteRings() (the cold-cache fallback) throws like production. */
+        public static bool $ringDetectionFails = false;
 
         // ── inputs for detectFanInCoordination() ──────────────────────
         /** @var list<object> rows shaped like getRecentVotersWithRegistration() */
@@ -207,6 +209,7 @@ namespace BCC\Trust\Core {
             self::$vouchEdges      = [];
             self::$mutualVouchPairs = [];
             self::$ringReadFails   = false;
+            self::$ringDetectionFails = false;
             self::$recentVoters    = [];
             self::$otherPageVotes  = 0;
             self::$otherPagesReadFails = false;
@@ -609,6 +612,9 @@ namespace BCC\Trust\Core\Security {
             /** @return array<int, array<string, mixed>> */
             public function detectVoteRings(?int $minSize = null): array
             {
+                if (W::$ringDetectionFails) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(self::class, __FUNCTION__, "injected");
+                }
                 return W::$rings;
             }
         }

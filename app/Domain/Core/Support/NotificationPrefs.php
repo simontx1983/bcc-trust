@@ -71,6 +71,7 @@ final class NotificationPrefs
         NotificationType::HOLDER_COMMUNITY_LIVE,
         NotificationType::DELEGATOR_GROUP_REMOVED,
         NotificationType::CONTENT_AUTO_HIDDEN,
+        NotificationType::CLAIM_BADGE_REMOVED,
     ];
 
     /**
@@ -133,6 +134,7 @@ final class NotificationPrefs
         'bell_bcc_holder_community_live'                     => true,
         'bell_bcc_delegator_group_removed'                   => true,
         'bell_bcc_content_auto_hidden'                       => true,
+        'bell_bcc_claim_badge_removed'                       => true,
         'push_master'                                        => false,
         'push_event_review'                                  => true,
         'push_event_dispute_outcome'                         => true,

@@ -246,6 +246,27 @@ namespace BCC\Core\Permissions {
     if (!class_exists(Permissions::class, false)) {
         final class Permissions
         {
+            /**
+             * ⚠ Mirrors the real `current_user_can('manage_options')`, and it
+             * has to exist here: §F-02's posts gate asks
+             * ProfileAccess::viewerIsExemptFromVisibility() on every feed and
+             * page-stream read, so a stub without this method turns the whole
+             * consuming class into fatals ("Call to undefined method") rather
+             * than one failed assertion.
+             *
+             * Reads the same `__bcc_test_caps` fixture as the bootstrap's
+             * global `current_user_can()` shim, so a test does not have to
+             * know whether it got the real class or this one. Default FALSE:
+             * defaulting true would exempt every test from every capability
+             * gate.
+             */
+            public static function is_admin(): bool
+            {
+                $caps = $GLOBALS['__bcc_test_caps'] ?? [];
+
+                return is_array($caps) && in_array('manage_options', $caps, true);
+            }
+
             public static function is_not_suspended(?int $userId = null, bool $allowAdminBypass = true): bool
             {
                 return !in_array($userId, $GLOBALS['__bcc_suspended'] ?? [], true);

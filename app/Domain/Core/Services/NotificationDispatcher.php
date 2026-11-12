@@ -1646,6 +1646,72 @@ final class NotificationDispatcher
     }
 
     /**
+     * F-14 — the weekly re-verify sweep revoked a verified claim. A plain,
+     * factual notice: what changed and how to restore it. Names no reason
+     * code and no provider. Sent by the sweep only (not on the revoke hook,
+     * so other revoke callers do not ring the bell).
+     */
+    public function onClaimBadgeRemoved(int $userId, int $claimId, string $entityName, string $reason): void
+    {
+        if ($userId <= 0 || $claimId <= 0) {
+            return;
+        }
+        try {
+            $this->dispatch(
+                $userId,
+                $userId,
+                self::claimBadgeRemovedMessage($entityName, $reason),
+                NotificationType::CLAIM_BADGE_REMOVED,
+                $claimId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] claim badge removal bell failed', [
+                'user_id'  => $userId,
+                'claim_id' => $claimId,
+                'error'    => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /** F-14 copy (wallet / validator reasons) — approved by the product owner 2026-11-11. */
+    public const CLAIM_BADGE_REMOVED_MESSAGE =
+        "We couldn't confirm you still control the wallet behind your %s claim, so the verified badge was removed. Reconnect the wallet and claim again to restore it.";
+
+    /** F-14 copy (holder reason) — approved with the F-14 PR B plan 2026-11-11. */
+    public const CLAIM_HOLDER_BADGE_REMOVED_MESSAGE =
+        "We couldn't confirm your linked wallets still hold %s, so the holder badge was removed. Claim again once a linked wallet holds it.";
+
+    /**
+     * F-14 copy (validator_row_gone) — the validator itself is no longer in
+     * our records, so the wallet wording does not fit (#594 review).
+     */
+    public const CLAIM_VALIDATOR_GONE_MESSAGE =
+        "We can no longer find the validator behind your %s claim, so the verified badge was removed. If it's still running, claim it again to restore the badge.";
+
+    /**
+     * The bell text for a revoked claim. An empty entity name drops the
+     * name from the sentence ("your claim") rather than producing
+     * "your this claim" (#594 review).
+     */
+    public static function claimBadgeRemovedMessage(string $entityName, string $reason): string
+    {
+        $name = trim($entityName) !== '' ? mb_strimwidth(trim($entityName), 0, 80, '…', 'UTF-8') : '';
+
+        if ($reason === 'no_longer_holder') {
+            return sprintf(self::CLAIM_HOLDER_BADGE_REMOVED_MESSAGE, $name !== '' ? $name : 'this collection');
+        }
+
+        $template = $reason === 'validator_row_gone'
+            ? self::CLAIM_VALIDATOR_GONE_MESSAGE
+            : self::CLAIM_BADGE_REMOVED_MESSAGE;
+
+        return $name !== ''
+            ? sprintf($template, $name)
+            : str_replace('your %s claim', 'your claim', $template);
+    }
+
+    /**
      * F-73 — the author's post was hidden AUTOMATICALLY (credible-report
      * threshold). Subscriber for `bcc_content_auto_hidden`
      * ($actId, $count, $threshold, $reportId); only the act id is used.

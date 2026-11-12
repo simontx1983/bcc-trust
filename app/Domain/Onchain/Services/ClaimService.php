@@ -595,4 +595,28 @@ class ClaimService {
             ]);
         }
     }
+
+    /**
+     * F-14 PR B2: does this ONE wallet still prove control of a validator's
+     * operator address? The same per-family rule as claim time
+     * (matchValidator: EVM case-folded, Cosmos same 20 bytes under any HRP,
+     * exact otherwise), so the re-verify sweep can never be stricter or
+     * looser than the claim was.
+     *
+     * @param WalletWithChain $wallet
+     */
+    public static function walletProvesOperator(object $wallet, string $operatorAddress, string $chainType): bool
+    {
+        // matchValidator() reads only operator_address and chain_type; the
+        // other EntityForClaim keys are present but unused here.
+        $entity = (object) [
+            'id'               => '',
+            'wallet_link_id'   => null,
+            'chain_id'         => '',
+            'chain_slug'       => '',
+            'chain_type'       => $chainType,
+            'operator_address' => $operatorAddress,
+        ];
+        return self::matchValidator([$wallet], $entity) !== null;
+    }
 }

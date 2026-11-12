@@ -17,6 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 use Exception;
 use BCC\Trust\Core\Exceptions\RepositoryException;
+use BCC\Trust\Core\Support\SiteClock;
 use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
@@ -589,7 +590,7 @@ class VoteRepository {
      * breaking atomicity with the score update.
      *
      * @param array<string, mixed> $data
-     * @return array{vote_id:int,was_inserted:bool,vote_type_changed:bool,weight_changed:bool,previous_vote_type:int|null,previous_weight:float}
+     * @return array{vote_id:int,was_inserted:bool,vote_type_changed:bool,weight_changed:bool,previous_vote_type:int|null,previous_weight:float,previous_applied_weight:float}
      */
     public function upsertRaw( array $data ): array {
         // Runtime assertion: this method's FOR UPDATE lock is only
@@ -890,6 +891,9 @@ class VoteRepository {
      *                     bcc_trust_confidence_min_voter_age_days old (default 7).
      *                     Used by calculateConfidenceScore's diversity term so
      *                     24-hour-old sockpuppets cannot inflate confidence tier.
+     * @throws RepositoryReadFailure when the read did not run. Never
+     *                     returns a zero row for a failed read: the
+     *                     recalc would save it as the page's score.
      *
      * @phpstan-return VoteAggregateRow
      */
@@ -911,14 +915,17 @@ class VoteRepository {
      *     "the". check_safe_collation() then failed and the query was rejected
      *     with "Could not perform query because it contains invalid data".
      *
-     * Either one alone yields an empty result, which the `if (!$result)` guard
-     * below converts into a zero row — indistinguishable from "this page has no
-     * votes". Keep the SQL prose-free; document it here instead.
+     * Either one alone yielded an empty result, which an `if (!$result)` guard
+     * used to convert into a zero row — indistinguishable from "this page has
+     * no votes". A failed read now throws (runRead, fail-closed), but the
+     * query would still never run, so keep the SQL prose-free; document it
+     * here instead.
      *
      * ── voter maturity (confidence-diversity term) ──
      * Fresh accounts (age < N days) are left out of the mature_unique_voters
-     * distinct count. user_registered is in site-local time, same frame as
-     * NOW(), so the comparison carries no timezone drift.
+     * distinct count. user_registered is WordPress core's UTC column (it was
+     * documented here as site-local and compared with the DB session's NOW()),
+     * so its cutoff is bound from gmdate() (F-87 L3).
      *
      * ── vesting-aware weight ──
      * Sums vested_weight — the value VoteWriter applied to the score,
@@ -951,6 +958,8 @@ class VoteRepository {
      *
      * ── time decay ──
      * The final CASE applies the linear decay described in the docblock above.
+     * Vote age is measured from a bound site-local "now" — created_at's frame —
+     * not UTC_TIMESTAMP(), which is off by the site's UTC offset (F-87 L3).
      *
      * Guarded by tests/Unit/PreparedSqlCommentPlaceholderTest.php.
      */
@@ -962,6 +971,7 @@ class VoteRepository {
         $fraudFloor    = $this->fraudFloor;
         $decayDays     = $this->decayDays;
         $decayMin      = $this->decayMin;
+        $nowLocal      = SiteClock::now();
 
         /** @var int $minVoterAgeDays */
         $minVoterAgeDays = (int) apply_filters('bcc_trust_confidence_min_voter_age_days', 7);
@@ -970,7 +980,7 @@ class VoteRepository {
         }
 
         // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $result = $wpdb->get_row( $wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT
                 COALESCE(SUM(CASE WHEN d.vote_type > 0  THEN d.eff_weight ELSE 0 END), 0) AS positive_score,
                 COALESCE(SUM(CASE WHEN d.vote_type <= 0 THEN d.eff_weight ELSE 0 END), 0) AS negative_score,
@@ -985,7 +995,7 @@ class VoteRepository {
                     v.created_at,
                     CASE
                         WHEN u.user_registered IS NOT NULL
-                         AND u.user_registered <= DATE_SUB(NOW(), INTERVAL %d DAY)
+                         AND u.user_registered <= %s
                           THEN 1
                         ELSE 0
                     END AS is_mature,
@@ -1004,9 +1014,9 @@ class VoteRepository {
                                   1.0)
                       END
                     * CASE
-                        WHEN TIMESTAMPDIFF(SECOND, v.created_at, UTC_TIMESTAMP()) / 86400.0 > %d
+                        WHEN TIMESTAMPDIFF(SECOND, v.created_at, %s) / 86400.0 > %d
                           THEN %f
-                        ELSE GREATEST(%f, 1.0 - TIMESTAMPDIFF(SECOND, v.created_at, UTC_TIMESTAMP()) / (86400.0 * %d))
+                        ELSE GREATEST(%f, 1.0 - TIMESTAMPDIFF(SECOND, v.created_at, %s) / (86400.0 * %d))
                       END
                     AS eff_weight
                 FROM {$this->table} v
@@ -1016,7 +1026,7 @@ class VoteRepository {
                   AND v.status  = 1
                   AND " . $this->hiddenReviewExclusion('v') . "
              ) d",
-            $minVoterAgeDays, // maturity: INTERVAL %d DAY for user_registered cutoff
+            gmdate('Y-m-d H:i:s', time() - $minVoterAgeDays * 86400), // maturity: user_registered (UTC) cutoff
             $fraudMedium,   // fraud: current <= threshold → no discount
             $fraudFloor,    // fraud: GREATEST floor (current factor)
             $fraudMedium,   // fraud: original > threshold (>= branch)
@@ -1024,25 +1034,35 @@ class VoteRepository {
             $fraudFloor,    // fraud: GREATEST floor (current factor, ELSE branch)
             $fraudMedium,   // fraud: original > threshold (ELSE branch)
             $fraudFloor,    // fraud: GREATEST floor (original factor, ELSE branch)
+            $nowLocal,      // decay: vote age measured to site-local now
             $decayDays,     // decay: beyond threshold → min
             $decayMin,      // decay: min factor (beyond threshold)
             $decayMin,      // decay: GREATEST floor
+            $nowLocal,      // decay: vote age measured to site-local now
             $decayDays,     // decay: divisor for linear interpolation
             $pageId         // WHERE page_id
-        ) );
+        );
         // phpcs:enable WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 
-        // $wpdb->get_row always returns an object or null; guarantee object.
-        if ( ! $result ) {
-            return (object) [
-                'positive_score'       => 0.0,
-                'negative_score'       => 0.0,
-                'vote_count'           => 0,
-                'unique_voters'        => 0,
-                'mature_unique_voters' => 0,
-                'last_vote_at'         => null,
-            ];
+        // FAIL-CLOSED. This read feeds recalculateScore(), which SAVES what
+        // it returns. The old get_row() + `if (!$result)` turned a failed
+        // read (lock-wait timeout, dropped connection, a refused prepare())
+        // into an all-zero row, and the recalc then wrote positive = negative
+        // = 0 over the page's real score and cleared its recalc flag. A
+        // failed read now throws RepositoryReadFailure: the recalc
+        // transaction rolls back, the stored score stays, and the caller
+        // re-flags the page. runRead() also catches wpdb's early-return
+        // failures that leave last_error empty (see GuardsReadFailures).
+        $rows = self::runRead((string) $sql, __FUNCTION__, true);
+
+        // An aggregate with no GROUP BY yields exactly one row, even over
+        // zero votes. No row means the result is not this query's.
+        if (!isset($rows[0])) {
+            throw new RepositoryReadFailure(static::class, __FUNCTION__, 'aggregate returned no row');
         }
+
+        /** @var VoteAggregateRow $result */
+        $result = $rows[0];
 
         return $result;
     }
@@ -1643,19 +1663,23 @@ class VoteRepository {
         // state cannot make this loop spin forever inside the cron tick.
         $maxIterations = 20;
         $total         = 0;
+        $nowLocal      = SiteClock::now();
 
         for ($i = 0; $i < $maxIterations; $i++) {
             $affected = $wpdb->query(
                 $wpdb->prepare(
                     "DELETE FROM {$this->table}
-                     WHERE (status = %d AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY))
-                        OR (status = %d AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY))
+                     WHERE (status = %d AND updated_at < DATE_SUB(%s, INTERVAL %d DAY))
+                        OR (status = %d AND updated_at < DATE_SUB(%s, INTERVAL %d DAY))
                      LIMIT %d",
+                    // F-87 L3: updated_at is site-local; UTC_TIMESTAMP() is not.
                     self::STATUS_REMOVED,
+                    $nowLocal,
                     $this->cleanupDays,
                     // Moderation removals stay restorable for the full
                     // window, independent of the retraction retention.
                     self::STATUS_MODERATION_REMOVED,
+                    $nowLocal,
                     self::MODERATION_RESTORE_WINDOW_DAYS,
                     $batchSize
                 )
@@ -1703,7 +1727,7 @@ class VoteRepository {
      * than necessary. Stats are now refreshed by the StatsRefresher async job.
      *
      * @param array<string, mixed> $voteData
-     * @return array{vote_id:int,was_inserted:bool,vote_type_changed:bool,weight_changed:bool,previous_vote_type:int|null,previous_weight:float}
+     * @return array{vote_id:int,was_inserted:bool,vote_type_changed:bool,weight_changed:bool,previous_vote_type:int|null,previous_weight:float,previous_applied_weight:float}
      */
     private function executeUpsert( array $voteData, string $now ): array {
         global $wpdb;
@@ -1720,7 +1744,7 @@ class VoteRepository {
         //   C. No row at all             → insert (was_inserted = true).
         $existing = $wpdb->get_row(
             $wpdb->prepare(
-                "SELECT id, vote_type, weight, status FROM {$this->table}
+                "SELECT id, vote_type, weight, vested_weight, status FROM {$this->table}
                  WHERE voter_user_id = %d
                    AND page_id       = %d
                    AND category_id   = %d
@@ -1757,6 +1781,10 @@ class VoteRepository {
                 'weight_changed'     => $weightChanged,
                 'previous_vote_type' => (int)   $existing->vote_type,
                 'previous_weight'    => (float) $existing->weight,
+                // F-83: what the previous write actually applied to the score
+                // (velocity-capped vested_weight). Reversals must subtract
+                // THIS, not the raw `weight`, or a capped vote is over-reversed.
+                'previous_applied_weight' => (float) $existing->vested_weight,
             ];
         }
 
@@ -1806,6 +1834,7 @@ class VoteRepository {
                 'weight_changed'     => false,
                 'previous_vote_type' => null,
                 'previous_weight'    => 0.0,
+                'previous_applied_weight' => 0.0,
             ];
         }
 
@@ -1829,6 +1858,7 @@ class VoteRepository {
             'weight_changed'     => false,
             'previous_vote_type' => null,
             'previous_weight'    => 0.0,
+            'previous_applied_weight' => 0.0,
         ];
     }
 
@@ -2057,8 +2087,9 @@ class VoteRepository {
              FROM {$this->table}
              WHERE voter_user_id = %d
              AND status = 1
-             AND created_at > (UTC_TIMESTAMP() - INTERVAL %d DAY)",
+             AND created_at > (%s - INTERVAL %d DAY)",
             $userId,
+            SiteClock::now(), // F-87 L3: created_at is site-local
             $days
         ) );
     }
@@ -2085,11 +2116,12 @@ class VoteRepository {
              AND v1.id != v2.id
              AND v1.vote_type != v2.vote_type
              AND v2.created_at > v1.created_at
-             AND v2.created_at > (UTC_TIMESTAMP() - INTERVAL %d MINUTE)
+             AND v2.created_at > (%s - INTERVAL %d MINUTE)
              AND v1.status = 1
              AND v2.status = 1",
             $userId,
             $userId,
+            SiteClock::now(), // F-87 L3: created_at is site-local
             $minutes
         ), __FUNCTION__, true );
 
@@ -2144,9 +2176,10 @@ class VoteRepository {
              LEFT JOIN {$userInfoTable} ui ON v.voter_user_id = ui.user_id
              WHERE v.page_id = %d
                AND v.status = 1
-               AND v.created_at >= DATE_SUB(NOW(), INTERVAL %d DAY)
+               AND v.created_at >= DATE_SUB(%s, INTERVAL %d DAY)
              GROUP BY v.voter_user_id",
             $pageId,
+            SiteClock::now(), // F-87 L3: created_at is site-local, not the DB clock
             $days
         ) );
     }
@@ -2568,8 +2601,9 @@ class VoteRepository {
              WHERE page_id = %d
                AND vote_type = -1
                AND status = 1
-               AND created_at >= DATE_SUB(NOW(), {$intervalSql})",
+               AND created_at >= DATE_SUB(%s, {$intervalSql})",
             $pageId,
+            SiteClock::now(), // F-87 L3: created_at is site-local, not the DB clock
             $magnitude
         ));
     }

@@ -399,9 +399,9 @@ class VoteEligibilityChecker {
      *
      * Uses the trust-engine's atomic RateLimiter (wp_options CONCAT/CAST
      * pattern) which is safe under concurrent requests. Trust boosts never
-     * raise the cap: getAdjustedLimit() takes min(risk, trust) and risk is
-     * at most 1.0, so a risk penalty can only LOWER it (pinned by
-     * DownvoteDailyCapIntegrationTest for an elite, verified voter).
+     * raise the cap: 'downvote_daily' is not in RateLimiter's
+     * BOOSTABLE_ACTIONS (F-219), so a risk penalty can only LOWER it (pinned
+     * by DownvoteDailyCapIntegrationTest for an elite, verified voter).
      */
     private function enforceDownvoteCap(): void {
         // Parity with the other user-level gates: only test mode bypasses.

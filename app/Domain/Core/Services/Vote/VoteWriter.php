@@ -170,10 +170,14 @@ class VoteWriter {
                     );
                 } elseif ($upsert['vote_type_changed'] || !empty($upsert['weight_changed'])) {
                     // Direction flip or weight change — reverse old delta and apply new one.
-                    // previous_weight carries the `weight` column's prior value, which
-                    // correctWeight() rewrites to the capped vested amount after the
-                    // first write — so this IS the actual previously-applied delta.
-                    $previousWeight = (float) $upsert['previous_weight'];
+                    //
+                    // F-83: reverse what the previous write actually APPLIED.
+                    // correctWeight() persists the velocity-capped amount onto
+                    // vested_weight and leaves the raw `weight` column alone, so
+                    // previous_weight (raw) over-reversed every capped vote and
+                    // GREATEST(0, …) hid the excess by eating other voters'
+                    // contribution. previous_applied_weight is vested_weight.
+                    $previousWeight = (float) $upsert['previous_applied_weight'];
 
                     if ($preCappedWeight !== null) {
                         // Velocity cap already applied by the caller (multi-category path).
@@ -188,12 +192,21 @@ class VoteWriter {
                         $fullSwing   = $previousWeight + $scoreWeight;
                         $cappedSwing = $this->scoreRepo->applyVelocityCap($pageId, $fullSwing);
                         $cappedWeight = max(0.0, $cappedSwing - $previousWeight);
-                    } else {
-                        // Same-direction weight change — cap the new weight directly.
-                        $cappedWeight = $this->scoreRepo->applyVelocityCap(
+                    } elseif ($scoreWeight > $previousWeight) {
+                        // Same-direction weight INCREASE — the score moves by
+                        // the increase only, so only the increase is charged
+                        // and capped. Capping the whole new weight charged the
+                        // already-applied part again, and a clamp below
+                        // $previousWeight made the score FALL on a raise.
+                        $cappedWeight = $previousWeight + $this->scoreRepo->applyVelocityCap(
                             $pageId,
-                            $scoreWeight
+                            $scoreWeight - $previousWeight
                         );
+                    } else {
+                        // Same-direction weight DECREASE — less influence is
+                        // never blocked and consumes no budget. Capping it
+                        // against a spent budget zeroed the vote for good.
+                        $cappedWeight = $scoreWeight;
                     }
 
                     $this->scoreRepo->reverseAndReapplyDelta(

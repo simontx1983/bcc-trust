@@ -113,14 +113,15 @@ mutate() {
     $s = file_get_contents($f);
     $a = getenv("SEARCH"); $b = getenv("REPLACE");
 
-    $i = strpos($s, $a);
-    if ($i === false) {
+    // ⚠ EXACTLY ONCE. strpos() alone mutated the FIRST match of an
+    // ambiguous anchor, which may not be the site the control names.
+    if (substr_count($s, $a) !== 1) {
       $aCrlf = str_replace("\n", "\r\n", str_replace("\r\n", "\n", $a));
-      $i = strpos($s, $aCrlf);
-      if ($i === false) { exit(9); }
+      if (substr_count($s, $aCrlf) !== 1) { exit(9); }
       $a = $aCrlf;
       $b = str_replace("\n", "\r\n", str_replace("\r\n", "\n", $b));
     }
+    $i = strpos($s, $a);
 
     file_put_contents($f, substr_replace($s, $b, $i, strlen($a)));
     exit(0);
@@ -128,7 +129,7 @@ mutate() {
   local applied=$?
 
   if [ $applied -ne 0 ]; then
-    echo "  BROKEN   $name  (anchor not found — the mutation tested nothing)"
+    echo "  BROKEN   $name  (anchor not found exactly once — the mutation tested nothing)"
     BROKEN=$((BROKEN + 1)); FAILED_NAMES+=("$name [anchor drifted]")
     restore "$file"; return
   fi

@@ -48,8 +48,9 @@ namespace BCC\Trust\Tests\Integration {
      *
      * The voter is elite, verified and trust_rank > 0.8, i.e. every boost the
      * limiter knows. That pins the cap at exactly 3 for the users it applies
-     * to: getAdjustedLimit() takes min(risk, trust) with risk <= 1.0, so no
-     * boost can raise it (F-153's "5-6/day" claim does not reproduce).
+     * to: 'downvote_daily' is not one of RateLimiter's BOOSTABLE_ACTIONS
+     * (F-219), so no boost can raise it (F-153's "5-6/day" claim does not
+     * reproduce).
      */
     #[Group('integration')]
     #[CoversClass(VoteEligibilityChecker::class)]

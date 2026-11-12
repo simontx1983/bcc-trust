@@ -33,20 +33,31 @@ final class BlockSeversFollowsTest extends TestCase
         require_once __DIR__ . '/../Stubs/block-follow-stubs.php';
         BlockFollowWorld::reset();
 
-        // The follow-id-for-pair lookup reads BlockFollowWorld::$follows.
+        // The follow-id-for-pair lookup reads BlockFollowWorld::$follows
+        // through the guarded query() path (GuardsReadFailures::runRead).
         $GLOBALS['wpdb'] = new class {
             public string $prefix = 'wp_';
+            public string $last_error = '';
+            /** @var list<object>|null */
+            public ?array $last_result = null;
             /** @param mixed ...$args */
             public function prepare(string $sql, ...$args): string
             {
                 return $sql . '|' . implode(',', array_map('strval', $args));
             }
-            public function get_var(string $sql): ?string
+            public function query(string $sql): int|false
             {
                 [, $args] = explode('|', $sql, 2) + ['', ''];
                 [$active, $passive] = array_map('intval', explode(',', $args)) + [0, 0];
-                $id = BlockFollowWorld::$follows[$active . ':' . $passive] ?? null;
-                return $id === null ? null : (string) $id;
+                $key = $active . ':' . $passive;
+                if (in_array($key, BlockFollowWorld::$failReads, true)) {
+                    // A failed read leaves the PREVIOUS rows behind, as wpdb does.
+                    $this->last_error = 'MySQL server has gone away';
+                    return false;
+                }
+                $id = BlockFollowWorld::$follows[$key] ?? null;
+                $this->last_result = $id === null ? [] : [(object) ['uf_id' => (string) $id]];
+                return count($this->last_result);
             }
         };
     }
@@ -82,6 +93,35 @@ final class BlockSeversFollowsTest extends TestCase
         self::assertSame(0, $this->service()->severFollowsBetween(self::ME, self::THEM));
         self::assertSame([], BlockFollowWorld::$unfollowCalls);
         self::assertSame([], BlockFollowWorld::$metaDeleted);
+    }
+
+    public function testAFailedFollowReadIsLoggedAndTheOtherDirectionStillGoes(): void
+    {
+        // M2: a DB blip used to read as "no follow" and skip the direction silently.
+        BlockFollowWorld::$follows   = [self::ME . ':' . self::THEM => 901, self::THEM . ':' . self::ME => 902];
+        BlockFollowWorld::$failReads = [self::ME . ':' . self::THEM];
+
+        self::assertSame(1, $this->service()->severFollowsBetween(self::ME, self::THEM));
+        self::assertSame([[self::THEM, self::ME]], BlockFollowWorld::$unfollowCalls, 'the readable direction is still removed');
+        self::assertSame([902], BlockFollowWorld::$metaDeleted);
+
+        $messages = array_column(BlockFollowWorld::$errors, 0);
+        self::assertContains('[bcc-trust] block: follow read failed, this direction was NOT removed', $messages);
+        $ctx = BlockFollowWorld::$errors[array_search('[bcc-trust] block: follow read failed, this direction was NOT removed', $messages, true)][1];
+        self::assertSame(self::ME, $ctx['active_user_id']);
+        self::assertSame(self::THEM, $ctx['passive_user_id']);
+    }
+
+    public function testAFailedUnfollowIsLoggedAndKeepsItsSidecar(): void
+    {
+        BlockFollowWorld::$follows       = [self::ME . ':' . self::THEM => 901, self::THEM . ':' . self::ME => 902];
+        BlockFollowWorld::$failUnfollows = [self::THEM . ':' . self::ME];
+
+        self::assertSame(1, $this->service()->severFollowsBetween(self::ME, self::THEM));
+        self::assertSame([901], BlockFollowWorld::$metaDeleted, 'the follow that is still there keeps its sidecar');
+        self::assertCount(1, BlockFollowWorld::$errors);
+        self::assertSame('[bcc-trust] block: unfollow failed, this direction was NOT removed', BlockFollowWorld::$errors[0][0]);
+        self::assertSame(902, BlockFollowWorld::$errors[0][1]['follow_id']);
     }
 
     public function testABlockedViewerGetsAGenericRefusalAndNoFollowIsAttempted(): void

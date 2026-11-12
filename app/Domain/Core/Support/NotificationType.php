@@ -145,6 +145,15 @@ final class NotificationType
     public const CONTENT_AUTO_HIDDEN                = 'bcc_content_auto_hidden';
 
     /**
+     * F-14 — the weekly re-verify sweep revoked the member's verified claim
+     * because it could no longer confirm the ownership behind it.
+     * Self-notification, bell only (no push, kept out of the digest). Sent
+     * only by the sweep, after a real (enforce-mode) revoke. external_id is
+     * the claim id.
+     */
+    public const CLAIM_BADGE_REMOVED                = 'bcc_claim_badge_removed';
+
+    /**
      * Types that are delivered in-app ONLY: NotificationRepository's
      * weekly email digest excludes them. Push is opt-in per dispatch
      * (pushDispatcher->enqueue), and none of these dispatch one.
@@ -154,6 +163,7 @@ final class NotificationType
     public const BELL_ONLY = [
         self::DELEGATOR_GROUP_REMOVED,
         self::CONTENT_AUTO_HIDDEN,
+        self::CLAIM_BADGE_REMOVED,
     ];
 
     /**
@@ -192,6 +202,7 @@ final class NotificationType
         self::HOLDER_COMMUNITY_LIVE,
         self::DELEGATOR_GROUP_REMOVED,
         self::CONTENT_AUTO_HIDDEN,
+        self::CLAIM_BADGE_REMOVED,
     ];
 
     public static function isValid(string $type): bool

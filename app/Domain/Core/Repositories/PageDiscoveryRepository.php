@@ -179,7 +179,7 @@ final class PageDiscoveryRepository
             default        => $ranking_expr . ' DESC',
         };
 
-        $count_sql = "SELECT COUNT(*)
+        $count_sql = "SELECT COUNT(*) AS n
             FROM {$wpdb->posts} p
             INNER JOIN {$rm_table} rm ON rm.page_id = p.ID
             {$chain_joins}
@@ -189,8 +189,7 @@ final class PageDiscoveryRepository
             $count_sql = $wpdb->prepare($count_sql, ...$params);
         }
 
-        self::clearLastError();
-        $total = (int) $wpdb->get_var($count_sql);
+        $total = self::trustedCount($count_sql);
 
         // ⚠⚠ F-197: THE SAME BLIND SPOT AS THE FALLBACK, ON THE PATH THAT
         // ACTUALLY RUNS. `get_var()` answers null on failure, `(int) null` is
@@ -207,7 +206,7 @@ final class PageDiscoveryRepository
         // unreadable table" is the RATIFIED behaviour for discovery, and
         // changing it is a route-contract decision, not a repository one.
         // What changes is that the failure is no longer silent.
-        if (self::readFailed()) {
+        if ($total === null) {
             self::logReadFailure('read-model count', ['verified_only' => $verified_only]);
 
             return ['rows' => [], 'total' => 0, 'pages' => 0, 'page' => $page];
@@ -243,15 +242,21 @@ final class PageDiscoveryRepository
 
         $all_params = array_merge($params, [$limit, $offset]);
 
-        self::clearLastError();
-        $rows = $wpdb->get_results($wpdb->prepare($main_sql, ...$all_params));
+        // The row shape is restated here because trustedRows() takes an
+        // arbitrary SQL string and can only promise list<object>; this
+        // method's @phpstan-return promises what THIS SELECT produces. Same
+        // pattern as the two finders below. (The shape was equally
+        // unverified before: get_results()'s stub return was just loose
+        // enough that PHPStan did not object.)
+        /** @var list<object{ID: int|numeric-string, post_title: string, post_date: string, post_name: string, owner_id: int|numeric-string, trust_score: float|numeric-string, reputation_tier: string, confidence_score: float|numeric-string, onchain_bonus: float|numeric-string, endorsement_count: int|numeric-string, unique_voters: int|numeric-string, follower_count: int|numeric-string, page_type: string, is_verified: int|numeric-string, last_vote_at?: string|null, ranking_score?: float|numeric-string}>|null $rows */
+        $rows = self::trustedRows($wpdb->prepare($main_sql, ...$all_params));
 
         // ⚠ The COUNT can succeed while this fails — they are two
         // statements, and only this one carries the ORDER BY, the LIMIT and
         // the ranking expression. That combination is exactly how F-144's
         // second defect hid: an honest non-zero total beside an empty row
         // set. Checked separately for that reason, not as a formality.
-        if (self::readFailed()) {
+        if ($rows === null) {
             self::logReadFailure('read-model rows', ['verified_only' => $verified_only]);
             $rows = [];
         }
@@ -413,7 +418,7 @@ final class PageDiscoveryRepository
 
         $where_clause = implode(' AND ', $where);
 
-        $count_sql = "SELECT COUNT(DISTINCT p.ID)
+        $count_sql = "SELECT COUNT(DISTINCT p.ID) AS n
             FROM {$wpdb->posts} p
             {$join}
             WHERE {$where_clause}";
@@ -422,8 +427,7 @@ final class PageDiscoveryRepository
             $count_sql = $wpdb->prepare($count_sql, ...$params);
         }
 
-        self::clearLastError();
-        $total = (int) $wpdb->get_var($count_sql);
+        $total = self::trustedCount($count_sql);
 
         // ⚠⚠ A FAILED READ IS NOT AN EMPTY RESULT, and telling them apart is
         // the other half of F-144. `get_var()` answers null on failure and
@@ -436,7 +440,7 @@ final class PageDiscoveryRepository
         // is a contract decision for the route, not something to slip into a
         // repository fix. What changes here is that the next occurrence is
         // VISIBLE instead of silent.
-        if (self::readFailed()) {
+        if ($total === null) {
             self::logReadFailure('discovery count', ['verified_only' => $verified_only]);
 
             return ['rows' => [], 'total' => 0, 'pages' => 0, 'page' => $page];
@@ -465,14 +469,20 @@ final class PageDiscoveryRepository
 
         $all_params = array_merge($params, [$limit, $offset]);
 
-        self::clearLastError();
-        $rows = $wpdb->get_results($wpdb->prepare($main_sql, ...$all_params));
+        // The row shape is restated here because trustedRows() takes an
+        // arbitrary SQL string and can only promise list<object>; this
+        // method's @phpstan-return promises what THIS SELECT produces. Same
+        // pattern as the two finders below. (The shape was equally
+        // unverified before: get_results()'s stub return was just loose
+        // enough that PHPStan did not object.)
+        /** @var list<object{ID: int|numeric-string, post_title: string, post_author: int|numeric-string, post_date: string, post_name: string, trust_score: float|numeric-string, reputation_tier: string, endorsements: int|numeric-string, unique_voters: int|numeric-string, follower_count: int|numeric-string|null}>|null $rows */
+        $rows = self::trustedRows($wpdb->prepare($main_sql, ...$all_params));
 
         // ⚠ Same reasoning as the COUNT above. `get_results()` answers null
         // on failure in some wpdb paths and `[]` in others, and neither is
         // distinguishable from "no rows" to a caller — so the failure is
         // logged rather than inferred from the shape of the result.
-        if (self::readFailed()) {
+        if ($rows === null) {
             self::logReadFailure('discovery rows', ['verified_only' => $verified_only]);
             $rows = [];
         }
@@ -483,6 +493,66 @@ final class PageDiscoveryRepository
             'pages' => $pages,
             'page'  => $page,
         ];
+    }
+
+    /**
+     * Run a SELECT and return its rows ONLY when they are this query's.
+     *
+     * ⚠⚠ `last_error` ALONE IS NOT AN EXHAUSTIVE FAILURE SIGNAL, which is
+     * the gap this closes (#590 review, Info). `get_results()` and
+     * `get_var()` call `query()` and DISCARD its return value, and
+     * `wpdb::query()` has failure paths that return **false without setting
+     * `last_error`**: the `! $this->ready` guard after a failed reconnect,
+     * and an empty result from the `query` filter. Both return BEFORE
+     * `flush()`, so `last_result` still holds the PREVIOUS query's rows —
+     * meaning the old check could not merely miss the failure, it could hand
+     * a caller an unrelated query's rows as an answer.
+     *
+     * So `query()` is called explicitly and BOTH signals are read. Adopted
+     * from bcc-core's `PeepSoHashtagRepository::trustedRows()` (#96), which
+     * is the canonical shape for this; `PeepSoBlockRepository::runProbe()`
+     * and `HiddenActivityRepository::runRead()` are the same idea.
+     *
+     * ⚠ The comparison is `=== false`, never falsy: for a SELECT `query()`
+     * returns the ROW COUNT, so a legitimate empty result returns 0.
+     *
+     * @return list<object>|null null = the read did not run
+     */
+    private static function trustedRows(string $sql): ?array
+    {
+        global $wpdb;
+
+        self::clearLastError();
+        $ok = $wpdb->query($sql);
+        if ($ok === false || self::readFailed()) {
+            return null;
+        }
+
+        $rows = $wpdb->last_result;
+
+        return is_array($rows) ? array_values($rows) : [];
+    }
+
+    /**
+     * The integer a `COUNT(...) AS n` answered, or null when the read failed.
+     *
+     * ⚠ THE `AS n` ALIAS IS LOAD-BEARING. The count is now read out of
+     * `last_result` rather than through `get_var()`, and a row object needs a
+     * named property — an unaliased `COUNT(*)` would arrive under the literal
+     * key `COUNT(*)`. Both count statements in this class carry the alias.
+     *
+     * ⚠ Returns 0 for an empty result set rather than null: "no rows" is a
+     * legitimate answer and must stay distinguishable from "the read
+     * failed", which is the whole point of the null.
+     */
+    private static function trustedCount(string $sql): ?int
+    {
+        $rows = self::trustedRows($sql);
+        if ($rows === null) {
+            return null;
+        }
+
+        return isset($rows[0]) ? (int) ($rows[0]->n ?? 0) : 0;
     }
 
     /**
@@ -593,9 +663,8 @@ final class PageDiscoveryRepository
         global $wpdb;
         $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
 
-        self::clearLastError();
         /** @var list<object{ID: int|numeric-string, post_title: string, post_name: string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        $rows = self::trustedRows($wpdb->prepare(
             "SELECT ID, post_title, post_name
                FROM {$wpdb->posts}
               WHERE ID IN ({$placeholders})
@@ -614,7 +683,7 @@ final class PageDiscoveryRepository
         // ⚠ FAILS CLOSED, and that is left exactly as it was: callers get
         // fewer pages, never more, so this is a visibility fix rather than a
         // behaviour change.
-        if (self::readFailed()) {
+        if ($rows === null) {
             self::logReadFailure('published pages by id', ['ids' => count($pageIds)]);
 
             return [];
@@ -652,9 +721,8 @@ final class PageDiscoveryRepository
         $params   = $postIds;
         $params[] = $chainId;
 
-        self::clearLastError();
         /** @var list<object{post_id: numeric-string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        $rows = self::trustedRows($wpdb->prepare(
             "SELECT post_id
                FROM {$wpdb->postmeta}
               WHERE meta_key IN ('_bcc_gate_chain_id', '_bcc_chain_tag')
@@ -672,7 +740,7 @@ final class PageDiscoveryRepository
         // quiet degradation.
         //
         // Behaviour is therefore unchanged on purpose; only the silence goes.
-        if (self::readFailed()) {
+        if ($rows === null) {
             self::logReadFailure('chain-gated post ids', ['ids' => count($postIds)]);
 
             return [];

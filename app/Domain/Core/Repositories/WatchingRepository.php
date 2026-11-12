@@ -27,6 +27,8 @@
 namespace BCC\Trust\Core\Repositories;
 
 use BCC\Trust\Core\Database\TableRegistry;
+use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -45,6 +47,8 @@ if (!defined('ABSPATH')) {
  */
 final class WatchingRepository
 {
+    use GuardsReadFailures;
+
     /**
      * Active-follow predicate for peepso_user_followers per the
      * existing PeepSoFollowerRepository convention.
@@ -185,6 +189,12 @@ final class WatchingRepository
      * not), or 0 when there is none. F-29: a block severs follows in both
      * directions, and the bcc_watch_meta sidecar is keyed by this id.
      * Bounded by the unique (active, passive) pair.
+     *
+     * Fail-closed: a failed read THROWS (logged by runRead()) instead of
+     * reading as 0, which would make the caller skip that direction as
+     * "no follow" and leave it in place with nothing in the logs.
+     *
+     * @throws RepositoryReadFailure when the read did not run
      */
     public function findFollowIdForPair(int $activeUserId, int $passiveUserId): int
     {
@@ -195,13 +205,15 @@ final class WatchingRepository
         global $wpdb;
         $follows = $wpdb->prefix . 'peepso_user_followers';
 
-        return (int) $wpdb->get_var($wpdb->prepare(
+        $rows = self::runRead($wpdb->prepare(
             "SELECT uf_id FROM {$follows}
               WHERE uf_active_user_id = %d AND uf_passive_user_id = %d
               LIMIT 1",
             $activeUserId,
             $passiveUserId
-        ));
+        ), __FUNCTION__, true);
+
+        return isset($rows[0]->uf_id) ? (int) $rows[0]->uf_id : 0;
     }
 
     /**

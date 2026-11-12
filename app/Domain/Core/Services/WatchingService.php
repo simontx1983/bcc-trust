@@ -1017,6 +1017,12 @@ final class WatchingService
      *
      * Idempotent: a direction with no follow, or one already unfollowed, is
      * a no-op. Returns how many follows were removed.
+     *
+     * Never throws for one direction's failure, and never fails the block:
+     * a follow read that did not run, or an unfollow that did not happen,
+     * is logged with both user ids and the other direction still runs. A
+     * failed unfollow keeps its sidecar (the follow is still there), as
+     * unwatch() does.
      */
     public function severFollowsBetween(int $userA, int $userB): int
     {
@@ -1026,14 +1032,29 @@ final class WatchingService
 
         $removed = 0;
         foreach ([[$userA, $userB], [$userB, $userA]] as [$active, $passive]) {
-            $followId = $this->watchingRepo->findFollowIdForPair($active, $passive);
+            try {
+                $followId = $this->watchingRepo->findFollowIdForPair($active, $passive);
+            } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] block: follow read failed, this direction was NOT removed', [
+                    'active_user_id'  => $active,
+                    'passive_user_id' => $passive,
+                    'error'           => $e->getMessage(),
+                ]);
+                continue;
+            }
             if ($followId <= 0) {
                 continue;
             }
-            if (PeepSoFollowWriter::unfollow($active, $passive)) {
-                $removed++;
+            if (!PeepSoFollowWriter::unfollow($active, $passive)) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] block: unfollow failed, this direction was NOT removed', [
+                    'active_user_id'  => $active,
+                    'passive_user_id' => $passive,
+                    'follow_id'       => $followId,
+                ]);
+                continue;
             }
-            // The sidecar goes even if the row was already unfollowed.
+            $removed++;
+            // §C2 cascade: bcc_watch_meta does not outlive its follow.
             $this->watchMetaRepo->delete($followId);
         }
         return $removed;

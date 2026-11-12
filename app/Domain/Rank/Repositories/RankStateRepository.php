@@ -244,10 +244,6 @@ class RankStateRepository
     /** §5 generation-counter bump for rank-state read caches. */
     private function invalidateCache(int $userId): void
     {
-        $genKey = "rank_state_gen:{$userId}";
-        $result = wp_cache_incr($genKey, 1, self::CACHE_GROUP);
-        if ($result === false) {
-            wp_cache_set($genKey, 2, self::CACHE_GROUP, 0);
-        }
+        \BCC\Trust\Core\Support\CacheGeneration::bump("rank_state_gen:{$userId}", self::CACHE_GROUP);
     }
 }

@@ -9,6 +9,7 @@ use BCC\Trust\Core\Admin\AdminMenus;
 
 use BCC\Trust\Onchain\OnchainPlugin;
 use BCC\Trust\Onchain\Services\NftGroupGateService;
+use BCC\Trust\Onchain\Services\NftGroupReconcileSweepService;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -24,10 +25,12 @@ if (!defined('ABSPATH')) {
  * memberships, not group creation).
  *
  * Two operations:
- *   1. Run sweep now — mimics the cron handler at bcc-trust.php:533:
- *      iterates up to 20 opt-in users (USER_META_AUTO_JOIN='1'),
- *      ID-ASC ordering, calls NftGroupGateService::reconcileForUser
- *      on each. Same opt-in respect as the cron.
+ *   1. Run sweep now — runs ONE tick of the cron's own
+ *      NftGroupReconcileSweepService::sweep() (F-93): the next
+ *      BATCH_SIZE opt-in users (USER_META_AUTO_JOIN='1') in the shared
+ *      rotation, each through NftGroupGateService::reconcileForUser.
+ *      Same lock as the cron, so a manual run beside a cron tick skips
+ *      instead of reconciling the same users twice.
  *   2. Reconcile specific user — input field for user ID, runs
  *      reconcileForUser regardless of opt-in (which the service
  *      itself enforces and returns zeros for opted-out users).
@@ -52,7 +55,7 @@ final class HolderGroupsPage
 {
     public const PAGE_SLUG = 'bcc-holder-groups';
 
-    private const SWEEP_BATCH_SIZE = 20;
+    private const SWEEP_BATCH_SIZE = NftGroupReconcileSweepService::BATCH_SIZE;
     private const NONCE_SWEEP      = 'bcc_holder_groups_run_sweep';
     private const NONCE_USER       = 'bcc_holder_groups_reconcile_user';
 
@@ -94,41 +97,41 @@ final class HolderGroupsPage
         AdminActionSupport::requirePost();
         check_admin_referer(self::NONCE_SWEEP);
 
-        $userIds = get_users([
-            'meta_key'   => NftGroupGateService::USER_META_AUTO_JOIN,
-            'meta_value' => '1',
-            'fields'     => 'ID',
-            'number'     => self::SWEEP_BATCH_SIZE,
-            'orderby'    => 'ID',
-            'order'      => 'ASC',
-        ]);
-
-        $service       = OnchainPlugin::instance()->nftGroupGateService();
-        $totalJoined   = 0;
-        $usersTouched  = 0;
-        $usersConsidered = count($userIds);
-
-        foreach ($userIds as $uid) {
-            $r = $service->reconcileForUser((int) $uid);
-            if (($r['joined'] ?? 0) > 0) {
-                $totalJoined += (int) $r['joined'];
-                $usersTouched++;
-            }
+        // F-93: the cron's own tick, under its lock. It used to be a
+        // separate loop over the FIRST 20 opted-in users (always the same
+        // 20), with no lock, so it could run beside a cron tick.
+        try {
+            $stats = OnchainPlugin::instance()->nftGroupReconcileSweepService()->sweep();
+        } catch (\Throwable $e) {
+            // A per-user failure is contained inside the tick; anything that
+            // still escapes it lands here. Log it and show a notice
+            // instead of a fatal admin page. The cursor only moves past
+            // users that were processed, so nobody is skipped.
+            \BCC\Core\Log\Logger::error('[bcc-trust] Holder-group reconcile sweep (manual) failed', [
+                'operator' => get_current_user_id(),
+                'error'    => $e->getMessage(),
+            ]);
+            wp_safe_redirect(add_query_arg([
+                'page'   => self::PAGE_SLUG,
+                'op'     => 'sweep',
+                'failed' => 1,
+            ], admin_url('admin.php')));
+            exit;
         }
 
-        \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group reconcile sweep (manual)', [
-            'considered' => $usersConsidered,
-            'touched'    => $usersTouched,
-            'joined'     => $totalJoined,
-            'operator'   => get_current_user_id(),
+        \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group reconcile sweep (manual)', $stats + [
+            'operator' => get_current_user_id(),
         ]);
 
         wp_safe_redirect(add_query_arg([
             'page'        => self::PAGE_SLUG,
             'op'          => 'sweep',
-            'considered'  => $usersConsidered,
-            'touched'     => $usersTouched,
-            'joined'      => $totalJoined,
+            'considered'  => $stats['checked'],
+            'touched'     => $stats['users_touched'],
+            'joined'      => $stats['joins_total'],
+            'errored'     => $stats['errored'],
+            'overlap'     => $stats['skipped_overlap'] ? 1 : 0,
+            'nolock'      => $stats['lock_unavailable'] ? 1 : 0,
         ], admin_url('admin.php')));
         exit;
     }
@@ -219,6 +222,26 @@ final class HolderGroupsPage
         }
 
         if ($op === 'sweep') {
+            if (isset($_GET['failed']) && (int) $_GET['failed'] === 1) {
+                echo '<div class="notice notice-error is-dismissible"><p>'
+                    . '<strong>Sweep failed.</strong> The sweep hit an error; see the log. '
+                    . 'The error is in the log. No user was skipped; the next run starts where the last one stopped.</p></div>';
+                return;
+            }
+            if (isset($_GET['nolock']) && (int) $_GET['nolock'] === 1) {
+                echo '<div class="notice notice-error is-dismissible"><p>'
+                    . '<strong>Sweep did not run.</strong> The sweep lock (bcc-core AdvisoryLock) is unavailable, '
+                    . 'and the sweep refuses to run without it. Check that bcc-core is active and up to date; '
+                    . 'the error is in the log.</p></div>';
+                return;
+            }
+            if (isset($_GET['overlap']) && (int) $_GET['overlap'] === 1) {
+                echo '<div class="notice notice-warning is-dismissible"><p>'
+                    . '<strong>Sweep skipped.</strong> Another reconcile sweep was already running, '
+                    . 'so this one did nothing. Try again in a minute.</p></div>';
+                return;
+            }
+            $errored    = isset($_GET['errored'])    ? (int) $_GET['errored']    : 0;
             $considered = isset($_GET['considered']) ? (int) $_GET['considered'] : 0;
             $touched    = isset($_GET['touched'])    ? (int) $_GET['touched']    : 0;
             $joined     = isset($_GET['joined'])     ? (int) $_GET['joined']     : 0;
@@ -226,10 +249,11 @@ final class HolderGroupsPage
             printf(
                 '<div class="notice notice-success is-dismissible"><p>'
                 . '<strong>Sweep complete.</strong> Considered %d opt-in user(s), '
-                . 'touched %d, joined %d holder-group membership(s).</p></div>',
+                . 'touched %d, joined %d holder-group membership(s), %d failed (logged; retried on the next pass).</p></div>',
                 (int) $considered,
                 (int) $touched,
-                (int) $joined
+                (int) $joined,
+                (int) $errored
             );
             return;
         }
@@ -323,14 +347,14 @@ final class HolderGroupsPage
 
         echo '<p style="color:var(--bcc-text-secondary);margin-top:8px;">'
             . 'The cron runs <strong>twicedaily</strong>, processing up to ' . esc_html((string) self::SWEEP_BATCH_SIZE)
-            . ' opt-in users per tick (ID-ASC ordering). Manual triggers below mirror that bounded behavior.</p>';
+            . ' opt-in users per tick, resuming where the last tick stopped. The manual sweep below runs one of those ticks.</p>';
     }
 
     private static function renderRunSweep(): void
     {
         echo '<h2 style="margin-top:24px;">Run reconcile sweep now</h2>';
         echo '<p style="color:var(--bcc-text-secondary);">Processes up to ' . esc_html((string) self::SWEEP_BATCH_SIZE)
-            . ' opt-in users in one batch (same logic as the cron tick). Safe to repeat — already-joined memberships are skipped.</p>';
+            . ' opt-in users: the next batch of the cron\'s own rotation. Safe to repeat — already-joined memberships are skipped, and it never runs beside a cron tick.</p>';
 
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:8px;">';
         echo '<input type="hidden" name="action" value="bcc_holder_groups_run_sweep">';

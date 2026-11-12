@@ -256,6 +256,8 @@ final class WebhooksPage
             HeliusDeliveryLog::OUTCOME_AUTH_FAILED => AdminUi::badge('auth_failed', AdminUi::BAD),
             HeliusDeliveryLog::OUTCOME_NO_PAYLOAD  => AdminUi::badge('no_payload',  AdminUi::WARN),
             HeliusDeliveryLog::OUTCOME_NO_CHAIN    => AdminUi::badge('no_chain',    AdminUi::WARN),
+            // Nothing ingested; Helius was asked to redeliver (503).
+            HeliusDeliveryLog::OUTCOME_DEDUPE_FAILED => AdminUi::badge('dedupe_failed', AdminUi::BAD),
             default                                => AdminUi::badge($outcome,     AdminUi::MUTED),
         };
     }

@@ -80,6 +80,18 @@ class RateLimiter {
     ];
 
     /**
+     * F-219: the actions whose limit is a throughput ceiling that earned
+     * trust may RAISE. Every other action — fixed product caps
+     * (downvote_daily), OAuth-callback and share-verification attempt
+     * limits, flag reports, and any action not listed here — gets the risk
+     * penalty only, never a boost. Fail-safe: a new action is unboosted
+     * until it is added here deliberately.
+     *
+     * @var list<string>
+     */
+    private const BOOSTABLE_ACTIONS = ['vote', 'endorse', 'comment', 'message', 'api', 'watch', 'unwatch'];
+
+    /**
      * @var UserInfoRepository
      */
     private static $userInfoRepo;
@@ -234,21 +246,28 @@ class RateLimiter {
             //      they used to spend the shared subnet bucket too, so one
             //      account flooding past its own limit locked every other
             //      account on the subnet out of watch/vote/share.
-            //   2. The cap is at least one full account (the base $limit:
-            //      getAdjustedLimit() never raises it, risk <= 1.0 wins the
-            //      min) plus this caller's own share, plus 1 for the sliding
+            //   2. The cap is at least one full account (the base $limit)
+            //      plus this caller's own share, plus 1 for the sliding
             //      window's integer rounding. Without it a risk-penalised
             //      caller (0.2× → cap 0.8× base) was locked out by a single
             //      ordinary neighbour using its normal allowance.
             // An unpenalised caller (adj = limit) keeps exactly 4×, since
             // 2×limit + 1 <= 4×limit; so the multi-account cap is unchanged.
-            $ipLimit   = max(10, $adjustedLimit * 4, $limit + $adjustedLimit + 1);
+            //
+            // F-219: the 4× term is anchored on min(adj, base), so a trust
+            // boost raises the caller's OWN bucket but never the subnet's.
+            // The largest boost is 1.2 × 1.5 × 1.2 = 2.16×, and
+            // round(2.16 × base) <= 3 × base - 1 for every base >= 1, so
+            // base + adj + 1 <= 4 × base too: for a boosted caller the cap
+            // is exactly max(10, 4 × base), the same as an unboosted one.
+            // CRIT-2's flood bound per /24 is therefore unchanged by boosts.
+            $ipLimit   = max(10, min($adjustedLimit, $limit) * 4, $limit + $adjustedLimit + 1);
             $allowedByUser = self::slidingWindowCheck($userKey, $adjustedLimit, $window);
             $allowedByIp   = $allowedByUser && self::slidingWindowCheck($ipKey, $ipLimit, $window);
             $allowed = $allowedByUser && $allowedByIp;
             $slidingKey = $allowedByUser ? $ipKey : $userKey;
         } else {
-            // Normalize IP to /24 (IPv4) or /64 (IPv6) subnet to bound
+            // Normalize IP to /24 (IPv4) or /48 (IPv6) subnet to bound
             // key cardinality and prevent DB growth from rotating IPs.
             $subnet = self::normalizeIpToSubnet($ip);
             $slidingKey = "{$action}_anon_{$subnet}";
@@ -301,7 +320,11 @@ class RateLimiter {
 
         // Compute risk penalty and trust bonus SEPARATELY so that
         // trust boosts can never offset a fraud-score penalty.
-        // Final multiplier = min(riskMultiplier, trustMultiplier).
+        //
+        // F-219: a penalised user (risk < 1.0) gets the risk multiplier and
+        // nothing else; an unpenalised user gets the trust boost, on a
+        // BOOSTABLE_ACTIONS action only. The previous min(risk, trust) could
+        // never exceed 1.0 (risk <= 1.0 <= trust), so no boost ever applied.
         $riskMultiplier  = 1.0;
         $trustMultiplier = 1.0;
 
@@ -314,6 +337,16 @@ class RateLimiter {
             $riskMultiplier = self::TRUST_MULTIPLIERS['medium_risk'];
         } elseif ($userInfo->fraud_score >= BCC_TRUST_FRAUD_LOW) {
             $riskMultiplier = self::TRUST_MULTIPLIERS['low_risk'];
+        }
+
+        // Risk penalty always wins: a flagged user cannot be boosted
+        // above their risk-capped limit regardless of tier or verification.
+        if ($riskMultiplier < 1.0) {
+            return max(1, (int) round($baseLimit * $riskMultiplier));
+        }
+
+        if (!in_array($action, self::BOOSTABLE_ACTIONS, true)) {
+            return $baseLimit;
         }
 
         // Trust boosts (only applied when no risk penalty is active).
@@ -337,11 +370,7 @@ class RateLimiter {
             $trustMultiplier *= 1.2;
         }
 
-        // Risk penalty always wins: a flagged user cannot be boosted
-        // above their risk-capped limit regardless of tier or verification.
-        $multiplier = min($riskMultiplier, $trustMultiplier);
-
-        $adjusted = (int) round($baseLimit * $multiplier);
+        $adjusted = (int) round($baseLimit * $trustMultiplier);
 
         return max(1, $adjusted);
     }
@@ -450,6 +479,11 @@ class RateLimiter {
      * Normalize an IP to its subnet to bound key cardinality.
      * IPv4 → /24, IPv6 → /48. Invalid → returned as-is.
      *
+     * IPv4-mapped IPv6 (::ffff:a.b.c.d, what a dual-stack socket reports for
+     * an IPv4 peer) keys on that IPv4's /24 (F-126). Masked as IPv6 its first
+     * 6 bytes are zero, so every such client shared ONE bucket ("::").
+     * bcc-core's Throttle normalizes the same way.
+     *
      * IPv6 uses /48 (not /64) because a /48 is the standard end-site
      * allocation (RFC 6177). Normalizing to /64 lets an attacker on a
      * single ISP customer allocation hop across /64 subnets and get a
@@ -465,8 +499,12 @@ class RateLimiter {
 
         if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
             $packed = inet_pton($ip);
-            if ($packed === false) {
+            if ($packed === false || strlen($packed) !== 16) {
                 return $ip;
+            }
+            if (substr($packed, 0, 12) === str_repeat("\0", 10) . "\xff\xff") {
+                $v4 = inet_ntop(substr($packed, 12, 4));
+                return $v4 === false ? $ip : self::normalizeIpToSubnet($v4);
             }
             // Zero out bytes 7-16 (the host + subnet-ID part of a /48).
             $masked = substr($packed, 0, 6) . str_repeat("\0", 10);

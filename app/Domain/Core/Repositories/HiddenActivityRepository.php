@@ -420,20 +420,11 @@ final class HiddenActivityRepository
      */
     public static function getGeneration(): int
     {
-        $gen = wp_cache_get(self::CACHE_KEY_GEN, self::CACHE_GROUP);
-        if (is_numeric($gen)) {
-            // Tolerant read (NOT is_int): persistent object-cache
-            // backends return integers as numeric strings on
-            // cross-process reads (maybe_serialize(0) === "0"). A
-            // strict is_int check here treated every cross-process
-            // read as "uninitialized" and reset the generation to 0 —
-            // permanently undoing every bustCache() increment, so
-            // hide/unhide never invalidated downstream caches. Same
-            // tolerant shape as CollectionSignalRepository::generation().
-            return (int) $gen;
-        }
-        wp_cache_set(self::CACHE_KEY_GEN, 0, self::CACHE_GROUP);
-        return 0;
+        // CacheGeneration reads numeric strings tolerantly (persistent
+        // backends return ints as strings cross-process, the 2026-07-21
+        // P1) and seeds a MISSING key from the clock, never 0, so an
+        // evicted counter can't point readers back at a stale entry.
+        return \BCC\Trust\Core\Support\CacheGeneration::get(self::CACHE_KEY_GEN, self::CACHE_GROUP);
     }
 
     private static function cacheGenerationKey(): string
@@ -443,6 +434,6 @@ final class HiddenActivityRepository
 
     private static function bustCache(): void
     {
-        wp_cache_incr(self::CACHE_KEY_GEN, 1, self::CACHE_GROUP);
+        \BCC\Trust\Core\Support\CacheGeneration::bump(self::CACHE_KEY_GEN, self::CACHE_GROUP);
     }
 }

@@ -102,6 +102,12 @@ final class PagePostsIntegrationTest extends TestCase
         }
         $wpdb->query("DELETE FROM {$wpdb->postmeta}");
         $wpdb->query("DELETE FROM {$wpdb->posts}");
+        // ⚠ peepso_users is deliberately NOT dropped here, unlike the two
+        // tables this suite owns. It is created with IF NOT EXISTS, it holds
+        // no rows this suite inserted, and the §F-02 gate in any later suite
+        // needs it — dropping a shared table is the sabotage
+        // BlogTabGroupVisibilityIntegrationTest::tearDown() documents at
+        // length. An empty leftover table costs nothing.
         $wpdb->query("DROP TABLE IF EXISTS {$wpdb->prefix}peepso_activities, {$wpdb->prefix}peepso_blocks");
         $wpdb->query(
             "ALTER TABLE {$wpdb->posts}
@@ -700,6 +706,19 @@ final class PagePostsIntegrationTest extends TestCase
                 blk_user_id BIGINT UNSIGNED NOT NULL,
                 blk_blocked_id BIGINT UNSIGNED NOT NULL,
                 PRIMARY KEY (blk_user_id, blk_blocked_id)
+            ) DEFAULT CHARSET=utf8mb4",
+            // ⚠ Required by §F-02: the per-post visibility gate LEFT JOINs
+            // this table to read each author's profile level. The join is
+            // LEFT, so an author with no row reads as level 10 (public) and
+            // the fixtures behave as they did — but a MISSING TABLE is a SQL
+            // error, which surfaces as an empty result set rather than an
+            // error, i.e. every feed assertion failing for a reason that
+            // looks like a visibility bug. Same shape as peepso_blocks:
+            // created if absent, dropped in teardown.
+            "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}peepso_users (
+                usr_id BIGINT UNSIGNED NOT NULL,
+                usr_profile_acc TINYINT NOT NULL DEFAULT 10,
+                PRIMARY KEY (usr_id)
             ) DEFAULT CHARSET=utf8mb4",
         ];
         foreach ($statements as $sql) {
