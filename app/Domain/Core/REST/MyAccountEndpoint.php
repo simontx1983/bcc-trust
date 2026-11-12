@@ -256,10 +256,13 @@ final class MyAccountEndpoint
 
         // Revoke FIRST, then mint — the fresh token carries the bumped
         // version; every session minted before the change now fails
-        // ERR_REVOKED. (Same order and reason as patchPassword.)
+        // ERR_REVOKED. (Same order and reason as patchPassword.) The fresh
+        // token CONTINUES this session (F-253): read when it began before
+        // the revoke invalidates the presented token.
+        $sessionStart = \BCC\Trust\Core\Support\JwtToken::presentedSessionStartedAt($userId);
         \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
         $handle     = (string) get_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE, true);
-        $freshToken = \BCC\Trust\Core\Support\JwtToken::encode($userId, $handle);
+        $freshToken = \BCC\Trust\Core\Support\JwtToken::encodeContinuation($userId, $handle, $sessionStart);
 
         // Account-state mutation — log after the write commits.
         AuditLogger::log('account_email_changed', $userId, [], 'user', $userId);
@@ -352,10 +355,12 @@ final class MyAccountEndpoint
         // Order matters: revoke FIRST, then mint, so the fresh token carries
         // the bumped version and survives; every OTHER token now fails
         // ERR_REVOKED. The new token is returned below so the caller's own
-        // session stays alive. [audit H-2]
+        // session stays alive. [audit H-2] It CONTINUES this session (F-253):
+        // read when it began before the revoke.
+        $sessionStart = \BCC\Trust\Core\Support\JwtToken::presentedSessionStartedAt($userId);
         \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
         $handle    = (string) get_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE, true);
-        $freshToken = \BCC\Trust\Core\Support\JwtToken::encode($userId, $handle);
+        $freshToken = \BCC\Trust\Core\Support\JwtToken::encodeContinuation($userId, $handle, $sessionStart);
 
         // A rotation cuts off every other token, so it must also cut off
         // every device's push subscription — including the caller's own,

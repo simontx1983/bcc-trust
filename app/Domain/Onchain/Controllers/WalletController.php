@@ -253,12 +253,18 @@ class WalletController
             // Revoke FIRST, then mint: the fresh token carries the bumped
             // version and is the caller's working session. The token is
             // returned whether or not the switch is ON (see the constant).
+            // The fresh token CONTINUES this session (F-253): an unlink is
+            // not a sign-in, so it must not move auth_time forward (else a
+            // wallet linked mid-session would count as linked before it).
+            // Read before the revoke invalidates the presented token.
+            $sessionStart = JwtToken::presentedSessionStartedAt($userId);
             if ((bool) get_option(self::UNLINK_REVOKES_SESSIONS_OPTION, false)) {
                 JwtToken::revokeAllForUser($userId);
             }
-            $freshToken = JwtToken::encode(
+            $freshToken = JwtToken::encodeContinuation(
                 $userId,
-                (string) get_user_meta($userId, HandleService::META_HANDLE, true)
+                (string) get_user_meta($userId, HandleService::META_HANDLE, true),
+                $sessionStart
             );
         }
 

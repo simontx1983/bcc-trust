@@ -326,21 +326,100 @@ final class AccountWalletConfirmTest extends TestCase
         self::assertTrue(self::challengeIsLive());
     }
 
-    public function testARefreshKeepsWhenTheSessionBegan(): void
+    /**
+     * Every token mint in the plugin, and whether it is a real sign-in
+     * (auth_time = now) or a continuation of the caller's session (keeps
+     * auth_time). A wallet unlink or a credential change is NOT a sign-in:
+     * re-minting there with a fresh auth_time would let a wallet linked
+     * mid-session count as linked before the sign-in.
+     *
+     * @return array<string, array{string, string, int}>
+     */
+    public static function mintSites(): array
     {
-        $src = (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Core/REST/Auth/SessionController.php');
-        $body = substr($src, (int) strpos($src, 'public function refresh('));
-        self::assertMatchesRegularExpression(
-            "/JwtToken::encode\(\\\$userId, \\\$handle, \['auth_time' => JwtToken::sessionStartedAt\(\\\$payload\)\]\)/",
-            $body,
-            'a refresh must not move auth_time forward'
-        );
+        return [
+            'password sign-in'     => ['app/Domain/Core/REST/Auth/PasswordAuthController.php', 'encodeNewSession', 1],
+            'oauth sign-in/up'     => ['app/Domain/Core/REST/Auth/OAuthController.php', 'encodeNewSession', 2],
+            'wallet sign-in/up'    => ['app/Domain/Core/REST/Auth/WalletAuthController.php', 'encodeNewSession', 2],
+            '2fa completion'       => ['app/Domain/Core/REST/Auth/TwoFactorController.php', 'encodeNewSession', 1],
+            'email-verify sign-in' => ['app/Domain/Core/REST/Auth/AuthSupport.php', 'encodeNewSession', 1],
+            'refresh'              => ['app/Domain/Core/REST/Auth/SessionController.php', 'encodeContinuation', 1],
+            'email + password'     => ['app/Domain/Core/REST/MyAccountEndpoint.php', 'encodeContinuation', 2],
+            'wallet unlink'        => ['app/Domain/Onchain/Controllers/WalletController.php', 'encodeContinuation', 1],
+        ];
+    }
 
-        $payload = \BCC\Trust\Core\Support\JwtToken::decode(\BCC\Trust\Core\Support\JwtToken::encode(self::USER, 'h', ['auth_time' => 1234]))['payload'];
-        self::assertSame(1234, \BCC\Trust\Core\Support\JwtToken::sessionStartedAt($payload));
-        self::assertSame(time(), \BCC\Trust\Core\Support\JwtToken::sessionStartedAt(
-            \BCC\Trust\Core\Support\JwtToken::decode(\BCC\Trust\Core\Support\JwtToken::encode(self::USER, 'h'))['payload']
-        ), 'a fresh sign-in starts now');
+    #[\PHPUnit\Framework\Attributes\DataProvider('mintSites')]
+    public function testEachMintSiteSaysWhetherItIsASignIn(string $rel, string $helper, int $count): void
+    {
+        $src = (string) file_get_contents(dirname(__DIR__, 2) . '/' . $rel);
+        self::assertSame($count, substr_count($src, 'JwtToken::' . $helper . '('), $rel);
+        self::assertStringNotContainsString('JwtToken::encode(', $src, 'no mint without a session decision');
+    }
+
+    public function testNoOtherCodeMintsTokensDirectly(): void
+    {
+        $root = dirname(__DIR__, 2);
+        $hits = [];
+        $it   = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root . '/app', \FilesystemIterator::SKIP_DOTS));
+        foreach ($it as $f) {
+            if ($f->getExtension() === 'php' && !str_ends_with($f->getPathname(), 'JwtToken.php')
+                && str_contains((string) file_get_contents($f->getPathname()), 'JwtToken::encode(')
+            ) {
+                $hits[] = $f->getPathname();
+            }
+        }
+        self::assertSame([], $hits);
+    }
+
+    public function testASignInStartsNowAndAContinuationKeepsTheStart(): void
+    {
+        $jwt = \BCC\Trust\Core\Support\JwtToken::class;
+
+        $fresh = $jwt::decode($jwt::encodeNewSession(self::USER, 'h'))['payload'];
+        self::assertSame(time(), $fresh['auth_time']);
+
+        $cont = $jwt::decode($jwt::encodeContinuation(self::USER, 'h', 1234))['payload'];
+        self::assertSame(1234, $jwt::sessionStartedAt($cont));
+        self::assertGreaterThan(1234, $cont['iat'], 'iat is the mint time; only auth_time is kept');
+
+        self::signIn(['auth_time' => 4321]);
+        self::assertSame(4321, $jwt::presentedSessionStartedAt(self::USER));
+        self::assertSame(0, $jwt::presentedSessionStartedAt(self::OTHER), 'a token for someone else counts for nothing');
+        unset($_SERVER['HTTP_AUTHORIZATION']);
+        self::assertSame(0, $jwt::presentedSessionStartedAt(self::USER), 'unknown → 0: no wallet predates it (fail closed)');
+    }
+
+    public function testAnInSessionReMintKeepsTheSessionStart(): void
+    {
+        // The re-mint after a credential change (here: a wallet-only member
+        // setting a password with their wallet) continues the SAME session.
+        self::verifiedAgo(1, 5 * 86400);
+        self::signIn(['auth_time' => time() - 4 * 86400]);
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_PASSWORD_CHANGE);
+
+        [$status, $data] = self::call([new MyAccountEndpoint(), 'patchPassword'], ['password' => 'a brand new passphrase'] + self::walletProof($sig));
+
+        self::assertSame(200, $status);
+        $payload = \BCC\Trust\Core\Support\JwtToken::decode($data['token'])['payload'];
+        self::assertSame(time() - 4 * 86400, $payload['auth_time']);
+    }
+
+    public function testAWalletLinkedMidSessionStillCannotConfirmAfterAReMint(): void
+    {
+        // The attack: a stolen session (signed in 60h ago) links wallet W
+        // 49h ago, then gets a re-minted token (unlink, refresh, ...). The
+        // re-mint keeps auth_time, so W is still "after the sign-in".
+        self::verifiedAgo(1, 49 * 3600);
+        $start = time() - 60 * 3600;
+        $reMinted = \BCC\Trust\Core\Support\JwtToken::encodeContinuation(self::USER, 'handle' . self::USER, $start);
+        $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . $reMinted;
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_ACCOUNT_DELETE);
+
+        [$status] = self::call([new MyAccountEndpoint(), 'deleteAccount'], ['confirm' => 'DELETE'] + self::walletProof($sig));
+
+        self::assertSame(403, $status);
+        self::assertSame([], $GLOBALS['__bcc_wc']['deleted']);
     }
 
     public function testAChallengeForAnotherChangeIsRefused(): void

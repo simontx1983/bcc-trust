@@ -310,7 +310,7 @@ final class OAuthController
                 );
             }
 
-            $token = JwtToken::encode($userId, $handle);
+            $token = JwtToken::encodeNewSession($userId, $handle);
 
             do_action('bcc_user_login', $userId, $handle);
 
@@ -496,7 +496,7 @@ final class OAuthController
         // Consume the provider_token only after the user row is committed.
         AuthSupport::consumeOauthProviderToken($providerToken);
 
-        $token = JwtToken::encode($userIdInt, $handle);
+        $token = JwtToken::encodeNewSession($userIdInt, $handle);
 
         Logger::audit('user_signup', [
             'user_id'  => $userIdInt,

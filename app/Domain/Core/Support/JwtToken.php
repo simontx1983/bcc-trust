@@ -95,7 +95,37 @@ final class JwtToken
     public const ERR_LOGGED_OUT    = 'jwt_logged_out';
 
     /**
-     * Encode a token for the given user + handle.
+     * F-253: mint the token for a REAL sign-in (password + 2FA, OAuth,
+     * wallet sign-in / sign-up, email-verification sign-in). Stamps
+     * `auth_time` = now: the moment this session began.
+     */
+    public static function encodeNewSession(int $userId, string $handle): string
+    {
+        return self::encode($userId, $handle, ['auth_time' => time()]);
+    }
+
+    /**
+     * F-253: mint a token that CONTINUES the caller's session (refresh, and
+     * the re-mints after a credential change or a wallet unlink). It keeps
+     * the session's `auth_time`, so an in-session re-mint can never move
+     * "when did this sign-in happen?" forward — otherwise a wallet linked
+     * mid-session would count as linked before the sign-in, and could
+     * confirm account changes (AccountCredentialCheck).
+     *
+     * @param int $sessionStartedAt from sessionStartedAt() of the token being
+     *                              continued, or presentedSessionStartedAt()
+     *                              read BEFORE any revocation; 0 when unknown
+     *                              (fails closed: no wallet predates it).
+     */
+    public static function encodeContinuation(int $userId, string $handle, int $sessionStartedAt): string
+    {
+        return self::encode($userId, $handle, ['auth_time' => max(0, $sessionStartedAt)]);
+    }
+
+    /**
+     * Encode a token for the given user + handle. Low level: app code mints
+     * through encodeNewSession() or encodeContinuation(), which set
+     * `auth_time` (a guard test pins that).
      *
      * @param array<string, mixed> $extraClaims optional additional payload claims.
      */
@@ -112,9 +142,6 @@ final class JwtToken
             'iss'     => self::issuer(),
             'sub'     => (string) $userId,
             'iat'     => $now,
-            // When this sign-in happened. A refresh carries it forward
-            // (sessionStartedAt), so it survives the token being re-minted.
-            'auth_time' => $now,
             'exp'     => $now + self::TTL_SECONDS,
             'ver'     => self::TOKEN_VERSION,
             'jti'     => wp_generate_uuid4(),
@@ -318,6 +345,25 @@ final class JwtToken
     public static function sessionStartedAt(array $payload): int
     {
         return (int) ($payload['auth_time'] ?? $payload['iat'] ?? 0);
+    }
+
+    /**
+     * The session start of the bearer token PRESENTED with this request, if
+     * it is a valid token for $userId; else 0. Read it BEFORE
+     * revokeAllForUser() (which would make the presented token fail decode)
+     * and pass it to encodeContinuation().
+     */
+    public static function presentedSessionStartedAt(int $userId): int
+    {
+        $token = BearerAuth::readBearerToken();
+        if ($token === null) {
+            return 0;
+        }
+        $decoded = self::decode($token);
+        if ($decoded['ok'] !== true || (int) ($decoded['payload']['user_id'] ?? 0) !== $userId) {
+            return 0;
+        }
+        return self::sessionStartedAt($decoded['payload']);
     }
 
     /** User-meta key holding the user's single-token-logout denylist. */

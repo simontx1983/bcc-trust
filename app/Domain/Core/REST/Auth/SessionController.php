@@ -387,7 +387,7 @@ final class SessionController
 
         // A refresh continues the same sign-in: keep when it began (F-253's
         // "wallet linked before this sign-in" rule must not reset here).
-        $fresh = JwtToken::encode($userId, $handle, ['auth_time' => JwtToken::sessionStartedAt($payload)]);
+        $fresh = JwtToken::encodeContinuation($userId, $handle, JwtToken::sessionStartedAt($payload));
 
         Logger::audit('token_refreshed', [
             'user_id' => $userId,

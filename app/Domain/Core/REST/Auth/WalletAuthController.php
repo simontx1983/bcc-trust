@@ -569,7 +569,7 @@ final class WalletAuthController
         wp_set_current_user($userId);
         wp_set_auth_cookie($userId, true);
 
-        $token = JwtToken::encode($userId, $handle);
+        $token = JwtToken::encodeNewSession($userId, $handle);
 
         Logger::audit('user_login', [
             'user_id' => $userId,
@@ -813,7 +813,7 @@ final class WalletAuthController
         wp_set_current_user($userIdInt);
         wp_set_auth_cookie($userIdInt, true);
 
-        $token = JwtToken::encode($userIdInt, $handle);
+        $token = JwtToken::encodeNewSession($userIdInt, $handle);
 
         Logger::audit('user_signup', [
             'user_id' => $userIdInt,
