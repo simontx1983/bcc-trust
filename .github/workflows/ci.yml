@@ -374,6 +374,9 @@ jobs:
       # The script's default re-loads gmp/intl/mysqli with -d flags, which
       # setup-php has already enabled below.
       PHP: php
+      # An unreachable DB, or any skipped integration half, fails the run
+      # instead of passing with the integration controls never run.
+      REQUIRE_DB: '1'
     steps:
       - uses: actions/checkout@v4
         with:
