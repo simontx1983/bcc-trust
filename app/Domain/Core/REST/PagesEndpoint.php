@@ -383,8 +383,12 @@ final class PagesEndpoint
         // §M suspension gate (F-109), admin bypass OFF: a suspended account
         // must not take over a validator page. Throttle stays FIRST
         // (throttle-before-credentials rule).
+        //
+        // `data.reason` (v1.127): every 403 on this route names its cause, so
+        // a client can tell "suspended" (final) from a wallet problem. Before,
+        // the frontend told a suspended member to try a different wallet.
         if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
-            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403, ['reason' => 'suspended']);
         }
 
         $pageId     = (int) $request->get_param('id');
@@ -421,7 +425,8 @@ final class PagesEndpoint
             return ApiResponse::error(
                 'bcc_forbidden',
                 'That entity is not attached to this page.',
-                403
+                403,
+                ['reason' => 'entity_not_bound']
             );
         }
 
@@ -795,13 +800,33 @@ final class PagesEndpoint
             );
         }
 
+        // F-303: the wallet DOES hold the collection, but holding is not
+        // owning — only an operator or creator may claim a page. Its own
+        // message, so a holder is not told their wallet "does not match".
+        if (($result['error'] ?? '') === 'holder_not_owner') {
+            return ApiResponse::error(
+                'bcc_forbidden',
+                "Holding an NFT doesn't make you this collection's creator.",
+                403,
+                ['reason' => 'holder_not_owner']
+            );
+        }
+
+        // ClaimService::claim()'s own §M suspension gate (F-109). It used to
+        // fall through to the wallet-mismatch default below, so a suspended
+        // member was told their wallet did not match.
+        if (($result['error'] ?? '') === 'bcc_forbidden') {
+            return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403, ['reason' => 'suspended']);
+        }
+
         // Default failure: no matching wallet. Sanitize the message to
         // avoid leaking internal phrasing (operator address strings,
         // moniker references, etc.) — keep it user-facing.
         return ApiResponse::error(
             'bcc_forbidden',
             'Your connected wallet does not match the operator for this entity.',
-            403
+            403,
+            ['reason' => 'not_operator']
         );
     }
 

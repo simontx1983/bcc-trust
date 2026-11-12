@@ -55,7 +55,8 @@ class ClaimService {
 
     /**
      * Exclusive roles — only ONE verified claim allowed per entity.
-     * Holders are unlimited. Operators/creators are exclusive.
+     * Operators/creators are exclusive, and they are the ONLY roles
+     * claim() accepts (F-303): a holder result is refused, never recorded.
      */
     private const EXCLUSIVE_ROLES = ['operator', 'creator'];
 
@@ -169,35 +170,22 @@ class ClaimService {
             ];
         }
 
-        // Non-exclusive roles (e.g. holder) — upsert is idempotent via ON DUPLICATE KEY.
-        $upsertResult = ClaimRepository::upsert(
-            $userId,
-            $entityType,
-            $entityId,
-            $match['wallet_address'],
-            $match['chain_id'],
-            $match['role'],
-            'verified'
-        );
-
-        if (!$upsertResult) {
-            return ['success' => false, 'error' => 'transient', 'message' => 'Failed to save claim.'];
-        }
-
-        $claimId = $upsertResult['id'];
-
-        // Only fire the action if this was a fresh insert.
-        // ON DUPLICATE KEY UPDATE sets rows_affected=2 for updates, 0 for no-op.
-        if ($upsertResult['inserted']) {
-            do_action('bcc_onchain_claim_verified', $userId, $entityType, $entityId, $match['role']);
-        }
-
+        // ⛔ F-303: a NON-exclusive role (holder) is REFUSED here, and nothing
+        // is recorded.
+        //
+        // This method's only caller is the page-claim route (PagesEndpoint),
+        // which mirrors whatever succeeds as an EXCLUSIVE page claim and fires
+        // `bcc_page_claimed` — and PeepSoIntegration::onPageClaimed then hands
+        // an unowned page (post_author 0, how placeholder pages are minted)
+        // and its followers to the claimer. A holder result reaching that path
+        // would let ANY wallet holding one NFT of a collection take its page
+        // and block the real creator. Holding is not owning: holder status is
+        // served by the holder-group flows, never by a page claim. Only
+        // operator and creator may claim a page.
         return [
-            'success'    => true,
-            'message'    => self::successMessage($entityType, $match['role']),
-            'claim_id'   => $claimId,
-            'role'       => $match['role'],
-            'is_primary' => false,
+            'success' => false,
+            'error'   => 'holder_not_owner',
+            'message' => "Holding an NFT doesn't make you this collection's creator.",
         ];
     }
 
@@ -420,14 +408,25 @@ class ClaimService {
             return null;
         }
 
-        // Delegate to trust-engine's BlockchainQueryService if available.
-        $queryClass = '\\BCC\\Trust\\Services\\wallet\\BlockchainQueryService';
+        // Delegate to Core's BlockchainQueryService.
+        //
+        // ⚠ F-303: this used to name `\BCC\Trust\Services\wallet\…`, a class
+        // that does not exist, so class_exists() was false and every
+        // collection claim fell through to "no match". The real class lives
+        // under Core. Fixing it is only safe together with claim()'s refusal
+        // of non-exclusive roles — see the comment there.
+        $queryClass = '\\BCC\\Trust\\Core\\Services\\wallet\\BlockchainQueryService';
         if (!class_exists($queryClass)) {
             return null;
         }
 
+        // CREATOR wins across ALL wallets. This loop used to return on the
+        // first wallet with ANY role, so a holder wallet listed before the
+        // user's creator wallet answered "holder" — which claim() now
+        // refuses — and the creator could never claim their own collection.
+        $holder = null;
         foreach ($wallets as $wallet) {
-            $addr     = $wallet->wallet_address;
+            $addr      = $wallet->wallet_address;
             $chainType = $entity->chain_type ?? 'evm';
 
             $role = match ($chainType) {
@@ -444,8 +443,8 @@ class ClaimService {
                 ];
             }
 
-            if ($role === 'holder') {
-                return [
+            if ($role === 'holder' && $holder === null) {
+                $holder = [
                     'wallet_address' => $addr,
                     'chain_id'       => (int) $wallet->chain_id,
                     'role'           => 'holder',
@@ -453,7 +452,7 @@ class ClaimService {
             }
         }
 
-        return null;
+        return $holder;
     }
 
     /**
