@@ -83,6 +83,14 @@ final class FeedRankingService
      */
     private const BLOCK_PROBE_CHUNK = 100;
 
+    /**
+     * F-297: how many FURTHER pages a multi-author feed reads when the exact
+     * block filter empties the page it fetched — see
+     * {@see fetchPastBlockedPages()}. Bounded, so a viewer who blocks a
+     * prolific author costs at most this many extra reads per request.
+     */
+    private const BLOCK_REFILL_PAGES = 3;
+
     public function __construct(
         private readonly ActivityFeedService $activityFeed,
         private readonly ReputationRepository $reputationRepo,
@@ -270,7 +278,9 @@ final class FeedRankingService
      * mirror of `getHotFeed()` for everything that governs VISIBILITY:
      *
      *   - same `$excluded` set: $this->reputationRepo->getCautionAndRiskyUserIds()
-     *     (§O4.1 caution/risky shadow-limit) — IDENTICAL call, no merge.
+     *     (§O4.1 caution/risky shadow-limit) — IDENTICAL call, PLUS the
+     *     viewer's mutual blocks (F-297). Extra exclusions only NARROW, so
+     *     the subset relation holds; the hot feed has no viewer to block for.
      *   - same `$hidden` set: $this->hiddenRepo->getAllHiddenIds()
      *     (§K1-C moderation hide) — IDENTICAL call.
      *   - same restricted-group posture: NEITHER method computes one, because
@@ -305,7 +315,8 @@ final class FeedRankingService
      * Beyond the §F-02 viewer id noted above, the only difference from
      * getHotFeed is the trailing `$hashtag` argument
      * forwarded to `activityFeed->getFeed(...)`, which is a pure NARROWING
-     * predicate (`post_content LIKE '%#tag%'`). A narrowing predicate can only
+     * predicate (PeepSo's whole-word `#tag` match, shared with the trending
+     * recount since bcc-core F-268). A narrowing predicate can only
      * remove rows from the already-gated candidate set — it can never add one
      * — so the visibility parity with the hot feed holds by construction.
      *
@@ -330,7 +341,18 @@ final class FeedRankingService
         // `$excludedGroupIds` parameter below is a no-op in bcc-core, so the
         // `public_all` gate is what holds the hot-feed parity. Changing one of
         // the two methods here without the other breaks the stated invariant.
-        $excluded = $this->reputationRepo->getCautionAndRiskyUserIds();
+        //
+        // F-297: the viewer's mutual blocks are merged into the SQL exclusion
+        // too, as getFeed() does. Excluding more authors can only NARROW the
+        // gated set, so the hot-feed parity invariant still holds; what it
+        // buys is that a tag dominated by an author the viewer blocked no
+        // longer reads back as an empty page (the exact filter below used to
+        // be the only block filter on this surface).
+        $excluded = self::mergeExclusions(
+            $this->reputationRepo->getCautionAndRiskyUserIds(),
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
+            $viewerId > 0 ? PeepSoBlockRepository::getBlockerIds($viewerId) : []
+        );
         $hidden   = $this->hiddenRepo->getAllHiddenIds();
 
         // §F-02 per-post visibility, enforced UNCONDITIONALLY here too —
@@ -352,21 +374,26 @@ final class FeedRankingService
         // stranger's restricted post, which is what the invariant
         // protects; the docblock above states this rather than leaving
         // the literal wording to carry it.
-        $payload = $this->activityFeed->getFeed(
-            $viewerId,
-            ActivityFeedService::SCOPE_FOR_YOU,
+        $friendIds = $viewerId > 0
+            ? (PeepSoFriendGate::viewerFriendIdList($viewerId) ?: null)
+            : null;
+        $payload = self::fetchPastBlockedPages(
+            fn (?string $pageCursor): array => $this->activityFeed->getFeed(
+                $viewerId,
+                ActivityFeedService::SCOPE_FOR_YOU,
+                $pageCursor,
+                $limit,
+                $excluded === [] ? null : $excluded,
+                $hidden === []   ? null : $hidden,
+                null,
+                null,
+                null,
+                $hashtag,
+                viewerFriendIds: $friendIds,
+                enforcePostVisibility: true
+            ),
             $cursor,
-            $limit,
-            $excluded === [] ? null : $excluded,
-            $hidden === []   ? null : $hidden,
-            null,
-            null,
-            null,
-            $hashtag,
-            viewerFriendIds: $viewerId > 0
-                ? (PeepSoFriendGate::viewerFriendIdList($viewerId) ?: null)
-                : null,
-            enforcePostVisibility: true
+            $viewerId
         );
 
         // ⚠⚠ F-54: THIS SURFACE HAD NO BLOCK FILTERING AT ALL, which is a
@@ -380,7 +407,7 @@ final class FeedRankingService
         // methods do not have the same inputs. The reputation and hidden
         // gates stay identical; the viewer-specific one cannot, and could
         // never have been shared with a globally cached anonymous feed.
-        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+        // The exact filter runs inside fetchPastBlockedPages() above.
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
@@ -423,23 +450,26 @@ final class FeedRankingService
         // ProfileAccess::postVisibilityArgs().
         [$friendIds, $enforceF02] = ProfileAccess::postVisibilityArgs($viewerId);
 
-        $payload = $this->activityFeed->getFeed(
-            $viewerId,
-            $scope,
-            $cursor,
-            $limit,
-            $excluded === [] ? null : $excluded,
-            $hidden === []   ? null : $hidden,
-            null,
-            $excludedGroups === [] ? null : $excludedGroups,
-            viewerFriendIds: $friendIds,
-            enforcePostVisibility: $enforceF02
-        );
-
-        // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
+        // ⚠ F-54: EXACT mutual-block filter over each page's authors. The
         // `$excluded` list above is a cheap pre-filter and is NOT sufficient
-        // — see dropMutuallyBlockedAuthors().
-        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+        // — see dropMutuallyBlockedAuthors(). F-297: a page it empties is
+        // read past, see fetchPastBlockedPages().
+        $payload = self::fetchPastBlockedPages(
+            fn (?string $pageCursor): array => $this->activityFeed->getFeed(
+                $viewerId,
+                $scope,
+                $pageCursor,
+                $limit,
+                $excluded === [] ? null : $excluded,
+                $hidden === []   ? null : $hidden,
+                null,
+                $excludedGroups === [] ? null : $excludedGroups,
+                viewerFriendIds: $friendIds,
+                enforcePostVisibility: $enforceF02
+            ),
+            $cursor,
+            $viewerId
+        );
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
@@ -838,24 +868,27 @@ final class FeedRankingService
         // residual gap is bcc-core's permalink-syndication policy, NOT
         // §F-02, and closing it would be a deliberate widening of what
         // the permalink serves.
-        $payload = $this->activityFeed->getFeed(
-            $viewerId,
-            ActivityFeedService::SCOPE_GROUP,
-            $cursor,
-            $limit,
-            $excluded === [] ? null : $excluded,
-            $hidden === []   ? null : $hidden,
-            $groupId,
-            null,
-            $visibilityIn,
-            null,
-            $hallFeed === 'ranked' ? 'ranked' : 'main'
-        );
-
-        // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
+        // ⚠ F-54: EXACT mutual-block filter over each page's authors. The
         // `$excluded` list above is a cheap pre-filter and is NOT sufficient
-        // — see dropMutuallyBlockedAuthors().
-        $payload['items'] = self::dropMutuallyBlockedAuthors($payload['items'], $viewerId);
+        // — see dropMutuallyBlockedAuthors(). F-297: a page it empties is
+        // read past, see fetchPastBlockedPages().
+        $payload = self::fetchPastBlockedPages(
+            fn (?string $pageCursor): array => $this->activityFeed->getFeed(
+                $viewerId,
+                ActivityFeedService::SCOPE_GROUP,
+                $pageCursor,
+                $limit,
+                $excluded === [] ? null : $excluded,
+                $hidden === []   ? null : $hidden,
+                $groupId,
+                null,
+                $visibilityIn,
+                null,
+                $hallFeed === 'ranked' ? 'ranked' : 'main'
+            ),
+            $cursor,
+            $viewerId
+        );
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
@@ -958,6 +991,20 @@ final class FeedRankingService
      */
     private static function dropMutuallyBlockedAuthors(array $items, int $viewerId): array
     {
+        return self::keepUnblockedOrNull($items, $viewerId) ?? [];
+    }
+
+    /**
+     * {@see dropMutuallyBlockedAuthors()}, but a failed block read answers
+     * NULL instead of an empty page, so {@see fetchPastBlockedPages()} can
+     * tell "everything here was blocked" (read on) from "the block table is
+     * unreadable" (fail closed, read nothing more).
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>|null
+     */
+    private static function keepUnblockedOrNull(array $items, int $viewerId): ?array
+    {
         if ($viewerId <= 0 || $items === []) {
             return $items;
         }
@@ -971,7 +1018,7 @@ final class FeedRankingService
         foreach (array_chunk($authorIds, self::BLOCK_PROBE_CHUNK) as $chunk) {
             $set = PeepSoBlockRepository::getMutuallyBlockedSetOrUnknown($viewerId, $chunk);
             if ($set === null) {
-                return [];
+                return null;
             }
             foreach ($set as $id => $_) {
                 $blocked[(int) $id] = true;
@@ -992,6 +1039,52 @@ final class FeedRankingService
         }
 
         return $kept;
+    }
+
+    /**
+     * F-297: fetch a page, apply the exact block filter, and when that leaves
+     * NOTHING while the feed says there is more, read on from the page's own
+     * `next_cursor` — up to BLOCK_REFILL_PAGES more pages.
+     *
+     * Without this, a viewer who blocks a prolific author (or more than the
+     * pre-filter's 500) could get `items: []` with `has_more: true`, which the
+     * client renders as the empty state with no way to load more, although
+     * older posts by other authors exist.
+     *
+     * Only an EMPTIED page is refilled; a short page is returned as is (the
+     * client pages on). The cursor of the last page read is returned, so
+     * nothing is skipped or repeated. A failed block read stays fail-closed:
+     * an empty page, no further reads. The anonymous viewer (0) is never
+     * filtered, so this is a single fetch for them.
+     *
+     * @param callable(?string): array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}} $fetch
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    private static function fetchPastBlockedPages(callable $fetch, ?string $cursor, int $viewerId): array
+    {
+        $payload = $fetch($cursor);
+        for ($refills = 0; ; $refills++) {
+            $fetched = $payload['items'];
+            $kept    = self::keepUnblockedOrNull($fetched, $viewerId);
+            if ($kept === null) {
+                $payload['items'] = [];
+                return $payload;
+            }
+            $payload['items'] = $kept;
+
+            $next = $payload['pagination']['next_cursor'] ?? null;
+            if ($kept !== []
+                || $fetched === []
+                || $refills >= self::BLOCK_REFILL_PAGES
+                || !($payload['pagination']['has_more'] ?? false)
+                || $next === null
+                || $next === $cursor
+            ) {
+                return $payload;
+            }
+            $cursor  = $next;
+            $payload = $fetch($cursor);
+        }
     }
 
     /**

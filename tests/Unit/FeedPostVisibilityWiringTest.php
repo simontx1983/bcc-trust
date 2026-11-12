@@ -231,6 +231,31 @@ final class FeedPostVisibilityWiringTest extends TestCase
         self::assertSame([self::FRIEND], $call['friends']);
     }
 
+    // ── F-297: the tag feed pre-filters blocks in SQL, like /feed ────
+
+    public function testTheTagFeedExcludesTheViewersBlocksInSql(): void
+    {
+        $GLOBALS['__bcc_f02feed']['blocked']  = [501];
+        $GLOBALS['__bcc_f02feed']['blockers'] = [502];
+
+        $this->service()->getTagFeed(self::VIEWER, 'solana');
+
+        $excluded = $GLOBALS['__bcc_f02feed']['excluded']['getFeed:tag'] ?? null;
+        self::assertIsArray($excluded, 'the tag feed must forward an author exclusion');
+        self::assertContains(501, $excluded, 'someone the viewer blocked');
+        self::assertContains(502, $excluded, 'someone who blocked the viewer');
+    }
+
+    /** Control: the anonymous tag feed has no viewer, so no block list. */
+    public function testTheAnonymousTagFeedForwardsNoBlockList(): void
+    {
+        $GLOBALS['__bcc_f02feed']['blocked'] = [501];
+
+        $this->service()->getTagFeed(0, 'solana');
+
+        self::assertNull($GLOBALS['__bcc_f02feed']['excluded']['getFeed:tag'] ?? null);
+    }
+
     // ── the carve-out, asserted as a decision ───────────────────────
 
     /**

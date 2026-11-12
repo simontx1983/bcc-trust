@@ -164,7 +164,7 @@ namespace BCC\Core\Feed {
             bool $enforcePostVisibility = false
         ): array {
             unset(
-                $cursor, $limit, $excludedAuthorIds, $excludedActIds,
+                $cursor, $limit, $excludedActIds,
                 $excludedGroupIds, $groupVisibilityIn, $hallFeed
             );
 
@@ -174,6 +174,9 @@ namespace BCC\Core\Feed {
             $label = $onlyForGroupId !== null && $onlyForGroupId > 0
                 ? 'getFeed:group'
                 : ($hashtag !== null ? 'getFeed:tag' : 'getFeed:' . $scope);
+
+            // F-297: the SQL author exclusion each surface forwards.
+            $GLOBALS['__bcc_f02feed']['excluded'][$label] = $excludedAuthorIds;
 
             \bcc_f02feed_record($label, $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
@@ -247,7 +250,7 @@ namespace BCC\Core\Repositories {
         {
             unset($userId);
 
-            return [];
+            return $GLOBALS['__bcc_f02feed']['blocked'] ?? [];
         }
 
         /** @return list<int> */
@@ -255,7 +258,7 @@ namespace BCC\Core\Repositories {
         {
             unset($userId);
 
-            return [];
+            return $GLOBALS['__bcc_f02feed']['blockers'] ?? [];
         }
 
         /** @return array<int, true>|null */
