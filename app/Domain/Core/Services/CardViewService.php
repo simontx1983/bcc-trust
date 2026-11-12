@@ -350,6 +350,8 @@ final class CardViewService
             $name = self::preferMoniker($moniker, $name);
         }
 
+        $claimTarget = self::resolveClaimTarget($kind, $pageId, $isClaimed, $validatorRows);
+
         $card = [
             'id'                  => $pageId,
             'name'                => $name,
@@ -410,7 +412,7 @@ final class CardViewService
             // to drive the four-step modal. Server resolves these from
             // the page id (per §A2/§L5 — frontend never derives). Null
             // for already-claimed pages or non-validator kinds.
-            'claim_target'        => self::resolveClaimTarget($kind, $pageId, $isClaimed, $validatorRows),
+            'claim_target'        => $claimTarget,
             // §K3 — chains an operator runs on. Null for single-chain
             // pages (the common case) so the frontend doesn't render
             // a dead one-tab strip. Validator-only in V1.5; creator
@@ -458,7 +460,12 @@ final class CardViewService
                 $cardTargetKind,
                 $pageId,
                 $messagingState['can_message']
-            ),
+            ) + [
+                // F-301: whether THIS viewer may claim the page. The claim
+                // CTA rendered on claim_target alone, so a suspended member
+                // was offered a claim the write always refuses (F-109).
+                'can_claim' => self::resolveCanClaim($viewerId, $claimTarget !== null),
+            ],
             // STUB: social_proof composition deferred (§O4). Field is
             // ALWAYS emitted (nullable) per the contract.
             'social_proof'        => null,
@@ -2244,6 +2251,32 @@ final class CardViewService
             // not_applicable a non-owner gets so the FE can message
             // "no contestable downvotes" vs hide the control entirely.
             return self::deny(null, 'no_contestable_downvote');
+        }
+        return self::allow();
+    }
+
+    /**
+     * §4.4 can_claim (F-301) — page cards only. Mirrors the claim write's
+     * viewer gates (POST /pages/:id/claim): signed in, and not suspended
+     * (admin bypass off, F-109). Whether the page is claimable at all is
+     * `claim_target` (null → `not_applicable`). The wallet proof and the
+     * page binding are checked by the write itself, never predicted here.
+     *
+     * An UNKNOWN suspension state (null) is allowed: display only, the
+     * write gate fails closed on its own.
+     *
+     * @return Permission
+     */
+    private static function resolveCanClaim(int $viewerId, bool $hasClaimTarget): array
+    {
+        if (!$hasClaimTarget) {
+            return self::deny(null, 'not_applicable');
+        }
+        if ($viewerId <= 0) {
+            return self::deny('Sign in to claim this page.', 'signin_required');
+        }
+        if (\BCC\Core\Permissions\Permissions::suspensionState($viewerId, false) === true) {
+            return self::deny('Your account is suspended, so you cannot claim pages.', 'suspended');
         }
         return self::allow();
     }
