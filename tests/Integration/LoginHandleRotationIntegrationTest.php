@@ -119,6 +119,12 @@ final class LoginHandleRotationIntegrationTest extends TestCase
                 return array_map('strval', $wpdb->get_col($sql));
             }
             function get_user_by(string $field, $value) { return false; }
+            function get_userdata(int $id)
+            {
+                global $wpdb;
+                $row = $wpdb->get_row($wpdb->prepare("SELECT ID FROM {$wpdb->users} WHERE ID = %d", $id));
+                return $row === null ? false : $row;
+            }
             function sanitize_title(string $s): string
             {
                 $s = strtolower(trim($s));
