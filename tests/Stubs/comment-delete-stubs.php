@@ -94,6 +94,20 @@ namespace BCC\Trust\Tests\Stubs {
     }
 }
 
+namespace BCC\Core\Permissions {
+    // createComment()'s suspension gate (bcc-core is not autoloadable in
+    // the unit suite). Not suspended: the F-265 cases test what follows it.
+    if (!class_exists(Permissions::class, false)) {
+        final class Permissions
+        {
+            public static function is_not_suspended(int $userId, bool $allowAdminBypass = true): bool
+            {
+                return true;
+            }
+        }
+    }
+}
+
 namespace BCC\Core\PeepSo {
     if (!class_exists(PeepSoCommentWriter::class, false)) {
         final class PeepSoCommentWriter

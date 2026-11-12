@@ -34,7 +34,14 @@
  *   is_admin   => bool          what Permissions::is_admin() returns
  *   friend_ids => list<int>     what PeepSoFriendsModel hands back
  *   calls      => list<array{method: string, viewer: int,
- *                            friends: mixed, enforce: mixed}>
+ *                            friends: mixed, enforce: mixed,
+ *                            defer: mixed}>
+ *
+ * Group-rule keys (the permalink's second look):
+ *   group_rule       => bool   what canSeeHydratedItem() answers
+ *                              (DEFAULT true, so a forgotten fixture
+ *                              cannot make a refusal test pass)
+ *   group_rule_calls => list<array{viewer: int, post_id: mixed}>  spy log
  *
  * Permalink-only keys, for the §F-02 group carve-out
  * ({@see FeedRankingService::groupTaggedDespiteProfileLevel()}):
@@ -87,13 +94,17 @@ namespace {
     }
 
     /** Record one forwarded call's §F-02 arguments. */
-    function bcc_f02feed_record(string $method, int $viewer, $friends, $enforce): void
+    function bcc_f02feed_record(string $method, int $viewer, $friends, $enforce, $defer = false): void
     {
         $GLOBALS['__bcc_f02feed']['calls'][] = [
             'method'  => $method,
             'viewer'  => $viewer,
             'friends' => $friends,
             'enforce' => $enforce,
+            // Only the permalink's second look may set this. Every other
+            // surface records the default, so a stray `true` anywhere
+            // else is visible rather than silent.
+            'defer'   => $defer,
         ];
     }
 
@@ -164,7 +175,7 @@ namespace BCC\Core\Feed {
             bool $enforcePostVisibility = false
         ): array {
             unset(
-                $cursor, $limit, $excludedAuthorIds, $excludedActIds,
+                $cursor, $limit, $excludedActIds,
                 $excludedGroupIds, $groupVisibilityIn, $hallFeed
             );
 
@@ -174,6 +185,9 @@ namespace BCC\Core\Feed {
             $label = $onlyForGroupId !== null && $onlyForGroupId > 0
                 ? 'getFeed:group'
                 : ($hashtag !== null ? 'getFeed:tag' : 'getFeed:' . $scope);
+
+            // F-297: the SQL author exclusion each surface forwards.
+            $GLOBALS['__bcc_f02feed']['excluded'][$label] = $excludedAuthorIds;
 
             \bcc_f02feed_record($label, $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
@@ -187,10 +201,18 @@ namespace BCC\Core\Feed {
             ?array $excludedAuthorIds = null,
             ?array $excludedActIds = null,
             ?array $viewerFriendIds = null,
-            bool $enforcePostVisibility = false
+            bool $enforcePostVisibility = false,
+            bool $deferGroupVisibilityToCaller = false
         ): ?array {
+            $GLOBALS['__bcc_f02feed']['excluded']['getActivityById'] = $excludedAuthorIds;
             unset($actId, $excludedAuthorIds, $excludedActIds);
-            \bcc_f02feed_record('getActivityById', $viewerId, $viewerFriendIds, $enforcePostVisibility);
+            \bcc_f02feed_record(
+                'getActivityById',
+                $viewerId,
+                $viewerFriendIds,
+                $enforcePostVisibility,
+                $deferGroupVisibilityToCaller
+            );
 
             $fixture = \bcc_f02feed_fixture();
 
@@ -214,6 +236,7 @@ namespace BCC\Core\Feed {
             ?array $viewerFriendIds = null,
             bool $enforcePostVisibility = false
         ): array {
+            $GLOBALS['__bcc_f02feed']['excluded']['getActivityForAuthor'] = $excludedAuthorIds;
             unset($authorId, $cursor, $limit, $excludedAuthorIds, $excludedActIds, $excludedGroupIds);
             \bcc_f02feed_record('getActivityForAuthor', $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
@@ -231,6 +254,7 @@ namespace BCC\Core\Feed {
             ?array $viewerFriendIds = null,
             bool $enforcePostVisibility = false
         ): array {
+            $GLOBALS['__bcc_f02feed']['excluded']['getActivityForPage'] = $excludedAuthorIds;
             unset($pageId, $cursor, $limit, $excludedAuthorIds, $excludedActIds);
             \bcc_f02feed_record('getActivityForPage', $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
@@ -247,7 +271,7 @@ namespace BCC\Core\Repositories {
         {
             unset($userId);
 
-            return [];
+            return $GLOBALS['__bcc_f02feed']['blocked'] ?? [];
         }
 
         /** @return list<int> */
@@ -255,7 +279,7 @@ namespace BCC\Core\Repositories {
         {
             unset($userId);
 
-            return [];
+            return $GLOBALS['__bcc_f02feed']['blockers'] ?? [];
         }
 
         /** @return array<int, true>|null */
@@ -274,7 +298,7 @@ namespace BCC\Trust\Core\Repositories {
         /** @return list<int> */
         public function getCautionAndRiskyUserIds(): array
         {
-            return [];
+            return $GLOBALS['__bcc_f02feed']['caution'] ?? [];
         }
     }
 
@@ -294,6 +318,30 @@ namespace BCC\Trust\Core\Repositories {
 }
 
 namespace BCC\Trust\Core\Services {
+    /**
+     * The GROUP's own visibility rule, stubbed as a SPY.
+     *
+     * The permalink's second look reads unenforced and so MUST apply this
+     * instead; the interesting assertions are that it is consulted at all,
+     * that its refusal is honoured, and that it is asked about the viewer.
+     * A return-value-only stub would let "never consulted" pass.
+     */
+    final class FeedItemReportVisibility
+    {
+        public function canSeeHydratedItem(int $viewerId, array $item): bool
+        {
+            $GLOBALS['__bcc_f02feed']['group_rule_calls'][] = [
+                'viewer'  => $viewerId,
+                'post_id' => $item['external_id'] ?? null,
+            ];
+
+            // Defaults to ALLOW, so a test that forgets to set it does not
+            // accidentally pass for the wrong reason; the refusal case sets
+            // it explicitly.
+            return (bool) ($GLOBALS['__bcc_f02feed']['group_rule'] ?? true);
+        }
+    }
+
     final class GroupContextResolver
     {
         public function forGroup(int $groupId): ?object

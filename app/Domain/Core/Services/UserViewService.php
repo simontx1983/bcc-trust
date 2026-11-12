@@ -51,7 +51,9 @@ use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Repositories\XRepository;
+use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\PrivacySettings;
+use BCC\Trust\Core\Support\ProfileGroupVisibility;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Core\Support\WalletAddressValidator;
@@ -128,7 +130,7 @@ final class UserViewService
         $tier         = $this->reputationRepo->getTier($userId);
         $handle       = self::resolveHandle($user);
         $followCounts = PeepSoFollowerRepository::getCounts($userId);
-        $halls        = $this->resolveHalls($userId);
+        $halls        = $this->resolveHalls($userId, $viewerId);
         $primaryHall  = $this->resolvePrimaryHall($userId, $halls);
 
         // Member state (Rank redesign Phase 5) — prefer the prefetched
@@ -438,7 +440,7 @@ final class UserViewService
                     'name' => $primaryHallInfo->post_title,
                 ];
         } else {
-            $halls       = $this->resolveHalls($userId);
+            $halls       = $this->resolveHalls($userId, $viewerId);
             $primaryHall = $this->resolvePrimaryHall($userId, $halls);
         }
 
@@ -859,13 +861,28 @@ final class UserViewService
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * The member's group memberships, primary-Hall flagged. Preserves the
-     * pre-rename all-member-groups listing behaviour (this is the "groups
-     * I'm in" surface); the `is_primary` flag marks the home Hall.
+     * The member's group memberships, primary-Hall flagged. Despite the
+     * name this is the "groups I'm in" surface and carries EVERY group,
+     * not just halls.
+     *
+     * ⚠⚠ F-323 (High): this used to take only $userId and apply NO
+     * filter of any kind, so the `halls` field of the user view-model
+     * published the owner's complete membership - SECRET groups included
+     * - to any profile reader. The Groups tab next door was the stricter
+     * of the two. It now applies the SAME rules, through the one shared
+     * owner: {@see ProfileGroupVisibility::filter()}.
+     *
+     * ⚠ Fail-closed on an unresolvable context. A group whose
+     * GroupContext cannot be resolved cannot be privacy-classified, so
+     * for a non-owner viewer it is DROPPED rather than shown. Previously
+     * such a group was listed unconditionally.
+     *
+     * The OWNER's own view is deliberately byte-identical to before -
+     * no filter, and no resolver call at all.
      *
      * @return list<array{id: int, slug: string, name: string, is_primary: bool}>
      */
-    private function resolveHalls(int $userId): array
+    private function resolveHalls(int $userId, int $viewerId): array
     {
         if ($userId <= 0) {
             return [];
@@ -880,6 +897,25 @@ final class UserViewService
         $myGroupIds = $this->collectUserGroupIds($userId);
         if ($myGroupIds === []) {
             return [];
+        }
+
+        // F-270 / F-323 - what may THIS viewer see of them? Skipped
+        // entirely for the owner, who always sees their own groups.
+        if ($viewerId <= 0 || $viewerId !== $userId) {
+            $visible = ProfileGroupVisibility::filter(
+                Plugin::instance()->groupContextResolver()->forManyGroups($myGroupIds),
+                $userId,
+                $viewerId
+            );
+            $myGroupIds = array_values(array_filter(
+                $myGroupIds,
+                static fn(int $id): bool => isset($visible[$id])
+            ));
+            if ($myGroupIds === []) {
+                // ⚠ EMPTY, never a refusal. A 403 here would disclose
+                // that groups exist and are being withheld.
+                return [];
+            }
         }
 
         $primaryGroupId = self::loadPrimaryGroupId($userId);

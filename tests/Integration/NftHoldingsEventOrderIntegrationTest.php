@@ -348,6 +348,25 @@ final class NftHoldingsEventOrderIntegrationTest extends TestCase
         }
     }
 
+    public function testAFailedCommitThrowsAndLeavesTheHoldingInPlace(): void
+    {
+        // F-278: the indexer announces lost holdings only after ingestBatch
+        // returns. A COMMIT that failed must not return as if it persisted.
+        $this->in(100);
+
+        $GLOBALS['wpdb']->failQueriesMatching = '/^COMMIT$/';
+        try {
+            $this->out(200);
+            self::fail('a failed COMMIT must throw');
+        } catch (\RuntimeException $e) {
+            self::assertStringContainsString('COMMIT failed', $e->getMessage());
+        } finally {
+            $GLOBALS['wpdb']->clearFaultInjection();
+        }
+
+        self::assertSame(1, $this->row()['balance'] ?? null, 'the transfer-out was rolled back');
+    }
+
     public function testPruneIsBounded(): void
     {
         foreach (['a', 'b', 'c'] as $t) {

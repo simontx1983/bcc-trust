@@ -133,6 +133,13 @@ final class NotificationDispatcher
             return;
         }
         try {
+            // F-265: no bell for a reaction on a post (or a comment under a
+            // post) that is deleted or moderation-hidden. Same rule as the
+            // write gate the reaction came through.
+            if (\BCC\Trust\Core\Support\GroupInteractionGate::resolveLiveTarget($actId) === null) {
+                return;
+            }
+
             $authorId = $this->resolveActAuthor($actId);
             if ($authorId <= 0 || $authorId === $actorId) {
                 return;
@@ -979,6 +986,15 @@ final class NotificationDispatcher
             if ($parentAct === null) {
                 return;
             }
+            // F-265: no comment, reply or mention bell for a post that is
+            // deleted (get_post() below still returns a trashed post) or
+            // moderation-hidden. Shared liveness rule.
+            if (!\BCC\Trust\Core\Services\FeedItemReportVisibility::isLiveWith(
+                $parentAct,
+                \BCC\Trust\Core\Plugin::instance()->hiddenActivityRepository()
+            )) {
+                return;
+            }
             $parentPostId = isset($parentAct->act_external_id) ? (int) $parentAct->act_external_id : 0;
             if ($parentPostId <= 0) {
                 return;
@@ -1627,6 +1643,91 @@ final class NotificationDispatcher
                 'error'    => $e->getMessage(),
             ]);
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // F-272 — closed/secret group requests and invitations
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * A member asked to join a closed group: tell each owner/manager.
+     * Bell only. The group title in the message is a fallback; the link is
+     * resolved at read time from external_id (the group).
+     *
+     * @param list<int> $recipientIds owners + managers (the requester is skipped)
+     */
+    public function onGroupJoinRequested(int $requesterId, int $groupId, array $recipientIds): void
+    {
+        if ($requesterId <= 0 || $groupId <= 0) {
+            return;
+        }
+        try {
+            $message = sprintf('@%s asked to join %s.', self::resolveHandle($requesterId), self::groupTitle($groupId));
+            foreach (array_unique($recipientIds) as $recipientId) {
+                if ($recipientId > 0 && $recipientId !== $requesterId) {
+                    $this->dispatch($requesterId, $recipientId, $message, NotificationType::GROUP_JOIN_REQUESTED, $groupId, 0);
+                }
+            }
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] group join-request bell failed', [
+                'group_id' => $groupId,
+                'error'    => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /** An owner/manager approved a request: tell the requester. Bell only. */
+    public function onGroupJoinApproved(int $approverId, int $requesterId, int $groupId): void
+    {
+        if ($approverId <= 0 || $requesterId <= 0 || $groupId <= 0 || $approverId === $requesterId) {
+            return;
+        }
+        try {
+            $this->dispatch(
+                $approverId,
+                $requesterId,
+                sprintf("You're now a member of %s.", self::groupTitle($groupId)),
+                NotificationType::GROUP_JOIN_APPROVED,
+                $groupId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] group join-approved bell failed', [
+                'group_id' => $groupId,
+                'error'    => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /** An owner/manager invited a member: tell the invitee. Bell only. */
+    public function onGroupInvited(int $inviterId, int $inviteeId, int $groupId): void
+    {
+        if ($inviterId <= 0 || $inviteeId <= 0 || $groupId <= 0 || $inviterId === $inviteeId) {
+            return;
+        }
+        try {
+            $this->dispatch(
+                $inviterId,
+                $inviteeId,
+                sprintf('@%s invited you to join %s.', self::resolveHandle($inviterId), self::groupTitle($groupId)),
+                NotificationType::GROUP_INVITED,
+                $groupId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] group invite bell failed', [
+                'group_id' => $groupId,
+                'error'    => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private static function groupTitle(int $groupId): string
+    {
+        $group = PeepSoGroupRepository::findManyByIds([$groupId])[$groupId] ?? null;
+        return $group !== null
+            ? mb_strimwidth((string) $group->post_title, 0, 80, '…', 'UTF-8')
+            : 'a community';
     }
 
     /**

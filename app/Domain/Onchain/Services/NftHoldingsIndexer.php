@@ -189,6 +189,22 @@ final class NftHoldingsIndexer
         $result['inserts']  = $persisted['inserts'];
         $result['deletes']  = $persisted['deletes'];
 
+        // F-278: a holding just went away (a transfer-out). Drop the wallet's
+        // cached holdings and announce it, so a gated-group member who sold
+        // is re-checked within a minute instead of at the next twice-daily
+        // sweep. Committed state only; a listener failure never fails ingest.
+        foreach (self::lostHoldings($plan) as $lost) {
+            try {
+                HoldingsService::invalidateWallet($lost['wallet_link_id']);
+                do_action('bcc_nft_holding_lost', $lost['wallet_link_id'], $lost['chain_id'], $lost['contract']);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::warning('[NftHoldingsIndexer] holding-lost follow-up failed', [
+                    'chain_id'    => $lost['chain_id'],
+                    'error_class' => get_class($e),
+                ]);
+            }
+        }
+
         // Step 4: discovery bridge. Every distinct (chain, contract) we
         // established or increased a holding in should have a matching stub
         // row in wp_bcc_onchain_collections so the admin Verify page sees
@@ -215,6 +231,32 @@ final class NftHoldingsIndexer
         }
 
         return $result;
+    }
+
+    /**
+     * F-278: the distinct (wallet, chain, contract) holdings a plan REMOVES —
+     * every 721 delete (tombstone) and every negative 1155 delta. A 1155
+     * decrease that leaves a balance is included too: the re-check it
+     * triggers reads the real balance and keeps a member who still holds, so
+     * over-reporting costs one read, never a wrongful removal. Pure.
+     *
+     * @param BatchPlan $plan
+     * @return list<array{wallet_link_id: int, chain_id: int, contract: string}>
+     */
+    public static function lostHoldings(array $plan): array
+    {
+        $out = [];
+        foreach ($plan['deletes'] as $d) {
+            $out[$d['wallet_link_id'] . '|' . $d['chain_id'] . '|' . $d['contract']] =
+                ['wallet_link_id' => (int) $d['wallet_link_id'], 'chain_id' => (int) $d['chain_id'], 'contract' => (string) $d['contract']];
+        }
+        foreach ($plan['deltas'] as $d) {
+            if ($d['delta'] < 0) {
+                $out[$d['wallet_link_id'] . '|' . $d['chain_id'] . '|' . $d['contract_address']] =
+                    ['wallet_link_id' => (int) $d['wallet_link_id'], 'chain_id' => (int) $d['chain_id'], 'contract' => (string) $d['contract_address']];
+            }
+        }
+        return array_values(array_filter($out, static fn (array $l): bool => $l['wallet_link_id'] > 0 && $l['contract'] !== ''));
     }
 
     /**

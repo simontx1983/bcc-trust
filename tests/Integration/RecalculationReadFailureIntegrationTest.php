@@ -218,20 +218,16 @@ final class RecalculationReadFailureIntegrationTest extends TestCase
     public function testABonusWriteWhoseLockReadFailsWritesNothing(): void
     {
         // Before: the lock read's result was ignored, so a failed FOR UPDATE
-        // let the bonus write run WITHOUT the row lock. Now it throws and the
-        // transaction rolls back (the same way applyBonus's other failure
-        // paths already end: TransactionManager turns them into a throw).
-        $threw = null;
-        $hits  = $this->withFault(self::LOCK_READ, function () use (&$threw): void {
-            try {
-                (new ScoreContributorService(new ScoreRepository()))->applyBonus($this->pageId, 'onchain', 3.0);
-            } catch (RepositoryReadFailure $e) {
-                $threw = $e;
-            }
+        // let the bonus write run WITHOUT the row lock. Now the read throws,
+        // the transaction rolls back, and applyBonus reports `false` — its
+        // interface contract, on which the callers queue a retry (F-240).
+        $ok   = null;
+        $hits = $this->withFault(self::LOCK_READ, function () use (&$ok): void {
+            $ok = (new ScoreContributorService(new ScoreRepository()))->applyBonus($this->pageId, 'onchain', 3.0);
         });
 
         self::assertSame(1, $hits, 'precondition: the lock read was the one failed');
-        self::assertInstanceOf(RepositoryReadFailure::class, $threw, 'the bonus write must abort, not run without the row lock');
+        self::assertFalse($ok, 'the bonus write must abort, not run without the row lock');
         self::assertEqualsWithDelta(0.0, (float) $this->scoreRow()['onchain_bonus'], 0.0001);
     }
 }

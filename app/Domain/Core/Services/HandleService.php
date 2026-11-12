@@ -40,10 +40,12 @@ final class HandleService
 
     /**
      * wp_usermeta key (non-unique, one row per handle) recording a handle
-     * this member held before it was retired, because it equalled their
-     * login. Written only by the login-handle rotation migration. A
-     * retired handle resolves to its member (old links keep working) and
-     * is never available again.
+     * this member held before: written when a member renames (F-280), by
+     * the renamed-original-handle backfill, and by the login-handle
+     * rotation migration (a handle that equalled the login). A retired
+     * handle resolves to its member (old links keep working) and is never
+     * available to ANOTHER member. Its owner may reclaim it, unless it
+     * equals their login (see isAvailable()).
      */
     public const META_HANDLE_RETIRED = 'bcc_handle_retired';
 
@@ -144,11 +146,25 @@ final class HandleService
      */
     public function isAvailable(string $handle, ?int $excludeUserId = null): bool
     {
-        // A retired handle stays reserved for good. Old /u/<retired>
-        // links resolve to the member who held it, so handing it to
-        // anyone (even that member, since it was their login) would
-        // hijack those links or put the login back on show.
-        if (self::retiredOwner($handle) !== null) {
+        // A retired handle stays reserved against every OTHER member: old
+        // /u/<retired> links resolve to the member who held it, so handing
+        // it to someone else would hijack those links. Its owner may take
+        // it back (F-280: a rename is not a one-way door), except one that
+        // equals their login: the login-handle rotation retired those so
+        // the login is never on show again.
+        if (self::isRetiredAgainst($handle, $excludeUserId)) {
+            return false;
+        }
+
+        // Every signup mints the login u_<handle> (AuthSupport::deriveLogin)
+        // and wp_users.user_login is UNIQUE, so a handle whose login
+        // already exists can never be signed up: it was some member's
+        // original handle, and they renamed away from it before F-280
+        // retired renamed handles. Report it taken HERE, or availability
+        // says "free" and signup then answers 409 (F-280). The member who
+        // owns that login may still take it back.
+        $loginOwner = username_exists(\BCC\Trust\Core\REST\Auth\AuthSupport::deriveLogin($handle));
+        if ($loginOwner !== false && $loginOwner !== null && (int) $loginOwner !== $excludeUserId) {
             return false;
         }
 
@@ -194,8 +210,8 @@ final class HandleService
 
     /**
      * The user who held $handle before it was retired, or null when it
-     * was never retired. Exact match only: this resolves the specific
-     * handles the login-handle rotation retired, never a login lookup.
+     * was never retired. Exact match only: this resolves retired handles
+     * (renames and the login-handle rotation), never a login lookup.
      */
     public static function retiredOwner(string $handle): ?int
     {
@@ -214,5 +230,66 @@ final class HandleService
         }
         $id = (int) $users[0];
         return $id > 0 ? $id : null;
+    }
+
+    /**
+     * The member who holds $handle as their CURRENT handle, for sign-in by
+     * handle (F-280). Null when nobody holds it, AND when more than one
+     * member does: bcc_handle has no UNIQUE constraint and the rename
+     * path checks then writes, so a duplicate is possible, and sign-in
+     * must never pick one of two accounts. Exact match only; a RETIRED
+     * handle never signs in (it is a link alias, not a credential).
+     */
+    public static function currentOwner(string $handle): ?int
+    {
+        $handle = strtolower(trim($handle));
+        if ($handle === '') {
+            return null;
+        }
+        $users = get_users([
+            'meta_key'   => self::META_HANDLE,
+            'meta_value' => $handle,
+            'fields'     => 'ID',
+            'number'     => 2,
+        ]);
+        if (count($users) !== 1) {
+            return null;
+        }
+        $id = (int) $users[0];
+        return $id > 0 ? $id : null;
+    }
+
+    /**
+     * True when $handle is retired and may NOT go to $userId: it is
+     * retired by another member, or it is $userId's own retired handle
+     * that equals their login. $userId null (signup) = every retired
+     * handle is reserved.
+     */
+    private static function isRetiredAgainst(string $handle, ?int $userId): bool
+    {
+        $handle = strtolower(trim($handle));
+        if ($handle === '') {
+            return false;
+        }
+        $others = get_users([
+            'meta_key'   => self::META_HANDLE_RETIRED,
+            'meta_value' => $handle,
+            'fields'     => 'ID',
+            'number'     => 1,
+            'exclude'    => $userId !== null && $userId > 0 ? [$userId] : [],
+        ]);
+        if ($others !== []) {
+            return true;
+        }
+        if ($userId === null || $userId <= 0) {
+            return false;
+        }
+        /** @var list<string> $own */
+        $own = (array) get_user_meta($userId, self::META_HANDLE_RETIRED, false);
+        if (!in_array($handle, array_map('strtolower', $own), true)) {
+            return false;
+        }
+        $user = get_userdata($userId);
+        return $user === false || strcasecmp($handle, (string) $user->user_login) === 0;
     }
 }

@@ -722,5 +722,91 @@ namespace BCC\Trust\Tests\Integration {
             }
             self::fail('the sweep did not cover the group within ' . $maxTicks . ' ticks');
         }
+
+        // ════════════════════════════════════════════════════════════════
+        // F-278: the targeted re-check after a holding is lost
+        // ════════════════════════════════════════════════════════════════
+
+        public function testARecheckRemovesAMemberWhoNoLongerHolds(): void
+        {
+            $this->seedGroup(2); // both answer 0 (sold)
+            RevocationScriptedFetcher::$answers[self::cosmosAddress(self::FIRST_USER + 1)] = 1; // still holds
+
+            self::assertSame('revoked', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP));
+
+            self::assertSame([self::FIRST_USER + 1], $this->remainingMembers(), 'only the seller is removed');
+            self::assertSame(1, $this->revokeAuditRows());
+            $wpdb = $GLOBALS['wpdb'];
+            self::assertSame(1, (int) $wpdb->get_var(
+                'SELECT COUNT(*) FROM `' . $wpdb->prefix . "bcc_trust_activity` WHERE action = 'holder_group_revoked' AND meta LIKE '%holding_lost_recheck%'"
+            ), 'audited as the targeted re-check, not the sweep');
+        }
+
+        public function testARecheckKeepsAMemberWhoStillHolds(): void
+        {
+            $this->seedGroup(1);
+            RevocationScriptedFetcher::$answers[self::cosmosAddress(self::FIRST_USER)] = 1;
+
+            self::assertSame('kept', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP));
+            self::assertSame([self::FIRST_USER], $this->remainingMembers());
+            self::assertSame(0, $this->revokeAuditRows());
+        }
+
+        public function testARecheckKeepsAMemberWhoMovedTheNftToTheirOtherWallet(): void
+        {
+            // Lost on wallet A, now held on the same member's wallet B, which
+            // the index has not seen yet. The re-check reads every linked
+            // wallet live, so the move is not a sale.
+            $this->seedGroup(1); // wallet A answers 0
+            $walletB = self::cosmosAddress(self::FIRST_USER + 500);
+            $this->insertWallet(self::FIRST_USER, $this->chainId('cosmos'), $walletB);
+            RevocationScriptedFetcher::$answers[$walletB] = 1;
+
+            self::assertSame('kept', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP));
+            self::assertContains($walletB, RevocationScriptedFetcher::$asked, 'wallet B was read live');
+            self::assertSame([self::FIRST_USER], $this->remainingMembers());
+            self::assertSame(0, $this->revokeAuditRows());
+        }
+
+        public function testARecheckNeverRemovesOnAnUnknownAnswer(): void
+        {
+            $this->seedGroup(1);
+            RevocationScriptedFetcher::$answers[self::cosmosAddress(self::FIRST_USER)] = null; // provider could not answer
+
+            self::assertSame('unknown', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP));
+            self::assertSame([self::FIRST_USER], $this->remainingMembers(), 'remove only when sure');
+        }
+
+        public function testARecheckNeverRemovesTheOwnerOrTouchesANonMember(): void
+        {
+            $this->seedGroup(1);
+
+            self::assertSame('owner', (new NftGroupRevokeService())->recheckMember(self::OWNER, self::GROUP));
+            self::assertSame('not_member', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER + 50, self::GROUP));
+            self::assertSame('not_holder_group', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP + 999));
+            self::assertSame(0, $this->revokeAuditRows());
+        }
+
+        public function testARecheckWaitsForARunningSweep(): void
+        {
+            $this->seedGroup(1);
+            $other = new \mysqli(
+                getenv('BCC_TEST_DB_HOST') ?: '127.0.0.1',
+                getenv('BCC_TEST_DB_USER') ?: 'root',
+                getenv('BCC_TEST_DB_PASS') ?: 'root',
+                getenv('BCC_TEST_DB_NAME') ?: 'bcc_test',
+                (int) (getenv('BCC_TEST_DB_PORT') ?: 10005)
+            );
+            try {
+                $other->query("SELECT GET_LOCK('" . NftGroupRevokeService::SWEEP_LOCK . "', 0)");
+                self::assertSame('locked', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP));
+                self::assertSame([self::FIRST_USER], $this->remainingMembers(), 'nothing done while a sweep runs');
+            } finally {
+                $other->query("SELECT RELEASE_LOCK('" . NftGroupRevokeService::SWEEP_LOCK . "')");
+                $other->close();
+            }
+
+            self::assertSame('revoked', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP), 'and runs once it ends');
+        }
     }
 }
