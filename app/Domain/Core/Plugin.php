@@ -984,6 +984,16 @@ final class Plugin
     }
 
     private ?Repositories\PageFollowRepository $pageFollowRepository = null;
+    private ?Services\ViewerWatchResolver $viewerWatchResolver = null;
+    /** F-255: per-card "is the viewer watching this?" for any watchlist size. */
+    public function viewerWatchResolver(): Services\ViewerWatchResolver
+    {
+        return $this->viewerWatchResolver ??= new Services\ViewerWatchResolver(
+            $this->watchingRepository(),
+            $this->pageFollowRepository()
+        );
+    }
+
     public function pageFollowRepository(): Repositories\PageFollowRepository
     {
         return $this->pageFollowRepository ??= new Repositories\PageFollowRepository();

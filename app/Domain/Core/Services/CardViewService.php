@@ -132,8 +132,18 @@ final class CardViewService
         private readonly AttestationService $attestationService,
         private readonly NewEntityReputationVelocityCap $newEntityVelocityCap,
         private readonly DivergenceStateClassifier $divergenceClassifier,
-        private readonly UserViewService $userViewService
+        private readonly UserViewService $userViewService,
+        private ?ViewerWatchResolver $viewerWatchResolver = null
     ) {
+    }
+
+    /**
+     * F-255: built lazily (no Plugin.php wiring change, and suites that
+     * construct this class without it keep working); injected by tests.
+     */
+    private function viewerWatches(): ViewerWatchResolver
+    {
+        return $this->viewerWatchResolver ??= \BCC\Trust\Core\Plugin::instance()->viewerWatchResolver();
     }
 
     /**
@@ -251,6 +261,18 @@ final class CardViewService
             $viewerHasReviewed = isset($prefetched['viewer_votes'][$pageId]);
         } else {
             $viewerHasReviewed = $this->voteService->hasUserVotedPage($pageId, $viewerId);
+        }
+
+        // F-255: the viewer's watch on THIS card, so the button never has
+        // to find it in the first page of /me/watching (there is no cap on
+        // how many things a member watches). Batched by the prefetcher;
+        // one resolve on the single-card path.
+        if ($viewerId <= 0) {
+            $viewerWatch = null;
+        } elseif ($prefetched !== null && isset($prefetched['viewer_watches'])) {
+            $viewerWatch = $prefetched['viewer_watches'][$pageId] ?? null;
+        } else {
+            $viewerWatch = $this->viewerWatches()->forPages($viewerId, [$pageId])[$pageId] ?? null;
         }
 
         if ($prefetched !== null && isset($prefetched['endorse_eligibility'])) {
@@ -386,6 +408,13 @@ final class CardViewService
             // "WRITE A REVIEW" → "REMOVE YOUR REVIEW" CTA swap.
             // Always false for anonymous viewers.
             'viewer_has_reviewed' => $viewerHasReviewed,
+            // F-255 — is the viewer watching this card, and the handle
+            // `DELETE /me/watching/:follow_id[?source=page]` takes. The
+            // source of truth for every watch button; never derive it from
+            // a page of /me/watching. null / false for anonymous viewers
+            // and for the viewer's own card.
+            'viewer_is_watching'  => $viewerWatch !== null,
+            'viewer_watch'        => $viewerWatch,
             // §V1.5 — true when the current viewer has already vouched for
             // this page (= holds an active vouch attestation on it).
             // Drives the entity-page vouch button's idle → "REMOVE" CTA
@@ -763,6 +792,16 @@ final class CardViewService
             $viewerHasReviewed = $this->voteService->hasUserVotedPage($selfPageId, $viewerId);
         }
 
+        // F-255: the viewer's watch (follow) of this member — see the page
+        // card branch.
+        if ($viewerId <= 0) {
+            $viewerWatch = null;
+        } elseif ($prefetched !== null && isset($prefetched['viewer_watches'])) {
+            $viewerWatch = $prefetched['viewer_watches'][$userId] ?? null;
+        } else {
+            $viewerWatch = $this->viewerWatches()->forMembers($viewerId, [$userId])[$userId] ?? null;
+        }
+
         return [
             'id'                  => $userId,
             'name'                => \BCC\Trust\Core\Support\PublicIdentity::visibleName($userId, $user->display_name, $user->user_login, $resolvedHandle, $viewerId),
@@ -792,6 +831,13 @@ final class CardViewService
             // has the viewer reviewed this member (vote on the
             // self-page)? Drives the REMOVE-YOUR-REVIEW branch.
             'viewer_has_reviewed' => $viewerHasReviewed,
+            // F-255 — is the viewer watching this card, and the handle
+            // `DELETE /me/watching/:follow_id[?source=page]` takes. The
+            // source of truth for every watch button; never derive it from
+            // a page of /me/watching. null / false for anonymous viewers
+            // and for the viewer's own card.
+            'viewer_is_watching'  => $viewerWatch !== null,
+            'viewer_watch'        => $viewerWatch,
             // v1.49 — the self-page id member reviews live on. This is
             // the id the FE passes to DELETE /me/reviews/:id; the FE
             // must never derive ID_BASE itself (§L5). The WRITE path

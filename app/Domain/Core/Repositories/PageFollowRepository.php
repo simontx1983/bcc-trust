@@ -166,11 +166,57 @@ final class PageFollowRepository
               ORDER BY created_at DESC, id DESC
               LIMIT %d OFFSET %d",
             $userId,
+            // A PAGE size bound only (callers pass ≤ 50). F-255: there is
+            // no cap on how many pages a member can watch; the watchlist
+            // pages through every row with $offset.
             max(1, min($limit, 100)),
             max(0, $offset)
         ));
 
         return $rows ?: [];
+    }
+
+    /**
+     * F-255: which of `$pageIds` (placeholder pages) the viewer is
+     * watching, as page id => page-follow id (the id
+     * `DELETE /me/watching/:id?source=page` takes). One bounded IN() per
+     * chunk; (user_id, page_id) is unique, so at most one row per page.
+     *
+     * @param list<int> $pageIds
+     * @return array<int, int> page id => page-follow id
+     */
+    public function findIdsForUserPages(int $userId, array $pageIds): array
+    {
+        $ids = [];
+        foreach ($pageIds as $id) {
+            $id = (int) $id;
+            if ($id > 0) {
+                $ids[$id] = true;
+            }
+        }
+        if ($userId <= 0 || $ids === []) {
+            return [];
+        }
+
+        global $wpdb;
+
+        $out = [];
+        foreach (array_chunk(array_keys($ids), 200) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '%d'));
+            /** @var list<object{id: int|numeric-string, page_id: int|numeric-string}>|null $rows */
+            $rows = $wpdb->get_results($wpdb->prepare(
+                "SELECT id, page_id FROM {$this->table}
+                  WHERE user_id = %d AND page_id IN ({$placeholders})
+                  LIMIT %d",
+                $userId,
+                ...array_merge($chunk, [count($chunk)])
+            ));
+            foreach ($rows ?: [] as $row) {
+                $out[(int) $row->page_id] = (int) $row->id;
+            }
+        }
+
+        return $out;
     }
 
     /**
