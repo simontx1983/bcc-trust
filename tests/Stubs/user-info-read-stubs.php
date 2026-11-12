@@ -79,6 +79,25 @@ namespace {
             $this->query($sql);
             return $this->last_result[0] ?? null;
         }
+
+        /**
+         * Faithful to real wpdb: get_col(null) does NOT query; it reads the
+         * first column of last_result (unlike get_row(null)).
+         *
+         * @return list<mixed>
+         */
+        public function get_col(?string $sql = null): array
+        {
+            if ($sql !== null) {
+                $this->query($sql);
+            }
+            $out = [];
+            foreach ($this->last_result as $row) {
+                $values = array_values((array) $row);
+                $out[]  = $values[0] ?? null;
+            }
+            return $out;
+        }
     };
 }
 
