@@ -92,6 +92,10 @@ final class NftSelectionRepository
         // Build NULL-safe SQL fragments for nullable %s fields. wpdb->prepare
         // converts a PHP null into an empty string for %s, which would fail
         // to preserve the column's NULL semantics on snapshot fields.
+        // F-165: the image snapshot is stored canonical (https, IPFS on
+        // ipfs.io) — never a presented gateway URL or a raw upstream value.
+        $data['image_url'] = \BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules::sanitizeImageUrl($data['image_url'] ?? null);
+
         $nullable = [];
         foreach (['collection_name', 'name', 'image_url', 'metadata_uri', 'token_standard'] as $col) {
             $val = $data[$col] ?? null;

@@ -283,8 +283,13 @@ final class CollectionMetadataRules
      *
      * HTTPS only — an `http://` image is a mixed-content warning on every
      * page that renders it, and `data:`/`javascript:` are injection vectors
-     * dressed as images. `ipfs://` is refused here rather than rewritten:
-     * choosing a gateway is a product decision, not a sanitizer's.
+     * dressed as images.
+     *
+     * IPFS (F-165): `ipfs://<cid>/…` and allowlisted gateway URLs are
+     * rewritten to the canonical `https://ipfs.io/ipfs/<cid>/…`
+     * ({@see IpfsImageUrl::canonicalize()}). The stored value stays a
+     * working, gateway-neutral https URL; the configured gateway is applied
+     * when a surface presents it ({@see IpfsImageUrl::present()}).
      */
     public static function sanitizeImageUrl(mixed $raw): ?string
     {
@@ -303,6 +308,11 @@ final class CollectionMetadataRules
             return null;
         }
 
+        $ipfs = IpfsImageUrl::canonicalize($url);
+        if ($ipfs !== null) {
+            return strlen($ipfs) <= self::MAX_IMAGE_URL ? $ipfs : null;
+        }
+
         $parts = parse_url($url);
         if ($parts === false || !isset($parts['scheme'], $parts['host'])) {
             return null;
@@ -317,6 +327,19 @@ final class CollectionMetadataRules
         }
 
         return $url;
+    }
+
+    /**
+     * An image as a surface PRESENTS it (F-165): sanitized, then moved onto
+     * the configured IPFS gateway with the ipfs.io URL as `fallback_url`.
+     * Safe for ANY stored or upstream value — a legacy raw `http://`,
+     * `ipfs://` or `javascript:` row comes out sanitized or null.
+     *
+     * @return array{url: ?string, fallback_url: ?string}
+     */
+    public static function presentImage(mixed $raw): array
+    {
+        return IpfsImageUrl::present(self::sanitizeImageUrl($raw));
     }
 
     /**
