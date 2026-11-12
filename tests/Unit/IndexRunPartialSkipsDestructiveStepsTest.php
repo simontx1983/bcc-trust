@@ -123,9 +123,39 @@ final class IndexRunPartialSkipsDestructiveStepsTest extends TestCase
 
         self::assertSame([40], \IndexRunRecorder::callsOf('validators.bulkUpsert'));
         self::assertSame(['bcc_onchain_indexer_stats'], \IndexRunRecorder::callsOf('update_option'));
-        self::assertCount(1, \IndexRunRecorder::callsOf('markDeadValidators'));
+        self::assertSame([[self::CHAIN_A]], \IndexRunRecorder::callsOf('markDeadValidators'));
         self::assertSame([self::CHAIN_A], \IndexRunRecorder::callsOf('mintMissing'));
         self::assertSame([self::CHAIN_A], \IndexRunRecorder::callsOf('breaker.recordSuccess'));
+    }
+
+    /**
+     * F-157: a chain the run SKIPPED (breaker resting) is not in the sweep.
+     * Its rows were not refreshed, so another chain's clean run must not
+     * mark them dead.
+     */
+    public function testASkippedChainIsNotSweptByAnotherChainsCleanRun(): void
+    {
+        $this->chain(self::CHAIN_A, 'chain-a');
+        $this->chain(self::CHAIN_B, 'chain-b');
+        \IndexRunRecorder::$fetchResults[self::CHAIN_A] = self::validators(40);
+        \IndexRunRecorder::$fetchResults[self::CHAIN_B] = self::validators(40);
+        \IndexRunRecorder::$resting = [self::CHAIN_B];
+
+        ChainRefreshService::index_validators();
+
+        self::assertSame([[self::CHAIN_A]], \IndexRunRecorder::callsOf('markDeadValidators'));
+    }
+
+    public function testEveryIndexedChainIsInTheSweep(): void
+    {
+        $this->chain(self::CHAIN_A, 'chain-a');
+        $this->chain(self::CHAIN_B, 'chain-b');
+        \IndexRunRecorder::$fetchResults[self::CHAIN_A] = self::validators(40);
+        \IndexRunRecorder::$fetchResults[self::CHAIN_B] = self::validators(40);
+
+        ChainRefreshService::index_validators();
+
+        self::assertSame([[self::CHAIN_A, self::CHAIN_B]], \IndexRunRecorder::callsOf('markDeadValidators'));
     }
 
     public function testOneEmptyChainWithholdsDeadMarkingForTheWholeRun(): void

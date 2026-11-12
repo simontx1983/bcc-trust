@@ -1076,14 +1076,32 @@ final class ValidatorRepository
     // ── Enrichment scheduler methods ────────────────────────────────────────
 
     /**
-     * Mark validators as inactive if not seen by indexer in 30+ days.
+     * Mark validators as inactive if not seen by indexer in 30+ days,
+     * ONLY on the chains in $chainIds.
      *
+     * F-157: this used to be a GLOBAL update with no chain predicate. A
+     * chain the index run SKIPPED (circuit breaker resting, no driver, no
+     * validator support) never refreshes its rows' fetched_at, so once
+     * they aged past 30 days another chain's clean run marked them dead.
+     * The caller now passes the chains it actually indexed this run. An
+     * empty list marks nothing.
+     *
+     * @param list<int> $chainIds
      * @return int Number of rows updated.
      */
-    public static function markDeadValidators(int $maxAttempts): int
+    public static function markDeadValidators(int $maxAttempts, array $chainIds): int
     {
         global $wpdb;
         $table = self::table();
+
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', $chainIds),
+            static fn(int $id): bool => $id > 0
+        )));
+        if ($ids === []) {
+            return 0;
+        }
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
 
         $result = $wpdb->query($wpdb->prepare(
             "UPDATE {$table}
@@ -1091,8 +1109,10 @@ final class ValidatorRepository
                  next_enrichment_at = NULL
              WHERE enrichment_attempts >= %d
                AND fetched_at < DATE_SUB(NOW(), INTERVAL 30 DAY)
-               AND status != 'inactive'",
-            $maxAttempts
+               AND status != 'inactive'
+               AND chain_id IN ({$placeholders})",
+            $maxAttempts,
+            ...$ids
         ));
 
         return (int) $result;

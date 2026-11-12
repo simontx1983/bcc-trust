@@ -248,11 +248,16 @@ final class EnrichmentScheduler
      * These rows won't be deleted (historical data), but they'll be marked
      * inactive so the scheduler skips them and the UI shows correct status.
      *
+     * F-157: scoped to $chainIds, the chains that run actually indexed. A
+     * skipped chain's rows are never touched (that run proved nothing about
+     * them).
+     *
+     * @param list<int> $chainIds
      * @return int Number of validators marked inactive.
      */
-    public static function markDeadValidators(): int
+    public static function markDeadValidators(array $chainIds): int
     {
-        $result = ValidatorRepository::markDeadValidators(self::MAX_ATTEMPTS);
+        $result = ValidatorRepository::markDeadValidators(self::MAX_ATTEMPTS, $chainIds);
 
         if ($result > 0) {
             self::log(sprintf('Marked %d dead validators as inactive.', $result));
