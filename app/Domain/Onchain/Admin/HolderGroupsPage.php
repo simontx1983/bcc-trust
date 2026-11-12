@@ -100,7 +100,24 @@ final class HolderGroupsPage
         // F-93: the cron's own tick, under its lock. It used to be a
         // separate loop over the FIRST 20 opted-in users (always the same
         // 20), with no lock, so it could run beside a cron tick.
-        $stats = OnchainPlugin::instance()->nftGroupReconcileSweepService()->sweep();
+        try {
+            $stats = OnchainPlugin::instance()->nftGroupReconcileSweepService()->sweep();
+        } catch (\Throwable $e) {
+            // A per-user failure is contained inside the tick; anything that
+            // still escapes it lands here. Log it and show a notice
+            // instead of a fatal admin page. The cursor only moves past
+            // users that were processed, so nobody is skipped.
+            \BCC\Core\Log\Logger::error('[bcc-trust] Holder-group reconcile sweep (manual) failed', [
+                'operator' => get_current_user_id(),
+                'error'    => $e->getMessage(),
+            ]);
+            wp_safe_redirect(add_query_arg([
+                'page'   => self::PAGE_SLUG,
+                'op'     => 'sweep',
+                'failed' => 1,
+            ], admin_url('admin.php')));
+            exit;
+        }
 
         \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group reconcile sweep (manual)', $stats + [
             'operator' => get_current_user_id(),
@@ -114,6 +131,7 @@ final class HolderGroupsPage
             'joined'      => $stats['joins_total'],
             'errored'     => $stats['errored'],
             'overlap'     => $stats['skipped_overlap'] ? 1 : 0,
+            'nolock'      => $stats['lock_unavailable'] ? 1 : 0,
         ], admin_url('admin.php')));
         exit;
     }
@@ -204,6 +222,19 @@ final class HolderGroupsPage
         }
 
         if ($op === 'sweep') {
+            if (isset($_GET['failed']) && (int) $_GET['failed'] === 1) {
+                echo '<div class="notice notice-error is-dismissible"><p>'
+                    . '<strong>Sweep failed.</strong> The sweep hit an error; see the log. '
+                    . 'The error is in the log. No user was skipped; the next run starts where the last one stopped.</p></div>';
+                return;
+            }
+            if (isset($_GET['nolock']) && (int) $_GET['nolock'] === 1) {
+                echo '<div class="notice notice-error is-dismissible"><p>'
+                    . '<strong>Sweep did not run.</strong> The sweep lock (bcc-core AdvisoryLock) is unavailable, '
+                    . 'and the sweep refuses to run without it. Check that bcc-core is active and up to date; '
+                    . 'the error is in the log.</p></div>';
+                return;
+            }
             if (isset($_GET['overlap']) && (int) $_GET['overlap'] === 1) {
                 echo '<div class="notice notice-warning is-dismissible"><p>'
                     . '<strong>Sweep skipped.</strong> Another reconcile sweep was already running, '

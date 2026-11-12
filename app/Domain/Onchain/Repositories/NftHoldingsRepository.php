@@ -1232,15 +1232,8 @@ final class NftHoldingsRepository
         if ($walletLinkId <= 0) {
             return;
         }
-        $key = self::GENERATION_KEY_PREFIX . $walletLinkId;
-        // wp_cache_incr seeds the value at 1 if missing on most object
-        // cache backends, but the WP core fallback transient does not —
-        // call wp_cache_add first defensively.
-        if (wp_cache_get($key, self::CACHE_GROUP) === false) {
-            wp_cache_add($key, 1, self::CACHE_GROUP);
-            return;
-        }
-        wp_cache_incr($key, 1, self::CACHE_GROUP);
+        // Seeds a missing key from the clock, never 1 (F-87 pattern).
+        \BCC\Trust\Core\Support\CacheGeneration::bump(self::GENERATION_KEY_PREFIX . $walletLinkId, self::CACHE_GROUP);
     }
 
     /**
@@ -1253,9 +1246,7 @@ final class NftHoldingsRepository
         if ($walletLinkId <= 0) {
             return 0;
         }
-        $key = self::GENERATION_KEY_PREFIX . $walletLinkId;
-        $value = wp_cache_get($key, self::CACHE_GROUP);
-        return is_numeric($value) ? (int) $value : 0;
+        return \BCC\Trust\Core\Support\CacheGeneration::get(self::GENERATION_KEY_PREFIX . $walletLinkId, self::CACHE_GROUP);
     }
 
     /**

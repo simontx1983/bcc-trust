@@ -1780,7 +1780,10 @@ final class CardViewService
             $logo = \BCC\Trust\Onchain\Repositories\ValidatorRepository::findLogoByPageId($pageId);
         }
         if (is_string($logo) && $logo !== '') {
-            return $logo;
+            // `logo_url` is stored ABSOLUTE (host baked in at sideload). A
+            // sibling-host upload (stage./apex) is re-based onto this site's
+            // uploads at read time — the 2026-11-12 stage-host incident.
+            return (string) \BCC\Trust\Onchain\Support\LocalUploadUrl::rebase($logo);
         }
 
         // 5. Empty → frontend renders the initials monogram fallback.

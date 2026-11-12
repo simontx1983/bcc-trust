@@ -180,10 +180,6 @@ final class PhotoAltRepository
      */
     private function invalidateCache(int $phoId): void
     {
-        $genKey = "photo_alt_gen:{$phoId}";
-        $result = wp_cache_incr($genKey, 1, self::CACHE_GROUP);
-        if ($result === false) {
-            wp_cache_set($genKey, 2, self::CACHE_GROUP, 0);
-        }
+        \BCC\Trust\Core\Support\CacheGeneration::bump("photo_alt_gen:{$phoId}", self::CACHE_GROUP);
     }
 }

@@ -182,10 +182,6 @@ class RankEventsRepository
     /** §5 generation-counter bump; user 0 = coarse whole-ledger bump. */
     private function invalidateCache(int $subjectUserId): void
     {
-        $genKey = "rank_events_gen:{$subjectUserId}";
-        $result = wp_cache_incr($genKey, 1, self::CACHE_GROUP);
-        if ($result === false) {
-            wp_cache_set($genKey, 2, self::CACHE_GROUP, 0);
-        }
+        \BCC\Trust\Core\Support\CacheGeneration::bump("rank_events_gen:{$subjectUserId}", self::CACHE_GROUP);
     }
 }
