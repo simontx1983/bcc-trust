@@ -747,6 +747,12 @@ final class Plugin
         return $this->groupMembersService ??= new Services\GroupMembersService();
     }
 
+    private ?Services\GroupJoinRequestService $groupJoinRequestService = null;
+    public function groupJoinRequestService(): Services\GroupJoinRequestService
+    {
+        return $this->groupJoinRequestService ??= new Services\GroupJoinRequestService();
+    }
+
     private ?Services\ShiftLogService $shiftLogService = null;
     public function shiftLogService(): Services\ShiftLogService
     {
@@ -984,6 +990,16 @@ final class Plugin
     }
 
     private ?Repositories\PageFollowRepository $pageFollowRepository = null;
+    private ?Services\ViewerWatchResolver $viewerWatchResolver = null;
+    /** F-255: per-card "is the viewer watching this?" for any watchlist size. */
+    public function viewerWatchResolver(): Services\ViewerWatchResolver
+    {
+        return $this->viewerWatchResolver ??= new Services\ViewerWatchResolver(
+            $this->watchingRepository(),
+            $this->pageFollowRepository()
+        );
+    }
+
     public function pageFollowRepository(): Repositories\PageFollowRepository
     {
         return $this->pageFollowRepository ??= new Repositories\PageFollowRepository();
@@ -1789,6 +1805,7 @@ final class Plugin
         // residual case. Holder groups → /me/holder-groups; Halls →
         // /me/halls; this endpoint covers user/system groups.
         \BCC\Trust\Core\REST\MyGroupsEndpoint::register();
+        \BCC\Trust\Core\REST\GroupJoinRequestsEndpoint::register();
 
         // V2: Group discovery surface — verified-first, then heat-aware
         // ranking. ?verified=1 filters to On-Chain Verified groups only.

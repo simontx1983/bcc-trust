@@ -63,6 +63,7 @@ if (!defined('ABSPATH')) {
  *   claimed_pages: array<int, bool>,
  *   viewer_claims: array<int, ClaimRow>,
  *   viewer_votes: array<int, true>,
+ *   viewer_watches: array<int, array{follow_id: int, source: 'peepso'|'page'}>,
  *   viewer_attestations: array<int, array{vouch: object|null, stand_behind: object|null}>,
  *   endorse_eligibility: array<int, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>,
  *   dispute_active_counts: array<int, int>,
@@ -132,6 +133,7 @@ final class PageCardPrefetcher
             'claimed_pages'              => [],
             'viewer_claims'              => [],
             'viewer_votes'               => [],
+            'viewer_watches'             => [],
             'viewer_attestations'        => [],
             'endorse_eligibility'        => [],
             'dispute_active_counts'      => [],
@@ -332,11 +334,19 @@ final class PageCardPrefetcher
             }
         }
 
+        // F-255: the viewer's watch handle per page card — two bounded IN()
+        // reads for the whole page, whatever the watchlist size. Anon gets
+        // the empty map per the bundle convention.
+        $viewerWatches = $viewerId > 0
+            ? Plugin::instance()->viewerWatchResolver()->forPages($viewerId, $pageIds)
+            : [];
+
         return [
             'read_models'                => $readModels,
             'claimed_pages'              => $claimedPages,
             'viewer_claims'              => $viewerClaims,
             'viewer_votes'               => $viewerVotes,
+            'viewer_watches'             => $viewerWatches,
             'viewer_attestations'        => $viewerAttestations,
             'endorse_eligibility'        => $endorseEligibility,
             'dispute_active_counts'      => $disputeActiveCounts,

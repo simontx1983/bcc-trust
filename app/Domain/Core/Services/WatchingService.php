@@ -90,11 +90,9 @@ final class WatchingService
      * identifier-only page. Clamped SILENTLY (no 400) and echoed back
      * in `pagination.page_size`; the route arg max stays MAX_PAGE_SIZE.
      *
-     * SCOPE (do not over-read this constant): it bounds the PeepSo page
-     * budget only. It does NOT bound the number of cards built on page
-     * 1 — getWatching prepends up to 100 bcc_page_follows rows there
-     * regardless of page_size, and every returned row is hydrated. See
-     * the bound note at the attachCards call site in getWatching.
+     * SCOPE: it bounds the WHOLE page (both sources together, F-255:
+     * sliceWatchlist), so it is also the number of cards built per page.
+     * It is a page size, never a cap on how many things a member watches.
      */
     public const HYDRATED_MAX_PAGE_SIZE = 24;
 
@@ -151,34 +149,40 @@ final class WatchingService
         $offset   = ($page - 1) * $pageSize;
 
         // ────────────────────────────────────────────────────────────
-        //  Two-source watchlist (V1.6+):
-        //    1. PeepSo user→user follows (the historical source — claimed
-        //       pages + member follows go here)
-        //    2. bcc_page_follows         (pre-claim placeholder pages,
+        //  Two-source watchlist (V1.6+), paged as ONE ordered list:
+        //    1. bcc_page_follows          (pre-claim placeholder pages,
         //       drained on claim — see PeepSoIntegration::onPageClaimed)
+        //       take positions [0, pageFollowTotal);
+        //    2. PeepSo user→user follows  (claimed pages + members) take
+        //       the positions after them.
         //
-        //  Page-follows accrue slowly (one per unclaimed validator a
-        //  viewer cares about) and migrate out as operators claim. V1
-        //  always fetches the full set (cap 100) and prepends them on
-        //  page 1 only — pagination still anchors on the PeepSo side
-        //  for the bulk of follows. When page_follows exceed page 1's
-        //  budget, the overflow visibly drops; this is a known V1
-        //  limitation that becomes a non-issue post-claim drainage.
+        //  F-255 (user decision 2026-11-12): there is NO cap on how many
+        //  things a member watches; page_size is only a page size. This
+        //  used to fetch at most 100 page follows, all on page 1, and
+        //  page 2+ offset the PeepSo side by (page - 1) * page_size as if
+        //  page 1 had held only PeepSo rows. So page follows past the
+        //  100th never appeared, and as many PeepSo follows as page 1 had
+        //  page follows were skipped at every page boundary. Each source is
+        //  now sliced from the global offset (sliceWatchlist()), so every
+        //  row appears exactly once across pages, and a page never holds
+        //  more than page_size rows (which also bounds card hydration).
         //
-        //  Query budget remains capped: countItemsForUser +
-        //  findItemsForUser + findPageInfoByUserIds (PeepSo side) +
-        //  findByUserId + bulk get_post (page-follow side) = 5 queries.
-        //  Acceptable for the directory UX which fires once per session.
+        //  Queries: two COUNTs + at most one ranged read per source +
+        //  findPageInfoByUserIds + bulk get_post for the page-follow rows.
         // ────────────────────────────────────────────────────────────
+        $pageFollowTotal = $this->pageFollowRepo->countByUserId($userId);
+        $peepsoTotal     = $this->watchingRepo->countItemsForUser($userId);
+        $slice           = self::sliceWatchlist($offset, $pageSize, $pageFollowTotal);
 
         // ── Page-follows (placeholder pages, pre-claim) ──────────────
         $pageFollowItems = [];
-        $pageFollowCount = 0;
-        if ($page === 1) {
-            $pageFollowRows = $this->pageFollowRepo->findByUserId($userId, 100, 0);
-            $pageFollowCount = count($pageFollowRows);
-
-            if ($pageFollowCount > 0) {
+        if ($slice['page_follow_take'] > 0) {
+            $pageFollowRows = $this->pageFollowRepo->findByUserId(
+                $userId,
+                $slice['page_follow_take'],
+                $slice['page_follow_offset']
+            );
+            if ($pageFollowRows !== []) {
                 $pageIds = array_map(fn($r) => (int) $r->page_id, $pageFollowRows);
                 _prime_post_caches($pageIds, false, false);
                 foreach ($pageFollowRows as $pfRow) {
@@ -188,22 +192,11 @@ final class WatchingService
                     }
                 }
             }
-        } else {
-            // page > 1 — still need the count for accurate totals.
-            $pageFollowCount = $this->pageFollowRepo->countByUserId($userId);
         }
 
-        // ── PeepSo follows (legacy source) ───────────────────────────
-        $peepsoTotal = $this->watchingRepo->countItemsForUser($userId);
-
-        // Leave room on page 1 for the page-follow items above. Page 2+
-        // uses the full pageSize budget for PeepSo follows.
-        $peepsoBudget = $page === 1
-            ? max(0, $pageSize - count($pageFollowItems))
-            : $pageSize;
-
-        $rows = $peepsoBudget > 0
-            ? $this->watchingRepo->findItemsForUser($userId, $offset, $peepsoBudget)
+        // ── PeepSo follows ───────────────────────────────────────────
+        $rows = $slice['peepso_take'] > 0
+            ? $this->watchingRepo->findItemsForUser($userId, $slice['peepso_offset'], $slice['peepso_take'])
             : [];
 
         $followeeUserIds = [];
@@ -229,26 +222,15 @@ final class WatchingService
         //  so the absent-vs-null distinction lives here and nowhere
         //  else. Do not hoist, inline or "simplify" this guard.
         //
-        //  HYDRATION BOUND ON PAGE 1 (accepted, deliberate):
-        //  page 1 prepends up to 100 bcc_page_follows rows on top of
-        //  the PeepSo budget, so the real hydrated bound there is
-        //  min(100, N_pageFollows) + pageSize — ~124 Cards worst case,
-        //  not the 24 the clamp implies. We do NOT bound the
-        //  page-follow fetch to $pageSize in hydrated mode: page
-        //  follows render on page 1 only, so the overflow would become
-        //  unreachable and rows would silently vanish from the user's
-        //  watchlist. Losing rows from the UI is worse than the build
-        //  cost. The cost is batched CPU/serialization, not queries:
-        //  the prefetch IN() lists are hard-capped at 100 by
-        //  PageFollowRepository::findByUserId and there is no per-row
-        //  query on a prefetch miss. Page follows also accrue slowly
-        //  and drain on claim (PeepSoIntegration::onPageClaimed).
+        //  HYDRATION BOUND: a page holds at most page_size rows from
+        //  both sources together (F-255, sliceWatchlist), so the
+        //  hydrated bound is HYDRATED_MAX_PAGE_SIZE cards.
         // ────────────────────────────────────────────────────────────
         if ($includeCards) {
             $items = $this->attachCards($items, $userId);
         }
 
-        $total      = $peepsoTotal + $pageFollowCount;
+        $total      = $peepsoTotal + $pageFollowTotal;
         $totalPages = $total > 0 ? (int) ceil($total / $pageSize) : 0;
 
         return [
@@ -259,6 +241,31 @@ final class WatchingService
                 'total'       => $total,
                 'total_pages' => $totalPages,
             ],
+        ];
+    }
+
+    /**
+     * F-255: which rows of each source a page holds, treating the
+     * watchlist as ONE ordered list — the page follows first (positions
+     * [0, $pageFollowTotal)), then the PeepSo follows. Pure, so the paging
+     * is unit-testable: every row lands on exactly one page, a page holds
+     * at most $pageSize rows, and nothing is capped.
+     *
+     * @return array{page_follow_offset: int, page_follow_take: int, peepso_offset: int, peepso_take: int}
+     */
+    private static function sliceWatchlist(int $offset, int $pageSize, int $pageFollowTotal): array
+    {
+        $offset          = max(0, $offset);
+        $pageSize        = max(0, $pageSize);
+        $pageFollowTotal = max(0, $pageFollowTotal);
+
+        $pageFollowTake = max(0, min($pageSize, $pageFollowTotal - $offset));
+
+        return [
+            'page_follow_offset' => $pageFollowTake > 0 ? $offset : 0,
+            'page_follow_take'   => $pageFollowTake,
+            'peepso_offset'      => max(0, $offset - $pageFollowTotal),
+            'peepso_take'        => $pageSize - $pageFollowTake,
         ];
     }
 
@@ -1075,15 +1082,10 @@ final class WatchingService
             return $user !== false ? (int) $user->ID : 0;
         }
 
-        // Page kinds: target_id is a peepso-page post_id; followee = post_author.
-        $post = get_post($targetId);
-        if (!$post instanceof \WP_Post
-            || $post->post_type !== 'peepso-page'
-            || $post->post_status !== 'publish'
-        ) {
-            return 0;
-        }
-        return (int) $post->post_author;
+        // Page kinds: target_id is a peepso-page post_id; followee =
+        // post_author. Shared with ViewerWatchResolver (F-255), so a card's
+        // viewer_is_watching always agrees with what this watch writes.
+        return ViewerWatchResolver::pageFollowee($targetId) ?? 0;
     }
 
     /**

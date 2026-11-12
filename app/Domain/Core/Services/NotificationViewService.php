@@ -299,6 +299,13 @@ final class NotificationViewService
             // post is moderation-hidden, so every feed (the author's
             // included) excludes it and a focus link would dead-end.
             NotificationType::CONTENT_AUTO_HIDDEN => '/',
+            // F-272: external_id is the group. Requests land the
+            // owner/manager on the group page (where the request list
+            // lives); invites land the invitee on it (an invitee may view
+            // a secret group); approvals land the new member there.
+            NotificationType::GROUP_JOIN_REQUESTED,
+            NotificationType::GROUP_JOIN_APPROVED,
+            NotificationType::GROUP_INVITED => self::resolveCommunityLink($externalId),
             default                       => '/',
         };
     }
@@ -311,6 +318,16 @@ final class NotificationViewService
      * Falls back to /halls on any resolution failure so the bell row
      * never produces a 404 URL.
      */
+    /** A plain (user/system) community's page, or the directory when it no longer resolves. */
+    private static function resolveCommunityLink(int $groupId): string
+    {
+        $group = $groupId > 0 ? (PeepSoGroupRepository::findManyByIds([$groupId])[$groupId] ?? null) : null;
+        $slug  = $group !== null && isset($group->post_name) ? (string) $group->post_name : '';
+        return $slug !== ''
+            ? \BCC\Trust\Core\Support\CardUrlMap::groupUrl('user', $slug)
+            : '/communities';
+    }
+
     private static function resolveHallLink(int $groupId): string
     {
         if ($groupId <= 0) {
