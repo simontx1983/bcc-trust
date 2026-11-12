@@ -177,6 +177,95 @@ final class CountPrivacyTest extends TestCase
         }
     }
 
+    // ── the card renders what it is handed (BEHAVIOUR) ──────────────
+
+    /**
+     * ⚠⚠ THIS IS THE TEST THAT WOULD HAVE CAUGHT THE DEAD CODE.
+     *
+     * The first revision had `buildMemberStats()` decide privacy itself
+     * from `$summary['privacy']` / `$summary['is_self']` — keys
+     * `getSummary()` DOES NOT RETURN. It therefore always received `[]`
+     * and `false`, narrowed nothing, and `reviews_written` kept leaking on
+     * every member card. Every source-text wiring assertion passed,
+     * because the text was all present and correct.
+     *
+     * The fix was structural: the card now renders counts that arrive
+     * ALREADY NARROWED and holds no privacy logic, so it cannot forget to
+     * apply it. This test pins that contract — the tiles equal the
+     * arguments — so reintroducing an independent read (a second source,
+     * a second chance to forget) breaks it.
+     *
+     * Reflection, because the method is private and the class's
+     * constructor pulls in half the container; it needs no state, which
+     * is itself the property under test.
+     */
+    public function testTheMemberStatTilesEqualTheCountsHandedIn(): void
+    {
+        $ref = new \ReflectionMethod(
+            \BCC\Trust\Core\Services\CardViewService::class,
+            'buildMemberStats'
+        );
+        $ref->setAccessible(true);
+
+        /** @var list<array{key: string, raw: int}> $tiles */
+        $tiles = $ref->invoke(null, 7, 11, 22, 33);
+
+        $raw = [];
+        foreach ($tiles as $tile) {
+            $raw[$tile['key']] = $tile['raw'];
+        }
+
+        self::assertSame(7, $raw['trust']);
+        self::assertSame(11, $raw['watchers'], 'watchers must be the count handed in');
+        self::assertSame(22, $raw['watching'], 'watching must be the count handed in');
+        self::assertSame(
+            33,
+            $raw['reviews_written'],
+            'reviews_written must be the NARROWED count handed in, never re-read'
+        );
+    }
+
+    /**
+     * ⚠ And a zero stays zero. If the card ever re-acquired its own
+     * source, a hidden count arriving as 0 would be "helpfully" replaced
+     * by the real number — which is precisely the leak.
+     */
+    public function testAZeroedCountIsRenderedAsZero(): void
+    {
+        $ref = new \ReflectionMethod(
+            \BCC\Trust\Core\Services\CardViewService::class,
+            'buildMemberStats'
+        );
+        $ref->setAccessible(true);
+
+        /** @var list<array{key: string, raw: int, value: string}> $tiles */
+        $tiles = $ref->invoke(null, 7, 0, 0, 0);
+
+        foreach ($tiles as $tile) {
+            if ($tile['key'] === 'trust') {
+                continue;
+            }
+            self::assertSame(0, $tile['raw'], $tile['key'] . ' must stay 0');
+            self::assertSame('0', $tile['value'], $tile['key'] . ' must render "0"');
+        }
+    }
+
+    /**
+     * ⭐ THE STRUCTURAL INVARIANT behind both tests above: the card must
+     * hold NO count source and NO privacy decision of its own.
+     */
+    public function testTheCardHoldsNoCountSourceOfItsOwn(): void
+    {
+        $body = GateOrder::body(
+            GateOrder::code('app/Domain/Core/Services/CardViewService.php'),
+            'buildMemberStats'
+        );
+
+        self::assertStringNotContainsString('countByVoter', $body, 'no second source');
+        self::assertStringNotContainsString('prefetched', $body, 'no prefetch read');
+        self::assertStringNotContainsString('CountPrivacy', $body, 'no privacy decision here');
+    }
+
     // ── every surface is wired to it ────────────────────────────────
 
     /**
@@ -192,9 +281,6 @@ final class CountPrivacyTest extends TestCase
             'profile counts' => ['app/Domain/Core/Services/UserViewService.php', 'resolveCounts'],
             // The card's two follow-graph tiles, emitted raw before F-283.
             'card summary'   => ['app/Domain/Core/Services/UserViewService.php', 'getSummary'],
-            // reviews_written, read from its own source and so never
-            // narrowed by resolveCounts at all.
-            'member stats'   => ['app/Domain/Core/Services/CardViewService.php', 'buildMemberStats'],
             // pagination.total on /followers and /following.
             'follows total'  => ['app/Domain/Core/Services/UserFollowsService.php', 'totalFor'],
         ];
@@ -213,29 +299,25 @@ final class CountPrivacyTest extends TestCase
     }
 
     /**
-     * ⚠⚠ WHICH RULES, not merely "some rule". A mutation that deleted the
-     * `reviews_written` narrowing from the member card SURVIVED the
-     * provider above, because the card's other two calls still mentioned
-     * `CountPrivacy::` and the assertion only looked for the class name.
-     *
-     * `reviews_written` is the one that matters most here: the card reads
-     * it from its OWN source, so unlike the two follow-graph tiles it
-     * never passes through a narrowing step anywhere else.
+     * ⚠⚠ WHICH RULES, not merely "some rule". A mutation that deleted one
+     * surface's narrowing SURVIVED an earlier version of this file,
+     * because the surface's OTHER calls still mentioned `CountPrivacy::`
+     * and the assertion only looked for the class name.
      *
      * @return array<string, array{0: string, 1: string, 2: list<string>}>
      */
     public static function surfaceRules(): array
     {
         return [
-            'member stats applies all three' => [
-                'app/Domain/Core/Services/CardViewService.php',
-                'buildMemberStats',
-                ['FLAG_REVIEWS', 'FLAG_FOLLOWERS', 'FLAG_WATCHING'],
-            ],
-            'card summary applies both follow-graph rules' => [
+            // ⚠ FOUR rules, not two. The engagement block is copied
+            // wholesale onto every member card as
+            // `member_dossier.engagement`, so reviews/disputes have to be
+            // narrowed HERE or the dossier contradicts the stat tiles on
+            // the same card (review finding).
+            'card summary applies all four rules' => [
                 'app/Domain/Core/Services/UserViewService.php',
                 'getSummary',
-                ['FLAG_FOLLOWERS', 'FLAG_WATCHING'],
+                ['FLAG_FOLLOWERS', 'FLAG_WATCHING', 'FLAG_REVIEWS', 'FLAG_DISPUTES'],
             ],
             'follows total applies the follower rule' => [
                 'app/Domain/Core/Services/UserFollowsService.php',

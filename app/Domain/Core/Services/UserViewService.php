@@ -566,11 +566,21 @@ final class UserViewService
                 'github_username' => $githubConnection['provider_username'] ?? null,
                 'wallets_verified' => $walletsVerified,
             ],
+            // ⚠⚠ §K2 count privacy (F-283 review). This block is copied
+            // WHOLESALE onto every member card as `member_dossier.engagement`
+            // by CardViewService, so leaving it raw meant the card's stat
+            // tiles read 0 while the dossier on the SAME card printed the
+            // real numbers. `endorsements_received` and `solids_received`
+            // have no privacy flag and are deliberately untouched.
             'engagement' => [
                 'endorsements_received' => $endorsementsReceived,
                 'solids_received'       => $solidsReceived,
-                'reviews_written'       => $reviewsWritten,
-                'disputes_signed'       => $disputesSigned,
+                'reviews_written'       => CountPrivacy::hides($privacy, CountPrivacy::FLAG_REVIEWS, $isSelf)
+                    ? 0
+                    : $reviewsWritten,
+                'disputes_signed'       => CountPrivacy::hides($privacy, CountPrivacy::FLAG_DISPUTES, $isSelf)
+                    ? 0
+                    : $disputesSigned,
             ],
         ];
     }

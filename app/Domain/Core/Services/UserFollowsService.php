@@ -146,7 +146,7 @@ final class UserFollowsService
                 'pagination' => $this->pagination(
                     $offset,
                     $limit,
-                    $this->totalFor($targetId, $viewerId, $total),
+                    $this->totalFor($targetId, $viewerId, $total, $relation),
                     false
                 ),
             ];
@@ -177,7 +177,7 @@ final class UserFollowsService
             'pagination' => $this->pagination(
                 $offset,
                 $limit,
-                $this->totalFor($targetId, $viewerId, $total),
+                $this->totalFor($targetId, $viewerId, $total, $relation),
                 $hasMore
             ),
         ];
@@ -207,8 +207,18 @@ final class UserFollowsService
      * and only the aggregate the member hid is withheld. `has_more` is
      * computed from the real total by the caller and is unaffected.
      */
-    private function totalFor(int $targetId, int $viewerId, int $total): int
+    private function totalFor(int $targetId, int $viewerId, int $total, string $relation): int
     {
+        // ⚠ FOLLOWERS ONLY. `follower_count_hidden` governs the count of
+        // people following this member, not the count they follow — that
+        // is `watching_hidden`, and this service already refuses the whole
+        // list under it, so by the time we are here the following total is
+        // permitted. An earlier revision applied the followers flag to
+        // both and zeroed `/following`'s total for no reason (review, LOW).
+        if ($relation !== self::RELATION_FOLLOWERS) {
+            return $total;
+        }
+
         $isSelf = $viewerId > 0 && $viewerId === $targetId;
 
         return CountPrivacy::hides(
