@@ -549,8 +549,16 @@ class RateLimiter {
      * allocation (RFC 6177). Normalizing to /64 lets an attacker on a
      * single ISP customer allocation hop across /64 subnets and get a
      * fresh rate-limit bucket for each one.
+     *
+     * ⚠ PUBLIC because it is shared, not because it is a general-purpose
+     * utility. F-324's viewer dedupe needs the identical normalisation for
+     * its signed-out subject: if analytics coarsened IPs differently from
+     * the limiter, the two would disagree about what "the same client"
+     * means. Promoted rather than copied — bcc-core's Throttle already
+     * carries its own private copy of this logic, and a third would be a
+     * §11 duplicate.
      */
-    private static function normalizeIpToSubnet(string $ip): string
+    public static function normalizeIpToSubnet(string $ip): string
     {
         if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
             $parts = explode('.', $ip);
