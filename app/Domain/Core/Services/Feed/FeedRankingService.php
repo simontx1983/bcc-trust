@@ -460,6 +460,15 @@ final class FeedRankingService
      * docblock), and bcc-core's `getActivityById()` enforces that same
      * gate directly. Mirroring it here would just reproduce dead weight.
      *
+     * ⚠ §F-02 IS NOT THE DECIDER FOR A GROUP-TAGGED POST (user decision,
+     * 2026-11-12). Inside a group a post follows the GROUP's rules, and
+     * profile privacy hides posts on the main feed, the profile and the
+     * blog only. So a post the room shows must not 404 by link merely
+     * because its author's profile is restricted — see
+     * {@see groupTaggedDespiteProfileLevel()} for the second look that
+     * implements it, and `getGroupFeed()` for the matching room-side
+     * carve-out. The two are deliberately consistent now; change both.
+     *
      * @return array<string, mixed>|null
      */
     public function getActivityById(int $actId, int $viewerId): ?array
@@ -485,6 +494,16 @@ final class FeedRankingService
             viewerFriendIds: $friendIds,
             enforcePostVisibility: $enforceF02
         );
+
+        // §F-02 group carve-out: a refusal above may have been the
+        // author's PROFILE level withholding a post whose room shows it.
+        // Only reachable when the gate actually ran ($enforceF02), so an
+        // exempt reader costs no second query, and only a GROUP-tagged
+        // post can be recovered.
+        if ($item === null && $enforceF02) {
+            $item = $this->groupTaggedDespiteProfileLevel($actId, $viewerId, $excluded, $hidden);
+        }
+
         if ($item === null) {
             return null;
         }
@@ -498,6 +517,71 @@ final class FeedRankingService
 
         $hydrated = $this->hydrationPipeline->hydrate([$item], $viewerId);
         return $hydrated[0] ?? null;
+    }
+
+    /**
+     * Re-ask for a permalink that the §F-02 profile gate refused, and
+     * return it ONLY when it is a GROUP-tagged post.
+     *
+     * Per the 2026-11-12 user decision, a group post's audience is
+     * decided by the group, not by its author's profile level. The room
+     * (`getGroupFeed()`) does not apply §F-02, so the permalink must not
+     * either — otherwise a post a fellow member is reading in the room
+     * 404s the moment they share the link to it.
+     *
+     * ⚠ THIS IS NOT AN UNGATED READ, and the fail-closed property is
+     * worth stating precisely. The re-ask drops exactly ONE predicate
+     * (§F-02) and keeps every other gate bcc-core applies to a
+     * permalink, because they all live inside the same call: the module
+     * allowlist, `act_status = publish`, the excluded-author and
+     * hidden-activity lists, and — the load-bearing one here —
+     * `ActivityFeedService::isVisibleGlobally()`, which admits a
+     * group-tagged post only when it is marked `public_all` and the
+     * group-syndication rule allows it. A `members_only` or
+     * `public_group` post therefore still 404s by link for everyone,
+     * member or not, exactly as it did before this method existed. What
+     * changes is only that the AUTHOR'S PROFILE LEVEL no longer
+     * overrides the group's own answer.
+     *
+     * A post with no `peepso_group_id` is returned as null, so §F-02's
+     * refusal stands untouched on every non-group surface.
+     *
+     * @param list<int> $excluded
+     * @param list<int> $hidden
+     * @return array<string, mixed>|null
+     */
+    private function groupTaggedDespiteProfileLevel(
+        int $actId,
+        int $viewerId,
+        array $excluded,
+        array $hidden
+    ): ?array {
+        $candidate = $this->activityFeed->getActivityById(
+            $actId,
+            $viewerId,
+            $excluded === [] ? null : $excluded,
+            $hidden === []   ? null : $hidden,
+            // Explicitly inert: bcc-core reads the friend list only when
+            // the gate below is true.
+            viewerFriendIds: null,
+            enforcePostVisibility: false
+        );
+        if ($candidate === null) {
+            return null;
+        }
+
+        // The group marker lives on the BACKING wp_post, which is
+        // `external_id` — never the act_id. Keying on act_id reads meta
+        // off an unrelated low-numbered post (audit H-B1, the same trap
+        // FeedHydrationPipeline::hydrateGroupContexts() documents).
+        $postId = is_int($candidate['external_id'] ?? null) ? $candidate['external_id'] : 0;
+        if ($postId <= 0) {
+            return null;
+        }
+
+        return (int) get_post_meta($postId, 'peepso_group_id', true) > 0
+            ? $candidate
+            : null;
     }
 
     /**
@@ -703,10 +787,12 @@ final class FeedRankingService
         // members_only ⇒ hidden).
         $visibilityIn = $publicOnly ? ['public_group', 'public_all'] : null;
 
-        // ⚠⚠ §F-02 IS DELIBERATELY NOT ENFORCED ON THIS SURFACE, and this
-        // is the one judgment call in the F-02 posts wiring rather than a
-        // mechanical application of it. Flagged for review; it is one
-        // argument to reverse.
+        // ⚠⚠ §F-02 IS DELIBERATELY NOT ENFORCED ON THIS SURFACE. This was
+        // the one judgment call in the F-02 posts wiring rather than a
+        // mechanical application of it, and it is now a RATIFIED USER
+        // DECISION (2026-11-12): inside a group, posts follow the GROUP's
+        // own visibility rules, and profile privacy hides posts on the
+        // main feed, the profile and the blog only.
         //
         // Inside a group the AUDIENCE IS THE ROOM, and the room already
         // has its own gate: membership (resolved by the endpoint — secret
@@ -728,12 +814,30 @@ final class FeedRankingService
         // in its activity queries, so the stricter-of-the-two ladder is
         // BCC's own policy and this is BCC's own decision.
         //
-        // ⚠ KNOWN ASYMMETRY that follows from it: a group post's
-        // PERMALINK does enforce (getActivityById above), so a post a
-        // fellow member reads in the room can 404 by link when its
-        // author's profile is restricted. Failing closed on the permalink
-        // is the safe side of that trade, but the two have to be changed
-        // together — whichever way this is decided.
+        // ⚠ THE PERMALINK NOW AGREES, and that was not free — see
+        // `groupTaggedDespiteProfileLevel()`. It used to enforce §F-02,
+        // so a post a fellow member read in the room could 404 by link
+        // when its author's profile was restricted. The permalink now
+        // declines to let the author's profile level override the
+        // group's answer, which is the same rule this surface applies.
+        //
+        // ⚠⚠ THE CARVE-OUT STOPS AT THESE TWO SURFACES (user
+        // clarification, 2026-11-12). A `public_all` group post that is
+        // SYNDICATED OUT of the room — onto /feed, /feed/hot or
+        // /feed/tag — KEEPS its author's profile gate, because profile
+        // privacy is exactly a statement about the main feed. Only this
+        // room and that post's own permalink follow the group's rules.
+        // Those three surfaces pass `enforcePostVisibility: true` and
+        // are deliberately untouched by the permalink's second look.
+        //
+        // ⚠ What the permalink still refuses, because it is the GROUP's
+        // own rule and not a profile one: a `members_only` /
+        // `public_group` post 404s by link for everyone, member or not
+        // (bcc-core's `isVisibleGlobally()` admits only `public_all`).
+        // The room shows such a post to members; its link does not. That
+        // residual gap is bcc-core's permalink-syndication policy, NOT
+        // §F-02, and closing it would be a deliberate widening of what
+        // the permalink serves.
         $payload = $this->activityFeed->getFeed(
             $viewerId,
             ActivityFeedService::SCOPE_GROUP,

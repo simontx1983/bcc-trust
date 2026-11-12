@@ -260,4 +260,117 @@ final class FeedPostVisibilityWiringTest extends TestCase
             'the group room is the documented §F-02 carve-out; reversing it is a product decision'
         );
     }
+
+    // ── the permalink follows the GROUP, not the profile ────────────
+    //
+    // User decision, 2026-11-12: inside a group, posts follow the
+    // GROUP's own visibility rules; profile privacy hides posts on the
+    // main feed, the profile and the blog only. The room was already
+    // ungated (above); these four are about the PERMALINK agreeing.
+    //
+    // ⚠ WHAT THESE TESTS CAN AND CANNOT SHOW. Group membership and the
+    // permalink's syndication rule (`isVisibleGlobally()`) are resolved
+    // inside bcc-core, so at this seam "the group allows it" IS the
+    // unenforced call returning a row, and "the group refuses it" IS
+    // that call returning null. What is asserted here is therefore that
+    // bcc-trust DEFERS to the group's answer and stops imposing the
+    // author's profile level on top of it — not that bcc-core resolves
+    // membership correctly, which is bcc-core's own suite.
+
+    /**
+     * ⭐ THE DECISION, as a test. A post whose room shows it must not
+     * 404 by link because its AUTHOR's profile is restricted.
+     *
+     * Modelled exactly as production hits it: the gated read comes back
+     * null (the §F-02 predicate withheld the row), the post is
+     * group-tagged, and the group's own answer is "yes" — so the
+     * permalink resolves.
+     */
+    public function testAGroupPostPermalinkOpensDespiteTheAuthorsProfileLevel(): void
+    {
+        $row = ['external_id' => 5150];
+        $GLOBALS['__bcc_f02feed']['row_enforced']   = null;
+        $GLOBALS['__bcc_f02feed']['row_unenforced'] = $row;
+        $GLOBALS['__bcc_f02feed']['group_by_post']  = [5150 => 1138];
+
+        $item = $this->service()->getActivityById(1138, self::VIEWER);
+
+        self::assertSame($row, $item, 'the room shows it, so the link must open it');
+
+        $calls = $this->calls();
+        self::assertCount(2, $calls, 'one gated read, then the group-only second look');
+        self::assertTrue($calls[0]['enforce'], 'the gate is still tried FIRST');
+        self::assertFalse($calls[1]['enforce'], 'the second look is the one that drops §F-02');
+        self::assertNull(
+            $calls[1]['friends'],
+            'the friend list is inert when the gate is off; passing it would imply otherwise'
+        );
+    }
+
+    /**
+     * ⭐⭐ THE FAIL-CLOSED CONTROL, and the most important test of the
+     * four. The second look deliberately reads UNENFORCED, so the only
+     * thing standing between it and a plain §F-02 bypass is the
+     * group-tag check. Delete that check and this is the single test
+     * that fails.
+     *
+     * Same refusal as above, same unenforced row available — but the
+     * post carries no `peepso_group_id`, so §F-02's refusal stands and
+     * the permalink stays a 404.
+     */
+    public function testANonGroupPostStaysRefusedByTheProfileGate(): void
+    {
+        $GLOBALS['__bcc_f02feed']['row_enforced']   = null;
+        $GLOBALS['__bcc_f02feed']['row_unenforced'] = ['external_id' => 5150];
+        $GLOBALS['__bcc_f02feed']['group_by_post']  = [];
+
+        self::assertNull(
+            $this->service()->getActivityById(1138, self::VIEWER),
+            'off a group surface §F-02 still decides; the second look must not launder it'
+        );
+    }
+
+    /**
+     * The other half of the decision: a non-member still gets a 404,
+     * because the GROUP's rules are what the permalink now defers to.
+     *
+     * Here the group's own answer is "no" (bcc-core refuses the
+     * unenforced read too — a non-member of a closed group, or a
+     * `members_only` / `public_group` post that the permalink's
+     * syndication rule never serves by link). bcc-trust must take that
+     * for an answer rather than manufacture a row.
+     */
+    public function testAGroupPostTheGroupsOwnRulesRefuseStaysA404(): void
+    {
+        $GLOBALS['__bcc_f02feed']['row_enforced']   = null;
+        $GLOBALS['__bcc_f02feed']['row_unenforced'] = null;
+        $GLOBALS['__bcc_f02feed']['group_by_post']  = [5150 => 1138];
+
+        self::assertNull($this->service()->getActivityById(1138, self::VIEWER));
+        self::assertCount(2, $this->calls(), 'it asks the group, and accepts the refusal');
+    }
+
+    /**
+     * An exempt reader already saw everything on the first read, so a
+     * null from them is a genuine 404 and the second look would be a
+     * wasted query. Also a guard against the second look drifting into
+     * being the primary path.
+     *
+     * ⚠ Note which fixture row an exempt reader actually gets: their one
+     * call IS the unenforced one, so it reads `row_unenforced`. That is
+     * set to null here to model the genuine 404, while `row_enforced` is
+     * deliberately left at its default ROW to show it is never consulted
+     * — the second look does not happen at all.
+     */
+    public function testAnExemptReaderNeverTakesTheSecondLook(): void
+    {
+        $GLOBALS['__bcc_f02feed']['is_admin']       = true;
+        $GLOBALS['__bcc_f02feed']['row_unenforced'] = null;
+        $GLOBALS['__bcc_f02feed']['group_by_post']  = [5150 => 1138];
+
+        self::assertNull($this->service()->getActivityById(1138, self::VIEWER));
+
+        $call = $this->onlyCall();
+        self::assertFalse($call['enforce'], 'the exemption read it unenforced the first time');
+    }
 }

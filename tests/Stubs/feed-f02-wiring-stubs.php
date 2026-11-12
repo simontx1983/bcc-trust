@@ -35,22 +35,54 @@
  *   friend_ids => list<int>     what PeepSoFriendsModel hands back
  *   calls      => list<array{method: string, viewer: int,
  *                            friends: mixed, enforce: mixed}>
+ *
+ * Permalink-only keys, for the §F-02 group carve-out
+ * ({@see FeedRankingService::groupTaggedDespiteProfileLevel()}):
+ *   row_enforced   => array|null  what getActivityById() returns when the
+ *                                 gate RAN (null models an F-02 refusal)
+ *   row_unenforced => array|null  what it returns on the second look
+ *                                 (null models the GROUP's own rules
+ *                                 refusing — `isVisibleGlobally()` and
+ *                                 the module allowlist live in bcc-core,
+ *                                 so from here they are that null)
+ *   group_by_post  => array<int, int>  external_id => peepso_group_id;
+ *                                 absent = not a group post
+ *
+ * ⚠ `row_enforced` DEFAULTS TO A ROW, not to null. A permalink that
+ * resolves is the ordinary case, and it keeps the second look from
+ * firing in tests that are not about it — several of them assert that
+ * exactly ONE read was forwarded.
  */
 
 declare(strict_types=1);
 
 namespace {
+    /** The external_id (backing wp_post) of the default permalink row. */
+    const BCC_F02FEED_DEFAULT_POST = 5150;
+
     /**
-     * @return array{is_admin: bool, friend_ids: list<int>, calls: list<array<string, mixed>>}
+     * @return array{is_admin: bool, friend_ids: list<int>, calls: list<array<string, mixed>>,
+     *               row_enforced: array<string, mixed>|null,
+     *               row_unenforced: array<string, mixed>|null,
+     *               group_by_post: array<int, int>}
      */
     function bcc_f02feed_fixture(): array
     {
         $f = $GLOBALS['__bcc_f02feed'] ?? [];
 
+        // `array_key_exists`, not `??` — an explicit null is the whole
+        // point of `row_enforced` and must not fall back to the default.
+        $enforced = array_key_exists('row_enforced', $f)
+            ? $f['row_enforced']
+            : ['external_id' => BCC_F02FEED_DEFAULT_POST];
+
         return [
-            'is_admin'   => (bool) ($f['is_admin'] ?? false),
-            'friend_ids' => is_array($f['friend_ids'] ?? null) ? $f['friend_ids'] : [],
-            'calls'      => is_array($f['calls'] ?? null) ? $f['calls'] : [],
+            'is_admin'       => (bool) ($f['is_admin'] ?? false),
+            'friend_ids'     => is_array($f['friend_ids'] ?? null) ? $f['friend_ids'] : [],
+            'calls'          => is_array($f['calls'] ?? null) ? $f['calls'] : [],
+            'row_enforced'   => is_array($enforced) ? $enforced : null,
+            'row_unenforced' => is_array($f['row_unenforced'] ?? null) ? $f['row_unenforced'] : null,
+            'group_by_post'  => is_array($f['group_by_post'] ?? null) ? $f['group_by_post'] : [],
         ];
     }
 
@@ -160,7 +192,14 @@ namespace BCC\Core\Feed {
             unset($actId, $excludedAuthorIds, $excludedActIds);
             \bcc_f02feed_record('getActivityById', $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
-            return null;
+            $fixture = \bcc_f02feed_fixture();
+
+            // The only stub method whose RETURN is load-bearing: the
+            // permalink's second look is driven entirely by the first
+            // call answering null.
+            return $enforcePostVisibility
+                ? $fixture['row_enforced']
+                : $fixture['row_unenforced'];
         }
 
         /** @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}} */
@@ -306,6 +345,25 @@ namespace BCC\Trust\Core\Services\Feed {
             unset($key, $group);
 
             return false;
+        }
+    }
+
+    // The group marker the permalink's second look reads. Namespaced so
+    // it shadows the global for FeedRankingService only, exactly as the
+    // cache functions below do.
+    if (!\function_exists('BCC\Trust\Core\Services\Feed\get_post_meta')) {
+        /** @return mixed */
+        function get_post_meta(int $postId, string $key = '', bool $single = false)
+        {
+            unset($single);
+            if ($key !== 'peepso_group_id') {
+                return '';
+            }
+
+            // '' for an unmapped post — what WordPress returns for absent
+            // meta, and what `(int)` then turns into the 0 that means
+            // "not a group post".
+            return \bcc_f02feed_fixture()['group_by_post'][$postId] ?? '';
         }
     }
 
