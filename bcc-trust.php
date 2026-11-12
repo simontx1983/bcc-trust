@@ -222,6 +222,8 @@ require_once BCC_TRUST_PATH . 'includes/database/rotate-login-handles.php';
 // F-280: retire the original handle of members who renamed before renames
 // retired the outgoing handle (registered in migration-runner.php).
 require_once BCC_TRUST_PATH . 'includes/database/retire-renamed-original-handles.php';
+// F-257: fold the discovery opt-out into hide_from_search (registered in migration-runner.php).
+require_once BCC_TRUST_PATH . 'includes/database/fold-discovery-optout.php';
 require_once BCC_TRUST_PATH . 'includes/database/flush-object-cache-display-names.php';
 // One-shot repair of NFT-gate pointers orphaned by retire-stargaze-chain.php
 // (deleted chain + collections, surviving PeepSo group posts). Repoints only
@@ -1605,8 +1607,9 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
 // publication path.
 \BCC\Trust\Core\Announcements\AnnouncementPublicationGuard::register();
 
-// §K2 / §G1: hook PeepSo's user-search filter so users with
-// `bcc_privacy_discovery_optout = 1` are excluded from search results.
+// §K2 / §G1: hook PeepSo's user-search filter so users hidden from search
+// (hide_from_search, which /me/privacy's discovery_optout aliases since
+// F-257) are excluded from search results.
 // Registered at file load (top-level) so the filter is in place by the
 // time PeepSo's UserSearch fires — before any REST or AJAX request.
 \BCC\Trust\Core\Support\PrivacySettings::registerSearchFilter();
