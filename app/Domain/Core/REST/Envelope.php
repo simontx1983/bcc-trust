@@ -166,6 +166,10 @@ final class Envelope
 
     private static function isOurNamespace(string $route): bool
     {
+        // F-337: WordPress dispatches routes case-INSENSITIVELY
+        // (WP_REST_Server::match_request_to_handler, '@^…$@i'), so
+        // /BCC/v1/… reaches a bcc/v1 handler; it must be enveloped too.
+        $route = strtolower($route);
         foreach (self::NAMESPACES as $prefix) {
             if (strpos($route, $prefix) === 0) {
                 return true;
