@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Tests\Unit;
 
+use BCC\Trust\Tests\Support\GateOrder;
 use PHPUnit\Framework\Attributes\CoversNothing;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
@@ -201,6 +202,56 @@ final class OperatorProfileAuthorityAndShapeTest extends TestCase
             );
             self::assertStringContainsString('get_current_user_id()', $body);
         }
+    }
+
+    /**
+     * F-96: the two tests above only prove each gate is CALLED. Here, in
+     * every write handler, the gate's refusal is returned and no write (row
+     * update, upload, attachment delete) comes before it.
+     *
+     * @return iterable<string, array{string, string, list<string>}>
+     */
+    public static function gatedWrites(): iterable
+    {
+        $page   = 'return $gate;';
+        $shared = "return self::privateError('bcc_forbidden'";
+
+        yield 'updatePageOverride' => ['updatePageOverride', $page, ['->updatePageOverrides(']];
+        yield 'resetPageOverride'  => ['resetPageOverride', $page, ['->deletePageOverrides(']];
+        yield 'updateShared'       => ['updateShared', $shared, ['->updateProfile(']];
+        yield 'uploadLogo'         => ['uploadLogo', $shared, ['->upload(', '->setLogoAttachment(', 'wp_delete_attachment(', 'discardSupersededLogo(']];
+        yield 'deleteLogo'         => ['deleteLogo', $shared, ['->setLogoAttachment(', 'wp_delete_attachment(', 'discardSupersededLogo(']];
+    }
+
+    /** @param list<string> $writes */
+    #[\PHPUnit\Framework\Attributes\DataProvider('gatedWrites')]
+    public function testEveryWriteReturnsItsGatesRefusalBeforeWriting(string $handler, string $refusal, array $writes): void
+    {
+        $body = GateOrder::body(GateOrder::code('app/Domain/Onchain/REST/OperatorProfileEndpoint.php'), $handler);
+
+        if ($refusal === 'return $gate;') {
+            GateOrder::assertOrder($body, ['self::requireVerifiedOperator(', 'if ($gate !== null) {', $refusal], $handler);
+        } else {
+            self::assertMatchesRegularExpression(
+                '/listVerifiedValidatorPagesForUser\(\$userId, 1\) === \[\]\) \{\s*return self::privateError\(\'bcc_forbidden\'/',
+                $body,
+                "{$handler}: an empty claim list must return the 403"
+            );
+        }
+        GateOrder::assertNoWorkBefore($body, $refusal, $writes, $handler);
+    }
+
+    /** The per-page gate denies unless the authority answered OPERATOR. */
+    public function testThePerPageGateOnlyPassesAnOperatorDecision(): void
+    {
+        $body = GateOrder::body(GateOrder::code('app/Domain/Onchain/REST/OperatorProfileEndpoint.php'), 'requireVerifiedOperator');
+
+        GateOrder::assertOrder(
+            $body,
+            ['ValidatorPageOperatorAuthority::decide(', '!== ValidatorPageOperatorAuthority::DECISION_OPERATOR) {', '403', 'return null;'],
+            'requireVerifiedOperator()'
+        );
+        self::assertSame(1, substr_count($body, 'return null;'), 'the only pass is after the OPERATOR check');
     }
 
     /** ⛔ No handler may take the acting user from the request. */

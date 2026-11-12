@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Tests\Unit;
 
 use BCC\Trust\Core\Announcements\AnnouncementViewerStanding as Standing;
+use BCC\Trust\Tests\Support\GateOrder;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
@@ -702,6 +703,26 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
         );
     }
 
+    public function testRestoreRefusesBeforeItReadsWritesOrAudits(): void
+    {
+        // F-96: present is not enough. The policy refusal must be the first
+        // thing restore does: no read, no clearRemoved(), no audit row for
+        // an actor the policy refuses.
+        $body = self::body(self::SERVICE, 'adminRestore');
+
+        GateOrder::assertOrder(
+            $body,
+            ['if (!Policy::mayRestore(', 'return self::fail(self::ERR_FORBIDDEN'],
+            'adminRestore()'
+        );
+        GateOrder::assertNoWorkBefore(
+            $body,
+            'return self::fail(self::ERR_FORBIDDEN',
+            ['->findOne(', '->clearRemoved(', 'AuditLogger::log('],
+            'adminRestore()'
+        );
+    }
+
     public function testEveryRemovalDenialUsesTheSameGenericReason(): void
     {
         $body = self::body(self::SERVICE, 'remove');
@@ -962,6 +983,17 @@ final class AnnouncementCommentRouteInvariantsTest extends TestCase
             substr_count($body, 'current_user_can('),
             'the admin decision has one owner; do not re-derive it here'
         );
+
+        // F-96: CALLING requireAdmin() is not enough; its answer must BE the
+        // callback's answer when the feature is on. `requireAdmin(); return
+        // true;` would keep every token above and let anyone in. The one
+        // `return true;` is the feature-off hand-off, and it comes first.
+        GateOrder::assertOrder(
+            $body,
+            ['if (!Feature::isEnabled()) {', 'return true;', 'return BearerAuth::requireAdmin();'],
+            'adminPermission()'
+        );
+        self::assertSame(1, substr_count($body, 'return true;'), 'the only unconditional pass is the feature-off hand-off');
     }
 
     // ── 7. the capability call PHPStan caught ──────────────────────────
