@@ -359,15 +359,76 @@ final class GroupInteractionGateTest extends TestCase
         self::assertSame([], $GLOBALS['__bcc_gig']['access_calls'], 'no membership lookup');
     }
 
-    public function testCommentRoutesPassTheirOwnNotFoundMessage(): void
+    // ── checkComment(): the comment-stoke / comment-helpful-mark gate ───
+
+    /** @return array{0:int,1:string,2:string} status, code, message */
+    private static function refusal(?\WP_REST_Response $r): array
+    {
+        [$status, $code] = self::statusAndCode($r);
+        $body = $r?->get_data();
+        self::assertIsArray($body);
+
+        return [$status, $code, (string) $body['error']['message']];
+    }
+
+    private const COMMENT_404 = [404, 'bcc_not_found', 'Comment not found.'];
+
+    /** F-265 (review of #623): a removed thread's comments take no stoke / helpful-mark. */
+    public function testCheckCommentRefusesACommentUnderADeletedPost(): void
+    {
+        self::assertSame(self::COMMENT_404, self::refusal((self::GATE)::checkComment(self::USER, self::TRASH_COMMENT_ACT)));
+        self::assertSame([], $GLOBALS['__bcc_gig']['access_calls'], 'refused before any membership lookup');
+    }
+
+    public function testCheckCommentRefusesACommentUnderAModerationHiddenPost(): void
+    {
+        self::assertSame(self::COMMENT_404, self::refusal((self::GATE)::checkComment(self::USER, self::HIDDEN_PARENT_COMMENT_ACT)));
+    }
+
+    public function testCheckCommentRefusesAModerationHiddenComment(): void
+    {
+        self::assertSame(self::COMMENT_404, self::refusal((self::GATE)::checkComment(self::USER, self::HIDDEN_COMMENT_ACT)));
+    }
+
+    public function testCheckCommentRefusesAnUnknownOrNonCommentAct(): void
+    {
+        self::assertSame(self::COMMENT_404, self::refusal((self::GATE)::checkComment(self::USER, self::UNKNOWN_ACT)));
+        self::assertSame(
+            self::COMMENT_404,
+            self::refusal((self::GATE)::checkComment(self::USER, self::PLAIN_POST_ACT)),
+            'a POST act is not a comment on these routes'
+        );
+    }
+
+    public function testCheckCommentKeepsTheSecretGroupOracleClosed(): void
+    {
+        self::assertSame(self::COMMENT_404, self::refusal((self::GATE)::checkComment(self::USER, self::SECRET_COMMENT_ACT)));
+    }
+
+    public function testCheckCommentStillAppliesMembership(): void
+    {
+        $this->setMember(false);
+        self::assertSame(403, self::refusal((self::GATE)::checkComment(self::USER, self::GROUP_COMMENT_ACT))[0]);
+
+        $this->setMember(true);
+        self::assertNull((self::GATE)::checkComment(self::USER, self::GROUP_COMMENT_ACT));
+        self::assertNull((self::GATE)::checkComment(self::USER, self::PLAIN_COMMENT_ACT), 'a live comment on an ordinary post passes');
+    }
+
+    public function testCommentRoutesUseTheSharedCommentGate(): void
     {
         $rest = dirname(__DIR__, 2) . '/app/Domain/Core/REST/';
         foreach (['CommentStokeEndpoint.php', 'HelpfulMarkEndpoint.php'] as $file) {
             $src = (string) file_get_contents($rest . $file);
             self::assertStringContainsString(
-                "GroupInteractionGate::checkPost(\$userId, (int) \$meta->parent_post_id, 'Comment not found.')",
+                'GroupInteractionGate::checkComment($userId, $commentActId)',
                 $src,
-                "{$file}: the secret-group 404 must match its own unknown-comment 404"
+                "{$file}: comment routes must gate through checkComment() (liveness + membership)"
+            );
+            self::assertStringNotContainsString(
+                '->parent_post_id',
+                $src,
+                "{$file}: no route-local parent resolution that could skip liveness"
             );
         }
     }

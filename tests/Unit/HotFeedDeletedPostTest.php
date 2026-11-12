@@ -90,15 +90,49 @@ final class HotFeedDeletedPostTest extends TestCase
         self::assertNotContains(self::$payloadId, \BccHotFeedCacheStore::$writes);
     }
 
+    /**
+     * Review of #623: the first page is cached once per requested `limit`,
+     * not only at the warmed 20, so every cached size must be cleaned.
+     */
+    public function testEveryCachedPageSizeIsCleaned(): void
+    {
+        $ids = [];
+        foreach ([1, 7, FeedRankingService::HOT_CACHE_MAX_LIMIT] as $limit) {
+            $this->seedCache([self::DELETED, self::KEPT_A], $limit);
+            $ids[$limit] = self::$payloadId;
+        }
+
+        self::service()->forgetDeletedPost(self::DELETED);
+
+        foreach ($ids as $limit => $id) {
+            /** @var array{items: list<array<string, mixed>>} $page */
+            $page = \BccHotFeedCacheStore::$store[$id];
+            self::assertSame(['feed_' . self::KEPT_A], array_column($page['items'], 'id'), "limit {$limit}");
+        }
+    }
+
+    /**
+     * The cached range must cover every size the endpoint accepts, or a
+     * page could be cached where forgetDeletedPost() never looks. (Pages
+     * above HOT_CACHE_MAX_LIMIT are built uncached by hotFeedPayload().)
+     */
+    public function testTheEndpointCannotAskForAnUncleanablePageSize(): void
+    {
+        $endpointMax = (new ReflectionClass(\BCC\Trust\Core\REST\FeedEndpoint::class))->getConstant('MAX_LIMIT');
+
+        self::assertIsInt($endpointMax);
+        self::assertLessThanOrEqual(FeedRankingService::HOT_CACHE_MAX_LIMIT, $endpointMax);
+    }
+
     // ── helpers ─────────────────────────────────────────────────────
 
     /** @param list<int> $actIds */
-    private function seedCache(array $actIds): void
+    private function seedCache(array $actIds, int $limit = FeedRankingService::HOT_WARM_LIMIT): void
     {
         $r     = new ReflectionClass(FeedRankingService::class);
         $keyFn = $r->getMethod('hotFeedCacheKey');
         /** @var string $key */
-        $key = $keyFn->invoke(null, FeedRankingService::HOT_WARM_LIMIT);
+        $key = $keyFn->invoke(null, $limit);
         /** @var string $group */
         $group = $r->getConstant('HOT_CACHE_GROUP');
 

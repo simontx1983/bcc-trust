@@ -67,6 +67,35 @@ final class GroupInteractionGate
     }
 
     /**
+     * The gate for the COMMENT routes (comment stoke, comment helpful-mark),
+     * which take a comment act id and answer "Comment not found." for
+     * anything they cannot act on.
+     *
+     * Order: the act must be a published comment; then it must be LIVE
+     * (F-265: not hidden itself, and its parent post published and not
+     * moderation-hidden, via {@see resolveLiveTarget()}); then the parent
+     * post's membership gate ({@see checkPost()}). Every refusal before the
+     * membership step is the route's own unknown-comment 404, so a removed
+     * thread and a secret group's comment both read as a comment that does
+     * not exist.
+     */
+    public static function checkComment(int $userId, int $commentActId): ?WP_REST_Response
+    {
+        $notFound = self::notFound(self::NOT_FOUND_COMMENT);
+        if ($commentActId <= 0 || Plugin::instance()->commentRepository()->getCommentMeta($commentActId) === null) {
+            return $notFound;
+        }
+        $parentPostId = self::resolveLiveTarget($commentActId);
+        if ($parentPostId === null) {
+            return $notFound;
+        }
+
+        return self::checkPost($userId, $parentPostId, self::NOT_FOUND_COMMENT);
+    }
+
+    private const NOT_FOUND_COMMENT = 'Comment not found.';
+
+    /**
      * The wp_post that gates an interaction with `$actId`, or NULL when the
      * act is not something anyone may still interact with: unknown, off the
      * feed allowlist, or NOT LIVE (F-265).
