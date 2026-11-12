@@ -196,6 +196,60 @@ namespace BCC\Trust\Core\Repositories {
             {
                 $GLOBALS['__bcc_drain']['page_counts'][] = [$userId, $pageId];
             }
+
+            // F-334: a released page no longer counts for its old owner.
+            public function decrementPageCount(int $userId, int $pageId): void
+            {
+                $GLOBALS['__bcc_drain']['page_count_drops'][] = [$userId, $pageId];
+            }
+        }
+    }
+
+    // F-334: the owner-keyed score rows, as `page_id => page_owner_id`
+    // ($GLOBALS['__bcc_drain']['score_owner']; absent = no score row).
+    if (!class_exists('BCC\Trust\Core\Repositories\ScoreRepository', false)) {
+        final class ScoreRepository
+        {
+            public function getPageOwnerId(int $pageId): int
+            {
+                return (int) ($GLOBALS['__bcc_drain']['score_owner'][$pageId] ?? 0);
+            }
+
+            public function updateOwner(int $pageId, int $ownerId): void
+            {
+                $GLOBALS['__bcc_drain']['score_owner'][$pageId] = $ownerId;
+            }
+        }
+    }
+}
+
+// F-334: whether ANY verified claim still binds a page
+// ($GLOBALS['__bcc_drain']['page_held'][pageId] = true; `held_read_fails`
+// = throw, as the real fail-closed read does).
+namespace BCC\Trust\Onchain\Repositories {
+    if (!class_exists(__NAMESPACE__ . '\\ClaimRepository', false)) {
+        final class ClaimRepository
+        {
+            public static function anyPrimaryClaimBoundToPage(int $pageId): bool
+            {
+                if (!empty($GLOBALS['__bcc_drain']['held_read_fails'])) {
+                    throw new \RuntimeException('read failed');
+                }
+                return !empty($GLOBALS['__bcc_drain']['page_held'][$pageId]);
+            }
+        }
+    }
+}
+
+namespace BCC\Trust\Core\Security {
+    if (!class_exists(__NAMESPACE__ . '\\AuditLogger', false)) {
+        final class AuditLogger
+        {
+            /** @param array<string, mixed> $meta */
+            public static function log(string $action, ?int $targetId = null, array $meta = [], ?string $targetType = null, ?int $userId = null): void
+            {
+                $GLOBALS['__bcc_drain']['audits'][] = [$action, $targetId, $meta];
+            }
         }
     }
 }

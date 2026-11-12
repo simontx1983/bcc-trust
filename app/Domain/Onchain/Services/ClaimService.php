@@ -554,6 +554,17 @@ class ClaimService {
             }
         });
 
+        // F-334 (user decision): free each page the user LOST (revoke()'s
+        // mirror_page_ids already exclude pages they still hold through
+        // another claim), so the next verified operator's claim takes it
+        // over. One isolated step per page; it re-checks that no verified
+        // claim of ANY user still binds the page before touching it.
+        foreach ($result['mirror_page_ids'] as $lostPageId) {
+            self::afterCommit('page_release', $claimId, static function () use ($lostPageId, $userId): void {
+                \BCC\Trust\Core\Plugin::instance()->peepSoIntegration()->releaseClaimedPage((int) $lostPageId, $userId);
+            });
+        }
+
         // The CLAIMED page's `has_verified_claim` (card badge, rank composite)
         // lives on the bound page, which `bcc_trust_verification_changed`
         // does not reach — it resyncs only the claimant's own page.

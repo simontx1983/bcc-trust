@@ -215,6 +215,22 @@ class PeepSoIntegration
 
         $this->userInfoRepo->incrementPageCount($userId, $pageId);
 
+        // F-334: a page freed by a revoked claim keeps its score rows, which
+        // are keyed to the PREVIOUS owner (`page_owner_id` is stamped when a
+        // row is created and only handleOwnerChange() moves it). The new
+        // operator takes the page over, its score history included. A page
+        // claimed for the first time has no score row (an unowned page cannot
+        // get one), so this is a no-op there.
+        $previousScoreOwner = $this->scoreRepo->getPageOwnerId($pageId);
+        if ($previousScoreOwner > 0 && $previousScoreOwner !== $userId) {
+            $this->scoreRepo->updateOwner($pageId, $userId);
+            AuditLogger::log('page_owner_changed', $pageId, [
+                'old_owner' => $previousScoreOwner,
+                'new_owner' => $userId,
+                'via'       => 'claim_after_release',
+            ], 'page');
+        }
+
         // F-299: record the claimer as the page's PeepSo OWNER too. Every
         // directory and card owner signal (the /members VALIDATORS filter
         // and chip counts, owned-page counts on member cards) reads the
@@ -315,6 +331,89 @@ class PeepSoIntegration
         self::ensurePageOwnerMembership($pageId, $userId);
 
         $this->migratePageFollowersToPeepSo($pageId, $userId);
+    }
+
+    /**
+     * F-334 (user decision): a REVOKED claim frees the page, so the next
+     * verified operator's claim takes it over.
+     *
+     * For a page the revoked user lost (ClaimRepository::revoke()'s
+     * `mirror_page_ids`):
+     *   - nothing happens if ANY verified operator/creator claim still binds
+     *     the page (a multi-chain page can be held through another
+     *     validator) — read fail-closed: unknown never frees a page;
+     *   - `post_author` goes back to 0, only if it is still this user (an
+     *     admin reassignment since the claim is left alone), and their
+     *     owned-page count drops;
+     *   - their PeepSo `member_owner` row is demoted to `member` (F-299
+     *     wrote it); they stay a member/follower;
+     *   - one `page_owner_released` audit row records the old owner.
+     *
+     * The score rows stay keyed to the old owner until the next claim moves
+     * them (onPageClaimed). Called from ClaimService::revokeClaim's isolated
+     * post-commit steps: answers false on any failure, never throws.
+     */
+    public function releaseClaimedPage(int $pageId, int $userId): bool
+    {
+        if ($pageId <= 0 || $userId <= 0) {
+            return false;
+        }
+
+        try {
+            if (\BCC\Trust\Onchain\Repositories\ClaimRepository::anyPrimaryClaimBoundToPage($pageId)) {
+                \BCC\Core\Log\Logger::info('[bcc-trust] page release skipped - another verified claim still holds the page', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                ]);
+                return false;
+            }
+
+            $authorReset = false;
+            if ((int) get_post_field('post_author', $pageId) === $userId) {
+                $update = wp_update_post(['ID' => $pageId, 'post_author' => 0], true);
+                if (is_wp_error($update)) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] page release: post_author reset failed', [
+                        'page_id' => $pageId,
+                        'user_id' => $userId,
+                        'error'   => $update->get_error_message(),
+                    ]);
+                    return false;
+                }
+                $this->userInfoRepo->decrementPageCount($userId, $pageId);
+                $authorReset = true;
+            }
+
+            $ownerRow = 'none';
+            if (class_exists('PeepSoPageUser')) {
+                $member = new \PeepSoPageUser($pageId, $userId);
+                if ($member->is_owner === true) {
+                    $ownerRow = $member->member_modify('member') === true ? 'demoted' : 'demote_failed';
+                }
+            }
+
+            AuditLogger::log('page_owner_released', $pageId, [
+                'old_owner'    => $userId,
+                'author_reset' => $authorReset,
+                'owner_row'    => $ownerRow,
+            ], 'page');
+
+            if ($ownerRow === 'demote_failed') {
+                \BCC\Core\Log\Logger::error('[bcc-trust] page release: member_owner demotion failed', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                ]);
+                return false;
+            }
+
+            return true;
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] page release failed', [
+                'page_id' => $pageId,
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return false;
+        }
     }
 
     /**

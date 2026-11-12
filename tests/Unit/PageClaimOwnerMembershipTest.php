@@ -71,6 +71,9 @@ final class PageClaimOwnerMembershipTest extends TestCase
         $prop = new ReflectionProperty(PeepSoIntegration::class, 'userInfoRepo');
         $prop->setAccessible(true);
         $prop->setValue($instance, new \BCC\Trust\Core\Repositories\UserInfoRepository());
+        $score = new ReflectionProperty(PeepSoIntegration::class, 'scoreRepo');
+        $score->setAccessible(true);
+        $score->setValue($instance, new \BCC\Trust\Core\Repositories\ScoreRepository());
 
         return $instance;
     }
