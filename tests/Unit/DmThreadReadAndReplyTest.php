@@ -174,7 +174,42 @@ final class DmThreadReadAndReplyTest extends TestCase
         $this->assertSame(self::ALLOWED, self::canReply());
     }
 
+    /**
+     * DRIFT GUARD: can_reply and the reply POST must give the same answer.
+     * A blocked pair whose peer the display list hides: the POST refuses
+     * (the §4.19 404 shield) and can_reply says messaging_unavailable.
+     * Both go through ONE method, existingConversationGate().
+     */
+    public function testTheReplyPostAndCanReplyAgreeOnABlockedPair(): void
+    {
+        \DmWorld::$blocked                      = true;
+        \DmWorld::$hiddenFromViewer[self::PEER] = true;
+
+        $post = self::service()->sendMessage(self::VIEWER, null, self::ROOT, 'hello');
+
+        $this->assertSame('bcc_not_found', $post['error'] ?? null, 'the POST refuses');
+        $this->assertSame(self::SHIELD, self::canReply(), 'and can_reply says so up front');
+
+        $src = (string) file_get_contents((string) (new ReflectionClass(MessagesService::class))->getFileName());
+        $this->assertSame(
+            2,
+            substr_count($src, 'self::existingConversationGate('),
+            'exactly two callers: the reply POST and can_reply'
+        );
+    }
+
     // ── F-246 member-card can_message ───────────────────────────────────
+
+    /** Contract: anonymous member cards are unchanged — never auth_required. */
+    public function testAnAnonymousViewerGetsNotApplicable(): void
+    {
+        $m = new ReflectionMethod(CardViewService::class, 'memberMessagePermission');
+
+        $this->assertSame(
+            ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'not_applicable'],
+            $m->invoke(null, self::PEER, 0, null)
+        );
+    }
 
     public function testAMemberCardPrefersTheBatchedEligibility(): void
     {

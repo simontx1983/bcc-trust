@@ -156,6 +156,12 @@ namespace BCC\Core\Repositories {
                 return 0;
             }
 
+            /** The send path's rate-limit probe: never throttled here. */
+            public static function countRecentByAuthor(int $authorId, int $windowSeconds): int
+            {
+                return 0;
+            }
+
             public static function markConversationAsViewed(int $userId, int $rootMsgId): void
             {
                 \DmWorld::$viewedCalls[] = [$userId, $rootMsgId];

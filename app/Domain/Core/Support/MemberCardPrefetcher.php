@@ -151,6 +151,8 @@ final class MemberCardPrefetcher
         // once, one block read, the friend set at most once) on top of
         // the cache_users() above. Viewer-scoped by construction; empty
         // for anon viewers, whose member cards carry no can_message.
+        // ⚠ VIEWER-SCOPED: this map (and the can_message it feeds) must
+        // never enter a shared or anonymous card cache.
         $map['message_eligibility'] = $viewerId > 0 && $idList !== []
             ? MessagesService::canMessageMany($viewerId, $idList)
             : [];

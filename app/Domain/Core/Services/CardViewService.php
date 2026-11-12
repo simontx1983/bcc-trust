@@ -2284,6 +2284,13 @@ final class CardViewService
      */
     private static function memberMessagePermission(int $targetUserId, int $viewerId, ?array $prefetched): array
     {
+        // Anonymous viewers keep not_applicable (contract: unchanged for
+        // anon). resolveMemberPermissions() returns before reaching here
+        // for anon today; this guard keeps it true if that ever changes —
+        // canMessage(0, …) would answer auth_required instead.
+        if ($viewerId <= 0) {
+            return self::deny(null, 'not_applicable');
+        }
         if ($prefetched !== null
             && isset($prefetched['message_eligibility'])
             && is_array($prefetched['message_eligibility'])
