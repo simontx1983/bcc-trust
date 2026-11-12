@@ -31,6 +31,7 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\PeepSo\PeepSoFollowWriter;
+use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Trust\Core\Repositories\WatchingRepository;
 use BCC\Trust\Core\Repositories\PageFollowRepository;
 use BCC\Trust\Core\Repositories\WatchMetaRepository;
@@ -903,6 +904,20 @@ final class WatchingService
             return ['error' => 'bcc_invalid_request', 'message' => 'You cannot watch yourself.'];
         }
 
+        // F-29: a block in EITHER direction prevents the follow. bcc-core's
+        // PeepSoFollowWriter::follow() enforces the same rule for every
+        // caller; it is checked here as well so the viewer gets a clear,
+        // generic refusal (it does not say who blocked whom) instead of an
+        // internal error. An unreadable block state is not a refusal: it is
+        // the existing failure.
+        $blocked = PeepSoBlockRepository::isMutuallyBlockedOrUnknown($viewerId, $followeeId);
+        if ($blocked === true) {
+            return ['error' => 'bcc_forbidden', 'message' => "You can't watch this account."];
+        }
+        if ($blocked === null) {
+            return ['error' => 'bcc_internal_error', 'message' => 'Failed to record follow.'];
+        }
+
         $followId = PeepSoFollowWriter::follow($viewerId, $followeeId);
         if ($followId === 0) {
             return ['error' => 'bcc_internal_error', 'message' => 'Failed to record follow.'];
@@ -992,6 +1007,36 @@ final class WatchingService
         $this->watchMetaRepo->delete($followId);
 
         return ['status' => 'unwatched', 'follow_id' => $followId];
+    }
+
+    /**
+     * F-29 (user decision): a block removes follows in BOTH directions, the
+     * blocker's of the blocked user and the blocked user's of the blocker,
+     * each with its bcc_watch_meta sidecar, exactly as unwatch() does.
+     * Unblocking restores nothing.
+     *
+     * Idempotent: a direction with no follow, or one already unfollowed, is
+     * a no-op. Returns how many follows were removed.
+     */
+    public function severFollowsBetween(int $userA, int $userB): int
+    {
+        if ($userA <= 0 || $userB <= 0 || $userA === $userB) {
+            return 0;
+        }
+
+        $removed = 0;
+        foreach ([[$userA, $userB], [$userB, $userA]] as [$active, $passive]) {
+            $followId = $this->watchingRepo->findFollowIdForPair($active, $passive);
+            if ($followId <= 0) {
+                continue;
+            }
+            if (PeepSoFollowWriter::unfollow($active, $passive)) {
+                $removed++;
+            }
+            // The sidecar goes even if the row was already unfollowed.
+            $this->watchMetaRepo->delete($followId);
+        }
+        return $removed;
     }
 
     /**
