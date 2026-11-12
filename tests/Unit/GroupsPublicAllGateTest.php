@@ -237,6 +237,30 @@ final class GroupsPublicAllGateTest extends TestCase
     }
 
     /**
+     * F-96: the denials above run after allowed calls have already set the
+     * flag to '1', so a denied caller that still WROTE would be invisible
+     * there. Here only denied callers act, on a group whose flag starts off.
+     */
+    public function testADeniedPolicyToggleWritesNothing(): void
+    {
+        $this->registerGroup(401, self::CLOSED, false, [
+            3 => 'member_moderator',
+            4 => 'member',
+            5 => 'member_readonly',
+        ]);
+        $svc = $this->service();
+
+        foreach ([3 => 'moderator', 4 => 'member', 5 => 'readonly', 9 => 'non-member', 0 => 'anonymous'] as $uid => $label) {
+            self::assertFalse($svc->setPublicAllMembersPolicy($uid, 401, true)['ok'] ?? false, $label);
+            self::assertSame(
+                '',
+                $GLOBALS['__bcc_puball_fixture']['groups'][401]['meta']['_bcc_group_public_all_members'] ?? null,
+                $label . ': the flag must stay off'
+            );
+        }
+    }
+
+    /**
      * A non-member of a SECRET group must get 404 (not 403) — the write
      * route must never leak a secret group's existence, even to reject an
      * unauthorized toggle.
