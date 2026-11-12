@@ -657,27 +657,25 @@ final class ModerationService
     }
 
     /**
-     * The tier a page has NOW, by the canonical ladder with the same inputs
-     * the stored tier uses (F-177): the total score, the NATIVE score
-     * (without onchain_bonus, clamped independently: computeNative) and the
-     * resolved elite gate. Read back after the override's recompute, so the
-     * admin notice can never claim a tier the page did not get.
+     * The tier a page has NOW (F-177): its stored reputation_tier, read back
+     * after the override's recompute, so the admin notice can never claim a
+     * tier the page did not get (F-193: read, not re-derived).
      */
     private function resultingTier(int $pageId): string
     {
-        $row = $this->scoreRepository->getByPageId($pageId);
-        if ($row === null) {
+        // F-193: the STORED reputation_tier, read back after the override's
+        // recompute, not a second derivation in PHP. Re-deriving with
+        // tierFor() could drift from what tierSql() actually stored (two
+        // implementations of one ladder), and then the notice would describe
+        // a tier the page does not have. The strict write-path read: a
+        // failed read reports 'unknown', never a guessed tier.
+        try {
+            $row = $this->scoreRepository->getByPageIdOrFail($pageId);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
             return 'unknown';
         }
-        $native = TrustScoreService::computeNative(
-            $row->getPositiveScore(),
-            $row->getNegativeScore(),
-            $row->getContributionBonus(),
-            $row->getPenaltyAdjustment(),
-            $row->getAttestationBonus()
-        );
-        // isEliteEligible() already resolves the never-evaluated grandfather case.
-        return TrustScoreService::tierFor($row->getTotalScore(), $native, $row->isEliteEligible());
+        $tier = $row !== null ? $row->getReputationTier() : '';
+        return $tier !== '' ? $tier : 'unknown';
     }
 
     /**
