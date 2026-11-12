@@ -124,11 +124,14 @@ if (!function_exists('bcc_trust_rotate_login_handles')) {
         \BCC\Trust\Core\Services\HandleService $handleService
     ): ?string {
         $base = bcc_trust_bch_derive_base($displayName, $userLogin, $userId);
-        $new  = bcc_trust_bch_find_free_variant($base, $handleService);
+        // $userId lets the internal path write this member's own reserved
+        // 'member-{id}' fallback (HandleService::validate).
+        $new  = bcc_trust_bch_find_free_variant($base, $handleService, $userId);
         if ($new === null) {
             $new = bcc_trust_bch_find_free_variant(
                 \BCC\Trust\Core\Support\PublicIdentity::HANDLE_PREFIX . $userId,
-                $handleService
+                $handleService,
+                $userId
             );
         }
         if ($new === null || strcasecmp($new, $userLogin) === 0) {
