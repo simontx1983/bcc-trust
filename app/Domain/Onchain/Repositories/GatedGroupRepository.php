@@ -527,6 +527,45 @@ final class GatedGroupRepository {
     }
 
     /**
+     * Holder groups with an id above $afterId, ascending. The revoke sweep's
+     * walk (F-278): keyset, so it reaches every group however many there
+     * are, and a group deleted between two calls can't make it skip or
+     * repeat one. Same filter as listAllGatedGroupIds().
+     *
+     * Bounded (§4): `LIMIT %d`.
+     *
+     * @return list<int>
+     */
+    public static function listGatedGroupIdsAfter(int $afterId, int $limit): array {
+        if ($limit <= 0) {
+            return [];
+        }
+
+        global $wpdb;
+
+        $rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT pm.post_id
+               FROM {$wpdb->postmeta} pm
+         INNER JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+              WHERE pm.meta_key   = %s
+                AND pm.meta_value = %s
+                AND p.post_type   = %s
+                AND p.post_status = %s
+                AND p.ID > %d
+              ORDER BY p.ID ASC
+              LIMIT %d",
+            self::META_KIND,
+            self::KIND_HOLDERS,
+            'peepso-group',
+            'publish',
+            max(0, $afterId),
+            $limit
+        ));
+
+        return array_values(array_map('intval', $rows ?: []));
+    }
+
+    /**
      * @return list<int>
      */
     public static function listAllGatedGroupIds(int $limit = 500): array {

@@ -204,6 +204,12 @@ final class HoldingsService
      * budget-exhausted check on this (chain, contract) stopped, so repeated
      * attempts eventually read every wallet. See WALLET_ROTATION_META. It is
      * never set by the sweep or by read-only surfaces, which must not write.
+     *
+     * `$distrustCachedPositiveAfterLoss` is for the revoke sweep (F-278): a
+     * cached "owns" observed before the transfer index recorded the wallet
+     * losing this collection is not trusted, and the provider is asked
+     * instead. It can only send a read to the provider, never manufacture
+     * a negative.
      */
     public static function eligibilityVerdict(
         int $userId,
@@ -211,7 +217,8 @@ final class HoldingsService
         string $contract,
         int $minBalance,
         ?ProviderRequestBudget $budget = null,
-        bool $resumeAcrossRequests = false
+        bool $resumeAcrossRequests = false,
+        bool $distrustCachedPositiveAfterLoss = false
     ): EligibilityVerdict {
         $min = max(1, $minBalance);
 
@@ -224,7 +231,7 @@ final class HoldingsService
         $budget ??= self::verificationBudget(self::SURFACE_JOIN);
 
         if (!$resumeAcrossRequests || $wallets === []) {
-            return self::verdictForWallets($fetcher, $wallets, $contract, $chainId, $min, $budget);
+            return self::verdictForWallets($fetcher, $wallets, $contract, $chainId, $min, $budget, distrustCachedPositiveAfterLoss: $distrustCachedPositiveAfterLoss);
         }
 
         $key      = self::walletRotationKey($chainId, $contract);
@@ -232,7 +239,7 @@ final class HoldingsService
         $startAt  = $rotation[$key]['offset'] ?? 0;
         $resumeAt = null;
 
-        $verdict = self::verdictForWallets($fetcher, $wallets, $contract, $chainId, $min, $budget, $startAt, $resumeAt);
+        $verdict = self::verdictForWallets($fetcher, $wallets, $contract, $chainId, $min, $budget, $startAt, $resumeAt, $distrustCachedPositiveAfterLoss);
 
         if ($verdict->isBudgetExhausted()) {
             // Only a real step forward is worth a write: no step means even the
@@ -348,7 +355,8 @@ final class HoldingsService
         int $min,
         ProviderRequestBudget $budget,
         int $startAt = 0,
-        ?int &$resumeAt = null
+        ?int &$resumeAt = null,
+        bool $distrustCachedPositiveAfterLoss = false
     ): EligibilityVerdict {
         if ($wallets === []) {
             // Read successfully, and there is none: a complete answer.
@@ -376,7 +384,8 @@ final class HoldingsService
                 $contract,
                 $chainId,
                 $tokenStandard,
-                $budget
+                $budget,
+                $distrustCachedPositiveAfterLoss
             );
 
             if ($evidence === EligibilityVerdict::REASON_BUDGET_EXHAUSTED) {
@@ -1154,7 +1163,8 @@ final class HoldingsService
         string $contract,
         int $chainId,
         ?string $tokenStandard,
-        ProviderRequestBudget $budget
+        ProviderRequestBudget $budget,
+        bool $distrustCachedPositiveAfterLoss = false
     ): HoldingsCount|string {
         if ($tokenStandard !== null && stripos($tokenStandard, '1155') !== false) {
             if ($walletLinkId <= 0 || $chainId <= 0) {
@@ -1220,7 +1230,10 @@ final class HoldingsService
             // a partial or truncated walk can only have missed MORE. But only
             // while the observation is recent and first-hand: a positive with
             // no bounded age would keep a member in after they sold.
-            if ($matches > 0 && self::cachedPositiveIsTrusted($cached)) {
+            if ($matches > 0 && self::cachedPositiveIsTrusted($cached)
+                && !($distrustCachedPositiveAfterLoss
+                    && self::lossFollowsObservation($walletLinkId, $contract, (int) $cached['observed_at']))
+            ) {
                 return HoldingsCount::atLeast($matches);
             }
 
@@ -1286,6 +1299,24 @@ final class HoldingsService
         $age = time() - $observedAt;
 
         return $age >= 0 && $age <= self::POSITIVE_EVIDENCE_MAX_AGE;
+    }
+
+    /**
+     * F-278: did the transfer index record this wallet losing a $contract
+     * holding at or after $observedAt? Then a cached positive from that
+     * observation may predate the sale. A failed read answers yes: the
+     * cached positive is then not trusted and the provider decides, which
+     * is never a negative on its own.
+     */
+    private static function lossFollowsObservation(int $walletLinkId, string $contract, int $observedAt): bool
+    {
+        try {
+            $lostAt = NftHoldingsRepository::latestLossAtOrThrow($walletLinkId, $contract);
+        } catch (RepositoryReadFailure $e) {
+            return true;
+        }
+
+        return $lostAt !== null && $lostAt >= $observedAt;
     }
 
     /**

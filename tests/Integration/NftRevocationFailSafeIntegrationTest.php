@@ -566,6 +566,42 @@ namespace BCC\Trust\Tests\Integration {
             self::assertCount(120, $this->remainingMembers(), 'the 40 complete zeros were removed, the 120 holders kept');
         }
 
+        public function testTheHolderGroupWalkIsAKeysetWithNoCeiling(): void
+        {
+            // F-278: listAllGatedGroupIds() stopped at 500 groups, so the
+            // sweep never reached the rest. The keyset walk reaches them all,
+            // and only published holder groups.
+            $wpdb = $GLOBALS['wpdb'];
+            $ids  = [];
+            for ($i = 0; $i < 520; $i++) {
+                $id = 80_000 + $i;
+                $wpdb->query($wpdb->prepare(
+                    "INSERT INTO `{$wpdb->posts}` (ID, post_title, post_name, post_type, post_status) VALUES (%d, 'h', 'h', 'peepso-group', 'publish')",
+                    $id
+                ));
+                $wpdb->query($wpdb->prepare(
+                    "INSERT INTO `{$wpdb->postmeta}` (post_id, meta_key, meta_value) VALUES (%d, %s, %s)",
+                    $id,
+                    GatedGroupRepository::META_KIND,
+                    GatedGroupRepository::KIND_HOLDERS
+                ));
+                $ids[] = $id;
+            }
+            // Not holder groups: a draft holder group and a different kind.
+            $wpdb->query("INSERT INTO `{$wpdb->posts}` (ID, post_title, post_name, post_type, post_status) VALUES (80600, 'd', 'd', 'peepso-group', 'draft'), (80601, 'v', 'v', 'peepso-group', 'publish')");
+            $wpdb->query($wpdb->prepare(
+                "INSERT INTO `{$wpdb->postmeta}` (post_id, meta_key, meta_value) VALUES (80600, %s, %s), (80601, %s, 'delegators')",
+                GatedGroupRepository::META_KIND,
+                GatedGroupRepository::KIND_HOLDERS,
+                GatedGroupRepository::META_KIND
+            ));
+
+            self::assertSame(array_slice($ids, 0, 500), GatedGroupRepository::listGatedGroupIdsAfter(0, 500));
+            self::assertSame(array_slice($ids, 500), GatedGroupRepository::listGatedGroupIdsAfter($ids[499], 500));
+            self::assertSame([], GatedGroupRepository::listGatedGroupIdsAfter($ids[519], 500));
+            self::assertSame([], GatedGroupRepository::listGatedGroupIdsAfter(0, 0));
+        }
+
         public function testWalletOrderIsDeterministicAmongWalletsLinkedInTheSameSecond(): void
         {
             // A resumed join depends on position N meaning the same wallet next
