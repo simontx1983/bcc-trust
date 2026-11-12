@@ -1419,6 +1419,49 @@ class UserInfoRepository {
     }
 
     /**
+     * §F-182 — the JOIN and WHERE fragments that exclude suspended
+     * members from a `WP_User_Query` listing.
+     *
+     * Lives here rather than in the caller because this repository owns
+     * `user_info`, and the arch guardrail is right to insist: a `$wpdb`
+     * in the Support layer is a second place that knows the schema.
+     * {@see \BCC\Trust\Core\Support\ProfileAccess::filterSuspendedFromListing}
+     * only appends the strings.
+     *
+     * ⚠ The join is LEFT and the NULL arm is load-bearing: a member with
+     * no row here is NOT suspended and must stay listed. An INNER JOIN
+     * would silently drop everyone who has never been scored.
+     *
+     * ⚠ The alias is part of the contract with the caller, which uses it
+     * to detect a double append — `pre_user_query` can fire more than
+     * once on one query, and a second join would fail the whole listing
+     * with "Not unique table/alias".
+     *
+     * @return array{from: string, where: string, alias: string}
+     */
+    public function listingSuspensionClause(int $viewerId): array
+    {
+        global $wpdb;
+
+        $alias = 'bcc_f182';
+
+        return [
+            'alias' => $alias,
+            'from'  => " LEFT JOIN {$this->table} {$alias}"
+                . " ON {$alias}.user_id = {$wpdb->users}.ID",
+            // The viewer id is already an int, but it goes through
+            // prepare() anyway: the one place a reader checks for
+            // interpolation is a string built by hand.
+            'where' => (string) $wpdb->prepare(
+                " AND ({$alias}.is_suspended IS NULL"
+                . " OR {$alias}.is_suspended = 0"
+                . " OR {$wpdb->users}.ID = %d)",
+                $viewerId
+            ),
+        ];
+    }
+
+    /**
      * Get suspended user IDs from a set of user IDs.
      *
      * @param int[] $userIds
@@ -1439,6 +1482,49 @@ class UserInfoRepository {
              WHERE is_suspended = 1
                AND user_id IN ({$safe})"
         ));
+    }
+
+    /**
+     * Which of $userIds are suspended, or NULL when that could not be READ.
+     *
+     * getSuspendedUserIds() above answers `[]` on a database error
+     * (`get_col()` never returns null), which reads as "nobody is suspended";
+     * its callers rely on that. This variant is for display paths that must
+     * not guess: the feed's reactor faces drop entirely on null (F-90).
+     * Same trust test as HiddenActivityRepository::runRead(): query() can fail
+     * without setting last_error, so both signals are checked, and the rows
+     * come from last_result via get_col(null), which (unlike get_row(null))
+     * does read it.
+     *
+     * Bounded by the caller's id list (the feed passes at most 150).
+     *
+     * @param list<int> $userIds
+     * @return list<int>|null
+     */
+    public function suspendedAmongOrUnknown(array $userIds): ?array
+    {
+        global $wpdb;
+
+        $ids = array_values(array_filter(array_map('intval', $userIds), static fn (int $id): bool => $id > 0));
+        if ($ids === []) {
+            return [];
+        }
+
+        $sql = "SELECT user_id FROM {$this->table}
+                 WHERE is_suspended = 1
+                   AND user_id IN (" . implode(',', $ids) . ')';
+
+        $this->clearLastError();
+        $ok = $wpdb->query($sql);
+        if ($ok === false || $this->lastReadFailed()) {
+            \BCC\Core\Log\Logger::error('[UserInfoRepository] suspended-ids read failed', [
+                'ids'   => count($ids),
+                'error' => (string) $wpdb->last_error,
+            ]);
+            return null;
+        }
+
+        return array_values(array_map('intval', $wpdb->get_col(null)));
     }
 
     /**

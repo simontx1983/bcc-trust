@@ -273,8 +273,12 @@ jobs:
       # `install`, not `update` — see the note in the php job above (#191).
       - name: Install dependencies
         run: composer install --no-interaction --no-progress --prefer-dist
+      # F-96: --fail-on-skipped, in CI only. A fresh CI database trips none of
+      # the suite's skip guards (they protect a LOCAL run from overwriting real
+      # rows, or note a fixture the harness did not seed), so any skip here
+      # means a check silently stopped running. Local runs keep skipping.
       - name: Integration tests (real $wpdb vs MySQL)
-        run: composer test:integration
+        run: composer test:integration -- --fail-on-skipped
 
   # Production runs MariaDB 11.8, not MySQL 8, and the two engines do not
   # accept the same SQL. `FOR SHARE` is valid MySQL 8 and a parse error on

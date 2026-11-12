@@ -81,24 +81,29 @@ final class CommunityCustodyServiceTest extends TestCase
     public function testNonexistentGroupAndNonMemberBothCollapseTo404(): void
     {
         // Viewer has NO row at all (group may not even exist).
-        $none = $this->service(statuses: [])->transfer(self::OWNER, self::GROUP, self::RECEIVER);
+        $svc  = $this->service(statuses: []);
+        $none = $svc->transfer(self::OWNER, self::GROUP, self::RECEIVER);
         self::assertSame('bcc_not_found', $none['error'] ?? null);
+        self::assertSame([], $svc->writerCalls, 'F-96: a refusal writes nothing');
 
         // Pending / banned rows are NOT active membership — same 404, no leak.
         foreach (['pending_admin', 'banned', 'block_invites'] as $status) {
-            $result = $this->service(statuses: [self::OWNER => $status])
-                ->transfer(self::OWNER, self::GROUP, self::RECEIVER);
+            $svc    = $this->service(statuses: [self::OWNER => $status]);
+            $result = $svc->transfer(self::OWNER, self::GROUP, self::RECEIVER);
             self::assertSame('bcc_not_found', $result['error'] ?? null, "status {$status}");
+            self::assertSame([], $svc->writerCalls, "status {$status}: nothing written");
         }
     }
 
     public function testActiveMemberWhoIsNotOwnerGets403(): void
     {
         // Membership already proves existence to them — 403 leaks nothing.
-        $result = $this->service(statuses: [self::OWNER => 'member_manager', self::RECEIVER => 'member'])
-            ->transfer(self::OWNER, self::GROUP, self::RECEIVER);
+        $svc    = $this->service(statuses: [self::OWNER => 'member_manager', self::RECEIVER => 'member']);
+        $result = $svc->transfer(self::OWNER, self::GROUP, self::RECEIVER);
 
         self::assertSame('bcc_forbidden', $result['error'] ?? null);
+        // F-96: the refusal must also be the outcome — no custody write.
+        self::assertSame([], $svc->writerCalls);
     }
 
     public function testOnlyUserKindGroupsTransfer(): void

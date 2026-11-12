@@ -104,7 +104,14 @@ final class ScoreContributorService implements ScoreContributorInterface
              // need to route to the corresponding getter on PageScore, but
              // at present $column is always 'onchain_bonus' — a ternary on
              // $column would be dead code PHPStan rightly flags.
-            $existing = $this->scoreRepository->getByPageId($pageId);
+            // ...OrFail (F-101): reading "no row" after a failed read made the
+            // current bonus 0, so the velocity cap was measured against the
+            // full value. Abort the write instead; the caller retries.
+            try {
+                $existing = $this->scoreRepository->getByPageIdOrFail($pageId);
+            } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+                return false;
+            }
             $currentBonus = $existing ? (float) $existing->getOnchainBonus() : 0.0;
 
             $delta = $value - $currentBonus;

@@ -1544,7 +1544,9 @@ final class DelegatorGroupIntegrationTest extends TestCase
         // the rank notices are, so the actor is the member and fully resolved.
         self::assertSame(['id', 'handle', 'display_name', 'avatar_url'], array_keys($items[0]['actor']));
         self::assertSame(self::MEMBER, $items[0]['actor']['id']);
-        self::assertSame('user' . self::MEMBER, $items[0]['actor']['handle']);
+        // The fixture member has no bcc_handle, so the public handle is the
+        // PublicIdentity fallback, never the login ('user' . MEMBER here).
+        self::assertSame('member-' . self::MEMBER, $items[0]['actor']['handle']);
         self::assertSame('User ' . self::MEMBER, $items[0]['actor']['display_name']);
         self::assertNotSame('', $items[0]['actor']['avatar_url']);
     }

@@ -63,6 +63,7 @@ final class ModerationService
         'self'              => 'you cannot suspend yourself',
         'admin'             => 'an administrator cannot be suspended; remove their admin role first',
         'already_suspended' => 'already suspended',
+        'unverifiable'      => 'could not check whether they are already suspended; try again',
     ];
 
     /** Per-admin, short-lived: the names a bulk or ring suspend skipped, for the next page view. */
@@ -75,11 +76,17 @@ final class ModerationService
      *  - 'self': the acting admin;
      *  - 'admin': a manage_options account (demote first, user decision);
      *  - 'already_suspended': re-suspending wrote a SECOND suspensions row and
-     *    overwrote the original reason in fraud_triggers.
+     *    overwrote the original reason in fraud_triggers;
+     *  - 'unverifiable': the suspended read FAILED (#488 review L2). It used
+     *    to collapse to "not suspended" and re-suspend; now that member is
+     *    skipped and named, and the admin retries.
      *
-     * The suspended read goes to the table, not the row cache.
+     * The suspended read is UserInfoRepository::getByUserIdOrThrow() (#523):
+     * "no row" is null, a failed read THROWS and is never cached. It goes
+     * through the 5-minute row cache, which every suspend/unsuspend clears
+     * after its commit (F-114), so a cached row reflects the latest change.
      *
-     * @return 'self'|'admin'|'already_suspended'|null
+     * @return 'self'|'admin'|'already_suspended'|'unverifiable'|null
      */
     private function suspensionRefusal(int $userId, int $adminId): ?string
     {
@@ -89,7 +96,12 @@ final class ModerationService
         if (user_can($userId, 'manage_options')) {
             return 'admin';
         }
-        if ($this->userInfoRepository->getSuspendedUserIds([$userId]) !== []) {
+        try {
+            $row = $this->userInfoRepository->getByUserIdOrThrow($userId);
+        } catch (\BCC\Trust\Core\Exceptions\RepositoryException) {
+            return 'unverifiable';
+        }
+        if ($row !== null && (int) $row->is_suspended === 1) {
             return 'already_suspended';
         }
         return null;
@@ -119,8 +131,29 @@ final class ModerationService
             $this->userInfoRepository->suspendUser($userId, $reason);
         });
 
-        $this->userInfoRepository->notifySuspensionChanged($userId);
-        $this->revokeSessions($userId);
+        // COMMITTED. Nothing below may report the suspension as failed
+        // (#488 review L1): a throw here used to escape to the caller's
+        // catch, which logged suspend_failed and did not count a suspension
+        // that had landed.
+        $this->afterCommit('notify', $userId, fn () => $this->userInfoRepository->notifySuspensionChanged($userId));
+        $this->afterCommit('revoke_sessions', $userId, fn () => $this->revokeSessions($userId));
+    }
+
+    /**
+     * Run one after-commit step of a suspension change. A failure is logged
+     * and swallowed: the database change is already committed and stands.
+     */
+    private function afterCommit(string $step, int $userId, \Closure $work): void
+    {
+        try {
+            $work();
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] suspend_followup_failed', [
+                'step'    => $step,
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -135,7 +168,7 @@ final class ModerationService
             $this->userInfoRepository->unsuspendUser($userId);
         });
 
-        $this->userInfoRepository->notifySuspensionChanged($userId);
+        $this->afterCommit('notify', $userId, fn () => $this->userInfoRepository->notifySuspensionChanged($userId));
     }
 
     /**
@@ -487,16 +520,17 @@ final class ModerationService
             return ['success' => false, 'message' => 'Override reason is required.'];
         }
 
-        // Determine tier from new score, via the canonical ladder.
+        // The admin's INTENT: does this target grant Elite? Evaluated as fiat
+        // (gate and native floor treated as met), it decides only the elite
+        // PIN below, which keeps the eligibility flag set until an admin
+        // removes it.
         //
-        // §J.12: an admin override is explicit fiat, so it is evaluated as a
-        // STICKY GRANT — the native-conduct floor and the eligibility gate are
-        // both satisfied by the admin's decision (there are no score
-        // components to measure here; the admin is setting the score
-        // directly). The flag is then persisted below so the nightly
-        // eligibility sweep does not silently revert the override, which
-        // would otherwise present as an admin action that "didn't take".
-        $tier = TrustScoreService::tierFor((float) $newScore, (float) $newScore, true);
+        // ⚠ It is NOT the tier the pages end up with (F-177). The stored tier
+        // still applies the native-conduct floor, where native = the score
+        // WITHOUT onchain_bonus (user decision: on-chain depth alone must not
+        // mint Elite). So the notice reports each page's real tier, read back
+        // below, and never this intent.
+        $grantElite = TrustScoreService::tierFor((float) $newScore, (float) $newScore, true) === 'elite';
 
         // One override or undo per user at a time: the ledger is a
         // read-modify-write, and two admins racing would double-apply.
@@ -512,6 +546,8 @@ final class ModerationService
         $ledgerId = '';
         /** @var array<int, array{delta: float, prev_pin: array{admin_id: int, granted_at: string}|null}> $ledgerPages */
         $ledgerPages = [];
+        /** @var array<int, string> $pageTiers page id => the tier the page actually has now */
+        $pageTiers = [];
 
         try {
             $affectedPageIds = $this->scoreRepository->getPageIdsByOwner($userId);
@@ -556,7 +592,7 @@ final class ModerationService
                 //    nightly sweep honours. Any other target REMOVES a pin
                 //    and re-evaluates the flag, so an earlier manual grant
                 //    can no longer outlive an override down.
-                if ($tier === 'elite') {
+                if ($grantElite) {
                     $this->elitePin->pin($pid, $adminId, $now);
                     $this->scoreRepository->setEliteEligibility($pid, true, $now);
                 } else {
@@ -568,9 +604,11 @@ final class ModerationService
                 //    priority-20 subscriber — proving durability on the spot.
                 do_action('bcc.trust.recalculate_score', $pid);
 
-                if ($tier !== 'elite') {
+                if (!$grantElite) {
                     $this->recomputeElite($pid);
                 }
+
+                $pageTiers[$pid] = $this->resultingTier($pid);
             }
 
             $ledgerId = $ledgerPages === []
@@ -580,21 +618,77 @@ final class ModerationService
             \BCC\Core\DB\AdvisoryLock::release($lock);
         }
 
+        $tierSummary = self::summariseTiers($pageTiers);
+
         $this->logAction('admin_score_override', $userId, [
             'new_score'     => $newScore,
-            'new_tier'      => $tier,
+            'new_tier'      => $tierSummary,
+            'page_tiers'    => $pageTiers,
             'reason'        => $reason,
             'pages_updated' => $updated,
             'ledger_id'     => $ledgerId,
-            'elite_pinned'  => $tier === 'elite',
+            'elite_pinned'  => $grantElite,
         ]);
 
-        $eliteNote = $tier === 'elite' ? ' Elite granted manually; stays until removed.' : '';
+        $eliteNote = '';
+        if ($grantElite) {
+            $eliteNote = ' Elite granted manually; stays until removed.';
+            $belowFloor = count(array_filter($pageTiers, static fn (string $t): bool => $t !== 'elite'));
+            if ($belowFloor > 0) {
+                $eliteNote .= sprintf(
+                    ' %d page(s) stay below Elite until their native score (without the on-chain bonus) reaches %d.',
+                    $belowFloor,
+                    (int) TrustScoreService::eliteNativeFloor()
+                );
+            }
+        }
         $undoNote  = ($ledgerPages !== [] && $ledgerId === '')
             ? ' ⚠ The undo record could not be saved, so this override cannot be undone.'
             : '';
-        echo '<div class="notice notice-success"><p>Trust score overridden to <strong>' . $newScore . '</strong> (' . esc_html($tier) . ') for ' . intval($updated) . ' page(s). Reason: ' . esc_html($reason) . '.' . esc_html($eliteNote . $undoNote) . '</p></div>';
-        return ['success' => true, 'message' => 'Trust score overridden.', 'tier' => $tier, 'pages_updated' => $updated, 'ledger_id' => $ledgerId];
+        echo '<div class="notice notice-success"><p>Trust score overridden to <strong>' . $newScore . '</strong> (' . esc_html($tierSummary) . ') for ' . intval($updated) . ' page(s). Reason: ' . esc_html($reason) . '.' . esc_html($eliteNote . $undoNote) . '</p></div>';
+        return ['success' => true, 'message' => 'Trust score overridden.', 'tier' => $tierSummary, 'page_tiers' => $pageTiers, 'pages_updated' => $updated, 'ledger_id' => $ledgerId];
+    }
+
+    /**
+     * The tier a page has NOW, by the canonical ladder with the same inputs
+     * the stored tier uses (F-177): the total score, the NATIVE score
+     * (without onchain_bonus, clamped independently: computeNative) and the
+     * resolved elite gate. Read back after the override's recompute, so the
+     * admin notice can never claim a tier the page did not get.
+     */
+    private function resultingTier(int $pageId): string
+    {
+        $row = $this->scoreRepository->getByPageId($pageId);
+        if ($row === null) {
+            return 'unknown';
+        }
+        $native = TrustScoreService::computeNative(
+            $row->getPositiveScore(),
+            $row->getNegativeScore(),
+            $row->getContributionBonus(),
+            $row->getPenaltyAdjustment(),
+            $row->getAttestationBonus()
+        );
+        // isEliteEligible() already resolves the never-evaluated grandfather case.
+        return TrustScoreService::tierFor($row->getTotalScore(), $native, $row->isEliteEligible());
+    }
+
+    /**
+     * "elite", or for pages that differ "elite ×1, trusted ×2".
+     *
+     * @param array<int, string> $pageTiers
+     */
+    private static function summariseTiers(array $pageTiers): string
+    {
+        $counts = array_count_values($pageTiers);
+        if (count($counts) <= 1) {
+            return (string) (array_key_first($counts) ?? 'no pages');
+        }
+        $parts = [];
+        foreach ($counts as $tier => $n) {
+            $parts[] = $tier . ' ×' . $n;
+        }
+        return implode(', ', $parts);
     }
 
     /**

@@ -56,6 +56,14 @@ final class HeliusDeliveryLog
     public const OPTION_KEY   = 'bcc_helius_delivery_log';
     public const MAX_ENTRIES  = 200;
 
+    /**
+     * F-186: most auth_failed rows the ring ever holds. A newer auth_failed
+     * replaces the OLDEST auth_failed, never a real delivery row, so a
+     * sustained junk flood (≈5 rows/min after F-49) can no longer fill the
+     * ring and evict the delivery history the admin page relies on.
+     */
+    public const MAX_AUTH_FAILED_ENTRIES = 10;
+
     /** Valid outcome values. Mirrored in the admin renderer for badge coloring. */
     public const OUTCOME_AUTH_FAILED = 'auth_failed';
     public const OUTCOME_NO_PAYLOAD  = 'no_payload';
@@ -92,6 +100,26 @@ final class HeliusDeliveryLog
         $current = get_option(self::OPTION_KEY, []);
         if (!is_array($current)) {
             $current = [];
+        }
+
+        $current = array_values($current);
+
+        // F-186: keep auth_failed rows to MAX_AUTH_FAILED_ENTRIES by dropping
+        // the oldest auth_failed rows (never a real delivery) before appending.
+        if ($normalized['outcome'] === self::OUTCOME_AUTH_FAILED) {
+            $authFailedIdx = [];
+            foreach ($current as $i => $row) {
+                if (is_array($row) && ($row['outcome'] ?? '') === self::OUTCOME_AUTH_FAILED) {
+                    $authFailedIdx[] = $i;
+                }
+            }
+            $excess = count($authFailedIdx) - (self::MAX_AUTH_FAILED_ENTRIES - 1);
+            if ($excess > 0) {
+                foreach (array_slice($authFailedIdx, 0, $excess) as $i) {
+                    unset($current[$i]);
+                }
+                $current = array_values($current);
+            }
         }
 
         $current[] = $normalized;

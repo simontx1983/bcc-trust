@@ -232,11 +232,9 @@ final class NotificationViewService
                 'avatar_url'   => '',
             ];
         }
-        $handle = (string) get_user_meta($userId, 'bcc_handle', true);
-        if ($handle === '') {
-            $handle = $user->user_login;
-        }
-        $displayName = $user->display_name !== '' ? $user->display_name : $handle;
+        $identity    = \BCC\Trust\Core\Support\PublicIdentity::forUser($user);
+        $handle      = $identity['handle'];
+        $displayName = $identity['display_name'];
 
         return [
             'id'           => $userId,

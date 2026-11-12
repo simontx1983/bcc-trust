@@ -145,10 +145,15 @@ final class BonusService
         }
 
         try {
-            $signalBonus = array_sum(array_column(
-                SignalRepository::get_for_page($pageId),
-                'score_contribution'
-            ));
+            // F-101: a failed signal read must not be written as a
+            // claims-only bonus; retry later, as on lock contention.
+            try {
+                $signalRows = SignalRepository::get_for_page($pageId);
+            } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+                BonusRetryService::queue($pageId, 0.0);
+                return;
+            }
+            $signalBonus = array_sum(array_column($signalRows, 'score_contribution'));
 
             $claimBonus = ClaimRepository::computePageClaimBonus($userId);
 

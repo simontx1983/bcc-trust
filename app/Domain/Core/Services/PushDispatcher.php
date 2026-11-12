@@ -41,6 +41,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Cron\AsyncDispatcher;
 use BCC\Core\Http\SafeHttpClient;
 use BCC\Core\Log\Logger;
+use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Trust\Core\Repositories\PushSubscriptionRepository;
 use BCC\Trust\Core\Support\NotificationPrefs;
 use BCC\Trust\Core\Support\PushMetrics;
@@ -122,11 +123,17 @@ final class PushDispatcher
      * or per-event OFF) — the bell still wrote; we just skip the push
      * channel for this user.
      *
+     * F-74: a push never crosses a block. When the event has a person
+     * behind it ($actorId > 0), a block in EITHER direction drops this push,
+     * and so does a block table that cannot be read (fail closed, as F-99).
+     * The bell is unaffected: PeepSo applies blocks to it on its own path.
+     * System events (no actor) pass 0.
+     *
      * @param array<string, mixed> $payload Free-form metadata for body
      *   rendering. Keys consumed by PushPayload: actor_handle, page_id,
      *   page_name, dispute_id, outcome.
      */
-    public function enqueue(int $recipientId, string $eventType, array $payload): void
+    public function enqueue(int $recipientId, string $eventType, array $payload, int $actorId = 0): void
     {
         if ($recipientId <= 0) {
             return;
@@ -145,6 +152,19 @@ final class PushDispatcher
         if (!NotificationPrefs::isPushEnabled($recipientId, $eventType)) {
             return;
         }
+        if ($actorId > 0) {
+            $blocked = PeepSoBlockRepository::isMutuallyBlockedOrUnknown($recipientId, $actorId);
+            if ($blocked !== false) {
+                if ($blocked === null) {
+                    // Never silent: an unreadable block table drops pushes.
+                    Logger::warning('[PushDispatcher] enqueue dropped: block state unreadable', [
+                        'event_type'   => $eventType,
+                        'recipient_id' => $recipientId,
+                    ]);
+                }
+                return;
+            }
+        }
 
         $key      = self::queueKey($recipientId, $eventType);
         $existing = get_transient($key);
@@ -156,6 +176,8 @@ final class PushDispatcher
                     'count'         => 1,
                     'first_payload' => $payload,
                     'first_at'      => time(),
+                    // F-189: who contributed, so flush() can re-check blocks.
+                    'actors'        => [$actorId => ['n' => 1, 'payload' => $payload]],
                 ],
                 self::QUEUE_TTL
             );
@@ -170,12 +192,71 @@ final class PushDispatcher
 
         // Subsequent event in the same window — accumulate. The
         // already-scheduled flush will pick this up.
+        $actors = isset($existing['actors']) && is_array($existing['actors']) ? $existing['actors'] : [];
+        if (isset($actors[$actorId]) && is_array($actors[$actorId])) {
+            $actors[$actorId]['n'] = (int) ($actors[$actorId]['n'] ?? 0) + 1;
+        } elseif (count($actors) < self::MAX_TRACKED_ACTORS) {
+            $actors[$actorId] = ['n' => 1, 'payload' => $payload];
+        } else {
+            // F-189: an actor beyond the cap could not be re-checked for a
+            // block at flush, so their event is not counted (fail closed).
+            return;
+        }
+        $existing['actors']    = $actors;
         $count                 = isset($existing['count']) && is_int($existing['count']) ? $existing['count'] : 0;
         $existing['count']     = $count + 1;
         if (!isset($existing['first_payload'])) {
             $existing['first_payload'] = $payload;
         }
         set_transient($key, $existing, self::QUEUE_TTL);
+    }
+
+    /** F-189: distinct actors one debounce window tracks for the flush-time block re-check. */
+    private const MAX_TRACKED_ACTORS = 50;
+
+    /**
+     * F-189: re-check, at send time, every actor counted into a queued push.
+     * A block created AFTER an event was queued must still stop it: the
+     * enqueue-time check (F-74) only saw the moment of enqueue, and the
+     * window stays open for 5 minutes.
+     *
+     * An actor now blocked in either direction, OR whose block state cannot
+     * be read (fail closed, as F-99; the probe has no cache, so a failed
+     * read is never remembered), is removed with all of their events. The
+     * push names the first actor who remains. System events (actor 0) are
+     * never looked up.
+     *
+     * @param array<int|string, mixed> $actors the queue's 'actors' map
+     * @return array{count: int, first_payload: array<string, mixed>}
+     */
+    private function survivingEvents(int $recipientId, string $eventType, array $actors): array
+    {
+        $count        = 0;
+        $firstPayload = null;
+        foreach ($actors as $actorKey => $entry) {
+            $actorId = (int) $actorKey;
+            $n       = is_array($entry) ? (int) ($entry['n'] ?? 0) : 0;
+            if ($n <= 0) {
+                continue;
+            }
+            if ($actorId > 0) {
+                $blocked = PeepSoBlockRepository::isMutuallyBlockedOrUnknown($recipientId, $actorId);
+                if ($blocked !== false) {
+                    if ($blocked === null) {
+                        Logger::warning('[PushDispatcher] flush dropped an actor: block state unreadable', [
+                            'event_type'   => $eventType,
+                            'recipient_id' => $recipientId,
+                        ]);
+                    }
+                    continue;
+                }
+            }
+            $count += $n;
+            if ($firstPayload === null) {
+                $firstPayload = is_array($entry['payload'] ?? null) ? $entry['payload'] : [];
+            }
+        }
+        return ['count' => $count, 'first_payload' => $firstPayload ?? []];
     }
 
     /**
@@ -203,8 +284,17 @@ final class PushDispatcher
         if (!is_array($data)) {
             return;
         }
-        $count        = isset($data['count']) && is_int($data['count']) ? $data['count'] : 0;
-        $firstPayload = isset($data['first_payload']) && is_array($data['first_payload']) ? $data['first_payload'] : [];
+        if (isset($data['actors']) && is_array($data['actors'])) {
+            // F-189: only the events of actors still unblocked are sent.
+            $surviving    = $this->survivingEvents($recipientId, $eventType, $data['actors']);
+            $count        = $surviving['count'];
+            $firstPayload = $surviving['first_payload'];
+        } else {
+            // A window queued before F-189 (no actor list): sent as queued.
+            // Its events already passed F-74's enqueue-time check.
+            $count        = isset($data['count']) && is_int($data['count']) ? $data['count'] : 0;
+            $firstPayload = isset($data['first_payload']) && is_array($data['first_payload']) ? $data['first_payload'] : [];
+        }
         if ($count <= 0) {
             return;
         }

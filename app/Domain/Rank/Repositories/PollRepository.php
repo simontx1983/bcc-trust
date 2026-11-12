@@ -46,6 +46,8 @@ if (!defined('ABSPATH')) {
  */
 class PollRepository
 {
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+
     /** Cache group for per-poll generation counters (§5). */
     private const CACHE_GROUP = 'bcc_rank_polls';
 
@@ -136,11 +138,19 @@ class PollRepository
 
         global $wpdb;
 
+        // F-101: a failed read used to be cached as 'none' for CACHE_TTL,
+        // so the poll 404'd and every cast was refused. It now reads as
+        // null for this call only.
+        try {
+            $rows = self::runRead((string) $wpdb->prepare(
+                'SELECT ' . self::COLUMNS . " FROM {$this->table} WHERE id = %d",
+                $pollId
+            ), __FUNCTION__, true);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+            return null;
+        }
         /** @var PollRow|null $row */
-        $row = $wpdb->get_row($wpdb->prepare(
-            'SELECT ' . self::COLUMNS . " FROM {$this->table} WHERE id = %d",
-            $pollId
-        ));
+        $row = $rows[0] ?? null;
 
         wp_cache_set($cacheKey, $row ?? 'none', self::CACHE_GROUP, self::CACHE_TTL);
 

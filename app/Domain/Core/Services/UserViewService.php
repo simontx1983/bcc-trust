@@ -144,7 +144,7 @@ final class UserViewService
         // §K2: when the viewer isn't the owner, apply each toggle to the
         // outgoing fields. Owner always sees full data so the settings
         // surface can show "you've hidden X" without lying to itself.
-        $displayName  = $user->display_name !== '' ? $user->display_name : $user->user_login;
+        $displayName  = \BCC\Trust\Core\Support\PublicIdentity::displayName($user->display_name, $user->user_login, $handle);
         $effectiveName = (!$isSelf && $privacy['real_name_hidden'])
             ? '@' . $handle
             : $displayName;
@@ -399,7 +399,7 @@ final class UserViewService
         $state = $prefetched['member_states'][$userId]
             ?? $this->rankStateService->memberState($userId);
 
-        $displayName  = $user->display_name !== '' ? $user->display_name : $user->user_login;
+        $displayName  = \BCC\Trust\Core\Support\PublicIdentity::displayName($user->display_name, $user->user_login, $handle);
         $effectiveName = (!$isSelf && $privacy['real_name_hidden'])
             ? '@' . $handle
             : $displayName;
@@ -783,11 +783,10 @@ final class UserViewService
 
     private static function resolveHandle(\WP_User $user): string
     {
-        $handle = (string) get_user_meta($user->ID, 'bcc_handle', true);
-        if ($handle !== '') {
-            return $handle;
-        }
-        return $user->user_login; // fallback for users without a bcc_handle yet
+        return \BCC\Trust\Core\Support\PublicIdentity::handle(
+            (int) $user->ID,
+            get_user_meta($user->ID, 'bcc_handle', true)
+        );
     }
 
     /**

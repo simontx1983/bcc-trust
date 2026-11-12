@@ -26,6 +26,8 @@ if (!defined('ABSPATH')) {
  */
 final class CollectionSignalRepository
 {
+    use GuardsReadFailures;
+
     public const STANCE_WAITLIST = 'waitlist';
     public const STANCE_SPAM     = 'spam';
 
@@ -180,20 +182,25 @@ final class CollectionSignalRepository
         }
         $params[] = $limit;
 
-        /** @var list<SignalCountRow>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT chain_id, contract_address,
-                    SUM(stance = %s) AS waitlist_count,
-                    SUM(stance = %s) AS spam_count
-             FROM {$table}
-             {$where}
-             GROUP BY chain_id, contract_address
-             ORDER BY waitlist_count DESC
-             LIMIT %d",
-            $params
-        ));
+        // F-101: a failed read used to cache [] ("no waitlist/spam signals")
+        // for 5 minutes. It now answers [] for this call only.
+        try {
+            /** @var list<SignalCountRow> $rows */
+            $rows = self::runRead((string) $wpdb->prepare(
+                "SELECT chain_id, contract_address,
+                        SUM(stance = %s) AS waitlist_count,
+                        SUM(stance = %s) AS spam_count
+                 FROM {$table}
+                 {$where}
+                 GROUP BY chain_id, contract_address
+                 ORDER BY waitlist_count DESC
+                 LIMIT %d",
+                $params
+            ), __FUNCTION__, true);
+        } catch (RepositoryReadFailure) {
+            return [];
+        }
 
-        $rows = $rows ?: [];
         wp_cache_set($cacheKey, $rows, self::CACHE_GROUP, 5 * MINUTE_IN_SECONDS);
         return $rows;
     }

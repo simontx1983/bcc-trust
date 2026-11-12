@@ -212,7 +212,7 @@ final class NotificationDispatcher
                 'actor_handle' => $actorHandle,
                 'page_id'      => $pageId,
                 'page_name'    => $pageName,
-            ]);
+            ], $authorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] review dispatch failed', [
                 'author_id' => $authorId,
@@ -748,7 +748,7 @@ final class NotificationDispatcher
                 'post_id'      => $postId,
                 'act_id'       => $actId,
                 'is_comment'   => $isComment,
-            ]);
+            ], $authorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] mention dispatch failed', [
                 'author_id'    => $authorId,
@@ -915,7 +915,7 @@ final class NotificationDispatcher
                 'hall_name'    => $hallName,
                 'hall_slug'    => $hallSlug,
                 'act_id'       => $actId,
-            ]);
+            ], $authorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] hall-post dispatch failed', [
                 'author_id'    => $authorId,
@@ -1125,7 +1125,7 @@ final class NotificationDispatcher
             // PushPayload::forCommentReceived branches its copy on this.
             $payload['is_reply'] = true;
         }
-        $this->pushDispatcher->enqueue($recipientId, 'comment_received', $payload);
+        $this->pushDispatcher->enqueue($recipientId, 'comment_received', $payload, $commenterId);
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1201,7 +1201,7 @@ final class NotificationDispatcher
                 'target_kind'     => $targetKind,
                 'target_id'       => $targetId,
                 'kind'            => $kind,
-            ]);
+            ], $attestorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] attestation-created dispatch failed', [
                 'attestor_id'    => $attestorId,
@@ -1291,7 +1291,7 @@ final class NotificationDispatcher
                 'target_kind'     => $targetKind,
                 'target_id'       => $targetId,
                 'kind'            => $kind,
-            ]);
+            ], $attestorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] attestation-revoked dispatch failed', [
                 'attestor_id'    => $attestorId,
@@ -1348,7 +1348,7 @@ final class NotificationDispatcher
                 'target_kind'     => $targetKind,
                 'target_id'       => $targetId,
                 'kind'            => $kind,
-            ]);
+            ], $attestorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] attestation-reaffirmed dispatch failed', [
                 'attestor_id'    => $attestorId,
@@ -1773,11 +1773,10 @@ final class NotificationDispatcher
         if ($handle !== '') {
             return $handle;
         }
-        $user = get_userdata($userId);
-        if ($user === false) {
+        if (get_userdata($userId) === false) {
             return 'someone';
         }
-        return $user->user_login !== '' ? $user->user_login : 'someone';
+        return \BCC\Trust\Core\Support\PublicIdentity::handle($userId, '');
     }
 
     private static function resolvePageName(int $pageId): string

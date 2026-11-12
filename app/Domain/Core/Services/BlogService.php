@@ -801,8 +801,7 @@ final class BlogService
             ];
         }
 
-        $handleRaw = get_user_meta($userId, 'bcc_handle', true);
-        $handle    = is_string($handleRaw) && $handleRaw !== '' ? $handleRaw : $user->user_login;
+        $handle    = \BCC\Trust\Core\Support\PublicIdentity::handle($userId, get_user_meta($userId, 'bcc_handle', true));
         // Cached seam (honors the avatar-change bust hook), not raw get_avatar_url.
         $avatarUrl = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrl($userId);
 
@@ -810,7 +809,7 @@ final class BlogService
             'kind'                  => 'user',
             'id'                    => $userId,
             'handle'                => $handle,
-            'display_name'          => $user->display_name !== '' ? $user->display_name : $user->user_login,
+            'display_name'          => \BCC\Trust\Core\Support\PublicIdentity::displayName($user->display_name, $user->user_login, $handle),
             'avatar_url'            => $avatarUrl,
             // Trust-derived fields — leave as conservative defaults.
             // The blog tab is a per-user surface; the profile header

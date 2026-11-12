@@ -252,6 +252,15 @@ final class NftPieceViewModelBuilder
         // ── 8. Indexer state (forwarded per §3.6) ───────────────────
         $indexer = HoldingsService::getIndexerStateForChain($chainSlug);
 
+        // Token-level images are upstream-controlled (CW-721 extension,
+        // Alchemy, Helius) and rendered as <img> for every viewer, so they
+        // pass the same rule as collection images: https only, IPFS moved
+        // onto the configured gateway with an ipfs.io fallback (F-165).
+        // Applied here, at composition, so a FRESH cache row written
+        // before this rule cannot bypass it.
+        $image = CollectionMetadataRules::presentImage($pieceMeta['image_url']);
+        $thumb = CollectionMetadataRules::presentImage($pieceMeta['image_url_thumb']);
+
         // ── 9. Compose envelope ─────────────────────────────────────
         $viewModel = [
             'id' => self::buildOpaqueId($chainSlug, $normalizedContract, $tokenId),
@@ -264,16 +273,10 @@ final class NftPieceViewModelBuilder
             'token_id'         => $tokenId,
             'name'             => $pieceMeta['name'],
             'description'      => $pieceMeta['description'],
-            // Token-level images are upstream-controlled (CW-721 extension,
-            // Alchemy, Helius) and rendered as <img> for every viewer, so
-            // they pass the same rule as collection images: https only.
-            // Applied here, at composition, so a FRESH cache row written
-            // before this rule cannot bypass it. ipfs:// is refused, not
-            // rewritten: browsers cannot load it, and there is no gateway
-            // rewrite anywhere today, so it degrades to the null
-            // placeholder instead of a broken image.
-            'image_url'        => CollectionMetadataRules::sanitizeImageUrl($pieceMeta['image_url']),
-            'image_url_thumb'  => CollectionMetadataRules::sanitizeImageUrl($pieceMeta['image_url_thumb']),
+            'image_url'                    => $image['url'],
+            'image_fallback_url'           => $image['fallback_url'],
+            'image_url_thumb'              => $thumb['url'],
+            'image_url_thumb_fallback_url' => $thumb['fallback_url'],
             'attributes'       => $pieceMeta['attributes'],
             'owner'            => $dominantOwner,
             'owners_count'     => $ownersCount,

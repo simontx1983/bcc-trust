@@ -48,6 +48,8 @@ if (!defined('ABSPATH')) {
  */
 final class AttestorReliabilityCacheRepository
 {
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+
     /** Explicit column list for bcc_attestor_reliability_cache (no SELECT *). */
     private const COLUMNS = 'user_id, operator_reliability, reliability_standing, consensus_reliability, early_read_accuracy, attestation_count, trend, reliability_baseline, baseline_at, targets_disputed_and_upheld, targets_disputed_and_dismissed, targets_received_further_attestations, targets_clean_and_active, computed_at';
 
@@ -92,12 +94,17 @@ final class AttestorReliabilityCacheRepository
             return $cached === 'null' ? null : $cached;
         }
 
-        $row = $wpdb->get_row(
-            $wpdb->prepare(
+        // F-101: a failed read used to be cached as 'null' (no reliability
+        // row) for CACHE_TTL; it now reads as null for this call only.
+        try {
+            $rows = self::runRead((string) $wpdb->prepare(
                 "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE user_id = %d LIMIT 1",
                 $userId
-            )
-        );
+            ), __FUNCTION__, true);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+            return null;
+        }
+        $row = $rows[0] ?? null;
 
         if (!is_object($row)) {
             wp_cache_set($cacheKey, 'null', self::CACHE_GROUP, self::CACHE_TTL);
