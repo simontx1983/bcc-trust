@@ -492,6 +492,7 @@ return array(
     'BCC\\Trust\\Onchain\\Services\\NftDiscoveryControlPlaneSnapshot' => $baseDir . '/app/Domain/Onchain/Services/NftDiscoveryControlPlaneSnapshot.php',
     'BCC\\Trust\\Onchain\\Services\\NftEnrichmentService' => $baseDir . '/app/Domain/Onchain/Services/NftEnrichmentService.php',
     'BCC\\Trust\\Onchain\\Services\\NftGroupGateService' => $baseDir . '/app/Domain/Onchain/Services/NftGroupGateService.php',
+    'BCC\\Trust\\Onchain\\Services\\NftGroupReconcileSweepService' => $baseDir . '/app/Domain/Onchain/Services/NftGroupReconcileSweepService.php',
     'BCC\\Trust\\Onchain\\Services\\NftGroupRevokeService' => $baseDir . '/app/Domain/Onchain/Services/NftGroupRevokeService.php',
     'BCC\\Trust\\Onchain\\Services\\NftHoldingsIndexer' => $baseDir . '/app/Domain/Onchain/Services/NftHoldingsIndexer.php',
     'BCC\\Trust\\Onchain\\Services\\NftIndexerHealthSnapshot' => $baseDir . '/app/Domain/Onchain/Services/NftIndexerHealthSnapshot.php',

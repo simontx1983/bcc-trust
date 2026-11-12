@@ -97,4 +97,12 @@ final class OnchainPlugin
             $this->delegationEligibilityService()
         );
     }
+
+    private ?\BCC\Trust\Onchain\Services\NftGroupReconcileSweepService $nftGroupReconcileSweepService = null;
+    public function nftGroupReconcileSweepService(): \BCC\Trust\Onchain\Services\NftGroupReconcileSweepService
+    {
+        return $this->nftGroupReconcileSweepService ??= new \BCC\Trust\Onchain\Services\NftGroupReconcileSweepService(
+            $this->nftGroupGateService()
+        );
+    }
 }
