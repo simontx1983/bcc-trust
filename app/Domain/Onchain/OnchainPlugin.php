@@ -36,6 +36,14 @@ final class OnchainPlugin
         return $this->nftGroupGateService ??= new NftGroupGateService();
     }
 
+    private ?\BCC\Trust\Onchain\Services\NftGroupReconcileSweepService $nftGroupReconcileSweepService = null;
+    public function nftGroupReconcileSweepService(): \BCC\Trust\Onchain\Services\NftGroupReconcileSweepService
+    {
+        return $this->nftGroupReconcileSweepService ??= new \BCC\Trust\Onchain\Services\NftGroupReconcileSweepService(
+            $this->nftGroupGateService()
+        );
+    }
+
     private ?\BCC\Trust\Onchain\Services\NftGroupRevokeService $nftGroupRevokeService = null;
     public function nftGroupRevokeService(): \BCC\Trust\Onchain\Services\NftGroupRevokeService
     {

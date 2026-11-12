@@ -648,6 +648,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Services\\NftDiscoveryControlPlaneSnapshot' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/NftDiscoveryControlPlaneSnapshot.php',
         'BCC\\Trust\\Onchain\\Services\\NftEnrichmentService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/NftEnrichmentService.php',
         'BCC\\Trust\\Onchain\\Services\\NftGroupGateService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/NftGroupGateService.php',
+        'BCC\\Trust\\Onchain\\Services\\NftGroupReconcileSweepService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/NftGroupReconcileSweepService.php',
         'BCC\\Trust\\Onchain\\Services\\NftGroupRevokeService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/NftGroupRevokeService.php',
         'BCC\\Trust\\Onchain\\Services\\NftHoldingsIndexer' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/NftHoldingsIndexer.php',
         'BCC\\Trust\\Onchain\\Services\\NftIndexerHealthSnapshot' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/NftIndexerHealthSnapshot.php',

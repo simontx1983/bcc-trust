@@ -1180,52 +1180,19 @@ add_action('bcc_trust_daily_attestation_decay', static function (): void {
 });
 
 add_action('bcc_gated_group_reconcile_sweep', function () {
-    // Rotation cursor — without it the prior `ORDER BY ID ASC LIMIT 20`
-    // re-processed the SAME first-20 opted-in users on every tick forever,
-    // so the 21st-onward auto-join users were never reconciled. Mirrors
-    // CronService::dailyFraudRefresh: page forward by user_id, advance the
-    // cursor to the largest id returned, wrap to 0 on a short batch.
-    $batchSize    = 20;
-    $cursorOption = 'bcc_gated_group_reconcile_cursor';
-    $afterId      = (int) get_option($cursorOption, 0);
-
-    // Cursor-paged via the repository (§1 — no direct $wpdb in bootstrap).
-    $userIds = \BCC\Trust\Onchain\Repositories\GatedGroupRepository::listAutoJoinUserIdsAfter(
-        $afterId,
-        $batchSize
-    );
-
-    if ($userIds === []) {
-        // End of the cursor — reset so the next tick wraps to the start.
-        if ($afterId > 0) {
-            update_option($cursorOption, 0, false);
+    // F-93: bounded, rotated auto-join walk over opted-in holders, under a
+    // single-runner lock, with the cursor saved AFTER each user and one
+    // user's failure isolated. See NftGroupReconcileSweepService.
+    try {
+        $stats = \BCC\Trust\Onchain\OnchainPlugin::instance()
+            ->nftGroupReconcileSweepService()
+            ->sweep();
+        if ($stats['users_touched'] > 0 || $stats['errored'] > 0) {
+            \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group reconcile sweep', $stats);
         }
-        return;
-    }
-
-    // Advance the cursor to the largest id returned. A short batch
-    // (< $batchSize) means we reached the end → wrap to 0 next tick.
-    $maxReturned = (int) max(array_map('intval', $userIds));
-    $nextCursor  = count($userIds) < $batchSize ? 0 : $maxReturned;
-    update_option($cursorOption, $nextCursor, false);
-
-    $service     = \BCC\Trust\Onchain\OnchainPlugin::instance()->nftGroupGateService();
-    $totalJoined = 0;
-    $usersTouched = 0;
-
-    foreach ($userIds as $uid) {
-        $result = $service->reconcileForUser((int) $uid);
-        if ($result['joined'] > 0) {
-            $totalJoined += $result['joined'];
-            $usersTouched++;
-        }
-    }
-
-    if ($usersTouched > 0) {
-        \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group reconcile sweep', [
-            'users_eligible' => count($userIds),
-            'users_touched'  => $usersTouched,
-            'joins_total'    => $totalJoined,
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::warning('[bcc-trust] Holder-group reconcile sweep failed', [
+            'error' => $e->getMessage(),
         ]);
     }
 });
