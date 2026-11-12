@@ -2199,7 +2199,12 @@ class VoteRepository {
 
         $scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
 
-        return $wpdb->get_results( $wpdb->prepare(
+        // F-209: FAIL-CLOSED. A failed read used to come back as [] —
+        // "no mutual pairs" — which detectVoteRings() then cached for an
+        // hour and the daily cron for a day, hiding every ring from every
+        // consumer. Throwing keeps a failure from ever being cached.
+        /** @var list<MutualVotePair> */
+        return self::runRead( $wpdb->prepare(
             "SELECT
                 v1.voter_user_id as user_a,
                 v2.voter_user_id as user_b,
@@ -2223,7 +2228,7 @@ class VoteRepository {
             max( 0, $afterUserB ),
             $minSize,
             $pageLimit
-        ) );
+        ), __FUNCTION__, true );
     }
 
     /**

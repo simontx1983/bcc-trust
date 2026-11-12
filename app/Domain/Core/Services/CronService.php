@@ -316,7 +316,18 @@ class CronService
 
             // Ring / sybil detection (cache results for FraudDetector lookups)
             $ringMinSize = defined('BCC_TRUST_RING_MIN_SIZE') ? BCC_TRUST_RING_MIN_SIZE : 3;
-            $rings       = $graph->getSuspiciousClusters($ringMinSize);
+            // F-209: the ring reads FAIL CLOSED. On a failed read do NOT
+            // write ring_results — caching [] would hide every ring from
+            // the admin dashboard and FraudDetector for a day. The last
+            // good value stays until its own TTL; PageRank above is done.
+            try {
+                $rings = $graph->getSuspiciousClusters($ringMinSize);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] ring detection failed — ring_results left unchanged', [
+                    'error' => $e->getMessage(),
+                ]);
+                return;
+            }
             // Shared cache key with AdminDashboardRepository::getRingsData()
             wp_cache_set('ring_results', $rings, 'bcc_trust_admin', DAY_IN_SECONDS);
         } finally {
@@ -358,7 +369,17 @@ class CronService
                 ? (int) BCC_TRUST_SLOW_RING_WINDOW_DAYS
                 : 14;
 
-            $rings = $graph->detectSlowEndorsementRings($windowDays);
+            // F-209: the read fails closed; a failed scan is logged as a
+            // failure, never reported as "0 rings found".
+            try {
+                $rings = $graph->detectSlowEndorsementRings($windowDays);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] weekly slow-ring scan failed', [
+                    'window_days' => $windowDays,
+                    'error'       => $e->getMessage(),
+                ]);
+                return;
+            }
 
             \BCC\Core\Log\Logger::info(
                 '[bcc-trust] weekly slow-ring scan complete',
