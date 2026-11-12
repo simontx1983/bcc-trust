@@ -1720,7 +1720,19 @@ class UserInfoRepository {
     {
         global $wpdb;
 
-        return $wpdb->insert($this->table, $data, $formats) !== false;
+        $ok = $wpdb->insert($this->table, $data, $formats) !== false;
+
+        // Reads cache a MISSING row as '' for BCC_TRUST_CACHE_USER, so a
+        // user read before their row existed kept reading as "no row" (no
+        // trust data; suspension reads take the no-row answer) for up to
+        // 5 minutes after this insert created it. Flush, as updateByUserId()
+        // already does.
+        $userId = (int) ($data['user_id'] ?? 0);
+        if ($ok && $userId > 0) {
+            $this->invalidateCache($userId);
+        }
+
+        return $ok;
     }
 
     /**
