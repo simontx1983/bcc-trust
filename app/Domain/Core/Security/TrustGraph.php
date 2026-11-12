@@ -711,6 +711,9 @@ class TrustGraph {
      * Detect vote rings using config thresholds
      *
      * @return array<int, array<string, mixed>>
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure when the
+     *         edge read fails (F-209). Nothing is cached and no cursor
+     *         moves, so a failure is never served as "no rings".
      */
     public function detectVoteRings(?int $minSize = null): array {
         $minSize = $minSize ?? $this->ringMinSize;
@@ -883,6 +886,9 @@ class TrustGraph {
      * @param int|null $minSize    Min component size. Default
      *                             BCC_TRUST_RING_MIN_SIZE (3).
      * @return array<int, array<string, mixed>>
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure when the
+     *         edge read fails (F-209). Nothing is cached and no cursor
+     *         moves, so a failure is never served as "no rings".
      */
     public function detectSlowEndorsementRings(?int $windowDays = null, ?int $minSize = null): array {
         $windowDays = $windowDays ?? (int) BCC_TRUST_SLOW_RING_WINDOW_DAYS;
@@ -1206,6 +1212,9 @@ class TrustGraph {
      * tradespeople who rate each other produce.
      *
      * @return array<int, array<string, mixed>>
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure when the
+     *         edge read fails (F-209). Nothing is cached and no cursor
+     *         moves, so a failure is never served as "no rings".
      */
     public function detectEndorsementRings(int $minSize = 3): array {
         $cached = wp_cache_get('endorsement_rings', self::CACHE_GROUP);
@@ -1344,6 +1353,9 @@ class TrustGraph {
      * Get suspicious clusters — combines vote rings AND endorsement rings.
      *
      * @return array<int, array<string, mixed>>
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure when the
+     *         edge read fails (F-209). Nothing is cached and no cursor
+     *         moves, so a failure is never served as "no rings".
      */
     public function getSuspiciousClusters(int $minSize = 3): array {
         return array_merge(
