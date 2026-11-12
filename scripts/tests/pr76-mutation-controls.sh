@@ -53,11 +53,18 @@ control () {
 
   snapshot "$file"
   before="$(md5sum "$file" | cut -d' ' -f1)"
+  # ⚠ LINE ENDINGS ARE PRESERVED. Reading in text mode turned CRLF into LF,
+  # so an anchor that matched nothing still moved the bytes past the md5
+  # check below and an UNMUTATED tree could be reported as SURVIVED.
   python - "$file" <<PY
 import io, sys
 p = sys.argv[1]
-s = io.open(p, encoding='utf-8').read()
+raw = io.open(p, encoding='utf-8', newline='').read()
+crlf = '\r\n' in raw
+s = raw.replace('\r\n', '\n')
 ${mutation}
+if crlf:
+    s = s.replace('\n', '\r\n')
 io.open(p, 'w', encoding='utf-8', newline='').write(s)
 PY
   after="$(md5sum "$file" | cut -d' ' -f1)"
@@ -102,8 +109,12 @@ control_integration () {
   python - "$file" <<PYMUT
 import io, sys
 p = sys.argv[1]
-s = io.open(p, encoding='utf-8').read()
+raw = io.open(p, encoding='utf-8', newline='').read()
+crlf = '\r\n' in raw
+s = raw.replace('\r\n', '\n')
 ${mutation}
+if crlf:
+    s = s.replace('\n', '\r\n')
 io.open(p, 'w', encoding='utf-8', newline='').write(s)
 PYMUT
   after="$(md5sum "$file" | cut -d' ' -f1)"
@@ -128,8 +139,10 @@ PYMUT
 
 CLASSIFIER="app/Domain/Onchain/Services/CosmwasmClassifier.php"
 BREAKER="app/Domain/Onchain/Support/OnchainCircuitBreaker.php"
-WORKER="app/Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php"
-STOPREASON="app/Domain/Onchain/Support/CosmwasmPassStopReason.php"
+# The CosmWasm discovery worker and its pass stop-reason were deleted in the
+# scanner retirement (S1-S8), with EnumerationTelemetryTest, CircuitOpenReason-
+# Test and MixedEvidencePersistenceIntegrationTest. Controls 5, 6, 11 and 12
+# went with them (2026-11-12).
 RETRY="app/Domain/Onchain/Support/ApiRetry.php"
 CHECKPOINT="app/Domain/Onchain/Repositories/ChainCheckpointRepository.php"
 FETCHER="app/Domain/Onchain/Fetchers/CosmosFetcher.php"
@@ -153,22 +166,15 @@ control "http_4xx and malformed become node-caused faults" "$CLASSIFIER" \
   "s = s.replace(\"return \$kind === self::KIND_NODE_ERROR || \$kind === self::KIND_TRANSPORT;\", \"return self::isTransientFault(\$kind);\")"
 
 # ── 4. Fetcher: a recognised contract rejection blamed on the provider ──
+# ⚠ KNOWN SURVIVOR (2026-11-12). The `$smartQuery` branch is still live —
+# wasmSmartQueryResult() calls lcdGetResult(..., true) for the CW721 probes —
+# but SmartQueryOptInWiringTest and CosmwasmSmartQueryRetryTest, the two tests
+# that killed this, were deleted in scanner S8. ApiRetryApplicationErrorTest
+# mirrors the predicate but not the fetcher's wiring. Kept so the script stays
+# red until a test pins the opt-in again; see MUTATION-CONTROLS.md.
 control "recognised unknown-variant 500 treated as a provider failure" "$FETCHER" \
-  "SmartQueryOptInWiringTest|CosmwasmSmartQueryRetryTest|ApiRetryApplicationErrorTest" \
+  "ApiRetryApplicationErrorTest" \
   "s = s.replace(\"        if (\$smartQuery) {\", \"        if (false) {\")"
-
-# ── 5. Telemetry: the enumeration failure code is dropped ───────────────
-control "enumeration telemetry dropped on the tail path" "$WORKER" \
-  "SmartQueryOptInWiringTest|EnumerationTelemetryTest" \
-  "s = s.replace(\"            ChainCheckpointRepository::recordCwEnumerationFailure(\", \"            false && ChainCheckpointRepository::recordCwEnumerationFailure(\")"
-
-# ── 6. Telemetry: a raw provider body is persisted instead of a token ───
-# ⚠ INTEGRATION-ONLY. The guard lives in the repository and is proven by a
-# real write, so running this control against the unit config would report a
-# SURVIVOR that is really an un-run test.
-control_integration "raw provider prose persisted into cw_last_error" "$CHECKPOINT" \
-  "MixedEvidencePersistenceIntegrationTest" \
-  "s = s.replace(\"        if (\$chainId <= 0 || !CosmwasmEnumerationFailure::isValid(\$code)) {\n            return false;\n        }\", \"        if (\$chainId <= 0) {\n            return false;\n        }\")"
 
 # ── 7. Breaker: the threshold is raised out of reach ────────────────────
 control "failure threshold 5 becomes 50" "$BREAKER" \
@@ -189,16 +195,6 @@ control "stale counter reopens the breaker instantly" "$BREAKER" \
 control "half-open admits every caller (lock bypassed)" "$BREAKER" \
   "BreakerLifecycleTest" \
   "s = s.replace(\"if (\\\\BCC\\\\Core\\\\DB\\\\AdvisoryLock::acquire(self::PROBE_LOCK_PREFIX . \$chainId, 0)) {\", \"if (true) {\")"
-
-# ── 11. Operator truth: the circuit reason collapses back ───────────────
-control "circuit-open collapses back to chain_refused_to_prepare" "$STOPREASON" \
-  "CircuitOpenReasonTest|CosmwasmOneShotCliTest" \
-  "s = s.replace(\"            return self::PROVIDER_CIRCUIT_OPEN;\", \"            return self::CHAIN_REFUSED_TO_PREPARE;\")"
-
-# ── 12. Worker: the breaker refusal stops being distinguishable ─────────
-control "prepareChain stops reporting the circuit refusal" "$WORKER" \
-  "CircuitOpenReasonTest|BreakerStopsProviderWorkTest" \
-  "s = s.replace(\"            \$refusal = self::PASS_CIRCUIT_OPEN;\", \"            \$refusal = null;\")"
 
 # ── 14. Status reader: the old `time() - 0` arithmetic comes back ───────
 #

@@ -78,12 +78,22 @@ verify_clean () {
   fi
 }
 
+# ⚠ LINE ENDINGS ARE PRESERVED, AND A REPLACE THAT MATCHES NOTHING CHANGES
+# NOTHING. This used to read in text mode, which turns CRLF into LF: an anchor
+# that missed still moved the bytes, passed the md5 check below, and an
+# UNMUTATED tree was reported as SURVIVED (five false survivors, 2026-11-12).
+# The mutation now runs on LF text and the original endings are written back,
+# so the md5 check sees only the mutation itself.
 apply () {
   python - "$1" <<PY || { echo "FATAL: mutation script errored"; exit 2; }
 import io, sys
 p = sys.argv[1]
-s = io.open(p, encoding='utf-8').read()
+raw = io.open(p, encoding='utf-8', newline='').read()
+crlf = '\r\n' in raw
+s = raw.replace('\r\n', '\n')
 ${2}
+if crlf:
+    s = s.replace('\n', '\r\n')
 io.open(p, 'w', encoding='utf-8', newline='').write(s)
 PY
 }
@@ -137,20 +147,20 @@ echo "────────────────────────�
 
 # ── 1-3. Each ApiRetry charge site stops attributing ────────────────────
 control "429 charge no longer attributed" "$RETRY" "$UNIT" \
-  "s = s.replace(\"                            ProviderFailureKind::RATE_LIMITED,\n\", \"\")"
+  "s = s.replace(\"                        ProviderFailureKind::RATE_LIMITED,\n                        \$requestClass,\", \"                        null,\n                        \$requestClass,\")"
 
 control "5xx charge no longer attributed" "$RETRY" "$UNIT" \
-  "s = s.replace(\"                            ProviderFailureKind::HTTP_5XX,\n\", \"\")"
+  "s = s.replace(\"                        ProviderFailureKind::HTTP_5XX,\n                        \$requestClass,\", \"                        null,\n                        \$requestClass,\")"
 
 control "transport charge no longer attributed" "$RETRY" "$UNIT" \
-  "s = s.replace(\"                    ProviderFailureKind::TRANSPORT,\n                    \$requestClass\n\", \"\")"
+  "s = s.replace(\"            self::settleFailure(\n                \$chainId,\n                ProviderFailureKind::TRANSPORT,\", \"            self::settleFailure(\n                \$chainId,\n                null,\")"
 
 # ── 4. The kinds are swapped — attribution present but WRONG ────────────
 control "429 mislabelled as http_5xx" "$RETRY" "$UNIT" \
   "s = s.replace(\"ProviderFailureKind::RATE_LIMITED,\", \"ProviderFailureKind::HTTP_5XX,\")"
 
 control "transport mislabelled as rate_limited" "$RETRY" "$UNIT" \
-  "s = s.replace(\"ProviderFailureKind::TRANSPORT,\n                    \$requestClass\", \"ProviderFailureKind::RATE_LIMITED,\n                    \$requestClass\")"
+  "s = s.replace(\"            self::settleFailure(\n                \$chainId,\n                ProviderFailureKind::TRANSPORT,\", \"            self::settleFailure(\n                \$chainId,\n                ProviderFailureKind::RATE_LIMITED,\")"
 
 # ── 5. The request class is faked instead of derived ────────────────────
 control "request class hard-coded instead of derived" "$RETRY" "$UNIT" \
@@ -161,7 +171,7 @@ control "smart query no longer detected from the opt-in" "$CLASSVO" "$UNIT" \
 
 # ── 6-7. THE STORE: attribution dropped or never persisted ──────────────
 control "attribution never written to state" "$BREAKER" "$UNIT" \
-  "s = s.replace(\"            'kind'          => \$kind ?? \$priorKind,\n            'request_class' => \$requestClass ?? \$priorClass,\n\", \"\")"
+  "s = s.replace(\"            'kind'          => \$kind ?? (\$foreign ? null : \$priorKind),\n            'request_class' => \$requestClass ?? (\$foreign ? null : \$priorClass),\n\", \"\")"
 
 control "attribution dropped on read" "$BREAKER" "$UNIT" \
   "s = s.replace(\"            'kind'          => \$kind,\n            'request_class' => \$requestClass,\n\", \"\")"

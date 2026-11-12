@@ -201,11 +201,22 @@ control 'provision: postcondition re-read' \
 # 5. Remove compensation. The rolled-back transaction leaves the PeepSo
 #    group standing, invisible to findGroupForCollection(), and the next run
 #    creates a duplicate.
+# ⚠ Anchored on the finalization-failure branch's log context: since F-160
+#    the owner read-back has its own compensate() call, so the bare call line
+#    is no longer unique.
 control 'provision: compensation' \
     'GatedGroupProvisioningIntentTest' 'unit' \
     'app/Domain/Onchain/Services/GatedGroupProvisioningService.php' \
-    "            \$auditOk = \$this->compensate(\$groupId, \$collectionId, \$ownerId, \$chainId);" \
-    '            $auditOk = true; // mutant: no compensation — the group is left behind'
+    "                'error'         => \$e->getMessage(),
+            ]);
+
+            \$this->invalidateGroupCaches(\$groupId);
+            \$auditOk = \$this->compensate(\$groupId, \$collectionId, \$ownerId, \$chainId);" \
+    "                'error'         => \$e->getMessage(),
+            ]);
+
+            \$this->invalidateGroupCaches(\$groupId);
+            \$auditOk = true; // mutant: no compensation — the group is left behind"
 
 # 6. Accept a chain whose family does not match the tab the nonce was minted
 #    on. A Solana-tab nonce could then drive an add against a Cosmos chain.
