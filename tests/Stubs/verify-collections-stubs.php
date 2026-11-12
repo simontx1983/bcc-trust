@@ -324,6 +324,31 @@ namespace BCC\Trust\Onchain\Repositories {
 
             public static bool $findByChainContractReturnsNull = false;
 
+            /** F-115: makes findChainContractKeyCollision() throw (an unreadable check). */
+            public static bool $keyCollisionReadFails = false;
+
+            /**
+             * F-115: mirrors production. A row holding the case-INSENSITIVE
+             * (chain_id, contract_address) key whose canonical_identifier is
+             * NULL/absent or not byte-equal to $canonical.
+             */
+            public static function findChainContractKeyCollision(int $chainId, string $contract, string $canonical): ?object
+            {
+                if (self::$keyCollisionReadFails) {
+                    throw new RepositoryReadFailure('findChainContractKeyCollision', 'SQLSTATE[HY000] stub');
+                }
+                foreach (self::$rows as $row) {
+                    $rowCanonical = $row->canonical_identifier ?? null;
+                    if ((int) $row->chain_id === $chainId
+                        && strcasecmp((string) $row->contract_address, $contract) === 0
+                        && ($rowCanonical === null || (string) $rowCanonical !== $canonical)
+                    ) {
+                        return $row;
+                    }
+                }
+                return null;
+            }
+
             public static function seed(
                 int $id,
                 int $chainId = 4,
@@ -593,6 +618,7 @@ namespace BCC\Trust\Onchain\Repositories {
                 self::$upsertWritten = 1;
                 self::$upsertCalls = [];
                 self::$findByChainContractReturnsNull = false;
+                self::$keyCollisionReadFails          = false;
                 self::$provisioning = [];
                 self::$stateWriteRefuses = false;
                 self::$stateWrites = [];

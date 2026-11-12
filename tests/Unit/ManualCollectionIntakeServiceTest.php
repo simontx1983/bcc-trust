@@ -275,6 +275,86 @@ final class ManualCollectionIntakeServiceTest extends TestCase
         self::assertSame([], \BCC\Trust\Onchain\Repositories\CollectionRepository::$added);
     }
 
+    /**
+     * F-115: a Solana mint differing only in CASE from a stored one is a
+     * different collection, but `uq_chain_contract` is case-insensitive, so
+     * the add would have overwritten the stored row. Refused, and it names
+     * that row; nothing is written.
+     */
+    public function testACaseOnlyVariantOfAStoredMintIsRefusedAsAKeyCollision(): void
+    {
+        $this->seedChain(6, 'solana', 'solana');
+        $stored  = self::SOLANA_MINT;
+        $variant = self::caseVariantThatIsAValidMint($stored);
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::$rows[88] = (object) [
+            'id'                   => 88,
+            'chain_id'             => 6,
+            'contract_address'     => $stored,
+            'canonical_identifier' => $stored,
+        ];
+
+        $result = $this->service->add('solana', 6, $variant, self::OPERATOR);
+
+        self::assertFalse($result['ok']);
+        self::assertSame(ManualCollectionIntakeService::REFUSED_KEY_COLLISION, $result['reason']);
+        self::assertSame(88, $result['collides_with']);
+        self::assertSame([], \BCC\Trust\Onchain\Repositories\CollectionRepository::$added);
+    }
+
+    /** A legacy alias row (no canonical identity) holding the key is a different collection too. */
+    public function testALegacyAliasRowHoldingTheKeyIsAKeyCollision(): void
+    {
+        $this->seedChain(4, 'ethereum', 'evm');
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::$findByChainContractReturnsNull = true; // the exact lookup misses it
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::$rows[91] = (object) [
+            'id'                   => 91,
+            'chain_id'             => 4,
+            'contract_address'     => strtoupper(self::EVM_ADDRESS),
+            'canonical_identifier' => null,
+        ];
+
+        $result = $this->service->add('evm', 4, self::EVM_ADDRESS, self::OPERATOR);
+
+        self::assertSame(ManualCollectionIntakeService::REFUSED_KEY_COLLISION, $result['reason'] ?? null);
+        self::assertSame(91, $result['collides_with'] ?? null);
+        self::assertSame([], \BCC\Trust\Onchain\Repositories\CollectionRepository::$added);
+    }
+
+    public function testAnUnreadableCollisionCheckWritesNothing(): void
+    {
+        $this->seedChain(4, 'ethereum', 'evm');
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::$keyCollisionReadFails = true;
+
+        $result = $this->service->add('evm', 4, self::EVM_ADDRESS, self::OPERATOR);
+
+        self::assertFalse($result['ok']);
+        self::assertSame(ManualCollectionIntakeService::REFUSED_WRITE_FAILED, $result['reason']);
+        self::assertSame([], \BCC\Trust\Onchain\Repositories\CollectionRepository::$added);
+    }
+
+    /**
+     * Flip the case of letters in a base58 mint until the result still
+     * decodes to 32 bytes (base58 has no 0/O/I/l, so a flipped letter may be
+     * outside the alphabet or change the length).
+     */
+    private static function caseVariantThatIsAValidMint(string $mint): string
+    {
+        $alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+        for ($i = 0, $n = strlen($mint); $i < $n; $i++) {
+            $c = $mint[$i];
+            $flip = ctype_upper($c) ? strtolower($c) : strtoupper($c);
+            if ($flip === $c || strpos($alphabet, $flip) === false) {
+                continue;
+            }
+            $candidate = substr($mint, 0, $i) . $flip . substr($mint, $i + 1);
+            $decoded = Base58::decode($candidate);
+            if (is_string($decoded) && strlen($decoded) === 32) {
+                return $candidate;
+            }
+        }
+        self::fail('no valid case-variant mint found for the fixture');
+    }
+
     // ── Cosmos validation, and its honesty ──────────────────────────────
 
     /** A real bech32 address with a valid checksum, from production data. */

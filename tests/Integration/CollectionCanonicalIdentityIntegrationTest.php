@@ -301,6 +301,76 @@ final class CollectionCanonicalIdentityIntegrationTest extends TestCase
         );
     }
 
+    // ── (2b) F-115: a manual add never overwrites a DIFFERENT collection ─
+
+    /**
+     * Before F-115, addManual(SOL_LOWER) hit the case-insensitive
+     * uq_chain_contract, and its ON DUPLICATE KEY UPDATE rewrote the
+     * SOL_UPPER collection (name, source) and returned ITS id.
+     */
+    public function testAManualAddOfACaseVariantMintIsRefusedAndLeavesTheStoredRowAlone(): void
+    {
+        $chainId = $this->chainId('solana');
+        self::assertTrue($this->insertRaw($chainId, self::SOL_UPPER, self::SOL_UPPER));
+        $wpdb  = $GLOBALS['wpdb'];
+        $table = CollectionRepository::table();
+        $before = $wpdb->get_row($wpdb->prepare("SELECT id, collection_name, source FROM {$table} WHERE chain_id = %d", $chainId));
+
+        $collision = CollectionRepository::findChainContractKeyCollision($chainId, self::SOL_LOWER, self::SOL_LOWER);
+        self::assertNotNull($collision, 'MySQL matches the key case-insensitively');
+        self::assertSame((int) $before->id, (int) $collision->id);
+
+        $result = CollectionRepository::addManual([
+            'chain_id'         => $chainId,
+            'contract_address' => self::SOL_LOWER,
+            'collection_name'  => 'Overwriting name',
+        ]);
+
+        self::assertFalse($result, 'refused, not resolved to the other row');
+        $after = $wpdb->get_row($wpdb->prepare("SELECT id, collection_name, source FROM {$table} WHERE chain_id = %d", $chainId));
+        self::assertEquals($before, $after, 'the stored collection is untouched');
+        self::assertSame(1, (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table}"));
+    }
+
+    /** A legacy alias row (canonical NULL) holding the key is a different collection: refused too. */
+    public function testAManualAddOverALegacyAliasRowIsRefused(): void
+    {
+        $chainId = $this->chainId('ethereum');
+        self::assertTrue($this->insertRaw($chainId, strtoupper(self::EVM_CHECKSUMMED), null));
+
+        self::assertFalse(CollectionRepository::addManual([
+            'chain_id'         => $chainId,
+            'contract_address' => strtolower(self::EVM_CHECKSUMMED),
+            'collection_name'  => 'Overwriting name',
+        ]));
+        self::assertNull(
+            $GLOBALS['wpdb']->get_var('SELECT collection_name FROM `' . CollectionRepository::table() . '`'),
+            'the legacy row keeps its (empty) name'
+        );
+    }
+
+    /** Anti-vacuity: re-adding the SAME collection (any EVM case) still updates it in place. */
+    public function testReAddingTheSameCollectionStillUpdatesItInPlace(): void
+    {
+        $chainId = $this->chainId('ethereum');
+        $created = CollectionRepository::upsert(['chain_id' => $chainId, 'contract_address' => self::EVM_CHECKSUMMED], 0);
+        self::assertSame('created', $created['status']);
+
+        self::assertNull(CollectionRepository::findChainContractKeyCollision(
+            $chainId,
+            strtolower(self::EVM_CHECKSUMMED),
+            strtolower(self::EVM_CHECKSUMMED)
+        ));
+        $id = CollectionRepository::addManual([
+            'chain_id'         => $chainId,
+            'contract_address' => strtolower(self::EVM_CHECKSUMMED),
+            'collection_name'  => 'Curated name',
+        ]);
+
+        self::assertSame($created['id'], $id);
+        self::assertSame('Curated name', (string) $GLOBALS['wpdb']->get_var('SELECT collection_name FROM `' . CollectionRepository::table() . '`'));
+    }
+
     // ── (3) exact Solana case survives write -> read ────────────────────
 
     public function testSolanaCaseSurvivesAWriteAndRead(): void
