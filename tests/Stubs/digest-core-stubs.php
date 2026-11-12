@@ -44,24 +44,3 @@ namespace BCC\Core\Log {
         }
     }
 }
-
-namespace BCC\Core\Repositories {
-    // F-296: the notification reads exclude blocked members. No blocks in
-    // these digest tests; NotificationBlockedActorTest covers the exclusion.
-    if (!class_exists(__NAMESPACE__ . '\PeepSoBlockRepository', false)) {
-        final class PeepSoBlockRepository
-        {
-            /** @return list<int> */
-            public static function getBlockedIds(int $blockerId, int $limit = 500): array
-            {
-                return [];
-            }
-
-            /** @return list<int> */
-            public static function getBlockerIds(int $blockedId, int $limit = 500): array
-            {
-                return [];
-            }
-        }
-    }
-}

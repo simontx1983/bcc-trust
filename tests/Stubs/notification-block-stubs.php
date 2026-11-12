@@ -1,33 +1,26 @@
 <?php
 /**
- * Stubs for NotificationBlockedActorTest (F-296). Subprocess-only.
- *
- * $GLOBALS['__bcc_nb'] = ['blocked' => list<int>, 'blockers' => list<int>]
+ * Stubs for NotificationBlockedActorTest (F-296). Subprocess-only: the
+ * fail-closed block read logs through bcc-core's Logger before throwing.
  */
 
 declare(strict_types=1);
 
-namespace BCC\Core\Repositories {
-    if (!class_exists(__NAMESPACE__ . '\PeepSoBlockRepository', false)) {
-        final class PeepSoBlockRepository
+namespace BCC\Core\Log {
+    if (!class_exists(__NAMESPACE__ . '\Logger', false)) {
+        final class Logger
         {
-            /** @return list<int> */
-            public static function getBlockedIds(int $blockerId, int $limit = 500): array
+            /** @param array<string, mixed> $c */
+            public static function error(string $m, array $c = []): void
             {
-                return $GLOBALS['__bcc_nb']['blocked'] ?? [];
+                $GLOBALS['__bcc_nb_errors'][] = $m;
             }
 
-            /** @return list<int> */
-            public static function getBlockerIds(int $blockedId, int $limit = 500): array
-            {
-                return $GLOBALS['__bcc_nb']['blockers'] ?? [];
-            }
+            /** @param array<string, mixed> $c */
+            public static function warning(string $m, array $c = []): void {}
+
+            /** @param array<string, mixed> $c */
+            public static function info(string $m, array $c = []): void {}
         }
-    }
-}
-
-namespace {
-    if (!defined('BCC_NOTIFICATION_MODULE_ID')) {
-        define('BCC_NOTIFICATION_MODULE_ID', 9001);
     }
 }

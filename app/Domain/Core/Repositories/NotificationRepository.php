@@ -45,6 +45,14 @@ if (!defined('ABSPATH')) {
  */
 final class NotificationRepository
 {
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+
+    /** PeepSo's block table (read-only here; bcc-core owns the writes). */
+    private const BLOCKS_TABLE_SUFFIX = 'peepso_blocks';
+
+    /** Per direction; same bound as bcc-core PeepSoBlockRepository::getBlockedIds(). */
+    private const BLOCK_READ_LIMIT = 500;
+
     /** Owned by PeepSo — see class docblock. */
     private const TABLE_SUFFIX = 'peepso_notifications';
 
@@ -63,21 +71,46 @@ final class NotificationRepository
      * member's old bell rows too: they used to stay in the list, count
      * toward the badge and go out in the digest. Applied in SQL, before
      * LIMIT, for the same reason as the type scope (a post-filter makes
-     * short pages and pagination dead-ends). Same two bounded reads the feed
-     * uses (FeedRankingService). System rows (from user 0) are never
-     * excluded.
+     * short pages and pagination dead-ends). System rows (from user 0) are
+     * never excluded.
+     *
+     * FAIL-CLOSED. The same two bounded reads the feed makes, but through
+     * runRead(): bcc-core's getBlockedIds()/getBlockerIds() are get_col()
+     * reads that return [] on a failed query, which would read as "no
+     * blocks" and drop the filter. A failed read THROWS instead: the bell
+     * list and the badge count answer 503, and the digest skips that user
+     * this run (DigestService counts it as failed; nothing is mailed).
+     *
+     * Beyond BLOCK_READ_LIMIT blocks in one direction the rest stay
+     * unfiltered (same bound as the feed; >500 blocks is pathological).
      *
      * @return array{0: string, 1: list<int>} [" AND `not_from_user_id` NOT IN (…)" or "", its ids]
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure when a block read did not run
      */
     private static function blockedActorClause(int $userId): array
     {
-        $ids = array_values(array_unique(array_filter(
-            array_map('intval', array_merge(
-                \BCC\Core\Repositories\PeepSoBlockRepository::getBlockedIds($userId),
-                \BCC\Core\Repositories\PeepSoBlockRepository::getBlockerIds($userId)
-            )),
-            static fn (int $id): bool => $id > 0
-        )));
+        global $wpdb;
+        $blocks = $wpdb->prefix . self::BLOCKS_TABLE_SUFFIX;
+
+        $blocked = self::runRead($wpdb->prepare(
+            "SELECT blk_blocked_id AS uid FROM {$blocks} WHERE blk_user_id = %d LIMIT %d",
+            $userId,
+            self::BLOCK_READ_LIMIT
+        ), __FUNCTION__, true);
+        $blockers = self::runRead($wpdb->prepare(
+            "SELECT blk_user_id AS uid FROM {$blocks} WHERE blk_blocked_id = %d LIMIT %d",
+            $userId,
+            self::BLOCK_READ_LIMIT
+        ), __FUNCTION__, true);
+
+        $ids = [];
+        foreach (array_merge($blocked, $blockers) as $row) {
+            $id = isset($row->uid) ? (int) $row->uid : 0;
+            if ($id > 0) {
+                $ids[$id] = $id;
+            }
+        }
+        $ids = array_values($ids);
         if ($ids === []) {
             return ['', []];
         }
