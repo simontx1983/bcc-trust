@@ -102,10 +102,12 @@ final class DisputeAdjudicator implements DisputeAdjudicationInterface
                 );
                 $decrementUnique = ($remainingCount === 0);
 
+                // F-83: reverse the applied (velocity-capped) vested_weight,
+                // not the raw `weight` column.
                 $this->scoreRepository->reverseVoteDelta(
                     (int) $vote->page_id,
                     (int) ($vote->category_id ?? 0),
-                    (float) $vote->weight,
+                    (float) $vote->vested_weight,
                     ((int) $vote->vote_type) === 1,
                     $decrementUnique
                 );

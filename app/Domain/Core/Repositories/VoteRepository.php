@@ -589,7 +589,7 @@ class VoteRepository {
      * breaking atomicity with the score update.
      *
      * @param array<string, mixed> $data
-     * @return array{vote_id:int,was_inserted:bool,vote_type_changed:bool,weight_changed:bool,previous_vote_type:int|null,previous_weight:float}
+     * @return array{vote_id:int,was_inserted:bool,vote_type_changed:bool,weight_changed:bool,previous_vote_type:int|null,previous_weight:float,previous_applied_weight:float}
      */
     public function upsertRaw( array $data ): array {
         // Runtime assertion: this method's FOR UPDATE lock is only
@@ -1703,7 +1703,7 @@ class VoteRepository {
      * than necessary. Stats are now refreshed by the StatsRefresher async job.
      *
      * @param array<string, mixed> $voteData
-     * @return array{vote_id:int,was_inserted:bool,vote_type_changed:bool,weight_changed:bool,previous_vote_type:int|null,previous_weight:float}
+     * @return array{vote_id:int,was_inserted:bool,vote_type_changed:bool,weight_changed:bool,previous_vote_type:int|null,previous_weight:float,previous_applied_weight:float}
      */
     private function executeUpsert( array $voteData, string $now ): array {
         global $wpdb;
@@ -1720,7 +1720,7 @@ class VoteRepository {
         //   C. No row at all             → insert (was_inserted = true).
         $existing = $wpdb->get_row(
             $wpdb->prepare(
-                "SELECT id, vote_type, weight, status FROM {$this->table}
+                "SELECT id, vote_type, weight, vested_weight, status FROM {$this->table}
                  WHERE voter_user_id = %d
                    AND page_id       = %d
                    AND category_id   = %d
@@ -1757,6 +1757,10 @@ class VoteRepository {
                 'weight_changed'     => $weightChanged,
                 'previous_vote_type' => (int)   $existing->vote_type,
                 'previous_weight'    => (float) $existing->weight,
+                // F-83: what the previous write actually applied to the score
+                // (velocity-capped vested_weight). Reversals must subtract
+                // THIS, not the raw `weight`, or a capped vote is over-reversed.
+                'previous_applied_weight' => (float) $existing->vested_weight,
             ];
         }
 
@@ -1806,6 +1810,7 @@ class VoteRepository {
                 'weight_changed'     => false,
                 'previous_vote_type' => null,
                 'previous_weight'    => 0.0,
+                'previous_applied_weight' => 0.0,
             ];
         }
 
@@ -1829,6 +1834,7 @@ class VoteRepository {
             'weight_changed'     => false,
             'previous_vote_type' => null,
             'previous_weight'    => 0.0,
+            'previous_applied_weight' => 0.0,
         ];
     }
 
