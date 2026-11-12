@@ -769,6 +769,32 @@ final class GatedGroupProvisioningService {
     }
 
     /**
+     * F-130: run $critical under the SAME per-collection lock that
+     * provisioning takes, so a delete cannot interleave with a create (the
+     * delete's "no community?" check and its DELETE would otherwise straddle
+     * a provision and orphan the new community).
+     *
+     * Fails closed: when the lock is not acquired $critical does not run and
+     * `acquired` is false. Exactly one release per acquire, in `finally`.
+     *
+     * @template T
+     * @param callable(): T $critical
+     * @return array{acquired: bool, result: T|null}
+     */
+    public static function withCollectionLock(int $collectionId, callable $critical): array
+    {
+        $lock = self::lockName($collectionId);
+        if (!self::acquire($lock)) {
+            return ['acquired' => false, 'result' => null];
+        }
+        try {
+            return ['acquired' => true, 'result' => $critical()];
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
+        }
+    }
+
+    /**
      * Remove a community that was created but could not be gated.
      *
      * ── WHY THIS IS NOT JUST `wp_trash_post()` ──────────────────────────
@@ -1382,6 +1408,12 @@ final class GatedGroupProvisioningService {
         // gm_user_id = 0 owner row nobody can ever act as. So the requester
         // is made the current user for the constructor alone, and the
         // previous identity is restored on every path, including a throw.
+        //
+        // ⚠ Safe HERE only because $ownerId is a re-verified administrator
+        // (resolveRequesterAsOwner: get_userdata + user_can manage_options)
+        // and the swap spans one PeepSo constructor. Do not copy this pattern
+        // for a non-admin owner: every hook fired inside the window runs AS
+        // that user, with their capabilities (#457 review L2).
         $previousUserId = get_current_user_id();
         $swapped        = $previousUserId !== $ownerId;
 

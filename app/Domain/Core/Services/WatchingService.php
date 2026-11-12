@@ -533,11 +533,9 @@ final class WatchingService
      */
     private static function buildItem(object $row, ?object $pageInfo): array
     {
-        // Handle resolution: bcc_handle preferred (per §B6), user_login
-        // fallback for accounts that haven't picked a handle yet.
-        $handle = $row->card_handle !== null && $row->card_handle !== ''
-            ? $row->card_handle
-            : $row->user_login;
+        // Handle resolution: bcc_handle preferred (per §B6); the
+        // PublicIdentity fallback never exposes user_login.
+        $handle = \BCC\Trust\Core\Support\PublicIdentity::handle((int) $row->card_user_id, $row->card_handle);
 
         $watchedAt = $row->watched_at !== null && $row->watched_at !== ''
             ? self::toIso8601($row->watched_at)

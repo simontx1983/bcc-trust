@@ -139,8 +139,11 @@ final class NftCollectionPiecesRepository
 
         $name        = self::normalizeNullableString($fields['name']             ?? null, 255);
         $description = self::normalizeNullableString($fields['description']      ?? null, 65000);
-        $imageUrl    = self::normalizeNullableString($fields['image_url']        ?? null, 65000);
-        $imageThumb  = self::normalizeNullableString($fields['image_url_thumb']  ?? null, 65000);
+        // F-165: stored canonical (https only, IPFS on ipfs.io). The COALESCE
+        // below never replaces a stored image, so a raw value written here
+        // would have stuck for good.
+        $imageUrl    = \BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules::sanitizeImageUrl($fields['image_url']       ?? null);
+        $imageThumb  = \BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules::sanitizeImageUrl($fields['image_url_thumb'] ?? null);
         $attrsJson   = self::normalizeNullableString($fields['attributes_json']  ?? null, 4_000_000);
 
         // Inline NULL literals for fields we want to pass as actual NULL

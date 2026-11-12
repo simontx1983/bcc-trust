@@ -454,6 +454,33 @@ final class CollectionStancePanelStatusTest extends TestCase
         self::assertNotContains('', CollectionStanceService::HOLDINGS_STATUSES);
     }
 
+    /**
+     * F-165: holdings images reached the panel RAW. They are now sanitized and
+     * an IPFS image is served from the configured gateway with a fallback.
+     */
+    public function testPanelImagesAreSanitizedAndIpfsGetsAFallback(): void
+    {
+        define('BCC_IPFS_GATEWAY', 'amber-perfect-butterfly-459.mypinata.cloud');
+        $this->linkWallets([self::hubWallet()]);
+        self::hubWalk(complete: true, withCollection: true);
+        \BccFanOutWorld::$holdings[self::HUB_WALLET]['items'][0]['image_url'] = 'ipfs://QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG/atlas.png';
+
+        $row = $this->panel()['items'][0];
+        self::assertSame('https://amber-perfect-butterfly-459.mypinata.cloud/ipfs/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG/atlas.png', $row['image_url']);
+        self::assertSame('https://ipfs.io/ipfs/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG/atlas.png', $row['image_fallback_url']);
+    }
+
+    public function testARawHttpPanelImageIsNoLongerEmitted(): void
+    {
+        $this->linkWallets([self::hubWallet()]);
+        self::hubWalk(complete: true, withCollection: true);
+        \BccFanOutWorld::$holdings[self::HUB_WALLET]['items'][0]['image_url'] = 'http://cdn.example/atlas.png';
+
+        $row = $this->panel()['items'][0];
+        self::assertNull($row['image_url'], 'a raw http:// image is no longer emitted');
+        self::assertNull($row['image_fallback_url']);
+    }
+
     /** The `items` contract is unchanged — this is an ADDITIVE change. */
     public function testTheItemsShapeStillMatchesTheFixture(): void
     {

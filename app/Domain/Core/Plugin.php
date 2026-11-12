@@ -2866,6 +2866,18 @@ final class Plugin
             $this->notificationDispatcher()->onUserSignup($userId);
         }, 30, 1);
 
+        // Every account gets a public handle at creation, whatever the
+        // path (wp-admin, WP-CLI, partner code), so no public surface has
+        // to fall back to user_login. Priority 10: before the welcome
+        // notification above, which renders the handle. BCC signup
+        // already wrote its chosen handle via meta_input, which the
+        // callback leaves alone.
+        add_action('user_register', static function (int $userId): void {
+            if (function_exists('bcc_trust_assign_handle_if_missing')) {
+                bcc_trust_assign_handle_if_missing($userId);
+            }
+        }, 10, 1);
+
         // §I1 V2 — @-mention bell + push dispatch. Two subscribers,
         // both ORIGINAL-WRITE ONLY (no `*_edited` action exists in
         // bcc-trust by design, so an edit-as-ping abuse vector cannot

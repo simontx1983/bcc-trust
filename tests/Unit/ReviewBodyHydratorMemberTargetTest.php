@@ -167,6 +167,10 @@ namespace BCC\Trust\Core\Tests\Unit {
 
             self::assertCount(1, $GLOBALS['bcc_test_get_posts_calls']);
             self::assertSame([123], $GLOBALS['bcc_test_get_posts_calls'][0]['post__in']);
+            // F-90: only PUBLISHED pages resolve. A draft, private or trashed
+            // target renders like a missing one, never its title or slug.
+            self::assertSame('peepso-page', $GLOBALS['bcc_test_get_posts_calls'][0]['post_type']);
+            self::assertSame('publish', $GLOBALS['bcc_test_get_posts_calls'][0]['post_status']);
             self::assertSame('Everstake', $bodies[1]['page_name']);
             self::assertSame('member', $bodies[2]['page_kind']);
             self::assertSame('Simon TX', $bodies[2]['page_name']);
