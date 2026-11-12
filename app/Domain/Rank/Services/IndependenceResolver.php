@@ -12,8 +12,11 @@
  * nothing is zero-credited without a formal, auditable, reversible
  * determination row.
  *
- * Per-request memo: the ingestor consults this on every evidence hook,
- * and findings change rarely.
+ * Memoized: the ingestor consults this on every evidence hook, and
+ * findings change rarely. The memo is rebuilt when this process wrote a
+ * finding (ClusterFindingsRepository::writeVersion()) and after MEMO_TTL
+ * seconds — a WP-CLI run or cron batch lives far longer than one request,
+ * and never sees another process's writes otherwise (F-87 L4).
  *
  * @package BCC\Trust\Rank\Services
  * @since Rank redesign Phase 4 (2026-07-31)
@@ -38,6 +41,15 @@ class IndependenceResolver
      * @var array<int, int>|null
      */
     private static ?array $memberToRepresentative = null;
+
+    /** Seconds a built map is trusted in a long-running process. */
+    public const MEMO_TTL = 60;
+
+    /** ClusterFindingsRepository::writeVersion() the memo was built at. */
+    private static int $memoVersion = -1;
+
+    /** time() the memo was built at. */
+    private static int $memoBuiltAt = 0;
 
     public function __construct(
         private readonly ClusterFindingsRepository $findings
@@ -85,7 +97,10 @@ class IndependenceResolver
     /** @return array<int, int> */
     private function map(): array
     {
-        if (self::$memberToRepresentative !== null) {
+        if (self::$memberToRepresentative !== null
+            && self::$memoVersion === ClusterFindingsRepository::writeVersion()
+            && time() - self::$memoBuiltAt < self::MEMO_TTL
+        ) {
             return self::$memberToRepresentative;
         }
 
@@ -100,6 +115,9 @@ class IndependenceResolver
                 $map[(int) $member] = $representative;
             }
         }
+
+        self::$memoVersion = ClusterFindingsRepository::writeVersion();
+        self::$memoBuiltAt = time();
 
         return self::$memberToRepresentative = $map;
     }

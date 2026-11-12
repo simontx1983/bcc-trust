@@ -15,6 +15,8 @@ use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Core\ValueObjects\PageScore;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Exceptions\RepositoryException;
+use BCC\Trust\Core\Support\CacheGeneration;
+use BCC\Trust\Core\Support\SiteClock;
 use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use DateTimeImmutable;
@@ -223,8 +225,11 @@ class ScoreRepository {
         }
 
         if (wp_using_ext_object_cache()) {
-            $gen = wp_cache_get('score_gen_' . $pageId, self::CACHE_GROUP);
-            $result = $gen !== false ? (int) $gen : 0;
+            // F-87 L2: a MISSING key is seeded, never read as 0. Reading it as
+            // 0 cached fresh entries under g0, and the next eviction of the
+            // key sent readers back to g0 — and to whatever was cached there
+            // before (up to CACHE_TTL old).
+            $result = CacheGeneration::get('score_gen_' . $pageId, self::CACHE_GROUP);
             $this->generationCache[$pageId] = $result;
             return $result;
         }
@@ -255,11 +260,12 @@ class ScoreRepository {
         unset($this->generationCache[$pageId]);
 
         if (wp_using_ext_object_cache()) {
-            $key = 'score_gen_' . $pageId;
-            $result = wp_cache_incr($key, 1, self::CACHE_GROUP);
-            if ($result === false) {
-                wp_cache_set($key, 1, self::CACHE_GROUP, 3600);
-            }
+            // F-87 L2: a missing key used to be re-created as 1 with a
+            // one-hour expiry, so every eviction restarted the counter at 1
+            // and an entry cached under an earlier g1 — up to CACHE_TTL old —
+            // was served again as current. CacheGeneration re-seeds past
+            // every value the counter can have held, with no expiry.
+            CacheGeneration::bump('score_gen_' . $pageId, self::CACHE_GROUP);
             return;
         }
 
@@ -273,6 +279,7 @@ class ScoreRepository {
             $optionName
         ));
     }
+
 
     /**
      * @deprecated Use saveRecalculated() inside a transaction with lockForUpdate().
@@ -293,6 +300,11 @@ class ScoreRepository {
         }
 
         $data    = $score->toDatabaseArray();
+        // F-222: stamped HERE, in the frame every other score writer uses.
+        // PageScore carries a PHP DateTimeImmutable, which WordPress pins to
+        // UTC, so the recalc wrote UTC while every incremental writer wrote
+        // site-local — see SiteClock.
+        $data['last_calculated_at'] = SiteClock::now();
         $formats = $this->getFormatSpecifiers($data);
 
         // Build INSERT ... ON DUPLICATE KEY UPDATE instead of REPLACE INTO.
@@ -323,6 +335,17 @@ class ScoreRepository {
     }
 
     /**
+     * Find the first page_id owned by a user in the scores table.
+     */
+    public function getPageIdForOwner(int $userId): int {
+        global $wpdb;
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT page_id FROM {$this->table} WHERE page_owner_id = %d LIMIT 1",
+            $userId
+        ));
+    }
+
+    /**
      * Overwrite a recalculated score row using UPDATE (not REPLACE INTO).
      *
      * Must only be called from inside a TransactionManager::run() closure where
@@ -337,21 +360,12 @@ class ScoreRepository {
      *                                  does not include category_id.
      * @throws Exception
      */
-    /**
-     * Find the first page_id owned by a user in the scores table.
-     */
-    public function getPageIdForOwner(int $userId): int {
-        global $wpdb;
-        return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT page_id FROM {$this->table} WHERE page_owner_id = %d LIMIT 1",
-            $userId
-        ));
-    }
-
     public function saveRecalculated(PageScore $score, int $categoryId): void {
         global $wpdb;
 
         $data = $score->toDatabaseArray();
+        // F-222: site-local, like every other score writer (see save()).
+        $data['last_calculated_at'] = SiteClock::now();
 
         // page_id is part of the WHERE clause, not the SET clause.
         $pageId = $data['page_id'];
@@ -632,7 +646,10 @@ class ScoreRepository {
     public function hasVoteSince(int $pageId, int $secondsAgo): bool {
         global $wpdb;
 
-        $cutoff = gmdate('Y-m-d H:i:s', time() - max(0, $secondsAgo));
+        // F-87 L3: last_vote_at is written site-local (current_time('mysql'));
+        // a gmdate() cutoff was off by the site's UTC offset — hours, against
+        // a 30 s window.
+        $cutoff = SiteClock::secondsAgo($secondsAgo);
 
         $row = $wpdb->get_var($wpdb->prepare(
             "SELECT 1 FROM {$this->table}
@@ -1491,8 +1508,9 @@ class ScoreRepository {
              FROM {$votes_table}
              WHERE page_id = %d
                AND status = 1
-               AND created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)",
-            $pageId
+               AND created_at >= %s",
+            $pageId,
+            SiteClock::secondsAgo(3600) // F-87 L3: created_at is site-local
         ));
 
         $netWeight     = (float) ($row->up_weight ?? 0) - (float) ($row->down_weight ?? 0);
@@ -1691,7 +1709,7 @@ class ScoreRepository {
         }
 
         $velocityTable = \BCC\Trust\Core\Database\TableRegistry::scoreVelocity();
-        $today         = current_time('Y-m-d');
+        $today         = SiteClock::today(); // site-local day, the vote tables' frame
         $maxDaily      = (float) BCC_TRUST_MAX_SCORE_CHANGE_PER_DAY;
 
         // Ensure the row exists so FOR UPDATE can lock it.
@@ -1776,13 +1794,16 @@ class ScoreRepository {
     {
         global $wpdb;
 
+        // F-87 L3 / F-222: last_calculated_at is site-local (SiteClock); the
+        // boundary is bound from the same frame, not the DB session's NOW().
         return array_map('intval', $wpdb->get_col($wpdb->prepare(
             "SELECT page_id FROM {$this->table}
              WHERE last_calculated_at IS NULL
-                OR last_calculated_at < DATE_SUB(NOW(), INTERVAL 1 HOUR)
+                OR last_calculated_at < %s
              GROUP BY page_id
              ORDER BY MAX(last_calculated_at IS NULL) DESC, MIN(last_calculated_at) ASC, page_id ASC
              LIMIT %d",
+            SiteClock::secondsAgo(3600),
             $limit
         )) ?: []);
     }
