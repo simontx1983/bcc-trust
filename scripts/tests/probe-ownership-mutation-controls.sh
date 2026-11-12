@@ -32,10 +32,12 @@ RETRY="app/Domain/Onchain/Support/ApiRetry.php"
 WORKER="app/Domain/Onchain/Workers/NftEthIndexerWorker.php"
 REFRESH="app/Domain/Onchain/Services/ChainRefreshService.php"
 SCHED="app/Domain/Onchain/Services/EnrichmentScheduler.php"
-CWWORKER="app/Domain/Onchain/Workers/CosmwasmDiscoveryWorker.php"
+# M1d (the frozen CosmWasm discovery worker) was removed with that worker in
+# the scanner retirement (S1-S4); scanner-removal-mutation-controls.sh and
+# ScannerRemovedInventoryTest guard that it stays gone.
 
 SNAPDIR="$(mktemp -d)"
-for f in "$BREAKER" "$RETRY" "$WORKER" "$REFRESH" "$SCHED" "$CWWORKER"; do
+for f in "$BREAKER" "$RETRY" "$WORKER" "$REFRESH" "$SCHED"; do
     cp "$f" "$SNAPDIR/$(basename "$f").orig" || { echo "FATAL: snapshot failed for $f"; exit 2; }
 done
 
@@ -91,8 +93,7 @@ echo "── half-open probe ownership mutation controls (issue #264) ───�
 for spec in \
   "$WORKER|M1a EVM indexer preflight claims the probe again" \
   "$REFRESH|M1b validator-index preflight claims the probe again" \
-  "$SCHED|M1c enrichment scheduler preflight claims the probe again" \
-  "$CWWORKER|M1d frozen cosmwasm preflight claims the probe again" ; do
+  "$SCHED|M1c enrichment scheduler preflight claims the probe again" ; do
     f="${spec%%|*}"; label="${spec#*|}"
     mutate "$f" '
 $f = $argv[1]; $s = file_get_contents($f);
@@ -155,8 +156,8 @@ file_put_contents($f, str_replace($old, "        // stranded", $s));
 # ── 4. strand on the transport path: ApiRetry stops releasing in finally ────
 mutate "$RETRY" '
 $f = $argv[1]; $s = file_get_contents($f);
-$old = "            if (\$chainId > 0) {\r\n                OnchainCircuitBreaker::releaseProbe(\$chainId);\r\n            }\r\n        }\r\n    }\r\n\r\n    /**\r\n     * Convenience: wp_remote_get with retry + SSRF hardening.";
-$new = "        }\r\n    }\r\n\r\n    /**\r\n     * Convenience: wp_remote_get with retry + SSRF hardening.";
+$old = "            if (\$chainId > 0) {\r\n                OnchainCircuitBreaker::releaseProbe(\$chainId);\r\n            }\r\n        }\r\n    }\r\n\r\n    /**\r\n     * The deadline these two convenience wrappers hand to";
+$new = "        }\r\n    }\r\n\r\n    /**\r\n     * The deadline these two convenience wrappers hand to";
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
 ' unit 'BreakerRetryAccountingTest::testTheProbeIsReleasedExactlyOncePerRequest' \

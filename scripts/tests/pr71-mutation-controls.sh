@@ -38,20 +38,14 @@ PHP="${PHP_BIN:-php}"
 PY="${PYTHON_BIN:-python}"
 MUTATE="scripts/tests/mutate.py"
 
-UNIT_FILTER='DiscoveryReadinessTest|DiscoveryExecutorFrozenModeTest|DiscoveryRunReadinessGateTest|DiscoveryExecutorReadinessRecheckTest|EnrichmentCronRetiredTest|AutomaticNftDiscoveryRetiredTest|DiscoveryRunServiceTest'
-INT_FILTER='DiscoveryReadinessIntegrationTest'
+UNIT_FILTER='EnrichmentCronRetiredTest|AutomaticNftDiscoveryRetiredTest'
 
-READY='app/Domain/Onchain/Support/DiscoveryReadiness.php'
-EXEC='app/Domain/Onchain/Workers/DiscoveryRunExecutor.php'
-SERVICE='app/Domain/Onchain/Services/DiscoveryRunService.php'
-PAGE='app/Domain/Onchain/Admin/VerifyCollectionsPage.php'
 HOOKS='includes/cron-hooks.php'
 UNSCHED='includes/database/unschedule-automatic-nft-discovery.php'
 RUNNER='includes/database/migration-runner.php'
 ENRICH='app/Domain/Onchain/Services/NftEnrichmentService.php'
-MODE='app/Domain/Onchain/ValueObjects/DiscoveryScanMode.php'
 
-FILES=("$READY" "$EXEC" "$SERVICE" "$PAGE" "$HOOKS" "$UNSCHED" "$RUNNER" "$ENRICH" "$MODE")
+FILES=("$HOOKS" "$UNSCHED" "$RUNNER" "$ENRICH")
 
 WORK="$(mktemp -d)"
 KILLED=0
@@ -66,8 +60,6 @@ cleanup() { restore; rm -rf "$WORK"; }
 trap cleanup EXIT
 
 run_unit() { "$PHP" vendor/bin/phpunit --filter "$UNIT_FILTER" --no-coverage >/dev/null 2>&1; }
-run_int()  { "$PHP" -d extension_dir=C:/php/ext -d extension=mysqli vendor/bin/phpunit \
-                -c phpunit-integration.xml.dist --filter "$INT_FILTER" --no-coverage >/dev/null 2>&1; }
 
 # ── PREFLIGHT ───────────────────────────────────────────────────────────
 echo "── preflight ──────────────────────────────────────────────────────"
@@ -84,14 +76,6 @@ if ! run_unit; then
   exit 2
 fi
 echo "  ok   unit harness green before mutating"
-
-if ! run_int; then
-  echo "ABORT: the integration anchor does not pass on unmutated code."
-  echo "       Check the throwaway MySQL is up and BCC_TEST_DB_* are set —"
-  echo "       an unreachable database makes every kill a FALSE kill."
-  exit 2
-fi
-echo "  ok   integration harness green before mutating"
 echo
 
 control() {
@@ -109,8 +93,7 @@ control() {
   fi
 
   local unit_red=0 int_red=0
-  if [ "$harness" = unit ] || [ "$harness" = both ]; then run_unit || unit_red=1; fi
-  if [ "$harness" = int ]  || [ "$harness" = both ]; then run_int  || int_red=1;  fi
+  if [ "$harness" = unit ]; then run_unit || unit_red=1; fi
 
   restore
 
@@ -128,183 +111,15 @@ frag() { local p; p="$(mktemp "$WORK/frag.XXXXXX")"; cat > "$p"; printf '%s' "$p
 
 echo "── controls ───────────────────────────────────────────────────────"
 
-# ── ⚠ (1) PRODUCT SUPPORT IS THE FIRST QUESTION ─────────────────────────
-
-N=$(frag <<'EOF'
-        if ($nftSupported !== true) {
-            return DiscoveryRunError::NFT_DISCOVERY_UNSUPPORTED;
-        }
-EOF
-)
-R=$(frag <<'EOF'
-        if (false) {
-            return DiscoveryRunError::NFT_DISCOVERY_UNSUPPORTED;
-        }
-EOF
-)
-control "product support stops being checked at all" both "$READY" "$N" "$R"
-
-# The classic truthiness bug: '0' from MySQL is falsy, but a loose check
-# written as `!$nftSupported` treats the ABSENT column (null) the same as
-# false — which is right — while `== false` on a '0' string is a different
-# trap. This plants the one that ACCEPTS an unreadable column.
-N=$(frag <<'EOF'
-        if ($nftSupported !== true) {
-EOF
-)
-R=$(frag <<'EOF'
-        if ($nftSupported === false) {
-EOF
-)
-control "an unreadable support column is treated as supported" both "$READY" "$N" "$R"
-
-# ── ⚠ (2) THE ORDER IS THE SECURITY PROPERTY ────────────────────────────
+# ── CONTROLS (1)-(7) AND (9) REMOVED, WITH THEIR TARGETS (2026-11-12) ──
 #
-# Moving support AFTER the per-chain verdict is the mutation that makes a
-# capability row and an allowlist entry able to rescue a validator-only
-# chain. The behaviour is identical on every supported chain, so only a
-# test that pins the ORDER can catch it.
-N=$(frag <<'EOF'
-        // (2) PRODUCT SUPPORT — asked before anything an operator can set.
-EOF
-)
-R=$(frag <<'EOF'
-        if ($chainVerdict === CosmwasmScanEligibility::ELIGIBLE && $nftSupported !== true) { return CosmwasmScanEligibility::ELIGIBLE; }
-        // (2) PRODUCT SUPPORT — asked before anything an operator can set.
-EOF
-)
-control "an eligible verdict overrides missing product support" both "$READY" "$N" "$R"
-
-# ── ⚠ (3) THE MODE-GATED ENVIRONMENT SWITCHES ───────────────────────────
-
-N=$(frag <<'EOF'
-            if (!$discoveryEnabled) {
-                return DiscoveryRunError::DISCOVERY_GLOBALLY_DISABLED;
-            }
-EOF
-)
-R=$(frag <<'EOF'
-            if (false) {
-                return DiscoveryRunError::DISCOVERY_GLOBALLY_DISABLED;
-            }
-EOF
-)
-control "the global master switch stops blocking a historical run" unit "$READY" "$N" "$R"
-
-N=$(frag <<'EOF'
-            if (!$backfillEnabled) {
-                return DiscoveryRunError::HISTORICAL_BACKFILL_DISABLED;
-            }
-EOF
-)
-R=$(frag <<'EOF'
-            if (false) {
-                return DiscoveryRunError::HISTORICAL_BACKFILL_DISABLED;
-            }
-EOF
-)
-control "the backfill switch stops blocking a historical run" unit "$READY" "$N" "$R"
-
-# The inverse: gating INCREMENTAL on the switches too. This is the mutation
-# that would refuse the supervised operator path — a failure in the
-# blocks-legitimate-work direction, which is the one review misses.
-N=$(frag <<'EOF'
-        if ($scanMode === DiscoveryScanMode::HISTORICAL) {
-EOF
-)
-R=$(frag <<'EOF'
-        if (true) {
-EOF
-)
-control "incremental is wrongly gated on the environment switches" unit "$READY" "$N" "$R"
-
-# ── ⚠ (4) THE PER-CHAIN VERDICT FAILS OPEN ──────────────────────────────
-
-N=$(frag <<'EOF'
-                default                                     => DiscoveryRunError::DISCOVERY_DISABLED,
-EOF
-)
-R=$(frag <<'EOF'
-                default                                     => CosmwasmScanEligibility::ELIGIBLE,
-EOF
-)
-control "an unknown verdict is treated as eligible" unit "$READY" "$N" "$R"
-
-N=$(frag <<'EOF'
-        return $reason === CosmwasmScanEligibility::ELIGIBLE;
-EOF
-)
-R=$(frag <<'EOF'
-        return $reason !== DiscoveryRunError::NFT_DISCOVERY_UNSUPPORTED;
-EOF
-)
-control "isEligible becomes a negation instead of an identity test" both "$READY" "$N" "$R"
-
-# ── ⚠ (5) THE EXECUTOR STOPS RE-ASKING ──────────────────────────────────
-
-N=$(frag <<'EOF'
-        if (!$readiness['eligible']) {
-EOF
-)
-R=$(frag <<'EOF'
-        if (false) {
-EOF
-)
-control "the executor stops acting on its readiness recheck" unit "$EXEC" "$N" "$R"
-
-# Re-judging against a freshly derived mode instead of the frozen one is the
-# subtle version: a checkpoint completing between queue and pickup would
-# switch the run to incremental and skip the backfill gate it was approved
-# under.
-N=$(frag <<'EOF'
-        $readiness = DiscoveryReadiness::forExecution($chainId, $scanMode);
-EOF
-)
-R=$(frag <<'EOF'
-        $readiness = DiscoveryReadiness::forExecution($chainId, DiscoveryScanMode::INCREMENTAL);
-EOF
-)
-control "the executor re-judges against a mode the run was not approved for" unit "$EXEC" "$N" "$R"
-
-# ── ⚠ (6) THE REQUEST GATE STOPS REFUSING ───────────────────────────────
-
-N=$(frag <<'EOF'
-        $readiness = $this->chainReadiness($chainId, $forceScanMode);
-        if (!$readiness['eligible']) {
-            return $this->refuse($readiness['reason']);
-        }
-EOF
-)
-R=$(frag <<'EOF'
-        $readiness = $this->chainReadiness($chainId, $forceScanMode);
-        if (false) {
-            return $this->refuse($readiness['reason']);
-        }
-EOF
-)
-control "the request gate accepts a run it cannot execute" unit "$SERVICE" "$N" "$R"
-
-# ── ⚠ (7) THE PANEL SHOWS UNSUPPORTED CHAINS AGAIN ──────────────────────
-
-N=$(frag <<'EOF'
-                static fn(object $c): bool => DiscoveryReadiness::isNftDiscoverySurface($c)
-EOF
-)
-R=$(frag <<'EOF'
-                static fn(object $c): bool => true
-EOF
-)
-control "validator-only chains regain a scan panel" unit "$PAGE" "$N" "$R"
-
-N=$(frag <<'EOF'
-        return NftChainCapability::bccNftSupportState($chain) === true;
-EOF
-)
-R=$(frag <<'EOF'
-        return NftChainCapability::bccNftSupportState($chain) !== false;
-EOF
-)
-control "the scan surface admits an unreadable support column" both "$READY" "$N" "$R"
+# They mutated DiscoveryReadiness, DiscoveryRunService, DiscoveryScanMode,
+# the executor's readiness recheck and the Verify Collections scan panel. All
+# of that was deleted in the scanner retirement (S1-S8), together with every
+# test these controls named (DiscoveryReadinessTest, DiscoveryRunServiceTest,
+# DiscoveryReadinessIntegrationTest, ...). scanner-removal-mutation-
+# controls.sh and ScannerRemovedInventoryTest guard that the surface stays
+# gone. What remains is (8): the retirement itself must stay retired.
 
 # ── ⚠ (8) THE ENRICHMENT LOOP COMES BACK ────────────────────────────────
 
@@ -366,36 +181,6 @@ R=$(frag <<'EOF'
 EOF
 )
 control "the enrichment self-heal is restored" unit "$ENRICH" "$N" "$R"
-
-# ── ⚠ (9) THE SCAN-MODE RULE ────────────────────────────────────────────
-
-N=$(frag <<'EOF'
-        if (!is_string($completedAt) || trim($completedAt) === '') {
-            return self::HISTORICAL;
-        }
-EOF
-)
-R=$(frag <<'EOF'
-        if (false) {
-            return self::HISTORICAL;
-        }
-EOF
-)
-control "a never-walked chain resolves to incremental" both "$MODE" "$N" "$R"
-
-N=$(frag <<'EOF'
-        if (str_starts_with($completedAt, '0000-00-00')) {
-            return self::HISTORICAL;
-        }
-EOF
-)
-R=$(frag <<'EOF'
-        if (false) {
-            return self::HISTORICAL;
-        }
-EOF
-)
-control "the MySQL zero-date is read as a real completion" unit "$MODE" "$N" "$R"
 
 echo
 echo "── result ─────────────────────────────────────────────────────────"
