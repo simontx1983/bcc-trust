@@ -30,6 +30,7 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\ProfileAccess;
+use BCC\Trust\Core\Support\ProfileGroupVisibility;
 use BCC\Trust\Core\Support\PublicAllPolicy;
 use BCC\Trust\Core\Support\UserSlugResolver;
 use BCC\Trust\Core\ValueObjects\GroupContext;
@@ -102,7 +103,7 @@ final class UserGroupsEndpoint
         $displays  = PeepSoGroupRepository::findManyByIds($groupIds);
 
         // Privacy filter — drop secret groups the viewer can't see.
-        $visibleContexts = $this->filterByPrivacy($contexts, $viewerId, $isSelf);
+        $visibleContexts = $this->filterByPrivacy($contexts, $viewerId, $isSelf, $targetId);
         if ($visibleContexts === []) {
             return $this->respond([]);
         }
@@ -165,40 +166,29 @@ final class UserGroupsEndpoint
     }
 
     /**
+     * Privacy filter for the Groups tab.
+     *
+     * ⚠ THE RULES NO LONGER LIVE HERE. They moved to
+     * {@see ProfileGroupVisibility::filter()} because the user
+     * view-model's `halls` field publishes the same fact and had NO
+     * filter at all — it leaked secret-group membership to any profile
+     * reader (F-323). Two copies of a privacy rule is how that happened;
+     * this method is now a thin adapter so there is exactly one.
+     *
+     * What it gained besides the move (user decisions, 2026-11-12): the
+     * "Show my groups on my profile" toggle, and holder/delegator groups
+     * being withheld from anonymous readers (F-270).
+     *
      * @param array<int, GroupContext> $contexts
      * @return array<int, GroupContext>
      */
-    private function filterByPrivacy(array $contexts, int $viewerId, bool $isSelf): array
+    private function filterByPrivacy(array $contexts, int $viewerId, bool $isSelf, int $ownerId): array
     {
         if ($isSelf) {
             return $contexts; // viewer is the member, sees all their own groups
         }
 
-        $secretIds = [];
-        foreach ($contexts as $groupId => $ctx) {
-            if ($ctx->privacy === PeepSoPrivacy::Secret) {
-                $secretIds[] = $groupId;
-            }
-        }
-
-        if ($secretIds === [] || $viewerId === 0) {
-            // No secret groups in the result, or viewer is anonymous —
-            // strip all secrets either way.
-            if ($viewerId === 0) {
-                foreach ($secretIds as $sid) {
-                    unset($contexts[$sid]);
-                }
-            }
-            return $contexts;
-        }
-
-        $viewerSecretMemberships = PeepSoGroupRepository::findUserMemberships($viewerId, $secretIds);
-        foreach ($secretIds as $sid) {
-            if (!isset($viewerSecretMemberships[$sid])) {
-                unset($contexts[$sid]);
-            }
-        }
-        return $contexts;
+        return ProfileGroupVisibility::filter($contexts, $ownerId, $viewerId);
     }
 
     /**

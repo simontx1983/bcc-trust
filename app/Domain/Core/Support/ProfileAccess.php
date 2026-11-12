@@ -107,6 +107,12 @@ final class ProfileAccess
     public const REASON_PRIVATE = 'profile_private';
 
     /**
+     * user_meta key behind "Show my groups on my profile" (F-270).
+     * ⚠ Absent = ON; see {@see showsGroupsOnProfile()}.
+     */
+    public const META_SHOW_GROUPS = 'bcc_show_groups_on_profile';
+
+    /**
      * Largest id set {@see filterVisible} will judge in one call.
      *
      * A list page is a few dozen rows, so this is a defensive bound on
@@ -350,6 +356,36 @@ final class ProfileAccess
         }
 
         return 40;
+    }
+
+    /**
+     * "Show my groups on my profile" (F-270).
+     *
+     * ⚠ ABSENT MEANS ON. The decision was to default to today's
+     * behaviour, so a member who has never touched the setting keeps
+     * their groups listed; only an explicit falsey value hides them.
+     * That makes this the one profile-privacy read in this class whose
+     * default is PERMISSIVE, which is why it says so loudly.
+     *
+     * The companion rules - secret groups never shown to non-members,
+     * holder/delegator groups shown to signed-in viewers only - do NOT
+     * depend on this flag and are applied regardless. Consult this only
+     * through {@see ProfileGroupVisibility::filter()}, which owns all of
+     * them; a surface reading this flag on its own would reimplement
+     * half the policy.
+     */
+    public static function showsGroupsOnProfile(int $ownerId): bool
+    {
+        if ($ownerId <= 0) {
+            return false;
+        }
+
+        $raw = get_user_meta($ownerId, self::META_SHOW_GROUPS, true);
+        if (!is_string($raw) || $raw === '') {
+            return true;
+        }
+
+        return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
     }
 
     /**
