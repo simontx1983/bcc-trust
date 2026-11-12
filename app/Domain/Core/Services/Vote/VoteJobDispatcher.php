@@ -40,9 +40,15 @@ class VoteJobDispatcher {
      * sweeps; fraud analysis has none, so a failure inside it (a deadlock,
      * a DB blip) used to be logged and then lost for good — the voter's
      * fraud_score never reflected that vote. It is now retried with
-     * exponential backoff: 5, 10, 20, 40, 80 minutes. Re-running is safe:
-     * VoteFraudAnalyzer::run() re-checks that the vote is still active and
-     * recomputes the score from live signals.
+     * exponential backoff: 5, 10, 20, 40, 80 minutes.
+     *
+     * Re-running is safe for the SCORE: VoteFraudAnalyzer::run() re-checks
+     * that the vote is still active, recomputes from live signals, and the
+     * stored score is written monotonically. It is NOT side-effect free: a
+     * retry after a failure part-way through can write a second
+     * fraud_analysis row, a second fraud_analysis_vote audit row and repeat
+     * the downvote-velocity / fan-in alerts. Those are observational
+     * records, and a duplicate is preferred to a vote never analysed.
      */
     public const FRAUD_RETRY_HOOK         = 'bcc_trust_async_fraud_analysis_retry';
     public const FRAUD_RETRY_MAX_ATTEMPTS = 5;
