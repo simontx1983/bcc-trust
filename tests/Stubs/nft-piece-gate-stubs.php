@@ -10,6 +10,12 @@
  * Fixture ($GLOBALS['__bcc_np']):
  *   throttle_denied  bool                      Throttle::allow() answers !this
  *   throttle_calls   list<string>              actions passed to Throttle::allow
+ *   throttle_keys    list<string>              "action|key" per call ("" key = per-caller default)
+ *   throttle_deny    list<string>              "action|key" entries to refuse (F-57)
+ *   fetcher_cosmos   bool                      FetcherFactory returns an UNCONSTRUCTED CosmosFetcher
+ *   fetcher_object   bool                      FetcherFactory returns a plain object (no driver)
+ *                                              instead of throwing — the builder then answers
+ *                                              "no metadata" without any real provider call
  *   chains           array<string, object>     slug → chain row
  *   collections      array<string, object>     "chainId|contract" → collection row
  *   collection_calls list<string>              "chainId|contract" lookups
@@ -26,7 +32,12 @@ namespace BCC\Core\Security {
             public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null): bool
             {
                 $GLOBALS['__bcc_np']['throttle_calls'][] = $action;
-                return empty($GLOBALS['__bcc_np']['throttle_denied']);
+                $entry = $action . '|' . ($key ?? '');
+                $GLOBALS['__bcc_np']['throttle_keys'][] = $entry;
+                if (!empty($GLOBALS['__bcc_np']['throttle_denied'])) {
+                    return false;
+                }
+                return !in_array($entry, $GLOBALS['__bcc_np']['throttle_deny'] ?? [], true);
             }
         }
     }
@@ -75,6 +86,15 @@ namespace BCC\Trust\Onchain\Factories {
         public static function make_for_chain(object $chain): object
         {
             $GLOBALS['__bcc_np']['fetcher_calls'] = ($GLOBALS['__bcc_np']['fetcher_calls'] ?? 0) + 1;
+            if (!empty($GLOBALS['__bcc_np']['fetcher_cosmos'])) {
+                // A real CosmosFetcher type with NO constructor run: it passes the
+                // builder's instanceof check, and any method call would fail loudly,
+                // so a test using it proves the refusal came before any LCD query.
+                return (new \ReflectionClass(\BCC\Trust\Onchain\Fetchers\CosmosFetcher::class))->newInstanceWithoutConstructor();
+            }
+            if (!empty($GLOBALS['__bcc_np']['fetcher_object'])) {
+                return new \stdClass();
+            }
             throw new \RuntimeException('upstream fetcher must not be reached in this test');
         }
     }
