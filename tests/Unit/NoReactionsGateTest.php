@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Tests\Unit;
 
+use BCC\Trust\Tests\Support\EngagementWriteRoutes;
+use BCC\Trust\Tests\Support\GateOrder;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -282,6 +284,30 @@ final class NoReactionsGateTest extends TestCase
                 "{$file}: every guard must return the refusal rather than fall through"
             );
         }
+    }
+
+    /**
+     * F-96: the counts above hold with the gate placed AFTER the write. In
+     * each handler that consults the gate, the refusal is returned before
+     * any engagement write call.
+     */
+    public function testEveryGatedHandlerReturnsTheRefusalBeforeItWrites(): void
+    {
+        $checked = 0;
+        foreach (EngagementWriteRoutes::HANDLERS as $h) {
+            if (!$h['noReactions']) {
+                continue;
+            }
+            $label = "{$h['file']}::{$h['method']}()";
+            $body  = GateOrder::body(GateOrder::code(EngagementWriteRoutes::REST_DIR . $h['file']), $h['method']);
+
+            GateOrder::assertOrder($body, ['NoReactionsGate::check(', 'if ($noReactions !== null) {', 'return $noReactions;'], $label);
+            GateOrder::assertNoWorkBefore($body, 'return $noReactions;', $h['writes'], $label);
+            $checked++;
+        }
+
+        // The same five handlers the call-site count above covers.
+        self::assertSame(5, $checked);
     }
 
     /**

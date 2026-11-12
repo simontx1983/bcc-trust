@@ -32,6 +32,8 @@ require_once __DIR__ . '/../vendor/autoload.php';
 // F-94: the single resolver for files in the bcc-core checkout beside this
 // plugin — fails in CI, skips locally. No autoload-dev, so required here.
 require_once __DIR__ . '/Support/CoreSibling.php';
+require_once __DIR__ . '/Support/GateOrder.php';
+require_once __DIR__ . '/Support/EngagementWriteRoutes.php';
 
 // Namespace-scoped WP shims for CronService's schedule self-healing, plus the
 // bcc-core collaborators it calls by fully-qualified name.
