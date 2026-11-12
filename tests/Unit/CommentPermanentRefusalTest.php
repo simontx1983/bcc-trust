@@ -109,6 +109,12 @@ final class CommentPermanentRefusalTest extends TestCase
             {
                 return true;
             }
+
+            // The parent post is live (F-265 is not under test here).
+            public function isLive(object $activity): bool
+            {
+                return true;
+            }
         };
 
         $class   = new ReflectionClass(CommentService::class);
