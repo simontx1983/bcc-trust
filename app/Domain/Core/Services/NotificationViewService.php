@@ -9,8 +9,8 @@
  * type code.
  *
  * Per-type link resolution:
- *   - REACTION       → `/feed?focus=<act_id>` (jump back to the post
- *                       that was reacted to)
+ *   - REACTION       → `/post/<act_id>` (the permalink of the post that
+ *                       was reacted to; F-245 — `?focus=` was never read)
  *   - REVIEW         → `/v/<page_handle>` etc. via PageTypeMap +
  *                       page_id (the reviewed page)
  *   - CARD_WATCHED   → `/u/<actor_handle>` (the watcher's profile)
@@ -19,8 +19,8 @@
  *                    → `/me/progression` (the §N11 standing file —
  *                       the member's own progression surface, where
  *                       grade, recovery, and findings detail render)
- *   - MENTION        → `/?focus=<act_id>` (jump to the floor focused
- *                       on the post containing the mention; mirrors
+ *   - MENTION        → `/post/<act_id>` (the permalink of the post
+ *                       containing the mention; mirrors
  *                       REACTION). For comment mentions, act_id is the
  *                       PARENT post's act_id so the user lands on the
  *                       post on the floor — the FE has no comment-anchor
@@ -33,8 +33,8 @@
  *                       (the Hall's group_id). Falls back to
  *                       `/halls` if the group is no longer a Hall
  *                       (deleted, renamed off-prefix).
- *   - COMMENT_RECEIVED → `/?focus=<act_id>` (jump to the floor focused
- *                       on the parent post that received the comment;
+ *   - COMMENT_RECEIVED → `/post/<act_id>` (the permalink of the parent
+ *                       post that received the comment;
  *                       mirrors REACTION + MENTION shape — the FE has
  *                       no comment-anchor consumer in V1).
  *
@@ -49,7 +49,9 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\NotificationRepository;
+use BCC\Trust\Core\Repositories\PeepSoQueryRepository;
 use BCC\Trust\Core\Support\NotificationType;
 use BCC\Trust\Core\Support\PageTypeMap;
 
@@ -74,9 +76,68 @@ final class NotificationViewService
         'creator'   => '/c/',
     ];
 
+    /**
+     * Types whose `link` is the permalink of the post they are about
+     * (`/post/<act_id>`, F-245), and so carry a meaningful
+     * `target_available`.
+     */
+    private const POST_LINKED_TYPES = [
+        NotificationType::REACTION,
+        NotificationType::MENTION,
+        NotificationType::COMMENT_RECEIVED,
+    ];
+
     public function __construct(
-        private readonly NotificationRepository $repo
+        private readonly NotificationRepository $repo,
+        private readonly ?HiddenActivityRepository $hiddenRepo = null
     ) {
+    }
+
+    /**
+     * F-245: the act ids (of $actIds) whose post is KNOWN to be gone —
+     * deleted or unpublished, or moderation-hidden.
+     *
+     * Unknown is not gone: when either read fails this answers "none gone",
+     * so a row keeps `target_available: true` and its link, and the
+     * permalink makes the final call (it 404s a missing post). Nothing here
+     * is cached, so a failure is never remembered.
+     *
+     * @param list<int> $actIds
+     * @return array<int, true>
+     */
+    private function goneActIds(array $actIds): array
+    {
+        if ($actIds === []) {
+            return [];
+        }
+
+        $live = PeepSoQueryRepository::liveActivityIds($actIds);
+        if ($live === null) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] notifications: post availability unreadable; links left as-is', [
+                'act_ids' => count($actIds),
+            ]);
+            return [];
+        }
+
+        $hidden = [];
+        if ($this->hiddenRepo !== null) {
+            try {
+                $hidden = array_flip($this->hiddenRepo->getAllHiddenIds());
+            } catch (\Throwable $e) {
+                // Moderation state unreadable: judge on existence alone.
+                $hidden = [];
+            }
+        }
+
+        $liveSet = array_flip($live);
+        $gone    = [];
+        foreach ($actIds as $actId) {
+            if (!isset($liveSet[$actId]) || isset($hidden[$actId])) {
+                $gone[$actId] = true;
+            }
+        }
+
+        return $gone;
     }
 
     /**
@@ -130,9 +191,20 @@ final class NotificationViewService
         }
         $removalNotices = \BCC\Trust\Onchain\Services\DelegatorGroupView::removalNotices(array_keys($removedFrom));
 
+        // F-245: one batched "is the post gone" check for the rows that link
+        // to a post, instead of letting the bell send the user to a 404.
+        $postActIds = [];
+        foreach ($rows as $row) {
+            $actId = isset($row->not_act_id) ? (int) $row->not_act_id : 0;
+            if ($actId > 0 && in_array($row->not_type ?? '', self::POST_LINKED_TYPES, true)) {
+                $postActIds[$actId] = true;
+            }
+        }
+        $goneActIds = $this->goneActIds(array_keys($postActIds));
+
         $items = [];
         foreach ($rows as $row) {
-            $shape = self::shapeRow($row, $actorsById, $removalNotices);
+            $shape = self::shapeRow($row, $actorsById, $removalNotices, $goneActIds);
             if ($shape !== null) {
                 $items[] = $shape;
             }
@@ -168,9 +240,10 @@ final class NotificationViewService
     /**
      * @param array<int, array{id: int, handle: string, display_name: string, avatar_url: string}> $actorsById
      * @param array<int, array{message: string, link: string}> $removalNotices keyed by group id
+     * @param array<int, true> $goneActIds act ids whose post is known to be gone (F-245)
      * @return array<string, mixed>|null
      */
-    private static function shapeRow(object $row, array $actorsById = [], array $removalNotices = []): ?array
+    private static function shapeRow(object $row, array $actorsById = [], array $removalNotices = [], array $goneActIds = []): ?array
     {
         $type = isset($row->not_type) && is_string($row->not_type) ? $row->not_type : '';
         if (!NotificationType::isValid($type)) {
@@ -198,13 +271,17 @@ final class NotificationViewService
         }
 
         return [
-            'id'         => $id,
-            'type'       => $type,
-            'message'    => $message,
-            'created_at' => self::toIso8601($timestamp),
-            'read'       => $isRead,
-            'actor'      => $actor,
-            'link'       => $link,
+            'id'               => $id,
+            'type'             => $type,
+            'message'          => $message,
+            'created_at'       => self::toIso8601($timestamp),
+            'read'             => $isRead,
+            'actor'            => $actor,
+            'link'             => $link,
+            // F-245: false only when this row links to a post that is KNOWN
+            // to be gone (deleted, unpublished or moderation-hidden). True
+            // for every other row, and when availability could not be read.
+            'target_available' => !(in_array($type, self::POST_LINKED_TYPES, true) && isset($goneActIds[$actId])),
         ];
     }
 
@@ -247,7 +324,11 @@ final class NotificationViewService
     private static function resolveLink(string $type, int $externalId, int $actId, string $actorHandle): string
     {
         return match ($type) {
-            NotificationType::REACTION    => $actId > 0 ? '/?focus=' . $actId : '/',
+            // F-245: reaction, mention and comment rows open the post's own
+            // permalink (/post/<act_id>, served by GET /feed/{id}). They used
+            // to link `/?focus=<act_id>`, which no frontend route reads, so
+            // every one of them dead-ended on the Floor.
+            NotificationType::REACTION    => $actId > 0 ? '/post/' . $actId : '/',
             NotificationType::REVIEW      => self::resolvePageLink($externalId),
             NotificationType::CARD_WATCHED => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
             // Rank standing changes + §15 findings all deep-link to the
@@ -271,11 +352,11 @@ final class NotificationViewService
             // seconds of signup), but tapping the bell row should still
             // do something coherent.
             NotificationType::WELCOME     => '/',
-            // Mention links to the floor focused on the post containing
-            // the @-tag. For comment mentions the dispatcher passes the
-            // PARENT post's act_id so this lands on the post; the FE
-            // has no comment-anchor consumer in V1.
-            NotificationType::MENTION     => $actId > 0 ? '/?focus=' . $actId : '/',
+            // Mention links to the post containing the @-tag. For comment
+            // mentions the dispatcher passes the PARENT post's act_id so
+            // this lands on the post; the FE has no comment-anchor consumer
+            // in V1.
+            NotificationType::MENTION     => $actId > 0 ? '/post/' . $actId : '/',
             // HALL_POST: bell row's external_id is the Hall's group_id.
             // Deep-link to /halls/{slug} so the user lands on the Hall
             // detail page (where they'll see the new post in the feed
@@ -285,7 +366,7 @@ final class NotificationViewService
             // COMMENT_RECEIVED: bell row's act_id is the parent post's
             // activity row; mirrors REACTION + MENTION shape. The FE
             // has no comment-anchor consumer in V1.
-            NotificationType::COMMENT_RECEIVED => $actId > 0 ? '/?focus=' . $actId : '/',
+            NotificationType::COMMENT_RECEIVED => $actId > 0 ? '/post/' . $actId : '/',
             // V2 Trust Attestation Layer — all four events link to the
             // attestor's profile (the source of the change). Revoke
             // uses the same shape since the (former) attestor is the
@@ -295,9 +376,9 @@ final class NotificationViewService
             NotificationType::ATTESTATION_STAND_BEHIND_RECEIVED => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
             NotificationType::ATTESTATION_REVOKED              => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
             NotificationType::ATTESTATION_REAFFIRMED           => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
-            // F-73 auto-hide notice: deliberately NOT '/?focus=act' — the
+            // F-73 auto-hide notice: deliberately NOT '/post/<act>' — the
             // post is moderation-hidden, so every feed (the author's
-            // included) excludes it and a focus link would dead-end.
+            // included) excludes it and a permalink would dead-end.
             NotificationType::CONTENT_AUTO_HIDDEN => '/',
             default                       => '/',
         };

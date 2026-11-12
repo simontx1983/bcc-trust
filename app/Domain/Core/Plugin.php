@@ -694,7 +694,8 @@ final class Plugin
     public function notificationViewService(): Services\NotificationViewService
     {
         return $this->notificationViewService ??= new Services\NotificationViewService(
-            $this->notificationRepository()
+            $this->notificationRepository(),
+            $this->hiddenActivityRepository()
         );
     }
 
