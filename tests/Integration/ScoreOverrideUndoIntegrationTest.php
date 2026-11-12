@@ -211,6 +211,31 @@ final class ScoreOverrideUndoIntegrationTest extends TestCase
         self::assertSame('elite', $this->storedTier(), 'the notice agrees with the tier the formula stores');
     }
 
+    /**
+     * F-101: a FAILED score read skips the page. getByPageId() turned the
+     * failure into null and null into "current = 50", so the override wrote
+     * a delta computed from a score the page never had.
+     */
+    public function testAnUnreadableScoreSkipsThePageInsteadOfWritingAWrongDelta(): void
+    {
+        global $wpdb;
+        $before = $this->total();
+        $table  = $wpdb->prefix . 'bcc_trust_page_scores';
+        $wpdb->failQueriesMatching = '/^SELECT .* FROM ' . preg_quote($table, '/') . ' WHERE page_id = ' . self::PAGE . ' LIMIT 1$/s';
+        try {
+            [$result, $notice] = $this->quietWithOutput(fn () => $this->mod->overrideScore(self::OWNER, 90, 'grant'));
+        } finally {
+            $wpdb->failQueriesMatching = null;
+        }
+
+        self::assertSame(0, $result['pages_updated'] ?? null);
+        self::assertSame(1, $result['pages_unread'] ?? null);
+        self::assertStringContainsString('1 page(s) were NOT changed: their current score could not be read', $notice);
+        self::assertSame(round($before, 4), round($this->total(), 4), 'no delta was written');
+        self::assertFalse($this->pin->isElitePinned(self::PAGE), 'and no elite pin');
+        self::assertNull($this->mod->latestUndoableOverride(self::OWNER), 'nothing was recorded to undo');
+    }
+
     private function storedTier(): string
     {
         global $wpdb;

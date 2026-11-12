@@ -548,6 +548,7 @@ final class ModerationService
         }
 
         $updated  = 0;
+        $unreadable = 0;
         $now      = gmdate('Y-m-d H:i:s');
         $adminId  = (int) get_current_user_id();
         $ledgerId = '';
@@ -567,7 +568,24 @@ final class ModerationService
                 //    reproduce — not against a stale row.
                 do_action('bcc.trust.recalculate_score', $pid);
 
-                $row     = $this->scoreRepository->getByPageId($pid);
+                // F-101: the delta is measured against this read, so it must
+                // be the write-path read. getByPageId() turned a FAILED read
+                // into null, and null into "current = 50", so applyPenalty
+                // wrote a delta computed from a score the page never had. A
+                // failed read now skips the page (no delta, no pin change, no
+                // ledger entry) and the notice says so; a genuinely missing
+                // row still means the neutral 50.
+                try {
+                    $row = $this->scoreRepository->getByPageIdOrFail($pid);
+                } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] score override skipped page: score read failed', [
+                        'page_id' => $pid,
+                        'user_id' => $userId,
+                        'error'   => $e->getMessage(),
+                    ]);
+                    $unreadable++;
+                    continue;
+                }
                 $current = $row !== null ? $row->getTotalScore() : 50.0;
                 $delta   = (float) $newScore - $current;
 
@@ -633,6 +651,7 @@ final class ModerationService
             'page_tiers'    => $pageTiers,
             'reason'        => $reason,
             'pages_updated' => $updated,
+            'pages_unread'  => $unreadable,
             'ledger_id'     => $ledgerId,
             'elite_pinned'  => $grantElite,
         ]);
@@ -652,8 +671,11 @@ final class ModerationService
         $undoNote  = ($ledgerPages !== [] && $ledgerId === '')
             ? ' ⚠ The undo record could not be saved, so this override cannot be undone.'
             : '';
-        echo '<div class="notice notice-success"><p>Trust score overridden to <strong>' . $newScore . '</strong> (' . esc_html($tierSummary) . ') for ' . intval($updated) . ' page(s). Reason: ' . esc_html($reason) . '.' . esc_html($eliteNote . $undoNote) . '</p></div>';
-        return ['success' => true, 'message' => 'Trust score overridden.', 'tier' => $tierSummary, 'page_tiers' => $pageTiers, 'pages_updated' => $updated, 'ledger_id' => $ledgerId];
+        $unreadNote = $unreadable > 0
+            ? sprintf(' ⚠ %d page(s) were NOT changed: their current score could not be read. Try again.', $unreadable)
+            : '';
+        echo '<div class="notice notice-success"><p>Trust score overridden to <strong>' . $newScore . '</strong> (' . esc_html($tierSummary) . ') for ' . intval($updated) . ' page(s). Reason: ' . esc_html($reason) . '.' . esc_html($eliteNote . $undoNote . $unreadNote) . '</p></div>';
+        return ['success' => true, 'message' => 'Trust score overridden.', 'tier' => $tierSummary, 'page_tiers' => $pageTiers, 'pages_updated' => $updated, 'pages_unread' => $unreadable, 'ledger_id' => $ledgerId];
     }
 
     /**
