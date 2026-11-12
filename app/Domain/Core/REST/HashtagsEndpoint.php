@@ -10,6 +10,13 @@
  * parallel BCC tag counter (§11) — PeepSo owns the write path and the
  * `ht_count` accounting.
  *
+ * Counts (F-168): `count` is the number of posts ANYONE can see carrying
+ * the tag, not PeepSo's raw `ht_count` (which also counts closed/secret
+ * group, members-only, private and private-profile posts). A tag used only
+ * in hidden posts is not listed. bcc-core recounts its top 50 candidates
+ * and caches the ranking for 10 minutes; see
+ * PeepSoHashtagRepository::getTrendingPubliclyVisible().
+ *
  * Cache policy: the trending list is identical for every viewer (no
  * per-viewer state), so it carries a public, short-TTL shared cache.
  *
@@ -72,7 +79,7 @@ final class HashtagsEndpoint
         $limit = max(1, min(self::MAX_LIMIT, $limit));
 
         $items = [];
-        foreach (PeepSoHashtagRepository::getTrending($limit) as $row) {
+        foreach (PeepSoHashtagRepository::getTrendingPubliclyVisible($limit) as $row) {
             $items[] = [
                 // PeepSo stores ht_name bare, but strip a defensive leading
                 // '#' in case a row was ever written with one.
