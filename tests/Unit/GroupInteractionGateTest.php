@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Tests\Unit;
 
+use BCC\Trust\Tests\Support\EngagementWriteRoutes;
+use BCC\Trust\Tests\Support\GateOrder;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -325,6 +327,24 @@ final class GroupInteractionGateTest extends TestCase
                 substr_count($src, 'GroupInteractionGate::check($userId, $actId)'),
                 "{$file}: expected {$count} call(s) to GroupInteractionGate::check"
             );
+        }
+    }
+
+    /**
+     * F-96: the count above passes with the gate called AFTER the write, or
+     * with its answer ignored. In every engagement write handler (comment
+     * routes included, which gate on the parent via checkPost) the gate's
+     * error is guarded and returned, and no write call comes before that
+     * return.
+     */
+    public function testEveryWriteHandlerReturnsTheGateErrorBeforeItWrites(): void
+    {
+        foreach (EngagementWriteRoutes::HANDLERS as $h) {
+            $label = "{$h['file']}::{$h['method']}()";
+            $body  = GateOrder::body(GateOrder::code(EngagementWriteRoutes::REST_DIR . $h['file']), $h['method']);
+
+            GateOrder::assertOrder($body, ['$gateError = ', 'if ($gateError !== null) {', 'return $gateError;'], $label);
+            GateOrder::assertNoWorkBefore($body, 'return $gateError;', $h['writes'], $label);
         }
     }
 }
