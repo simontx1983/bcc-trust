@@ -2551,19 +2551,30 @@ class ScoreRepository {
      *
      * MUST be called inside a TransactionManager::run() closure.
      *
+     * FAIL-CLOSED. The old `get_results() ?: []` turned a failed lock read
+     * (a lock-wait timeout or deadlock is the likely one here) into "this
+     * page has no score rows". recalculateScore() then skipped the locked
+     * UPDATE path and REPLACEd the row rebuilt from defaults, without the
+     * lock it believed it held. A failed read now throws, so the caller's
+     * transaction rolls back and nothing is written.
+     *
      * @param int $pageId
      * @return object[]  Array of locked row objects (page_id, category_id).
      * @phpstan-return list<object{page_id: int|numeric-string, category_id: int|numeric-string}>
+     * @throws RepositoryReadFailure when the read did not run
      */
     public function lockAllForPage( int $pageId ): array {
         global $wpdb;
 
-        return $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT page_id, category_id FROM {$this->table} WHERE page_id = %d FOR UPDATE",
-                $pageId
-            )
-        ) ?: [];
+        $sql = $wpdb->prepare(
+            "SELECT page_id, category_id FROM {$this->table} WHERE page_id = %d FOR UPDATE",
+            $pageId
+        );
+
+        /** @var list<object{page_id: int|numeric-string, category_id: int|numeric-string}> $rows */
+        $rows = self::runRead((string) $sql, __FUNCTION__, true);
+
+        return $rows;
     }
 
     /**
