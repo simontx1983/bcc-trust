@@ -12,7 +12,15 @@
  *   - bcc_not_found             (404) — collection unindexed AND fetch failed,
  *                                       OR token not on-chain
  *   - bcc_unsupported_standard  (422) — fungible token contract
- *   - bcc_upstream_unavailable  (503) — Cosmos LCD timeout, no cache
+ *   - bcc_upstream_unavailable  (503) — Cosmos LCD timeout, no cache; OR
+ *                                       the site-wide upstream budget is
+ *                                       spent and no stale row exists (F-57)
+ *   - bcc_rate_limited          (429) — the per-request throttle (F-154), OR
+ *                                       the caller's upstream budget (F-57)
+ *
+ * Two separate budgets: F-154's throttle below counts every request; F-57's,
+ * in NftPieceViewModelBuilder, counts only requests that actually call a
+ * provider (cache misses / stale refreshes / every Cosmos read).
  *
  * @package BCC\Trust\Onchain\REST
  * @since V2 Phase 6 (§H1)
@@ -242,6 +250,11 @@ final class NftPieceEndpoint
                 'bcc_upstream_unavailable',
                 $e->getMessage(),
                 503
+            ),
+            NftPieceViewModelBuilder::ERROR_RATE_LIMITED => ApiResponse::error(
+                'bcc_rate_limited',
+                $e->getMessage(),
+                429
             ),
             default => ApiResponse::error(
                 'bcc_internal_error',
