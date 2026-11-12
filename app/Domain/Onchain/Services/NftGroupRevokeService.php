@@ -82,6 +82,15 @@ final class NftGroupRevokeService
     public const SWEEP_LOCK = 'bcc_gated_group_revoke_sweep';
 
     /**
+     * F-278: single-event re-check of ONE member after the indexer saw one of
+     * their wallets lose a holding. Args: [user_id, group_id].
+     */
+    public const RECHECK_HOOK = 'bcc_gated_group_member_recheck';
+
+    /** PeepSo statuses that hold access (the sweep's member list). */
+    private const ACTIVE_STATUSES = ['member', 'member_owner', 'member_manager', 'member_moderator', 'member_readonly'];
+
+    /**
      * TRUE only for the brief window around a system-initiated
      * PeepSoGroupWriter::leave() in this sweep. The
      * peepso_action_group_user_delete listener (bcc-trust.php) reads this
@@ -353,6 +362,55 @@ final class NftGroupRevokeService
     }
 
     /**
+     * F-278: re-check ONE member of ONE holder group now, with the sweep's
+     * rules — ELIGIBLE keeps, INELIGIBLE revokes (system revoke: no opt-out,
+     * audited), UNKNOWN keeps. Owners are never revoked. Runs under the
+     * sweep's lock; 'locked' means a sweep tick is running and the caller
+     * should retry shortly.
+     *
+     * @return 'revoked'|'kept'|'unknown'|'not_member'|'owner'|'not_holder_group'|'unresolved'|'locked'
+     */
+    public function recheckMember(int $userId, int $groupId): string
+    {
+        if ($userId <= 0 || $groupId <= 0) {
+            return 'not_member';
+        }
+        if (!\BCC\Core\DB\AdvisoryLock::acquire(self::SWEEP_LOCK, 0)) {
+            return 'locked';
+        }
+
+        try {
+            $config = GatedGroupRepository::getGateConfig($groupId);
+            if ($config === null) {
+                return 'not_holder_group';
+            }
+            $status = PeepSoGroupRepository::getMembershipStatus($userId, $groupId);
+            if ($status === null || !in_array($status, self::ACTIVE_STATUSES, true)) {
+                return 'not_member';
+            }
+            if ($this->isOwnerRole($status)) {
+                return 'owner';
+            }
+            $identity = GateIdentityResolver::resolve($config);
+            if (!$identity->isResolved()) {
+                return 'unresolved';
+            }
+
+            $budget = $this->budgetFactory !== null
+                ? ($this->budgetFactory)()
+                : HoldingsService::verificationBudget(HoldingsService::SURFACE_REVOKE);
+            $verdict = $this->verdictForMember($userId, $identity->chainSlug(), $identity->canonical(), $config, $budget);
+
+            if ($verdict->isIneligible()) {
+                return $this->revokeMember($userId, $groupId, $config, $verdict, 'holding_lost_recheck') ? 'revoked' : 'kept';
+            }
+            return $verdict->isUnknown() ? 'unknown' : 'kept';
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release(self::SWEEP_LOCK);
+        }
+    }
+
+    /**
      * Re-derive a member's eligibility verdict. Isolated for testability
      * and so a single member's failure can't escape the loop.
      */
@@ -399,7 +457,7 @@ final class NftGroupRevokeService
      * Returns true only on a real removal (owner-refusal / PeepSo-absence
      * returns false → no audit row).
      */
-    private function revokeMember(int $userId, int $groupId, GatedGroupConfig $config, EligibilityVerdict $verdict): bool
+    private function revokeMember(int $userId, int $groupId, GatedGroupConfig $config, EligibilityVerdict $verdict, string $via = 'revoke_sweep'): bool
     {
         self::$systemRevokeInProgress = true;
         try {
@@ -427,7 +485,7 @@ final class NftGroupRevokeService
                 'reason'             => 'reverification_ineligible',
                 'min_balance'        => $config->minBalance,
                 'best_known_balance' => $verdict->bestKnownBalance,
-                'via'                => 'revoke_sweep',
+                'via'                => $via,
             ],
             'group',
             $userId
