@@ -91,7 +91,13 @@ final class ViewerFingerprint
             return null;
         }
 
-        $hex = DeviceFingerprinter::keyedHash($day . '|' . $subject, 'viewerFingerprint');
+        // ⚠ 'viewer:' DOMAIN PREFIX. `keyedHash()` is shared (hashIp() uses
+        // it too), so every caller must namespace its message or two
+        // different kinds of input could, in principle, hash identically and
+        // mean different things. Free to add now because the feature ships
+        // dark and no dedupe row exists yet — changing it later would
+        // silently reset every viewer's code mid-day and double-count them.
+        $hex = DeviceFingerprinter::keyedHash('viewer:' . $day . '|' . $subject, 'viewerFingerprint');
 
         if ($hex === null) {
             return null;

@@ -139,6 +139,8 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         array (
             0 => __DIR__ . '/..' . '/simplito/bigint-wrapper-php/lib',
         ),
+        'BCC\\Trust\\Core\\Repositories\\PostReachRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/PostReachRepository.php',
+        'BCC\\Trust\\Core\\Support\\ViewerFingerprint' => __DIR__ . '/../..' . '/app/Domain/Core/Support/ViewerFingerprint.php',
         'BCC\\Trust\\Rank\\' =>
         array (
             0 => __DIR__ . '/../..' . '/app/Domain/Rank',

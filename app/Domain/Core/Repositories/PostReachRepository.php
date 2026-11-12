@@ -61,11 +61,22 @@ final class PostReachRepository
      * inside its 48-hour window makes that reader countable again, so the
      * only consequence is a slightly OVER-counted `unique_viewers`. It can
      * never leak anything: the rows hold a salted one-way hash.
+     *
+     * ⚠⚠ THIS CAP MUST STAY BELOW `RetentionHealthSnapshot`'s watermark
+     * (`DEFAULT_ALARM_THRESHOLD`, 250_000, overridable by
+     * `BCC_RETENTION_ALARM_THRESHOLD`). That snapshot applies ONE threshold
+     * to every table in `RetentionHealthRepository::rowCounts()`, and this
+     * table is registered there — so a cap above the watermark would make a
+     * perfectly healthy table read as permanently "overgrown" in
+     * /system/health, i.e. an alarm that is always on and therefore
+     * useless. An earlier revision of this file had exactly that bug
+     * (cap 500_000 against a 250_000 watermark).
+     *
+     * There is deliberately no local alarm constant: the overgrown alarm
+     * promised in the schema docblock is that shared snapshot, not a second
+     * threshold maintained here.
      */
-    public const DEDUPE_MAX_ROWS = 500000;
-
-    /** Dashboard alarm threshold — same cap:alarm ratio as the Helius sweep. */
-    public const DEDUPE_ALARM_THRESHOLD = 600000;
+    public const DEDUPE_MAX_ROWS = 200000;
 
     /** Bounded age-delete: rows per batch, and max batches per sweep. */
     private const CLEANUP_BATCH_SIZE     = 5000;
@@ -311,17 +322,28 @@ final class PostReachRepository
         $deletedOverflow = 0;
 
         if ($remaining !== null && $remaining > $maxRows) {
+            // Batched for the same reason as the age delete above: one
+            // unbounded `DELETE … LIMIT {excess}` would, after a long stall,
+            // take a single long lock that blocks request-path dedupe
+            // inserts. Whatever a sweep cannot finish, the next one does.
             $excess = $remaining - $maxRows;
-            $n      = $wpdb->query($wpdb->prepare(
-                "DELETE FROM {$table} ORDER BY seen_at ASC LIMIT %d",
-                $excess
-            ));
-            if ($n === false) {
-                self::logWriteFailure('sweep_overflow');
-            } else {
-                $deletedOverflow = (int) $n;
-                $remaining      -= $deletedOverflow;
+            for ($i = 0; $i < self::CLEANUP_MAX_ITERATIONS && $excess > 0; $i++) {
+                $batch = min($excess, self::CLEANUP_BATCH_SIZE);
+                $n     = $wpdb->query($wpdb->prepare(
+                    "DELETE FROM {$table} ORDER BY seen_at ASC LIMIT %d",
+                    $batch
+                ));
+                if ($n === false) {
+                    self::logWriteFailure('sweep_overflow');
+                    break;
+                }
+                $deletedOverflow += (int) $n;
+                $excess          -= (int) $n;
+                if ((int) $n < $batch) {
+                    break; // table drained faster than the estimate
+                }
             }
+            $remaining -= $deletedOverflow;
         }
 
         return [
