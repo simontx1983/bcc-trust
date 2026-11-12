@@ -104,12 +104,109 @@ final class AuthSessionEndpointTest extends TestCase
                 'user_id'          => self::USER,
                 'handle'           => 'handle' . self::USER,     // CURRENT meta, not the token claim
                 'in_good_standing' => true,                       // resolveInGoodStanding fails open
+                'suspended'        => false,                      // F-305
                 'expires_at'       => (int) $payload['payload']['exp'],
             ],
             $body['data']
         );
         self::assertSame('no-store', self::headers($res)['Cache-Control'] ?? null);
         self::assertSame('Authorization', self::headers($res)['Vary'] ?? null);
+    }
+
+    // ── F-305: suspended members are signed in READ-ONLY ───────────────
+
+    /** @return array{0: int, 1: array<string, mixed>} */
+    private static function refresh(string $token): array
+    {
+        $req = new \WP_REST_Request([]);
+        $req->set_header('Authorization', 'Bearer ' . $token);
+        $res  = (new SessionController())->refresh($req);
+        $data = $res->get_data();
+        self::assertIsArray($data);
+        return [$res->get_status(), $data];
+    }
+
+    public function testTheSessionReadSaysTheMemberIsSuspended(): void
+    {
+        $GLOBALS['__bcc_susp'] = [self::USER => true];
+
+        [$status, $body] = self::call('Bearer ' . JwtToken::encode(self::USER, 'h'));
+
+        self::assertSame(200, $status, 'a suspended member is still signed in');
+        self::assertTrue($body['data']['suspended']);
+    }
+
+    public function testAnUnknownSuspensionStateShowsNoNotice(): void
+    {
+        $GLOBALS['__bcc_susp'] = [self::USER => null];
+
+        [, $body] = self::call('Bearer ' . JwtToken::encode(self::USER, 'h'));
+
+        self::assertFalse($body['data']['suspended'], 'display only; a failed read must not show a suspension');
+    }
+
+    public function testASuspendedMemberCanRefreshAndTheFreshTokenSaysSo(): void
+    {
+        // A token minted AFTER the suspension (they signed in again).
+        $GLOBALS['__bcc_susp'] = [self::USER => true];
+
+        [$status, $body] = self::refresh(JwtToken::encode(self::USER, 'h'));
+
+        self::assertSame(200, $status, 'read-only sign-in: a suspension no longer refuses the refresh');
+        self::assertTrue($body['data']['suspended']);
+        self::assertNotSame('', (string) $body['data']['token']);
+    }
+
+    public function testARefreshThatIsNotSuspendedSaysSo(): void
+    {
+        [$status, $body] = self::refresh(JwtToken::encode(self::USER, 'h'));
+
+        self::assertSame(200, $status);
+        self::assertFalse($body['data']['suspended']);
+    }
+
+    public function testARevokedTokenOfASuspendedMemberSaysWhyInsteadOfAPlainSignOut(): void
+    {
+        // The suspension revoked every token minted before it (F-119).
+        $token = JwtToken::encode(self::USER, 'h');
+        JwtToken::revokeAllForUser(self::USER);
+        $GLOBALS['__bcc_susp'] = [self::USER => true];
+
+        [$status, $body] = self::refresh($token);
+
+        self::assertSame(403, $status);
+        self::assertSame('bcc_forbidden', $body['error']['code']);
+        self::assertSame('account_suspended', $body['error']['data']['reason_code']);
+    }
+
+    /** @return array<string, array{?bool}> */
+    public static function notKnownSuspended(): array
+    {
+        return ['not suspended' => [false], 'unknown' => [null]];
+    }
+
+    #[DataProvider('notKnownSuspended')]
+    public function testAnyOtherRevokedTokenStaysTheUniform401(?bool $state): void
+    {
+        $token = JwtToken::encode(self::USER, 'h');
+        JwtToken::revokeAllForUser(self::USER);
+        $GLOBALS['__bcc_susp'] = [self::USER => $state];
+
+        [$status, $body] = self::refresh($token);
+
+        self::assertSame(401, $status);
+        self::assertArrayNotHasKey('data', $body['error'], 'no reason leaked');
+    }
+
+    public function testASuspendedUsersGarbageTokenIsNeverTreatedAsRevoked(): void
+    {
+        // Only a token whose signature verified can name its user.
+        $GLOBALS['__bcc_susp'] = [self::USER => true];
+        $forged = JwtToken::encode(self::USER, 'h') . 'x';
+
+        [$status] = self::refresh($forged);
+
+        self::assertSame(401, $status);
     }
 
     public function testATokenWithinTheSkewWindowIsStillValid(): void

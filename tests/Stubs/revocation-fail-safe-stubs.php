@@ -357,9 +357,13 @@ namespace BCC\Core\DB {
             /** @var list<string> "acquire:<key>" / "release:<key>", in order */
             public static array $calls = [];
 
+            /** @var list<int> the wait each acquire asked for, in order */
+            public static array $waits = [];
+
             public static function acquire(string $key, int $timeout = 0): bool
             {
                 self::$calls[] = 'acquire:' . $key;
+                self::$waits[] = $timeout;
                 return !in_array($key, self::$heldElsewhere, true);
             }
 
@@ -372,6 +376,7 @@ namespace BCC\Core\DB {
             {
                 self::$heldElsewhere = [];
                 self::$calls         = [];
+                self::$waits         = [];
             }
         }
     }

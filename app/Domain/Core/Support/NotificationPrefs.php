@@ -72,6 +72,9 @@ final class NotificationPrefs
         NotificationType::DELEGATOR_GROUP_REMOVED,
         NotificationType::CONTENT_AUTO_HIDDEN,
         NotificationType::CLAIM_BADGE_REMOVED,
+        NotificationType::GROUP_JOIN_REQUESTED,
+        NotificationType::GROUP_JOIN_APPROVED,
+        NotificationType::GROUP_INVITED,
     ];
 
     /**
@@ -135,6 +138,9 @@ final class NotificationPrefs
         'bell_bcc_delegator_group_removed'                   => true,
         'bell_bcc_content_auto_hidden'                       => true,
         'bell_bcc_claim_badge_removed'                       => true,
+        'bell_bcc_group_join_requested'                      => true,
+        'bell_bcc_group_join_approved'                       => true,
+        'bell_bcc_group_invited'                             => true,
         'push_master'                                        => false,
         'push_event_review'                                  => true,
         'push_event_dispute_outcome'                         => true,

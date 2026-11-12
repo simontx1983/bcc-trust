@@ -37,6 +37,9 @@ final class MentionSearchNoLoginOracleTest extends TestCase
             7 => ['u_alice', 'Alice Smith', 'alice', false],
             8 => ['secretlogin', 'Bob Jones', 'bobj', false],
             9 => ['u_quietfox', 'Carol Real', 'quietfox', true],
+            // Renamed dana -> zed before F-280; display_name still holds
+            // the u_<original> login (F-302 review).
+            10 => ['u_dana', 'u_dana', 'zed', false],
         ];
         $GLOBALS['__ms_ctor'] = [];
         eval(<<<'PHP'
@@ -58,6 +61,12 @@ final class MentionSearchNoLoginOracleTest extends TestCase
                 return $out;
             }
             function update_meta_cache(string $type, array $ids): void {}
+            function cache_users(array $ids): void {}
+            function get_userdata($id)
+            {
+                $u = $GLOBALS['__ms_users'][(int) $id] ?? null;
+                return $u === null ? false : (object) ['ID' => (int) $id, 'user_login' => $u[0], 'display_name' => $u[1]];
+            }
             final class PeepSoUserSearch
             {
                 public array $results = [];
@@ -105,6 +114,14 @@ final class MentionSearchNoLoginOracleTest extends TestCase
     {
         self::assertSame([], self::ids('secretlogin'));
         self::assertSame([], $GLOBALS['__ms_ctor'], 'no candidates: PeepSo is not even asked');
+    }
+
+    public function testALoginEqualDisplayNameIsNotAName(): void
+    {
+        // The matcher feeds /members, the mention picker and global search.
+        self::assertSame([], self::ids('dana'), 'display_name u_dana is the login, not a public name');
+        self::assertSame([], self::ids('u_dan'));
+        self::assertSame([10], self::ids('zed'), 'still found by the current handle');
     }
 
     public function testAHiddenRealNameMatchesOnlyByHandle(): void
