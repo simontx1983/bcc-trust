@@ -7,6 +7,11 @@
  * WordPress sets display_name to user_login. So some members' public
  * @handle IS their login, and /u/<login> shows it to anyone.
  *
+ * Also picks up a squatted fallback: a 'member-N' handle whose N is not
+ * the member's own id (chosen before HandleService reserved that form).
+ * Those are re-derived the same way but NOT retired (step 2): member-N is
+ * member N's own reserved fallback, so it gets no redirect.
+ *
  * Per member whose bcc_handle equals user_login (case-insensitive):
  *   1. new base = bcc_trust_bch_derive_base(): the display-name slug
  *      unless that is (or normalises to) the login, else 'member-{id}';
@@ -18,7 +23,9 @@
  *      to the current handle). HandleService::isAvailable() never hands
  *      a retired handle out again.
  *   3. write the new handle, and fire bcc_handle_changed (the same
- *      action a user rename fires, so caches and read models follow).
+ *      action a user rename fires; nothing listens to it today, it is fired
+ *      for parity so a future listener sees rotations too). A failed
+ *      handle write counts as skipped and is retried.
  *      The rename cooldown is NOT armed: the member didn't choose this.
  *
  * Logs a dry-run count of matching members before writing anything.
@@ -46,14 +53,23 @@ if (!function_exists('bcc_trust_rotate_login_handles')) {
         $handleService = new \BCC\Trust\Core\Services\HandleService();
         $metaHandle    = \BCC\Trust\Core\Services\HandleService::META_HANDLE;
 
-        // Dry-run count, logged before any write. Collation is
-        // case-insensitive, matching how logins compare.
+        // Who to rotate: a handle equal to the login (case-insensitive via
+        // the column collation), OR a squatted fallback: a 'member-N'
+        // handle whose N is not this member's own id, chosen before
+        // HandleService reserved that form. A member's OWN member-{id}
+        // never matches, so the selection still self-narrows. No '%'
+        // literals here: this is interpolated into prepare() templates.
+        $match = "um.meta_value = u.user_login
+                  OR (um.meta_value REGEXP '^member-[0-9]+$'
+                      AND um.meta_value <> CONCAT('member-', u.ID))";
+
+        // Dry-run count, logged before any write.
         $count = $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*)
                FROM {$wpdb->users} u
                INNER JOIN {$wpdb->usermeta} um
                        ON um.user_id = u.ID AND um.meta_key = %s
-              WHERE um.meta_value = u.user_login",
+              WHERE {$match}",
             $metaHandle
         ));
         if ($wpdb->last_error !== '') {
@@ -77,7 +93,7 @@ if (!function_exists('bcc_trust_rotate_login_handles')) {
                    FROM {$wpdb->users} u
                    INNER JOIN {$wpdb->usermeta} um
                            ON um.user_id = u.ID AND um.meta_key = %s
-                  WHERE um.meta_value = u.user_login{$notIn}
+                  WHERE ({$match}){$notIn}
                   ORDER BY u.ID ASC
                   LIMIT %d",
                 $metaHandle,
@@ -140,10 +156,27 @@ if (!function_exists('bcc_trust_rotate_login_handles')) {
 
         // Retire first, so the old handle is reserved before the member
         // stops holding it (no window where someone else could take it).
-        if ($oldHandle !== '') {
+        // Only a LOGIN-equal handle is retired. A squatted 'member-N' is
+        // not: it is member N's own fallback form, already reserved by
+        // HandleService::validate(), and must stay assignable to member N.
+        // So no redirect for it either.
+        // Idempotent across retries: a retired row already recorded for
+        // this member (an earlier attempt whose handle write failed) is
+        // not written again.
+        if (
+            $oldHandle !== ''
+            && strcasecmp($oldHandle, trim($userLogin)) === 0
+            && \BCC\Trust\Core\Services\HandleService::retiredOwner($oldHandle) !== $userId
+        ) {
             add_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE_RETIRED, $oldHandle, false);
         }
-        update_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE, $new);
+
+        // A failed handle write counts as skipped: no bcc_handle_changed,
+        // and the caller retries this member on the next run. The retired
+        // row (if any) stays; the check above stops a duplicate.
+        if (update_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE, $new) === false) {
+            return null;
+        }
 
         do_action('bcc_handle_changed', $userId, $oldHandle, $new);
 

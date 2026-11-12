@@ -63,6 +63,7 @@ final class LoginHandleRotationIntegrationTest extends TestCase
         $wpdb->query("DELETE FROM `{$wpdb->usermeta}`");
         $wpdb->query("DELETE FROM `{$wpdb->users}`");
         $GLOBALS['__bcc_handle_changed'] = [];
+        $GLOBALS['__bcc_fail_handle_write'] = false;
     }
 
     protected function tearDown(): void
@@ -91,6 +92,9 @@ final class LoginHandleRotationIntegrationTest extends TestCase
             function update_user_meta(int $userId, string $key, $value): bool
             {
                 global $wpdb;
+                if (!empty($GLOBALS['__bcc_fail_handle_write']) && $key === 'bcc_handle') {
+                    return false; // simulated write failure, nothing written
+                }
                 $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->usermeta} WHERE user_id = %d AND meta_key = %s", $userId, $key));
                 $wpdb->insert($wpdb->usermeta, ['user_id' => $userId, 'meta_key' => $key, 'meta_value' => (string) $value]);
                 return true;
@@ -207,6 +211,48 @@ final class LoginHandleRotationIntegrationTest extends TestCase
         self::assertNull(HandleService::retiredOwner('privatelogin'));
         self::assertSame(0, UserSlugResolver::resolve('privatelogin'));
         self::assertSame(5, UserSlugResolver::resolve('pat'));
+    }
+
+    public function testSquattedMemberHandleIsRederivedButNotRetired(): void
+    {
+        // Member 10 chose 'member-7' before the form was reserved.
+        self::user(10, 'tenlogin', 'Ten Person', 'member-7');
+        // Member 11 holds their OWN fallback form: never selected.
+        self::user(11, 'elevenlogin', 'Eleven', 'member-11');
+
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_rotate_login_handles());
+
+        $svc = new HandleService();
+        self::assertSame('ten-person', $svc->getHandle(10));
+        self::assertSame('member-11', $svc->getHandle(11), 'own member-{id} is left alone');
+
+        // Not retired: no redirect, and member 7 can still be given it.
+        self::assertNull(HandleService::retiredOwner('member-7'));
+        self::assertSame(0, UserSlugResolver::resolve('member-7'));
+        self::assertTrue($svc->isAvailable('member-7'));
+        self::assertNull($svc->validate('member-7', 7));
+
+        self::assertCount(1, $GLOBALS['__bcc_handle_changed']);
+        self::assertSame([10, 'member-7', 'ten-person'], $GLOBALS['__bcc_handle_changed'][0]);
+    }
+
+    public function testAFailedHandleWriteIsSkippedAndRetriedWithoutDuplicates(): void
+    {
+        global $wpdb;
+        self::user(1, 'jsmith77', 'Jane Smith', 'jsmith77');
+
+        $GLOBALS['__bcc_fail_handle_write'] = true;
+        self::assertSame(BCC_TRUST_MIGRATION_INCOMPLETE, bcc_trust_rotate_login_handles());
+        self::assertSame([], $GLOBALS['__bcc_handle_changed'], 'no bcc_handle_changed for a failed write');
+        self::assertSame('jsmith77', (new HandleService())->getHandle(1));
+
+        $GLOBALS['__bcc_fail_handle_write'] = false;
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_rotate_login_handles());
+        self::assertSame('jane-smith', (new HandleService())->getHandle(1));
+        self::assertCount(1, $GLOBALS['__bcc_handle_changed']);
+        self::assertSame('1', (string) $wpdb->get_var(
+            "SELECT COUNT(*) FROM {$wpdb->usermeta} WHERE meta_key = 'bcc_handle_retired'"
+        ), 'the retry must not write a second retired row');
     }
 
     public function testDisplayNameEqualToLoginIsRewrittenToTheNewHandle(): void
