@@ -61,10 +61,52 @@ final class MysqliWpdb
     /** How many statements the injected fault has actually broken. */
     public int $injectedFailures = 0;
 
+    /**
+     * Make every statement matching this regex fail the way wpdb's own
+     * SILENT paths do: return `false` with `last_error` left EMPTY.
+     *
+     * ── WHY A SECOND MODE ───────────────────────────────────────────────
+     * `failQueriesMatching` sets `last_error`, so it is caught by a
+     * `last_error` check alone — which means it CANNOT exercise the gap
+     * that `trustedRows()` exists to close. `wpdb::query()` has real
+     * failure paths that return false and record nothing: the
+     * `! $this->ready` guard after a failed reconnect, and an empty result
+     * from the `query` filter.
+     *
+     * ⚠⚠ AND THEY RETURN **BEFORE** `flush()`, so `last_result` still holds
+     * the PREVIOUS query's rows. That is the dangerous half: a caller
+     * checking only `last_error` reads a clean error AND a populated
+     * `last_result`, so it can be handed an unrelated query's rows as an
+     * answer. This mode is therefore applied before the flush model below,
+     * clearing neither field — otherwise it would model something milder
+     * than the real thing and a test over it would prove too little.
+     */
+    public ?string $failSilentlyMatching = null;
+
+    /** How many statements the SILENT fault has broken. */
+    public int $silentFailures = 0;
+
     public function clearFaultInjection(): void
     {
-        $this->failQueriesMatching = null;
-        $this->injectedFailures    = 0;
+        $this->failQueriesMatching  = null;
+        $this->injectedFailures     = 0;
+        $this->failSilentlyMatching = null;
+        $this->silentFailures       = 0;
+    }
+
+    private function shouldFailSilently(string $sql): bool
+    {
+        if ($this->failSilentlyMatching === null) {
+            return false;
+        }
+
+        if (preg_match($this->failSilentlyMatching, $sql) !== 1) {
+            return false;
+        }
+
+        $this->silentFailures++;
+
+        return true;
     }
 
     private function shouldFail(string $sql): bool
@@ -288,6 +330,16 @@ final class MysqliWpdb
      */
     public function query(string $sql)
     {
+        // ⚠⚠ DELIBERATELY BEFORE the flush model below. wpdb's silent
+        // failure paths (`! $this->ready`, an empty `query`-filter result)
+        // return false WITHOUT clearing `last_error` or `last_result`, so
+        // the previous query's rows stay readable and no error is recorded.
+        // Clearing either here would model something milder than the real
+        // fault. See $failSilentlyMatching.
+        if ($this->shouldFailSilently($sql)) {
+            return false;
+        }
+
         $this->last_error = '';
         // Real `wpdb::query()` calls `flush()` first, which clears
         // `last_result`. Modelled, so a failed or non-SELECT query cannot

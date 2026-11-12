@@ -195,6 +195,141 @@ final class PageDiscoveryReadFailureIntegrationTest extends TestCase
         );
     }
 
+    // ── the SILENT failure: false with no last_error ─────────────────────
+
+    /**
+     * ⚠⚠⚠ THE CASE THAT JUSTIFIES `trustedRows()`, and the one a
+     * `last_error` check cannot pass.
+     *
+     * `wpdb::query()` has failure paths that return false and record
+     * NOTHING — the `! $this->ready` guard after a failed reconnect, and an
+     * empty result from the `query` filter. They return BEFORE `flush()`, so
+     * `last_result` still holds the PREVIOUS query's rows.
+     *
+     * Here only the MAIN read is silenced, so the COUNT runs first and
+     * succeeds — which means `last_error` is genuinely EMPTY and
+     * `last_result` is genuinely POPULATED (with the COUNT's own row) at the
+     * moment the main read fails. The pre-`trustedRows()` guard would have
+     * seen a clean error, trusted `get_results()`, and handed the caller a
+     * row object made out of the COUNT — a bogus "page" carrying an `n`
+     * property.
+     *
+     * So this asserts three separate things: the rows are refused, the total
+     * is still honest, and `last_error` was empty the whole time (without
+     * which the case would be passing through the OLD check and proving
+     * nothing new).
+     */
+    public function testASilentFailureIsCaughtAndStaleRowsAreRefused(): void
+    {
+        $GLOBALS['wpdb']->failSilentlyMatching = '/' . preg_quote(self::ROWS_NEEDLE, '/') . '/';
+
+        $result = self::query();
+
+        self::assertSame(1, $result['total'], 'the COUNT ran and answered honestly');
+        self::assertSame([], $result['rows'], 'the previous query\'s rows must NOT be served as this one\'s');
+        self::assertSame(1, $GLOBALS['wpdb']->silentFailures, 'exactly the main read was silenced');
+        self::assertSame(
+            '',
+            (string) $GLOBALS['wpdb']->last_error,
+            'ANTI-VACUITY: last_error stayed empty, so only the query() return could have caught this'
+        );
+        self::assertSame('read-model rows', self::loggedFailure()['context']['what']);
+
+        // ⚠⚠ FIXTURE FIDELITY, asserted rather than assumed. The danger is
+        // not just a missed failure: the real wpdb paths return BEFORE
+        // flush(), so the previous query's rows are still sitting in
+        // `last_result` and a `last_error`-only guard would serve them.
+        // If the harness cleared them, this case would be exercising
+        // something milder than the fault it is named after, and would pass
+        // for the wrong reason.
+        self::assertNotSame(
+            [],
+            $GLOBALS['wpdb']->last_result,
+            'the COUNT rows must still be in last_result — that is what makes a silent failure dangerous'
+        );
+    }
+
+    /**
+     * ⚠ The same for the COUNT. A silent failure there previously produced
+     * `(int) null === 0` with nothing logged — the original F-197 defect,
+     * reachable even after the `last_error` guard was added.
+     */
+    public function testASilentCountFailureIsCaught(): void
+    {
+        $GLOBALS['wpdb']->failSilentlyMatching = '/' . preg_quote(self::COUNT_NEEDLE, '/') . '/';
+
+        $result = self::query();
+
+        self::assertSame(self::EMPTY_PAYLOAD, $result, 'the payload is unchanged by design');
+        self::assertSame(1, $GLOBALS['wpdb']->silentFailures);
+        self::assertSame('read-model count', self::loggedFailure()['context']['what']);
+    }
+
+    /**
+     * ⚠ And the finders too, since they went through the same conversion.
+     * `findPublishedByIds()` is the one whose stale-row exposure mattered
+     * most: its result is keyed by page id, so an unrelated query's rows
+     * would have been indexed as though they were pages.
+     */
+    public function testASilentFailureIsCaughtInTheFinders(): void
+    {
+        $GLOBALS['wpdb']->failSilentlyMatching = '/' . preg_quote('SELECT ID, post_title, post_name', '/') . '/';
+        self::assertSame([], PageDiscoveryRepository::findPublishedByIds([self::PAGE]));
+        self::assertSame('published pages by id', self::loggedFailure()['context']['what']);
+
+        \BCC\Core\Log\Logger::reset();
+        $GLOBALS['wpdb']->clearFaultInjection();
+        $GLOBALS['wpdb']->failSilentlyMatching = '/' . preg_quote('_bcc_gate_chain_id', '/') . '/';
+        self::assertSame([], PageDiscoveryRepository::findPostIdsGatedByChain([self::PAGE], self::CHAIN));
+        self::assertSame('chain-gated post ids', self::loggedFailure()['context']['what']);
+    }
+
+    /**
+     * ⚠ ANTI-VACUITY for the silent mode itself: a zero-row result is NOT a
+     * failure. `query()` returns 0 for an empty SELECT, which is falsy but
+     * not `=== false`, so an honestly empty page must still come back as a
+     * successful empty read with nothing logged.
+     */
+    public function testAnHonestlyEmptyResultIsNotTreatedAsAFailure(): void
+    {
+        global $wpdb;
+        $wpdb->query("DELETE FROM {$wpdb->posts}");
+
+        $result = self::query();
+
+        self::assertSame(self::EMPTY_PAYLOAD, $result);
+        self::assertSame([], \BCC\Core\Log\Logger::$lines, 'no rows is an answer, not a failure');
+    }
+
+    /**
+     * ⚠⚠ `=== false`, NEVER FALSY — and this is the only case that pins it.
+     *
+     * For a SELECT, `query()` returns the ROW COUNT, so a legitimately empty
+     * result returns **0**. A `!$ok` test would read that as a failed read
+     * and log one, turning "these ids are not published" into a fabricated
+     * error.
+     *
+     * ⚠ The two list queries cannot exercise this: `COUNT(… ) AS n` always
+     * returns exactly one row, and when the total is 0 the main read is
+     * skipped entirely — so NO statement in those paths ever returns zero
+     * rows. A finder asked about an id that does not exist is the one read
+     * that does. (A mutation to `!$ok` survived the whole suite until this
+     * case existed.)
+     */
+    public function testAZeroRowFinderResultIsNotAFailure(): void
+    {
+        $absent = self::PAGE + 4242;
+
+        $out = PageDiscoveryRepository::findPublishedByIds([$absent]);
+
+        self::assertSame([], $out, 'an absent id yields no rows');
+        self::assertSame(
+            [],
+            \BCC\Core\Log\Logger::$lines,
+            'zero rows is an ANSWER: query() returned 0, which is falsy but not false'
+        );
+    }
+
     // ── F-216: the two bulk finders ─────────────────────────────────────
 
     /**

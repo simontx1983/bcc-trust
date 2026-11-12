@@ -97,6 +97,17 @@ namespace BCC\Trust\Core\Tests\Unit {
         /** @var list<string> */
         public array $results = [];
 
+        /**
+         * Real `wpdb::$last_result`, which `trustedRows()` reads (F-230).
+         *
+         * ⚠ DECLARED, not left to PHP: an undeclared property assigned in
+         * `query()` is created dynamically, which PHP 8.2 deprecates and
+         * PHP 9 makes a FATAL.
+         *
+         * @var list<object>
+         */
+        public array $last_result = [];
+
         /** @param mixed ...$args */
         public function prepare(string $sql, ...$args): string
         {
@@ -119,6 +130,31 @@ namespace BCC\Trust\Core\Tests\Unit {
         {
             $this->results[] = $sql;
             return [];
+        }
+
+        /**
+         * ⚠ ADDED FOR F-230. The repository now reads through
+         * `trustedRows()`, which calls `query()` explicitly and takes its
+         * rows from `last_result`, because `wpdb::query()` can fail without
+         * setting `last_error` and `get_results()` discards its return.
+         *
+         * Every statement is still recorded, which is what this double is
+         * for; the COUNT now lands in `$results` too, and
+         * {@see PageDiscoveryTiebreakSqlTest::mainSql()} already selects
+         * only the statement carrying LIMIT/OFFSET, so the assertions are
+         * unaffected.
+         *
+         * The 30 that `get_var()` used to report moves into `last_result`
+         * under the `n` alias — without it the total reads as 0 and the
+         * paged SELECT this test exists to inspect is never built.
+         */
+        public function query(string $sql): int
+        {
+            $this->results[]   = $sql;
+            $this->last_error  = '';
+            $this->last_result = str_contains($sql, 'COUNT(') ? [(object) ['n' => 30]] : [];
+
+            return count($this->last_result);
         }
     }
 }

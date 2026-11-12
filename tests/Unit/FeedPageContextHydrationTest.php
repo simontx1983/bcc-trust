@@ -39,6 +39,9 @@ namespace BCC\Trust\Core\Tests\Unit {
         /** @var list<object> */
         public array $pages = [];
 
+        /** Real `wpdb::$last_result`, which `trustedRows()` reads (F-230). */
+        public array $last_result = [];
+
         /** @param mixed ...$args */
         public function prepare(string $query, ...$args): string
         {
@@ -52,6 +55,28 @@ namespace BCC\Trust\Core\Tests\Unit {
             $this->sql[] = $sql;
 
             return str_contains($sql, 'post_title, post_name') ? $this->pages : [];
+        }
+
+        /**
+         * ⚠ ADDED FOR F-230. `PageDiscoveryRepository` now reads through
+         * `trustedRows()`, which calls `query()` explicitly and takes its
+         * rows from `last_result` — because `wpdb::query()` has failure
+         * paths that return false WITHOUT setting `last_error`, and
+         * `get_results()` discards that return. So the double has to model
+         * the surface the code actually uses.
+         *
+         * Bookkeeping is identical to `get_results()` above — one read per
+         * call — so `$reads` keeps the meaning
+         * {@see testReadCountDoesNotGrowWithTheNumberOfItems} relies on.
+         */
+        public function query(string $sql): int
+        {
+            ++$this->reads;
+            $this->sql[]       = $sql;
+            $this->last_error  = '';
+            $this->last_result = str_contains($sql, 'post_title, post_name') ? $this->pages : [];
+
+            return count($this->last_result);
         }
     }
 
