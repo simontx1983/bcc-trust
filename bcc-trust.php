@@ -1127,6 +1127,19 @@ add_action('plugins_loaded', static function (): void {
     if (!wp_next_scheduled('bcc_gated_group_reconcile_sweep')) {
         wp_schedule_event(time() + 90 * MINUTE_IN_SECONDS, 'twicedaily', 'bcc_gated_group_reconcile_sweep');
     }
+
+    // F-116 — on-chain signal refresh (daily) + bonus-application retry
+    // (hourly) self-heal. Same silent-drift class: both were scheduled only
+    // in bcc_trust_activate(), so a site whose cron entries were lost (a
+    // cron-array reset, a migration, an update without reactivation) never
+    // refreshed wallet signals or retried a failed bonus again, with nothing
+    // reporting it. Guarded + additive; mirrors the activation-side schedule.
+    if (!wp_next_scheduled('bcc_onchain_daily_refresh')) {
+        wp_schedule_event(time(), 'daily', 'bcc_onchain_daily_refresh');
+    }
+    if (!wp_next_scheduled('bcc_onchain_retry_bonus')) {
+        wp_schedule_event(time(), 'hourly', 'bcc_onchain_retry_bonus');
+    }
 }, 5);
 
 // PR-8b — daily divergence-state sweep callback. Runs the worker;
