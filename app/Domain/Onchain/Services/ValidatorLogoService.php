@@ -181,18 +181,12 @@ final class ValidatorLogoService
     }
 
     /**
-     * Select the logo resolver. Phase 1 has a single Keybase resolver
-     * gated by the 16-hex identity format, so Cosmos identities resolve
-     * and everything else returns null. Phase 2 (Solana validator-info)
-     * introduces chain-keyed selection here.
-     */
-    /**
      * Whether a validator's logo must be (re-)downloaded.
      *
      * Skipped ONLY when the Keybase source is unchanged AND the stored URL is
      * on this site's upload baseurl AND its file exists. The old check skipped
      * whenever any logo_url existed, so a URL carried in from another host
-     * (the 2026-11-12 staging-restore incident: 73 broken logos) or a file
+     * (the 2026-11-12 staging-restore incident: broken logos) or a file
      * that had gone missing never healed itself.
      *
      * @param array{baseurl?: string, basedir?: string}|null $uploadDir test seam; defaults to wp_upload_dir()
@@ -205,6 +199,12 @@ final class ValidatorLogoService
         return !\BCC\Trust\Onchain\Support\LocalUploadUrl::isCurrentAndPresent($storedUrl, $uploadDir);
     }
 
+    /**
+     * Select the logo resolver. Phase 1 has a single Keybase resolver
+     * gated by the 16-hex identity format, so Cosmos identities resolve
+     * and everything else returns null. Phase 2 (Solana validator-info)
+     * introduces chain-keyed selection here.
+     */
     private static function resolverFor(): LogoResolver
     {
         return new KeybaseLogoResolver();

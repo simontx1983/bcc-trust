@@ -15,7 +15,7 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Validator logos stored with another host baked in (the 2026-11-12 staging-
- * restore incident: 73 `stage.` logo URLs on production, every one a 404,
+ * restore incident: `stage.` logo URLs on production, every one a 404,
  * none self-healing).
  *
  *   - rebase(): a sibling-host upload URL is served from this site's uploads.
@@ -99,6 +99,46 @@ final class LocalUploadUrlTest extends TestCase
         self::assertFalse(LocalUploadUrl::isCurrentAndPresent(self::CMS . '/2026/06/validator-129-logo.jpg', $u), 'file missing');
         self::assertFalse(LocalUploadUrl::isCurrentAndPresent(self::CMS . '/2026/../2026/06/validator-128-logo.jpg', $u), 'traversal');
         self::assertFalse(LocalUploadUrl::isCurrentAndPresent(null, $u));
+
+        // Encoded traversal / backslash / NUL (#622 review): decoded first, then refused.
+        file_put_contents(dirname($this->dir) . '/bcc-outside-' . basename($this->dir) . '.txt', 'x');
+        $outside = 'bcc-outside-' . basename($this->dir) . '.txt';
+        foreach ([
+            self::CMS . '/%2e%2e/' . $outside,
+            self::CMS . '/2026/%2E%2E/%2e%2e/%2e%2e/' . $outside,
+            self::CMS . '/2026%5c06%5cvalidator-128-logo.jpg',
+            self::CMS . '/2026/06/validator-128-logo.jpg%00.png',
+        ] as $bad) {
+            self::assertFalse(LocalUploadUrl::isCurrentAndPresent($bad, $u), $bad);
+        }
+        @unlink(dirname($this->dir) . '/' . $outside);
+        self::assertSame(
+            'https://stage.bluecollarcrypto.io/wp-content/uploads/%2e%2e/wp-config.php',
+            LocalUploadUrl::rebase('https://stage.bluecollarcrypto.io/wp-content/uploads/%2e%2e/wp-config.php', $u),
+            'an encoded traversal is never rebased'
+        );
+    }
+
+    /**
+     * Defence in depth behind the `..` rejection: a SYMLINK inside uploads
+     * that points outside must not count as a present upload (realpath
+     * confinement). Runs where symlinks can be created (CI on Linux).
+     */
+    public function testASymlinkOutOfTheUploadsDirIsNotPresent(): void
+    {
+        $outside = dirname($this->dir) . '/bcc-symlink-target-' . basename($this->dir) . '.txt';
+        file_put_contents($outside, 'x');
+        $link = $this->dir . '/2026/06/escape.jpg';
+        if (!@symlink($outside, $link)) {
+            @unlink($outside);
+            self::markTestSkipped('symlink() is not permitted here (e.g. Windows without the privilege)');
+        }
+        try {
+            self::assertFalse(LocalUploadUrl::isCurrentAndPresent(self::CMS . '/2026/06/escape.jpg', $this->uploads()));
+        } finally {
+            @unlink($link);
+            @unlink($outside);
+        }
     }
 
     // ── the self-healing refresh ─────────────────────────────────────────

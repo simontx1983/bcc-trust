@@ -7,7 +7,7 @@ declare(strict_types=1);
  *
  * `bcc_onchain_validators.logo_url` is written from wp_get_attachment_url()
  * at sideload time, so it carries whatever host ran the download. A
- * staging-flavoured DB restore put 73 `stage.bluecollarcrypto.io` logo URLs
+ * staging-flavoured DB restore put `stage.bluecollarcrypto.io` logo URLs
  * into production (2026-11-12 incident); every one 404'd and none self-healed.
  *
  * Two helpers, both pure given an upload dir:
@@ -78,12 +78,18 @@ final class LocalUploadUrl
         }
 
         $rel = substr($url, strlen($baseUrl) + 1);
-        $rel = (string) strtok($rel, '?#');
-        if ($rel === '' || str_contains($rel, '..') || str_contains($rel, '\\')) {
+        $rel = self::safeDecodedPath((string) strtok($rel, '?#'));
+        if ($rel === null) {
             return false;
         }
 
-        return is_file($baseDir . '/' . rawurldecode($rel));
+        // Confine to the uploads dir: the resolved file must live under it.
+        $root = realpath($baseDir);
+        $file = realpath($baseDir . '/' . $rel);
+        if ($root === false || $file === false) {
+            return false;
+        }
+        return str_starts_with($file, $root . DIRECTORY_SEPARATOR) && is_file($file);
     }
 
     /** The path after /wp-content/uploads/, or null when the URL is not an upload. */
@@ -95,7 +101,18 @@ final class LocalUploadUrl
             return null;
         }
         $rel = substr($path, strlen(self::UPLOADS_PATH));
-        if ($rel === '' || str_contains($rel, '..')) {
+        return self::safeDecodedPath($rel) === null ? null : $rel;
+    }
+
+    /**
+     * The percent-DECODED relative path, or null when it is empty or carries
+     * a traversal, backslash or NUL. Decoding comes FIRST: checking the raw
+     * string let `%2e%2e/` through (#622 review).
+     */
+    private static function safeDecodedPath(string $raw): ?string
+    {
+        $rel = rawurldecode($raw);
+        if ($rel === '' || str_contains($rel, '..') || str_contains($rel, '\\') || str_contains($rel, "\0")) {
             return null;
         }
         return $rel;
