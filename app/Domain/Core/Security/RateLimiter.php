@@ -226,9 +226,25 @@ class RateLimiter {
             // This absorbs legitimate shared-network traffic (households,
             // offices, CG-NAT) while still cutting off multi-account
             // bursts from one subnet.
-            $ipLimit   = max(10, $adjustedLimit * 4);
+            //
+            // F-155: ONE account must never be able to exhaust its /24.
+            //   1. The subnet bucket is charged only for requests the
+            //      account's OWN bucket allowed. Denied requests still
+            //      spend the per-user bucket (pessimistic accounting), but
+            //      they used to spend the shared subnet bucket too, so one
+            //      account flooding past its own limit locked every other
+            //      account on the subnet out of watch/vote/share.
+            //   2. The cap is at least one full account (the base $limit:
+            //      getAdjustedLimit() never raises it, risk <= 1.0 wins the
+            //      min) plus this caller's own share, plus 1 for the sliding
+            //      window's integer rounding. Without it a risk-penalised
+            //      caller (0.2× → cap 0.8× base) was locked out by a single
+            //      ordinary neighbour using its normal allowance.
+            // An unpenalised caller (adj = limit) keeps exactly 4×, since
+            // 2×limit + 1 <= 4×limit; so the multi-account cap is unchanged.
+            $ipLimit   = max(10, $adjustedLimit * 4, $limit + $adjustedLimit + 1);
             $allowedByUser = self::slidingWindowCheck($userKey, $adjustedLimit, $window);
-            $allowedByIp   = self::slidingWindowCheck($ipKey, $ipLimit, $window);
+            $allowedByIp   = $allowedByUser && self::slidingWindowCheck($ipKey, $ipLimit, $window);
             $allowed = $allowedByUser && $allowedByIp;
             $slidingKey = $allowedByUser ? $ipKey : $userKey;
         } else {
