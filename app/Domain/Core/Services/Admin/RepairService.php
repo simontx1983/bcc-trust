@@ -239,7 +239,14 @@ final class RepairService
             $pageIds = $scoreRepo->getAllPageIds($batchSize, $offset);
 
             foreach ($pageIds as $page_id) {
-                $vote_stats = $voteRepo->getPageStats($page_id);
+                // F-101: never rewrite a score from a FAILED vote read (it
+                // used to read as zero votes); leave the page as it is.
+                try {
+                    $vote_stats = $voteRepo->getPageStatsOrFail($page_id);
+                } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+                    $results['details'][] = "Skipped page #{$page_id}: its votes could not be read, score left unchanged";
+                    continue;
+                }
 
                 $existing = $scoreRepo->getRawRow($page_id);
                 $onchainBonus = (float) ($existing->onchain_bonus ?? 0.0);
@@ -583,7 +590,14 @@ final class RepairService
             $pageIds = $scoreRepo->getAllPageIds($batchSize, $offset);
 
             foreach ($pageIds as $page_id) {
-                $vote_stats = $voteRepo->getPageStats($page_id);
+                // F-101: never rewrite a score from a FAILED vote read (it
+                // used to read as zero votes); leave the page as it is.
+                try {
+                    $vote_stats = $voteRepo->getPageStatsOrFail($page_id);
+                } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+                    $results['details'][] = "Skipped page #{$page_id}: its votes could not be read, score left unchanged";
+                    continue;
+                }
 
                 $existing = $scoreRepo->getRawRow($page_id);
                 $onchainBonus = (float) ($existing->onchain_bonus ?? 0.0);

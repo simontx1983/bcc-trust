@@ -50,6 +50,7 @@ final class SchemaCompletionGateIntegrationTest extends TestCase
         $GLOBALS['wpdb']->clearFaultInjection();
         $GLOBALS['__bcc_test_options_frozen'] = false;
         $GLOBALS['__bcc_test_options'][self::OPTION] = 'BASELINE';
+        unset($GLOBALS['__bcc_test_transients']['bcc_trust_schema_retry_backoff']);
         \BCC\Core\Log\Logger::reset();
     }
 
@@ -293,6 +294,42 @@ final class SchemaCompletionGateIntegrationTest extends TestCase
         );
         self::assertTrue(bcc_trust_stamp_schema_version(true, 'NEW-VERSION'));
         self::assertSame('NEW-VERSION', $this->storedVersion());
+    }
+
+    // ── F-151b: a failed pass retries hourly, not on every request ──────
+
+    public function testARefusedStampBacksOffAtThatVersionOnly(): void
+    {
+        self::assertFalse(bcc_trust_schema_retry_backed_off('NEW-VERSION'));
+
+        bcc_trust_stamp_schema_version(false, 'NEW-VERSION');
+
+        self::assertTrue(bcc_trust_schema_retry_backed_off('NEW-VERSION'),
+            'the gate skips the installer at the version that failed');
+        self::assertFalse(bcc_trust_schema_retry_backed_off('NEXT-DEPLOY'),
+            'a deploy that changes the schema is retried at once');
+        self::assertEqualsWithDelta(
+            HOUR_IN_SECONDS,
+            $GLOBALS['__bcc_test_transients']['bcc_trust_schema_retry_backoff'][1] - time(),
+            2,
+            'for one hour'
+        );
+    }
+
+    public function testAStampThatDoesNotStickAlsoBacksOff(): void
+    {
+        $GLOBALS['__bcc_test_options_frozen'] = true;
+
+        bcc_trust_stamp_schema_version(true, 'NEW-VERSION');
+
+        self::assertTrue(bcc_trust_schema_retry_backed_off('NEW-VERSION'));
+    }
+
+    public function testACleanStampSetsNoBackoff(): void
+    {
+        self::assertTrue(bcc_trust_stamp_schema_version(true, 'NEW-VERSION'));
+
+        self::assertFalse(bcc_trust_schema_retry_backed_off('NEW-VERSION'));
     }
 
     // ── Case 5: the write that did not stick ────────────────────────────

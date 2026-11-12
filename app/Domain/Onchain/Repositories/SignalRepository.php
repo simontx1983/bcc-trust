@@ -26,6 +26,8 @@ use BCC\Core\PeepSo\PeepSo;
  */
 class SignalRepository
 {
+    use GuardsReadFailures;
+
     /** @var string Explicit column list — must match schema (install_own_table). */
     private const COLUMNS = 'id, user_id, wallet_address, chain, wallet_age_days, first_tx_at,
                  tx_count, contract_count, score_contribution, raw_data, fetched_at,
@@ -231,6 +233,7 @@ class SignalRepository
      * by owner user_id and invalidated automatically on upsert().
      *
      * @return array<int, array<string, mixed>>
+     * @throws RepositoryReadFailure when the signal read did not run (F-101)
      */
     public static function get_for_page(int $page_id): array
     {
@@ -245,7 +248,15 @@ class SignalRepository
     /**
      * Get all signals for a user, with two-tier caching.
      *
+     * FAIL-CLOSED (F-101). Every caller is a bonus WRITER (BonusService /
+     * BonusRetryService via get_for_page), which SETs onchain_bonus from
+     * these rows. A failed read used to come back as [] and be cached in
+     * the object cache AND a transient for the TTL, so the bonus was
+     * rewritten as claims-only and the score drop persisted. A failed read
+     * now throws and caches nothing; the writers retry later.
+     *
      * @return array<int, array<string, mixed>>
+     * @throws RepositoryReadFailure when the read did not run
      */
     public static function getByUser(int $userId): array
     {
@@ -269,10 +280,15 @@ class SignalRepository
         global $wpdb;
         $table = self::table();
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare("SELECT " . self::COLUMNS . " FROM {$table} WHERE user_id = %d ORDER BY score_contribution DESC LIMIT 1000", $userId),
-            ARRAY_A
-        ) ?: [];
+        // runRead() yields objects; (array) is exactly what ARRAY_A does.
+        $rows = array_map(
+            static fn (object $row): array => (array) $row,
+            self::runRead(
+                (string) $wpdb->prepare("SELECT " . self::COLUMNS . " FROM {$table} WHERE user_id = %d ORDER BY score_contribution DESC LIMIT 1000", $userId),
+                __FUNCTION__,
+                true
+            )
+        );
 
         $ttl = self::ttl();
         wp_cache_set($cache_key, $rows, self::CACHE_GROUP, $ttl);

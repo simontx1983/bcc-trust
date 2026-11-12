@@ -109,6 +109,12 @@ final class MyGroupsPostPolicyRouteTest extends TestCase
             $r = $this->call($uid, 400, true);
             self::assertSame(403, $r->get_status(), $label);
             self::assertSame('bcc_permission_denied', $this->body($r)['error']['code'] ?? null, $label);
+            // F-96: the refusal is also the outcome — the policy flag stayed off.
+            self::assertSame(
+                '',
+                $GLOBALS['__bcc_puball_fixture']['groups'][400]['meta']['_bcc_group_public_all_members'] ?? null,
+                $label . ': nothing written'
+            );
         }
     }
 

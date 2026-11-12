@@ -106,6 +106,7 @@ final class MyGroupsOracleTest extends TestCase
             'This community requires admin approval. Visit the group page to request access.',
             $data['error']['message']
         );
+        self::assertSame([], $GLOBALS['__bcc_mg']['writes'], 'F-96: a refused join writes nothing');
     }
 
     public function testASecretGroupMemberStillGetsTheInviteOnly403(): void
@@ -116,6 +117,7 @@ final class MyGroupsOracleTest extends TestCase
 
         self::assertSame(403, $status);
         self::assertSame('This community is invite-only.', $data['error']['message']);
+        self::assertSame([], $GLOBALS['__bcc_mg']['writes'], 'F-96: a refused join writes nothing');
     }
 
     public function testASecretGroupMemberCanStillLeave(): void
