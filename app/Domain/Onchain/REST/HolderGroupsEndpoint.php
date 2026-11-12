@@ -186,11 +186,16 @@ final class HolderGroupsEndpoint
         // budget bounds what is left; a group it cannot reach is simply not
         // suggested this poll.
         $gateService = OnchainPlugin::instance()->nftGroupGateService();
+        // F-271: a banned group is shown as removed, never offered as Join.
+        $banned = $gateService->bannedGroupIdSet($userId, $groupIds);
 
         $balanceKeyByGroup = [];
         $pairs             = [];
         foreach ($configs as $cfg) {
-            if (isset($memberships[$cfg->groupId]) || $gateService->isOptOutActive($userId, $cfg->groupId)) {
+            if (isset($memberships[$cfg->groupId])
+                || isset($banned[$cfg->groupId])
+                || $gateService->isOptOutActive($userId, $cfg->groupId)
+            ) {
                 continue;
             }
             $identity = GateIdentityResolver::resolve($cfg);
@@ -227,6 +232,13 @@ final class HolderGroupsEndpoint
 
             if (isset($memberships[$cfg->groupId])) {
                 $joined[] = $item;
+                continue;
+            }
+
+            if (isset($banned[$cfg->groupId])) {
+                // A PeepSo ban: a moderator removal, Join is refused.
+                $item['opt_out_kind'] = self::OPT_OUT_KIND_REMOVED;
+                $optedOut[] = $item;
                 continue;
             }
 
@@ -367,6 +379,14 @@ final class HolderGroupsEndpoint
             );
         }
 
+        // F-267: only a real member's Leave records an opt-out. A
+        // moderator-removed (or banned) user has no active row; their Leave
+        // used to write a voluntary opt-out over the permanent one, and an
+        // explicit Join overrides a voluntary opt-out. Same guard as the
+        // delegator leave; recordOptOut() also never downgrades a permanent
+        // opt-out.
+        $wasMember = self::isActiveMemberStatus(PeepSoGroupRepository::getMembershipStatus($userId, $groupId));
+
         $left = \BCC\Core\PeepSo\PeepSoGroupWriter::leave($userId, $groupId);
         if (!$left) {
             // Most likely cause: caller is the group owner.
@@ -378,11 +398,13 @@ final class HolderGroupsEndpoint
             );
         }
 
-        OnchainPlugin::instance()->nftGroupGateService()->recordOptOut($userId, $groupId);
+        if ($wasMember) {
+            OnchainPlugin::instance()->nftGroupGateService()->recordOptOut($userId, $groupId);
 
-        // §CRIT-05 — mirror of holder_group_join; records the 90-day opt-out
-        // that prevents the reconcile sweep from re-adding the user.
-        AuditLogger::log('holder_group_leave', $groupId, [], 'group', $userId);
+            // §CRIT-05 — mirror of holder_group_join; records the 90-day opt-out
+            // that prevents the reconcile sweep from re-adding the user.
+            AuditLogger::log('holder_group_leave', $groupId, [], 'group', $userId);
+        }
 
         return ApiResponse::ok([
             'left'     => true,
@@ -504,6 +526,17 @@ final class HolderGroupsEndpoint
             'verification' => GroupVerification::onChain()->toApiResponse(),
             'activity'     => $activity,
         ];
+    }
+
+    /**
+     * An ACTIVE membership status (PeepSo `member%`: member, manager,
+     * moderator, owner, readonly). pending_*, banned and block_invites are
+     * not membership, and neither is no row (null). Shared with the
+     * delegator leave.
+     */
+    public static function isActiveMemberStatus(?string $status): bool
+    {
+        return $status !== null && str_starts_with($status, 'member');
     }
 
     private function translateFailure(JoinResult $result, int $groupId): WP_REST_Response
