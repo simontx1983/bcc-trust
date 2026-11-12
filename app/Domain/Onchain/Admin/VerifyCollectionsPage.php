@@ -37,6 +37,7 @@ use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\CollectionDemandService;
 use BCC\Trust\Onchain\Services\CollectionStateClassifier;
 use BCC\Trust\Onchain\Services\CommunityRequestService;
+use BCC\Trust\Onchain\Services\GatedGroupProvisioningService;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Onchain\ValueObjects\ChainDescriptionState;
@@ -3556,8 +3557,40 @@ final class VerifyCollectionsPage
         $contract = (string) $coll->contract_address;
         $chainId  = (int) $coll->chain_id;
 
+        // ⚠⚠ F-130: THE CHECK AND THE DELETE RUN UNDER THE PROVISIONING LOCK.
+        // GatedGroupProvisioningService::provisionOne() serialises on the same
+        // per-collection lock; without it a provision landing between "no
+        // community?" and the DELETE left a new community pointing at a
+        // collection that no longer exists. Not acquired ⇒ nothing removed.
+        $locked = GatedGroupProvisioningService::withCollectionLock(
+            $collectionId,
+            static fn (): array => self::deleteCollectionLocked($collectionId, $contract, $chainId)
+        );
+        if (!$locked['acquired']) {
+            return [[
+                'type'    => 'error',
+                'message' => 'Remove: a holder community for this collection is being created or '
+                    . 'repaired right now, so nothing was removed. Try again in a moment.',
+            ]];
+        }
+
+        /** @var list<array{type: string, message: string}> $notices */
+        $notices = $locked['result'];
+        return $notices;
+    }
+
+    /**
+     * The delete itself — called ONLY under the per-collection provisioning
+     * lock ({@see handleDeleteCollection()}).
+     *
+     * @return list<array{type: string, message: string}>
+     */
+    private static function deleteCollectionLocked(int $collectionId, string $contract, int $chainId): array
+    {
         try {
-            $groupId = GatedGroupRepository::findPublishedGroupIdForCollectionId($collectionId);
+            // F-130: ANY holder group blocks — a trashed, draft or pending one
+            // too. Only a permanently deleted group does not.
+            $group = GatedGroupRepository::findHolderGroupForCollectionIdAnyStatus($collectionId);
         } catch (RepositoryReadFailure $e) {
             // ⚠ FAIL CLOSED, AND NO DURABLE AUDIT ROW.
             //
@@ -3584,14 +3617,22 @@ final class VerifyCollectionsPage
             ]];
         }
 
-        if ($groupId !== null) {
+        if ($group !== null) {
+            $live = $group['status'] === 'publish';
             return [[
                 'type'    => 'warning',
-                'message' => sprintf(
-                    'Remove blocked: %s still has a holder community (group #%d). Unverify it and remove the community first, then delete.',
-                    $contract,
-                    $groupId
-                ),
+                'message' => $live
+                    ? sprintf(
+                        'Remove blocked: %s still has a holder community (group #%d). Unverify it and remove the community first, then delete.',
+                        $contract,
+                        $group['id']
+                    )
+                    : sprintf(
+                        'Remove blocked: %s still has a holder community (group #%d, %s). Delete that group permanently first — restoring it later would point it at a missing collection.',
+                        $contract,
+                        $group['id'],
+                        $group['status'] === 'trash' ? 'in the trash' : $group['status']
+                    ),
             ]];
         }
 

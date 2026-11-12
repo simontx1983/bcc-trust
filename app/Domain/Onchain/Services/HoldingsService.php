@@ -541,7 +541,7 @@ final class HoldingsService
         }
 
         return [
-            'items'             => self::annotateCollectionVerified($items),
+            'items'             => self::presentImages(self::annotateCollectionVerified($items)),
             'truncated'         => $truncatedCount > 0,
             'wallets_checked'   => $walletsChecked,
             'wallets_truncated' => $truncatedCount,
@@ -550,6 +550,26 @@ final class HoldingsService
                 'indexer_state_label' => self::buildIndexerStateLabels($indexerState),
             ],
         ];
+    }
+
+    /**
+     * F-165: every gallery item's image as the surface presents it —
+     * sanitized (holdings rows and live provider items were emitted RAW:
+     * http://, ipfs:// and worse went straight to <img>), moved onto the
+     * configured IPFS gateway, with `image_fallback_url` beside it.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private static function presentImages(array $items): array
+    {
+        foreach ($items as &$item) {
+            $image = \BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules::presentImage($item['image_url'] ?? null);
+            $item['image_url']          = $image['url'];
+            $item['image_fallback_url'] = $image['fallback_url'];
+        }
+        unset($item);
+        return $items;
     }
 
     /**

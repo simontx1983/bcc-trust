@@ -737,10 +737,17 @@ class DisputeRepository
             $params[] = $pageId;
         }
 
-        $count = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table} WHERE {$where}",
-            ...$params
-        ));
+        // F-101: a failed read used to cache 0 ("signed no disputes") for
+        // TTL_HOT. It now answers 0 for this call only.
+        try {
+            $rows = self::runRead((string) $wpdb->prepare(
+                "SELECT COUNT(*) AS n FROM {$table} WHERE {$where}",
+                ...$params
+            ), __FUNCTION__, true);
+        } catch (RepositoryReadFailure) {
+            return 0;
+        }
+        $count = (int) ($rows[0]->n ?? 0);
 
         wp_cache_set($cacheKey, $count, self::CACHE_GROUP, self::TTL_HOT);
         return $count;
@@ -901,7 +908,11 @@ class DisputeRepository
         $params[] = $limit;
         $params[] = $offset;
 
-        $rows = $wpdb->get_results($wpdb->prepare(
+        // F-101: get_results() returns [] (not null) on a SQL error, so the
+        // is_array() guard never caught one and an empty "my disputes" page
+        // was cached for TTL_HOT. A failed read now returns [] uncached.
+        try {
+            $objects = self::runRead((string) $wpdb->prepare(
             "SELECT d.id, d.vote_id, d.page_id, d.reason, d.evidence_url, d.status,
                     d.voter_id, d.reporter_id, d.created_at, d.resolved_at,
                     p.post_title AS page_title,
@@ -915,11 +926,12 @@ class DisputeRepository
              ORDER BY d.created_at DESC
              LIMIT %d OFFSET %d",
             ...$params
-        ), ARRAY_A);
-
-        if (!is_array($rows)) {
+            ), __FUNCTION__, true);
+        } catch (RepositoryReadFailure) {
             return [];
         }
+        // (array) is exactly what ARRAY_A does.
+        $rows = array_map(static fn (object $o): array => (array) $o, $objects);
 
         $dtos = [];
         foreach ($rows as $row) {
@@ -973,11 +985,19 @@ class DisputeRepository
         global $wpdb;
         $table = self::disputes_table();
 
-        $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT id, status, vote_id, page_id, voter_id, reporter_id
-             FROM {$table} WHERE id = %d LIMIT 1",
-            $disputeId
-        ), ARRAY_A);
+        // F-101: a failed read used to be cached as 'NULL' (not found) for
+        // TTL_WARM: force-resolve 404'd and the dispute-vote gate refused
+        // votes. It now reads as not found for this call only.
+        try {
+            $rows = self::runRead((string) $wpdb->prepare(
+                "SELECT id, status, vote_id, page_id, voter_id, reporter_id
+                 FROM {$table} WHERE id = %d LIMIT 1",
+                $disputeId
+            ), __FUNCTION__, true);
+        } catch (RepositoryReadFailure) {
+            return null;
+        }
+        $row = isset($rows[0]) ? (array) $rows[0] : null;
 
         if (!is_array($row)) {
             wp_cache_set($cacheKey, 'NULL', self::CACHE_GROUP, self::TTL_WARM);

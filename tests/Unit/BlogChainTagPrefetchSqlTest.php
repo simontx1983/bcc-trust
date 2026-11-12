@@ -70,6 +70,20 @@ namespace BCC\Trust\Core\Tests\Unit {
                 public array $deletes = [];
                 /** @var list<array<string, mixed>> */
                 public array $inserts = [];
+                /** @var list<object> rows of the last query(), as real wpdb exposes them */
+                public array $last_result = [];
+
+                /**
+                 * Real wpdb::query() for a SELECT: fills last_result and
+                 * returns the ROW COUNT (0 for a genuine empty result).
+                 * Serves the same FIFO as get_results(), so a read done via
+                 * GuardsReadFailures::runRead() sees the queued rows (F-101).
+                 */
+                public function query(string $sql): int
+                {
+                    $this->last_result = array_shift($this->resultsQueue) ?? [];
+                    return count($this->last_result);
+                }
 
                 /** @param mixed ...$args */
                 public function prepare(string $sql, ...$args): string

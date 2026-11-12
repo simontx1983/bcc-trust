@@ -67,8 +67,13 @@ if (!defined('ABSPATH')) {
  *  - MORE       — the per-request batch cap was hit and rows remain. NOT a
  *                 failure: progress is persisted and the next request
  *                 resumes, with no backoff.
+ *  - WAITING    — blocked on a deliberate OPERATOR action (e.g. the
+ *                 scanner-schema drop's arming option). NOT a failure: no
+ *                 runner backoff and no runner error log, so arming takes
+ *                 effect on the very next request. The migration owns its
+ *                 own throttling while it waits.
  *  - INCOMPLETE — anything else that is not done: a failed statement, an
- *                 unreadable probe, a missing dependency, an unarmed gate.
+ *                 unreadable probe, a missing dependency.
  *                 F-151: the runner backs the migration off for an hour
  *                 (bcc_trust_migration_step_failed), so a migration that
  *                 fails PERMANENTLY is retried hourly, not on every request.
@@ -82,6 +87,9 @@ if (!defined('BCC_TRUST_MIGRATION_INCOMPLETE')) {
 }
 if (!defined('BCC_TRUST_MIGRATION_MORE')) {
     define('BCC_TRUST_MIGRATION_MORE', 'more');
+}
+if (!defined('BCC_TRUST_MIGRATION_WAITING')) {
+    define('BCC_TRUST_MIGRATION_WAITING', 'waiting');
 }
 
 if (!function_exists('bcc_trust_migration_backoff_active')) {
@@ -513,7 +521,7 @@ if (!function_exists('bcc_trust_pending_migrations')) {
             //    keeps future no-op checks free.
             if ($status === BCC_TRUST_MIGRATION_COMPLETE) {
                 update_option($doneOption, time(), true);
-            } elseif ($status !== BCC_TRUST_MIGRATION_MORE) {
+            } elseif ($status !== BCC_TRUST_MIGRATION_MORE && $status !== BCC_TRUST_MIGRATION_WAITING) {
                 // 7. F-151: not done and not mere batch progress — back off
                 //    for an hour instead of re-running on every request.
                 bcc_trust_migration_step_failed($migrationId, 'returned ' . $status);

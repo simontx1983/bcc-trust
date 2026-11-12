@@ -81,15 +81,136 @@ final class HalfOpenProbeOwnershipTest extends TestCase
         return $out;
     }
 
-    /** @return list<string> "relative/path.php:line" for each executable call */
-    private static function callSites(string $needle): array
+    /**
+     * Every `OnchainCircuitBreaker::isOpen()` call, as
+     * `relative/path.php::enclosingMethod`.
+     *
+     * ⭐ WHY NOT `file:line`, WHICH THIS USED TO RETURN. A line number is
+     * not the invariant. It moves whenever anything above a call site is
+     * edited — F-156(b) moved these twice in one PR, once by adding code and
+     * once by adding a DOCBLOCK to a method that merely sits above
+     * `getBatchSameHost()` — so the guard failed twice with nothing wrong.
+     *
+     * ⚠⚠ And worse, a line number cannot see the thing that matters. Move a
+     * claim into a private helper and the pin fails; renumber it, as a tired
+     * reader would, and the guard goes green on a REAL change of ownership.
+     * The enclosing method is both stable under edits above and sensitive to
+     * the move that counts. {@see testAClaimMovedIntoAHelperIsReported()}
+     * holds this to that.
+     *
+     * ⚠ Token-walked, not matched by regex: `$code` is already
+     * comment-stripped, but function scope still has to be tracked to answer
+     * "which method is this inside", and a closure must attribute to the
+     * named function containing it rather than to nothing.
+     *
+     * @return list<string>
+     */
+    private static function claimSitesIn(string $code, string $rel): array
+    {
+        $tokens = token_get_all($code);
+        $n      = count($tokens);
+
+        $sites     = [];
+        $depth     = 0;
+        $stack     = [];      // [name, depth at which its body opened]
+        $sawFn     = false;   // just passed T_FUNCTION
+        $pendingFn = null;    // its name, awaiting the body brace
+
+        for ($i = 0; $i < $n; $i++) {
+            $t = $tokens[$i];
+
+            if (is_array($t)) {
+                if ($t[0] === T_WHITESPACE) {
+                    continue;
+                }
+
+                if ($t[0] === T_FUNCTION) {
+                    $sawFn     = true;
+                    $pendingFn = null;
+                    continue;
+                }
+
+                // ⚠⚠ STRING-INTERPOLATION BRACES ARE ASYMMETRIC IN THE TOKEN
+                // STREAM, and this cost a debugging round. In
+                // `"chain {$chainId}"` the OPENING brace arrives as the array
+                // token `T_CURLY_OPEN` (or `T_DOLLAR_OPEN_CURLY_BRACES` for
+                // `${...}`), while the CLOSING one arrives as a plain `}`.
+                // Counting only plain braces therefore decrements once per
+                // interpolation with no matching increment: on ApiRetry.php
+                // depth reached -2 and `request()`'s frame was popped before
+                // its claim, which reported as `{file scope}`.
+                //
+                // Counting these keeps the two sides balanced. No frame is
+                // pushed — an interpolation is not a function body.
+                if ($t[0] === T_CURLY_OPEN || $t[0] === T_DOLLAR_OPEN_CURLY_BRACES) {
+                    $depth++;
+                    continue;
+                }
+
+                if ($sawFn && $t[0] === T_STRING) {
+                    // A NAMED function; a closure has `(` here instead and so
+                    // pushes no frame, leaving a claim inside it attributed to
+                    // the named method that contains it.
+                    $pendingFn = $t[1];
+                    $sawFn     = false;
+                    continue;
+                }
+
+                if ($t[0] === T_STRING && $t[1] === 'OnchainCircuitBreaker'
+                    && isset($tokens[$i + 1], $tokens[$i + 2])
+                    && is_array($tokens[$i + 1]) && $tokens[$i + 1][0] === T_DOUBLE_COLON
+                    && is_array($tokens[$i + 2]) && $tokens[$i + 2][1] === 'isOpen'
+                ) {
+                    $sites[] = $rel . '::' . ($stack === [] ? '{file scope}' : end($stack)[0]);
+                }
+
+                continue;
+            }
+
+            // ⚠⚠ ANY non-array token ends the chance to NAME this function,
+            // and that is load-bearing. `static function (int $c)` has `(`
+            // here; without this the walker kept looking and took the
+            // parameter's TYPE HINT as the name, pushing a bogus frame whose
+            // closing brace then popped at the wrong depth and corrupted the
+            // stack for the rest of the file. The visible symptom was the
+            // real `request()` claim reporting `{file scope}`.
+            $sawFn = false;
+
+            if ($t === '{') {
+                $depth++;
+                if ($pendingFn !== null) {
+                    $stack[]   = [$pendingFn, $depth];
+                    $pendingFn = null;
+                }
+                continue;
+            }
+
+            if ($t === '}') {
+                if ($stack !== [] && end($stack)[1] === $depth) {
+                    array_pop($stack);
+                }
+                $depth--;
+                continue;
+            }
+
+            // An abstract or interface method: `function f();` with no body.
+            if ($t === ';' && $pendingFn !== null) {
+                $pendingFn = null;
+            }
+        }
+
+        sort($sites);
+
+        return $sites;
+    }
+
+    /** @return list<string> */
+    private static function claimSites(): array
     {
         $sites = [];
         foreach (self::executableSources() as $rel => $code) {
-            $offset = 0;
-            while (($pos = strpos($code, $needle, $offset)) !== false) {
-                $offset = $pos + strlen($needle);
-                $sites[] = $rel . ':' . (substr_count($code, "\n", 0, $pos) + 1);
+            foreach (self::claimSitesIn($code, $rel) as $site) {
+                $sites[] = $site;
             }
         }
         sort($sites);
@@ -100,42 +221,200 @@ final class HalfOpenProbeOwnershipTest extends TestCase
     // ── the ownership rule ──────────────────────────────────────────────
 
     /**
-     * ⚠ EXACTLY TWO CLAIM SITES, BOTH IN ApiRetry: the single-request path
-     * and the batch-wave path. A new one anywhere else fails here.
+     * ⚠⚠ EXACTLY TWO CLAIM SITES, AND IN THESE TWO METHODS. `isOpen()` is
+     * the MUTATING reader — it claims the single HALF-OPEN probe slot — so
+     * ownership belongs to the transport that goes on to coordinate the
+     * request, and nowhere else. An outer preflight claiming it could strand
+     * the slot on an early exit, which is what #265 removed.
      */
     public function testOnlyApiRetryClaimsTheProbe(): void
     {
-        $sites = self::callSites('OnchainCircuitBreaker::isOpen(');
+        $sites = self::claimSites();
 
         self::assertNotSame([], $sites, 'anti-vacuity: the mutating check must still exist somewhere');
         self::assertSame(
             [
-                // ⚠⚠ LINE-PINNED, AND THE PIN IS THE FRAGILE PART. ANY edit
-                // above a claim site moves these numbers and fails this file
-                // without anything being wrong. F-156(b) moved them TWICE in
-                // one PR — once by adding the deadline checks, then again by
-                // adding a docblock to a method that merely sits above
-                // getBatchSameHost().
-                //
-                // The invariant actually being guarded is "exactly two claim
-                // sites, both in ApiRetry"; the line numbers are incidental
-                // to it, and a line number cannot even tell you the claim is
-                // in the RIGHT METHOD — which is the thing that matters.
-                // Asserting the enclosing method instead would be both
-                // stronger and stable; proposed separately rather than done
-                // here, because relaxing a guard this change does not own is
-                // not a decision to slip into an unrelated PR.
-                //
-                // ⇒ Until then: when these numbers move, CHECK THE ENCLOSING
-                // METHODS are still request() and getBatchSameHost() before
-                // pasting the new ones. Renumbering without that check is how
-                // a real regression would get waved through.
-                'Domain/Onchain/Support/ApiRetry.php:306',
-                'Domain/Onchain/Support/ApiRetry.php:782',
+                'Domain/Onchain/Support/ApiRetry.php::getBatchSameHost',
+                'Domain/Onchain/Support/ApiRetry.php::request',
             ],
             $sites,
-            "the half-open probe has exactly one owner — ApiRetry. Found:\n  " . implode("\n  ", $sites)
+            "the half-open probe has exactly one owner — ApiRetry::request() and\n"
+            . "ApiRetry::getBatchSameHost(). Found:\n  " . implode("\n  ", $sites)
         );
+    }
+
+    /**
+     * ⚠⚠ THE CASE THE OLD LINE PIN COULD NOT SEE, and the reason this guard
+     * was rewritten. Extracting the claim into a private helper is a REAL
+     * change of probe ownership: the helper can now be called from anywhere,
+     * including an outer preflight, and the two entry points no longer own
+     * it. A `file:line` pin fails on that — but it fails on a stray docblock
+     * too, so the honest response to a failure became "renumber it", and
+     * renumbering waves this through.
+     */
+    public function testAClaimMovedIntoAHelperIsReported(): void
+    {
+        $refactored = <<<'PHP'
+        <?php
+        final class ApiRetry
+        {
+            private static function claimProbe(int $chainId): bool
+            {
+                return OnchainCircuitBreaker::isOpen($chainId);
+            }
+
+            public static function request(callable $fn)
+            {
+                return self::claimProbe(1) ? null : $fn();
+            }
+        }
+        PHP;
+
+        self::assertSame(
+            ['Domain/Onchain/Support/ApiRetry.php::claimProbe'],
+            self::claimSitesIn($refactored, 'Domain/Onchain/Support/ApiRetry.php'),
+            'a claim moved into a helper must be reported against the HELPER'
+        );
+    }
+
+    /**
+     * ⚠ A claim added to an unrelated class is reported with its own
+     * method, so the failure names where to look instead of only saying a
+     * count changed.
+     */
+    public function testAClaimElsewhereIsReportedWithItsMethod(): void
+    {
+        $elsewhere = <<<'PHP'
+        <?php
+        final class ChainRefreshService
+        {
+            public function tick(): void
+            {
+                if (OnchainCircuitBreaker::isOpen($this->chainId)) {
+                    return;
+                }
+            }
+        }
+        PHP;
+
+        self::assertSame(
+            ['Domain/Onchain/Services/ChainRefreshService.php::tick'],
+            self::claimSitesIn($elsewhere, 'Domain/Onchain/Services/ChainRefreshService.php')
+        );
+    }
+
+    /**
+     * ⭐ A claim inside a CLOSURE attributes to the named method containing
+     * it, not to nothing. `ApiRetry` passes closures around, so a detector
+     * that lost scope there would report `{file scope}` and the main
+     * assertion would fail for a bogus reason.
+     */
+    public function testAClaimInsideAClosureAttributesToItsMethod(): void
+    {
+        $withClosure = <<<'PHP'
+        <?php
+        final class ApiRetry
+        {
+            public static function request(callable $fn)
+            {
+                $guard = static function (int $c) {
+                    return OnchainCircuitBreaker::isOpen($c);
+                };
+
+                return $guard(1) ? null : $fn();
+            }
+        }
+        PHP;
+
+        self::assertSame(
+            ['Domain/Onchain/Support/ApiRetry.php::request'],
+            self::claimSitesIn($withClosure, 'Domain/Onchain/Support/ApiRetry.php')
+        );
+    }
+
+    /**
+     * ⚠⚠ REGRESSION: STRING INTERPOLATION MUST NOT MOVE FUNCTION SCOPE.
+     * This is the bug that cost a debugging round, so it is pinned rather
+     * than left to a comment.
+     *
+     * `"chain {$id}"` puts the OPENING brace in the token stream as the
+     * array token `T_CURLY_OPEN` and the CLOSING one as a plain `}`. A
+     * walker counting only plain braces loses one level per interpolation;
+     * on the real `ApiRetry.php` depth reached -2 and `request()`'s frame
+     * was popped before its own claim, which then reported as
+     * `{file scope}` — a guard failure with nothing actually wrong.
+     *
+     * Two interpolations before the claim, so a single off-by-one is still
+     * caught.
+     */
+    public function testStringInterpolationDoesNotBreakScopeTracking(): void
+    {
+        $interpolating = <<<'PHP'
+        <?php
+        final class ApiRetry
+        {
+            public static function request(int $chainId)
+            {
+                self::log("BLOCKED by circuit breaker: {$chainId}");
+                self::log("another {$chainId} for luck");
+
+                if (OnchainCircuitBreaker::isOpen($chainId)) {
+                    return null;
+                }
+
+                return true;
+            }
+        }
+        PHP;
+
+        self::assertSame(
+            ['Domain/Onchain/Support/ApiRetry.php::request'],
+            self::claimSitesIn($interpolating, 'Domain/Onchain/Support/ApiRetry.php'),
+            'interpolation braces are asymmetric in the token stream and must be balanced'
+        );
+    }
+
+    /**
+     * ⚠ ANTI-VACUITY FOR THE DETECTOR: source with no claim must report
+     * NOTHING. A walker that reported a site per function, or that fell over
+     * and returned `[]` on everything, would pass the cases above in one
+     * direction or the other.
+     */
+    public function testSourceWithNoClaimReportsNothing(): void
+    {
+        $clean = <<<'PHP'
+        <?php
+        final class EnrichmentScheduler
+        {
+            public function tick(): void
+            {
+                if (OnchainCircuitBreaker::isResting($this->chainId)) {
+                    return;
+                }
+            }
+        }
+        PHP;
+
+        self::assertSame([], self::claimSitesIn($clean, 'x.php'));
+    }
+
+    /**
+     * ⚠ And `isResting()` is NOT mistaken for a claim. It is the
+     * non-mutating preflight reader, deliberately distinct (#264/#265); a
+     * detector that matched the class name alone would report all four
+     * preflights and the main assertion would fail.
+     */
+    public function testTheNonMutatingReaderIsNotCountedAsAClaim(): void
+    {
+        $sites = self::claimSites();
+
+        foreach ($sites as $site) {
+            self::assertStringStartsWith(
+                'Domain/Onchain/Support/ApiRetry.php::',
+                $site,
+                'isResting() call sites must not appear here: ' . $site
+            );
+        }
     }
 
     /**

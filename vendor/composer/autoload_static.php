@@ -707,6 +707,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\ValueObjects\\GatedGroupConfig' => __DIR__ . '/../..' . '/app/Domain/Onchain/ValueObjects/GatedGroupConfig.php',
         'BCC\\Trust\\Onchain\\ValueObjects\\HoldingsCount' => __DIR__ . '/../..' . '/app/Domain/Onchain/ValueObjects/HoldingsCount.php',
         'BCC\\Trust\\Onchain\\ValueObjects\\IntakeMetadata' => __DIR__ . '/../..' . '/app/Domain/Onchain/ValueObjects/IntakeMetadata.php',
+        'BCC\\Trust\\Onchain\\ValueObjects\\IpfsImageUrl' => __DIR__ . '/../..' . '/app/Domain/Onchain/ValueObjects/IpfsImageUrl.php',
         'BCC\\Trust\\Onchain\\ValueObjects\\JoinResult' => __DIR__ . '/../..' . '/app/Domain/Onchain/ValueObjects/JoinResult.php',
         'BCC\\Trust\\Onchain\\ValueObjects\\MarketplaceResearchUrl' => __DIR__ . '/../..' . '/app/Domain/Onchain/ValueObjects/MarketplaceResearchUrl.php',
         'BCC\\Trust\\Onchain\\ValueObjects\\ProviderFailureKind' => __DIR__ . '/../..' . '/app/Domain/Onchain/ValueObjects/ProviderFailureKind.php',

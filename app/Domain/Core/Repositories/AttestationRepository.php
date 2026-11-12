@@ -1783,9 +1783,20 @@ final class AttestationRepository
         }
 
         // A failed read is NULL, never [] — the sweep treats [] as "reached
-        // the end" and would otherwise restart its cursor on a DB error.
-        $rows = $wpdb->get_results($prepared);
-        if (!is_array($rows) || $wpdb->last_error !== '') {
+        // the end" and would otherwise CLEAR its cursor on a DB error.
+        //
+        // runRead shape (#481 review): query() can fail WITHOUT setting
+        // last_error (the silent !ready path after a lost connection), and
+        // get_results($sql) would then return the PREVIOUS statement's
+        // last_result — typically empty here, which reads as "end". So check
+        // query()'s return AND last_error, then take the rows from
+        // last_result. (Not get_results(null)/get_row(null): see
+        // reference wpdb, they do not read last_result.)
+        if ($wpdb->query($prepared) === false || $wpdb->last_error !== '') {
+            return null;
+        }
+        $rows = $wpdb->last_result;
+        if (!is_array($rows)) {
             return null;
         }
 

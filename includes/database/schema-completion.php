@@ -40,6 +40,27 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+if (!function_exists('bcc_trust_schema_retry_backed_off')) {
+    /**
+     * F-151b: an installer pass that could not stamp used to re-run on
+     * EVERY request — ~200 queries each — until the cause cleared. It now
+     * re-runs at most hourly.
+     *
+     * The backoff is keyed to the version it failed at, not just set: a
+     * deploy that changes the schema computes a new version, which this
+     * does not match, so a fix shipped in that deploy is tried at once.
+     */
+    function bcc_trust_schema_retry_backed_off(string $computed): bool
+    {
+        return get_transient('bcc_trust_schema_retry_backoff') === $computed;
+    }
+
+    function bcc_trust_schema_retry_back_off(string $computed): void
+    {
+        set_transient('bcc_trust_schema_retry_backoff', $computed, HOUR_IN_SECONDS);
+    }
+}
+
 if (!function_exists('bcc_trust_stamp_schema_version')) {
     /**
      * Record the schema version — but ONLY if the migrations that report
@@ -62,10 +83,11 @@ if (!function_exists('bcc_trust_stamp_schema_version')) {
     function bcc_trust_stamp_schema_version(bool $migrationsComplete, string $computed): bool
     {
         if (!$migrationsComplete) {
+            bcc_trust_schema_retry_back_off($computed);
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::error(
                     '[bcc-trust] schema version NOT advanced — a reporting migration did not complete. '
-                    . 'The installer will run again on the next request; every step is probe-guarded and idempotent.',
+                    . 'The installer will run again in an hour (or at once on a new deploy); every step is probe-guarded and idempotent.',
                     ['computed' => $computed]
                 );
             }
@@ -84,6 +106,7 @@ if (!function_exists('bcc_trust_stamp_schema_version')) {
 
         $reread = get_option('bcc_trust_schema_version', '');
         if ($reread !== $computed) {
+            bcc_trust_schema_retry_back_off($computed);
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::error(
                     '[bcc-trust] schema version write did not stick — object cache likely stale',
