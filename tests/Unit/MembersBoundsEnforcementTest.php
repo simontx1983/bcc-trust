@@ -205,14 +205,15 @@ final class MembersBoundsEnforcementTest extends TestCase
     public function testTheSearchMatchesOnlyDisplayNamesAndHandles(): void
     {
         $members = self::membersBody();
-        self::assertStringContainsString('self::searchCandidateIds(', $members, 'members() must resolve q through the candidate helper');
+        self::assertStringContainsString('MemberSearchCandidates::ids(', $members, 'members() must resolve q through the shared candidate helper');
         self::assertStringNotContainsString("'search'", $members, 'no WP `search` arg in members(): its columns would include the login');
 
-        $code  = self::source();
-        $start = strpos($code, 'function searchCandidateIds(');
-        self::assertIsInt($start, 'searchCandidateIds() not found');
-        $next   = strpos($code, ' function ', $start + 10);
-        $helper = $next === false ? substr($code, $start) : substr($code, $start, $next - $start);
+        // The matcher moved to Support/MemberSearchCandidates so /members and
+        // the @-mention picker share ONE implementation.
+        $helper = (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Core/Support/MemberSearchCandidates.php');
+        $start  = strpos($helper, 'public static function ids(');
+        self::assertIsInt($start, 'MemberSearchCandidates::ids() not found');
+        $helper = substr($helper, $start);
 
         foreach (["'user_login'", "'user_nicename'", "'user_email'"] as $forbidden) {
             self::assertStringNotContainsString($forbidden, $helper, $forbidden . ' must never be matched (F-175)');

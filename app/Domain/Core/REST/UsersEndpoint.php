@@ -766,7 +766,7 @@ final class UsersEndpoint
             // resolved as a bounded candidate set and passed as `include`.
             // PeepSoUserSearch below still applies privacy, order and the
             // exact total INSIDE its query, over that set.
-            $candidates = self::searchCandidateIds(mb_substr($q, 0, 64));
+            $candidates = \BCC\Trust\Core\Support\MemberSearchCandidates::ids(mb_substr($q, 0, 64));
             if ($typeRestrictedIds !== null) {
                 $candidates = array_values(array_intersect($candidates, $typeRestrictedIds));
             }
@@ -809,7 +809,7 @@ final class UsersEndpoint
         // SEARCH: the third constructor argument is deliberately EMPTY and
         // must stay so. PeepSo's own search clause is `if (!empty($search))`,
         // so an empty string skips it and the `include` candidate set above
-        // (searchCandidateIds) does the matching. ⛔ Do NOT pass `$q` here:
+        // (MemberSearchCandidates::ids) does the matching. ⛔ Do NOT pass `$q` here:
         // PeepSo searches a first/last-name concat plus `user_login` (the
         // F-175 oracle), and optionally `user_email` behind the
         // `members_email_searchable` option, which would widen this route to
@@ -925,63 +925,6 @@ final class UsersEndpoint
         }
 
         return $response;
-    }
-
-    /**
-     * Upper bound on each half of the `q` candidate set (§3: no unbounded
-     * reads). Far above the directory's size today; a broader query is still
-     * served, but its `total` stops counting past this many matches per half.
-     */
-    private const MEMBER_SEARCH_MAX_CANDIDATES = 1000;
-
-    /**
-     * `q` → user ids whose DISPLAY NAME or @HANDLE (bcc_handle meta)
-     * contains it (F-175). Never user_login, user_nicename (derived from the
-     * login) or email. A leading "@" is ignored, so "@alice" finds handle
-     * "alice". These are candidate ids only: privacy is applied afterwards by
-     * PeepSoUserSearch, in its query.
-     *
-     * Both lookups go through WP_User_Query, which escapes `search` and adds
-     * the LIKE wildcards itself, so the needle is passed raw. Pre-escaping or
-     * adding "%" here would match a literal percent sign.
-     *
-     * @return list<int>
-     */
-    private static function searchCandidateIds(string $needle): array
-    {
-        $needle = trim($needle);
-        $handle = ltrim($needle, '@');
-
-        // F-28: a member who hides their real name must not be FINDABLE by
-        // it either, or searching a name would link it to their @handle.
-        // They stay findable by handle (below).
-        $byName = get_users([
-            'search'         => '*' . $needle . '*',
-            'search_columns' => ['display_name'],
-            'fields'         => 'ID',
-            'number'         => self::MEMBER_SEARCH_MAX_CANDIDATES,
-            'meta_query'     => [
-                'relation' => 'OR',
-                ['key' => 'bcc_privacy_real_name_hidden', 'compare' => 'NOT EXISTS'],
-                ['key' => 'bcc_privacy_real_name_hidden', 'value' => '1', 'compare' => '!='],
-            ],
-        ]);
-        $byHandle = $handle === '' ? [] : get_users([
-            'meta_key'     => 'bcc_handle',
-            'meta_value'   => $handle,
-            'meta_compare' => 'LIKE',
-            'fields'       => 'ID',
-            'number'       => self::MEMBER_SEARCH_MAX_CANDIDATES,
-        ]);
-
-        $ids = [];
-        foreach (array_merge($byName, $byHandle) as $id) {
-            if (is_numeric($id) && (int) $id > 0) {
-                $ids[(int) $id] = true;
-            }
-        }
-
-        return array_keys($ids);
     }
 
     /**
