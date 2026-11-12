@@ -105,8 +105,8 @@ final class ValidatorLogoService
             return;
         }
 
-        $localUrl = self::sideload($remoteUrl, $validatorId);
-        if ($localUrl === null) {
+        $new = self::sideload($remoteUrl, $validatorId);
+        if ($new === null) {
             Logger::warning('[ValidatorLogoService] sideload produced no local URL', [
                 'validator_id' => $validatorId,
             ]);
@@ -114,7 +114,67 @@ final class ValidatorLogoService
             return;
         }
 
-        ValidatorRepository::setLogo($validatorId, $localUrl, $remoteUrl);
+        $previous = is_string($state->logo_url ?? null) ? (string) $state->logo_url : null;
+        self::commitLogo($validatorId, $new, $remoteUrl, $previous);
+    }
+
+    /**
+     * Point the validator at the newly sideloaded logo, then drop the media
+     * it replaced (F-42).
+     *
+     * A logo change used to sideload a NEW attachment and leave the old one
+     * in the media library forever: every Keybase avatar change on every
+     * validator accumulated another orphaned image. And a failed row update
+     * left the new upload orphaned instead. Now:
+     *   - row update fails → delete the NEW attachment (nothing points at it);
+     *   - row update succeeds → delete the PREVIOUS auto-logo attachment,
+     *     only if it is provably one this service created for this
+     *     validator (see deleteReplacedLogo()).
+     *
+     * @param array{id: int, url: string} $new
+     */
+    private static function commitLogo(int $validatorId, array $new, string $remoteUrl, ?string $previousUrl): void
+    {
+        if (!ValidatorRepository::setLogo($validatorId, $new['url'], $remoteUrl)) {
+            wp_delete_attachment($new['id'], true);
+            Logger::warning('[ValidatorLogoService] logo row update failed; new upload removed', [
+                'validator_id' => $validatorId,
+            ]);
+            return;
+        }
+
+        if ($previousUrl !== null && $previousUrl !== '' && $previousUrl !== $new['url']) {
+            self::deleteReplacedLogo($validatorId, $previousUrl);
+        }
+    }
+
+    /**
+     * Delete the attachment behind a replaced auto-logo URL — but ONLY when
+     * it is one this service sideloaded for THIS validator: its file is
+     * `validator-{id}-logo.<ext>` (WP may append `-N` on a name clash) and
+     * it has no parent post. A URL that resolves to anything else — a
+     * claimer's own upload, a page thumbnail, a foreign or external URL —
+     * is left alone.
+     */
+    private static function deleteReplacedLogo(int $validatorId, string $previousUrl): void
+    {
+        $attachmentId = (int) attachment_url_to_postid($previousUrl);
+        if ($attachmentId <= 0) {
+            return;
+        }
+
+        $file = (string) get_attached_file($attachmentId);
+        $post = get_post($attachmentId);
+        $ours = preg_match('/^validator-' . $validatorId . '-logo(-\d+)?\.(png|jpe?g|webp)$/i', basename($file)) === 1
+            && $post instanceof \WP_Post
+            && $post->post_type === 'attachment'
+            && (int) $post->post_parent === 0;
+
+        if (!$ours) {
+            return;
+        }
+
+        wp_delete_attachment($attachmentId, true);
     }
 
     /**
@@ -130,12 +190,14 @@ final class ValidatorLogoService
 
     /**
      * Download + validate + sideload a remote image into WP media. Returns
-     * the local attachment URL or null on any failure. SSRF defence is
+     * the new attachment's id and local URL, or null on any failure. SSRF defence is
      * inherited from ApiRetry → SafeHttpClient (no redirects, private-IP
      * + metadata blocks, DNS pinning, size cap); on top we re-validate the
      * bytes are a real, allowlisted, fully-decodable image.
+     *
+     * @return array{id: int, url: string}|null
      */
-    private static function sideload(string $remoteUrl, int $validatorId): ?string
+    private static function sideload(string $remoteUrl, int $validatorId): ?array
     {
         $resp = ApiRetry::get(
             $remoteUrl,
@@ -220,7 +282,11 @@ final class ValidatorLogoService
         }
 
         $url = wp_get_attachment_url((int) $attachmentId);
-        return is_string($url) && $url !== '' ? $url : null;
+        if (!is_string($url) || $url === '') {
+            wp_delete_attachment((int) $attachmentId, true); // unusable without a URL
+            return null;
+        }
+        return ['id' => (int) $attachmentId, 'url' => $url];
     }
 
     private static function extensionForMime(string $mime): string
