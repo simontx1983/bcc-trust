@@ -69,7 +69,8 @@ final class ApiRetryApplicationErrorTest extends TestCase
      * The CosmWasm smart-query predicate, as production supplies it.
      *
      * Mirrors `CosmosFetcher::isSmartQueryApplicationError()`; the fetcher's
-     * own wiring is proven separately by CosmwasmSmartQueryRetryTest.
+     * own wiring is proven separately by Cw721ProbeSmartQueryOptInTest and
+     * CollectionMetadataApplicationErrorTest.
      */
     private function predicate(): callable
     {

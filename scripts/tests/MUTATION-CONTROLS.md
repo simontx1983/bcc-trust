@@ -50,19 +50,24 @@ for that run.
 | `pr7-mutation-controls.sh` | collection metadata rules, research URLs, description review | yes | ✅ 19/19 killed (3 scan-action controls removed with their target, 1 re-anchored) |
 | `pr71-mutation-controls.sh` | the retired enrichment cron stays retired | no | ✅ 5/5 killed (15 discovery-readiness controls removed with their targets) |
 | `pr78-mutation-controls.sh` | centralized breaker failure attribution | no | ✅ 23/23 killed (5 re-anchored; see the CRLF note below) |
-| `pr76-mutation-controls.sh` | CosmWasm classification and the breaker lifecycle | no | ❌ 11 killed, **1 survived** (a real gap, below) |
+| `pr76-mutation-controls.sh` | CosmWasm classification and the breaker lifecycle | no | ✅ 12/12 killed (smart-query opt-in re-pinned, below) |
 
-### The open survivor: pr76 smart-query opt-in
+### pr76 smart-query opt-in: re-pinned (was the open survivor)
 
 `CosmosFetcher::lcdGetResult()` is called with `$smartQuery = true` by
-`wasmSmartQueryResult()`, which the CW721 collection probes still use. In that
-case a recognised unknown-variant 500 is an *answer*, not a provider failure,
-and must not charge the breaker. The two tests that pinned this wiring
-(`SmartQueryOptInWiringTest`, `CosmwasmSmartQueryRetryTest`) were deleted with
-the scanner in S8. `ApiRetryApplicationErrorTest` mirrors the predicate, but
-not the fetcher's opt-in. Disabling the opt-in (`if (false)`) leaves the suite
-green. The control is kept, so the script stays red until a test pins the
-opt-in again.
+`wasmSmartQueryResult()`, which the CW721 probes use. A recognised
+unknown-variant 500 is then an *answer*, not a provider failure, and must not
+charge the breaker. The tests that pinned this (`SmartQueryOptInWiringTest`,
+`CosmwasmSmartQueryRetryTest`) were deleted in S8. Control 4 now runs:
+
+- **`tests/Unit/Cw721ProbeSmartQueryOptInTest`**, which covers `probeCw721()`.
+  Refusals cost one request each and no charge, and repeated probes never open
+  the breaker. A node fault still retries and charges.
+- **`CollectionMetadataApplicationErrorTest`**, which covers
+  `cw721CollectionInfoQuery()`. It already went red under the mutation but was
+  missing from the filter.
+
+Disabling the opt-in (`if (false)`) turns both red.
 
 ### Retired 2026-11-12
 
@@ -84,6 +89,8 @@ whose anchor matched **nothing** still changed the file's bytes. That passed
 the "did the mutation apply?" md5 check, and an **unmutated** tree was
 reported as SURVIVED. All five `pr78` survivors on 2026-11-12 were this:
 stale anchors disguised as survivors. Both scripts now preserve line endings.
+`pr76` also writes **nothing** when the mutation left the text unchanged, so a
+no-match is BROKEN even on a file with mixed line endings.
 A new script must read with `newline=''` (or use PHP's `file_get_contents`,
 as `breaker-charge` does) and refuse an anchor that does not match exactly
 once.

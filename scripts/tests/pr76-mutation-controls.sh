@@ -61,11 +61,11 @@ import io, sys
 p = sys.argv[1]
 raw = io.open(p, encoding='utf-8', newline='').read()
 crlf = '\r\n' in raw
-s = raw.replace('\r\n', '\n')
+s = orig = raw.replace('\r\n', '\n')
 ${mutation}
-if crlf:
-    s = s.replace('\n', '\r\n')
-io.open(p, 'w', encoding='utf-8', newline='').write(s)
+if s == orig:
+    sys.exit(0)  # matched nothing: leave the bytes alone so BROKEN fires
+io.open(p, 'w', encoding='utf-8', newline='').write(s.replace('\n', '\r\n') if crlf else s)
 PY
   after="$(md5sum "$file" | cut -d' ' -f1)"
 
@@ -111,11 +111,11 @@ import io, sys
 p = sys.argv[1]
 raw = io.open(p, encoding='utf-8', newline='').read()
 crlf = '\r\n' in raw
-s = raw.replace('\r\n', '\n')
+s = orig = raw.replace('\r\n', '\n')
 ${mutation}
-if crlf:
-    s = s.replace('\n', '\r\n')
-io.open(p, 'w', encoding='utf-8', newline='').write(s)
+if s == orig:
+    sys.exit(0)  # matched nothing: leave the bytes alone so BROKEN fires
+io.open(p, 'w', encoding='utf-8', newline='').write(s.replace('\n', '\r\n') if crlf else s)
 PYMUT
   after="$(md5sum "$file" | cut -d' ' -f1)"
 
@@ -144,7 +144,6 @@ BREAKER="app/Domain/Onchain/Support/OnchainCircuitBreaker.php"
 # Test and MixedEvidencePersistenceIntegrationTest. Controls 5, 6, 11 and 12
 # went with them (2026-11-12).
 RETRY="app/Domain/Onchain/Support/ApiRetry.php"
-CHECKPOINT="app/Domain/Onchain/Repositories/ChainCheckpointRepository.php"
 FETCHER="app/Domain/Onchain/Fetchers/CosmosFetcher.php"
 
 echo "PR 7.6 mutation controls"
@@ -166,14 +165,12 @@ control "http_4xx and malformed become node-caused faults" "$CLASSIFIER" \
   "s = s.replace(\"return \$kind === self::KIND_NODE_ERROR || \$kind === self::KIND_TRANSPORT;\", \"return self::isTransientFault(\$kind);\")"
 
 # ── 4. Fetcher: a recognised contract rejection blamed on the provider ──
-# ⚠ KNOWN SURVIVOR (2026-11-12). The `$smartQuery` branch is still live —
-# wasmSmartQueryResult() calls lcdGetResult(..., true) for the CW721 probes —
-# but SmartQueryOptInWiringTest and CosmwasmSmartQueryRetryTest, the two tests
-# that killed this, were deleted in scanner S8. ApiRetryApplicationErrorTest
-# mirrors the predicate but not the fetcher's wiring. Kept so the script stays
-# red until a test pins the opt-in again; see MUTATION-CONTROLS.md.
+# The `$smartQuery` branch is live: wasmSmartQueryResult() calls
+# lcdGetResult(..., true) for the CW721 probes. Its S8-deleted tests are
+# replaced by Cw721ProbeSmartQueryOptInTest (probeCw721) and
+# CollectionMetadataApplicationErrorTest (cw721CollectionInfoQuery).
 control "recognised unknown-variant 500 treated as a provider failure" "$FETCHER" \
-  "ApiRetryApplicationErrorTest" \
+  "Cw721ProbeSmartQueryOptInTest|CollectionMetadataApplicationErrorTest|ApiRetryApplicationErrorTest" \
   "s = s.replace(\"        if (\$smartQuery) {\", \"        if (false) {\")"
 
 # ── 7. Breaker: the threshold is raised out of reach ────────────────────
