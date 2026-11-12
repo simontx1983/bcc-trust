@@ -55,6 +55,16 @@ class VoteJobDispatcher {
     private const FRAUD_RETRY_BASE_DELAY  = 300;
 
     /**
+     * Delayed retry of the WHOLE post-vote job when its dispatch was missed
+     * before any sub-task ran (F-107 follow-up): the enqueue failed, or the
+     * dispatch lock timed out and the job is not actually scheduled. One
+     * attempt after FRAUD_RETRY_BASE_DELAY; the retry runs handlePostVote()
+     * INLINE (it is already in a worker, so there is no second enqueue to
+     * miss), and the fraud stage inside it keeps its own retries.
+     */
+    public const POST_VOTE_RETRY_HOOK = 'bcc_trust_async_post_vote_retry';
+
+    /**
      * Schedule all post-commit async jobs for a committed vote.
      *
      * Enqueues a SINGLE composite job that internally dispatches all
@@ -64,7 +74,17 @@ class VoteJobDispatcher {
      * @param int $voteId  The ID returned by VoteRepository::upsertRaw().
      */
     public static function dispatch( int $voteId ): void {
-        self::enqueue( 'bcc_trust_async_post_vote', [ $voteId ] );
+        if ( ! self::enqueue( 'bcc_trust_async_post_vote', [ $voteId ] ) ) {
+            self::scheduleRetry( self::POST_VOTE_RETRY_HOOK, [ $voteId ], self::FRAUD_RETRY_BASE_DELAY );
+        }
+    }
+
+    /**
+     * Retry handler for a missed post-vote dispatch (F-107 follow-up).
+     * Registered in Plugin::registerAsyncJobs.
+     */
+    public static function handlePostVoteRetry( int $voteId ): void {
+        self::handlePostVote( $voteId );
     }
 
     /**
@@ -146,26 +166,37 @@ class VoteJobDispatcher {
         }
     }
 
-    /**
-     * Schedule retry number $attempt (1-based) after its backoff delay.
-     * A failed schedule is recorded exactly like a failed first dispatch.
-     */
+    /** Schedule fraud retry number $attempt (1-based) after its backoff delay. */
     private static function scheduleFraudRetry( int $voteId, int $attempt ): void {
-        $runAt = time() + self::FRAUD_RETRY_BASE_DELAY * ( 2 ** ( $attempt - 1 ) );
-        $args  = [ $voteId, $attempt ];
+        self::scheduleRetry(
+            self::FRAUD_RETRY_HOOK,
+            [ $voteId, $attempt ],
+            self::FRAUD_RETRY_BASE_DELAY * ( 2 ** ( $attempt - 1 ) )
+        );
+    }
+
+    /**
+     * Schedule a delayed retry event. Action Scheduler when present, wp-cron
+     * otherwise. A failed schedule is recorded exactly like a failed first
+     * dispatch (no new DegradationMetric event).
+     *
+     * @param list<int> $args
+     */
+    private static function scheduleRetry( string $hook, array $args, int $delaySeconds ): void {
+        $runAt = time() + $delaySeconds;
 
         $scheduled = function_exists( 'as_schedule_single_action' )
-            ? (bool) as_schedule_single_action( $runAt, self::FRAUD_RETRY_HOOK, $args )
-            : wp_schedule_single_event( $runAt, self::FRAUD_RETRY_HOOK, $args ) !== false;
+            ? (bool) as_schedule_single_action( $runAt, $hook, $args )
+            : wp_schedule_single_event( $runAt, $hook, $args ) !== false;
 
         if ( ! $scheduled ) {
             if ( class_exists( '\\BCC\\Core\\Observability\\DegradationMetrics' ) ) {
                 \BCC\Core\Observability\DegradationMetrics::record( 'cron_dispatch', 'vote_job_dispatcher' );
             }
             if ( class_exists( '\\BCC\\Core\\Log\\Logger' ) ) {
-                \BCC\Core\Log\Logger::error( '[bcc-trust] fraud analysis retry could not be scheduled', [
-                    'vote_id' => $voteId,
-                    'attempt' => $attempt,
+                \BCC\Core\Log\Logger::error( '[bcc-trust] vote job retry could not be scheduled', [
+                    'hook' => $hook,
+                    'args' => $args,
                 ] );
             }
         }
@@ -193,11 +224,12 @@ class VoteJobDispatcher {
      *
      * @param string $hook
      * @param list<mixed> $args
+     * @return bool true when the job is scheduled (now or already); false
+     *              when the dispatch was missed
      */
-    private static function enqueue( string $hook, array $args ): void {
+    private static function enqueue( string $hook, array $args ): bool {
         if ( function_exists( 'as_enqueue_async_action' ) ) {
-            self::enqueueWithLock( $hook, $args );
-            return;
+            return self::enqueueWithLock( $hook, $args );
         }
 
         $positional = array_values( $args );
@@ -207,12 +239,12 @@ class VoteJobDispatcher {
         // Explicit wp_next_scheduled gate + md5-keyed transient closes the
         // TOCTOU window at native-cron resolution.
         if ( wp_next_scheduled( $hook, $positional ) ) {
-            return;
+            return true;
         }
 
         $fingerprint = 'bcc_enq_' . md5( $hook . '|' . wp_json_encode( $positional ) );
         if ( get_transient( $fingerprint ) ) {
-            return;
+            return true;
         }
         // Short TTL: only needs to span the scheduler's visibility lag.
         set_transient( $fingerprint, 1, 30 );
@@ -228,7 +260,9 @@ class VoteJobDispatcher {
                 'hook' => $hook,
                 'args' => $positional,
             ] );
+            return false;
         }
+        return true;
     }
 
     /**
@@ -250,8 +284,9 @@ class VoteJobDispatcher {
      *
      * @param string  $hook
      * @param mixed[] $args
+     * @return bool true when the job is scheduled (now or already)
      */
-    private static function enqueueWithLock( string $hook, array $args ): void {
+    private static function enqueueWithLock( string $hook, array $args ): bool {
         // Lock name: 'vote_job_' (9 chars) + md5 (32 hex chars) = 41 chars.
         $lockName    = 'vote_job_' . md5( $hook . wp_json_encode( $args ) );
         $lockTimeout = 10; // seconds to wait before giving up
@@ -264,30 +299,39 @@ class VoteJobDispatcher {
                 $hook,
                 wp_json_encode( $args )
             ) );
-            return;
+            // F-107 follow-up: the holder is ASSUMED to have enqueued it.
+            // Only a confirmed schedule counts; otherwise report a miss so
+            // the caller retries. (If the holder is still mid-enqueue the
+            // job can run twice; every post-vote sub-task is re-runnable.)
+            return as_has_scheduled_action( $hook, $args );
         }
 
         try {
-            if ( ! as_has_scheduled_action( $hook, $args ) ) {
-                // as_enqueue_async_action returns the new action id, or 0 when
-                // the Action Scheduler store rejects the insert. This is the
-                // PRIMARY dispatch path in production (AS present), yet it had
-                // NO failure handling — a soft enqueue failure silently
-                // stranded all post-vote sub-tasks (fraud, trust graph, stats)
-                // with neither a log nor a metric, unlike the wp-cron fallback
-                // in enqueue(). The cron_dispatch/vote_job_dispatcher subsystem
-                // already documents "AS returning 0" as its trigger; record it
-                // (+ log) so /system/health and the operator journal see the
-                // loss, at parity with the fallback.
-                $actionId = as_enqueue_async_action( $hook, $args );
-                if ( ! $actionId ) {
-                    \BCC\Core\Observability\DegradationMetrics::record( 'cron_dispatch', 'vote_job_dispatcher' );
-                    \BCC\Core\Log\Logger::error( '[bcc-trust] vote job dispatcher AS enqueue failed', [
-                        'hook' => $hook,
-                        'args' => $args,
-                    ] );
-                }
+            if ( as_has_scheduled_action( $hook, $args ) ) {
+                return true;
             }
+
+            // as_enqueue_async_action returns the new action id, or 0 when
+            // the Action Scheduler store rejects the insert. This is the
+            // PRIMARY dispatch path in production (AS present), yet it had
+            // NO failure handling — a soft enqueue failure silently
+            // stranded all post-vote sub-tasks (fraud, trust graph, stats)
+            // with neither a log nor a metric, unlike the wp-cron fallback
+            // in enqueue(). The cron_dispatch/vote_job_dispatcher subsystem
+            // already documents "AS returning 0" as its trigger; record it
+            // (+ log) so /system/health and the operator journal see the
+            // loss, at parity with the fallback. The caller now also
+            // retries a missed post-vote dispatch (F-107 follow-up).
+            $actionId = as_enqueue_async_action( $hook, $args );
+            if ( ! $actionId ) {
+                \BCC\Core\Observability\DegradationMetrics::record( 'cron_dispatch', 'vote_job_dispatcher' );
+                \BCC\Core\Log\Logger::error( '[bcc-trust] vote job dispatcher AS enqueue failed', [
+                    'hook' => $hook,
+                    'args' => $args,
+                ] );
+                return false;
+            }
+            return true;
         } finally {
             \BCC\Core\DB\AdvisoryLock::release( $lockName );
         }

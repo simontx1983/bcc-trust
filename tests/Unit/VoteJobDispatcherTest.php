@@ -14,9 +14,12 @@ namespace {
             public static bool $asHasScheduled = false;
             /** @var list<array{0:string,1:string}> recorded DegradationMetrics */
             public static array $metrics = [];
+            /** @var list<array{0:string,1:array<int,mixed>}> as_schedule_single_action calls */
+            public static array $scheduled = [];
 
             public static function reset(): void
             {
+                self::$scheduled       = [];
                 self::$asEnqueueReturn = 100;
                 self::$asHasScheduled  = false;
                 self::$metrics         = [];
@@ -45,6 +48,15 @@ namespace {
         function as_enqueue_async_action(string $hook, $args = [], string $group = ''): int
         {
             return \BccVoteDispatchState::$asEnqueueReturn;
+        }
+    }
+
+    if (!function_exists('as_schedule_single_action')) {
+        /** @param array<int, mixed> $args */
+        function as_schedule_single_action(int $timestamp, string $hook, array $args = [], string $group = ''): int
+        {
+            \BccVoteDispatchState::$scheduled[] = [$hook, $args];
+            return 1;
         }
     }
 }
