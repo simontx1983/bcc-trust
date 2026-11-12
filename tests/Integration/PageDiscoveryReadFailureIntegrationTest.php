@@ -52,6 +52,9 @@ final class PageDiscoveryReadFailureIntegrationTest extends TestCase
 {
     private const PAGE = 993101;
 
+    /** Chain id for the `_bcc_gate_chain_id` fixture (F-216). */
+    private const CHAIN = 9931;
+
     /** Matches the COUNT statement only. */
     private const COUNT_NEEDLE = 'SELECT COUNT(*)';
 
@@ -192,6 +195,100 @@ final class PageDiscoveryReadFailureIntegrationTest extends TestCase
         );
     }
 
+    // ── F-216: the two bulk finders ─────────────────────────────────────
+
+    /**
+     * ⚠ ANTI-VACUITY for the two finder cases below: healthy, each one finds
+     * its seeded row and logs nothing. Without these, a finder that always
+     * returned `[]` would satisfy both failure assertions.
+     */
+    public function testHealthyFindersReturnTheirRowsAndLogNothing(): void
+    {
+        $published = PageDiscoveryRepository::findPublishedByIds([self::PAGE]);
+        $gated     = PageDiscoveryRepository::findPostIdsGatedByChain([self::PAGE], self::CHAIN);
+
+        self::assertSame([self::PAGE], array_keys($published));
+        self::assertSame([self::PAGE], $gated);
+        self::assertSame([], \BCC\Core\Log\Logger::$lines, 'healthy finders are silent');
+    }
+
+    /**
+     * ⚠⚠ `findPublishedByIds()` used `$rows ?: []`, so a failed read read as
+     * "none of these pages is published". Its caller
+     * (`FeedHydrationPipeline`) then drops page context for a whole feed
+     * page. It still returns `[]` — fails closed, unchanged — but no longer
+     * silently.
+     */
+    public function testAFailedPublishedLookupIsLoggedAndStillReturnsEmpty(): void
+    {
+        $this->failReadsMatching('SELECT ID, post_title, post_name');
+
+        $out = PageDiscoveryRepository::findPublishedByIds([self::PAGE]);
+
+        self::assertSame([], $out, 'fails closed, exactly as before');
+        self::assertSame('published pages by id', self::loggedFailure()['context']['what']);
+    }
+
+    /**
+     * ⚠⚠ `findPostIdsGatedByChain()` answering `[]` means "no post is gated
+     * to this chain".
+     *
+     * ⭐ Its single caller (`GroupsDiscoveryEndpoint:454`) uses the result as
+     * an ALLOW-LIST and returns `[]` when it is empty, so this fails CLOSED —
+     * fewer groups listed, never a gated group exposed. That was checked at
+     * the call site, not assumed: the opposite reading would have made this a
+     * gating defect rather than a quiet degradation.
+     */
+    public function testAFailedGateLookupIsLoggedAndStillReturnsEmpty(): void
+    {
+        $this->failReadsMatching('_bcc_gate_chain_id');
+
+        $out = PageDiscoveryRepository::findPostIdsGatedByChain([self::PAGE], self::CHAIN);
+
+        self::assertSame([], $out, 'fails closed — an allow-list, so fewer groups, never more');
+        self::assertSame('chain-gated post ids', self::loggedFailure()['context']['what']);
+    }
+
+    /**
+     * ⚠⚠ THE WIDENED HELPER MUST NOT FABRICATE FACTS. F-216 replaced the
+     * helper's `bool $verifiedOnly` parameter with a context array precisely
+     * because the finders have no such notion — logging
+     * `verified_only: false` for them would assert something untrue about a
+     * query that never had the concept.
+     *
+     * So: the finders carry `ids` and NO `verified_only`, while the list
+     * queries still carry `verified_only` and no `ids`. This also pins that
+     * generalising the helper did not drop the key the earlier paths log.
+     */
+    public function testEachPathLogsOnlyTheFactsItHas(): void
+    {
+        $this->failReadsMatching('SELECT ID, post_title, post_name');
+        PageDiscoveryRepository::findPublishedByIds([self::PAGE]);
+        self::assertSame(['what', 'error', 'ids'], array_keys(self::loggedFailure()['context']));
+
+        \BCC\Core\Log\Logger::reset();
+        $this->failReadsMatching(self::COUNT_NEEDLE);
+        self::query();
+        self::assertSame(['what', 'error', 'verified_only'], array_keys(self::loggedFailure()['context']));
+    }
+
+    /**
+     * ⚠ And `$context` cannot shadow the fixed keys — it is merged AFTER
+     * them, so a caller cannot overwrite `what` or `error` with its own
+     * value. Asserted through a real failure rather than by reading the
+     * merge order.
+     */
+    public function testTheContextCannotOverwriteWhatOrError(): void
+    {
+        $this->failReadsMatching('_bcc_gate_chain_id');
+
+        PageDiscoveryRepository::findPostIdsGatedByChain([self::PAGE], self::CHAIN);
+
+        $line = self::loggedFailure();
+        self::assertSame('chain-gated post ids', $line['context']['what']);
+        self::assertNotSame('', (string) $line['context']['error'], 'the driver error survives the merge');
+    }
+
     // ── fixture ─────────────────────────────────────────────────────────
 
     /** @return array{rows: list<object>, total: int, pages: int, page: int} */
@@ -282,6 +379,16 @@ final class PageDiscoveryReadFailureIntegrationTest extends TestCase
             'read-model fixture: ' . $wpdb->last_error
         );
 
+        // F-216: makes the page chain-gated, for findPostIdsGatedByChain().
+        self::assertNotFalse(
+            $wpdb->insert($wpdb->postmeta, [
+                'post_id'    => self::PAGE,
+                'meta_key'   => '_bcc_gate_chain_id',
+                'meta_value' => (string) self::CHAIN,
+            ]),
+            'gate meta fixture: ' . $wpdb->last_error
+        );
+
         // ⚠ Asserted, not assumed: a silently empty fixture reads exactly
         // like the defect under test, so every failure case below would pass
         // for the wrong reason.
@@ -301,6 +408,7 @@ final class PageDiscoveryReadFailureIntegrationTest extends TestCase
     {
         global $wpdb;
 
+        $wpdb->query("DELETE FROM {$wpdb->postmeta}");
         $wpdb->query("DELETE FROM {$wpdb->posts}");
         $wpdb->query('DELETE FROM `' . TableRegistry::pageReadModel() . '` WHERE page_id = ' . self::PAGE);
     }
