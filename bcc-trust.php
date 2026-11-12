@@ -2206,6 +2206,13 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust activity',
         \BCC\Trust\Core\CLI\BackfillActivityModuleIdsCommand::class
     );
+    // F-299 one-off: record each claimed page's claimer as its PeepSo
+    // `member_owner` (claims before F-299 never wrote it). Dry run unless
+    // --apply; idempotent.
+    \WP_CLI::add_command(
+        'bcc-trust pages',
+        \BCC\Trust\Core\CLI\BackfillPageOwnersCommand::class
+    );
     // Validator message queue: inspect + recover the pre-claim backlog
     // (status / drain / retry / suppress). `retry` proves via the row's
     // idempotency key that no message landed before re-sending.

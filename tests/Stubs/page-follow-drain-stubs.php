@@ -38,6 +38,59 @@ namespace {
     if (!function_exists('__bcc_drain_state')) {
         function __bcc_drain_state(): array { return $GLOBALS['__bcc_drain']; }
     }
+
+    // F-299: PeepSo Pages' membership model, backed by
+    // $GLOBALS['__bcc_drain']['page_members'][pageId][userId] = status.
+    // Mirrors the real one: member_join() inserts `member` only when there is
+    // no row (an existing row is re-set to `member`); member_modify() updates
+    // an EXISTING row only (an UPDATE that matches nothing still "succeeds");
+    // both re-read the flags. Knobs: `fail_join`, `fail_modify` (bool).
+    if (!class_exists('PeepSoPageUser', false)) {
+        class PeepSoPageUser
+        {
+            /** @var string|false */
+            public $role = false;
+            public bool $is_member = false;
+            public bool $is_owner  = false;
+
+            public function __construct(private int $page_id, private ?int $user_id = null)
+            {
+                $this->init();
+            }
+
+            private function init(): void
+            {
+                $role            = $GLOBALS['__bcc_drain']['page_members'][$this->page_id][(int) $this->user_id] ?? false;
+                $this->role      = $role;
+                $this->is_member = is_string($role) && str_starts_with($role, 'member');
+                $this->is_owner  = $role === 'member_owner';
+            }
+
+            public function member_join(): bool
+            {
+                $GLOBALS['__bcc_drain']['page_writes'][] = ['join', $this->page_id, (int) $this->user_id];
+                if (!empty($GLOBALS['__bcc_drain']['fail_join'])) {
+                    return false;
+                }
+                $GLOBALS['__bcc_drain']['page_members'][$this->page_id][(int) $this->user_id] = 'member';
+                $this->init();
+                return true;
+            }
+
+            public function member_modify(string $role): bool
+            {
+                $GLOBALS['__bcc_drain']['page_writes'][] = ['modify', $this->page_id, (int) $this->user_id, $role];
+                if (!empty($GLOBALS['__bcc_drain']['fail_modify'])) {
+                    return false;
+                }
+                if (isset($GLOBALS['__bcc_drain']['page_members'][$this->page_id][(int) $this->user_id])) {
+                    $GLOBALS['__bcc_drain']['page_members'][$this->page_id][(int) $this->user_id] = $role;
+                }
+                $this->init();
+                return true;
+            }
+        }
+    }
 }
 
 namespace BCC\Trust\Core\Repositories {
@@ -131,6 +184,17 @@ namespace BCC\Trust\Core\Repositories {
             {
                 $GLOBALS['__bcc_drain']['meta'][] = $followId;
                 return true;
+            }
+        }
+    }
+
+    // F-299: onPageClaimed() counts the transferred page; recorded only.
+    if (!class_exists('BCC\Trust\Core\Repositories\UserInfoRepository', false)) {
+        final class UserInfoRepository
+        {
+            public function incrementPageCount(int $userId, int $pageId): void
+            {
+                $GLOBALS['__bcc_drain']['page_counts'][] = [$userId, $pageId];
             }
         }
     }
@@ -251,6 +315,28 @@ namespace BCC\Trust\Core\Integration {
             $GLOBALS['__bcc_drain']['author_reads']++;
 
             return $GLOBALS['__bcc_drain']['post_author'][(int) $postId] ?? 0;
+        }
+    }
+
+    // F-299: onPageClaimed()'s ownership transfer on an author-0 page.
+    if (!function_exists('BCC\Trust\Core\Integration\wp_update_post')) {
+        /**
+         * @param array<string, mixed> $post
+         * @return int|\WP_Error
+         */
+        function wp_update_post(array $post, bool $wpError = false)
+        {
+            $id = (int) ($post['ID'] ?? 0);
+            $GLOBALS['__bcc_drain']['post_author'][$id] = (int) ($post['post_author'] ?? 0);
+
+            return $id;
+        }
+    }
+    if (!function_exists('BCC\Trust\Core\Integration\is_wp_error')) {
+        /** @param mixed $thing */
+        function is_wp_error($thing): bool
+        {
+            return false;
         }
     }
 }

@@ -134,6 +134,100 @@ final class PeepSoQueryRepository
     }
 
     /**
+     * F-299 backfill: claimed pages whose claimer has no PeepSo
+     * `member_owner` row — the rows a claim made before F-299 never wrote.
+     *
+     * A candidate is a VERIFIED operator/creator PAGE claim (the page-mirror
+     * row) whose claimer IS the page's author (published `peepso-page`), with
+     * no `member_owner` row for that pair. Pages whose author is not the
+     * claimer are excluded on purpose: ownership is never assigned by a
+     * repair (onPageClaimed's no-automatic-transfer rule), and an author-0
+     * page heals when its claim is resubmitted.
+     *
+     * Keyset by page id, bounded by $limit (capped at 500). NULL = the read
+     * did not run (e.g. PeepSo Pages' table is missing) — never an empty
+     * list, so a caller cannot report "nothing to do" on a failure.
+     *
+     * Each row also carries what the backfill needs to decide and to be
+     * rolled back exactly: `current_role` (the claimer's existing
+     * peepso_page_members status on the page, null = no row) and
+     * `other_owner` (a DIFFERENT user already holding `member_owner` on the
+     * page, 0 = none).
+     *
+     * @return list<array{page_id: int, user_id: int, current_role: ?string, other_owner: int}>|null
+     */
+    public static function claimedPagesMissingOwnerRow(int $afterPageId, int $limit): ?array
+    {
+        global $wpdb;
+        $limit   = max(1, min(500, $limit));
+        $claims  = \BCC\Core\DB\DB::table('onchain_claims');
+        $members = $wpdb->prefix . 'peepso_page_members';
+
+        self::clearLastError();
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT c.entity_id AS page_id, c.user_id,
+                    (SELECT cur.pm_user_status FROM {$members} cur
+                      WHERE cur.pm_page_id = c.entity_id AND cur.pm_user_id = c.user_id
+                      ORDER BY cur.pm_id ASC LIMIT 1) AS current_role,
+                    (SELECT oth.pm_user_id FROM {$members} oth
+                      WHERE oth.pm_page_id = c.entity_id AND oth.pm_user_status = 'member_owner'
+                        AND oth.pm_user_id <> c.user_id
+                      ORDER BY oth.pm_id ASC LIMIT 1) AS other_owner
+               FROM {$claims} c
+               JOIN {$wpdb->posts} p
+                 ON p.ID = c.entity_id
+                AND p.post_type = 'peepso-page'
+                AND p.post_status = 'publish'
+                AND p.post_author = c.user_id
+              WHERE c.entity_type = 'page'
+                AND c.status = 'verified'
+                AND c.claim_role IN ('operator', 'creator')
+                AND c.entity_id > %d
+                AND NOT EXISTS (
+                    SELECT 1 FROM {$members} pm
+                     WHERE pm.pm_page_id = c.entity_id
+                       AND pm.pm_user_id = c.user_id
+                       AND pm.pm_user_status = 'member_owner'
+                )
+              ORDER BY c.entity_id ASC
+              LIMIT %d",
+            max(0, $afterPageId),
+            $limit
+        ));
+        if ($ok === false || self::lastError() !== '') {
+            return null;
+        }
+
+        $out = [];
+        foreach (is_array($wpdb->last_result) ? $wpdb->last_result : [] as $row) {
+            if (is_object($row) && isset($row->page_id, $row->user_id)) {
+                $out[] = [
+                    'page_id'      => (int) $row->page_id,
+                    'user_id'      => (int) $row->user_id,
+                    'current_role' => isset($row->current_role) && is_string($row->current_role) ? $row->current_role : null,
+                    'other_owner'  => isset($row->other_owner) ? (int) $row->other_owner : 0,
+                ];
+            }
+        }
+
+        return $out;
+    }
+
+    // Separate helpers (bcc-core's shape) so static analysis does not narrow
+    // last_error to '' across the query() call that sets it.
+    private static function clearLastError(): void
+    {
+        global $wpdb;
+        $wpdb->last_error = '';
+    }
+
+    private static function lastError(): string
+    {
+        global $wpdb;
+        return (string) $wpdb->last_error;
+    }
+
+    /**
      * Resolve a PeepSo page by ID from peepso_pages table.
      *
      * @return object|null Object with ID, name, owner_id, or null.
