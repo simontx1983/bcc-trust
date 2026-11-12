@@ -61,16 +61,25 @@ final class PublicIdentity
     }
 
     /**
-     * Convenience: both values for a WP_User in one call (one meta read).
+     * Convenience: both values for a user in one call (one meta read).
+     *
+     * Takes any object with ID / display_name / user_login: a WP_User, or
+     * the plain row objects some callers (and test harnesses) pass.
+     * Missing properties read as empty.
      *
      * @return array{handle: string, display_name: string}
      */
-    public static function forUser(\WP_User $user): array
+    public static function forUser(object $user): array
     {
-        $handle = self::handle((int) $user->ID, get_user_meta((int) $user->ID, 'bcc_handle', true));
+        $id     = isset($user->ID) && is_numeric($user->ID) ? (int) $user->ID : 0;
+        $handle = self::handle($id, $id > 0 ? get_user_meta($id, 'bcc_handle', true) : '');
         return [
             'handle'       => $handle,
-            'display_name' => self::displayName($user->display_name, $user->user_login, $handle),
+            'display_name' => self::displayName(
+                $user->display_name ?? '',
+                $user->user_login ?? '',
+                $handle
+            ),
         ];
     }
 }

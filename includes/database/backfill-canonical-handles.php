@@ -174,12 +174,12 @@ if (!function_exists('bcc_trust_backfill_canonical_handles')) {
             $userId
         );
 
-        $handle = bcc_trust_bch_find_free_variant($base, $handleService);
+        $handle = bcc_trust_bch_find_free_variant($base, $handleService, $userId);
         if ($handle === null) {
             // Suffix budget exhausted on the name-derived base (dense
             // collision cluster) — retry once on the deterministic
             // member-{id} base, which is unique by construction.
-            $handle = bcc_trust_bch_find_free_variant(\BCC\Trust\Core\Support\PublicIdentity::HANDLE_PREFIX . $userId, $handleService);
+            $handle = bcc_trust_bch_find_free_variant(\BCC\Trust\Core\Support\PublicIdentity::HANDLE_PREFIX . $userId, $handleService, $userId);
         }
         if ($handle === null) {
             return null;
@@ -272,7 +272,7 @@ if (!function_exists('bcc_trust_backfill_canonical_handles')) {
      * the single source of §B6 truth. Returns null when the suffix
      * budget is exhausted.
      */
-    function bcc_trust_bch_find_free_variant(string $base, \BCC\Trust\Core\Services\HandleService $handleService): ?string
+    function bcc_trust_bch_find_free_variant(string $base, \BCC\Trust\Core\Services\HandleService $handleService, ?int $forUserId = null): ?string
     {
         $maxLen = \BCC\Trust\Core\Services\HandleService::MAX_LENGTH;
 
@@ -289,7 +289,7 @@ if (!function_exists('bcc_trust_backfill_canonical_handles')) {
             if (strlen($candidate) < \BCC\Trust\Core\Services\HandleService::MIN_LENGTH) {
                 continue;
             }
-            if ($handleService->validate($candidate) !== null) {
+            if ($handleService->validate($candidate, $forUserId) !== null) {
                 // Reserved or format-invalid — a suffix changes the
                 // string, so keep trying.
                 continue;
