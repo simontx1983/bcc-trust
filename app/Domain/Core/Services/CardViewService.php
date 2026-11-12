@@ -45,6 +45,7 @@ use BCC\Trust\Core\Repositories\PageReadModelRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
+use BCC\Trust\Core\Support\CountPrivacy;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\Permission as PermissionShape;
 use BCC\Trust\Core\Support\ReputationTierMap;
@@ -881,7 +882,13 @@ final class CardViewService
                 $trustScore,
                 (int) $summary['followers_count'],
                 (int) $summary['following_count'],
-                $prefetched
+                $prefetched,
+                // §K2 count privacy (F-283). Taken from the summary that
+                // was ALREADY resolved above rather than re-read per user:
+                // this path also serves member LISTS, and a PrivacySettings
+                // read here would be one per row.
+                is_array($summary['privacy'] ?? null) ? $summary['privacy'] : [],
+                ($summary['is_self'] ?? false) === true
             ),
             'permissions'         => $this->resolveMemberPermissions($userId, $viewerId),
             // STUB: social_proof composition deferred (§O4). Field is
@@ -1942,6 +1949,7 @@ final class CardViewService
     }
 
     /**
+     * @param array<string, mixed> $privacy §K2 privacy block, already resolved by getSummary.
      * @param int $watchersCount Passed in from getSummary's
      *                           `followers_count` so the 3-col
      *                           StatsPanel isn't sparse — no re-query.
@@ -1959,7 +1967,9 @@ final class CardViewService
         int $trustScore,
         int $watchersCount,
         int $watchingCount,
-        ?array $prefetched = null
+        ?array $prefetched = null,
+        array $privacy = [],
+        bool $isSelf = false
     ): array {
         // Same read pattern as UserViewService::getSummary — when the
         // batch map is present, a missing key means zero (countByVoters
@@ -1968,6 +1978,23 @@ final class CardViewService
             $reviewsWritten = (int) ($prefetched['reviews_written_counts'][$userId] ?? 0);
         } else {
             $reviewsWritten = (int) $this->voteRepo->countByVoter($userId);
+        }
+
+        // ⚠⚠ §K2 count privacy (F-283). THIS CARD PUBLISHED THE NUMBERS
+        // THE PROFILE HID. `reviews_written` is read from its own source
+        // just above, so it never passed through
+        // `UserViewService::resolveCounts()`; `watchers`/`watching` arrive
+        // from `getSummary()`, which now narrows them too. Both are
+        // applied here so the card is correct even if a future caller
+        // hands over counts from somewhere else.
+        if (CountPrivacy::hides($privacy, CountPrivacy::FLAG_REVIEWS, $isSelf)) {
+            $reviewsWritten = 0;
+        }
+        if (CountPrivacy::hides($privacy, CountPrivacy::FLAG_FOLLOWERS, $isSelf)) {
+            $watchersCount = 0;
+        }
+        if (CountPrivacy::hides($privacy, CountPrivacy::FLAG_WATCHING, $isSelf)) {
+            $watchingCount = 0;
         }
 
         return [

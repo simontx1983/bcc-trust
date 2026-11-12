@@ -326,6 +326,7 @@ return array(
     'BCC\\Trust\\Core\\Support\\CelebrationStash' => $baseDir . '/app/Domain/Core/Support/CelebrationStash.php',
     'BCC\\Trust\\Core\\Support\\CircuitBreaker' => $baseDir . '/app/Domain/Core/Support/CircuitBreaker.php',
     'BCC\\Trust\\Core\\Support\\CorsHandler' => $baseDir . '/app/Domain/Core/Support/CorsHandler.php',
+    'BCC\\Trust\\Core\\Support\\CountPrivacy' => $baseDir . '/app/Domain/Core/Support/CountPrivacy.php',
     'BCC\\Trust\\Core\\Support\\DigestSettings' => $baseDir . '/app/Domain/Core/Support/DigestSettings.php',
     'BCC\\Trust\\Core\\Support\\Encryption' => $baseDir . '/app/Domain/Core/Support/Encryption.php',
     'BCC\\Trust\\Core\\Support\\Formatting' => $baseDir . '/app/Domain/Core/Support/Formatting.php',

@@ -35,6 +35,7 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Support\CountPrivacy;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
 use BCC\Trust\Core\Support\PeepSoFriendGate;
 use BCC\Trust\Core\Support\ProfileAccess;
@@ -142,7 +143,12 @@ final class UserFollowsService
         if ($userIds === []) {
             return [
                 'items'      => [],
-                'pagination' => $this->pagination($offset, $limit, $total, false),
+                'pagination' => $this->pagination(
+                    $offset,
+                    $limit,
+                    $this->totalFor($targetId, $viewerId, $total),
+                    false
+                ),
             ];
         }
 
@@ -166,7 +172,14 @@ final class UserFollowsService
 
         return [
             'items'      => $items,
-            'pagination' => $this->pagination($offset, $limit, $total, $hasMore),
+            // ⚠ $hasMore above is computed from the REAL total, so paging
+            // still terminates correctly when the count is hidden.
+            'pagination' => $this->pagination(
+                $offset,
+                $limit,
+                $this->totalFor($targetId, $viewerId, $total),
+                $hasMore
+            ),
         ];
     }
 
@@ -178,6 +191,31 @@ final class UserFollowsService
     {
         $profile = PrivacySettings::readProfile($userId);
         return $profile['watching_hidden'] === true;
+    }
+
+    /**
+     * ⚠⚠ `total` IS A DISCLOSURE, and it was the one F-283 named.
+     *
+     * This service refuses the whole LIST when `watching_hidden` is set,
+     * but that is a DIFFERENT flag from `follower_count_hidden`. A member
+     * who hid only their follower count still had the true number served
+     * here as `pagination.total`, while their profile reported 0 — so the
+     * setting was observably ineffective to anyone who paged the list.
+     *
+     * Zeroed rather than refused on purpose: the list itself is permitted
+     * (that is what the other flag governs), so the rows still come back
+     * and only the aggregate the member hid is withheld. `has_more` is
+     * computed from the real total by the caller and is unaffected.
+     */
+    private function totalFor(int $targetId, int $viewerId, int $total): int
+    {
+        $isSelf = $viewerId > 0 && $viewerId === $targetId;
+
+        return CountPrivacy::hides(
+            PrivacySettings::readProfile($targetId),
+            CountPrivacy::FLAG_FOLLOWERS,
+            $isSelf
+        ) ? 0 : $total;
     }
 
     /**

@@ -52,6 +52,7 @@ use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Repositories\XRepository;
 use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Support\CountPrivacy;
 use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\ProfileGroupVisibility;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
@@ -541,11 +542,20 @@ final class UserViewService
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::resolveFlags($userId),
             'trust_score'         => $this->resolveAugmentedTrustScore($userId),
-            'followers_count'     => $followersCount,
+            // ⚠ §K2 count privacy (F-283). These two are what
+            // `CardViewService::buildMemberStats()` renders as the
+            // `watchers` and `watching` tiles, and they were emitted RAW
+            // while `getUser()`'s `counts` block zeroed the same numbers
+            // — so the profile hid them and the card printed them.
+            'followers_count'     => CountPrivacy::hides($privacy, CountPrivacy::FLAG_FOLLOWERS, $isSelf)
+                ? 0
+                : $followersCount,
             // Active side of the same graph — accounts this member
             // watches. Surfaced on the member trading card beside
             // followers_count so the identity block shows both.
-            'following_count'     => $followingCount,
+            'following_count'     => CountPrivacy::hides($privacy, CountPrivacy::FLAG_WATCHING, $isSelf)
+                ? 0
+                : $followingCount,
             'primary_hall'        => $primaryHall,
             'owned_pages_count'   => $ownedPagesCount,
             'owned_pages_by_type' => $ownedPagesByType,
@@ -1043,23 +1053,13 @@ final class UserViewService
         // valid watch entries.
         $watchingSize = $followCounts['following'];
 
-        if (!$isSelf) {
-            if ($privacy['follower_count_hidden']) {
-                $followCounts['followers'] = 0;
-            }
-            if ($privacy['watching_hidden']) {
-                $watchingSize = 0;
-                $followCounts['following'] = 0;
-            }
-            if ($privacy['reviews_hidden']) {
-                $reviewsWritten = 0;
-            }
-            if ($privacy['disputes_hidden']) {
-                $disputesSigned = 0;
-            }
-        }
-
-        return [
+        // §K2 count privacy is applied to the BUILT block below, by
+        // {@see CountPrivacy::applyToCounts()}. It used to be four inline
+        // `if`s here — and that was the only place it happened, which is
+        // how the member CARD came to publish the numbers this method
+        // zeroes and `/followers` came to serve the true total as
+        // `pagination.total` (F-283). One owner now; do not re-inline.
+        return CountPrivacy::applyToCounts([
             'followers'         => $followCounts['followers'],
             'following'         => $followCounts['following'],
             'watching_size'     => $watchingSize,
@@ -1081,7 +1081,7 @@ final class UserViewService
             // act_module_id='blog' joined against wp_posts for the
             // published filter. Mirrors what /u/:handle/blog renders.
             'blog_posts_written' => \BCC\Core\Repositories\PeepSoActivityRepository::countBlogsByAuthor($userId),
-        ];
+        ], $privacy, $isSelf);
     }
 
     /**
