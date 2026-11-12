@@ -36,6 +36,8 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
+use BCC\Trust\Core\Support\PeepSoFriendGate;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\PrivacySettings;
 
 if (!defined('ABSPATH')) {
@@ -104,7 +106,24 @@ final class UserFollowsService
             $limit = self::MAX_LIMIT;
         }
 
-        $counts = PeepSoFollowerRepository::getCounts($targetId);
+        // §F-02 — a member whose profile is private must not be listed in
+        // someone else's followers or following. bcc-core owns the rule;
+        // this decides whether to apply it.
+        //
+        // ⚠⚠ THE COUNT AND THE LIST GET THE SAME ARGUMENTS. They are two
+        // queries, so gating one and not the other renders "128
+        // following" above seven rows — and the `$total === 0`
+        // short-circuit below would return an empty page while the count
+        // insisted otherwise. Any change here must change both.
+        //
+        // ⚠ Admins pass `false`, which is how bcc-core expects an admin
+        // read to be expressed: the repository deliberately holds no
+        // capability check. Same narrower `manage_options` notion the
+        // profile gate uses, so a row and its profile always agree.
+        $enforce   = !ProfileAccess::viewerIsExemptFromVisibility();
+        $friendIds = PeepSoFriendGate::viewerFriendIdList($viewerId);
+
+        $counts = PeepSoFollowerRepository::getCounts($targetId, $viewerId, $friendIds, $enforce);
         $total  = $relation === self::RELATION_FOLLOWERS
             ? $counts['followers']
             : $counts['following'];
@@ -117,8 +136,8 @@ final class UserFollowsService
         }
 
         $userIds = $relation === self::RELATION_FOLLOWERS
-            ? PeepSoFollowerRepository::getFollowers($targetId, $limit, $offset)
-            : PeepSoFollowerRepository::getFollowing($targetId, $limit, $offset);
+            ? PeepSoFollowerRepository::getFollowers($targetId, $limit, $offset, $viewerId, $friendIds, $enforce)
+            : PeepSoFollowerRepository::getFollowing($targetId, $limit, $offset, $viewerId, $friendIds, $enforce);
 
         if ($userIds === []) {
             return [
