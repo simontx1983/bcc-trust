@@ -105,8 +105,11 @@ final class GroupBanRemovalTest extends TestCase
         self::assertNotFalse($from);
         $leave = substr($src, $from, (int) strpos($src, 'return ApiResponse::ok(', $from) - $from);
 
-        self::assertStringContainsString('$wasMember = self::isActiveMemberStatus(PeepSoGroupRepository::getMembershipStatus($userId, $groupId));', $leave);
-        self::assertLessThan(strpos($leave, 'PeepSoGroupWriter::leave('), strpos($leave, '$wasMember ='), 'read BEFORE the writer deletes the row');
+        // F-329: the status is GroupLeaveGuard's fail-closed read (one read).
+        self::assertStringContainsString('[$refusal, $status] = \BCC\Trust\Core\Support\GroupLeaveGuard::precheck($userId, $groupId);', $leave);
+        self::assertStringContainsString('$wasMember = self::isActiveMemberStatus($status);', $leave);
+        self::assertLessThan(strpos($leave, 'PeepSoGroupWriter::leave('), strpos($leave, 'GroupLeaveGuard::precheck('), 'read BEFORE the writer deletes the row');
+        self::assertLessThan(strpos($leave, 'PeepSoGroupWriter::leave('), strpos($leave, '$wasMember ='), 'decided BEFORE the writer deletes the row');
         self::assertStringContainsString('if ($wasMember) { OnchainPlugin::instance()->nftGroupGateService()->recordOptOut($userId, $groupId);', $leave);
         self::assertSame(1, substr_count($leave, '->recordOptOut('), 'no unguarded opt-out write');
     }
@@ -114,8 +117,11 @@ final class GroupBanRemovalTest extends TestCase
     public function testTheDelegatorLeaveDoesNotCountABanAsMembership(): void
     {
         $src = self::source('app/Domain/Onchain/REST/ValidatorGroupsEndpoint.php');
-        self::assertStringContainsString('$wasMember = HolderGroupsEndpoint::isActiveMemberStatus( PeepSoGroupRepository::getMembershipStatus($userId, $groupId) );', $src);
+        // F-329: the status is GroupLeaveGuard's fail-closed read (one read).
+        self::assertStringContainsString('[$refusal, $status] = \BCC\Trust\Core\Support\GroupLeaveGuard::precheck($userId, $groupId);', $src);
+        self::assertStringContainsString('$wasMember = HolderGroupsEndpoint::isActiveMemberStatus($status);', $src);
         self::assertStringNotContainsString('getMembershipStatus($userId, $groupId) !== null', $src);
+        self::assertStringNotContainsString('$wasMember = $status !== null', $src);
     }
 
     /** @return array<string, array{string}> */

@@ -379,23 +379,23 @@ final class HolderGroupsEndpoint
             );
         }
 
+        // Owner → 403, failed read → 503, read BEFORE the write
+        // (GroupLeaveGuard); a non-owner's false is never "you are the owner".
+        [$refusal, $status] = \BCC\Trust\Core\Support\GroupLeaveGuard::precheck($userId, $groupId);
+        if ($refusal !== null) {
+            return $refusal;
+        }
+
         // F-267: only a real member's Leave records an opt-out. A
         // moderator-removed (or banned) user has no active row; their Leave
         // used to write a voluntary opt-out over the permanent one, and an
         // explicit Join overrides a voluntary opt-out. Same guard as the
         // delegator leave; recordOptOut() also never downgrades a permanent
-        // opt-out.
-        $wasMember = self::isActiveMemberStatus(PeepSoGroupRepository::getMembershipStatus($userId, $groupId));
+        // opt-out. Derived from the guard's fail-closed read (one read).
+        $wasMember = self::isActiveMemberStatus($status);
 
-        $left = \BCC\Core\PeepSo\PeepSoGroupWriter::leave($userId, $groupId);
-        if (!$left) {
-            // Most likely cause: caller is the group owner.
-            // PeepSoGroupWriter refuses to leave a group ownerless.
-            return ApiResponse::error(
-                'bcc_permission_denied',
-                'Owners cannot leave their own community. Hand off ownership or delete the group first.',
-                403
-            );
+        if (!\BCC\Core\PeepSo\PeepSoGroupWriter::leave($userId, $groupId)) {
+            return \BCC\Trust\Core\Support\GroupLeaveGuard::unavailable();
         }
 
         if ($wasMember) {
