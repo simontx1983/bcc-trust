@@ -22,6 +22,8 @@ if (!defined('ABSPATH')) {
  */
 class DisputeAdminRepository
 {
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+
     /** Cache group for all dispute-related keys. */
     private const CACHE_GROUP = DisputeRepositorySupport::CACHE_GROUP;
 
@@ -74,9 +76,18 @@ class DisputeAdminRepository
         global $wpdb;
         $table = DisputeRepository::disputes_table();
 
-        $rows = $wpdb->get_results(
-            "SELECT status, COUNT(*) AS cnt FROM {$table} GROUP BY status LIMIT 10"
-        );
+        // F-101: a failed read used to cache {} (every status 0) for
+        // TTL_HOT. It now answers {} for this call only.
+        try {
+            /** @var list<object{status: string, cnt: numeric-string}> $rows */
+            $rows = self::runRead(
+                "SELECT status, COUNT(*) AS cnt FROM {$table} GROUP BY status LIMIT 10",
+                __FUNCTION__,
+                true
+            );
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+            return [];
+        }
 
         $counts = [];
         foreach ($rows as $r) {
