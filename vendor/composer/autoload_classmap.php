@@ -186,6 +186,7 @@ return array(
     'BCC\\Trust\\Core\\Security\\FraudWhitelist' => $baseDir . '/app/Domain/Core/Security/FraudWhitelist.php',
     'BCC\\Trust\\Core\\Security\\IpResolver' => $baseDir . '/app/Domain/Core/Security/IpResolver.php',
     'BCC\\Trust\\Core\\Security\\RateLimiter' => $baseDir . '/app/Domain/Core/Security/RateLimiter.php',
+    'BCC\\Trust\\Core\\Security\\SuspendedWriteGate' => $baseDir . '/app/Domain/Core/Security/SuspendedWriteGate.php',
     'BCC\\Trust\\Core\\Security\\TransactionManager' => $baseDir . '/app/Domain/Core/Security/TransactionManager.php',
     'BCC\\Trust\\Core\\Security\\TrustGraph' => $baseDir . '/app/Domain/Core/Security/TrustGraph.php',
     'BCC\\Trust\\Core\\Services\\AccountRecoveryService' => $baseDir . '/app/Domain/Core/Services/AccountRecoveryService.php',

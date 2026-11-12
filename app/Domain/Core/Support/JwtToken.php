@@ -194,7 +194,7 @@ final class JwtToken
      *   success → ['ok' => true,  'payload' => array<string, mixed>]
      *   failure → ['ok' => false, 'error'   => one of ERR_*]
      *
-     * @return array{ok: true, payload: array<string, mixed>}|array{ok: false, error: string}
+     * @return array{ok: true, payload: array<string, mixed>}|array{ok: false, error: string, user_id?: int}
      */
     public static function decode(string $token): array
     {
@@ -211,7 +211,7 @@ final class JwtToken
      * (AuthEndpoint::refresh) is responsible for the additional
      * "not suspended" check before re-minting.
      *
-     * @return array{ok: true, payload: array<string, mixed>}|array{ok: false, error: string}
+     * @return array{ok: true, payload: array<string, mixed>}|array{ok: false, error: string, user_id?: int}
      */
     public static function decodeForRefresh(string $token): array
     {
@@ -224,7 +224,7 @@ final class JwtToken
      * Every security-critical check (algorithm, signature, issuer,
      * audience, version, revocation) is identical across both callers.
      *
-     * @return array{ok: true, payload: array<string, mixed>}|array{ok: false, error: string}
+     * @return array{ok: true, payload: array<string, mixed>}|array{ok: false, error: string, user_id?: int}
      */
     private static function decodeWithExpiryWindow(string $token, int $maxSecondsPastExp): array
     {
@@ -312,7 +312,11 @@ final class JwtToken
         $tokenTv   = isset($payload['tv']) ? (int) $payload['tv'] : 0;
         $currentTv = self::currentTokenVersion($userId);
         if ($tokenTv !== $currentTv) {
-            return ['ok' => false, 'error' => self::ERR_REVOKED];
+            // The user id rides along (signature, issuer, audience and
+            // version are already verified at this point) so /auth/refresh
+            // can say WHY: a suspension revokes every token (F-119), and
+            // the member must be told to sign in again read-only (F-305).
+            return ['ok' => false, 'error' => self::ERR_REVOKED, 'user_id' => $userId];
         }
 
         // Single-token logout (F-120): a token signed out via POST

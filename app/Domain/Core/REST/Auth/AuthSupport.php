@@ -270,6 +270,25 @@ final class AuthSupport
     public const JWT_TTL_SECONDS = JwtToken::TTL_SECONDS;
 
     /**
+     * F-305 (user decision 2026-11-12): a suspended member may SIGN IN,
+     * read-only, and must be told why they cannot post, comment or vote.
+     * Every sign-in response, /auth/refresh and /auth/session carry this
+     * flag; the frontend shows the notice from it.
+     *
+     * Admin bypass OFF, as at the write gates: the flag matches what the
+     * member will actually be refused. UNKNOWN (null, the state could not
+     * be read) is false: this is display, a DB blip must not show a
+     * suspension notice, and every write gate re-checks on its own.
+     */
+    public static function resolveSuspended(int $userId): bool
+    {
+        if ($userId <= 0) {
+            return false;
+        }
+        return \BCC\Core\Permissions\Permissions::suspensionState($userId, false) === true;
+    }
+
+    /**
      * Resolve the in_good_standing boolean for the auth response. Reads
      * the user's reputation tier (single repo call) and routes through
      * the canonical UserViewService::isInGoodStanding tier-mapping so
@@ -388,6 +407,9 @@ final class AuthSupport
             'expires_in'       => self::JWT_TTL_SECONDS,
             'token_type'       => 'Bearer',
             'in_good_standing' => self::resolveInGoodStanding($userId),
+            // F-305: a suspended member signs in READ-ONLY; the client shows
+            // the suspension notice from this flag. Every write gate refuses.
+            'suspended'        => self::resolveSuspended($userId),
             // How many wallets are linked to the account the caller just
             // proved the email of. > 0 tells the frontend to show "this
             // account has a wallet linked — is it yours?" (it lists them via

@@ -342,6 +342,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Security\\FraudWhitelist' => __DIR__ . '/../..' . '/app/Domain/Core/Security/FraudWhitelist.php',
         'BCC\\Trust\\Core\\Security\\IpResolver' => __DIR__ . '/../..' . '/app/Domain/Core/Security/IpResolver.php',
         'BCC\\Trust\\Core\\Security\\RateLimiter' => __DIR__ . '/../..' . '/app/Domain/Core/Security/RateLimiter.php',
+        'BCC\\Trust\\Core\\Security\\SuspendedWriteGate' => __DIR__ . '/../..' . '/app/Domain/Core/Security/SuspendedWriteGate.php',
         'BCC\\Trust\\Core\\Security\\TransactionManager' => __DIR__ . '/../..' . '/app/Domain/Core/Security/TransactionManager.php',
         'BCC\\Trust\\Core\\Security\\TrustGraph' => __DIR__ . '/../..' . '/app/Domain/Core/Security/TrustGraph.php',
         'BCC\\Trust\\Core\\Services\\AccountRecoveryService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/AccountRecoveryService.php',
