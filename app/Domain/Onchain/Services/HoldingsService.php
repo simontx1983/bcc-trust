@@ -130,12 +130,19 @@ final class HoldingsService
      *
      * Units are provider page requests before retries (see SURFACE_BUDGETS).
      * An unknown surface gets the join budget — small, never unbounded.
+     *
+     * `$clock` is for TESTS ONLY (passed through to ProviderRequestBudget):
+     * a test that is about paging, not about the deadline, freezes the clock
+     * so the surface's real request budget is the only thing that can stop
+     * it (F-338). Production never passes it.
+     *
+     * @param (\Closure(): float)|null $clock
      */
-    public static function verificationBudget(string $surface): ProviderRequestBudget
+    public static function verificationBudget(string $surface, ?\Closure $clock = null): ProviderRequestBudget
     {
         [$requests, $seconds] = self::SURFACE_BUDGETS[$surface] ?? self::SURFACE_BUDGETS[self::SURFACE_JOIN];
 
-        return new ProviderRequestBudget($requests, $seconds);
+        return new ProviderRequestBudget($requests, $seconds, $clock);
     }
 
     /**
