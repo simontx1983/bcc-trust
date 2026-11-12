@@ -148,7 +148,13 @@ final class PeepSoQueryRepository
      * did not run (e.g. PeepSo Pages' table is missing) — never an empty
      * list, so a caller cannot report "nothing to do" on a failure.
      *
-     * @return list<array{page_id: int, user_id: int}>|null
+     * Each row also carries what the backfill needs to decide and to be
+     * rolled back exactly: `current_role` (the claimer's existing
+     * peepso_page_members status on the page, null = no row) and
+     * `other_owner` (a DIFFERENT user already holding `member_owner` on the
+     * page, 0 = none).
+     *
+     * @return list<array{page_id: int, user_id: int, current_role: ?string, other_owner: int}>|null
      */
     public static function claimedPagesMissingOwnerRow(int $afterPageId, int $limit): ?array
     {
@@ -159,7 +165,14 @@ final class PeepSoQueryRepository
 
         self::clearLastError();
         $ok = $wpdb->query($wpdb->prepare(
-            "SELECT c.entity_id AS page_id, c.user_id
+            "SELECT c.entity_id AS page_id, c.user_id,
+                    (SELECT cur.pm_user_status FROM {$members} cur
+                      WHERE cur.pm_page_id = c.entity_id AND cur.pm_user_id = c.user_id
+                      ORDER BY cur.pm_id ASC LIMIT 1) AS current_role,
+                    (SELECT oth.pm_user_id FROM {$members} oth
+                      WHERE oth.pm_page_id = c.entity_id AND oth.pm_user_status = 'member_owner'
+                        AND oth.pm_user_id <> c.user_id
+                      ORDER BY oth.pm_id ASC LIMIT 1) AS other_owner
                FROM {$claims} c
                JOIN {$wpdb->posts} p
                  ON p.ID = c.entity_id
@@ -188,7 +201,12 @@ final class PeepSoQueryRepository
         $out = [];
         foreach (is_array($wpdb->last_result) ? $wpdb->last_result : [] as $row) {
             if (is_object($row) && isset($row->page_id, $row->user_id)) {
-                $out[] = ['page_id' => (int) $row->page_id, 'user_id' => (int) $row->user_id];
+                $out[] = [
+                    'page_id'      => (int) $row->page_id,
+                    'user_id'      => (int) $row->user_id,
+                    'current_role' => isset($row->current_role) && is_string($row->current_role) ? $row->current_role : null,
+                    'other_owner'  => isset($row->other_owner) ? (int) $row->other_owner : 0,
+                ];
             }
         }
 

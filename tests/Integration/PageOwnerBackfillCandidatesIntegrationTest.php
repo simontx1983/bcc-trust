@@ -115,7 +115,7 @@ final class PageOwnerBackfillCandidatesIntegrationTest extends TestCase
         self::assertNotFalse($ok, (string) $wpdb->last_error);
     }
 
-    /** @return list<array{page_id: int, user_id: int}> only this test's pages */
+    /** @return list<array{page_id: int, user_id: int, current_role: ?string, other_owner: int}> only this test's pages */
     private function candidates(int $after = 0, int $limit = 500): array
     {
         $rows = PeepSoQueryRepository::claimedPagesMissingOwnerRow($after, $limit);
@@ -152,10 +152,22 @@ final class PageOwnerBackfillCandidatesIntegrationTest extends TestCase
         $draft = $this->page(self::USER_A, 'draft');     // ✘ unpublished
         $this->claim(self::USER_A, $draft);
 
+        // Still CANDIDATES (the command's plan() skips them for manual review),
+        // so the query must report the facts that decide it.
+        $banned = $this->page(self::USER_A);             // claimer is banned on the page
+        $this->claim(self::USER_A, $banned);
+        $this->member(self::USER_A, $banned, 'banned');
+
+        $twoOwners = $this->page(self::USER_A);          // someone else already owns it
+        $this->claim(self::USER_A, $twoOwners);
+        $this->member(self::USER_B, $twoOwners, 'member_owner');
+
         self::assertSame(
             [
-                ['page_id' => $missing, 'user_id' => self::USER_A],
-                ['page_id' => $plainMember, 'user_id' => self::USER_A],
+                ['page_id' => $missing,     'user_id' => self::USER_A, 'current_role' => null,     'other_owner' => 0],
+                ['page_id' => $plainMember, 'user_id' => self::USER_A, 'current_role' => 'member', 'other_owner' => 0],
+                ['page_id' => $banned,      'user_id' => self::USER_A, 'current_role' => 'banned', 'other_owner' => 0],
+                ['page_id' => $twoOwners,   'user_id' => self::USER_A, 'current_role' => null,     'other_owner' => self::USER_B],
             ],
             $this->candidates()
         );
@@ -169,9 +181,9 @@ final class PageOwnerBackfillCandidatesIntegrationTest extends TestCase
         $this->claim(self::USER_B, $second);
 
         $page1 = PeepSoQueryRepository::claimedPagesMissingOwnerRow($first - 1, 1);
-        self::assertSame([['page_id' => $first, 'user_id' => self::USER_A]], $page1);
+        self::assertSame([['page_id' => $first, 'user_id' => self::USER_A, 'current_role' => null, 'other_owner' => 0]], $page1);
 
-        self::assertSame([['page_id' => $second, 'user_id' => self::USER_B]], $this->candidates($first));
+        self::assertSame([['page_id' => $second, 'user_id' => self::USER_B, 'current_role' => null, 'other_owner' => 0]], $this->candidates($first));
     }
 
     /** A read that did not run is NULL — never "nothing to repair". */
