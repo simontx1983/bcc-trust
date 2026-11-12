@@ -212,6 +212,14 @@ final class HeliusWebhookEndpoint
                     'marked_before' => count($markedThisDelivery),
                 ]);
                 self::reopenDedupe($markedThisDelivery);
+                HeliusDeliveryLog::record([
+                    'outcome'     => HeliusDeliveryLog::OUTCOME_DEDUPE_FAILED,
+                    'auth_passed' => true,
+                    'tx_count'    => count($transactions),
+                    'events'      => 0,
+                    'replays'     => $totalReplays,
+                    'ip'          => $clientIp,
+                ]);
                 return self::retryLater();
             }
             if ($seen === false) {

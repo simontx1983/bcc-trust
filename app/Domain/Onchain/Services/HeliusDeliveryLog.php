@@ -71,10 +71,19 @@ final class HeliusDeliveryLog
     public const OUTCOME_PROCESSED   = 'processed';
 
     /**
+     * F-67: auth passed, but a signature's dedupe write failed, so nothing
+     * from the delivery was ingested and the endpoint answered 503 for
+     * Helius to redeliver. Without this row the 503 left no trace on the
+     * admin page, and a run of them read as Helius going quiet.
+     */
+    public const OUTCOME_DEDUPE_FAILED = 'dedupe_failed';
+
+    /**
      * Append a delivery row + LRU-trim to MAX_ENTRIES.
      *
      * Non-blocking by intent: failure to record should never break
-     * the webhook handler, which always returns 200 to Helius.
+     * the webhook handler, which answers 200 to Helius on every outcome
+     * except dedupe_failed (503, so Helius redelivers).
      *
      * @param array{
      *     outcome: string,
