@@ -18,6 +18,7 @@ namespace BCC\Trust\Core\Repositories;
 use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Exceptions\RepositoryException;
 use BCC\Trust\Core\Repositories\WalletSignalRepository;
+use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 
@@ -235,6 +236,25 @@ class PageReadModelRepository
     // ──────────────────────────────────────────────────────────
 
     /**
+     * The page_type to store in the read model for a raw `_bcc_page_type`
+     * meta value (`get_post_meta(..., true)`, which is mixed).
+     *
+     * The legacy '' → 'builder' default is the shared
+     * PageTypeMap::effectivePageType(). On top of it, this keeps this call
+     * site's OLD `?: 'builder'` semantics exactly: '0' and any non-string
+     * value (false, null, a serialized array) also read as 'builder'.
+     * Unlike the other readers, which cast with (string) and would carry
+     * '0' through as an unrecognised type, this one never has. A read
+     * model written from here must not start disagreeing with what it wrote
+     * yesterday for the same page.
+     */
+    private static function effectivePageTypeFromMeta(mixed $raw): string
+    {
+        $stored = is_string($raw) && $raw !== '0' ? $raw : '';
+        return PageTypeMap::effectivePageType($stored);
+    }
+
+    /**
      * Upsert a single page's read model from the current source-of-truth tables.
      *
      * Pulls trust score, votes, endorsements from bcc_trust_page_scores,
@@ -277,7 +297,7 @@ class PageReadModelRepository
         // These WP API calls may run uncached queries against wp_postmeta /
         // wp_usermeta. Fetching them before the transaction avoids holding
         // shared score-row locks while WordPress resolves meta caches.
-        $pageType = get_post_meta($pageId, '_bcc_page_type', true) ?: 'builder';
+        $pageType = self::effectivePageTypeFromMeta(get_post_meta($pageId, '_bcc_page_type', true));
 
         // Pre-resolve owner so we can fetch follower count before locking.
         $resolver = \BCC\Trust\Core\Plugin::instance()->pageOwnerResolver();
