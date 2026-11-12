@@ -20,6 +20,23 @@
 
 declare(strict_types=1);
 
+namespace BCC\Core\Permissions {
+    // F-305: every auth response carries `suspended`
+    // (AuthSupport::resolveSuspended). $GLOBALS['__bcc_susp'] maps user id →
+    // true | false | null (UNKNOWN); absent → false. auth-session-stubs.php
+    // defines the same double when it is loaded first.
+    if (!class_exists(__NAMESPACE__ . '\Permissions', false)) {
+        final class Permissions
+        {
+            public static function suspensionState(?int $user_id = null, bool $allowAdminBypass = true): ?bool
+            {
+                $map = $GLOBALS['__bcc_susp'] ?? [];
+                return array_key_exists((int) $user_id, $map) ? $map[(int) $user_id] : false;
+            }
+        }
+    }
+}
+
 namespace BCC\Core\Security {
     if (!class_exists(Throttle::class, false)) {
         final class Throttle

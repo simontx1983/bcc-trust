@@ -142,6 +142,30 @@ final class AuthSupport
      * spreads guesses across addresses.
      */
     public const TWO_FA_MAX_FAILURES = 5;
+
+    /**
+     * Absolute 2FA challenge lifetime (F-292): a resend may re-arm a live
+     * challenge for one more code lifetime (TWO_FA_OTP_TTL), but never once
+     * the challenge is older than this. So a challenge lives at most
+     * TWO_FA_CHALLENGE_MAX_AGE + TWO_FA_OTP_TTL (35 min), however many
+     * resends happen.
+     */
+    public const TWO_FA_CHALLENGE_MAX_AGE = 1800;
+
+    /**
+     * Window for the two per-(user, challenge) wrong-code buckets (F-292).
+     *
+     * ⚠ Must be MUCH longer than a challenge's whole possible life, not
+     * merely equal to it. Throttle is a SLIDING window: a guess's weight
+     * decays linearly over the window after its bucket ends, so with a
+     * window equal to the lifetime, guesses made early could fade out
+     * while resends kept the challenge alive, and the 5-per-challenge cap
+     * would slowly refill. With 6 h against a ≤ 35 min life, the most
+     * TWO_FA_MAX_FAILURES guesses can fade in total is 5 × 35/360 ≈ 0.49
+     * of one guess, so the cap stays exact. The bucket keys include the
+     * challenge, so a long window costs nothing elsewhere.
+     */
+    public const TWO_FA_ATTEMPT_WINDOW = 21600;
     /** Per-PROVIDER-IDENTITY (provider + provider_id) throttle for /auth/oauth, per minute (F-131; was per IP). */
     public const OAUTH_LOGIN_RATE_LIMIT = 10;
 
@@ -244,6 +268,25 @@ final class AuthSupport
      * JwtToken; we expose it here for response payloads.
      */
     public const JWT_TTL_SECONDS = JwtToken::TTL_SECONDS;
+
+    /**
+     * F-305 (user decision 2026-11-12): a suspended member may SIGN IN,
+     * read-only, and must be told why they cannot post, comment or vote.
+     * Every sign-in response, /auth/refresh and /auth/session carry this
+     * flag; the frontend shows the notice from it.
+     *
+     * Admin bypass OFF, as at the write gates: the flag matches what the
+     * member will actually be refused. UNKNOWN (null, the state could not
+     * be read) is false: this is display, a DB blip must not show a
+     * suspension notice, and every write gate re-checks on its own.
+     */
+    public static function resolveSuspended(int $userId): bool
+    {
+        if ($userId <= 0) {
+            return false;
+        }
+        return \BCC\Core\Permissions\Permissions::suspensionState($userId, false) === true;
+    }
 
     /**
      * Resolve the in_good_standing boolean for the auth response. Reads
@@ -364,6 +407,9 @@ final class AuthSupport
             'expires_in'       => self::JWT_TTL_SECONDS,
             'token_type'       => 'Bearer',
             'in_good_standing' => self::resolveInGoodStanding($userId),
+            // F-305: a suspended member signs in READ-ONLY; the client shows
+            // the suspension notice from this flag. Every write gate refuses.
+            'suspended'        => self::resolveSuspended($userId),
             // How many wallets are linked to the account the caller just
             // proved the email of. > 0 tells the frontend to show "this
             // account has a wallet linked — is it yours?" (it lists them via
@@ -766,6 +812,13 @@ final class AuthSupport
         }
         set_transient('bcc_2fa_ct_' . $token, (string) $userId, self::TWO_FA_CHALLENGE_TTL);
         set_transient($pointerKey, self::twoFaChallengeKey($token), self::TWO_FA_CHALLENGE_TTL);
+        // F-292: when this challenge was issued, for the absolute lifetime
+        // a resend checks (rearm2faChallenge). Outlives any re-armed life.
+        set_transient(
+            'bcc_2fa_iat_' . self::twoFaChallengeKey($token),
+            (string) time(),
+            self::TWO_FA_CHALLENGE_MAX_AGE + self::TWO_FA_OTP_TTL
+        );
     }
 
     /**
@@ -791,6 +844,43 @@ final class AuthSupport
             return null;
         }
         return $id;
+    }
+
+    /**
+     * Keep a LIVE challenge alive for one more code lifetime, so a code
+     * sent by a resend can actually be used (F-292). Before, a resend late
+     * in the challenge's 10 minutes mailed a 5-minute code into a
+     * challenge about to expire, and that code then failed with "session
+     * expired".
+     *
+     * Re-arms the challenge AND the user's current-challenge pointer to
+     * TWO_FA_OTP_TTL from now, so the code and its challenge end together.
+     * Refuses (returns false) once the challenge is older than
+     * TWO_FA_CHALLENGE_MAX_AGE, or when its issue time is unknown (a
+     * challenge minted before this change): the caller then answers
+     * "session expired", the same as for an ended challenge. The caller
+     * must have checked peek2faChallenge() first.
+     *
+     * The wrong-code counters are NOT reset by this (they are keyed on the
+     * challenge with a window far longer than its life — see
+     * TWO_FA_ATTEMPT_WINDOW), so resends never buy extra guesses.
+     */
+    public static function rearm2faChallenge(string $token, int $userId): bool
+    {
+        if ($token === '' || $userId <= 0) {
+            return false;
+        }
+        $key    = self::twoFaChallengeKey($token);
+        $issued = get_transient('bcc_2fa_iat_' . $key);
+        if (!is_string($issued) || $issued === '' || !ctype_digit($issued)) {
+            return false;
+        }
+        if (time() - (int) $issued >= self::TWO_FA_CHALLENGE_MAX_AGE) {
+            return false;
+        }
+        set_transient('bcc_2fa_ct_' . $token, (string) $userId, self::TWO_FA_OTP_TTL);
+        set_transient('bcc_2fa_current_' . (string) $userId, $key, self::TWO_FA_OTP_TTL);
+        return true;
     }
 
     /** Delete the challenge token transient (call after successful OTP verify). */

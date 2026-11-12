@@ -450,6 +450,15 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_renamed_original_handles_retired',
                 'callback'    => 'bcc_trust_retire_renamed_original_handles',
             ],
+            // F-257: hide_from_search becomes the one hidden-from-search
+            // flag; every discovery opt-out that is ON is copied into it.
+            // Search honours the legacy key too until this is stamped done.
+            // See fold-discovery-optout.php.
+            [
+                'id'          => 'fold_discovery_optout_v1',
+                'done_option' => \BCC\Trust\Core\Support\PrivacySettings::FOLD_DONE_OPTION,
+                'callback'    => 'bcc_trust_fold_discovery_optout',
+            ],
         ];
     }
 
