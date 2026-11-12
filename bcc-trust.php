@@ -219,6 +219,9 @@ require_once BCC_TRUST_PATH . 'includes/database/cleanup-dispute-participations.
 require_once BCC_TRUST_PATH . 'includes/database/purge-edge-cache.php';
 require_once BCC_TRUST_PATH . 'includes/database/backfill-display-name-placeholders.php';
 require_once BCC_TRUST_PATH . 'includes/database/rotate-login-handles.php';
+// F-280: retire the original handle of members who renamed before renames
+// retired the outgoing handle (registered in migration-runner.php).
+require_once BCC_TRUST_PATH . 'includes/database/retire-renamed-original-handles.php';
 require_once BCC_TRUST_PATH . 'includes/database/flush-object-cache-display-names.php';
 // One-shot repair of NFT-gate pointers orphaned by retire-stargaze-chain.php
 // (deleted chain + collections, surviving PeepSo group posts). Repoints only

@@ -265,6 +265,18 @@ final class TableRegistry
         return $wpdb->prefix . 'bcc_trust_tier_days';
     }
 
+    public static function postReachDaily(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_trust_post_reach_daily';
+    }
+
+    public static function postViewDedupe(): string
+    {
+        global $wpdb;
+        return $wpdb->prefix . 'bcc_trust_post_view_dedupe';
+    }
+
     public static function rankEvents(): string
     {
         global $wpdb;

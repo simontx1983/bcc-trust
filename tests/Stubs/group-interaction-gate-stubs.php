@@ -19,7 +19,11 @@
  *
  * Fixture ($GLOBALS['__bcc_gig']):
  *   acts        array<int, array{external_id:int}>       act_id → activity row
- *   comments    array<int, array{parent_post_id:int}>    act_id → published comment meta
+ *   comments    array<int, array{parent_post_id:int, parent_act_id?:int}> act_id → published comment meta
+ *   post_status array<int, string>                        post_id → post_status (default publish);
+ *                                                         getById's act_status reads it, as the
+ *                                                         real `p.post_status AS act_status` does
+ *   hidden      list<int>                                 moderation-hidden act_ids (F-265)
  *   post_type   array<int, string>                        post_id → post_type
  *   group_of    array<int, int>                           post_id → peepso_group_id
  *   members     array<string, bool>                       "user:group" → isMember
@@ -45,7 +49,12 @@ namespace BCC\Core\Repositories {
                 return null;
             }
             $GLOBALS['__bcc_gig']['allowlists'][] = $allowedModuleIds;
-            return (object) ['act_id' => $actId, 'act_external_id' => $row['external_id'], 'act_module_id' => $module];
+            return (object) [
+                'act_id'          => $actId,
+                'act_external_id' => $row['external_id'],
+                'act_module_id'   => $module,
+                'act_status'      => $GLOBALS['__bcc_gig']['post_status'][(int) $row['external_id']] ?? 'publish',
+            ];
         }
     }
 }
@@ -60,7 +69,11 @@ namespace BCC\Trust\Core\Tests\Stubs {
             if ($c === null) {
                 return null;
             }
-            return (object) ['act_id' => $commentActId, 'parent_post_id' => $c['parent_post_id']];
+            return (object) [
+                'act_id'         => $commentActId,
+                'parent_post_id' => $c['parent_post_id'],
+                'parent_act_id'  => $c['parent_act_id'] ?? 0,
+            ];
         }
     }
 
@@ -79,6 +92,21 @@ namespace BCC\Trust\Core\Tests\Stubs {
     }
 }
 
+namespace BCC\Trust\Core\Repositories {
+
+    /**
+     * Double at the REAL FQCN: the class is final, and the gate passes it
+     * to FeedItemReportVisibility::isLiveWith(), which is typed on it.
+     */
+    final class HiddenActivityRepository
+    {
+        public function exists(int $actId): bool
+        {
+            return in_array($actId, $GLOBALS['__bcc_gig']['hidden'] ?? [], true);
+        }
+    }
+}
+
 namespace BCC\Trust\Core {
 
     final class Plugin
@@ -93,6 +121,11 @@ namespace BCC\Trust\Core {
         public function commentRepository(): Tests\Stubs\GigCommentRepository
         {
             return new Tests\Stubs\GigCommentRepository();
+        }
+
+        public function hiddenActivityRepository(): Repositories\HiddenActivityRepository
+        {
+            return new Repositories\HiddenActivityRepository();
         }
 
         public function groupsService(): Tests\Stubs\GigGroupsService

@@ -87,6 +87,9 @@ if (!class_exists('PeepSo')) {
         public const ACCESS_PUBLIC = 10;
         public const ACCESS_MEMBERS = 20;
         public const ACCESS_PRIVATE = 40;
+        public const PERM_COMMENT = 'comment';
+        /** PeepSo's permission gate (peepso.php); false = refused. */
+        public static function check_permissions(int $owner, string $action, int $author, bool $allow_logged_out = false, mixed $post = null): bool { return true; }
         public static function get_page(string $page = ''): string { return ''; }
         public static function get_peepso_uri(): string { return ''; }
         public static function get_asset(string $asset): string { return ''; }

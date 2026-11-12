@@ -72,6 +72,40 @@ class FeedItemReportVisibility
     }
 
     /**
+     * F-265: is this activity still LIVE, i.e. is its post published and
+     * not moderation-hidden? A post failing this is gone from every feed
+     * and from its permalink, so nothing may read its thread or act on it
+     * either (comments, reactions, stoke, helpful-mark, the bells they
+     * send). ONE predicate for all of them: {@see isLiveWith()}.
+     *
+     * @param object $activity A PeepSoActivityRepository::getById() row
+     *        (act_id, act_status).
+     */
+    public function isLive(object $activity): bool
+    {
+        return self::isLiveWith($activity, $this->hidden);
+    }
+
+    /**
+     * {@see isLive()} for the static call sites (GroupInteractionGate,
+     * NotificationDispatcher) that hold no instance of this class.
+     *
+     * `act_status` is the backing wp_post's post_status (bcc-core
+     * getById selects `p.post_status AS act_status`), so a post the author
+     * deleted (`trash`) is not live. HiddenActivityRepository::exists()
+     * fails closed (F-98): a failed read counts as hidden.
+     */
+    public static function isLiveWith(object $activity, HiddenActivityRepository $hidden): bool
+    {
+        $actId = (int) ($activity->act_id ?? 0);
+        if ($actId <= 0 || (string) ($activity->act_status ?? '') !== 'publish') {
+            return false;
+        }
+
+        return !$hidden->exists($actId);
+    }
+
+    /**
      * May `$viewerId` see — and therefore report — this activity?
      *
      * @param object $activity A PeepSoActivityRepository::getById() row
@@ -82,9 +116,6 @@ class FeedItemReportVisibility
         $actId  = (int) ($activity->act_id ?? 0);
         $postId = (int) ($activity->act_external_id ?? 0);
         if ($actId <= 0 || $postId <= 0) {
-            return false;
-        }
-        if ((string) ($activity->act_status ?? '') !== 'publish') {
             return false;
         }
         // Only modules a feed or permalink can show at all: the SAME
@@ -101,8 +132,8 @@ class FeedItemReportVisibility
         )) {
             return false;
         }
-        if ($this->hidden->exists($actId)) {
-            return false; // moderation-hidden: no feed shows it
+        if (!$this->isLive($activity)) {
+            return false; // trashed/unpublished or moderation-hidden: no feed shows it
         }
 
         return $this->groupRuleAllows($viewerId, $postId);
@@ -163,8 +194,7 @@ class FeedItemReportVisibility
      */
     private function groupRuleAllows(int $viewerId, int $postId): bool
     {
-        $groupRaw   = get_post_meta($postId, 'peepso_group_id', true);
-        $visibility = (string) get_post_meta($postId, '_bcc_post_visibility', true);
+        $groupRaw  = get_post_meta($postId, 'peepso_group_id', true);        $visibility = (string) get_post_meta($postId, '_bcc_post_visibility', true);
 
         // Global feed (mirrors ActivityFeedService::isVisibleGlobally()).
         if ($groupRaw === '' || $groupRaw === false || $visibility === self::GLOBAL_VISIBILITY) {

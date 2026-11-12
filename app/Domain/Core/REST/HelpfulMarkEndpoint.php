@@ -208,18 +208,12 @@ final class HelpfulMarkEndpoint
     }
 
     /**
-     * Comment gate — resolve the comment act to its parent post and gate
-     * on the parent's group membership (the comment row carries no
-     * `peepso_group_id`). Mirrors CommentStokeEndpoint.
+     * Comment gate — the shared comment-route gate: the comment must be live
+     * (F-265) and the parent's group membership must allow it. Same gate as
+     * CommentStokeEndpoint ({@see GroupInteractionGate::checkComment()}).
      */
     private function gateComment(int $userId, int $commentActId): ?WP_REST_Response
     {
-        $meta = Plugin::instance()->commentRepository()->getCommentMeta($commentActId);
-        if ($meta === null) {
-            return ApiResponse::error('bcc_not_found', 'Comment not found.', 404);
-        }
-
-        // Same message as the unknown-comment 404 above (secret-group oracle).
-        return GroupInteractionGate::checkPost($userId, (int) $meta->parent_post_id, 'Comment not found.');
+        return GroupInteractionGate::checkComment($userId, $commentActId);
     }
 }

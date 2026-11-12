@@ -349,6 +349,7 @@ return array(
     'BCC\\Trust\\Core\\Support\\Permission' => $baseDir . '/app/Domain/Core/Support/Permission.php',
     'BCC\\Trust\\Core\\Support\\PrivacySettings' => $baseDir . '/app/Domain/Core/Support/PrivacySettings.php',
     'BCC\\Trust\\Core\\Support\\ProfileAccess' => $baseDir . '/app/Domain/Core/Support/ProfileAccess.php',
+    'BCC\\Trust\\Core\\Support\\ProfileGroupVisibility' => $baseDir . '/app/Domain/Core/Support/ProfileGroupVisibility.php',
     'BCC\\Trust\\Core\\Support\\PublicAllPolicy' => $baseDir . '/app/Domain/Core/Support/PublicAllPolicy.php',
     'BCC\\Trust\\Core\\Support\\PublicIdentity' => $baseDir . '/app/Domain/Core/Support/PublicIdentity.php',
     'BCC\\Trust\\Core\\Support\\PushMetrics' => $baseDir . '/app/Domain/Core/Support/PushMetrics.php',
