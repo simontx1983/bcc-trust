@@ -371,22 +371,12 @@ class BallotRepository
      */
     private function generation(int $pollId): int
     {
-        $genKey = "ballots_gen:{$pollId}";
-        $gen    = wp_cache_get($genKey, self::CACHE_GROUP);
-        if (is_numeric($gen)) {
-            return (int) $gen;
-        }
-        wp_cache_set($genKey, 1, self::CACHE_GROUP, 0);
-        return 1;
+        return \BCC\Trust\Core\Support\CacheGeneration::get("ballots_gen:{$pollId}", self::CACHE_GROUP);
     }
 
     /** §5 generation-counter bump — every write path calls this. */
     private function invalidateCache(int $pollId): void
     {
-        $genKey = "ballots_gen:{$pollId}";
-        $result = wp_cache_incr($genKey, 1, self::CACHE_GROUP);
-        if ($result === false) {
-            wp_cache_set($genKey, 2, self::CACHE_GROUP, 0);
-        }
+        \BCC\Trust\Core\Support\CacheGeneration::bump("ballots_gen:{$pollId}", self::CACHE_GROUP);
     }
 }

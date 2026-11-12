@@ -301,23 +301,13 @@ final class BlogChainTagRepository
 
     private static function cacheKey(string $suffix): string
     {
-        $gen = wp_cache_get(self::CACHE_KEY_GEN, self::CACHE_GROUP);
-        if (is_numeric($gen)) {
-            // Tolerant read (NOT is_int): persistent backends return
-            // ints as numeric strings cross-process; a strict is_int
-            // reset the generation to 0 on every read and neutralized
-            // bustCache(). See HiddenActivityRepository::getGeneration.
-            return $suffix . ':' . (int) $gen;
-        }
-        wp_cache_set(self::CACHE_KEY_GEN, 0, self::CACHE_GROUP);
-        return $suffix . ':0';
+        return $suffix . ':' . \BCC\Trust\Core\Support\CacheGeneration::get(self::CACHE_KEY_GEN, self::CACHE_GROUP);
     }
 
     private static function bustCache(): void
     {
-        // wp_cache_incr is atomic; missing-key initializes to 1 on
-        // most object-cache backends. Defensive set-then-incr would
-        // be a TOCTOU on multi-node — the incr alone is correct.
-        wp_cache_incr(self::CACHE_KEY_GEN, 1, self::CACHE_GROUP);
+        // A bare incr re-creates an evicted key at 1 (Redis INCRBY),
+        // rewinding onto generations already used; this re-seeds it.
+        \BCC\Trust\Core\Support\CacheGeneration::bump(self::CACHE_KEY_GEN, self::CACHE_GROUP);
     }
 }

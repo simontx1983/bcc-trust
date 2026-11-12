@@ -135,6 +135,30 @@ namespace BCC\Trust\Core\Repositories {
     }
 }
 
+// The generation counter is read and bumped through CacheGeneration, whose
+// unqualified wp_cache_* calls resolve in its own namespace first: same store.
+namespace BCC\Trust\Core\Support {
+    function wp_cache_get($key, string $group = '')
+    {
+        return \BCC\Trust\Core\Repositories\wp_cache_get($key, $group);
+    }
+    function wp_cache_set($key, $value, string $group = '', int $expire = 0): bool
+    {
+        return \BCC\Trust\Core\Repositories\wp_cache_set($key, $value, $group, $expire);
+    }
+    function wp_cache_add($key, $value, string $group = '', int $expire = 0): bool
+    {
+        if (array_key_exists($group . ':' . $key, $GLOBALS['__hidden_cache'] ?? [])) {
+            return false;
+        }
+        return \BCC\Trust\Core\Repositories\wp_cache_set($key, $value, $group, $expire);
+    }
+    function wp_cache_incr($key, int $offset = 1, string $group = '')
+    {
+        return \BCC\Trust\Core\Repositories\wp_cache_incr($key, $offset, $group);
+    }
+}
+
 namespace BCC\Core\Observability {
     if (!class_exists(__NAMESPACE__ . '\\DegradationMetrics', false)) {
         final class DegradationMetrics

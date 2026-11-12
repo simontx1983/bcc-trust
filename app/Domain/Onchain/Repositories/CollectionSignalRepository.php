@@ -279,16 +279,11 @@ final class CollectionSignalRepository
     /** Mirrors NftSelectionRepository::bumpUserGeneration's seed-then-incr. */
     private static function bumpGeneration(): void
     {
-        if (wp_cache_get(self::GENERATION_KEY, self::CACHE_GROUP) === false) {
-            wp_cache_add(self::GENERATION_KEY, 1, self::CACHE_GROUP);
-            return;
-        }
-        wp_cache_incr(self::GENERATION_KEY, 1, self::CACHE_GROUP);
+        \BCC\Trust\Core\Support\CacheGeneration::bump(self::GENERATION_KEY, self::CACHE_GROUP);
     }
 
     private static function getGeneration(): int
     {
-        $value = wp_cache_get(self::GENERATION_KEY, self::CACHE_GROUP);
-        return is_numeric($value) ? (int) $value : 0;
+        return \BCC\Trust\Core\Support\CacheGeneration::get(self::GENERATION_KEY, self::CACHE_GROUP);
     }
 }
