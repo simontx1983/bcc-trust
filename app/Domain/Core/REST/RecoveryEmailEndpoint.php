@@ -134,7 +134,9 @@ final class RecoveryEmailEndpoint
         // with the account-change confirmations, F-253). The recovery flow
         // signs the ordinary "verify your wallet" challenge from
         // GET /auth/nonce, as it always has.
-        $proofError = AccountCredentialCheck::verifyOwnWallet($request, $userId, AccountCredentialCheck::PURPOSE_VERIFY);
+        // This route only attaches a FIRST real email (guard above), so the
+        // signup wallet may prove it right after sign-up (F-253 exception).
+        $proofError = AccountCredentialCheck::verifyOwnWallet($request, $userId, AccountCredentialCheck::PURPOSE_VERIFY, true);
         if ($proofError !== null) {
             return $proofError;
         }

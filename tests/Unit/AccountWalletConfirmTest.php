@@ -123,7 +123,12 @@ final class AccountWalletConfirmTest extends TestCase
     /** Present a bearer token for the member, as the frontend does. */
     private static function signIn(array $claims = []): void
     {
-        $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . \BCC\Trust\Core\Support\JwtToken::encode(self::USER, 'handle' . self::USER, $claims);
+        // A real sign-in stamps auth_time = now (encodeNewSession).
+        $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . \BCC\Trust\Core\Support\JwtToken::encode(
+            self::USER,
+            'handle' . self::USER,
+            array_merge(['auth_time' => time()], $claims)
+        );
     }
 
     private static function verifiedAgo(int $linkId, int $seconds): void
@@ -290,15 +295,21 @@ final class AccountWalletConfirmTest extends TestCase
         self::assertSame('random-never-shown', $GLOBALS['__bcc_ph']['passwords'][self::USER]);
     }
 
-    public function testATokenWithoutAuthTimeFallsBackToItsIssuedAt(): void
+    public function testATokenWithoutAuthTimeNeverDatesAWallet(): void
     {
-        self::verifiedAgo(1, 49 * 3600);
-        self::signIn(['auth_time' => null, 'iat' => time() - 50 * 3600, 'exp' => time() + 3600]);
+        // A token minted before auth_time existed: a pre-deploy refresh
+        // re-minted its iat = now, so iat can postdate a mid-session link.
+        // Missing auth_time counts as 0 — even a 3-day-old wallet is "after".
+        $jwt = \BCC\Trust\Core\Support\JwtToken::class;
+        $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . $jwt::encode(self::USER, 'handle' . self::USER);
+        self::assertSame(0, $jwt::sessionStartedAt($jwt::decode(substr($_SERVER['HTTP_AUTHORIZATION'], 7))['payload']));
         $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_ACCOUNT_DELETE);
 
-        [$status] = self::call([new MyAccountEndpoint(), 'deleteAccount'], ['confirm' => 'DELETE'] + self::walletProof($sig));
+        [$status, $err] = self::call([new MyAccountEndpoint(), 'deleteAccount'], ['confirm' => 'DELETE'] + self::walletProof($sig));
 
-        self::assertSame(403, $status, 'issued 50h ago, the wallet came after');
+        self::assertSame(403, $status);
+        self::assertSame('This wallet was verified after you signed in. Sign out, sign back in, and try again.', $err['message']);
+        self::assertSame([], $GLOBALS['__bcc_wc']['deleted']);
     }
 
     public function testUnlinkingAndRelinkingAWalletRestartsItsClock(): void
@@ -631,6 +642,159 @@ final class AccountWalletConfirmTest extends TestCase
         self::signIn(['auth_time' => time() - 60 * 3600]);
         [$status] = self::call([new RecoveryEmailEndpoint(), 'requestRecoveryEmail'], ['email' => 'first@example.com'] + self::walletProof($sig));
         self::assertSame(403, $status, 'and verified before this sign-in');
+    }
+
+    // ── Signup-wallet exception (recovery email, first email only) ──────
+
+    /**
+     * A wallet-only account created $agoSeconds ago, still on its placeholder
+     * email, whose signup wallet (link 1) was verified $linkedAfter seconds
+     * after creation.
+     */
+    private static function newWalletAccount(int $agoSeconds, int $linkedAfter = 30): int
+    {
+        $registered = time() - $agoSeconds;
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email']      = self::PLACEHOLDER;
+        $GLOBALS['__bcc_ph']['users'][self::USER]['registered'] = $registered;
+        self::verifiedAgo(1, $agoSeconds - $linkedAfter);
+        // POST /auth/wallet-signup marks link 1 as the signup wallet.
+        $GLOBALS['__bcc_ph']['meta'][self::USER][AccountRecoveryService::META_SIGNUP_WALLET_LINK] = '1';
+        return $registered;
+    }
+
+    /** @return array{0: int, 1: array<string, mixed>} */
+    private static function addRecoveryEmail(string $address = self::WALLET): array
+    {
+        $sig = self::sign(WalletChallenge::PURPOSE_VERIFY, $address);
+        return self::call(
+            [new RecoveryEmailEndpoint(), 'requestRecoveryEmail'],
+            ['email' => 'first@example.com'] + self::walletProof($sig, $address)
+        );
+    }
+
+    public function testTheSignupWalletAddsTheFirstEmailRightAfterSignUp(): void
+    {
+        // (a) ten minutes after sign-up, the wallet is only minutes old.
+        self::newWalletAccount(600);
+
+        [$status, $data] = self::addRecoveryEmail();
+
+        self::assertSame(200, $status);
+        self::assertTrue($data['ok']);
+        self::assertNotEmpty($GLOBALS['__bcc_ph']['mail'], 'the code went out');
+    }
+
+    public function testNoSessionTimeConditionAppliesToTheSignupWallet(): void
+    {
+        // (h) the session began before the wallet was verified, which the
+        // full rule refuses; the signup wallet's own signature is the proof.
+        self::newWalletAccount(600);
+        self::signIn(['auth_time' => time() - 3600]);
+
+        [$status] = self::addRecoveryEmail();
+
+        self::assertSame(200, $status);
+    }
+
+    public function testTheExceptionEndsFortyEightHoursAfterSignUp(): void
+    {
+        // (b) 49h after sign-up the full rule applies; this session began
+        // before the wallet was verified, so the full rule refuses.
+        $registered = self::newWalletAccount(49 * 3600);
+        self::signIn(['auth_time' => $registered]);
+
+        [$status, $err] = self::addRecoveryEmail();
+
+        self::assertSame(403, $status);
+        self::assertSame('This wallet was verified after you signed in. Sign out, sign back in, and try again.', $err['message']);
+    }
+
+    public function testAWalletLinkedAfterSignUpGetsTheFullRule(): void
+    {
+        // (c) a second wallet, linked 30 minutes after sign-up.
+        $registered = self::newWalletAccount(3600);
+        $second = '0x00000000000000000000000000000000000000dd';
+        $GLOBALS['__bcc_wc']['links'][] = ['id' => 4, 'user_id' => self::USER, 'chain_id' => 1, 'address' => $second, 'verified_at' => $registered + 1800];
+
+        [$status, $err] = self::addRecoveryEmail($second);
+
+        self::assertSame(403, $status);
+        self::assertStringContainsString('verified too recently', $err['message']);
+        self::assertSame([], $GLOBALS['__bcc_ph']['mail']);
+    }
+
+    public function testAWalletLinkedRightAfterAnOauthSignUpIsNotASignupWallet(): void
+    {
+        // An OAuth / password account links a wallet two minutes after
+        // signing up: verified close to user_registered, earliest, inside
+        // 48h — but not created by wallet sign-up, so no marker.
+        self::newWalletAccount(600, 120);
+        unset($GLOBALS['__bcc_ph']['meta'][self::USER][AccountRecoveryService::META_SIGNUP_WALLET_LINK]);
+
+        [$status] = self::addRecoveryEmail();
+
+        self::assertSame(403, $status);
+    }
+
+    public function testOnlyTheEarliestWalletCountsAsTheSignupWallet(): void
+    {
+        // (d) the marked link, but another wallet was verified earlier.
+        $registered = self::newWalletAccount(3600, 200);
+        $GLOBALS['__bcc_wc']['links'][] = ['id' => 5, 'user_id' => self::USER, 'chain_id' => 1, 'address' => '0x00000000000000000000000000000000000000ee', 'verified_at' => $registered + 10];
+
+        [$status] = self::addRecoveryEmail();
+
+        self::assertSame(403, $status);
+    }
+
+    public function testARelinkedSignupWalletIsNotTheSignupWallet(): void
+    {
+        // (e) unlinked, then linked again an hour after sign-up: a new row.
+        $registered = self::newWalletAccount(7200);
+        $GLOBALS['__bcc_wc']['links'] = array_values(array_filter($GLOBALS['__bcc_wc']['links'], static fn (array $l): bool => $l['id'] !== 1));
+        $GLOBALS['__bcc_wc']['links'][] = ['id' => 6, 'user_id' => self::USER, 'chain_id' => 1, 'address' => self::WALLET, 'verified_at' => $registered + 3600];
+        self::assertSame('1', $GLOBALS['__bcc_ph']['meta'][self::USER][AccountRecoveryService::META_SIGNUP_WALLET_LINK], 'the marker still names the old row');
+
+        [$status] = self::addRecoveryEmail();
+
+        self::assertSame(403, $status);
+    }
+
+    public function testTheExceptionNeverReachesAnAccountWithARealEmail(): void
+    {
+        // (f) the first-email guard answers before any wallet check.
+        self::newWalletAccount(600);
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = 'real@example.com';
+
+        [$status] = self::addRecoveryEmail();
+
+        self::assertSame(409, $status);
+    }
+
+    /** @return array<string, array{string, array<string, string>, string}> */
+    public static function confirmRoutes(): array
+    {
+        return [
+            // Plain strings: providers run before setUp() loads the core stubs.
+            'email change'    => ['patchEmail', ['email' => 'new@example.com'], 'confirm_email_change'],
+            'password change' => ['patchPassword', ['password' => 'a brand new passphrase'], 'confirm_password_change'],
+            'delete'          => ['deleteAccount', ['confirm' => 'DELETE'], 'confirm_account_delete'],
+        ];
+    }
+
+    /** @param array<string, string> $input */
+    #[\PHPUnit\Framework\Attributes\DataProvider('confirmRoutes')]
+    public function testTheConfirmRoutesNeverTakeTheSignupException(string $method, array $input, string $purpose): void
+    {
+        // (g) same new account, same signup wallet: still the full rule.
+        self::newWalletAccount(600);
+        $sig = self::sign($purpose);
+
+        [$status, $err] = self::call([new MyAccountEndpoint(), $method], $input + self::walletProof($sig));
+
+        self::assertSame(403, $status);
+        self::assertStringContainsString('verified too recently', $err['message']);
+        self::assertSame([], $GLOBALS['__bcc_wc']['deleted']);
     }
 
     public function testRecoveryEmailStillAttachesAFirstEmailToAPlaceholderAccount(): void

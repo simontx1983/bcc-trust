@@ -800,6 +800,15 @@ final class WalletAuthController
             );
         }
 
+        // F-253: remember WHICH link this account was created with — the
+        // only wallet its signup-wallet exception (adding the first recovery
+        // email right after sign-up) can ever apply to.
+        update_user_meta(
+            $userIdInt,
+            \BCC\Trust\Core\Services\AccountRecoveryService::META_SIGNUP_WALLET_LINK,
+            (string) (int) $walletLinkId
+        );
+
         // Fire the canonical domain event so trust-engine and
         // onchain-signals seed scoring/holdings rows. Same action as
         // verifyAndLink, so listeners don't need to care which path the

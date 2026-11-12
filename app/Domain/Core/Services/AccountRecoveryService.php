@@ -120,6 +120,15 @@ final class AccountRecoveryService
         return null;
     }
 
+    /**
+     * F-253: the wallet_links id of the wallet the account was CREATED with,
+     * written by POST /auth/wallet-signup once that link commits — and
+     * nowhere else. Its exact link row: a relink (a new row) is not it, and
+     * an OAuth / password account never has one. Read by
+     * AccountCredentialCheck's signup-wallet exception.
+     */
+    public const META_SIGNUP_WALLET_LINK = 'bcc_signup_wallet_link';
+
     public static function markHasPassword(int $userId): void
     {
         if ($userId > 0) {

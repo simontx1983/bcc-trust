@@ -74,6 +74,22 @@ final class HandleOnRegisterWiringTest extends TestCase
         );
     }
 
+    public function testOnlyWalletSignupMarksItsSignupWallet(): void
+    {
+        // F-253: the signup-wallet exception keys on this marker, so exactly
+        // the wallet-signup path writes it, after the link commits.
+        $wallet = self::src('app/Domain/Core/REST/Auth/WalletAuthController.php');
+        self::assertSame(1, substr_count($wallet, 'AccountRecoveryService::META_SIGNUP_WALLET_LINK'));
+        self::assertGreaterThan(
+            (int) strpos($wallet, 'if (!$walletLinkId) {'),
+            (int) strpos($wallet, 'AccountRecoveryService::META_SIGNUP_WALLET_LINK'),
+            'written only once the link committed (after the rollback branch)'
+        );
+        foreach (['app/Domain/Core/REST/Auth/OAuthController.php', 'app/Domain/Core/REST/Auth/PasswordAuthController.php'] as $rel) {
+            self::assertStringNotContainsString('META_SIGNUP_WALLET_LINK', self::src($rel), $rel);
+        }
+    }
+
     #[DataProvider('signupControllers')]
     public function testSignupRecordsWhetherTheMemberKnowsTheirPassword(string $rel, string $hasPassword): void
     {

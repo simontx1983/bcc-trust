@@ -74,6 +74,9 @@ final class AccountCredentialCheck
     /** A proving wallet must have been verified at least this long ago. */
     public const WALLET_MIN_AGE_SECONDS = 48 * 3600;
 
+    /** The signup-wallet exception (recovery email only) lasts this long after sign-up. */
+    public const SIGNUP_WALLET_WINDOW_SECONDS = 48 * 3600;
+
     /**
      * Confirm the caller with their password or a wallet signature.
      *
@@ -156,8 +159,13 @@ final class AccountCredentialCheck
      * checks pass.
      *
      * @param WP_REST_Request<array<string, mixed>> $request
+     * @param bool $allowSignupWallet ONLY RecoveryEmailEndpoint, attaching the
+     *                                account's first real email: waive the
+     *                                established-wallet rule for the wallet
+     *                                the account was created with, for
+     *                                SIGNUP_WALLET_WINDOW_SECONDS after sign-up
      */
-    public static function verifyOwnWallet(WP_REST_Request $request, int $userId, string $purpose): ?WP_REST_Response
+    public static function verifyOwnWallet(WP_REST_Request $request, int $userId, string $purpose, bool $allowSignupWallet = false): ?WP_REST_Response
     {
         // Purpose-bound challenges need bcc-core with F-253. An older core
         // would ignore the purpose and accept a plain "verify your wallet"
@@ -198,7 +206,8 @@ final class AccountCredentialCheck
 
         // Established wallets only (see the class docblock). Checked before
         // the challenge is spent: the member can't fix it by re-signing.
-        $establishedError = self::establishedWalletError((string) $link->verified_at);
+        $signupWallet = $allowSignupWallet && self::isSignupWallet($userId, $linkId, (string) $link->verified_at);
+        $establishedError = $signupWallet ? null : self::establishedWalletError((string) $link->verified_at);
         if ($establishedError !== null) {
             return $establishedError;
         }
@@ -227,6 +236,45 @@ final class AccountCredentialCheck
         }
 
         return null;
+    }
+
+    /**
+     * Is this link the wallet the account was CREATED with, and is the
+     * account still inside SIGNUP_WALLET_WINDOW_SECONDS of its creation?
+     * (F-253 signup exception: a new wallet-only member adds a recovery
+     * email right after signing up.)
+     *
+     * The signup wallet is EXACTLY the link row POST /auth/wallet-signup
+     * created (AccountRecoveryService::META_SIGNUP_WALLET_LINK), never
+     * inferred from timing — an OAuth or password account linking a wallet
+     * minutes after signing up has no such row. It must also still be the
+     * account's earliest verified wallet. A relink is a new row, so it is
+     * not it. No session-time condition: proving still needs a fresh
+     * signature from THIS wallet, which someone holding only a stolen
+     * session can't produce. Times are GMT.
+     */
+    private static function isSignupWallet(int $userId, int $linkId, string $verifiedAt): bool
+    {
+        $marked = (int) get_user_meta($userId, AccountRecoveryService::META_SIGNUP_WALLET_LINK, true);
+        if ($marked <= 0 || $marked !== $linkId) {
+            return false;
+        }
+
+        $user = get_userdata($userId);
+        if (!$user instanceof \WP_User || trim((string) $user->user_registered) === '') {
+            return false;
+        }
+        $registeredTs = strtotime((string) $user->user_registered . ' UTC');
+        $verifiedTs   = strtotime($verifiedAt . ' UTC');
+        if ($registeredTs === false || $verifiedTs === false) {
+            return false;
+        }
+        if (time() > $registeredTs + self::SIGNUP_WALLET_WINDOW_SECONDS) {
+            return false;
+        }
+
+        $oldest = WalletRepository::oldestVerifiedAt($userId);
+        return $oldest !== null && strtotime($oldest . ' UTC') === $verifiedTs;
     }
 
     /**

@@ -179,6 +179,17 @@ namespace BCC\Trust\Onchain\Repositories {
                 return 0;
             }
 
+            public static function oldestVerifiedAt(int $userId): ?string
+            {
+                $times = [];
+                foreach ($GLOBALS['__bcc_wc']['links'] as $l) {
+                    if ($l['user_id'] === $userId && $l['verified_at'] !== null) {
+                        $times[] = $l['verified_at'];
+                    }
+                }
+                return $times === [] ? null : gmdate('Y-m-d H:i:s', min($times));
+            }
+
             public static function getById(int $walletLinkId): ?object
             {
                 foreach ($GLOBALS['__bcc_wc']['links'] as $l) {

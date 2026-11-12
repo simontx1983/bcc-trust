@@ -334,17 +334,21 @@ final class JwtToken
     }
 
     /**
-     * When the session behind this token began: the `auth_time` claim, which
-     * POST /auth/refresh carries forward, else (a token minted before the
-     * claim existed) its `iat`. Unlike `iat` it can't be moved forward by
-     * refreshing, so "was this wallet linked before this sign-in?" can't be
-     * laundered through a refresh (F-253).
+     * When the session behind this token began: the `auth_time` claim, set
+     * at a real sign-in and kept by every in-session re-mint (F-253). Unlike
+     * `iat` it can't be moved forward by refreshing or re-minting, so "was
+     * this wallet linked before this sign-in?" can't be laundered.
+     *
+     * A token without the claim (minted before it existed) answers 0, NOT its
+     * `iat`: a pre-claim refresh re-minted `iat` = now, so it could postdate
+     * a wallet linked mid-session. 0 fails closed — no wallet predates it —
+     * and a wallet-only member simply signs in once after the deploy.
      *
      * @param array<string, mixed> $payload
      */
     public static function sessionStartedAt(array $payload): int
     {
-        return (int) ($payload['auth_time'] ?? $payload['iat'] ?? 0);
+        return (int) ($payload['auth_time'] ?? 0);
     }
 
     /**
