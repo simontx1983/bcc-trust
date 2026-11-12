@@ -250,7 +250,8 @@ class ScoreRepository {
     /**
      * Atomically bump the cache generation for a page score.
      *
-     * With persistent object cache: wp_cache_incr (Redis INCR / Memcached increment).
+     * With persistent object cache: CacheGeneration::bump() (atomic incr,
+     * re-seeded from the clock when the key was evicted).
      * Without: INSERT ... ON DUPLICATE KEY UPDATE gen = gen + 1 in wp_options.
      * Both paths are atomic under concurrency.
      */

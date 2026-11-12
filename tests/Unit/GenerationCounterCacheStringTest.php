@@ -7,6 +7,7 @@ namespace BCC\Trust\Core\Tests\Unit;
 use BCC\Trust\Core\Repositories\BlogChainTagRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Support\CacheGeneration;
+use BCC\Trust\Disputes\Repositories\DisputeRepositorySupport;
 use PHPUnit\Framework\Attributes\CoversMethod;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -32,6 +33,7 @@ use ReflectionMethod;
  */
 #[CoversMethod(HiddenActivityRepository::class, 'getGeneration')]
 #[CoversMethod(BlogChainTagRepository::class, 'cacheKey')]
+#[CoversMethod(DisputeRepositorySupport::class, 'getGeneration')]
 #[CoversMethod(CacheGeneration::class, 'get')]
 #[CoversMethod(CacheGeneration::class, 'bump')]
 #[RunTestsInSeparateProcesses]
@@ -133,6 +135,24 @@ final class GenerationCounterCacheStringTest extends TestCase
         $bust->invoke(null);
 
         self::assertGreaterThan(1_000_000_000_000_000, HiddenActivityRepository::getGeneration());
+    }
+
+    // ── DisputeRepositorySupport (reporter_gen readers) ──────────────
+
+    public function testDisputeGenerationSeedsFromClockAndSurvivesEvictionBump(): void
+    {
+        $key    = 'reporter_gen:42';
+        $before = CacheGeneration::seed();
+        $cold   = DisputeRepositorySupport::getGeneration($key);
+        self::assertGreaterThanOrEqual($before, $cold);
+
+        DisputeRepositorySupport::bumpGeneration($key);
+        self::assertSame($cold + 1, DisputeRepositorySupport::getGeneration($key));
+
+        wp_cache_delete($key, DisputeRepositorySupport::CACHE_GROUP); // eviction
+        $reread = DisputeRepositorySupport::getGeneration($key);
+        self::assertGreaterThan($cold + 1, $reread);
+        self::assertSame($reread, DisputeRepositorySupport::getGeneration($key));
     }
 
     // ── BlogChainTagRepository ───────────────────────────────────────
