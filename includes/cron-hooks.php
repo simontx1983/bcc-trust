@@ -41,6 +41,7 @@ return [
         // by CronScheduleSelfHealTest.
         'bcc_trust_weekly_slow_ring_scan'       => ['interval' => 'bcc_weekly',                   'description' => 'slow endorsement-ring detection (scale hardening)'],
         'bcc_trust_deferred_rm_sync'            => ['interval' => 'bcc_thirty_seconds',           'description' => 'read-model deferred-rebuild for staleness recovery'],
+        'bcc_trust_post_reach_dedupe_sweep'     => ['interval' => 'hourly',                       'description' => 'post-view dedupe: 48h TTL + row-cap trim (F-324)'],
         'bcc_trust_divergence_state_sweep'      => ['interval' => 'daily',                        'description' => 'divergence-state classification + §J.7 notifications'],
         'bcc_trust_daily_attestation_decay'     => ['interval' => 'daily',                        'description' => 'attestation_bonus decay recompute sweep (Slice E)'],
         'bcc_attestor_reliability_sweep'        => ['interval' => 'daily',                        'description' => 'operator-reliability cache recompute (Slice 3)'],
@@ -97,6 +98,11 @@ return [
         // (RankScheduler). Fire-once; cleared here so a deactivate between
         // a sweep and its continuation leaves nothing queued.
         'bcc_rank_daily_evaluate_continue',
+        // F-278: per-member re-check after a holding is lost. It carries
+        // [user_id, group_id] args, so deactivate/uninstall ALSO call
+        // wp_unschedule_hook() for it (wp_clear_scheduled_hook() without
+        // args leaves events that have args).
+        'bcc_gated_group_member_recheck',
         // F-14: same-tick continuation of a budget-cut claim re-verify sweep.
         'bcc_onchain_claim_reverify_continue',
         'bcc_rank_daily_tier_snapshot_continue',

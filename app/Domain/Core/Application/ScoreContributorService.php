@@ -74,7 +74,7 @@ final class ScoreContributorService implements ScoreContributorInterface
             : 20.0;
         $value = max(0.0, min($maxBonus, (float) $value));
 
-        $result = \BCC\Trust\Core\Security\TransactionManager::run(function () use ($pageId, $column, $value): bool {
+        $write = function () use ($pageId, $column, $value): bool {
             // Ensure a score row exists before attempting the UPDATE.
             // Without this, a new owner's first onchain bonus is lost
             // (UPDATE affects 0 rows and is treated as success by legacy callers).
@@ -129,7 +129,28 @@ final class ScoreContributorService implements ScoreContributorInterface
             }
 
             return $this->scoreRepository->applyBonusColumn($pageId, $column, $value);
-        });
+        };
+
+        // F-240: honour the interface's bool contract. Every failure inside
+        // $write ends as a THROW, not a false return: TransactionManager::run
+        // turns a closure's `false` into "Transaction callback returned
+        // false", and failed reads throw RepositoryReadFailure. Callers
+        // (BonusService::applyBonus, BonusRetryService::processAll) queue or
+        // count a retry on `false` and catch nothing, so a throw skipped the
+        // retry queue and aborted processAll's loop. The transaction has
+        // already rolled back by the time it reaches here.
+        try {
+            $result = \BCC\Trust\Core\Security\TransactionManager::run($write);
+        } catch (\Throwable $e) {
+            Logger::error('score_contributor_write_failed', [
+                'page_id' => $pageId,
+                'source'  => $source,
+                'value'   => $value,
+                'type'    => get_class($e),
+                'error'   => $e->getMessage(),
+            ]);
+            return false;
+        }
 
         if (!$result) {
             Logger::error('score_contributor_write_failed', [

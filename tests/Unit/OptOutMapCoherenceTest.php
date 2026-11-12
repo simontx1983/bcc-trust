@@ -60,6 +60,31 @@ namespace BCC\Trust\Core\Tests\Unit {
             );
         }
 
+        public function testALeaveAfterAModeratorRemovalDoesNotDowngradeThePermanentOptOut(): void
+        {
+            // F-267: a removed member pressing Leave used to overwrite the
+            // permanent marker with time(), a voluntary opt-out that an
+            // explicit Join overrides.
+            $gate = new NftGroupGateService();
+            $gate->recordPermanentOptOut(self::USER_ID, self::GROUP_ID);
+
+            $gate->recordOptOut(self::USER_ID, self::GROUP_ID);
+
+            self::assertTrue($gate->isPermanentOptOut(self::USER_ID, self::GROUP_ID));
+        }
+
+        public function testAVoluntaryLeaveStillRefreshesAVoluntaryOptOut(): void
+        {
+            $gate = new NftGroupGateService();
+            $gate->recordOptOut(self::USER_ID, self::GROUP_ID);
+            $gate->recordOptOut(self::USER_ID, self::GROUP_ID);
+
+            self::assertFalse($gate->isPermanentOptOut(self::USER_ID, self::GROUP_ID));
+            $stored = json_decode((string) current($GLOBALS['__bcc_optout_meta'][self::USER_ID]), true);
+            self::assertIsArray($stored);
+            self::assertGreaterThan(0, $stored[self::GROUP_ID] ?? 0, 'the voluntary opt-out is still written');
+        }
+
         public function testAClearedOptOutIsSeenByAnotherInstance(): void
         {
             $reader = new NftGroupGateService();

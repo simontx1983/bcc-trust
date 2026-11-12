@@ -114,6 +114,38 @@ class RateLimiter {
     }
 
     /**
+     * Test-only clock override. Null = real time.
+     *
+     * @var (\Closure(): int)|null
+     */
+    private static $clock = null;
+
+    /**
+     * Install (or clear) a fake clock, so a test can place a request at a
+     * chosen offset inside a window instead of sleeping.
+     *
+     * ⚠ SCOPE: only slidingWindowCheck() honours this. The other two clock
+     * reads — allow()'s denial-audit path (time() at :321) and resetIn()
+     * (time() at :480) — still call time() directly, because those lines sit
+     * inside hunks owned by open PRs #611 and #614 and editing them here
+     * would conflict. Unifying the three reads is a follow-up. Until then do
+     * NOT drive this clock through allow() or resetIn() and expect their
+     * bucket index to agree with the one computed here.
+     *
+     * @param (\Closure(): int)|null $clock
+     */
+    public static function setClockForTesting(?\Closure $clock): void {
+        self::$clock = $clock;
+    }
+
+    /**
+     * Current unix time, honouring an installed test clock.
+     */
+    private static function now(): int {
+        return self::$clock !== null ? (self::$clock)() : time();
+    }
+
+    /**
      * Check if action allowed using a caller-supplied key.
      *
      * Use this for unauthenticated endpoints (e.g. OAuth callbacks) where
@@ -139,7 +171,7 @@ class RateLimiter {
      * @return bool True if allowed, false if over limit.
      */
     private static function slidingWindowCheck(string $key, int $limit, int $window): bool {
-        $now    = time();
+        $now    = self::now();
         $window = max(1, $window);
         $bucket = (int) floor($now / $window);
 
@@ -174,18 +206,47 @@ class RateLimiter {
 
         // Sliding window approximation using integer arithmetic.
         // weight_pct = 100 - (elapsed * 100 / window), clamped to [0, 100].
-        // effective = current + prev * weight_pct / 100, clamped to [0, 2*limit].
         $elapsed   = $now - ($bucket * $window);
         $weightPct = max(0, min(100, 100 - (int) (($elapsed * 100) / $window)));
-        $effective = $curCount + (int) (($prevCount * $weightPct) / 100);
-        $effective = max(0, min($limit * 2, $effective));
+
+        // F-129: compare in HUNDREDTHS rather than flooring the previous
+        // bucket's weighted contribution down to a whole request. The old
+        // form was
+        //
+        //     $effective = $curCount + (int) (($prevCount * $weightPct) / 100);
+        //
+        // which discarded any contribution below 1 — i.e. whenever
+        // prev_count * weight_pct < 100. At small limits that erased the
+        // previous bucket outright and let a second request through inside
+        // one window: with limit 1 / window 60, requests at t=59 and t=90
+        // were BOTH allowed, because 1 × 50% floored to 0.
+        //
+        // An adjusted limit of exactly 1 is reachable and intended, not a
+        // corner case: getAdjustedLimit() ends in max(1, …) and the
+        // critical_risk multiplier is 0.2, so flag/login (base 5) land on 1
+        // for the highest-risk accounts — precisely the accounts this
+        // rounding handed a 2×.
+        //
+        // Scaling both sides by 100 removes the rounding entirely. It can
+        // only ever make the limiter stricter, by at most one request's
+        // worth of weight, which is the pessimistic direction the
+        // increment-first design already commits to.
+        //
+        // The old [0, 2*limit] clamp is dropped because it could not change
+        // the decision — it clamped to 2*limit, always above the limit it
+        // was compared against, and effective could not go negative. The one
+        // exception was limit 0, where it clamped effective to 0 and made
+        // `0 <= 0` ALLOW every request; no caller passes 0 today
+        // (getAdjustedLimit floors at 1, the per-IP cap at 10), so that was
+        // latent rather than live. The scaled form denies it.
+        $effectiveX100 = ($curCount * 100) + ($prevCount * $weightPct);
 
         // Denied requests still consume a slot. Decrement-on-deny was
         // removed because a flooder spamming past the limit would otherwise
         // see every Nth request succeed (the previous denial freed capacity
         // back into the same window). Pessimistic accounting is the whole
         // point of the increment-first pattern.
-        return $effective <= $limit;
+        return $effectiveX100 <= $limit * 100;
     }
 
     /**
@@ -488,8 +549,16 @@ class RateLimiter {
      * allocation (RFC 6177). Normalizing to /64 lets an attacker on a
      * single ISP customer allocation hop across /64 subnets and get a
      * fresh rate-limit bucket for each one.
+     *
+     * ⚠ PUBLIC because it is shared, not because it is a general-purpose
+     * utility. F-324's viewer dedupe needs the identical normalisation for
+     * its signed-out subject: if analytics coarsened IPs differently from
+     * the limiter, the two would disagree about what "the same client"
+     * means. Promoted rather than copied — bcc-core's Throttle already
+     * carries its own private copy of this logic, and a third would be a
+     * §11 duplicate.
      */
-    private static function normalizeIpToSubnet(string $ip): string
+    public static function normalizeIpToSubnet(string $ip): string
     {
         if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
             $parts = explode('.', $ip);

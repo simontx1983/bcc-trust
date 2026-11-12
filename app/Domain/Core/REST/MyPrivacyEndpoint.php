@@ -11,8 +11,11 @@
  * as private. The eighth flag — `discovery_optout` — is owner-only and
  * lives ONLY behind /me/privacy; it controls whether the user appears
  * in PeepSo's user search (hooked via PrivacySettings::registerSearchFilter).
+ * ⭐ Since F-257 it is an ALIAS of /me/profile-prefs `hide_from_search`:
+ * both read and write PeepSo's `peepso_is_hide_profile_from_user_listing`.
  *
- * Storage: `wp_usermeta.bcc_privacy_*` (boolean-truthy "1"/"0"). All
+ * Storage: `wp_usermeta.bcc_privacy_*` (boolean-truthy "1"/"0"), except
+ * `discovery_optout` (see above). All
  * read/write goes through PrivacySettings; the endpoint is pure glue.
  *
  * Auth: required. Self-only — there is no admin-overriding-someone-else

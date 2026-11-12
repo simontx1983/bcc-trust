@@ -187,6 +187,24 @@ final class ValidatorGroupGateTest extends TestCase
         self::assertNoMembershipWritten();
     }
 
+    /**
+     * F-271: a PeepSo ban is a moderator removal. Refused with the same 403
+     * opt_out_active as an eviction, before any eligibility read, instead of
+     * reaching the writer and surfacing its refusal as a 503 "try again".
+     */
+    public function testABannedDelegatorIsRefusedAsRemovedNotAsATransientFailure(): void
+    {
+        $GLOBALS['__bcc_valgate_fixture']['banned']  = true;
+        $GLOBALS['__bcc_valgate_fixture']['verdict'] = DelegationVerdict::eligible(1.0, 99.0);
+
+        $result = $this->service()->joinIfEligible(self::USER_ID, self::GROUP_ID);
+
+        self::assertFalse($result->success);
+        self::assertSame(JoinResult::CODE_OPT_OUT_ACTIVE, $result->code);
+        self::assertNoMembershipWritten();
+        self::assertSame([], $GLOBALS['__bcc_valgate_fixture']['cleared']);
+    }
+
     public function testAlreadyMemberIsIdempotentWithNoWrite(): void
     {
         $GLOBALS['__bcc_valgate_fixture']['is_member'] = true;

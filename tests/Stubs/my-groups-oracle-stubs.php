@@ -100,6 +100,12 @@ namespace BCC\Core\Repositories {
             {
                 return $GLOBALS['__bcc_mg']['memberships'][$userId][$groupId] ?? null;
             }
+
+            // The leave route's fail-closed pre-read (GroupLeaveGuard).
+            public static function getMembershipStatusOrFail(int $userId, int $groupId): string|null|false
+            {
+                return self::getMembershipStatus($userId, $groupId);
+            }
         }
     }
 }

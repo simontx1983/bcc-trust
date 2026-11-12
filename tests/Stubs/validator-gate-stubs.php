@@ -128,6 +128,12 @@ namespace BCC\Trust\Onchain\Services {
             {
                 $GLOBALS['__bcc_valgate_fixture']['cleared'][] = [$userId, $groupId];
             }
+
+            /** Fixture `banned`: a PeepSo gm_user_status='banned' row (F-271). */
+            public function isBannedFrom(int $userId, int $groupId): bool
+            {
+                return !empty($GLOBALS['__bcc_valgate_fixture']['banned']);
+            }
         }
     }
 }
