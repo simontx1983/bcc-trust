@@ -171,7 +171,10 @@ final class CommentService
         }
 
         $parent = PeepSoActivityRepository::getById($actId);
-        if ($parent === null) {
+        // F-265: a deleted (trashed) or moderation-hidden post is gone from
+        // every feed and its permalink; its thread is too. Same answer as an
+        // unknown id, for every viewer, before any membership check.
+        if ($parent === null || !$this->visibility()->isLive($parent)) {
             return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
         }
         $parentPostId = (int) $parent->act_external_id;
@@ -371,7 +374,10 @@ final class CommentService
         }
 
         $parent = PeepSoActivityRepository::getById($actId);
-        if ($parent === null) {
+        // F-265: a deleted (trashed) or moderation-hidden post is gone from
+        // every feed and its permalink; its thread is too. Same answer as an
+        // unknown id, for every viewer, before any membership check.
+        if ($parent === null || !$this->visibility()->isLive($parent)) {
             return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
         }
         $parentPostId   = (int) $parent->act_external_id;

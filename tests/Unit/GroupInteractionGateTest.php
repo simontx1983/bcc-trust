@@ -60,6 +60,14 @@ final class GroupInteractionGateTest extends TestCase
     private const TRASH_POST_ID       = 1003; // a trashed parent post
     private const TRASH_COMMENT_ACT   = 204;  // comment under TRASH_POST_ID
     private const TRASH_COMMENT_POST  = 2004;
+    // F-265 fixtures: posts that are gone (deleted / moderation-hidden).
+    private const TRASH_POST_ACT             = 103;  // the act of TRASH_POST_ID
+    private const HIDDEN_POST_ACT            = 104;  // moderation-hidden post
+    private const HIDDEN_POST_ID             = 1004;
+    private const HIDDEN_PARENT_COMMENT_ACT  = 205;  // comment under HIDDEN_POST_ID
+    private const HIDDEN_PARENT_COMMENT_POST = 2005;
+    private const HIDDEN_COMMENT_ACT         = 206;  // itself hidden, under PLAIN_POST_ID
+    private const HIDDEN_COMMENT_POST        = 2006;
     private const DM_ACT              = 300;  // PeepSo DM (module 6)
     private const DM_POST_ID          = 3000;
 
@@ -79,6 +87,10 @@ final class GroupInteractionGateTest extends TestCase
                 self::SECRET_POST_ACT    => ['external_id' => self::SECRET_POST_ID],
                 self::SECRET_COMMENT_ACT => ['external_id' => self::SECRET_COMMENT_POST],
                 self::TRASH_COMMENT_ACT  => ['external_id' => self::TRASH_COMMENT_POST],
+                self::TRASH_POST_ACT     => ['external_id' => self::TRASH_POST_ID],
+                self::HIDDEN_POST_ACT    => ['external_id' => self::HIDDEN_POST_ID],
+                self::HIDDEN_PARENT_COMMENT_ACT => ['external_id' => self::HIDDEN_PARENT_COMMENT_POST],
+                self::HIDDEN_COMMENT_ACT => ['external_id' => self::HIDDEN_COMMENT_POST],
                 // PeepSo's DM module. An act, but not a feed activity.
                 self::DM_ACT             => ['external_id' => self::DM_POST_ID, 'module' => 6],
             ],
@@ -87,6 +99,8 @@ final class GroupInteractionGateTest extends TestCase
                 self::PLAIN_COMMENT_ACT  => ['parent_post_id' => self::PLAIN_POST_ID],
                 self::SECRET_COMMENT_ACT => ['parent_post_id' => self::SECRET_POST_ID],
                 self::TRASH_COMMENT_ACT  => ['parent_post_id' => self::TRASH_POST_ID],
+                self::HIDDEN_PARENT_COMMENT_ACT => ['parent_post_id' => self::HIDDEN_POST_ID, 'parent_act_id' => self::HIDDEN_POST_ACT],
+                self::HIDDEN_COMMENT_ACT => ['parent_post_id' => self::PLAIN_POST_ID, 'parent_act_id' => self::PLAIN_POST_ACT],
                 // ORPHAN_COMMENT_ACT deliberately absent (unpublished / no parent)
             ],
             'post_type' => [
@@ -99,6 +113,10 @@ final class GroupInteractionGateTest extends TestCase
                 self::SECRET_COMMENT_POST => 'peepso-comment',
                 self::TRASH_COMMENT_POST  => 'peepso-comment',
                 self::DM_POST_ID          => 'peepso-message',
+                self::TRASH_POST_ID       => 'peepso-post',
+                self::HIDDEN_POST_ID      => 'peepso-post',
+                self::HIDDEN_PARENT_COMMENT_POST => 'peepso-comment',
+                self::HIDDEN_COMMENT_POST => 'peepso-comment',
             ],
             'post_status' => [
                 self::TRASH_POST_ID => 'trash',
@@ -112,6 +130,7 @@ final class GroupInteractionGateTest extends TestCase
             // a secret group + non-member resolves to NULL (existence hidden).
             'members'      => [],
             'access_calls' => [],
+            'hidden'       => [self::HIDDEN_POST_ACT, self::HIDDEN_COMMENT_ACT],
             'allowlists'   => [],
         ];
     }
@@ -290,6 +309,54 @@ final class GroupInteractionGateTest extends TestCase
             self::statusAndCode((self::GATE)::check(self::USER, self::TRASH_COMMENT_ACT))
         );
         self::assertSame([], $GLOBALS['__bcc_gig']['access_calls']);
+    }
+
+    // ── F-265: nothing may act on a post that is gone ────────────────────
+
+    public function testADeletedPostIsNotFound(): void
+    {
+        self::assertSame(
+            [404, 'bcc_not_found'],
+            self::statusAndCode((self::GATE)::check(self::USER, self::TRASH_POST_ACT))
+        );
+        self::assertSame([], $GLOBALS['__bcc_gig']['access_calls'], 'refused before any membership lookup');
+    }
+
+    public function testAModerationHiddenPostIsNotFound(): void
+    {
+        self::assertSame(
+            [404, 'bcc_not_found'],
+            self::statusAndCode((self::GATE)::check(self::USER, self::HIDDEN_POST_ACT))
+        );
+    }
+
+    public function testACommentUnderAModerationHiddenPostIsNotFound(): void
+    {
+        self::assertSame(
+            [404, 'bcc_not_found'],
+            self::statusAndCode((self::GATE)::check(self::USER, self::HIDDEN_PARENT_COMMENT_ACT))
+        );
+    }
+
+    public function testAModerationHiddenCommentIsNotFound(): void
+    {
+        self::assertSame(
+            [404, 'bcc_not_found'],
+            self::statusAndCode((self::GATE)::check(self::USER, self::HIDDEN_COMMENT_ACT))
+        );
+    }
+
+    /** The viewer-free resolver NotificationDispatcher uses: same rule, no membership. */
+    public function testResolveLiveTargetAnswersWithoutAViewer(): void
+    {
+        $gate = self::GATE;
+        self::assertSame(self::PLAIN_POST_ID, $gate::resolveLiveTarget(self::PLAIN_POST_ACT));
+        self::assertSame(self::GROUP_POST_ID, $gate::resolveLiveTarget(self::GROUP_COMMENT_ACT), 'a comment resolves to its parent');
+        self::assertNull($gate::resolveLiveTarget(self::TRASH_POST_ACT));
+        self::assertNull($gate::resolveLiveTarget(self::HIDDEN_POST_ACT));
+        self::assertNull($gate::resolveLiveTarget(self::HIDDEN_PARENT_COMMENT_ACT));
+        self::assertNull($gate::resolveLiveTarget(self::HIDDEN_COMMENT_ACT));
+        self::assertSame([], $GLOBALS['__bcc_gig']['access_calls'], 'no membership lookup');
     }
 
     public function testCommentRoutesPassTheirOwnNotFoundMessage(): void
