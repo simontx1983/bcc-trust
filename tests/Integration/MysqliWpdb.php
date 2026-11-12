@@ -88,6 +88,7 @@ final class MysqliWpdb
     public string $usermeta;
     public string $posts;
     public string $postmeta;
+    public string $comments;
 
     private mysqli $db;
     private bool $suppressErrors = false;
@@ -101,6 +102,7 @@ final class MysqliWpdb
         $this->usermeta = $prefix . 'usermeta';
         $this->posts    = $prefix . 'posts';
         $this->postmeta = $prefix . 'postmeta';
+        $this->comments = $prefix . 'comments';
     }
 
     /**
