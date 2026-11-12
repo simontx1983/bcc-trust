@@ -53,9 +53,21 @@ final class SuspendedWriteGateTest extends TestCase
             'log out'            => ['POST', '/bcc/v1/auth/logout'],
             'log out everywhere' => ['POST', '/bcc/v1/auth/logout-everywhere'],
             'refresh'            => ['POST', '/bcc/v1/auth/refresh'],
+            'session'            => ['POST', '/bcc/v1/auth/session'],
             'password sign-in'   => ['POST', '/bcc/v1/auth/login'],
+            'nonce'              => ['POST', '/bcc/v1/auth/nonce'],
+            'wallet nonce'       => ['POST', '/bcc/v1/auth/wallet-nonce'],
             'wallet sign-in'     => ['POST', '/bcc/v1/auth/wallet-login'],
+            'wallet sign-up'     => ['POST', '/bcc/v1/auth/wallet-signup'],
+            'sign-up'            => ['POST', '/bcc/v1/auth/signup'],
+            'oauth bridge'       => ['POST', '/bcc/v1/auth/oauth'],
+            'oauth complete'     => ['POST', '/bcc/v1/auth/oauth-complete'],
             '2fa verify'         => ['POST', '/bcc/v1/auth/2fa/verify'],
+            '2fa resend'         => ['POST', '/bcc/v1/auth/2fa/resend'],
+            'forgot password'    => ['POST', '/bcc/v1/auth/forgot-password'],
+            'reset password'     => ['POST', '/bcc/v1/auth/reset-password'],
+            'verify email'       => ['POST', '/bcc/v1/auth/verify-email'],
+            'resend verify'      => ['POST', '/bcc/v1/auth/resend-verification'],
             'appeal the finding' => ['POST', '/bcc/v1/me/findings/123/appeal'],
             'notification prefs' => ['PATCH', '/bcc/v1/me/notification-prefs'],
             'privacy'            => ['PATCH', '/bcc/v1/me/privacy'],
@@ -82,7 +94,7 @@ final class SuspendedWriteGateTest extends TestCase
             'announcement comment' => ['POST', '/bcc/v1/announcements/7/comments'],
             'attestation'          => ['POST', '/bcc/v1/me/attestations'],
             'report'               => ['POST', '/bcc/v1/me/reports'],
-            'recovery email'       => ['PUT', '/bcc/v1/me/account/recovery-email'],
+            'unlisted auth route'  => ['POST', '/bcc/v1/auth/something-new'],
             'push subscribe'       => ['POST', '/bcc/v1/me/push-subscriptions'],
             'push sub, not delete' => ['POST', '/bcc/v1/me/push-subscriptions/9'],
             'claim a page'         => ['POST', '/bcc/v1/pages/12/claim'],
@@ -115,12 +127,65 @@ final class SuspendedWriteGateTest extends TestCase
     }
 
     /** @return array<string, array{string, string}> */
+    public static function mixedCase(): array
+    {
+        return [
+            'upper namespace'        => ['POST', '/BCC/v1/posts'],
+            'mixed namespace'        => ['POST', '/Bcc/V1/me/reports'],
+            'mixed bcc-trust'        => ['POST', '/Bcc-Trust/v1/github/auth'],
+            'upper path'             => ['POST', '/bcc/v1/ME/ATTESTATIONS'],
+            'lower method'           => ['post', '/bcc/v1/posts'],
+        ];
+    }
+
+    /** WordPress routes case-insensitively, so the gate must too (review on #637). */
+    #[DataProvider('mixedCase')]
+    public function testCapitalLettersDoNotSkipTheGate(string $method, string $route): void
+    {
+        self::assertSame(SuspendedWriteGate::GATE, SuspendedWriteGate::classify($method, $route));
+        [$status] = self::answer($method, $route, true) ?? [0];
+        self::assertSame(403, $status);
+    }
+
+    public function testMixedCaseAccountAndAllowListRoutesKeepTheirRules(): void
+    {
+        self::assertSame(SuspendedWriteGate::ACCOUNT, SuspendedWriteGate::classify('DELETE', '/BCC/v1/ME/Account'));
+        self::assertSame(SuspendedWriteGate::ALLOW, SuspendedWriteGate::classify('PATCH', '/BCC/v1/me/Account/Password'));
+    }
+
+    /**
+     * The filter itself, as WordPress calls it, including for each
+     * sub-request of a /batch/v1 call (WP_REST_Server::serve_batch_request_v1
+     * applies rest_pre_dispatch per sub-request, with that sub-request's route).
+     */
+    public function testTheFilterRefusesAMixedCaseRouteAndLeavesAnEarlierAnswerAlone(): void
+    {
+        $GLOBALS['__bcc_susp'] = [71 => true]; // get_current_user_id() double = 71
+        $request = new class([]) extends \WP_REST_Request {
+            public function get_method(): string { return 'POST'; }
+            public function get_route(): string { return '/BCC/v1/collections/5/stance'; }
+        };
+
+        $res = SuspendedWriteGate::filter(null, null, $request);
+        self::assertInstanceOf(\WP_REST_Response::class, $res);
+        self::assertSame(403, $res->get_status());
+
+        $earlier = new \WP_REST_Response(['ok' => true], 200);
+        self::assertSame($earlier, SuspendedWriteGate::filter($earlier, null, $request), 'an earlier answer is never overridden');
+        self::assertSame('passthrough', SuspendedWriteGate::filter('passthrough', null, new \stdClass()));
+    }
+
+    /** @return array<string, array{string, string}> */
     public static function accountIdentity(): array
     {
         return [
             'email change'        => ['PATCH', '/bcc/v1/me/account/email'],
             'email change verify' => ['POST', '/bcc/v1/me/account/email/verify'],
             'account delete'      => ['DELETE', '/bcc/v1/me/account'],
+            'recovery email'      => ['PUT', '/bcc/v1/me/account/recovery-email'],
+            'recovery verify'     => ['POST', '/bcc/v1/me/account/recovery-email/verify'],
+            'link a wallet'       => ['POST', '/bcc/v1/auth/wallet-link'],
+            'link, mixed case'    => ['POST', '/BCC/v1/Auth/Wallet-Link'],
         ];
     }
 

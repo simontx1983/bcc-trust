@@ -22,15 +22,20 @@ if (!defined('ABSPATH')) {
  * able to do. Per-route checks stay as a second line.
  *
  * Allowed while suspended (classify() → ALLOW):
- *   - /auth/*                          sign in, refresh, session, log out
+ *   - the /auth/ routes in AUTH_ALLOWED  sign in, sign up, refresh, session,
+ *                                      log out, nonces, 2FA, password reset,
+ *                                      email verification (an EXPLICIT list:
+ *                                      an /auth/ route added later is gated
+ *                                      until it is listed here)
  *   - POST /me/findings/:id/appeal     appeal the finding
  *   - /me/notification-prefs, /me/privacy
  *   - DELETE /me/push-subscriptions/:id   unsubscribe (subscribing is a write)
  *   - /me/blocks, /me/blocks/:id       block / unblock (safety)
  *   - /me/account/password             password change (user decision)
  *
- * Account identity (classify() → ACCOUNT): email change, its verify step,
- * and DELETE /me/account. Suspended → 403 account_suspended; UNKNOWN → 503
+ * Account identity (classify() → ACCOUNT): email change and its verify
+ * step, the recovery email and its verify step, linking a wallet
+ * (POST /auth/wallet-link adds a sign-in identity), and DELETE /me/account. Suspended → 403 account_suspended; UNKNOWN → 503
  * (house rule F-109: an identity write denies on unknown).
  *
  * Everything else (classify() → GATE): suspended → 403 account_suspended.
@@ -50,6 +55,41 @@ final class SuspendedWriteGate
     private const NAMESPACES = ['/bcc/v1/', '/bcc-trust/v1/'];
 
     public const MESSAGE = 'Your account is suspended.';
+
+    /**
+     * /auth/ routes a suspended member may still call: everything needed to
+     * sign in (read-only), stay signed in, and sign out. NOT wallet-link,
+     * which changes the account (ACCOUNT below).
+     */
+    private const AUTH_ALLOWED = [
+        '/auth/login',
+        '/auth/logout',
+        '/auth/logout-everywhere',
+        '/auth/refresh',
+        '/auth/session',
+        '/auth/nonce',
+        '/auth/wallet-nonce',
+        '/auth/wallet-login',
+        '/auth/wallet-signup',
+        '/auth/signup',
+        '/auth/oauth',
+        '/auth/oauth-complete',
+        '/auth/2fa/verify',
+        '/auth/2fa/resend',
+        '/auth/forgot-password',
+        '/auth/reset-password',
+        '/auth/verify-email',
+        '/auth/resend-verification',
+    ];
+
+    /** Account-identity writes: suspended → 403, unknown → 503 (F-109). */
+    private const ACCOUNT_PATHS = [
+        '/me/account/email',
+        '/me/account/email/verify',
+        '/me/account/recovery-email',
+        '/me/account/recovery-email/verify',
+        '/auth/wallet-link',
+    ];
 
     public static function register(): void
     {
@@ -117,6 +157,12 @@ final class SuspendedWriteGate
             return self::NONE;
         }
 
+        // WordPress matches routes case-INSENSITIVELY (WP_REST_Server::
+        // match_request_to_handler, '@^…$@i'), so POST /BCC/v1/posts reaches
+        // the bcc/v1 handler. Compare lowercased, or a capital letter skips
+        // the gate. Batch sub-requests pass through rest_pre_dispatch too.
+        $route = strtolower($route);
+
         $path = null;
         foreach (self::NAMESPACES as $ns) {
             if (str_starts_with($route, $ns)) {
@@ -129,7 +175,7 @@ final class SuspendedWriteGate
         }
         $path = rtrim($path, '/');
 
-        if (str_starts_with($path, '/auth/')) {
+        if (in_array($path, self::AUTH_ALLOWED, true)) {
             return self::ALLOW;
         }
         if ($method === 'POST' && preg_match('#^/me/findings/\d+/appeal$#', $path) === 1) {
@@ -148,8 +194,7 @@ final class SuspendedWriteGate
             return self::ALLOW;
         }
 
-        if ($path === '/me/account/email'
-            || $path === '/me/account/email/verify'
+        if (in_array($path, self::ACCOUNT_PATHS, true)
             || ($method === 'DELETE' && $path === '/me/account')
         ) {
             return self::ACCOUNT;
