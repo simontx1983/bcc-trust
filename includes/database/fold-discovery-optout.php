@@ -12,7 +12,11 @@
  * This copies every opt-out that is ON into the one flag, so nobody hidden
  * today becomes visible:
  *   - only TURNS ON hide_from_search (sets '1'); it never turns one off, and
- *     a member whose hide_from_search is already on is not selected;
+ *     a member whose hide_from_search is already '1' is not selected.
+ *     "Already on" is exactly '1', what the search clause excludes on
+ *     (`value != '1'` lists the member): a hand-edited 'true' / 'on' would
+ *     read as on to PrivacySettings::flag() but LIST the member, so it is
+ *     normalised to '1' rather than skipped (review, Low 2);
  *   - leaves the legacy `bcc_privacy_discovery_optout` rows untouched
  *     (nothing reads them once this is done; deleting them buys nothing and
  *     would make a code rollback less safe).
@@ -59,7 +63,7 @@ if (!function_exists('bcc_trust_fold_discovery_optout')) {
                         SELECT 1 FROM {$wpdb->usermeta} h
                          WHERE h.user_id = o.user_id
                            AND h.meta_key = %s
-                           AND h.meta_value IN ('1', 'true', 'on', 'yes')
+                           AND h.meta_value = '1'
                     )
                   ORDER BY o.user_id ASC
                   LIMIT %d",

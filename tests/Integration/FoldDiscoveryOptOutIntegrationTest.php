@@ -115,6 +115,19 @@ final class FoldDiscoveryOptOutIntegrationTest extends TestCase
         }
     }
 
+    public function testANonCanonicalOnHideValueIsNormalisedSoSearchHidesThem(): void
+    {
+        // Search lists anyone whose hide value is not exactly '1'. A
+        // hand-edited 'true' plus an ON opt-out must end up '1', not be
+        // skipped as "already on" and then listed once folded.
+        self::meta(9, self::LEGACY, '1');
+        self::meta(9, self::HIDE, 'true');
+
+        self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_fold_discovery_optout());
+
+        self::assertSame('1', self::value(9, self::HIDE));
+    }
+
     public function testItNeverTurnsAnythingOffOrTouchesTheUninvolved(): void
     {
         self::meta(5, self::LEGACY, '0');           // opt-out off
