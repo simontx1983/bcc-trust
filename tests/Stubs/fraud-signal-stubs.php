@@ -125,6 +125,8 @@ namespace BCC\Trust\Core {
         /** @var array<int, array<string, mixed>> */
         public static array $rings = [];
         public static ?object $userInfo = null;
+        /** When true, UserInfoRepository::getByUserIdOrThrow() fails like a DB error. */
+        public static bool $userInfoReadFails = false;
         public static ?string $userRegistered = '2020-01-01 00:00:00';
 
         // ── recorded writes ───────────────────────────────────────────
@@ -189,6 +191,7 @@ namespace BCC\Trust\Core {
 
         public static function reset(): void
         {
+            self::$userInfoReadFails = false;
             self::$logs            = [];
             self::$mutualVotePairs = [];
             self::$vouchEdges      = [];
@@ -305,6 +308,15 @@ namespace BCC\Trust\Core\Repositories {
         {
             public function getByUserId(int $userId): ?object
             {
+                return W::$userInfo;
+            }
+
+            /** Real one throws on a FAILED read; W::$userInfoReadFails simulates it. */
+            public function getByUserIdOrThrow(int $userId): ?object
+            {
+                if (W::$userInfoReadFails) {
+                    throw new \BCC\Trust\Core\Exceptions\RepositoryException('simulated user_info read failure');
+                }
                 return W::$userInfo;
             }
 

@@ -251,6 +251,24 @@ class VoteRepository {
      * @phpstan-return VoteRow|null
      */
     public function getById( int $voteId ): ?object {
+        try {
+            return $this->getByIdOrFail($voteId);
+        } catch (RepositoryReadFailure) {
+            // F-101: fail open, uncached; the next call retries.
+            return null;
+        }
+    }
+
+    /**
+     * getById() for callers that must tell "no such vote" from "could not
+     * read": a failed read THROWS. VoteFraudAnalyzer::run() needs this —
+     * reading null after a DB blip ended the run as if it had succeeded,
+     * so the F-107 retry never fired for exactly the case it targets.
+     *
+     * @phpstan-return VoteRow|null
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public function getByIdOrFail( int $voteId ): ?object {
         $cacheKey = "vote_{$voteId}";
         $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
         if ($cached !== false) {
@@ -259,15 +277,11 @@ class VoteRepository {
 
         global $wpdb;
         // F-101: a failed read used to be cached as "no such vote" ('') for
-        // CACHE_TTL. It now reads as null for this call only.
-        try {
-            $rows = self::runRead((string) $wpdb->prepare(
-                "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE id = %d",
-                $voteId
-            ), __FUNCTION__, true);
-        } catch (RepositoryReadFailure) {
-            return null;
-        }
+        // CACHE_TTL. runRead() now throws before anything is cached.
+        $rows = self::runRead((string) $wpdb->prepare(
+            "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE id = %d",
+            $voteId
+        ), 'getById', true);
         /** @var VoteRow|null $row */
         $row = $rows[0] ?? null;
 

@@ -601,13 +601,21 @@ class FraudDetector {
 
     /**
      * Enhanced fraud score calculation using all systems and user_info table
+     *
+     * @throws \BCC\Trust\Core\Exceptions\RepositoryException when the
+     *         user_info read fails (F-107): blending a FAILED read as
+     *         "existing 0, peak 0" under-counts the score. Callers already
+     *         handle a throw: the post-vote retry, the daily cron (per-user
+     *         catch) and the admin reanalyse (documented @throws).
      */
     public static function getEnhancedFraudScore(int $userId): int {
 
         $analysis = self::analyzeFraud($userId);
 
-        // Get existing fraud score from user_info
-        $userInfo = self::userInfoRepo()->getByUserId($userId);
+        // Get existing fraud score from user_info. ...OrThrow: a failed read
+        // must not blend as 0 (the monotonic write keeps it from LOWERING the
+        // stored score, but it would under-raise it).
+        $userInfo = self::userInfoRepo()->getByUserIdOrThrow($userId);
         $existingScore = $userInfo ? (int) $userInfo->fraud_score : 0;
 
         // Blend with new analysis (70% new, 30% existing to smooth changes)
