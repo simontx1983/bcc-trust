@@ -1379,8 +1379,15 @@ class VoteService {
 
             // Derive existing score for endorsement_count / fraud_metadata
             // preservation. Use the first locked row if available.
+            //
+            // ...OrFail (F-101): the row is LOCKED, so it exists; a null here
+            // could only be a failed read, and recalculateFromVotes(null)
+            // would rebuild it from defaults — zeroing every bonus, the
+            // penalty and fraud_metadata — and save that. A failed read now
+            // throws, the transaction rolls back, and the caller re-flags
+            // the page for the next tick.
             $existing = !empty($lockedRows)
-                ? $this->scoreRepo->getByPageId($pageId, (int) $lockedRows[0]->category_id)
+                ? $this->scoreRepo->getByPageIdOrFail($pageId, (int) $lockedRows[0]->category_id)
                 : null;
 
             $newScore = $this->recalculateFromVotes($pageId, $voteAggregates, $ownerId, $existing);

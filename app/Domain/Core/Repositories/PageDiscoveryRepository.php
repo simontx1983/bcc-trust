@@ -211,8 +211,12 @@ final class PageDiscoveryRepository
             INNER JOIN {$rm_table} rm ON rm.page_id = p.ID
             {$chain_joins}
             WHERE {$where_clause}
-            ORDER BY {$orderby}
+            ORDER BY {$orderby}, p.ID DESC
             LIMIT %d OFFSET %d";
+        // F-143: `p.ID DESC` is the unique tiebreak. Every sort key above
+        // (counts, post_date, stake, the ranking expression) can tie, and
+        // MySQL returns tied rows in no fixed order, so LIMIT/OFFSET pages
+        // skipped or repeated pages that tied across a page boundary.
 
         $all_params = array_merge($params, [$limit, $offset]);
         $rows       = $wpdb->get_results($wpdb->prepare($main_sql, ...$all_params));
@@ -366,8 +370,9 @@ final class PageDiscoveryRepository
             FROM {$wpdb->posts} p
             {$join}
             WHERE {$where_clause}
-            ORDER BY {$orderby}
+            ORDER BY {$orderby}, p.ID DESC
             LIMIT %d OFFSET %d";
+        // F-143: unique `p.ID DESC` tiebreak — same reason as queryFromReadModel().
 
         $all_params = array_merge($params, [$limit, $offset]);
         $rows       = $wpdb->get_results($wpdb->prepare($main_sql, ...$all_params));

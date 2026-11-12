@@ -101,6 +101,11 @@ final class CelebrationsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Per-ACCOUNT limit on cheap self-scoped writes (F-134).
+        if (!\BCC\Core\Security\Throttle::allow('me_write', \BCC\Trust\Core\REST\Auth\AuthSupport::ME_WRITE_RATE_LIMIT, 60, 'me_write:' . $viewerId)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please slow down.', 429);
+        }
+
         // Idempotent — `clear` returns false when nothing was stashed,
         // but that's still a 200 from the caller's perspective. The
         // contract is "after this call, no celebration is pending."

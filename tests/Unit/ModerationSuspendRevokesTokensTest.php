@@ -69,15 +69,24 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
             {
                 $GLOBALS['__bcc_ms']['unsuspended'][] = $userId;
             }
-            /** @param int[] $userIds @return int[] */
-            public function getSuspendedUserIds(array $userIds): array
+            public function getByUserIdOrThrow(int $userId): ?object
             {
-                return array_values(array_intersect($userIds, $GLOBALS['__bcc_ms']['already'] ?? []));
+                if (in_array($userId, $GLOBALS['__bcc_ms']['unknown'] ?? [], true)) {
+                    throw new RepositoryException('user_info read failed for user ' . $userId);
+                }
+                if (empty($GLOBALS['__bcc_ms']['rows'][$userId])) {
+                    return null;
+                }
+                $suspended = in_array($userId, $GLOBALS['__bcc_ms']['already'] ?? [], true) ? 1 : 0;
+                return (object) ['user_id' => $userId, 'is_suspended' => (string) $suspended];
             }
             public function notifySuspensionChanged(int $userId): void
             {
                 // F-114: record WHETHER the flush ran inside the transaction.
                 $GLOBALS['__bcc_ms']['notified'][] = [$userId, \BCC\Trust\Core\Security\TransactionManager::isInRunTransaction()];
+                if (!empty($GLOBALS['__bcc_ms']['notify_throws'])) {
+                    throw new \RuntimeException('cache flush failed');
+                }
             }
             public function updateFraudFields(int $userId, int $fraudScore, string $riskLevel, int $behaviorScore): void
             {
@@ -256,6 +265,57 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
             [1 => 'self', 4402 => 'admin', 4403 => 'already_suspended'],
             $GLOBALS['__bcc_ms']['transients']['bcc_trust_suspend_skips_1'] ?? null,
             'who was skipped, and why, is kept for the next page view'
+        );
+    }
+
+    /**
+     * #488 review L2: a FAILED "already suspended?" read used to collapse to
+     * "no" and re-suspend (a second suspensions row). Now that member is
+     * skipped and named as unverifiable; nobody else is affected.
+     */
+    public function testAnUnreadableSuspendedCheckSkipsInsteadOfResuspending(): void
+    {
+        $GLOBALS['__bcc_ms']['unknown'] = [4701];
+        $GLOBALS['__bcc_ms']['rows']   += [4701 => true, 4702 => true];
+
+        ob_start();
+        $result = $this->service()->suspendUser(4701);
+        ob_end_clean();
+        self::assertFalse($result['success']);
+        self::assertStringContainsString('could not check whether they are already suspended', $result['message']);
+
+        self::runAdminHandler(fn () => $this->service()->handleBulkAction([4701, 4702], 'suspend'));
+
+        self::assertSame([4702], $GLOBALS['__bcc_ms']['suspended'], 'only the readable member is suspended');
+        self::assertSame(['bulk' => 1, 'bulk_skipped' => 1], $GLOBALS['__bcc_ms']['query']);
+        self::assertSame([4701 => 'unverifiable'], $GLOBALS['__bcc_ms']['transients']['bcc_trust_suspend_skips_1'] ?? null);
+    }
+
+    /**
+     * #488 review L1: once the transaction commits, the suspension stands. A
+     * failing after-commit step (cache flush) is logged, never reported as a
+     * failed suspension, and the session revocation after it still runs.
+     */
+    public function testAFailedAfterCommitStepStillCountsTheSuspensionAndRevokes(): void
+    {
+        $GLOBALS['__bcc_ms']['notify_throws'] = true;
+        $GLOBALS['__bcc_ms']['rows'] += [self::UID => true, 4801 => true];
+        $single = self::mintToken(self::UID);
+        $bulk   = self::mintToken(4801);
+
+        ob_start();
+        $result = $this->service()->suspendUser(self::UID);
+        ob_end_clean();
+        self::assertTrue($result['success'], $result['message']);
+        self::assertRevoked($single);
+
+        self::runAdminHandler(fn () => $this->service()->handleBulkAction([4801], 'suspend'));
+        self::assertSame(['bulk' => 1, 'bulk_skipped' => 0], $GLOBALS['__bcc_ms']['query'], 'counted as suspended');
+        self::assertRevoked($bulk);
+        self::assertSame(
+            ['bcc_trust:user_info_' . self::UID, 'bcc_trust:user_info_4801'],
+            $GLOBALS['__bcc_ms']['cache_deleted'] ?? [],
+            '#538 review: a failed flush still drops the row cache the suspend guard reads'
         );
     }
 

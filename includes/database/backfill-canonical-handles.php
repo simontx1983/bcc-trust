@@ -15,9 +15,10 @@
  * on real data.
  *
  * Derivation (per user missing the meta):
- *   1. candidate = sanitize_title(display_name); if that yields fewer
- *      than 3 usable chars, fall back to user_login — stripping a
- *      leading 'u-'/'u_' the login-derived form may carry.
+ *   1. candidate = sanitize_title(display_name), skipped when
+ *      display_name equals user_login (WordPress's default for accounts
+ *      made outside BCC signup). user_login itself is NEVER a source:
+ *      a public handle must not reveal the login.
  *   2. collapse to [a-z0-9-] (underscores → hyphens, strip the rest,
  *      no consecutive/leading/trailing hyphens), clamp to 20 chars
  *      (re-trimming a trailing hyphen).
@@ -173,12 +174,12 @@ if (!function_exists('bcc_trust_backfill_canonical_handles')) {
             $userId
         );
 
-        $handle = bcc_trust_bch_find_free_variant($base, $handleService);
+        $handle = bcc_trust_bch_find_free_variant($base, $handleService, $userId);
         if ($handle === null) {
             // Suffix budget exhausted on the name-derived base (dense
             // collision cluster) — retry once on the deterministic
             // member-{id} base, which is unique by construction.
-            $handle = bcc_trust_bch_find_free_variant('member-' . $userId, $handleService);
+            $handle = bcc_trust_bch_find_free_variant(\BCC\Trust\Core\Support\PublicIdentity::HANDLE_PREFIX . $userId, $handleService, $userId);
         }
         if ($handle === null) {
             return null;
@@ -197,29 +198,57 @@ if (!function_exists('bcc_trust_backfill_canonical_handles')) {
     }
 
     /**
+     * user_register callback (Plugin.php): give an account created
+     * outside BCC signup (wp-admin "Add User", WP-CLI, ...) a public
+     * handle immediately, so nothing ever has to fall back to its login.
+     * BCC signup passes its chosen handle via wp_insert_user meta_input,
+     * which core saves before firing user_register, so those accounts
+     * are left alone here.
+     *
+     * Returns the assigned handle, or null when one already existed or
+     * none could be assigned.
+     */
+    function bcc_trust_assign_handle_if_missing(int $userId): ?string
+    {
+        if ($userId <= 0) {
+            return null;
+        }
+        $existing = get_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE, true);
+        if (is_string($existing) && trim($existing) !== '') {
+            return null;
+        }
+        return bcc_trust_bch_assign_handle($userId, new \BCC\Trust\Core\Services\HandleService());
+    }
+
+    /**
      * Candidate base per the derivation rules in the file docblock.
      * Always returns a normalized string of >= 3 chars.
      */
     function bcc_trust_bch_derive_base(string $displayName, string $userLogin, int $userId): string
     {
-        $fromDisplay = bcc_trust_bch_normalize(sanitize_title($displayName));
-        if (strlen($fromDisplay) >= \BCC\Trust\Core\Services\HandleService::MIN_LENGTH) {
-            return $fromDisplay;
+        // user_login is NEVER a source: a public handle must not reveal
+        // the login. WordPress defaults display_name to user_login for
+        // accounts made outside BCC signup (wp-admin, WP-CLI), so a
+        // display_name equal to the login (case-insensitive) is treated
+        // as "no display name" too. $userLogin is taken only for that
+        // comparison.
+        $name = trim($displayName);
+        if ($name !== '' && strcasecmp($name, trim($userLogin)) !== 0) {
+            $fromDisplay = bcc_trust_bch_normalize(sanitize_title($name));
+            // A slug that normalises to the same string as the login
+            // ("JSmith 77" vs login "jsmith-77") would still spell it out.
+            $loginSlug = bcc_trust_bch_normalize(sanitize_title($userLogin));
+            if (
+                strlen($fromDisplay) >= \BCC\Trust\Core\Services\HandleService::MIN_LENGTH
+                && $fromDisplay !== $loginSlug
+            ) {
+                return $fromDisplay;
+            }
         }
 
-        // Login-derived form: strip a leading 'u-'/'u_' first (wallet
-        // signup logins carry that prefix; '/u/u-xyz' reads broken).
-        $login = $userLogin;
-        if (str_starts_with($login, 'u-') || str_starts_with($login, 'u_')) {
-            $login = substr($login, 2);
-        }
-        $fromLogin = bcc_trust_bch_normalize(sanitize_title($login));
-        if (strlen($fromLogin) >= \BCC\Trust\Core\Services\HandleService::MIN_LENGTH) {
-            return $fromLogin;
-        }
-
-        // Deterministic last resort — always valid, unique-leaning.
-        return 'member-' . $userId;
+        // Deterministic last resort — always valid, unique-leaning. The
+        // same form PublicIdentity::handle() shows for a missing handle.
+        return \BCC\Trust\Core\Support\PublicIdentity::HANDLE_PREFIX . $userId;
     }
 
     /**
@@ -249,7 +278,7 @@ if (!function_exists('bcc_trust_backfill_canonical_handles')) {
      * the single source of §B6 truth. Returns null when the suffix
      * budget is exhausted.
      */
-    function bcc_trust_bch_find_free_variant(string $base, \BCC\Trust\Core\Services\HandleService $handleService): ?string
+    function bcc_trust_bch_find_free_variant(string $base, \BCC\Trust\Core\Services\HandleService $handleService, ?int $forUserId = null): ?string
     {
         $maxLen = \BCC\Trust\Core\Services\HandleService::MAX_LENGTH;
 
@@ -266,7 +295,7 @@ if (!function_exists('bcc_trust_backfill_canonical_handles')) {
             if (strlen($candidate) < \BCC\Trust\Core\Services\HandleService::MIN_LENGTH) {
                 continue;
             }
-            if ($handleService->validate($candidate) !== null) {
+            if ($handleService->validate($candidate, $forUserId) !== null) {
                 // Reserved or format-invalid — a suffix changes the
                 // string, so keep trying.
                 continue;

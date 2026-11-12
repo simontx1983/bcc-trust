@@ -277,9 +277,15 @@ namespace BCC\Trust\Onchain\Repositories {
                 return self::$upsertWritten;
             }
 
+            /** @var list<string> F-130: advisory locks held when deleteById() ran. */
+            public static array $locksHeldAtDelete = [];
+
             public static function deleteById(int $id): int
             {
                 self::$deleted[] = $id;
+                if (class_exists(\BCC\Core\DB\AdvisoryLock::class, false)) {
+                    self::$locksHeldAtDelete = array_keys(\BCC\Core\DB\AdvisoryLock::$held);
+                }
                 return self::$deleteResult;
             }
 
@@ -626,6 +632,14 @@ namespace BCC\Trust\Onchain\Repositories {
 
             public static int $collectionIdReads = 0;
 
+            /**
+             * F-130: post_status per collection id for the any-status delete
+             * gate; absent ⇒ 'publish'.
+             *
+             * @var array<int, string>
+             */
+            public static array $statusByCollectionId = [];
+
             public static function findGroupForCollection(int $chainId, string $contract): ?int
             {
                 return self::$groups[$chainId . '|' . $contract] ?? null;
@@ -651,10 +665,38 @@ namespace BCC\Trust\Onchain\Repositories {
                 return self::$groupsByCollectionId[$collectionId] ?? null;
             }
 
+            /**
+             * F-130 delete gate: any holder group, any status. Same read
+             * counter and fail switch as the published-only read.
+             *
+             * @return array{id: int, status: string}|null
+             */
+            public static function findHolderGroupForCollectionIdAnyStatus(int $collectionId): ?array
+            {
+                if ($collectionId <= 0) {
+                    return null;
+                }
+
+                self::$collectionIdReads++;
+
+                if (self::$throwOnCollectionIdRead) {
+                    throw new RepositoryReadFailure(
+                        'findHolderGroupForCollectionIdAnyStatus',
+                        'SQLSTATE[HY000] stub'
+                    );
+                }
+
+                $id = self::$groupsByCollectionId[$collectionId] ?? null;
+                return $id === null
+                    ? null
+                    : ['id' => $id, 'status' => self::$statusByCollectionId[$collectionId] ?? 'publish'];
+            }
+
             public static function reset(): void
             {
                 self::$groups                   = [];
                 self::$groupsByCollectionId     = [];
+                self::$statusByCollectionId     = [];
                 self::$throwOnCollectionIdRead  = false;
                 self::$collectionIdReads        = 0;
             }

@@ -37,6 +37,7 @@ final class VerifyCollectionsHandlerSecurityTest extends TestCase
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/verify-collections-stubs.php';
+        require_once __DIR__ . '/../Stubs/vc-delete-lock-stub.php';   // F-130
 
         \BccAdminTestState::reset();
         \BccTransientStore::reset();
@@ -527,6 +528,72 @@ final class VerifyCollectionsHandlerSecurityTest extends TestCase
 
         $this->assertSame([], \BCC\Trust\Onchain\Repositories\CollectionRepository::$deleted);
         $this->assertNotContains('admin_vc_collection_deleted', \BCC\Trust\Core\Security\AuditLogger::actions());
+    }
+
+    // ── F-130: the delete runs under the provisioning lock ─────────────
+
+    public function testTheCheckAndTheDeleteRunInsideTheProvisioningLock(): void
+    {
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::seed(self::CID, 4, '0xabc');
+
+        $this->runDelete(self::CID);
+
+        $lock = 'bcc_gated_group_provision:' . self::CID;
+        $this->assertSame([self::CID], \BCC\Trust\Onchain\Repositories\CollectionRepository::$deleted);
+        $this->assertSame(
+            [$lock],
+            \BCC\Trust\Onchain\Repositories\CollectionRepository::$locksHeldAtDelete,
+            'the DELETE must run while the per-collection provisioning lock is held'
+        );
+        $this->assertSame([$lock], \BCC\Core\DB\AdvisoryLock::$acquired);
+        $this->assertSame([$lock], \BCC\Core\DB\AdvisoryLock::$released, 'exactly one release per acquire');
+    }
+
+    public function testALockHeldByAProvisionBlocksTheDeleteBeforeAnyRead(): void
+    {
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::seed(self::CID, 4, '0xabc');
+        \BCC\Core\DB\AdvisoryLock::$acquirable = false;
+
+        $this->runDelete(self::CID);
+
+        $this->assertSame([], \BCC\Trust\Onchain\Repositories\CollectionRepository::$deleted);
+        $this->assertSame(
+            0,
+            \BCC\Trust\Onchain\Repositories\GatedGroupRepository::$collectionIdReads,
+            'nothing is checked or deleted outside the lock'
+        );
+        $this->assertNotContains('admin_vc_collection_deleted', \BCC\Trust\Core\Security\AuditLogger::actions());
+        $this->assertStringContainsString('being created', $this->notices()[0]['message'] ?? '');
+        $this->assertSame([], \BCC\Core\DB\AdvisoryLock::$released, 'nothing to release when not acquired');
+    }
+
+    /**
+     * F-130: a trashed, draft or pending holder group blocks Remove too —
+     * restoring or publishing it later would point it at a missing row.
+     *
+     * @return iterable<string, array{string, string}>
+     */
+    public static function unpublishedGroupStatuses(): iterable
+    {
+        yield 'trashed' => ['trash', 'in the trash'];
+        yield 'draft'   => ['draft', 'draft'];
+        yield 'pending' => ['pending', 'pending'];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('unpublishedGroupStatuses')]
+    public function testAnUnpublishedHolderGroupStillBlocksTheDelete(string $status, string $said): void
+    {
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::seed(self::CID, 4, '0xabc');
+        \BCC\Trust\Onchain\Repositories\GatedGroupRepository::$groupsByCollectionId[self::CID] = 77;
+        \BCC\Trust\Onchain\Repositories\GatedGroupRepository::$statusByCollectionId[self::CID] = $status;
+
+        $this->runDelete(self::CID);
+
+        $this->assertSame([], \BCC\Trust\Onchain\Repositories\CollectionRepository::$deleted);
+        $message = $this->notices()[0]['message'] ?? '';
+        $this->assertStringContainsString('group #77', $message);
+        $this->assertStringContainsString($said, $message);
+        $this->assertStringContainsString('permanently', $message);
     }
 
     /**

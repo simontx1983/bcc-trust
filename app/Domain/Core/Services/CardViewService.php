@@ -767,7 +767,7 @@ final class CardViewService
 
         return [
             'id'                  => $userId,
-            'name'                => $user->display_name !== '' ? $user->display_name : $user->user_login,
+            'name'                => \BCC\Trust\Core\Support\PublicIdentity::displayName($user->display_name, $user->user_login, $resolvedHandle),
             'handle'              => $resolvedHandle,
             'card_kind'           => 'member',
             'bio'                 => self::resolveMemberBio($user),
@@ -827,7 +827,7 @@ final class CardViewService
             // Emitted for shape uniformity.
             'messaging'           => ['destination' => 'none', 'operator' => null],
             'crest'               => self::buildCrest(
-                (string) $user->display_name ?: $user->user_login,
+                \BCC\Trust\Core\Support\PublicIdentity::displayName($user->display_name, $user->user_login, $resolvedHandle),
                 'tier',
                 $tier,
                 self::resolveMemberAvatarUrl($userId)
@@ -1350,15 +1350,21 @@ final class CardViewService
         ]);
 
         if (empty($userIds)) {
-            return 0;
+            // A handle retired by the login-handle rotation still finds
+            // its member (exact retired-handle match, never a login
+            // lookup). The gate and the payload both come through here,
+            // so they still agree.
+            return \BCC\Trust\Core\Services\HandleService::retiredOwner($handle) ?? 0;
         }
         return (int) $userIds[0];
     }
 
     private static function resolveMemberHandle(\WP_User $user): string
     {
-        $handle = (string) get_user_meta($user->ID, 'bcc_handle', true);
-        return $handle !== '' ? $handle : $user->user_login;
+        return \BCC\Trust\Core\Support\PublicIdentity::handle(
+            (int) $user->ID,
+            get_user_meta($user->ID, 'bcc_handle', true)
+        );
     }
 
     private static function isPageClaimed(int $pageId): bool
@@ -2139,15 +2145,11 @@ final class CardViewService
         if ($user === false) {
             return null;
         }
-        $handle = (string) get_user_meta($userId, 'bcc_handle', true);
-        if ($handle === '') {
-            $handle = (string) $user->user_login;
-        }
-        $name = (string) $user->display_name;
+        $identity = \BCC\Trust\Core\Support\PublicIdentity::forUser($user);
 
         return [
-            'handle' => $handle,
-            'name'   => $name !== '' ? $name : $handle,
+            'handle' => $identity['handle'],
+            'name'   => $identity['display_name'],
         ];
     }
 

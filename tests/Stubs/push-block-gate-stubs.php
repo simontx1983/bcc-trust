@@ -108,6 +108,13 @@ namespace {
             return PushBlockWorld::$transients[$key] ?? false;
         }
     }
+    if (!function_exists('delete_transient')) {
+        function delete_transient(string $key): bool
+        {
+            unset(PushBlockWorld::$transients[$key]);
+            return true;
+        }
+    }
     if (!function_exists('set_transient')) {
         /** @param mixed $value */
         function set_transient(string $key, $value, int $ttl = 0): bool

@@ -15,6 +15,8 @@ use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Core\ValueObjects\PageScore;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Exceptions\RepositoryException;
+use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use DateTimeImmutable;
 use Exception;
 
@@ -50,6 +52,8 @@ if (!defined('ABSPATH')) {
  * }
  */
 class ScoreRepository {
+
+    use GuardsReadFailures;
 
     /** Explicit column list for bcc_trust_scores table. */
     private const COLUMNS = 'page_id, category_id, page_owner_id, total_score, onchain_bonus, contribution_bonus, penalty_adjustment, attestation_bonus, positive_score, negative_score, vote_count, unique_voters, confidence_score, reputation_tier, endorsement_count, last_vote_at, last_calculated_at, fraud_metadata, recalculate_required, recalc_failures';
@@ -108,6 +112,33 @@ class ScoreRepository {
      * Invalidated by invalidateCache() on vote/endorsement changes.
      */
     public function getByPageId(int $pageId, ?int $categoryId = null): ?PageScore {
+        try {
+            return $this->readByPageId($pageId, $categoryId);
+        } catch (RepositoryReadFailure) {
+            // Fail OPEN for display: no score. Logged by runRead(), and NOT
+            // cached, so the next call retries (F-101).
+            return null;
+        }
+    }
+
+    /**
+     * getByPageId() for WRITE paths: a failed read THROWS instead of
+     * reading as "no score row".
+     *
+     * A score write that read null would rebuild the row from defaults —
+     * the recalc zeroes onchain/contribution/attestation bonuses, the
+     * penalty and fraud_metadata; the bonus writer reads its current bonus
+     * as 0 — and then SAVE that. Same query as getByPageId(), stricter
+     * policy (cf. ChainCheckpointRepository::getAll / getAllOrFail).
+     *
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public function getByPageIdOrFail(int $pageId, ?int $categoryId = null): ?PageScore {
+        return $this->readByPageId($pageId, $categoryId);
+    }
+
+    /** @throws RepositoryReadFailure */
+    private function readByPageId(int $pageId, ?int $categoryId): ?PageScore {
         global $wpdb;
 
         // Version-stamped cache key: generation counter is bumped atomically
@@ -122,22 +153,23 @@ class ScoreRepository {
             return $cached === 'null' ? null : $cached;
         }
 
-        if ($categoryId !== null) {
-            $row = $wpdb->get_row(
-                $wpdb->prepare(
-                    "SELECT " . self::columns() . " FROM {$this->table} WHERE page_id = %d AND category_id = %d",
-                    $pageId,
-                    $categoryId
-                )
+        $sql = $categoryId !== null
+            ? $wpdb->prepare(
+                "SELECT " . self::columns() . " FROM {$this->table} WHERE page_id = %d AND category_id = %d",
+                $pageId,
+                $categoryId
+            )
+            : $wpdb->prepare(
+                "SELECT " . self::columns() . " FROM {$this->table} WHERE page_id = %d LIMIT 1",
+                $pageId
             );
-        } else {
-            $row = $wpdb->get_row(
-                $wpdb->prepare(
-                    "SELECT " . self::columns() . " FROM {$this->table} WHERE page_id = %d LIMIT 1",
-                    $pageId
-                )
-            );
-        }
+
+        // F-101: get_row() returns null on a SQL error exactly as for "no
+        // row", and that null used to be cached as 'null' for CACHE_TTL. A
+        // failed read now throws BEFORE anything is cached.
+        $rows = self::runRead((string) $sql, 'getByPageId', true);
+        /** @var ScoreRow|null $row */
+        $row  = $rows[0] ?? null;
 
         if (!$row) {
             wp_cache_set($cacheKey, 'null', self::CACHE_GROUP, self::CACHE_TTL);
@@ -1403,10 +1435,18 @@ class ScoreRepository {
         $readModelTable = \BCC\Trust\Core\Database\TableRegistry::pageReadModel();
 
         // READ MODEL ONLY — DO NOT BYPASS.
-        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is an internal constant
-        $rows = $wpdb->get_results(
-            "SELECT reputation_tier, COUNT(*) as cnt FROM {$readModelTable} GROUP BY reputation_tier"
-        );
+        // F-101: a failed read used to cache all-zero tiers for 60s; it now
+        // returns them for this request only.
+        try {
+            /** @var list<object{reputation_tier: string, cnt: numeric-string}> $rows */
+            $rows = self::runRead(
+                "SELECT reputation_tier, COUNT(*) as cnt FROM {$readModelTable} GROUP BY reputation_tier",
+                __FUNCTION__,
+                true
+            );
+        } catch (RepositoryReadFailure) {
+            return $tiers;
+        }
 
         foreach ($rows as $row) {
             if (isset($tiers[$row->reputation_tier])) {

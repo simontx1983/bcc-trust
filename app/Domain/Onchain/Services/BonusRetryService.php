@@ -160,10 +160,15 @@ final class BonusRetryService
 
             try {
                 // Recalculate from signals + claims (full bonus, not signals only).
-                $signalBonus = array_sum(array_column(
-                    SignalRepository::get_for_page($pageIdInt),
-                    'score_contribution'
-                ));
+                // F-101: a failed signal read must not be written as a
+                // claims-only bonus; count it as a failed attempt instead.
+                try {
+                    $signalRows = SignalRepository::get_for_page($pageIdInt);
+                } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+                    $failed[$pageId] = ($entry['attempts'] ?? 0) + 1;
+                    continue;
+                }
+                $signalBonus = array_sum(array_column($signalRows, 'score_contribution'));
 
                 $ownerId = \BCC\Core\PeepSo\PeepSo::get_page_owner($pageIdInt);
                 $claimBonus = 0.0;

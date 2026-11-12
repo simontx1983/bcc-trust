@@ -38,6 +38,15 @@ final class HandleService
     /** wp_usermeta key for the last-change timestamp (epoch seconds). */
     public const META_HANDLE_LAST_CHANGED = 'bcc_handle_last_changed';
 
+    /**
+     * wp_usermeta key (non-unique, one row per handle) recording a handle
+     * this member held before it was retired, because it equalled their
+     * login. Written only by the login-handle rotation migration. A
+     * retired handle resolves to its member (old links keep working) and
+     * is never available again.
+     */
+    public const META_HANDLE_RETIRED = 'bcc_handle_retired';
+
     /** §B6 cooldown window — 7 days in seconds. */
     public const COOLDOWN_SECONDS = 604800; // 7 * 24 * 60 * 60
 
@@ -75,8 +84,13 @@ final class HandleService
      *
      * Pre-condition: $handle should already be lowercased + trimmed by
      * the caller. The validator does NOT mutate input.
+     *
+     * $assignForUserId is for the INTERNAL handle-assignment path only
+     * (bcc_trust_bch_find_free_variant): it lets that path write the
+     * reserved 'member-{id}' form for that same user. User-facing
+     * callers (signup, rename) never pass it.
      */
-    public function validate(string $handle): ?string
+    public function validate(string $handle, ?int $assignForUserId = null): ?string
     {
         $len = strlen($handle);
         if ($len < self::MIN_LENGTH || $len > self::MAX_LENGTH) {
@@ -102,6 +116,17 @@ final class HandleService
             return self::ERR_RESERVED;
         }
 
+        // 'member-{id}' is the system fallback handle for member {id}
+        // (PublicIdentity). Nobody may CHOOSE one, or they could squat
+        // another member's fallback handle and links. Only the internal
+        // assignment path may write it, and only for its own id
+        // ($assignForUserId).
+        if (preg_match('/^member-(\d+)$/', $handle, $m) === 1
+            && ($assignForUserId === null || (int) $m[1] !== $assignForUserId)
+        ) {
+            return self::ERR_RESERVED;
+        }
+
         return null;
     }
 
@@ -119,6 +144,14 @@ final class HandleService
      */
     public function isAvailable(string $handle, ?int $excludeUserId = null): bool
     {
+        // A retired handle stays reserved for good. Old /u/<retired>
+        // links resolve to the member who held it, so handing it to
+        // anyone (even that member, since it was their login) would
+        // hijack those links or put the login back on show.
+        if (self::retiredOwner($handle) !== null) {
+            return false;
+        }
+
         $users = get_users([
             'meta_key'   => self::META_HANDLE,
             'meta_value' => $handle,
@@ -157,5 +190,29 @@ final class HandleService
     public function getHandle(int $userId): string
     {
         return (string) get_user_meta($userId, self::META_HANDLE, true);
+    }
+
+    /**
+     * The user who held $handle before it was retired, or null when it
+     * was never retired. Exact match only: this resolves the specific
+     * handles the login-handle rotation retired, never a login lookup.
+     */
+    public static function retiredOwner(string $handle): ?int
+    {
+        $handle = strtolower(trim($handle));
+        if ($handle === '') {
+            return null;
+        }
+        $users = get_users([
+            'meta_key'   => self::META_HANDLE_RETIRED,
+            'meta_value' => $handle,
+            'fields'     => 'ID',
+            'number'     => 1,
+        ]);
+        if ($users === []) {
+            return null;
+        }
+        $id = (int) $users[0];
+        return $id > 0 ? $id : null;
     }
 }

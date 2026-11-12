@@ -192,4 +192,26 @@ final class NftSelectionService
             . ($item['token_id'] ?? '')
         );
     }
+
+    /**
+     * F-165: stored selection rows as `GET /nft-selections` emits them. The
+     * image snapshot predates any image rule (it was copied raw from the
+     * holdings list), so it is sanitized and moved onto the configured IPFS
+     * gateway at read time, with `image_fallback_url` beside it.
+     *
+     * @param list<object> $rows
+     * @return list<array<string, mixed>>
+     */
+    public static function presentSelections(array $rows): array
+    {
+        $items = [];
+        foreach ($rows as $row) {
+            $item  = get_object_vars($row);
+            $image = \BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules::presentImage($item['image_url'] ?? null);
+            $item['image_url']          = $image['url'];
+            $item['image_fallback_url'] = $image['fallback_url'];
+            $items[] = $item;
+        }
+        return $items;
+    }
 }

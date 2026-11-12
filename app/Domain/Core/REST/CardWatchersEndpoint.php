@@ -20,6 +20,7 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Services\CardWatchersService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\ProfileAccess;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -103,8 +104,19 @@ final class CardWatchersEndpoint
         $limit  = (int) $request->get_param('limit');
         $viewer = get_current_user_id();
 
+        // 'validator_card' → 'validator', etc.: the kind the target page must be.
+        $cardKind = substr($targetKind, 0, -strlen('_card'));
+
         $data = (new CardWatchersService())
-            ->listWatchers($targetId, $viewer, $offset, $limit);
+            ->listWatchers($targetId, $viewer, $offset, $limit, $cardKind);
+
+        // F-26: the owner's profile is not viewable by this viewer (private,
+        // members/friends-only, or suspended) → the same refusal
+        // /users/:handle/followers gives. no-store: the answer depends on who
+        // is asking, so it must never sit in a shared cache.
+        if ($data === null) {
+            return self::noStore(ProfileAccess::forbidden());
+        }
 
         $response = ApiResponse::ok($data);
         if ($viewer > 0) {

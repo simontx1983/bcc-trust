@@ -232,7 +232,7 @@ if (!function_exists('bcc_trust_drop_scanner_schema')) {
         if (!get_option('bcc_trust_allow_drop_scanner_schema')
             && get_transient('bcc_trust_scanner_drop_unarmed_backoff')
         ) {
-            return BCC_TRUST_MIGRATION_INCOMPLETE;
+            return BCC_TRUST_MIGRATION_WAITING;
         }
 
         global $wpdb;
@@ -303,16 +303,18 @@ if (!function_exists('bcc_trust_drop_scanner_schema')) {
         //
         //   wp option update bcc_trust_allow_drop_scanner_schema 1
         //
-        // Unarmed, it changes nothing and returns INCOMPLETE (no stamp), so
+        // Unarmed, it changes nothing and returns WAITING (no stamp), so
         // it runs the moment it is armed. A database with nothing left to
         // drop (fresh install, or already dropped) completes without arming
         // — the gate guards destruction, not bookkeeping. Production and
         // staging are already stamped done and never reach this.
         if (!$nothingToDo && !get_option('bcc_trust_allow_drop_scanner_schema')) {
-            // The runner retries an INCOMPLETE migration every request. The
-            // backoff set here both throttles this log line to hourly and,
-            // via the check at the top of this function, skips the whole
-            // information_schema inventory while unarmed (#418 review L2).
+            // WAITING, not INCOMPLETE: the runner neither backs this off nor
+            // error-logs it (#458 review L1), so arming still takes effect on
+            // the next request. The backoff set here is the migration's own:
+            // it throttles this warning to hourly and, via the check at the
+            // top of this function, skips the information_schema inventory
+            // while unarmed (#418 review L2).
             set_transient('bcc_trust_scanner_drop_unarmed_backoff', 1, HOUR_IN_SECONDS);
             if ($hasLogger) {
                 \BCC\Core\Log\Logger::warning(
@@ -320,7 +322,7 @@ if (!function_exists('bcc_trust_drop_scanner_schema')) {
                     $inventory
                 );
             }
-            return BCC_TRUST_MIGRATION_INCOMPLETE;
+            return BCC_TRUST_MIGRATION_WAITING;
         }
 
         // ── 2. THE INDEX FIRST, EXPLICITLY ──────────────────────────────

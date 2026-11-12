@@ -368,14 +368,15 @@ final class ScannerSchemaDropIntegrationTest extends TestCase
 
     /**
      * UNARMED, a populated scanner schema is left exactly as it is and the
-     * migration reports INCOMPLETE (no stamp) — a restored or cloned
-     * database cannot lose the three tables on its first web request.
+     * migration reports WAITING (no stamp, and no runner backoff — it waits
+     * on an operator, it has not failed; #458 review L1) — a restored or
+     * cloned database cannot lose the three tables on its first web request.
      */
-    public function testAnUnarmedDropChangesNothingAndIsIncomplete(): void
+    public function testAnUnarmedDropChangesNothingAndIsWaiting(): void
     {
         \delete_option('bcc_trust_allow_drop_scanner_schema');
 
-        self::assertSame(BCC_TRUST_MIGRATION_INCOMPLETE, bcc_trust_drop_scanner_schema());
+        self::assertSame(BCC_TRUST_MIGRATION_WAITING, bcc_trust_drop_scanner_schema());
 
         foreach (self::DROPPED_TABLES as $bare) {
             self::assertTrue($this->tableExists($bare), "{$bare} must survive an unarmed run");
@@ -388,11 +389,11 @@ final class ScannerSchemaDropIntegrationTest extends TestCase
         self::assertContains(self::CHAIN_COLUMN, $this->columns('bcc_chains'));
     }
 
-    /** Arming it afterwards is all it takes — the INCOMPLETE run retries. */
+    /** Arming it afterwards is all it takes — the WAITING run retries. */
     public function testArmingAfterAnUnarmedRunCompletesTheDrop(): void
     {
         \delete_option('bcc_trust_allow_drop_scanner_schema');
-        self::assertSame(BCC_TRUST_MIGRATION_INCOMPLETE, bcc_trust_drop_scanner_schema());
+        self::assertSame(BCC_TRUST_MIGRATION_WAITING, bcc_trust_drop_scanner_schema());
 
         \update_option('bcc_trust_allow_drop_scanner_schema', '1');
         self::assertSame(BCC_TRUST_MIGRATION_COMPLETE, bcc_trust_drop_scanner_schema());
@@ -419,10 +420,10 @@ final class ScannerSchemaDropIntegrationTest extends TestCase
     {
         $wpdb = $GLOBALS['wpdb'];
         \delete_option('bcc_trust_allow_drop_scanner_schema');
-        self::assertSame(BCC_TRUST_MIGRATION_INCOMPLETE, bcc_trust_drop_scanner_schema());
+        self::assertSame(BCC_TRUST_MIGRATION_WAITING, bcc_trust_drop_scanner_schema());
 
         $wpdb->resetQueryCount();
-        self::assertSame(BCC_TRUST_MIGRATION_INCOMPLETE, bcc_trust_drop_scanner_schema());
+        self::assertSame(BCC_TRUST_MIGRATION_WAITING, bcc_trust_drop_scanner_schema());
         self::assertSame(0, $wpdb->queryCount, 'the backed-off unarmed run must not touch the database');
 
         // Anti-vacuity: arming takes effect immediately, backoff or not.

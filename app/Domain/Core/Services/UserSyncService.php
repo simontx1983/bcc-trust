@@ -66,6 +66,21 @@ class UserSyncService
     }
 
     /**
+     * user_info columns the trust engine owns. A sync writes them only when
+     * it CREATES the row, never on an existing one (see syncSingleUser()).
+     */
+    public const TRUST_OWNED_COLUMNS = [
+        'is_suspended',
+        'fraud_score',
+        'trust_rank',
+        'risk_level',
+        'votes_cast',
+        'endorsements_given',
+        'device_fingerprint',
+        'automation_score',
+    ];
+
+    /**
      * Sync a single WP_User to the user_info table.
      *
      * @param array<string, mixed> $counts Pre-fetched batch counts from UserSyncRepository.
@@ -107,7 +122,11 @@ class UserSyncService
             'user_id'            => $user->ID,
             'user_login'         => $user->user_login,
             'user_email'         => $user->user_email,
-            'display_name'       => $user->display_name ?: $user->user_login,
+            'display_name'       => \BCC\Trust\Core\Support\PublicIdentity::displayName(
+                $user->display_name,
+                $user->user_login,
+                \BCC\Trust\Core\Support\PublicIdentity::handle((int) $user->ID, get_user_meta((int) $user->ID, 'bcc_handle', true))
+            ),
             'registered'         => $user->user_registered,
             'usr_last_activity'  => $peepso_user ? $peepso_user->usr_last_activity : null,
             'usr_views'          => $peepso_user ? (int) $peepso_user->usr_views : 0,
@@ -129,6 +148,21 @@ class UserSyncService
             'automation_score'   => (int) get_user_meta($user->ID, 'bcc_trust_automation_score', true),
         ];
 
+        // ⚠⚠ TRUST STATE IS NEVER OVERWRITTEN BY A SYNC. These columns are
+        // owned by the trust engine (suspension, fraud scoring, rank, vote
+        // and fingerprint signals) and written only by UserInfoRepository's
+        // own methods. The values above come from user meta that NOTHING
+        // writes, so writing them on an existing row reset them: every login,
+        // profile update (including the email-change confirmation) and admin
+        // "sync users" run set is_suspended = 0 (a suspended member could
+        // un-suspend themselves) and zeroed fraud_score, automation_score,
+        // votes_cast and the fingerprint. They are written ONLY when the row
+        // is created, where those reads yield the column defaults.
+        $exists = $this->userInfoRepo->exists((int) $user->ID);
+        if ($exists) {
+            $data = array_diff_key($data, array_flip(self::TRUST_OWNED_COLUMNS));
+        }
+
         $formats = [];
         foreach ($data as $key => $value) {
             if (in_array($key, [
@@ -146,7 +180,7 @@ class UserSyncService
             }
         }
 
-        if ($this->userInfoRepo->exists((int) $user->ID)) {
+        if ($exists) {
             $this->userInfoRepo->updateByUserId((int) $user->ID, $data, $formats);
         } else {
             $this->userInfoRepo->insert($data, $formats);

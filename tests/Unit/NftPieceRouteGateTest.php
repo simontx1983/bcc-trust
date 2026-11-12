@@ -162,9 +162,37 @@ final class NftPieceRouteGateTest extends TestCase
         self::assertSame(200, $r->get_status(), var_export($r->get_data(), true));
         $data = $r->get_data()['data'] ?? $r->get_data();
 
-        self::assertNull($data['image_url'], 'ipfs:// cannot render and has no gateway rewrite: null placeholder');
+        self::assertNull($data['image_url'], 'an ipfs:// value that is not a valid CID cannot be rewritten: null placeholder');
         self::assertSame('https://cdn.example/7-thumb.png', $data['image_url_thumb'], 'an https image is kept');
         self::assertSame(0, $GLOBALS['__bcc_np']['fetcher_calls'], 'a fresh cache row needs no upstream call');
+    }
+
+    public function testAnIpfsTokenImageIsServedFromTheGatewayWithAnIpfsIoFallback(): void
+    {
+        // F-165: a valid ipfs:// image (raw in a cache row written before the
+        // write-time rule) is presented on BCC_IPFS_GATEWAY with ipfs.io as
+        // the client's fallback.
+        define('BCC_IPFS_GATEWAY', 'amber-perfect-butterfly-459.mypinata.cloud');
+        $GLOBALS['__bcc_np']['collections']['1|' . self::EVM_CONTRACT] = (object) [
+            'id' => 9, 'collection_name' => 'Demo', 'token_standard' => 'ERC-721', 'is_verified' => 0,
+        ];
+        $GLOBALS['__bcc_np']['pieces']['1|' . self::EVM_CONTRACT . '|9'] = (object) [
+            'name'            => 'Piece 9',
+            'description'     => null,
+            'image_url'       => 'ipfs://QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG/9.png',
+            'image_url_thumb' => 'https://cdn.example/9-thumb.png',
+            'attributes_json' => '[]',
+            'expires_at'      => gmdate('Y-m-d H:i:s', time() + 3600),
+        ];
+
+        $r = self::call('ethereum', self::EVM_CONTRACT, '9');
+        self::assertSame(200, $r->get_status(), var_export($r->get_data(), true));
+        $data = $r->get_data()['data'] ?? $r->get_data();
+
+        self::assertSame('https://amber-perfect-butterfly-459.mypinata.cloud/ipfs/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG/9.png', $data['image_url']);
+        self::assertSame('https://ipfs.io/ipfs/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG/9.png', $data['image_fallback_url']);
+        self::assertSame('https://cdn.example/9-thumb.png', $data['image_url_thumb'], 'a non-IPFS thumb is untouched');
+        self::assertNull($data['image_url_thumb_fallback_url']);
     }
 
     public function testJavascriptAndHttpImagesAreDropped(): void

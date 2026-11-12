@@ -769,26 +769,31 @@ final class GatedGroupProvisioningService {
     }
 
     /**
-     * Remove a community that was created but could not be gated.
+     * F-130: run $critical under the SAME per-collection lock that
+     * provisioning takes, so a delete cannot interleave with a create (the
+     * delete's "no community?" check and its DELETE would otherwise straddle
+     * a provision and orphan the new community).
      *
-     * ── WHY THIS IS NOT JUST `wp_trash_post()` ──────────────────────────
-     * Trashing leaves the post, its meta, the membership row and the album
-     * directory in place, and PeepSo's own `findGroupForCollection()` used to
-     * match a trashed group — so "trashed" was not provably "gone". This
-     * mirrors PeepSo's OWN supported delete cascade
-     * (peepso-groups/classes/api/groupajax.php:169-185 and
-     * classes/admin/groupslisttable.php:257-270): remove the uploads
-     * directory, hard-delete the post, then clean the orphan the cascade
-     * leaves behind.
+     * Fails closed: when the lock is not acquired $critical does not run and
+     * `acquired` is false. Exactly one release per acquire, in `finally`.
      *
-     * ── THE ONE THING THAT CANNOT BE UNDONE ─────────────────────────────
-     * `peepso_action_group_create` has already fired. If the site has
-     * `groups_create_notify_admin` enabled, an administrator notification
-     * e-mail was sent and cannot be recalled. That is reported, not hidden:
-     * the compensation audit records whether the notify option was on, so an
-     * operator reading the trail knows an e-mail exists for a community that
-     * does not.
+     * @template T
+     * @param callable(): T $critical
+     * @return array{acquired: bool, result: T|null}
      */
+    public static function withCollectionLock(int $collectionId, callable $critical): array
+    {
+        $lock = self::lockName($collectionId);
+        if (!self::acquire($lock)) {
+            return ['acquired' => false, 'result' => null];
+        }
+        try {
+            return ['acquired' => true, 'result' => $critical()];
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
+        }
+    }
+
     /**
      * The per-collection advisory lock name.
      *
@@ -861,6 +866,27 @@ final class GatedGroupProvisioningService {
         ];
     }
 
+    /**
+     * Remove a community that was created but could not be gated.
+     *
+     * ── WHY THIS IS NOT JUST `wp_trash_post()` ──────────────────────────
+     * Trashing leaves the post, its meta, the membership row and the album
+     * directory in place, and PeepSo's own `findGroupForCollection()` used to
+     * match a trashed group — so "trashed" was not provably "gone". This
+     * mirrors PeepSo's OWN supported delete cascade
+     * (peepso-groups/classes/api/groupajax.php:169-185 and
+     * classes/admin/groupslisttable.php:257-270): remove the uploads
+     * directory, hard-delete the post, then clean the orphan the cascade
+     * leaves behind.
+     *
+     * ── THE ONE THING THAT CANNOT BE UNDONE ─────────────────────────────
+     * `peepso_action_group_create` has already fired. If the site has
+     * `groups_create_notify_admin` enabled, an administrator notification
+     * e-mail was sent and cannot be recalled. That is reported, not hidden:
+     * the compensation audit records whether the notify option was on, so an
+     * operator reading the trail knows an e-mail exists for a community that
+     * does not.
+     */
     private function compensate(int $groupId, int $collectionId, int $ownerId, int $chainId): bool
     {
         $notes = [];
@@ -1382,6 +1408,12 @@ final class GatedGroupProvisioningService {
         // gm_user_id = 0 owner row nobody can ever act as. So the requester
         // is made the current user for the constructor alone, and the
         // previous identity is restored on every path, including a throw.
+        //
+        // ⚠ Safe HERE only because $ownerId is a re-verified administrator
+        // (resolveRequesterAsOwner: get_userdata + user_can manage_options)
+        // and the swap spans one PeepSo constructor. Do not copy this pattern
+        // for a non-admin owner: every hook fired inside the window runs AS
+        // that user, with their capabilities (#457 review L2).
         $previousUserId = get_current_user_id();
         $swapped        = $previousUserId !== $ownerId;
 

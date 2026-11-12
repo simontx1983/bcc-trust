@@ -963,12 +963,11 @@ final class ModerationQueueService
         $out = [];
         foreach ($users as $u) {
             $id        = (int) $u->ID;
-            $handleRaw = get_user_meta($id, 'bcc_handle', true);
-            $handle    = is_string($handleRaw) && $handleRaw !== '' ? $handleRaw : (string) $u->user_login;
+            $handle    = \BCC\Trust\Core\Support\PublicIdentity::handle($id, get_user_meta($id, 'bcc_handle', true));
             $out[$id]  = [
                 'user_id'      => $id,
                 'handle'       => $handle,
-                'display_name' => $u->display_name !== '' ? (string) $u->display_name : (string) $u->user_login,
+                'display_name' => \BCC\Trust\Core\Support\PublicIdentity::displayName($u->display_name, $u->user_login, $handle),
                 'profile_url'  => $handle !== '' ? '/u/' . $handle : '',
             ];
         }

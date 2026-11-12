@@ -1190,6 +1190,12 @@ final class NftHoldingsRepository
             $format[] = '%d';
         }
 
+        // F-165: the token image is stored canonical (https only, IPFS on
+        // ipfs.io). It was stored raw, so http:// and ipfs:// reached <img>.
+        if (array_key_exists('image_url', $fields)) {
+            $fields['image_url'] = \BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules::sanitizeImageUrl($fields['image_url']);
+        }
+
         $allowed = ['name', 'image_url', 'metadata_uri', 'collection_name'];
         foreach ($allowed as $key) {
             if (array_key_exists($key, $fields)) {

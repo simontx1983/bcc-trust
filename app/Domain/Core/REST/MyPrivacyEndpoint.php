@@ -91,6 +91,11 @@ final class MyPrivacyEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Per-ACCOUNT limit on cheap self-scoped writes (F-134).
+        if (!\BCC\Core\Security\Throttle::allow('me_write', \BCC\Trust\Core\REST\Auth\AuthSupport::ME_WRITE_RATE_LIMIT, 60, 'me_write:' . $userId)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please slow down.', 429);
+        }
+
         // Filter to known keys + cast to bool. WP's REST schema already
         // type-coerces (rest_sanitize_value_from_schema) but we re-check
         // here so a malformed direct call still produces a clean result.
