@@ -769,6 +769,32 @@ final class GatedGroupProvisioningService {
     }
 
     /**
+     * F-130: run $critical under the SAME per-collection lock that
+     * provisioning takes, so a delete cannot interleave with a create (the
+     * delete's "no community?" check and its DELETE would otherwise straddle
+     * a provision and orphan the new community).
+     *
+     * Fails closed: when the lock is not acquired $critical does not run and
+     * `acquired` is false. Exactly one release per acquire, in `finally`.
+     *
+     * @template T
+     * @param callable(): T $critical
+     * @return array{acquired: bool, result: T|null}
+     */
+    public static function withCollectionLock(int $collectionId, callable $critical): array
+    {
+        $lock = self::lockName($collectionId);
+        if (!self::acquire($lock)) {
+            return ['acquired' => false, 'result' => null];
+        }
+        try {
+            return ['acquired' => true, 'result' => $critical()];
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock);
+        }
+    }
+
+    /**
      * Remove a community that was created but could not be gated.
      *
      * ── WHY THIS IS NOT JUST `wp_trash_post()` ──────────────────────────
