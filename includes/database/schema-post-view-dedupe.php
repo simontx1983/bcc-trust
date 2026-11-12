@@ -9,7 +9,8 @@
  * it holds is a keyed one-way hash, never an identity.
  *
  * ── THE HASH ─────────────────────────────────────────────────────────
- *   viewer_hash = HMAC-SHA256(key = BCC_ENCRYPTION_KEY, msg = day || subject)
+ *   viewer_hash = HMAC-SHA256(key = BCC_ENCRYPTION_KEY,
+ *                             msg = 'viewer:' || day || subject)
  *                 truncated to 16 bytes
  *
  * `subject` is the viewer's user id when signed in, and the /24-or-/48

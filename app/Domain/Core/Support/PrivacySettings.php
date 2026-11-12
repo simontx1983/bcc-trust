@@ -17,6 +17,16 @@
  * — it's a self-only setting that affects search results, not the
  * profile page render. It only ships through /me/privacy.
  *
+ * ⭐ ONE FLAG FOR "HIDDEN FROM MEMBER SEARCH" (F-257, option A).
+ * `discovery_optout` (here, /me/privacy) and `hide_from_search` (PeepSo's
+ * `peepso_is_hide_profile_from_user_listing`, /me/profile-prefs) were two
+ * settings with one meaning, stored apart, so they could disagree.
+ * PeepSo's key is now the single source of truth: `discovery_optout` is an
+ * ALIAS that reads and writes it (KEY_ALIASES), the one-shot migration
+ * fold_discovery_optout_v1 copied every ON opt-out into it, and search
+ * excludes on it alone. The legacy `bcc_privacy_discovery_optout` rows are
+ * left in place but nothing reads them once the migration is done.
+ *
  * Boolean-truthy parsing (FILTER_VALIDATE_BOOLEAN) follows the same
  * convention as UserViewService::metaFlag — wp_usermeta stores strings,
  * so a `(bool)` cast on "false" or "0" surfaces phantom truthy values.
@@ -89,7 +99,26 @@ final class PrivacySettings
      * `MyProfilePrefsEndpoint` so PeepSo's surfaces honour it too. The
      * `bcc_privacy_*` namespace is for keys BCC owns outright.
      */
-    private const HIDE_FROM_LISTING_META = 'peepso_is_hide_profile_from_user_listing';
+    public const HIDE_FROM_LISTING_META = 'peepso_is_hide_profile_from_user_listing';
+
+    /**
+     * Public keys stored under a meta key other than `bcc_privacy_<key>`.
+     * `discovery_optout` IS `hide_from_search` (F-257): the field stays on
+     * /me/privacy for compatibility, but reads and writes the one flag.
+     */
+    private const KEY_ALIASES = [
+        'discovery_optout' => self::HIDE_FROM_LISTING_META,
+    ];
+
+    /** The pre-F-257 discovery opt-out key. Read only until the fold migration is done. */
+    public const LEGACY_DISCOVERY_OPTOUT_META = 'bcc_privacy_discovery_optout';
+
+    /**
+     * Done-marker of fold_discovery_optout_v1 (migration-runner.php). Until
+     * it is set, search ALSO honours the legacy key, so nobody hidden before
+     * the deploy is listed while the migration is still copying.
+     */
+    public const FOLD_DONE_OPTION = 'bcc_trust_discovery_optout_folded';
 
     /**
      * Read the §K2 flags for the user view-model. Always returns a
@@ -151,7 +180,7 @@ final class PrivacySettings
             }
             // Store as "1" / "0" strings (matches WP's boolean meta convention
             // and round-trips through FILTER_VALIDATE_BOOLEAN cleanly).
-            update_user_meta($userId, self::META_PREFIX . $key, $value ? '1' : '0');
+            update_user_meta($userId, self::metaKey($key), $value ? '1' : '0');
         }
     }
 
@@ -163,17 +192,23 @@ final class PrivacySettings
         if ($userId <= 0) {
             return false;
         }
-        $raw = get_user_meta($userId, self::META_PREFIX . $key, true);
+        $raw = get_user_meta($userId, self::metaKey($key), true);
         return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
     }
 
+    /** The wp_usermeta key a public flag is stored under. */
+    private static function metaKey(string $key): string
+    {
+        return self::KEY_ALIASES[$key] ?? self::META_PREFIX . $key;
+    }
+
     /**
-     * Hook the discovery_optout flag into PeepSo's user-search filter.
+     * Hook the hidden-from-search flag into PeepSo's user-search filter.
      *
      * Called once at plugin boot. PeepSo's UserSearch class fires
      * `peepso_user_search_args` to let consumers narrow the WP_User_Query
      * args; we splice in a `meta_query` clause that excludes any user
-     * with bcc_privacy_discovery_optout = '1'.
+     * whose hide_from_search (= discovery_optout, F-257) is on.
      *
      * Stays inside bcc-trust per §A4 — privacy decisions live in one
      * place, even when they affect a sibling plugin's surface.
@@ -293,18 +328,6 @@ final class PrivacySettings
      */
     public static function filterPeepSoSearchArgs(array $args): array
     {
-        $optoutClause = [
-            'relation' => 'OR',
-            [
-                'key'     => self::META_PREFIX . 'discovery_optout',
-                'compare' => 'NOT EXISTS',
-            ],
-            [
-                'key'     => self::META_PREFIX . 'discovery_optout',
-                'value'   => '1',
-                'compare' => '!=',
-            ],
-        ];
 
         // ── hide_from_search, honoured unconditionally ────────────────
         //
@@ -321,9 +344,11 @@ final class PrivacySettings
         // So this clause is unconditional and ADDITIVE — if the PeepSo
         // option is ever enabled, both clauses apply and agree.
         //
-        // Same NOT-EXISTS-OR-FALSY shape as the opt-out above, for the
-        // same reason: users who never touched the setting have no meta
-        // row at all, and a bare `value != '1'` would exclude them.
+        // NOT-EXISTS-OR-FALSY: users who never touched the setting have
+        // no meta row at all, and a bare `value != '1'` would exclude them.
+        //
+        // F-257: this is the ONE hidden-from-search flag; /me/privacy's
+        // `discovery_optout` reads and writes this same key.
         $hideClause = [
             'relation' => 'OR',
             [
@@ -360,7 +385,26 @@ final class PrivacySettings
             return $args;
         }
 
-        $bccClauses = ['relation' => 'AND', $optoutClause, $hideClause];
+        $bccClauses = ['relation' => 'AND', $hideClause];
+
+        // F-257 rollout: until fold_discovery_optout_v1 has copied every
+        // legacy opt-out into the one flag, keep honouring the legacy key
+        // too, so nobody hidden before the deploy is listed meanwhile. A
+        // migration that never completes keeps this on: fail closed.
+        if (!get_option(self::FOLD_DONE_OPTION)) {
+            $bccClauses[] = [
+                'relation' => 'OR',
+                [
+                    'key'     => self::LEGACY_DISCOVERY_OPTOUT_META,
+                    'compare' => 'NOT EXISTS',
+                ],
+                [
+                    'key'     => self::LEGACY_DISCOVERY_OPTOUT_META,
+                    'value'   => '1',
+                    'compare' => '!=',
+                ],
+            ];
+        }
 
         if (isset($args['meta_query']) && is_array($args['meta_query'])) {
             $existing = $args['meta_query'];
