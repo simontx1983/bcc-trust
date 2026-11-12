@@ -127,7 +127,8 @@ final class HallsChainPreviewTest extends TestCase
         $out = HallsService::previewFromRows([], [self::collectionRow()]);
 
         self::assertSame(
-            ['contract_address', 'id', 'image_url', 'name'],
+            // F-187 (contract additive): image_fallback_url, the ipfs.io copy of an IPFS cover.
+            ['contract_address', 'id', 'image_fallback_url', 'image_url', 'name'],
             self::sortedKeys($out['collections'][0])
         );
     }

@@ -287,8 +287,21 @@ final class PageDiscoveryRepository
             $params       = array_merge($params, $types);
         }
         if ($verified_only) {
-            $join   .= " INNER JOIN {$user_info_table} ui ON ui.user_id = COALESCE(pm_owner.meta_value, p.post_author) AND ui.is_verified = 1";
+            // ⚠⚠ F-144: `pm_owner` IS JOINED FIRST, AND THE ORDER IS THE BUG.
+            // The INNER JOIN below reads `pm_owner.meta_value` in its ON
+            // clause, and SQL only lets a join reference aliases introduced
+            // BEFORE it. With these two the other way round MySQL raised
+            // "Unknown column 'pm_owner.meta_value' in 'on clause'" and the
+            // whole query failed.
+            //
+            // ⚠ Which was INVISIBLE, because the failure arrived as emptiness:
+            // the COUNT below is read with `get_var()`, a failed read gives
+            // null, `(int) null` is 0, and the `$total === 0` branch returns
+            // an empty page. So "verified only" discovery answered "there are
+            // no verified pages" on every request that reached this fallback,
+            // with nothing logged and nothing thrown.
             $join   .= " LEFT JOIN {$wpdb->postmeta} pm_owner ON p.ID = pm_owner.post_id AND pm_owner.meta_key = '_bcc_page_owner'";
+            $join   .= " INNER JOIN {$user_info_table} ui ON ui.user_id = COALESCE(pm_owner.meta_value, p.post_author) AND ui.is_verified = 1";
         }
         if ($search !== '') {
             $like     = '%' . $wpdb->esc_like($search) . '%';
@@ -329,11 +342,32 @@ final class PageDiscoveryRepository
             + (COALESCE(ps.unique_voters, 0) / GREATEST(1, COALESCE(ps.vote_count, 1))) * 5.0
         )";
 
-        $orderby = match ($sort) {
-            'endorsements' => 'COALESCE(ps.endorsement_count, 0) DESC',
-            'newest'       => 'p.post_date DESC',
-            'followers'    => 'follower_count DESC',
-            default        => $fallback_ranking . ' DESC',
+        // ⚠⚠ THE RANKING EXPRESSION HAS TO BE SELECTED, NOT MERELY ORDERED
+        // BY. The main statement below is a `SELECT DISTINCT`, and MySQL 8
+        // REFUSES to order a DISTINCT result by an expression over columns
+        // the statement does not carry:
+        //
+        //   Expression #1 of ORDER BY clause is not in SELECT list,
+        //   references column 'ps.total_score' which is not in SELECT list;
+        //   this is incompatible with DISTINCT
+        //
+        // The DEFAULT sort was exactly such an expression, so the main read
+        // failed for every caller that did not ask for another sort — and it
+        // failed INVISIBLY, because an empty row set is indistinguishable
+        // from "no page matched". F-144's join fix alone still returned
+        // nothing on MySQL 8 for this reason. MariaDB accepts the statement,
+        // which is why only one of CI's two engines ever objected.
+        //
+        // ⭐ Every branch now names something the statement actually selects,
+        // which removes the class rather than this instance: a sort added
+        // later cannot reintroduce the fault without first adding a column.
+        // The pair is produced by ONE match so the ORDER BY and the SELECT
+        // cannot drift apart.
+        [$orderby, $ranking_select] = match ($sort) {
+            'endorsements' => ['endorsements DESC', ''],
+            'newest'       => ['p.post_date DESC', ''],
+            'followers'    => ['follower_count DESC', ''],
+            default        => ['ranking_score DESC', ", {$fallback_ranking} AS ranking_score"],
         };
 
         $follower_select = "(SELECT CAST(um.meta_value AS UNSIGNED)
@@ -353,7 +387,26 @@ final class PageDiscoveryRepository
             $count_sql = $wpdb->prepare($count_sql, ...$params);
         }
 
+        self::clearLastError();
         $total = (int) $wpdb->get_var($count_sql);
+
+        // ⚠⚠ A FAILED READ IS NOT AN EMPTY RESULT, and telling them apart is
+        // the other half of F-144. `get_var()` answers null on failure and
+        // `(int) null` is 0, which is indistinguishable from "nothing
+        // matched" — that is how a broken join went unnoticed.
+        //
+        // ⚠ This logs and still returns empty, which is deliberately NOT a
+        // behaviour change: whether a discovery list should answer
+        // "unavailable" rather than "empty" when the database is unreadable
+        // is a contract decision for the route, not something to slip into a
+        // repository fix. What changes here is that the next occurrence is
+        // VISIBLE instead of silent.
+        if (self::readFailed()) {
+            self::logReadFailure('discovery count', $verified_only);
+
+            return ['rows' => [], 'total' => 0, 'pages' => 0, 'page' => $page];
+        }
+
         $pages = $total > 0 ? (int) ceil($total / $limit) : 0;
 
         if ($total === 0) {
@@ -367,6 +420,7 @@ final class PageDiscoveryRepository
                 COALESCE(ps.endorsement_count, 0) AS endorsements,
                 COALESCE(ps.unique_voters, 0) AS unique_voters,
                 {$follower_select}
+                {$ranking_select}
             FROM {$wpdb->posts} p
             {$join}
             WHERE {$where_clause}
@@ -375,7 +429,18 @@ final class PageDiscoveryRepository
         // F-143: unique `p.ID DESC` tiebreak — same reason as queryFromReadModel().
 
         $all_params = array_merge($params, [$limit, $offset]);
-        $rows       = $wpdb->get_results($wpdb->prepare($main_sql, ...$all_params));
+
+        self::clearLastError();
+        $rows = $wpdb->get_results($wpdb->prepare($main_sql, ...$all_params));
+
+        // ⚠ Same reasoning as the COUNT above. `get_results()` answers null
+        // on failure in some wpdb paths and `[]` in others, and neither is
+        // distinguishable from "no rows" to a caller — so the failure is
+        // logged rather than inferred from the shape of the result.
+        if (self::readFailed()) {
+            self::logReadFailure('discovery rows', $verified_only);
+            $rows = [];
+        }
 
         return [
             'rows'  => $rows,
@@ -383,6 +448,71 @@ final class PageDiscoveryRepository
             'pages' => $pages,
             'page'  => $page,
         ];
+    }
+
+    /**
+     * Clear `wpdb::$last_error` so the next read's own failure is what is
+     * observed.
+     *
+     * ⚠ A STALE ERROR FROM AN EARLIER QUERY WOULD OTHERWISE READ AS THIS
+     * ONE'S. `last_error` persists until something overwrites it, so a check
+     * without a preceding clear reports whatever failed most recently
+     * anywhere in the request.
+     */
+    private static function clearLastError(): void
+    {
+        global $wpdb;
+
+        $wpdb->last_error = '';
+    }
+
+    /**
+     * Did the read just performed fail?
+     *
+     * ⚠ FACTORED OUT RATHER THAN INLINED. Written inline as
+     * `$wpdb->last_error = ''; ... if ($wpdb->last_error !== '')`, PHPStan
+     * narrows the property to the empty string at the assignment and reports
+     * the comparison as always-false — so the check reads as dead code and
+     * invites deletion. Through a method call the narrowing does not carry.
+     */
+    private static function readFailed(): bool
+    {
+        global $wpdb;
+
+        return (string) $wpdb->last_error !== '';
+    }
+
+    /**
+     * Record a failed discovery read.
+     *
+     * ⚠⚠ THE STATEMENT IS DELIBERATELY NOT LOGGED. By the time either read
+     * fails, `$count_sql` / `$main_sql` have been through
+     * `wpdb::prepare()`, which SUBSTITUTES the values rather than leaving
+     * placeholders — so the string carries the caller's `$search` term
+     * verbatim, which is free-text member input. `Logger` scrubs context
+     * values by KEY (`token`, `secret`, `wallet`, `address`, …); a key
+     * named `sql` matches none of them, so the term would reach the log
+     * file intact. (An earlier revision of this method logged it, and the
+     * docblock justifying that was simply wrong about `prepare()`.)
+     *
+     * ⭐ `$what` and `$verifiedOnly` identify the query without carrying any
+     * of its values. This method assembles its joins from exactly those two
+     * facts, and `$verified_only` is the branch F-144 broke — so the pair is
+     * the whole diagnostic, and the one that matters is a bool.
+     */
+    private static function logReadFailure(string $what, bool $verifiedOnly): void
+    {
+        global $wpdb;
+
+        if (!class_exists('\\BCC\\Core\\Log\\Logger')) {
+            return;
+        }
+
+        \BCC\Core\Log\Logger::error('[bcc-trust] page-discovery read failed', [
+            'what'          => $what,
+            'error'         => (string) $wpdb->last_error,
+            'verified_only' => $verifiedOnly,
+        ]);
     }
 
     /**

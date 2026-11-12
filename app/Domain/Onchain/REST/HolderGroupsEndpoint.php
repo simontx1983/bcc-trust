@@ -495,7 +495,9 @@ final class HolderGroupsEndpoint
                 'chain'     => $collection !== null ? (string) $collection->chain_slug : null,
                 'contract'  => $cfg->contractAddress,
                 'name'      => $collection !== null ? $collection->collection_name : null,
-                'image_url' => $collection !== null ? $collection->image_url : null,
+                // F-187: IPFS cover on the configured gateway + ipfs.io fallback.
+                'image_url'          => \BCC\Trust\Onchain\ValueObjects\IpfsImageUrl::present($collection !== null ? $collection->image_url : null)['url'],
+                'image_fallback_url' => \BCC\Trust\Onchain\ValueObjects\IpfsImageUrl::present($collection !== null ? $collection->image_url : null)['fallback_url'],
             ],
             'verification' => GroupVerification::onChain()->toApiResponse(),
             'activity'     => $activity,

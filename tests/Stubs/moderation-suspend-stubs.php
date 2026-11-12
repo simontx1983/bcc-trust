@@ -206,6 +206,12 @@ namespace BCC\Trust\Core\Services\Admin {
     {
         return in_array($userId, $GLOBALS['__bcc_ms']['admins'] ?? [], true);
     }
+    // #538 review: the notify-failure fallback drops the row-cache entry.
+    function wp_cache_delete(string $key, string $group = ''): bool
+    {
+        $GLOBALS['__bcc_ms']['cache_deleted'][] = $group . ':' . $key;
+        return true;
+    }
     /** @param mixed $value */
     function set_transient(string $key, $value, int $ttl = 0): bool
     {

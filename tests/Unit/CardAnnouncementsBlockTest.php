@@ -134,6 +134,28 @@ final class CardAnnouncementsBlockTest extends TestCase
         self::assertStringNotContainsString('current_user_can(', $site);
     }
 
+    public function testTheBlockIsAssignedOnlyAfterTheDecisionAndTheNullCheck(): void
+    {
+        // F-96: each token above is only asserted to be PRESENT. This pins
+        // the order that makes it a gate: the authority decides, the
+        // resolver turns that decision into a block, and the block reaches
+        // the card only past the non-null check.
+        $site = self::callSite();
+
+        $decide  = strpos($site, 'ValidatorPageOperatorAuthority::decide(');
+        $resolve = strpos($site, 'AnnouncementCapabilityResolver::forOwnerScope(');
+        $check   = strpos($site, 'if ($announcements !== null)');
+        $assign  = strpos($site, "\$card['announcements'] =");
+
+        self::assertIsInt($decide);
+        self::assertIsInt($resolve);
+        self::assertIsInt($check);
+        self::assertIsInt($assign);
+        self::assertLessThan($resolve, $decide, 'the authority decides before the block is built');
+        self::assertLessThan($check, $resolve, 'the block is built before it is checked');
+        self::assertLessThan($assign, $check, 'and assigned only past the non-null check');
+    }
+
     public function testTheBlockIsScopedToValidatorCards(): void
     {
         // decide() answers `not_a_validator_page` for any other kind, so an

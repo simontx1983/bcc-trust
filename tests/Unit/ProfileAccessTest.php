@@ -188,6 +188,76 @@ final class ProfileAccessTest extends TestCase
         self::assertSame(ProfileAccess::REASON_PRIVATE, $data['error']['data']['reason']);
     }
 
+    // ── stray profile levels snap to a canonical rung ───────────────
+
+    /**
+     * The forwarded level, as PeepSo actually received it.
+     */
+    private function forwardedAcc(int $storedLevel): mixed
+    {
+        $GLOBALS['__bcc_profile_access']['levels']   = [self::OWNER => $storedLevel];
+        $GLOBALS['__bcc_profile_access']['verdicts'] = [10 => true, 20 => true, 30 => true, 40 => false];
+
+        ProfileAccess::canViewProfile(self::OWNER);
+
+        $calls = $this->calls();
+        self::assertCount(1, $calls, 'PeepSo must be consulted exactly once');
+
+        return $calls[0]['acc'];
+    }
+
+    /**
+     * ⚠⚠ The mismatch this closes, verified against the shipped feed
+     * query on MySQL 8: an author with `usr_profile_acc = 15` had their
+     * post VISIBLE to any signed-in member (bcc-core reads 15 as the
+     * members rung) while this gate DENIED the profile, because
+     * `is_accessible_static` has no `case 15`. Posts readable, profile
+     * 403. The column takes it: PeepSo writes it from
+     * `$this->_input->raw('value')` with no allow-list.
+     */
+    public function testAStrayLevelSnapsToTheNearestStricterRung(): void
+    {
+        self::assertSame(20, $this->forwardedAcc(15), '11-20 is the members rung');
+    }
+
+    public function testAStrayLevelAboveMembersSnapsToFriends(): void
+    {
+        self::assertSame(30, $this->forwardedAcc(25));
+    }
+
+    public function testAStrayLevelAboveFriendsSnapsToPrivate(): void
+    {
+        self::assertSame(40, $this->forwardedAcc(35));
+    }
+
+    /** 127 is the TINYINT(1) ceiling, so this is the real worst case. */
+    public function testTheColumnCeilingSnapsToPrivate(): void
+    {
+        self::assertSame(40, $this->forwardedAcc(127));
+    }
+
+    /**
+     * `-1` is PeepSo's ACCESS_FORCE_PUBLIC, so it must snap DOWN to
+     * public rather than being treated as an unknown and denied.
+     */
+    public function testForcePublicSnapsToPublic(): void
+    {
+        self::assertSame(10, $this->forwardedAcc(-1));
+    }
+
+    /**
+     * Control: the four real levels must pass through untouched. If
+     * snapping moved any of them, every profile on the site would change
+     * audience at once — and the assertions above would still pass.
+     */
+    public function testTheFourRealLevelsAreForwardedUnchanged(): void
+    {
+        foreach ([10, 20, 30, 40] as $level) {
+            $GLOBALS['__bcc_profile_access']['calls'] = [];
+            self::assertSame($level, $this->forwardedAcc($level), "level {$level} must not move");
+        }
+    }
+
     // ── §F-182: a suspended member's profile is hidden from others ───
     //
     // ⚠ Every test ABOVE now also traverses the suspension branch, with

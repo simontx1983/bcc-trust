@@ -630,13 +630,37 @@ class PolkadotFetcher implements FetcherInterface
             return null;
         }
 
-        $json = json_decode(wp_remote_retrieve_body($response), true);
+        return self::parseSubscanBody(wp_remote_retrieve_body($response), $path);
+    }
+
+    /**
+     * Decode one Subscan response body. Null = failure; [] = an empty answer.
+     *
+     * @return array<string, mixed>|null
+     */
+    private static function parseSubscanBody(string $body, string $path): ?array
+    {
+        $json = json_decode($body, true);
 
         if (!is_array($json) || ($json['code'] ?? -1) !== 0) {
-            \BCC\Core\Log\Logger::error('[Polkadot Fetcher] API error for ' . $path . ': ' . ($json['message'] ?? 'unknown'));
+            \BCC\Core\Log\Logger::error('[Polkadot Fetcher] API error for ' . $path . ': ' . (is_array($json) ? ($json['message'] ?? 'unknown') : 'unknown'));
             return null;
         }
 
-        return $json['data'] ?? null;
+        // A SUCCESSFUL response (code 0) can carry "data": null — e.g. the
+        // page past the end when the validator count is an exact multiple of
+        // the page size. That is an EMPTY answer, not a failure: returning
+        // null here would make fetch_all_validators() throw (F-68) and mark
+        // the chain partial on every such run. Anything else that is not an
+        // array is malformed and stays a failure.
+        $data = $json['data'] ?? null;
+        if ($data === null) {
+            return [];
+        }
+        if (!is_array($data)) {
+            \BCC\Core\Log\Logger::error('[Polkadot Fetcher] Malformed data for ' . $path . ': expected an object, got ' . gettype($data));
+            return null;
+        }
+        return $data;
     }
 }

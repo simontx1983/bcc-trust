@@ -93,6 +93,13 @@ final class ProfileGateWiringTest extends TestCase
         // record: this inventory is only as complete as the sweep behind
         // it, and that is its standing weakness.
         'CardsEndpoint.php'           => ['handle'],
+        // ⚠ F-26: `GET /entities/{kind}/{id}/watchers` lists the page
+        // OWNER's followers, so it is a per-user read. It resolves no handle
+        // at all (page id → post_author), which is exactly the kind of
+        // resolver the accounting scan below states it cannot see, and how
+        // it stayed ungated. The gate lives in the service, where the owner
+        // is resolved; the path is relative to REST_DIR.
+        '../Services/CardWatchersService.php' => ['listWatchers'],
     ];
 
     /**

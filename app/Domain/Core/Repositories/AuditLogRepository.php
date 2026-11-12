@@ -12,6 +12,8 @@ namespace BCC\Trust\Core\Repositories;
 
 use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Exceptions\RepositoryException;
+use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
@@ -42,6 +44,8 @@ if ( ! defined( 'ABSPATH' ) ) {
  * }
  */
 class AuditLogRepository {
+
+    use GuardsReadFailures;
 
     private string $table;
 
@@ -125,11 +129,21 @@ class AuditLogRepository {
      * @param int $days
      * @return object[]
      * @phpstan-return list<ActivityBreakdownRow>
+     * @throws RepositoryReadFailure when the read failed. Its one caller
+     *         (BehavioralAnalyzer) PERSISTS a score built from it, so an
+     *         empty answer from a failed read must not pass as "no activity".
+     *
+     * ⚠ ORDER BY MAX(created_at), not created_at: a bare ungrouped column is
+     * rejected under MySQL's ONLY_FULL_GROUP_BY (MariaDB accepts it). The
+     * old form therefore FAILED on every MySQL host — silently, since the
+     * empty result scored "not suspicious". The caller only aggregates the
+     * rows, so the order is cosmetic.
      */
     public function getActivityBreakdown( int $userId, int $days = 30 ): array {
         global $wpdb;
 
-        return $wpdb->get_results( $wpdb->prepare(
+        /** @var list<ActivityBreakdownRow> */
+        return self::runRead( $wpdb->prepare(
             "SELECT
                 HOUR(created_at) as hour,
                 DAYOFWEEK(created_at) as day_of_week,
@@ -139,10 +153,10 @@ class AuditLogRepository {
              WHERE user_id = %d
                AND created_at > DATE_SUB(NOW(), INTERVAL %d DAY)
              GROUP BY DATE(created_at), HOUR(created_at), DAYOFWEEK(created_at)
-             ORDER BY created_at DESC",
+             ORDER BY MAX(created_at) DESC",
             $userId,
             $days
-        ) );
+        ), __FUNCTION__, true );
     }
 
     /**
@@ -152,6 +166,8 @@ class AuditLogRepository {
      * @param int $days
      * @return object[]
      * @phpstan-return list<ActivityActionRow>
+     * @throws RepositoryReadFailure when the read failed (one caller,
+     *         BehavioralAnalyzer, which persists the score it builds)
      */
     public function getRecentActions( int $userId, int $days = 30 ): array {
         global $wpdb;
@@ -161,7 +177,7 @@ class AuditLogRepository {
         // analysis. Keep the MOST RECENT rows (DESC + LIMIT), then return
         // them oldest-first as before — callers walk them chronologically.
         /** @var list<ActivityActionRow> $rows */
-        $rows = $wpdb->get_results( $wpdb->prepare(
+        $rows = self::runRead( $wpdb->prepare(
             "SELECT created_at, action
              FROM {$this->table}
              WHERE user_id = %d
@@ -171,7 +187,7 @@ class AuditLogRepository {
             $userId,
             $days,
             self::RECENT_ACTIONS_CAP
-        ) );
+        ), __FUNCTION__, true );
 
         return array_reverse( $rows );
     }
@@ -185,11 +201,13 @@ class AuditLogRepository {
      * @param int $userId
      * @param int $days
      * @return object[]
+     * @throws RepositoryReadFailure when the read failed (one caller,
+     *         BehavioralAnalyzer, which persists the score it builds)
      */
     public function getWeeklyActivitySummary( int $userId, int $days = 90 ): array {
         global $wpdb;
 
-        return $wpdb->get_results( $wpdb->prepare(
+        return self::runRead( $wpdb->prepare(
             "SELECT
                 WEEK(created_at) as week,
                 YEAR(created_at) as year,
@@ -201,7 +219,7 @@ class AuditLogRepository {
              ORDER BY year DESC, week DESC",
             $userId,
             $days
-        ) );
+        ), __FUNCTION__, true );
     }
 
     // countRecentVoteActions() removed (F-102): it counted 'vote_up' /

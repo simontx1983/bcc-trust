@@ -98,6 +98,12 @@ if (!class_exists('BccEndpointTransportSpy', false)) {
             self::$scripted    = [];
             self::$onFirstCall = null;
             self::clearPins();
+            // Disarm here too, not only in pinHost(): a suite that never pins
+            // (CosmosEndpointSwitchLockContentionIntegrationTest) otherwise reaches
+            // SafeHttpClient's real add_action('http_api_curl', …), which this
+            // harness deliberately leaves undefined. It passed in a full run only
+            // because some OTHER test file had declared a global add_action().
+            self::disarmHookRegistration();
         }
 
         /** Script one successful node_info response for a Cosmos network. */

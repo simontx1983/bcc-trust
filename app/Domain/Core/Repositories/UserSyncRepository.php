@@ -309,11 +309,11 @@ final class UserSyncRepository
         global $wpdb;
         $cutoff = gmdate('Y-m-d H:i:s', time() - ($intervalDays * 86_400));
 
-        // Explicit column. The `usr_role IS NULL OR usr_role != 'banned'`
-        // filter intentionally omitted — banned/suspended posture is
-        // surfaced via the trust layer (Permissions / flags) at hydration
-        // time, not at candidate-selection time. We don't want to leak
-        // moderation state through ordering decisions here.
+        // Explicit column. Recency ONLY: no role, privacy or block filter
+        // here, so moderation state never shapes the ordering. ⚠ The
+        // candidates therefore include banned, private and blocked users;
+        // the caller MUST filter them (FeedColdStartService does, through
+        // MentionPolicy / PeepSoUserSearch, F-78).
         if ($excludeUserId > 0) {
             $sql = $wpdb->prepare(
                 "SELECT usr_id

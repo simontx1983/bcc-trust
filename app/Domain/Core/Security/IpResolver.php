@@ -8,7 +8,10 @@
  *   Cloudflare (BCC_BEHIND_CLOUDFLARE / the bcc_behind_cloudflare filter — the
  *   same switch bcc-core's Throttle uses) AND REMOTE_ADDR is a verified
  *   Cloudflare IP.
- * - X-Forwarded-For is never trusted (any client can set it).
+ * - X-Forwarded-For is trusted only from operator-declared proxies
+ *   (BCC_TRUSTED_PROXY_IPS / the bcc_trusted_proxy_ips filter), resolved by
+ *   bcc-core's Throttle::clientIp() (F-125); otherwise never (any client can
+ *   set it).
  * - Falls back to REMOTE_ADDR as the authoritative source.
  * - Supports IPv4 and IPv6 throughout.
  *
@@ -62,6 +65,10 @@ class IpResolver {
      * Get the real client IP address.
      *
      * Trust priority:
+     *   0. Declared trusted proxies (BCC_TRUSTED_PROXY_IPS / bcc_trusted_proxy_ips)
+     *      — when any are declared, bcc-core Throttle::clientIp() decides
+     *      (rightmost untrusted X-Forwarded-For hop from a listed proxy;
+     *      otherwise REMOTE_ADDR). F-125.
      *   1. CF-Connecting-IP  — only when the site opted in to Cloudflare
      *                          (behindCloudflare()) AND REMOTE_ADDR is a
      *                          verified Cloudflare IP. Without the opt-in a
@@ -70,12 +77,26 @@ class IpResolver {
      *                          header any client on that egress can set (F-54).
      *   2. REMOTE_ADDR       — always authoritative when CF check fails.
      *
-     * X-Forwarded-For and X-Real-IP are deliberately ignored: any client or
-     * intermediate proxy can forge them.
+     * Without a declared proxy, X-Forwarded-For and X-Real-IP are ignored: any
+     * client or intermediate proxy can forge them.
      *
      * @return string Canonical IP string, or '0.0.0.0' as a safe fallback.
      */
     public static function getClientIp(): string {
+        // Declared trusted proxies (F-125): resolve through bcc-core's one
+        // resolver, which walks X-Forwarded-For from the right past the
+        // declared proxies. Only when an allowlist is configured — with none
+        // (production) this branch is skipped and the result is exactly what
+        // it was before. Guarded for a bcc-core that predates the API.
+        if (class_exists(\BCC\Core\Security\Throttle::class)
+            // @phpstan-ignore function.alreadyNarrowedType (an older bcc-core may be deployed alongside)
+            && method_exists(\BCC\Core\Security\Throttle::class, 'trustedProxies')
+            && \BCC\Core\Security\Throttle::trustedProxies() !== []
+        ) {
+            $ip = self::sanitizeIp(\BCC\Core\Security\Throttle::clientIp());
+            return $ip !== '' ? $ip : '0.0.0.0';
+        }
+
         $remoteAddr = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
         $remoteAddr = self::sanitizeIp($remoteAddr);
 

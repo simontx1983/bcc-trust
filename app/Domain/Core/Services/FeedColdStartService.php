@@ -52,6 +52,7 @@ use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\UserSyncRepository;
 use BCC\Trust\Core\Services\Feed\FeedRankingService;
+use BCC\Trust\Core\Services\Mentions\MentionPolicy;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 
@@ -137,7 +138,7 @@ final class FeedColdStartService
         return [
             'halls'            => $this->composeHalls($viewerIdInt),
             'recent_operators' => $this->composeOperators($viewerIdInt),
-            'hot_posts'        => $this->composeHotPosts(),
+            'hot_posts'        => $this->composeHotPosts($viewerIdInt),
         ];
     }
 
@@ -211,11 +212,8 @@ final class FeedColdStartService
      */
     private function composeOperators(int $viewerId): array
     {
-        $candidateIds = UserSyncRepository::getRecentlyActiveUserIds(
-            self::OPERATORS_WINDOW_DAYS,
-            self::OPERATORS_CANDIDATES,
-            $viewerId // excludes self when > 0; no-op when 0 (anon)
-        );
+        // F-78: only candidates this viewer may see; see the helper.
+        $candidateIds = $this->visibleOperatorCandidates($viewerId);
         if ($candidateIds === []) {
             return [];
         }
@@ -244,6 +242,34 @@ final class FeedColdStartService
             $out[] = self::projectOperatorRow($summary, self::resolveRecentAction($userId));
         }
         return $out;
+    }
+
+    /**
+     * The operator candidates this viewer may see (F-78).
+     *
+     * Candidate selection is recency only (see the repository), so it
+     * includes banned and unvalidated accounts, private profiles and anyone
+     * blocked either way with the viewer, and nothing downstream removed
+     * them. They go through the SAME privacy gate as the members directory
+     * and @-mention search (PeepSoUserSearch, via MentionPolicy):
+     * banned/unvalidated roles, private profiles, bidirectional blocks,
+     * hidden-from-listing, discovery opt-out. This runs BEFORE the shuffle,
+     * so ordering never encodes who was removed. No PeepSo → no gate →
+     * nobody (fail closed).
+     *
+     * @return list<int>
+     */
+    private function visibleOperatorCandidates(int $viewerId): array
+    {
+        $candidateIds = UserSyncRepository::getRecentlyActiveUserIds(
+            self::OPERATORS_WINDOW_DAYS,
+            self::OPERATORS_CANDIDATES,
+            $viewerId // excludes self when > 0; no-op when 0 (anon)
+        );
+        if ($candidateIds === []) {
+            return [];
+        }
+        return MentionPolicy::filterMentionable($viewerId, $candidateIds);
     }
 
     /**
@@ -420,14 +446,19 @@ final class FeedColdStartService
      *
      * @return list<array<string, mixed>>
      */
-    private function composeHotPosts(): array
+    private function composeHotPosts(int $viewerId): array
     {
         // Request the warm-cron page size (the only hot-feed entry that is
         // primed) and slice locally to the 2 we show. Asking for
         // HOT_POSTS_LIMIT directly keyed a separate `hot:v1:2` entry the cron
         // never warms, so cold-start rebuilt the hot feed inline on every call.
         // [audit L-B6]
-        $payload = $this->feedRankingService->getHotFeed(null, FeedRankingService::HOT_WARM_LIMIT);
+        //
+        // F-78: the viewer is passed so getHotFeed() drops authors blocked
+        // either way with them. That filter runs on this request's copy,
+        // AFTER the shared anonymous cache and never written back into it,
+        // so the warm cache is still hit. Anonymous (0) is unchanged.
+        $payload = $this->feedRankingService->getHotFeed(null, FeedRankingService::HOT_WARM_LIMIT, $viewerId);
 
         $items = $payload['items'] ?? [];
         if (!is_array($items)) {

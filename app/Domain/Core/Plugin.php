@@ -1918,6 +1918,20 @@ final class Plugin
         // sub-tasks internally. Reduces advisory lock overhead from 4→1 per vote.
         add_action('bcc_trust_async_post_vote', [\BCC\Trust\Core\Services\Vote\VoteJobDispatcher::class, 'handlePostVote']);
 
+        // F-107: delayed retry of a failed post-vote fraud analysis.
+        add_action(
+            \BCC\Trust\Core\Services\Vote\VoteJobDispatcher::FRAUD_RETRY_HOOK,
+            [\BCC\Trust\Core\Services\Vote\VoteJobDispatcher::class, 'handleFraudRetry'],
+            10,
+            2
+        );
+
+        // F-107 follow-up: retry of a post-vote job whose dispatch was missed.
+        add_action(
+            \BCC\Trust\Core\Services\Vote\VoteJobDispatcher::POST_VOTE_RETRY_HOOK,
+            [\BCC\Trust\Core\Services\Vote\VoteJobDispatcher::class, 'handlePostVoteRetry']
+        );
+
         // Edge recalculation after vote removal. Resolve the page owner
         // here: recalculateVoteEdge expects (source_user_id, target_user_id)
         // — passing $pageId as the target silently wrote a zero-weight edge

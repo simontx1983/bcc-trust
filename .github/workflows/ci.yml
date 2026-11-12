@@ -135,6 +135,22 @@ jobs:
       - name: Alchemy credential-source mutation controls
         run: bash scripts/tests/alchemy-credential-mutation-controls.sh
 
+      # F-96 part 4: the authorization and privacy controls. Each one plants a
+      # defect in an authority or visibility check and requires the test named
+      # for it to fail, so a test that stopped constraining that check turns
+      # the build red. Unit suite only — no DB. The remaining controls stay
+      # manual; see scripts/tests/MUTATION-CONTROLS.md.
+      - name: Operator-authority mutation controls
+        run: bash scripts/tests/operator-authority-mutation-controls.sh
+      - name: Announcement capability mutation controls
+        run: bash scripts/tests/announcement-capability-mutation-controls.sh
+      - name: Announcement read-route mutation controls
+        run: bash scripts/tests/announcement-endpoint-mutation-controls.sh
+      - name: Announcement read-path visibility mutation controls
+        run: bash scripts/tests/announcement-read-mutation-controls.sh
+      - name: Announcement reporting mutation controls
+        run: bash scripts/tests/announcement-reporting-mutation-controls.sh
+
       # verify-golden.sh itself needs a live WordPress + seeded DB, which CI
       # has not got — which is exactly why it was in no workflow, and why its
       # fixtures rotted unnoticed for months (foreman_insignia from v1.36,
@@ -279,6 +295,51 @@ jobs:
       # means a check silently stopped running. Local runs keep skipping.
       - name: Integration tests (real $wpdb vs MySQL)
         run: composer test:integration -- --fail-on-skipped
+
+  # F-96 part 4: the one authorization control that needs a real engine. It
+  # re-runs integration tests once per planted defect, which is too slow to
+  # share the integration job's 30-minute cap, so it gets its own job.
+  mutation-controls-db:
+    name: Verified-operator resolver mutation controls (MySQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=15
+    defaults:
+      run:
+        working-directory: app/public/wp-content/plugins/bcc-trust
+    env:
+      BCC_TEST_DB_HOST: 127.0.0.1
+      BCC_TEST_DB_PORT: '3306'
+      BCC_TEST_DB_USER: root
+      BCC_TEST_DB_PASS: root
+      BCC_TEST_DB_NAME: bcc_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app/public/wp-content/plugins/bcc-trust
+      - uses: actions/checkout@v4
+        with:
+          repository: simontx1983/bcc-core
+          path: app/public/wp-content/plugins/bcc-core
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: gmp, mbstring, mysqli
+          tools: composer:v2
+          coverage: none
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+      - name: Verified-operator resolver (post_meta leg) mutation controls
+        run: bash scripts/tests/operator-resolver-meta-leg-mutation-controls.sh
 
   # Production runs MariaDB 11.8, not MySQL 8, and the two engines do not
   # accept the same SQL. `FOR SHARE` is valid MySQL 8 and a parse error on

@@ -58,7 +58,11 @@ class VoteFraudAnalyzer {
      * the blended score.
      */
     public function run(int $voteId): void {
-        $vote = $this->voteRepo->getById($voteId);
+        // ...OrFail (F-107): a FAILED read must throw into the retry path.
+        // getById() answers null on a failed read, which ended this run as
+        // if the vote had been retracted — the DB-blip case the retry
+        // exists for was never retried.
+        $vote = $this->voteRepo->getByIdOrFail($voteId);
 
         if (!$vote || (int) $vote->status !== 1) {
             return;

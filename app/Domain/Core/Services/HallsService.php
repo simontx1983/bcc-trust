@@ -240,7 +240,7 @@ final class HallsService
      *   validator_count: int,
      *   collection_count: int,
      *   validators: list<array{id: int, moniker: string, logo_url: string|null, total_stake: string|null, delegator_count: int|null, uptime_30d: string|null, voting_power_rank: int|null, commission_rate: string|null}>,
-     *   collections: list<array{id: int, name: string|null, image_url: string|null, contract_address: string}>,
+     *   collections: list<array{id: int, name: string|null, image_url: string|null, image_fallback_url: string|null, contract_address: string}>,
      *   chain_profile: array{slug: string, name: string, native_token: string|null, chain_type: string, explorer_url: string|null, icon_url: string|null, color: string|null, description: string|null}|null,
      *   viewer_membership: array{is_member: bool, is_primary: bool, joined_at: string|null}|null,
      *   links: array{self: string}
@@ -301,7 +301,7 @@ final class HallsService
      *
      * @return array{
      *   validators: list<array{id: int, moniker: string, logo_url: string|null, total_stake: string|null, delegator_count: int|null, uptime_30d: string|null, voting_power_rank: int|null, commission_rate: string|null}>,
-     *   collections: list<array{id: int, name: string|null, image_url: string|null, contract_address: string}>
+     *   collections: list<array{id: int, name: string|null, image_url: string|null, image_fallback_url: string|null, contract_address: string}>
      * }
      */
     private function loadChainPreview(?string $chainSlug): array
@@ -343,7 +343,7 @@ final class HallsService
      * @param iterable<object> $collectionRows
      * @return array{
      *   validators: list<array{id: int, moniker: string, logo_url: string|null, total_stake: string|null, delegator_count: int|null, uptime_30d: string|null, voting_power_rank: int|null, commission_rate: string|null}>,
-     *   collections: list<array{id: int, name: string|null, image_url: string|null, contract_address: string}>
+     *   collections: list<array{id: int, name: string|null, image_url: string|null, image_fallback_url: string|null, contract_address: string}>
      * }
      */
     public static function previewFromRows(iterable $validatorRows, iterable $collectionRows): array
@@ -364,10 +364,13 @@ final class HallsService
 
         $collections = [];
         foreach ($collectionRows as $c) {
+            // F-187: IPFS cover on the configured gateway + ipfs.io fallback.
+            $image = \BCC\Trust\Onchain\ValueObjects\IpfsImageUrl::present(self::nonEmptyString($c->image_url ?? null));
             $collections[] = [
                 'id'               => (int) ($c->id ?? 0),
                 'name'             => self::nonEmptyString($c->collection_name ?? null),
-                'image_url'        => self::nonEmptyString($c->image_url ?? null),
+                'image_url'        => $image['url'],
+                'image_fallback_url' => $image['fallback_url'],
                 'contract_address' => (string) ($c->contract_address ?? ''),
             ];
         }

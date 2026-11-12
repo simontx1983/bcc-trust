@@ -66,4 +66,24 @@ final class PageTypeMap
     {
         return self::PAGE_TYPE_TO_KIND[$pageType] ?? null;
     }
+
+    /**
+     * The page_type a peepso-page's raw `_bcc_page_type` meta stands for.
+     * Legacy pages written before the meta existed have none; they are
+     * project pages, so '' reads as 'builder' (the default CardViewService,
+     * PageReadModelRepository and PageCardPrefetcher all apply).
+     */
+    public static function effectivePageType(string $storedPageType): string
+    {
+        return $storedPageType === '' ? 'builder' : $storedPageType;
+    }
+
+    /**
+     * card_kind for a page's raw `_bcc_page_type` meta, with the legacy
+     * '' → 'builder' default applied. null = an unrecognised type.
+     */
+    public static function kindForStoredPageType(string $storedPageType): ?string
+    {
+        return self::kindForPageType(self::effectivePageType($storedPageType));
+    }
 }
