@@ -17,6 +17,7 @@ use BCC\Trust\Onchain\REST\ValidatorGroupsEndpoint;
 use BCC\Trust\Onchain\Services\DelegatorGroupView;
 use BCC\Trust\Onchain\Services\NftGroupGateService;
 use BCC\Trust\Onchain\Services\ValidatorGroupProvisioningService;
+use BCC\Trust\Onchain\Services\ValidatorGroupRevokeService;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use BCC\Trust\Onchain\Support\Bech32;
 use BCC\Trust\Onchain\ValueObjects\JoinResult;
@@ -1368,6 +1369,82 @@ final class DelegatorGroupIntegrationTest extends TestCase
         self::assertCount(2, $this->storedNotices());
     }
 
+    /**
+     * Two overlapping ticks both revoked the same members and both wrote the
+     * audit row and the bell. sweep() now holds SWEEP_LOCK for the whole tick.
+     *
+     * REAL GET_LOCK on a REAL server. ⚠ GET_LOCK is re-entrant per session, so
+     * the competing tick MUST be a SECOND connection — re-acquiring on the
+     * harness connection would always succeed and prove nothing.
+     */
+    public function testAnOverlappingTickRevokesNobodyAndTheNextTickDoes(): void
+    {
+        $groupId = $this->createdGroup('10');
+        $below   = $this->addMembers($groupId, 2000, 1, 5.0);
+        $service = OnchainPlugin::instance()->validatorGroupRevokeService();
+
+        $other = $this->secondSession();
+        try {
+            self::assertSame(1, $this->lockIn($other, ValidatorGroupRevokeService::SWEEP_LOCK), 'the competing tick takes the lock');
+
+            $overlapping = $service->sweep();
+
+            self::assertTrue($overlapping['skipped_overlap'], 'the overlapping tick must not run');
+            self::assertSame(0, $overlapping['checked']);
+            self::assertSame('member', $this->memberStatus($below[0], $groupId));
+            self::assertSame(0, $this->auditCount('validator_group_revoked'));
+            self::assertSame([], $this->storedNotices());
+            self::assertSame([], $GLOBALS['__bcc_lcd_calls'], 'not even the chain is asked');
+
+            $other->query("SELECT RELEASE_LOCK('" . ValidatorGroupRevokeService::SWEEP_LOCK . "')");
+
+            $next = $service->sweep();
+
+            self::assertFalse($next['skipped_overlap'], 'once the other tick ends, the next one runs');
+            self::assertSame(1, $next['revoked']);
+            self::assertSame(1, $this->auditCount('validator_group_revoked'));
+            self::assertCount(1, $this->storedNotices());
+        } finally {
+            $other->close();
+        }
+    }
+
+    public function testTheSweepReleasesItsLockSoAnotherSessionCanTakeIt(): void
+    {
+        OnchainPlugin::instance()->validatorGroupRevokeService()->sweep();
+
+        $other = $this->secondSession();
+        try {
+            self::assertSame(1, $this->lockIn($other, ValidatorGroupRevokeService::SWEEP_LOCK), 'the lock must not outlive the sweep');
+            $other->query("SELECT RELEASE_LOCK('" . ValidatorGroupRevokeService::SWEEP_LOCK . "')");
+        } finally {
+            $other->close();
+        }
+    }
+
+    /**
+     * The holder-group sweep runs first on the same cron hook. A holder tick
+     * still running must not stop the delegator one: the locks are separate.
+     */
+    public function testAHolderSweepInProgressDoesNotBlockThisSweep(): void
+    {
+        $groupId = $this->createdGroup('10');
+        $this->addMembers($groupId, 2000, 1, 5.0);
+
+        $other = $this->secondSession();
+        try {
+            self::assertSame(1, $this->lockIn($other, 'bcc_gated_group_revoke_sweep'));
+
+            $stats = OnchainPlugin::instance()->validatorGroupRevokeService()->sweep();
+
+            self::assertFalse($stats['skipped_overlap']);
+            self::assertSame(1, $stats['revoked']);
+        } finally {
+            $other->query("SELECT RELEASE_LOCK('bcc_gated_group_revoke_sweep')");
+            $other->close();
+        }
+    }
+
     public function testAMemberWhoAlreadyLeftIsNotToldTheyWereRemoved(): void
     {
         $groupId = $this->createdGroup('10');
@@ -1966,6 +2043,26 @@ final class DelegatorGroupIntegrationTest extends TestCase
         }
 
         return $ids;
+    }
+
+    private function secondSession(): \mysqli
+    {
+        return new \mysqli(
+            getenv('BCC_TEST_DB_HOST') ?: '127.0.0.1',
+            getenv('BCC_TEST_DB_USER') ?: 'root',
+            getenv('BCC_TEST_DB_PASS') ?: 'root',
+            getenv('BCC_TEST_DB_NAME') ?: 'bcc_test',
+            (int) (getenv('BCC_TEST_DB_PORT') ?: 10005)
+        );
+    }
+
+    private function lockIn(\mysqli $session, string $name): int
+    {
+        $res = $session->query("SELECT GET_LOCK('" . $session->real_escape_string($name) . "', 0) AS got");
+        self::assertInstanceOf(\mysqli_result::class, $res);
+        $row = $res->fetch_assoc();
+
+        return (int) ($row['got'] ?? -1);
     }
 
     /** @return list<object> */

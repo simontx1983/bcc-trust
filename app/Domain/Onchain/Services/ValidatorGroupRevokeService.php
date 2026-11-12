@@ -78,6 +78,17 @@ final class ValidatorGroupRevokeService
     /** Member-read page size per group (PeepSoGroupRepository caps at 100). */
     private const MEMBER_PAGE_SIZE = 100;
 
+    /**
+     * One sweep at a time, as {@see NftGroupRevokeService::SWEEP_LOCK} (F-69).
+     * Two overlapping ticks (a slow tick still running when the next cron
+     * fires, or the cron beside a manual run) read the same members, both
+     * revoke them, and both write the `validator_group_revoked` audit row and
+     * the removal bell. Session-scoped MySQL advisory lock, non-blocking, so
+     * the overlapping tick skips instead of queueing. Its OWN name: the NFT
+     * sweep runs first on the same cron hook and must not block this one.
+     */
+    public const SWEEP_LOCK = 'bcc_validator_group_revoke_sweep';
+
     public function __construct(
         private readonly DelegationEligibilityService $eligibility,
         /** @var (\Closure(int, int): void)|null Replaces the bell, for tests only. */
@@ -87,16 +98,53 @@ final class ValidatorGroupRevokeService
     /**
      * Run one bounded, rotated revoke tick.
      *
-     * @return array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int}
+     * The whole tick runs under SWEEP_LOCK. When another tick holds it, this
+     * one does nothing and reports `skipped_overlap: true`. When the lock
+     * primitive itself is missing it also does nothing (fail closed: an
+     * unserialized sweep is the bug) and logs an error.
+     *
+     * @return array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_overlap: bool}
      */
     public function sweep(): array
+    {
+        if (!class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] Delegator-community revoke sweep cannot be serialized: AdvisoryLock is unavailable', [
+                'lock' => self::SWEEP_LOCK,
+            ]);
+            return self::emptyStats(true);
+        }
+        if (!\BCC\Core\DB\AdvisoryLock::acquire(self::SWEEP_LOCK, 0)) {
+            return self::emptyStats(true); // Another tick is running — never overlap.
+        }
+
+        try {
+            return $this->runSweep();
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release(self::SWEEP_LOCK);
+        }
+    }
+
+    /**
+     * @return array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_overlap: bool}
+     */
+    private static function emptyStats(bool $skippedOverlap): array
+    {
+        return ['checked' => 0, 'revoked' => 0, 'skipped_unknown' => 0, 'groups_touched' => 0, 'skipped_overlap' => $skippedOverlap];
+    }
+
+    /**
+     * The tick itself; only ever called under SWEEP_LOCK by sweep().
+     *
+     * @return array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_overlap: bool}
+     */
+    private function runSweep(): array
     {
         $batchCap = (int) apply_filters('bcc_validator_group_revoke_batch_size', self::SWEEP_BATCH_SIZE);
         if ($batchCap < 1) {
             $batchCap = self::SWEEP_BATCH_SIZE;
         }
 
-        $stats = ['checked' => 0, 'revoked' => 0, 'skipped_unknown' => 0, 'groups_touched' => 0];
+        $stats = self::emptyStats(false);
 
         $cursor  = $this->readCursor();
         $startId = $cursor['group_id'];
@@ -163,7 +211,7 @@ final class ValidatorGroupRevokeService
      * spin: a removal spends budget and shortens the list, and anything else
      * moves the offset.
      *
-     * @param array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int} $stats
+     * @param array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_overlap: bool} $stats
      */
     private function sweepGroup(int $groupId, ValidatorGatedGroupConfig $config, int $offset, int $batchCap, int &$processed, array &$stats): bool
     {
