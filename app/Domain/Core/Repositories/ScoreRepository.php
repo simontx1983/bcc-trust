@@ -1152,6 +1152,12 @@ class ScoreRepository {
         }
 
         $this->mirrorSelfPageTierToUserInfo($pageId);
+
+        // Bump the score-cache generation like every other score writer
+        // (F-87). The caller used to do it only AFTER its next write, so a
+        // throw from updateEndorsementCount() left this new bonus behind a
+        // stale cached score for up to CACHE_TTL.
+        $this->invalidateCache($pageId);
     }
 
     /**
@@ -1184,6 +1190,10 @@ class ScoreRepository {
                 'Failed to update endorsement count for page ' . $pageId . ': ' . $wpdb->last_error
             );
         }
+
+        // endorsement_count is part of the cached PageScore (COLUMNS), so
+        // this writer invalidates too (F-87).
+        $this->invalidateCache($pageId);
     }
 
     /**
@@ -1746,6 +1756,20 @@ class ScoreRepository {
     /**
      * Get page IDs with stale scores (not recalculated within the given interval).
      *
+     * OLDEST FIRST, ONE ENTRY PER PAGE (F-86). The hourly sweep runs every
+     * hour with a one-hour staleness window and this LIMIT, and the query had
+     * no ORDER BY: every page it recalculated was stale again by the next
+     * run, so the same lowest-key pages filled every batch and pages past
+     * them waited indefinitely. It also returned one row per CATEGORY row,
+     * so a multi-category page took several slots and was recalculated more
+     * than once per batch (recalculateScore() already rewrites every
+     * category row). Grouping by page and ordering by its OLDEST category
+     * row (never-calculated first) turns the sweep into a round-robin.
+     *
+     * Filesort over the stale set, not an index walk: idx_recalculate leads
+     * with recalculate_required. The table is one row per page/category, so
+     * this stays cheap; an index would be a schema change.
+     *
      * @return int[]
      */
     public function getStalePageIds(int $limit = 100): array
@@ -1756,6 +1780,8 @@ class ScoreRepository {
             "SELECT page_id FROM {$this->table}
              WHERE last_calculated_at IS NULL
                 OR last_calculated_at < DATE_SUB(NOW(), INTERVAL 1 HOUR)
+             GROUP BY page_id
+             ORDER BY MAX(last_calculated_at IS NULL) DESC, MIN(last_calculated_at) ASC, page_id ASC
              LIMIT %d",
             $limit
         )) ?: []);

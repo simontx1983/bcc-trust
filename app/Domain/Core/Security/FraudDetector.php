@@ -749,7 +749,17 @@ class FraudDetector {
             // Check voting diversity: do these voters ONLY vote on this page?
             $voterIds = array_map(fn($r) => (int) $r->voter_user_id, $recentVoters);
 
-            $otherPageVotes = self::voteRepo()->countOtherPagesVotedByUsers($voterIds, $pageId);
+            // F-205: a FAILED read used to come back as 0, i.e. "fewer than
+            // 3 other pages", which FIRED: a false pattern row, an audit row,
+            // and the 1h dedup that then hid a real one. Skip instead, writing
+            // nothing, so the next vote on this page re-checks. Not thrown:
+            // the caller is the post-vote analysis, whose retry would re-run
+            // the whole scoring pass for this non-scoring observation.
+            try {
+                $otherPageVotes = self::voteRepo()->countOtherPagesVotedByUsers($voterIds, $pageId);
+            } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+                return false;
+            }
 
             // Low diversity: these accounts vote on fewer than 3 other pages combined.
             if ($otherPageVotes < 3) {

@@ -504,8 +504,15 @@ class ClaimService {
      * feed now hides at read time (F-89).
      *
      * Returns false when there was nothing to revoke (unknown id, or already
-     * not verified). A failed read or write THROWS — the caller must treat
-     * that as UNKNOWN and never as a completed revoke.
+     * not verified). A failed read or write BEFORE the commit THROWS — the
+     * caller must treat that as UNKNOWN and never as a completed revoke.
+     * Once the revoke has committed it returns true: every follow-up step
+     * (audit, bonus, read model, events) is isolated, logged on failure and
+     * never thrown (F-14 PR B1). The claimed page's read model is marked
+     * dirty for every page bound to the entity, not only the claimant's own.
+     *
+     * ⚠ Must not be called inside TransactionManager::run() — see
+     * ClaimRepository::revoke(), which refuses it.
      *
      * @throws \InvalidArgumentException for a reason outside REVOKE_REASONS
      * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure|\RuntimeException
@@ -521,34 +528,72 @@ class ClaimService {
             return false;
         }
 
+        // ── COMMITTED. Nothing below may report the revoke as failed. ──
+        // A throw here used to escape after the commit: the next sweep sees
+        // the claim as already revoked and returns early, so the lost event
+        // and audit row were never retried (#561 review). Each step is now
+        // isolated — logged and swallowed — like ModerationService::afterCommit.
         $userId = $result['user_id'];
 
+        // Accountability first.
+        self::afterCommit('audit', $claimId, static function () use ($claimId, $reason, $result, $userId): void {
+            \BCC\Trust\Core\Security\AuditLogger::log('claim_revoked', $claimId, [
+                'reason'          => $reason,
+                'entity_type'     => $result['entity_type'],
+                'entity_id'       => $result['entity_id'],
+                'role'            => $result['claim_role'],
+                'mirror_page_ids' => $result['mirror_page_ids'],
+            ], 'claim', $userId);
+        });
+
         // The bonus is claimant-centric: it lives on the claimant's own page.
-        $pageId = \BCC\Core\ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($userId);
-        if ($pageId) {
-            BonusService::recomputeAndApply($pageId, $userId);
+        self::afterCommit('bonus', $claimId, static function () use ($userId): void {
+            $pageId = \BCC\Core\ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($userId);
+            if ($pageId) {
+                BonusService::recomputeAndApply($pageId, $userId);
+            }
+        });
+
+        // The CLAIMED page's `has_verified_claim` (card badge, rank composite)
+        // lives on the bound page, which `bcc_trust_verification_changed`
+        // does not reach — it resyncs only the claimant's own page.
+        foreach ($result['bound_page_ids'] as $boundPageId) {
+            self::afterCommit('read_model', $claimId, static function () use ($boundPageId): void {
+                \BCC\Trust\Core\Services\PageReadModelSync::markDirty($boundPageId);
+            });
         }
 
-        do_action('bcc_trust_verification_changed', $userId);
-        do_action(
-            'bcc_onchain_claim_revoked',
-            $claimId,
-            $userId,
-            $result['entity_type'],
-            $result['entity_id'],
-            $result['claim_role'],
-            $reason
-        );
+        self::afterCommit('verification_changed', $claimId, static function () use ($userId): void {
+            do_action('bcc_trust_verification_changed', $userId);
+        });
 
-        \BCC\Trust\Core\Security\AuditLogger::log('claim_revoked', $claimId, [
-            'reason'          => $reason,
-            'entity_type'     => $result['entity_type'],
-            'entity_id'       => $result['entity_id'],
-            'role'            => $result['claim_role'],
-            'mirror_page_ids' => $result['mirror_page_ids'],
-        ], 'claim', $userId);
+        self::afterCommit('claim_revoked_event', $claimId, static function () use ($claimId, $userId, $result, $reason): void {
+            do_action(
+                'bcc_onchain_claim_revoked',
+                $claimId,
+                $userId,
+                $result['entity_type'],
+                $result['entity_id'],
+                $result['claim_role'],
+                $reason
+            );
+        });
 
         return true;
+    }
+
+    /** One post-commit step of a revoke: a failure is logged, never thrown. */
+    private static function afterCommit(string $step, int $claimId, \Closure $work): void
+    {
+        try {
+            $work();
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] claim_revoke_followup_failed', [
+                'step'     => $step,
+                'claim_id' => $claimId,
+                'error'    => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

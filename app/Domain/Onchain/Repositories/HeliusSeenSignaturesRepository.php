@@ -56,9 +56,16 @@ final class HeliusSeenSignaturesRepository
      * Atomically record a signature as seen.
      *
      * Returns true when newly inserted (caller should process the
-     * payload), false when already present (caller should skip — replay).
+     * payload), false when already present (caller should skip — replay),
+     * and NULL when the write failed and the answer is unknown.
+     *
+     * F-67: a DB error used to come back as `false`, i.e. "already seen",
+     * so the caller skipped the transaction as a replay — and because the
+     * webhook always answers 200 and Solana has no polling walker, its
+     * events were lost for good. Unknown is not "seen": the caller must
+     * fail closed for the delivery instead of skipping the transaction.
      */
-    public static function markSeen(string $signature): bool
+    public static function markSeen(string $signature): ?bool
     {
         if ($signature === '' || mb_strlen($signature) > 96) {
             return false;
@@ -69,14 +76,23 @@ final class HeliusSeenSignaturesRepository
         $now   = current_time('mysql', true);
 
         // INSERT IGNORE returns 1 on insert, 0 when the unique key
-        // (signature) already exists. $wpdb->query returns affected rows.
+        // (signature) already exists. $wpdb->query returns affected rows,
+        // or false on failure — and can fail WITHOUT last_error (the silent
+        // !ready path), so both are checked. last_error is cleared and read
+        // through helpers so static analysis cannot narrow it to '' across
+        // the query() that sets it.
+        self::clearLastError();
         $result = $wpdb->query($wpdb->prepare(
             "INSERT IGNORE INTO {$table} (signature, seen_at) VALUES (%s, %s)",
             $signature,
             $now
         ));
 
-        return is_int($result) && $result === 1;
+        if ($result === false || self::lastReadError() !== '' || !is_int($result)) {
+            return null;
+        }
+
+        return $result === 1;
     }
 
     /**
@@ -242,6 +258,13 @@ final class HeliusSeenSignaturesRepository
         }
         update_option(self::SIZE_OPTION, $count, false);
         return $count;
+    }
+
+    /** Pairs with GuardsReadFailures::lastReadError() (bcc-core's helper shape). */
+    private static function clearLastError(): void
+    {
+        global $wpdb;
+        $wpdb->last_error = '';
     }
 
     /** COUNT(*) of the table, or NULL when the read did not run (logged). */

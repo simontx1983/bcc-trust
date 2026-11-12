@@ -23,6 +23,8 @@ if (!defined('ABSPATH')) {
 
 use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Security\TransactionManager;
+use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use RuntimeException;
 use wpdb;
 
@@ -43,6 +45,8 @@ use wpdb;
  */
 final class AttestationRepository
 {
+    use GuardsReadFailures;
+
     /**
      * Allowed target_kind values per §J.6 / api-contract-v1.md §4.20.
      * Enforced in application code (not as a DB enum) per the §J.5.1
@@ -1536,13 +1540,12 @@ final class AttestationRepository
         /** @phpstan-ignore-next-line argument.type */
         $prepared = $wpdb->prepare($sql, $limit);
         if (!is_string($prepared)) {
-            return [];
+            throw new RepositoryReadFailure(self::class, __FUNCTION__, 'wpdb::prepare() did not return a statement');
         }
 
-        $rows = $wpdb->get_results($prepared);
-        if (!is_array($rows)) {
-            return [];
-        }
+        // F-209: FAIL-CLOSED — see getMutualVotePairs(). A failed read must
+        // never be cached by the ring detector as "no rings".
+        $rows = self::runRead($prepared, __FUNCTION__, true);
 
         $out = [];
         foreach ($rows as $row) {
@@ -1627,13 +1630,12 @@ final class AttestationRepository
         /** @phpstan-ignore-next-line argument.type */
         $prepared = $wpdb->prepare($sql, $windowDays, $windowDays, $afterUserA, $afterUserA, $afterUserB, $minSize, $pageLimit);
         if (!is_string($prepared)) {
-            return [];
+            throw new RepositoryReadFailure(self::class, __FUNCTION__, 'wpdb::prepare() did not return a statement');
         }
 
-        $rows = $wpdb->get_results($prepared);
-        if (!is_array($rows)) {
-            return [];
-        }
+        // F-209: FAIL-CLOSED — see getMutualVotePairs(). A failed read must
+        // never be cached by the ring detector as "no rings".
+        $rows = self::runRead($prepared, __FUNCTION__, true);
 
         $out = [];
         foreach ($rows as $row) {

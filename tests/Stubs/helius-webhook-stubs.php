@@ -21,9 +21,14 @@ namespace BCC\Trust\Onchain\Repositories {
     if (!class_exists(HeliusSeenSignaturesRepository::class, false)) {
         class HeliusSeenSignaturesRepository
         {
-            public static function markSeen(string $signature): bool
+            public static function markSeen(string $signature): ?bool
             {
                 $f = &$GLOBALS['__bcc_helius_fixture'];
+                // F-67: a dedupe write that fails comes back NULL (unknown),
+                // as the real repository now reports it.
+                if (!empty($f['fail_on'][$signature])) {
+                    return null;
+                }
                 if (!empty($f['seen'][$signature])) {
                     return false; // replay
                 }

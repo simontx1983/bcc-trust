@@ -809,7 +809,7 @@ final class BlogService
             'kind'                  => 'user',
             'id'                    => $userId,
             'handle'                => $handle,
-            'display_name'          => \BCC\Trust\Core\Support\PublicIdentity::displayName($user->display_name, $user->user_login, $handle),
+            'display_name'          => \BCC\Trust\Core\Support\PublicIdentity::visibleName($userId, $user->display_name, $user->user_login, $handle),
             'avatar_url'            => $avatarUrl,
             // Trust-derived fields — leave as conservative defaults.
             // The blog tab is a per-user surface; the profile header

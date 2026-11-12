@@ -58,6 +58,9 @@ final class PageFollowDrainTest extends TestCase
             'warnings'               => [],
             'post_author'            => [],
             'author_reads'           => 0,
+            'blocked'                => [],
+            'block_unknown'          => [],
+            'block_reads'            => 0,
         ];
 
         require_once __DIR__ . '/../Stubs/page-follow-drain-stubs.php';
@@ -169,6 +172,34 @@ final class PageFollowDrainTest extends TestCase
 
         $this->assertSame([101], $this->survivors(), 'an exception must not delete the row');
         $this->assertSame([102], $GLOBALS['__bcc_drain']['deleted']);
+    }
+
+    public function testABlockedPairIsSkippedAsHandledAndNeverFollowed(): void
+    {
+        // F-29: viewer 12 and the claimer are blocked (either direction).
+        $this->seed(7, [11, 12, 13]);
+        $GLOBALS['__bcc_drain']['blocked'] = [12];
+
+        $this->drain(7, 500);
+
+        $this->assertSame([], $this->survivors(), 'a blocked pair is handled, so its row is removed and never retried');
+        $this->assertContains(102, $GLOBALS['__bcc_drain']['deleted']);
+        $this->assertSame([9011, 9013], $GLOBALS['__bcc_drain']['meta'], 'no follow and no meta row for the blocked pair');
+        $this->assertSame(2, $GLOBALS['__bcc_drain']['follows'], 'follow() is never attempted for the blocked pair');
+        $this->assertSame(1, $GLOBALS['__bcc_drain']['reads'], 'a skip is not an error, so there is no second pass');
+    }
+
+    public function testAnUnreadableBlockStateIsAnErrorAndTheRowIsKept(): void
+    {
+        $this->seed(7, [11, 12, 13]);
+        $GLOBALS['__bcc_drain']['block_unknown'] = [12];
+
+        $this->drain(7, 500);
+
+        $this->assertSame([102], $this->survivors(), 'unknown is not a decision: the row stays for a later claim');
+        $this->assertNotContains(102, $GLOBALS['__bcc_drain']['deleted']);
+        $this->assertSame([9011, 9013], $GLOBALS['__bcc_drain']['meta']);
+        $this->assertSame(2, $GLOBALS['__bcc_drain']['follows'], 'fail closed: no follow without a readable block state');
     }
 
     public function testAnErroredPassIsRetriedOnceAndThenStopsWithoutDeletingIt(): void

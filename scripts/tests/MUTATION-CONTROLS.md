@@ -29,22 +29,71 @@ others are **manual**: run them when you change the code they cover.
 | `announcement-read-mutation-controls.sh` | announcement visibility predicates (§4.32.1) | no | `php` job |
 | `announcement-reporting-mutation-controls.sh` | reporting does not disclose drafts or author ids | no | `php` job |
 | `operator-resolver-meta-leg-mutation-controls.sh` | the verified-operator resolver's post_meta leg | yes | `mutation-controls-db` job |
-| `breaker-charge-mutation-controls.sh` | circuit-breaker charging per provider request | no | manual |
-| `keyset-cursor-mutation-controls.sh` | the keyset cursor codec | no | manual |
-| `no-reactions-mutation-controls.sh` | an announcement takes no engagement (§4.32.15) | no | manual |
-| `probe-ownership-mutation-controls.sh` | half-open recovery-probe ownership (#264) | yes | manual |
-| `scanner-removal-mutation-controls.sh` | ownership budgets, retired discovery executor | no | manual |
-| `pr-e-fail-closed-mutation-controls.sh` | PR E provider fail-closed boundaries | yes | manual |
-| `pr5b-`, `pr6-`, `pr7-`, `pr71-`, `pr714-`, `pr72-`, `pr721-`, `pr73-`, `pr74-`, `pr75-`, `pr76-`, `pr77-`, `pr78-`, `pr7a-`, `pr7a1-mutation-controls.sh` | the NFT indexing / provisioning PR series, one script per PR (see each header) | most | manual |
+| `pr714-mutation-controls.sh` | NFT holder-community membership revocation fails safe (access control) | yes | `mutation-controls-revocation` job |
 
-The two #267 controls were wired first, when that incident was fixed. The
-other six were wired once they were confirmed green on main: no survivors, no
-broken controls, and the tree restored afterwards.
+## Manual scripts: status
 
-**The manual scripts have not been re-verified against current main.** Code
-they target may have moved or been retired, so a `broken` verdict from one
-probably means the control is out of date, not that a guarantee was lost.
-Fix or delete the control rather than ignoring it.
+Last verified **2026-11-12** against `main` at `5b0897d4`, one script at a
+time, in a git worktree, against a disposable MySQL 8. "Killed" counts are
+for that run.
+
+| Script | Covers | Needs DB | Status |
+|---|---|---|---|
+| `breaker-charge-mutation-controls.sh` | circuit-breaker charging per provider request | no | ✅ 12/12 killed (M4, M5 re-anchored) |
+| `keyset-cursor-mutation-controls.sh` | the keyset cursor codec | no | ✅ 10/10 killed |
+| `no-reactions-mutation-controls.sh` | an announcement takes no engagement (§4.32.15) | no | ✅ 8/8 killed |
+| `probe-ownership-mutation-controls.sh` | half-open recovery-probe ownership (#264) | yes | ✅ 9/9 killed (M1d removed with its target, M4 re-anchored) |
+| `scanner-removal-mutation-controls.sh` | ownership budgets, retired discovery executor | no | ✅ 3/3 killed |
+| `pr-e-fail-closed-mutation-controls.sh` | PR E provider fail-closed boundaries | yes | ✅ 29/29 killed |
+| `pr5b-mutation-controls.sh` | PR 5b provisioning fixes | yes | ✅ 6/6 killed |
+| `pr6-mutation-controls.sh` | PR 6 provisioning and intake | yes | ✅ 17/17 killed (compensation re-anchored after F-160) |
+| `pr7-mutation-controls.sh` | collection metadata rules, research URLs, description review | yes | ✅ 19/19 killed (3 scan-action controls removed with their target, 1 re-anchored) |
+| `pr71-mutation-controls.sh` | the retired enrichment cron stays retired | no | ✅ 5/5 killed (15 discovery-readiness controls removed with their targets) |
+| `pr78-mutation-controls.sh` | centralized breaker failure attribution | no | ✅ 23/23 killed (5 re-anchored; see the CRLF note below) |
+| `pr76-mutation-controls.sh` | CosmWasm classification and the breaker lifecycle | no | ✅ 12/12 killed (smart-query opt-in re-pinned, below) |
+
+### pr76 smart-query opt-in: re-pinned (was the open survivor)
+
+`CosmosFetcher::lcdGetResult()` is called with `$smartQuery = true` by
+`wasmSmartQueryResult()`, which the CW721 probes use. A recognised
+unknown-variant 500 is then an *answer*, not a provider failure, and must not
+charge the breaker. The tests that pinned this (`SmartQueryOptInWiringTest`,
+`CosmwasmSmartQueryRetryTest`) were deleted in S8. Control 4 now runs:
+
+- **`tests/Unit/Cw721ProbeSmartQueryOptInTest`**, which covers `probeCw721()`.
+  Refusals cost one request each and no charge, and repeated probes never open
+  the breaker. A node fault still retries and charges.
+- **`CollectionMetadataApplicationErrorTest`**, which covers
+  `cw721CollectionInfoQuery()`. It already went red under the mutation but was
+  missing from the filter.
+
+Disabling the opt-in (`if (false)`) turns both red.
+
+### Retired 2026-11-12
+
+These scripts were **deleted**. Everything they mutated was removed in the
+scanner retirement (S1-S8), and so was every test they named. There is no
+guarantee left for them to check. `scanner-removal-mutation-controls.sh` and
+`ScannerRemovedInventoryTest` guard that the retired surface stays gone.
+
+`pr72-` (scan completeness), `pr721-` (scan panel liveness), `pr73-`
+(operator scan sessions), `pr74-` (session totals), `pr75-` (classification
+wording and pacing), `pr77-` (contract-list enumeration telemetry), `pr7a-`
+(discovery-run ledger), `pr7a1-` (discovery-run maintenance cron).
+
+### ⚠ The CRLF false-survivor trap
+
+`pr78` and `pr76` used to read the target file in Python text mode, which
+turns CRLF into LF. Most of `app/Domain/Onchain/` is CRLF, so a mutation
+whose anchor matched **nothing** still changed the file's bytes. That passed
+the "did the mutation apply?" md5 check, and an **unmutated** tree was
+reported as SURVIVED. All five `pr78` survivors on 2026-11-12 were this:
+stale anchors disguised as survivors. Both scripts now preserve line endings.
+`pr76` also writes **nothing** when the mutation left the text unchanged, so a
+no-match is BROKEN even on a file with mixed line endings.
+A new script must read with `newline=''` (or use PHP's `file_get_contents`,
+as `breaker-charge` does) and refuse an anchor that does not match exactly
+once.
 
 ## Promoting a manual script into CI
 
@@ -63,8 +112,11 @@ bash scripts/tests/operator-authority-mutation-controls.sh
 
 - The scripts **edit production files in place** and restore them after
   each control. Most do not restore if you kill them mid-run. Run them in a
-  worktree or a throwaway copy, never in the live plugin directory, and never
-  while another suite runs in the same tree. Check `git status` afterwards.
+  **git worktree**, never in the live plugin directory, and never while
+  another suite runs in the same tree. Check `git status` afterwards.
+- `pr5b` and `pr6` restore with `git checkout --`. In a copy that is not a git
+  checkout the restore silently fails and the next control runs on a mutated
+  tree. Run them only in a worktree.
 - Scripts that need a DB take the same `BCC_TEST_DB_*` variables as the
   integration suite, and the bootstrap **drops and recreates** that database.
   Point them at a disposable server, never the Local site's database.

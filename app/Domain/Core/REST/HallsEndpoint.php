@@ -177,7 +177,31 @@ final class HallsEndpoint
         );
 
         $response = ApiResponse::ok($payload);
-        $response->header('Cache-Control', 'public, max-age=300');
+
+        // §F-27 — this payload is PER-VIEWER: every row carries
+        // `viewer_membership` (`is_member`, `is_primary`, `joined_at`)
+        // from `renderViewerMembership()`. It was sent as
+        // `public, max-age=300`, which lets any shared cache store one
+        // signed-in member's membership state and hand it to a different
+        // viewer, or to anonymous visitors, for up to five minutes.
+        //
+        // Nothing would look broken while that happened: the response is
+        // well-formed and plausible, just someone else's.
+        //
+        // Same posture as `showBySlug()` below, deliberately mirrored
+        // rather than invented: anonymous has no viewer bits to leak and
+        // stays cacheable; a signed-in read is private and not stored.
+        $response->header(
+            'Cache-Control',
+            $viewerId > 0 ? 'private, no-store' : 'public, max-age=300'
+        );
+
+        // ⚠ Sent UNCONDITIONALLY, including for anonymous. `private`
+        // tells a shared cache not to store the signed-in variant, but it
+        // says nothing about an ANONYMOUS response already in the cache
+        // being replayed to a signed-in viewer on the same URL. Vary is
+        // what keys those apart.
+        $response->header('Vary', 'Authorization, Cookie');
 
         return $response;
     }

@@ -1192,7 +1192,7 @@ final class FeedHydrationPipeline
                 continue;
             }
             $handle      = \BCC\Trust\Core\Support\PublicIdentity::handle($id, get_user_meta($id, 'bcc_handle', true));
-            $displayName = \BCC\Trust\Core\Support\PublicIdentity::displayName($u->display_name, $u->user_login, $handle);
+            $displayName = \BCC\Trust\Core\Support\PublicIdentity::visibleName($id, $u->display_name, $u->user_login, $handle);
 
             // Cached, shared seam (§11). get_avatar_url() here runs through
             // PeepSo's get_avatar_url filter, which constructs a PeepSoUser

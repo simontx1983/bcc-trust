@@ -1493,7 +1493,7 @@ final class MessagesService
         $out = [];
         foreach ($rows as $uid => $row) {
             $handle  = \BCC\Trust\Core\Support\PublicIdentity::handle((int) $uid, $row['handle']);
-            $display = \BCC\Trust\Core\Support\PublicIdentity::displayName($row['display_name'], $row['user_login'], $handle);
+            $display = \BCC\Trust\Core\Support\PublicIdentity::visibleName((int) $uid, $row['display_name'], $row['user_login'], $handle);
 
             $out[$uid] = [
                 'id'           => $uid,

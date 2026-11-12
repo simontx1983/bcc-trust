@@ -341,6 +341,61 @@ jobs:
       - name: Verified-operator resolver (post_meta leg) mutation controls
         run: bash scripts/tests/operator-resolver-meta-leg-mutation-controls.sh
 
+  # F-96: NFT holder-community membership revocation must fail SAFE — an
+  # unknown or unreadable ownership answer never removes a member, and only a
+  # decided, complete "not owned" does. This is the access-control guard for
+  # gated communities: a test that quietly stopped constraining it would let
+  # holders be thrown out (or non-holders kept) with CI green. 39 controls,
+  # unit + integration halves; ~19 min on a local Windows run, so it gets its
+  # own job and a longer cap than the 30 minutes the other jobs use.
+  mutation-controls-revocation:
+    name: NFT membership revocation mutation controls (MySQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=15
+    defaults:
+      run:
+        working-directory: app/public/wp-content/plugins/bcc-trust
+    env:
+      BCC_TEST_DB_HOST: 127.0.0.1
+      BCC_TEST_DB_PORT: '3306'
+      BCC_TEST_DB_USER: root
+      BCC_TEST_DB_PASS: root
+      BCC_TEST_DB_NAME: bcc_test
+      # The script's default re-loads gmp/intl/mysqli with -d flags, which
+      # setup-php has already enabled below.
+      PHP: php
+      # An unreachable DB, or any skipped integration half, fails the run
+      # instead of passing with the integration controls never run.
+      REQUIRE_DB: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app/public/wp-content/plugins/bcc-trust
+      - uses: actions/checkout@v4
+        with:
+          repository: simontx1983/bcc-core
+          path: app/public/wp-content/plugins/bcc-core
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: gmp, intl, mbstring, mysqli
+          tools: composer:v2
+          coverage: none
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+      - name: NFT membership revocation fail-safe mutation controls
+        run: bash scripts/tests/pr714-mutation-controls.sh
+
   # Production runs MariaDB 11.8, not MySQL 8, and the two engines do not
   # accept the same SQL. `FOR SHARE` is valid MySQL 8 and a parse error on
   # MariaDB: it passed the job above for months while production logged

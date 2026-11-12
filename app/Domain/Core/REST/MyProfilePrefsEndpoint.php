@@ -14,7 +14,7 @@
  *     "hide_birthday_year":     bool,
  *     "hide_online":            bool,
  *     "hide_from_search":       bool,
- *     "default_post_audience":  "public" | "members" | "private",
+ *     "default_post_audience":  "public" | "members" | "friends" | "private",
  *     "mentor_opt_in":          bool
  *   }
  *
@@ -124,25 +124,38 @@ final class MyProfilePrefsEndpoint
     ];
 
     /**
-     * `default_post_audience` (`peepso_last_used_post_privacy`) keeps the
-     * THREE-token set it has always accepted.
+     * `default_post_audience` (`peepso_last_used_post_privacy`).
      *
-     * ⚠ Deliberately a separate map, not a reuse of the one above. The
-     * two shared a constant until `friends` was added for the profile
-     * field; continuing to share it would have silently widened a SECOND
-     * public enum in the same change, without that being asked for or
-     * reviewed.
+     * §F-169 added `friends` (30). It is still a SEPARATE map from the
+     * profile-visibility one above, deliberately: they happen to hold the
+     * same four entries now, but they are two public enums on two fields
+     * and sharing a constant is how a future change to one silently
+     * widens the other. That is exactly what the previous note warned
+     * about, and the warning holds in the other direction too.
      *
-     * Extending this one to `friends` is defensible on its own merits —
-     * `act_access = 30` is a real PeepSo post level that peepso-friends
-     * gates — but it is a separate contract change and belongs in its own
-     * PR.
+     * ⚠⚠ WHY 30 HAD TO BE ADDED, rather than left out as "unused": PeepSo's
+     * own posting UI can store 30, and this map is the read path as well as
+     * the write path. With no entry for it, a stored 30 was reported as
+     * `members`, so a settings form that GETs and then PATCHes — which is
+     * what a settings form does — wrote 20 back and SILENTLY LOOSENED the
+     * user's default from friends to members. Omitting a token from a
+     * round-trip map is not neutral.
+     *
+     * ⚠ What `friends` means for a post TODAY: with peepso-friends removed
+     * from production, `act_access = 30` resolves to the author only (the
+     * §F-02 ladder's friends rung against an empty friend list). So this
+     * now round-trips the user's choice faithfully, and that choice
+     * currently means "only me" in practice. Reporting it honestly is
+     * still right — the alternative was changing it without being asked —
+     * but the copy shown beside this control is a product question, not
+     * something this map can answer.
      *
      * @var array<string, int>
      */
     private const POST_AUDIENCE_TOKENS = [
         'public'  => 10,
         'members' => 20,
+        'friends' => 30,
         'private' => 40,
     ];
 
@@ -265,7 +278,7 @@ final class MyProfilePrefsEndpoint
             if (!is_string($defaultAudience) || !isset(self::POST_AUDIENCE_TOKENS[$defaultAudience])) {
                 return ApiResponse::error(
                     'bcc_invalid_request',
-                    '`default_post_audience` must be one of: public, members, private.',
+                    '`default_post_audience` must be one of: public, members, friends, private.',
                     422
                 );
             }
@@ -382,18 +395,18 @@ final class MyProfilePrefsEndpoint
             'hide_online'           => self::flag($userId, 'peepso_hide_online_status', false),
             'hide_from_search'      => self::flag($userId, 'peepso_is_hide_profile_from_user_listing', false),
             // ⚠ POST_AUDIENCE_TOKENS, matching this field's WRITE path.
-            // Both maps hold the same three entries, so this read is
-            // byte-identical to before; the point is that read and write
-            // stay pinned to the SAME map now that the profile field's map
-            // has a fourth token. Had this kept reading the profile map, a
-            // client could GET 'friends' here and then be refused on PUT.
+            // Read and write stay pinned to the SAME map, so a client can
+            // never GET a token here that the write path would refuse.
             //
-            // 📌 PRE-EXISTING, not introduced here: a user whose stored
-            // `peepso_last_used_post_privacy` is 30 (settable in PeepSo's
-            // own UI) is reported as 'members', and a client round-trip
-            // would then write 20 back — LOOSENING friends to members.
-            // That is true on main today and is logged as a follow-up
-            // rather than silently changed under cover of this PR.
+            // §F-169 fixed what the previous note recorded: a stored 30
+            // was reported as 'members', so a GET-then-PATCH round trip
+            // wrote 20 back and loosened friends to members. 30 now has a
+            // token, so the round trip preserves it.
+            //
+            // ⚠ The 'members' fallback below is for a value with NO token
+            // at all — an unparseable or out-of-range meta value, which
+            // this column can hold since PeepSo does not validate it. It
+            // is no longer reachable for 30.
             'default_post_audience' => self::tokenForAcc(
                 self::readLastUsedPostPrivacy($userId),
                 self::POST_AUDIENCE_TOKENS,

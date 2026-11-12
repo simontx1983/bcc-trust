@@ -60,6 +60,7 @@ use BCC\Trust\Core\Security\TransactionManager;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Support\NftChainCapability;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
@@ -88,6 +89,13 @@ final class ManualCollectionIntakeService
     public const REFUSED_NO_MANUAL         = 'manual_discovery_disabled';
     public const REFUSED_BAD_IDENTIFIER    = 'identifier_invalid';
     public const REFUSED_DUPLICATE         = 'duplicate_canonical_identity';
+
+    /**
+     * F-115: a DIFFERENT collection on this chain already holds the
+     * case-insensitive `uq_chain_contract` key (a mint differing only in
+     * case, or a legacy alias row). Writing would have overwritten it.
+     */
+    public const REFUSED_KEY_COLLISION     = 'identifier_key_collision';
     public const REFUSED_NOT_CW721         = 'cw721_validation_failed';
     public const REFUSED_WRITE_FAILED      = 'write_failed';
 
@@ -140,7 +148,7 @@ final class ManualCollectionIntakeService
      * @param int    $chainId    from the request; re-resolved and re-checked
      * @param string $identifier the raw operator input
      * @param int    $operatorId the administrator performing the add
-     * @return array{ok: bool, reason?: string, collection_id?: int, validation?: string, duplicate_of?: int}
+     * @return array{ok: bool, reason?: string, collection_id?: int, validation?: string, duplicate_of?: int, collides_with?: int}
      */
     public function add(string $family, int $chainId, string $identifier, int $operatorId): array
     {
@@ -219,6 +227,23 @@ final class ManualCollectionIntakeService
         if ($existing !== null) {
             $result = $this->refuse(self::REFUSED_DUPLICATE, $chainId, $operatorId, $family);
             $result['duplicate_of'] = (int) $existing->id;
+            return $result;
+        }
+
+        // ── 6b. Key collision with a DIFFERENT collection (F-115) ───────
+        // `uq_chain_contract` is case-INSENSITIVE while identity is not, so
+        // the exact lookup above misses a mint differing only in case, and a
+        // legacy alias row with no canonical identity. The INSERT … ON
+        // DUPLICATE KEY UPDATE would then land on THAT row and overwrite it.
+        // Refuse, and name the row. An unreadable check refuses too.
+        try {
+            $collision = CollectionRepository::findChainContractKeyCollision($chainId, $canonical, $canonical);
+        } catch (RepositoryReadFailure $e) {
+            return $this->refuse(self::REFUSED_WRITE_FAILED, $chainId, $operatorId, $family);
+        }
+        if ($collision !== null) {
+            $result = $this->refuse(self::REFUSED_KEY_COLLISION, $chainId, $operatorId, $family);
+            $result['collides_with'] = (int) $collision->id;
             return $result;
         }
 
@@ -429,6 +454,8 @@ final class ManualCollectionIntakeService
                 return 'That identifier is not valid for this chain. Nothing was added.';
             case self::REFUSED_DUPLICATE:
                 return 'A collection with that on-chain identity already exists on this chain.';
+            case self::REFUSED_KEY_COLLISION:
+                return 'A different collection on this chain is stored under the same identifier ignoring letter case. Adding this one would overwrite it, so nothing was added. Review the existing collection on the Verify Collections page.';
             case self::REFUSED_NOT_CW721:
                 // ⚠ Now a DECIDED negative, and the copy may say so: the
                 // contract answered, and its answers are not an NFT

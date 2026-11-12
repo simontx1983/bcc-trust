@@ -58,6 +58,13 @@ final class MentionSearchService
     public const MAX_QUERY_LEN = 32;
 
     /**
+     * Bound on each half of the name/handle candidate set handed to
+     * PeepSoUserSearch. A short keystroke prefix can match many members;
+     * the picker shows MAX_LIMIT of them after PeepSo's privacy filter.
+     */
+    public const MAX_CANDIDATES = 200;
+
+    /**
      * Execute a prefix search against PeepSoUserSearch's privacy-aware
      * WP_User_Query wrapper. Returns the §4.4 view-model shape; empty
      * list when no rows match or PeepSo isn't installed.
@@ -81,23 +88,32 @@ final class MentionSearchService
             return [];
         }
 
-        // PeepSoUserSearch force-sets fields=ID and applies the
-        // privacy filter set in its pre_user_query callback. We pass
-        // `orderby=username` for stable alphabetical results — the
-        // mention picker is keystroke-driven, so prefix bias + alpha
-        // sort gives the most predictable typeahead UX.
-        //
-        // The constructor itself escapes $needle via $wpdb->esc_like;
-        // we trim + length-cap upstream so a pathological query can't
-        // inflate the LIKE planner.
+        // MATCHING is MemberSearchCandidates (display name or @handle,
+        // never the login; a hidden real name matches by handle only), the
+        // same matcher /members uses. ⛔ The raw query is NOT passed to
+        // PeepSoUserSearch: its own search matches first/last name plus
+        // user_login, which made this picker a login-existence probe and
+        // found members by a real name they had hidden.
+        $candidates = \BCC\Trust\Core\Support\MemberSearchCandidates::ids($needle, self::MAX_CANDIDATES);
+        if ($candidates === []) {
+            return [];
+        }
+
+        // PRIVACY stays PeepSo's: PeepSoUserSearch force-sets fields=ID and
+        // applies its privacy filter set in pre_user_query, over the
+        // candidate set passed as `include`, with an EMPTY search term (its
+        // own search clause is skipped when the term is empty). We pass
+        // `orderby=username` for stable alphabetical results; the picker is
+        // keystroke-driven, so a predictable order matters.
         $search = new \PeepSoUserSearch(
             [
                 'number'  => $limit,
                 'orderby' => 'username',
                 'order'   => 'ASC',
+                'include' => $candidates,
             ],
             $viewerId > 0 ? $viewerId : null,
-            $needle
+            ''
         );
 
         /** @var list<int|numeric-string> $rawIds */

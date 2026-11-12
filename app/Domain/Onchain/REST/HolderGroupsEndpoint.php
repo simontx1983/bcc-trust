@@ -486,6 +486,9 @@ final class HolderGroupsEndpoint
         ?object $collection,
         array $activity
     ): array {
+        // F-187: IPFS cover on the configured gateway + ipfs.io fallback.
+        $image = \BCC\Trust\Onchain\ValueObjects\IpfsImageUrl::present($collection !== null ? $collection->image_url : null);
+
         return [
             'group_id'     => $cfg->groupId,
             'slug'         => $display !== null ? (string) $display->post_name : '',
@@ -495,9 +498,8 @@ final class HolderGroupsEndpoint
                 'chain'     => $collection !== null ? (string) $collection->chain_slug : null,
                 'contract'  => $cfg->contractAddress,
                 'name'      => $collection !== null ? $collection->collection_name : null,
-                // F-187: IPFS cover on the configured gateway + ipfs.io fallback.
-                'image_url'          => \BCC\Trust\Onchain\ValueObjects\IpfsImageUrl::present($collection !== null ? $collection->image_url : null)['url'],
-                'image_fallback_url' => \BCC\Trust\Onchain\ValueObjects\IpfsImageUrl::present($collection !== null ? $collection->image_url : null)['fallback_url'],
+                'image_url'          => $image['url'],
+                'image_fallback_url' => $image['fallback_url'],
             ],
             'verification' => GroupVerification::onChain()->toApiResponse(),
             'activity'     => $activity,

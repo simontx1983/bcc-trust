@@ -87,6 +87,16 @@ if ! $PHP -r '$c=@mysqli_connect(getenv("BCC_TEST_DB_HOST")?:"127.0.0.1",getenv(
   INTEGRATION_OK=0
 fi
 
+# ⚠ REQUIRE_DB=1 (CI sets it): an unreachable database is a FAILURE, not a
+# skip. Without it, a broken MySQL service skipped every integration half and
+# the run still exited 0 — the integration controls would silently stop
+# running while the job stayed green. Locally, leave it unset to run the unit
+# halves alone.
+if [ "${REQUIRE_DB:-0}" = 1 ] && [ "$INTEGRATION_OK" -ne 1 ]; then
+  echo "FATAL: REQUIRE_DB=1 but the test database is unreachable (BCC_TEST_DB_*)."
+  exit 2
+fi
+
 # Failed test names (Class::method) from a JUnit file, one per line.
 failures () {
   python - "$1" <<'PY'
@@ -339,5 +349,10 @@ for f in "${FILES[@]}"; do
   cmp -s "$SNAPDIR/$f" "$f" || { echo "FATAL: $f differs from its snapshot at the end of the run"; exit 2; }
 done
 echo "all mutated files byte-identical to their pre-run snapshot"
+
+if [ "${REQUIRE_DB:-0}" = 1 ] && [ "${TALLY[skipped]}" -gt 0 ]; then
+  echo "FAIL: REQUIRE_DB=1 and ${TALLY[skipped]} control half(s) were skipped."
+  exit 1
+fi
 
 [ "${TALLY[survived]}" -eq 0 ] && [ "${TALLY[wrong_reason]}" -eq 0 ] && [ "${TALLY[broken]}" -eq 0 ]

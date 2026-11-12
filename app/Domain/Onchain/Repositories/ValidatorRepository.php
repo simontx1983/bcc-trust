@@ -963,6 +963,11 @@ final class ValidatorRepository
         $orderDir = in_array($orderBy, ['voting_power_rank', 'commission_rate', 'chain_name'], true) ? 'ASC' : 'DESC';
         $offset   = ($page - 1) * $perPage;
 
+        // F-146: MySQL and MariaDB both sort NULL FIRST under ASC, so an
+        // unranked validator (no voting_power_rank yet) led the rank sort
+        // ahead of #1. `(col IS NULL) ASC` puts unknown values last in either
+        // direction (a no-op for DESC, where NULLs already sort last).
+
         $total = (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*)
              FROM {$table} v
@@ -982,7 +987,7 @@ final class ValidatorRepository
              JOIN {$wallets} w ON w.id = v.wallet_link_id
              JOIN {$chains} c ON c.id = v.chain_id
              WHERE w.post_id = %d
-             ORDER BY {$orderColumn} {$orderDir}, v.id DESC
+             ORDER BY ({$orderColumn} IS NULL) ASC, {$orderColumn} {$orderDir}, v.id DESC
              LIMIT %d OFFSET %d",
             $postId, $perPage, $offset
         ));
@@ -1076,14 +1081,32 @@ final class ValidatorRepository
     // ── Enrichment scheduler methods ────────────────────────────────────────
 
     /**
-     * Mark validators as inactive if not seen by indexer in 30+ days.
+     * Mark validators as inactive if not seen by indexer in 30+ days,
+     * ONLY on the chains in $chainIds.
      *
+     * F-157: this used to be a GLOBAL update with no chain predicate. A
+     * chain the index run SKIPPED (circuit breaker resting, no driver, no
+     * validator support) never refreshes its rows' fetched_at, so once
+     * they aged past 30 days another chain's clean run marked them dead.
+     * The caller now passes the chains it actually indexed this run. An
+     * empty list marks nothing.
+     *
+     * @param list<int> $chainIds
      * @return int Number of rows updated.
      */
-    public static function markDeadValidators(int $maxAttempts): int
+    public static function markDeadValidators(int $maxAttempts, array $chainIds): int
     {
         global $wpdb;
         $table = self::table();
+
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', $chainIds),
+            static fn(int $id): bool => $id > 0
+        )));
+        if ($ids === []) {
+            return 0;
+        }
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
 
         $result = $wpdb->query($wpdb->prepare(
             "UPDATE {$table}
@@ -1091,8 +1114,10 @@ final class ValidatorRepository
                  next_enrichment_at = NULL
              WHERE enrichment_attempts >= %d
                AND fetched_at < DATE_SUB(NOW(), INTERVAL 30 DAY)
-               AND status != 'inactive'",
-            $maxAttempts
+               AND status != 'inactive'
+               AND chain_id IN ({$placeholders})",
+            $maxAttempts,
+            ...$ids
         ));
 
         return (int) $result;
@@ -1462,6 +1487,9 @@ final class ValidatorRepository
         // other direction (CAST(v.id AS CHAR)) trips a collation mismatch
         // because wp_postmeta is utf8mb4_unicode_ci and the CHAR cast
         // inherits utf8mb4_unicode_520_ci on this MySQL build.
+        //
+        // F-146: within a chain, ranked validators first (rank 1 up), then
+        // unranked ones. A bare `voting_power_rank ASC` put NULL first.
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT v.id, v.operator_address, v.moniker, v.status,
                     v.chain_id, c.slug AS chain_slug, c.name AS chain_name
@@ -1472,7 +1500,7 @@ final class ValidatorRepository
                      AND CAST(pm.meta_value AS UNSIGNED) = v.id
               WHERE {$whereSql}
                 AND pm.meta_id IS NULL
-              ORDER BY v.chain_id ASC, v.voting_power_rank ASC, v.id ASC
+              ORDER BY v.chain_id ASC, (v.voting_power_rank IS NULL) ASC, v.voting_power_rank ASC, v.id ASC
               LIMIT %d OFFSET %d",
             ...$params
         ));
