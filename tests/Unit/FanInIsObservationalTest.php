@@ -285,6 +285,34 @@ final class FanInIsObservationalTest extends TestCase
         self::assertFalse(FraudDetector::detectFanInCoordination(self::PAGE, self::VOTER));
     }
 
+    // ══ 3b. A FAILED DIVERSITY READ SKIPS (F-205) ════════════════════
+
+    public function testAFailedOtherPagesReadWritesNothingAndDoesNotFire(): void
+    {
+        // A failed read used to come back as 0 other pages, which is under
+        // the "< 3" floor: the rule FIRED on a database blip.
+        $this->legitimateCrew();
+        W::$otherPagesReadFails = true;
+
+        self::assertFalse(FraudDetector::detectFanInCoordination(self::PAGE, self::VOTER));
+        self::assertSame([], W::$patterns, 'no pattern row');
+        self::assertSame([], W::$auditLog, 'no audit row');
+        self::assertSame([], W::$transients, 'no dedup transient');
+    }
+
+    public function testAfterAFailedReadTheNextVoteStillChecks(): void
+    {
+        // The skip must not suppress the page: without a dedup transient,
+        // the next vote re-runs the rule and records a real observation.
+        $this->legitimateCrew();
+        W::$otherPagesReadFails = true;
+        self::assertFalse(FraudDetector::detectFanInCoordination(self::PAGE, self::VOTER));
+
+        W::$otherPagesReadFails = false;
+        self::assertTrue(FraudDetector::detectFanInCoordination(self::PAGE, self::VOTER));
+        self::assertCount(1, W::$patterns);
+    }
+
     // ══ 4. UNRELATED SIGNALS PRESERVED ════════════════════════════════
 
     public function testAnalyzeFraudIsCompletelyUnaffected(): void

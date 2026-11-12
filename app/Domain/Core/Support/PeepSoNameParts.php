@@ -18,7 +18,10 @@
  *     member's public handle (PublicIdentity::handle: bcc_handle, else
  *     member-{id}). A multi-part name is a real name and is never
  *     changed, even when one part equals the login (first name "Simon",
- *     login "simon"). Suffix parts PeepSo appends for admins
+ *     login "simon"). A single part that equals the member's own
+ *     first_name meta is a real name too ('real_name_first' style) and is
+ *     kept: PeepSo's fallback comes from get_username(), never first_name.
+ *     Suffix parts PeepSo appends for admins
  *     (' - Profile reported') are ignored for that check and kept;
  *   - drops a '(login)' admin suffix part.
  * Aggressive mode then writes the HANDLE, which is what the display-name
@@ -95,10 +98,19 @@ final class PeepSoNameParts
         if ($core === []) {
             return array_merge([$handle], $suffixes);
         }
-        if (count($core) === 1
-            && strcasecmp(trim(html_entity_decode((string) $core[0], ENT_QUOTES, 'UTF-8')), $login) === 0
-        ) {
-            return array_merge([$handle], $suffixes);
+        $single = count($core) === 1
+            ? trim(html_entity_decode((string) $core[0], ENT_QUOTES, 'UTF-8'))
+            : null;
+        if ($single !== null && strcasecmp($single, $login) === 0) {
+            // A single part can also be a REAL first name: PeepSo's
+            // 'real_name_first' style shows first_name alone, and "Simon"
+            // with login "simon" must stay "Simon". PeepSo's fallback comes
+            // from get_username(), never from first_name, so a part equal
+            // to the member's own first_name is a real name: keep it.
+            $firstName = trim(html_entity_decode((string) get_user_meta($id, 'first_name', true), ENT_QUOTES, 'UTF-8'));
+            if ($firstName === '' || $single !== $firstName) {
+                return array_merge([$handle], $suffixes);
+            }
         }
 
         return $parts;

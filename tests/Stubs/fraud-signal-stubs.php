@@ -159,6 +159,8 @@ namespace BCC\Trust\Core {
         /** @var list<object> rows shaped like getRecentVotersWithRegistration() */
         public static array $recentVoters = [];
         public static int $otherPageVotes = 0;
+        /** F-205: when true, countOtherPagesVotedByUsers() fails like production (RepositoryReadFailure). */
+        public static bool $otherPagesReadFails = false;
 
         /** @var list<array{action: string, target_id: ?int, meta: array<string, mixed>}> */
         public static array $auditLog = [];
@@ -210,6 +212,7 @@ namespace BCC\Trust\Core {
             self::$ringDetectionFails = false;
             self::$recentVoters    = [];
             self::$otherPageVotes  = 0;
+            self::$otherPagesReadFails = false;
             self::$auditLog        = [];
             self::$reverseAttestations = [];
             self::$attestationGraph = [];
@@ -397,6 +400,9 @@ namespace BCC\Trust\Core\Repositories {
             /** @param list<int> $voterIds */
             public function countOtherPagesVotedByUsers(array $voterIds, int $excludePageId): int
             {
+                if (W::$otherPagesReadFails) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(self::class, __FUNCTION__, 'injected');
+                }
                 return W::$otherPageVotes;
             }
         }

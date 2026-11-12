@@ -2179,6 +2179,10 @@ class VoteRepository {
      * @param int[] $voterIds
      * @param int   $excludePageId
      * @return int
+     * @throws RepositoryReadFailure when the read failed (F-205). One
+     *         caller, FraudDetector::detectFanInCoordination(), where 0
+     *         means "fewer than 3 other pages" and FIRES the observation.
+     *         It catches this and skips.
      */
     public function countOtherPagesVotedByUsers( array $voterIds, int $excludePageId ): int {
         global $wpdb;
@@ -2189,13 +2193,15 @@ class VoteRepository {
 
         $placeholders = implode( ',', array_fill( 0, count( $voterIds ), '%d' ) );
 
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(DISTINCT page_id) FROM {$this->table}
+        $rows = self::runRead( $wpdb->prepare(
+            "SELECT COUNT(DISTINCT page_id) AS n FROM {$this->table}
              WHERE voter_user_id IN ({$placeholders})
                AND page_id != %d
                AND status = 1",
             ...array_merge( $voterIds, [ $excludePageId ] )
-        ) );
+        ), __FUNCTION__, true );
+
+        return isset( $rows[0]->n ) ? (int) $rows[0]->n : 0;
     }
 
     /**
