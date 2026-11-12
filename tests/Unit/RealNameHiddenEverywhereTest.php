@@ -127,7 +127,7 @@ final class RealNameHiddenEverywhereTest extends TestCase
 
     public function testMembersSearchExcludesHiddenNamesFromTheNameMatch(): void
     {
-        $src = (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Core/REST/UsersEndpoint.php');
+        $src = (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Core/Support/MemberSearchCandidates.php');
         self::assertMatchesRegularExpression(
             "/'search_columns' => \['display_name'\],.*?'meta_query'\s*=>\s*\[.*?bcc_privacy_real_name_hidden.*?NOT EXISTS.*?bcc_privacy_real_name_hidden.*?'!='/s",
             $src
