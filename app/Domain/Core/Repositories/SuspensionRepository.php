@@ -134,11 +134,28 @@ class SuspensionRepository
         return $out;
     }
 
+    /** The marker an archived suspension's notes end with: exactly once. */
+    private const ARCHIVED_MARKER = ' [ARCHIVED]';
+
+    /** Rows one archive run may touch (bounded; the next run continues). */
+    private const ARCHIVE_BATCH = 1000;
+
     /**
-     * Archive old closed suspensions by appending [ARCHIVED] to notes.
+     * Mark old closed suspensions archived: their notes end with ONE
+     * " [ARCHIVED]" marker.
+     *
+     * F-146: this used to append the marker with no "already archived"
+     * guard, so every admin cleanup run added ANOTHER marker to every old
+     * closed suspension (the notes grew one marker per run, forever), the
+     * reported count was every old row every time, and a NULL note was
+     * never marked (CONCAT(NULL, …) is NULL). It is now idempotent: the
+     * note's trailing markers are stripped and exactly one is put back,
+     * and only rows that change are updated and counted. A row bloated by
+     * the old code is therefore normalised back to one marker; the original
+     * note text before the markers is kept.
      *
      * @param int $olderThanDays Suspensions closed more than this many days ago.
-     * @return int Number of rows updated.
+     * @return int Number of rows newly archived (or repaired) by this run.
      */
     public function archiveOldClosed(int $olderThanDays): int
     {
@@ -146,14 +163,27 @@ class SuspensionRepository
 
         $cutoff = date('Y-m-d H:i:s', strtotime("-{$olderThanDays} days") ?: 0);
 
-        return (int) $wpdb->query(
+        // One expression, used for both the new value and the "already
+        // correct?" test, so the two cannot drift.
+        $archived = "CONCAT(TRIM(TRAILING %s FROM COALESCE(notes, '')), %s)";
+
+        $result = $wpdb->query(
             $wpdb->prepare(
-                "UPDATE {$this->table} SET notes = CONCAT(notes, ' [ARCHIVED]')
+                "UPDATE {$this->table} SET notes = {$archived}
                  WHERE unsuspended_at IS NOT NULL
-                 AND unsuspended_at < %s",
-                $cutoff
+                   AND unsuspended_at < %s
+                   AND COALESCE(notes, '') <> {$archived}
+                 LIMIT %d",
+                self::ARCHIVED_MARKER,
+                self::ARCHIVED_MARKER,
+                $cutoff,
+                self::ARCHIVED_MARKER,
+                self::ARCHIVED_MARKER,
+                self::ARCHIVE_BATCH
             )
         );
+
+        return is_int($result) ? $result : 0;
     }
 
     /**
