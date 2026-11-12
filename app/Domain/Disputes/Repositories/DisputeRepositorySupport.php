@@ -125,18 +125,7 @@ final class DisputeRepositorySupport
      */
     public static function bumpGeneration(string $genKey): void
     {
-        $result = wp_cache_incr($genKey, 1, self::CACHE_GROUP);
-        if ($result === false) {
-            // incr failed — key may not exist. Verify before overwriting.
-            $current = wp_cache_get($genKey, self::CACHE_GROUP);
-            if ($current === false) {
-                // Key truly doesn't exist — set to 2 (first bump from implicit gen=1).
-                wp_cache_set($genKey, 2, self::CACHE_GROUP, 0);
-            } else {
-                // Key exists but incr failed (transient backend issue) — force set incremented value.
-                wp_cache_set($genKey, (int) $current + 1, self::CACHE_GROUP, 0);
-            }
-        }
+        \BCC\Trust\Core\Support\CacheGeneration::bump($genKey, self::CACHE_GROUP);
     }
 
     /**

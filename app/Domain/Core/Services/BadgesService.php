@@ -141,14 +141,7 @@ final class BadgesService
         if ($userId <= 0) {
             return;
         }
-        $key = "me_badges_gen:{$userId}";
-        $result = wp_cache_incr($key, 1, self::CACHE_GROUP);
-        if ($result === false) {
-            // Counter didn't exist yet — initialise to 2 so the next
-            // read sees a different generation than the implicit 1
-            // returned by getGeneration's fallback.
-            wp_cache_set($key, 2, self::CACHE_GROUP, 0);
-        }
+        \BCC\Trust\Core\Support\CacheGeneration::bump("me_badges_gen:{$userId}", self::CACHE_GROUP);
     }
 
     /**
@@ -231,13 +224,7 @@ final class BadgesService
 
     private function getGeneration(int $userId): int
     {
-        $key = "me_badges_gen:{$userId}";
-        $gen = wp_cache_get($key, self::CACHE_GROUP);
-        if ($gen === false) {
-            $gen = 1;
-            wp_cache_set($key, $gen, self::CACHE_GROUP, 0);
-        }
-        return (int) $gen;
+        return \BCC\Trust\Core\Support\CacheGeneration::get("me_badges_gen:{$userId}", self::CACHE_GROUP);
     }
 
     /**

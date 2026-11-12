@@ -61,7 +61,7 @@ final class ScoreReadService implements ScoreReadServiceInterface
         if ($cacheable) {
             // Include a generation counter in the key so score mutations
             // automatically invalidate all batch cache entries.
-            $gen = (int) wp_cache_get(self::GEN_KEY, self::CACHE_GROUP);
+            $gen = \BCC\Trust\Core\Support\CacheGeneration::get(self::GEN_KEY, self::CACHE_GROUP);
             $sorted = $pageIds;
             sort($sorted);
             $cacheKey = 'batch_scores_' . $gen . '_' . md5(implode(',', $sorted));
@@ -131,7 +131,7 @@ final class ScoreReadService implements ScoreReadServiceInterface
         $cacheable = count($pageIds) <= self::CACHE_MAX_IDS;
 
         if ($cacheable) {
-            $gen = (int) wp_cache_get(self::GEN_KEY, self::CACHE_GROUP);
+            $gen = \BCC\Trust\Core\Support\CacheGeneration::get(self::GEN_KEY, self::CACHE_GROUP);
             $sorted = $pageIds;
             sort($sorted);
             $cacheKey = 'batch_enriched_' . $gen . '_' . md5(implode(',', $sorted));
@@ -297,9 +297,6 @@ final class ScoreReadService implements ScoreReadServiceInterface
      */
     public static function bustBatchCache(): void
     {
-        $newGen = wp_cache_incr(self::GEN_KEY, 1, self::CACHE_GROUP);
-        if ($newGen === false) {
-            wp_cache_set(self::GEN_KEY, 1, self::CACHE_GROUP, 3600);
-        }
+        \BCC\Trust\Core\Support\CacheGeneration::bump(self::GEN_KEY, self::CACHE_GROUP);
     }
 }

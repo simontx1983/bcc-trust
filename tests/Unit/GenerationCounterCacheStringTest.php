@@ -6,6 +6,7 @@ namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Core\Repositories\BlogChainTagRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
+use BCC\Trust\Core\Support\CacheGeneration;
 use PHPUnit\Framework\Attributes\CoversMethod;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -31,12 +32,17 @@ use ReflectionMethod;
  */
 #[CoversMethod(HiddenActivityRepository::class, 'getGeneration')]
 #[CoversMethod(BlogChainTagRepository::class, 'cacheKey')]
+#[CoversMethod(CacheGeneration::class, 'get')]
+#[CoversMethod(CacheGeneration::class, 'bump')]
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
 final class GenerationCounterCacheStringTest extends TestCase
 {
     private const HIDDEN_GROUP = 'bcc_trust:hidden_activities';
     private const BLOG_GROUP   = 'bcc_trust:blog_chain_tags';
+
+    /** A clock-seeded generation, as CacheGeneration::seed() writes. */
+    private const CLOCK_GEN = 1_700_000_000_000_005;
 
     protected function setUp(): void
     {
@@ -49,26 +55,26 @@ final class GenerationCounterCacheStringTest extends TestCase
 
     public function testHiddenGenerationSurvivesStringRoundTrip(): void
     {
-        wp_cache_set('gen', 5, self::HIDDEN_GROUP);
-        // Stub returns '5' (string) — the cross-process view.
-        self::assertSame('5', wp_cache_get('gen', self::HIDDEN_GROUP));
-        self::assertSame(5, HiddenActivityRepository::getGeneration());
+        wp_cache_set('gen', self::CLOCK_GEN, self::HIDDEN_GROUP);
+        // Stub returns a numeric string — the cross-process view.
+        self::assertSame((string) self::CLOCK_GEN, wp_cache_get('gen', self::HIDDEN_GROUP));
+        self::assertSame(self::CLOCK_GEN, HiddenActivityRepository::getGeneration());
     }
 
     public function testHiddenGenerationIsNotResetByCrossProcessReads(): void
     {
-        wp_cache_set('gen', 7, self::HIDDEN_GROUP);
+        wp_cache_set('gen', self::CLOCK_GEN, self::HIDDEN_GROUP);
         // The old is_int guard reset the counter to 0 on the first
-        // read; a second read must still see 7 and the store must
-        // still hold 7.
-        self::assertSame(7, HiddenActivityRepository::getGeneration());
-        self::assertSame(7, HiddenActivityRepository::getGeneration());
-        self::assertSame(7, (int) \BccTestPersistentCache::raw('gen', self::HIDDEN_GROUP));
+        // read; a second read must still see it and the store must
+        // still hold it.
+        self::assertSame(self::CLOCK_GEN, HiddenActivityRepository::getGeneration());
+        self::assertSame(self::CLOCK_GEN, HiddenActivityRepository::getGeneration());
+        self::assertSame(self::CLOCK_GEN, (int) \BccTestPersistentCache::raw('gen', self::HIDDEN_GROUP));
     }
 
     public function testHiddenBustAdvancesGenerationAcrossProcesses(): void
     {
-        wp_cache_set('gen', 3, self::HIDDEN_GROUP);
+        wp_cache_set('gen', self::CLOCK_GEN, self::HIDDEN_GROUP);
 
         $bust = new ReflectionMethod(HiddenActivityRepository::class, 'bustCache');
         $bust->setAccessible(true);
@@ -76,40 +82,102 @@ final class GenerationCounterCacheStringTest extends TestCase
 
         // The bust must survive a subsequent cross-process read — this
         // is the exact sequence that failed live (hide → feed request).
-        self::assertSame(4, HiddenActivityRepository::getGeneration());
+        self::assertSame(self::CLOCK_GEN + 1, HiddenActivityRepository::getGeneration());
 
         $keyFn = new ReflectionMethod(HiddenActivityRepository::class, 'cacheGenerationKey');
         $keyFn->setAccessible(true);
-        self::assertSame('all_hidden_ids:4', $keyFn->invoke(null));
+        self::assertSame('all_hidden_ids:' . (self::CLOCK_GEN + 1), $keyFn->invoke(null));
     }
 
-    public function testHiddenColdCacheInitializesToZero(): void
+    /** A cold (or evicted) counter seeds from the clock, never 0. */
+    public function testHiddenColdCacheSeedsFromClock(): void
     {
-        self::assertSame(0, HiddenActivityRepository::getGeneration());
-        self::assertSame(0, (int) \BccTestPersistentCache::raw('gen', self::HIDDEN_GROUP));
+        $before = CacheGeneration::seed();
+        $gen    = HiddenActivityRepository::getGeneration();
+
+        self::assertGreaterThanOrEqual($before, $gen);
+        self::assertSame($gen, (int) \BccTestPersistentCache::raw('gen', self::HIDDEN_GROUP));
+    }
+
+    /**
+     * F-87 class: an eviction must not rewind the counter to a value an
+     * earlier generation already used. The stub's incr creates a missing
+     * key at 0+1, like Redis INCRBY in the production drop-in.
+     */
+    public function testHiddenBustAfterEvictionDoesNotRewind(): void
+    {
+        $bust = new ReflectionMethod(HiddenActivityRepository::class, 'bustCache');
+        $bust->setAccessible(true);
+
+        $first = HiddenActivityRepository::getGeneration();
+        $bust->invoke(null);
+        $bumped = HiddenActivityRepository::getGeneration();
+        self::assertSame($first + 1, $bumped);
+
+        wp_cache_delete('gen', self::HIDDEN_GROUP); // LRU eviction
+        $bust->invoke(null);
+
+        $after = HiddenActivityRepository::getGeneration();
+        self::assertGreaterThan($bumped, $after);
+        // The bump left a stable key: reads agree, so the cache can hit.
+        self::assertSame($after, HiddenActivityRepository::getGeneration());
+    }
+
+    /** A pre-clock counter (deployed before this change) moves forward too. */
+    public function testHiddenBustOfLegacySmallCounterMovesPastIt(): void
+    {
+        wp_cache_set('gen', 3, self::HIDDEN_GROUP);
+
+        $bust = new ReflectionMethod(HiddenActivityRepository::class, 'bustCache');
+        $bust->setAccessible(true);
+        $bust->invoke(null);
+
+        self::assertGreaterThan(1_000_000_000_000_000, HiddenActivityRepository::getGeneration());
     }
 
     // ── BlogChainTagRepository ───────────────────────────────────────
 
     public function testBlogChainTagCacheKeySurvivesStringRoundTrip(): void
     {
-        wp_cache_set('gen', 2, self::BLOG_GROUP);
+        wp_cache_set('gen', self::CLOCK_GEN, self::BLOG_GROUP);
 
         $keyFn = new ReflectionMethod(BlogChainTagRepository::class, 'cacheKey');
         $keyFn->setAccessible(true);
-        self::assertSame('post:9:2', $keyFn->invoke(null, 'post:9'));
+        self::assertSame('post:9:' . self::CLOCK_GEN, $keyFn->invoke(null, 'post:9'));
 
         $bust = new ReflectionMethod(BlogChainTagRepository::class, 'bustCache');
         $bust->setAccessible(true);
         $bust->invoke(null);
 
-        self::assertSame('post:9:3', $keyFn->invoke(null, 'post:9'));
+        self::assertSame('post:9:' . (self::CLOCK_GEN + 1), $keyFn->invoke(null, 'post:9'));
     }
 
-    public function testBlogChainTagColdCacheKeyIsGenerationZero(): void
+    public function testBlogChainTagColdCacheKeySeedsFromClock(): void
     {
         $keyFn = new ReflectionMethod(BlogChainTagRepository::class, 'cacheKey');
         $keyFn->setAccessible(true);
-        self::assertSame('post:1:0', $keyFn->invoke(null, 'post:1'));
+
+        $before = CacheGeneration::seed();
+        $key    = (string) $keyFn->invoke(null, 'post:1');
+        self::assertMatchesRegularExpression('/^post:1:\d{16,}$/', $key);
+        self::assertGreaterThanOrEqual($before, (int) substr($key, strlen('post:1:')));
+    }
+
+    public function testBlogChainTagBustAfterEvictionDoesNotRewind(): void
+    {
+        $keyFn = new ReflectionMethod(BlogChainTagRepository::class, 'cacheKey');
+        $keyFn->setAccessible(true);
+        $bust = new ReflectionMethod(BlogChainTagRepository::class, 'bustCache');
+        $bust->setAccessible(true);
+
+        $bust->invoke(null);
+        $before = (int) substr((string) $keyFn->invoke(null, 'p'), 2);
+
+        wp_cache_delete('gen', self::BLOG_GROUP);
+        $bust->invoke(null);
+
+        $after = (string) $keyFn->invoke(null, 'p');
+        self::assertGreaterThan($before, (int) substr($after, 2));
+        self::assertSame($after, $keyFn->invoke(null, 'p'));
     }
 }

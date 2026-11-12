@@ -331,12 +331,7 @@ final class NftSelectionRepository
         if ($userId <= 0) {
             return;
         }
-        $key = self::GENERATION_KEY_PREFIX . $userId;
-        if (wp_cache_get($key, self::CACHE_GROUP) === false) {
-            wp_cache_add($key, 1, self::CACHE_GROUP);
-            return;
-        }
-        wp_cache_incr($key, 1, self::CACHE_GROUP);
+        \BCC\Trust\Core\Support\CacheGeneration::bump(self::GENERATION_KEY_PREFIX . $userId, self::CACHE_GROUP);
     }
 
     /**
@@ -348,8 +343,6 @@ final class NftSelectionRepository
         if ($userId <= 0) {
             return 0;
         }
-        $key = self::GENERATION_KEY_PREFIX . $userId;
-        $value = wp_cache_get($key, self::CACHE_GROUP);
-        return is_numeric($value) ? (int) $value : 0;
+        return \BCC\Trust\Core\Support\CacheGeneration::get(self::GENERATION_KEY_PREFIX . $userId, self::CACHE_GROUP);
     }
 }
