@@ -27,17 +27,19 @@
  * invocation — `T_DOUBLE_COLON` followed by the name followed by `(`.
  *
  * ⚠ This is a STATIC wiring check, deliberately scoped. It proves the
- * call is present in each route body. It does NOT prove the call is
- * reached before the payload is composed, nor that its refusal is
- * returned — only an integration test through the REST stack can, and
- * that is tracked separately. Claiming more than that here would be the
- * false-confidence this file is meant to remove.
+ * call is present in each route body and (F-96) that, in source order,
+ * its refusal is returned before any success response is built. It does
+ * NOT prove the gate is REACHED on every path at runtime — only an
+ * integration test through the REST stack can, and that is tracked
+ * separately. Claiming more than that here would be the false-confidence
+ * this file is meant to remove.
  */
 
 declare(strict_types=1);
 
 namespace BCC\Trust\Tests\Unit;
 
+use BCC\Trust\Tests\Support\GateOrder;
 use PHPUnit\Framework\TestCase;
 
 final class ProfileGateWiringTest extends TestCase
@@ -176,6 +178,38 @@ final class ProfileGateWiringTest extends TestCase
                     . '"only me" profile to a stranger — which is the entire defect '
                     . 'F-02 exists to close. Either wire the gate or remove the route '
                     . 'from this inventory deliberately.'
+                );
+            }
+        }
+    }
+
+    /**
+     * F-96: CALLING the gate is not HONOURING it. A route that calls
+     * canViewProfile() but ignores the answer, or builds its success
+     * response first, still passes the presence check above. Every gated
+     * route must return the gate's refusal, and no success response may be
+     * built before it. The success response is the work this pins against
+     * because it is where the profile actually leaves the server.
+     */
+    public function testEveryGatedRouteReturnsTheRefusalBeforeAnySuccessResponse(): void
+    {
+        foreach (self::GATED_ROUTES as $file => $methods) {
+            $code = GateOrder::code('app/Domain/Core/REST/' . $file);
+
+            foreach ($methods as $method) {
+                $label = "{$file}::{$method}()";
+                $body  = GateOrder::body($code, $method);
+
+                self::assertMatchesRegularExpression(
+                    '/if \(!ProfileAccess::canViewProfile\([^)]*\)\) \{\s*return ProfileAccess::forbidden\(\);/',
+                    $body,
+                    "{$label}: the gate's refusal must be returned, not ignored"
+                );
+                GateOrder::assertNoWorkBefore(
+                    $body,
+                    'return ProfileAccess::forbidden();',
+                    ['ApiResponse::ok(', '->respond('],
+                    $label
                 );
             }
         }
