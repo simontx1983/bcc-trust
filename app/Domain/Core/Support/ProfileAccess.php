@@ -296,6 +296,31 @@ final class ProfileAccess
     }
 
     /**
+     * Is the CURRENT viewer exempt from §F-02 visibility filtering?
+     *
+     * One definition, used by this class's own gates and by the services
+     * that opt bcc-core's list gates in, because the exemptions have to
+     * agree: a viewer who can open a hidden profile must also see its row
+     * in a listing, and the reverse. Two inline `is_admin()` calls that
+     * later drifted apart would produce exactly the listed-but-unopenable
+     * state F-02 exists to remove.
+     *
+     * ⚠ "Admin" is `Permissions::is_admin()` = `manage_options`, NARROWER
+     * than the `PeepSo::is_admin()` the privacy ladder uses (which also
+     * admits the PeepSo role `admin`). Deliberately not widened: it errs
+     * toward hiding.
+     *
+     * ⚠ bcc-core's list gates hold NO capability check, by design, so an
+     * admin read is expressed by the CALLER passing `enforce = false`.
+     * That is why this is public.
+     */
+    public static function viewerIsExemptFromVisibility(): bool
+    {
+        return class_exists('\\BCC\\Core\\Permissions\\Permissions')
+            && \BCC\Core\Permissions\Permissions::is_admin();
+    }
+
+    /**
      * The single refusal shape, so all gated routes answer identically.
      *
      * 403 rather than 404 deliberately: the handle is already a public
@@ -384,14 +409,25 @@ final class ProfileAccess
      * state counts as "not suspended", so the profile stays visible: it
      * is a read path, and the alternative — treating unknown as
      * suspended — blacks out every profile on the site the moment the
-     * state cannot be read. Two consequences worth knowing:
-     *   - `UserInfoRepository::getByUserId()` CACHES a null row as "no
-     *     row" for 5 minutes, so a transient read fault becomes a
-     *     5-minute "not suspended" (see bcc-core #84, which exists
-     *     because an unknown state must never be cached).
-     *   - when bcc-core #84 lands, this should become
-     *     `Permissions::suspensionState($ownerId)` with `null` mapped to
-     *     VISIBLE — i.e. `=== true` for hidden, never `!== false`.
+     * state cannot be read.
+     *
+     * ⚠ "Unreadable" is now a REAL, OBSERVABLE state rather than
+     * something indistinguishable from "no row", and the whole chain has
+     * to hold for that to be true:
+     *   - `UserInfoRepository::getByUserIdOrThrow()` THROWS on a failed
+     *     read and does NOT cache the failure, so the next call retries.
+     *     ⚠ Note it is that method, not the 5-minute-cached
+     *     `getByUserId()`, that the suspension path uses — an audit that
+     *     assumed the row cache applied here would be wrong. (Before
+     *     that existed, `get_row()` returned null for a database error
+     *     exactly as for "no row", and the null was cached as "no row"
+     *     for five minutes: one blip read as NOT suspended, everywhere.)
+     *   - `TrustReadService::isSuspended()` turns that into
+     *     `\BCC\Core\Contracts\SuspensionUnknownException`.
+     *   - bcc-core's `suspensionState()` turns THAT into `null`, and
+     *     never caches it.
+     * So a fault surfaces as `null` here, which this method maps to
+     * VISIBLE on purpose — not by losing the information.
      */
     private static function hiddenBySuspension(int $ownerId): bool
     {
@@ -405,7 +441,7 @@ final class ProfileAccess
             return false;
         }
 
-        if (\BCC\Core\Permissions\Permissions::is_admin()) {
+        if (self::viewerIsExemptFromVisibility()) {
             return false;
         }
 
@@ -483,8 +519,7 @@ final class ProfileAccess
         if (!array_key_exists('_peepso_user_id', $query->query_vars)) {
             return;
         }
-        if (class_exists('\\BCC\\Core\\Permissions\\Permissions')
-            && \BCC\Core\Permissions\Permissions::is_admin()) {
+        if (self::viewerIsExemptFromVisibility()) {
             return;
         }
 
