@@ -42,8 +42,9 @@ final class PeepSoNamePartsNeverLoginTest extends TestCase
         $GLOBALS['__pn_users'] = [
             7 => (object) ['ID' => 7, 'user_login' => 'jsmith77'],
             8 => (object) ['ID' => 8, 'user_login' => 'nohandle'],
+            9 => (object) ['ID' => 9, 'user_login' => 'simon'],
         ];
-        $GLOBALS['__pn_meta'] = [7 => ['bcc_handle' => 'jane-smith']];
+        $GLOBALS['__pn_meta'] = [7 => ['bcc_handle' => 'jane-smith'], 9 => ['bcc_handle' => 'simon-t']];
         $GLOBALS['__pn_filters'] = [];
     }
 
@@ -84,5 +85,29 @@ final class PeepSoNamePartsNeverLoginTest extends TestCase
             [['peepso_get_name_parts', [PeepSoNameParts::class, 'filter'], 10, 2]],
             $GLOBALS['__pn_filters']
         );
+    }
+    /**
+     * Review finding on #602: a REAL first name equal to the login must not
+     * be swapped, or aggressive mode would write "<handle> Tx" into
+     * display_name. Only PeepSo's single-part fallback is replaced.
+     */
+    public function testARealFirstNameEqualToTheLoginIsLeftAlone(): void
+    {
+        self::assertSame(['Simon', 'Tx'], PeepSoNameParts::filter(['Simon', 'Tx'], 9));
+        self::assertSame(['simon', 'Tx'], PeepSoNameParts::filter(['simon', 'Tx'], 9));
+    }
+
+    public function testAFirstNameOnlyStyleEqualToTheLoginIsTheFallbackShape(): void
+    {
+        // A single part equal to the login is indistinguishable from the
+        // 'username' fallback, so it becomes the handle.
+        self::assertSame(['simon-t'], PeepSoNameParts::filter(['Simon'], 9));
+    }
+
+    public function testTheReportedSuffixIsKeptAndIgnoredForTheShapeCheck(): void
+    {
+        self::assertSame(['simon-t', ' - Profile reported'], PeepSoNameParts::filter(['simon', ' - Profile reported'], 9));
+        self::assertSame(['Simon', 'Tx', ' - Profile reported'], PeepSoNameParts::filter(['Simon', 'Tx', ' - Profile reported'], 9));
+        self::assertSame(['simon-t', ' - Profile reported'], PeepSoNameParts::filter(['simon', '(simon)', ' - Profile reported'], 9));
     }
 }

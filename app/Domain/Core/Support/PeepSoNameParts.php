@@ -13,9 +13,13 @@
  *
  * PeepSo passes its computed name parts through `peepso_get_name_parts`
  * just before using them. This filter:
- *   - replaces any part equal to the login (case-insensitive) with the
+ *   - replaces PeepSo's FALLBACK shape only: when the name proper is a
+ *     single part equal to the login (case-insensitive), it becomes the
  *     member's public handle (PublicIdentity::handle: bcc_handle, else
- *     member-{id});
+ *     member-{id}). A multi-part name is a real name and is never
+ *     changed, even when one part equals the login (first name "Simon",
+ *     login "simon"). Suffix parts PeepSo appends for admins
+ *     (' - Profile reported') are ignored for that check and kept;
  *   - drops a '(login)' admin suffix part.
  * Aggressive mode then writes the HANDLE, which is what the display-name
  * hygiene backfill writes too, so the two stop fighting, and PeepSo's own
@@ -59,16 +63,44 @@ final class PeepSoNameParts
             return $nameParts;
         }
 
-        $handle = PublicIdentity::handle($id, get_user_meta($id, 'bcc_handle', true));
-        $out    = [];
+        // Drop the admin '(login)' suffix wherever it appears.
+        $parts = [];
         foreach ($nameParts as $part) {
             $text = trim(html_entity_decode((string) $part, ENT_QUOTES, 'UTF-8'));
             if (strcasecmp($text, '(' . $login . ')') === 0) {
-                continue; // the admin '(login)' suffix
+                continue;
             }
-            $out[] = strcasecmp($text, $login) === 0 ? $handle : $part;
+            $parts[] = $part;
         }
 
-        return $out === [] ? [$handle] : $out;
+        // Replace ONLY PeepSo's fallback shape: the name proper is a SINGLE
+        // part equal to the login (style 'username', or empty first name).
+        // Suffix parts PeepSo appends (' - Profile reported' for admins) are
+        // ignored for this check and kept. A multi-part name is a real name
+        // and is left alone, even if one part happens to equal the login
+        // (first_name "Simon" with login "simon" must stay "Simon Tx").
+        $core = [];
+        $suffixes = [];
+        foreach ($parts as $part) {
+            $text = trim(html_entity_decode((string) $part, ENT_QUOTES, 'UTF-8'));
+            if (str_starts_with($text, '- ')) {
+                $suffixes[] = $part;
+            } else {
+                $core[] = $part;
+            }
+        }
+
+        $handle = PublicIdentity::handle($id, get_user_meta($id, 'bcc_handle', true));
+
+        if ($core === []) {
+            return array_merge([$handle], $suffixes);
+        }
+        if (count($core) === 1
+            && strcasecmp(trim(html_entity_decode((string) $core[0], ENT_QUOTES, 'UTF-8')), $login) === 0
+        ) {
+            return array_merge([$handle], $suffixes);
+        }
+
+        return $parts;
     }
 }
