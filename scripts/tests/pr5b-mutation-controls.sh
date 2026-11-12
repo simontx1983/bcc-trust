@@ -89,12 +89,19 @@ plant() {
         $f = $argv[1];
         $s = str_replace("\r\n", "\n", $argv[2]);
         $r = str_replace("\r\n", "\n", $argv[3]);
-        $c = str_replace("\r\n", "\n", (string) file_get_contents($f));
+        $raw = (string) file_get_contents($f);
+        $c = str_replace("\r\n", "\n", $raw);
         if (substr_count($c, $s) !== 1) {
             fwrite(STDERR, "anchor not found exactly once in {$f}\n");
             exit(3);
         }
-        file_put_contents($f, str_replace($s, $r, $c));
+        // Write back in the original line endings: a CRLF file must not
+        // come back LF with every line rewritten around the mutation.
+        $out = str_replace($s, $r, $c);
+        if (str_contains($raw, "\r\n")) {
+            $out = str_replace("\n", "\r\n", $out);
+        }
+        file_put_contents($f, $out);
     ' "$file" "$search" "$replace"
 }
 
