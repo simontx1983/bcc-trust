@@ -107,17 +107,48 @@ final class ListingPrivacyClausesTest extends TestCase
      * admin fix must not quietly loosen it. If someone later converts the
      * exemption into an early return from the method, this fails.
      */
-    public function testAdminsAreStillSubjectToTheDiscoveryOptOut(): void
+    /**
+     * §F-190 — the exemption now covers the opt-out too (the user's
+     * decision; #475 deliberately scoped it to the hide clause and
+     * raised this separately rather than loosening it unasked).
+     *
+     * ⚠ This test asserted the OPPOSITE before F-190. The assertion
+     * flipped because the behaviour did, not to make a failure go away:
+     * the old name said "StillSubjectTo" and the old message said the
+     * exemption covers hide_from_search ONLY.
+     */
+    public function testAdminsAreAlsoExemptFromTheDiscoveryOptOut(): void
     {
         $GLOBALS['__bcc_lp']['admin'] = true;
 
         $json = json_encode(PrivacySettings::filterPeepSoSearchArgs([]));
         self::assertIsString($json);
-        self::assertStringContainsString(
+        self::assertStringNotContainsString(
             'bcc_privacy_discovery_optout',
             $json,
-            'the admin exemption must cover hide_from_search ONLY'
+            'an admin must not be filtered by the discovery opt-out'
         );
+    }
+
+    /**
+     * ⚠ The early return must hand back a caller's existing
+     * `meta_query` UNTOUCHED. Returning `$args` is the easy half; not
+     * having rewrapped it in an `AND` around nothing is the half that
+     * would break PeepSo's own VIP filter, and it is invisible unless
+     * asserted by identity.
+     */
+    public function testAnAdminGetsTheCallersArgsBackByteForByte(): void
+    {
+        $GLOBALS['__bcc_lp']['admin'] = true;
+
+        $incoming = [
+            'number'     => 10,
+            'meta_query' => [
+                ['key' => 'peepso_vip', 'value' => '1', 'compare' => '='],
+            ],
+        ];
+
+        self::assertSame($incoming, PrivacySettings::filterPeepSoSearchArgs($incoming));
     }
 
     public function testAnExistingMetaQueryIsPreservedNotOverwritten(): void
