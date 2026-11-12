@@ -32,7 +32,9 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\CLI;
 
+use BCC\Core\DB\AdvisoryLock;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
+use BCC\Trust\Onchain\Services\ChainRefreshService;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Services\ValidatorPageMinter;
 use WP_CLI;
@@ -117,7 +119,27 @@ final class BackfillValidatorPagesCommand
             return;
         }
 
-        $result = ValidatorPageMinter::mintMissing($chainId, $dryRun, $max);
+        // F-157: a LIVE run takes the same advisory lock the chain-refresh
+        // cron holds while it indexes validators and mints their pages, so
+        // the two can never mint concurrently (which could create two
+        // placeholder pages for one validator). A dry run writes nothing
+        // and needs no lock.
+        $lockHeld = false;
+        if (!$dryRun) {
+            if (!AdvisoryLock::acquire(ChainRefreshService::INDEX_VALIDATORS_LOCK, 0)) {
+                WP_CLI::error('The chain-refresh cron is indexing validators right now. Try again in a few minutes.');
+                return;
+            }
+            $lockHeld = true;
+        }
+
+        try {
+            $result = ValidatorPageMinter::mintMissing($chainId, $dryRun, $max);
+        } finally {
+            if ($lockHeld) {
+                AdvisoryLock::release(ChainRefreshService::INDEX_VALIDATORS_LOCK);
+            }
+        }
 
         if ($dryRun) {
             WP_CLI::line(sprintf(

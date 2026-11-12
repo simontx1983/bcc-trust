@@ -109,6 +109,13 @@ class ChainRefreshService
     private const LOCK_GROUP = 'bcc_cron';
 
     /**
+     * The advisory lock the validator index run (and its page-minting
+     * tail) holds. Public so the backfill CLI can take the SAME lock and
+     * never mint concurrently with the cron (F-157).
+     */
+    public const INDEX_VALIDATORS_LOCK = self::LOCK_GROUP . ':index_validators';
+
+    /**
      * Acquire a MySQL advisory lock for a cron job.
      * Advisory locks are cross-request and don't require persistent object cache.
      */

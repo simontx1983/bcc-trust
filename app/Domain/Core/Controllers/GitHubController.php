@@ -112,10 +112,13 @@ class GitHubController {
      * Handle GitHub OAuth callback — validates state, then delegates to service
      */
     public static function handleCallback(WP_REST_Request $request): void {
-        // Rate-limit callback endpoint: 10 attempts per minute per IP.
-        // Use IP-based key instead of get_current_user_id() because OAuth
-        // callbacks arrive unauthenticated — all would share user ID 0.
-        if (!RateLimiter::allowByKey('github_callback_' . self::getClientIp(), 10, 60)) {
+        // F-157: 10 attempts per minute through RateLimiter::allow(), not a
+        // raw-IP key. The callback requires a signed-in session (checked
+        // below), so a signed-in caller is limited per ACCOUNT plus a
+        // capped subnet bucket, and an anonymous one per subnet (IPv4 /24,
+        // IPv6 /48). A bare-IP key let IPv6 rotation inside one network
+        // escape the limit.
+        if (!RateLimiter::allow('github_callback', 10, 60)) {
             wp_safe_redirect(add_query_arg('github_verified', 'error', home_url('/')));
             exit;
         }
@@ -264,12 +267,5 @@ class GitHubController {
             \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'GitHub API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
             return new WP_Error('bcc_internal', 'An unexpected error occurred. Please try again.', ['status' => 500]);
         }
-    }
-
-    /**
-     * Get client IP for rate limiting.
-     */
-    private static function getClientIp(): string {
-        return \BCC\Trust\Core\Security\IpResolver::getClientIp();
     }
 }
