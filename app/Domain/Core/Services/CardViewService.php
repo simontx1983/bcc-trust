@@ -1821,7 +1821,7 @@ final class CardViewService
      * the entity has no custom crest image — frontend falls back to
      * `initials + monogram_color` inside the hex.
      *
-     * @return array{initials: string, monogram_color: string, background_kind: string, background_value: string, image_url: string|null}
+     * @return array{initials: string, monogram_color: string, background_kind: string, background_value: string, image_url: string|null, image_fallback_url: string|null}
      */
     private static function buildCrest(string $name, string $backgroundKind, string $backgroundValue, string $imageUrl = ''): array
     {
@@ -1854,12 +1854,19 @@ final class CardViewService
         $hash    = crc32($name);
         $color   = $palette[$hash % count($palette)];
 
+        // F-187: an IPFS image (NFT collection art, stored canonical on
+        // ipfs.io) is served on BCC_IPFS_GATEWAY with the ipfs.io copy as
+        // `image_fallback_url`. present() only, NOT sanitize: the crest also
+        // carries uploaded page/user art, which passes through unchanged.
+        $image = \BCC\Trust\Onchain\ValueObjects\IpfsImageUrl::present($imageUrl !== '' ? $imageUrl : null);
+
         return [
-            'initials'         => $initials,
-            'monogram_color'   => $color,
-            'background_kind'  => $backgroundKind,
-            'background_value' => $backgroundValue,
-            'image_url'        => $imageUrl !== '' ? $imageUrl : null,
+            'initials'           => $initials,
+            'monogram_color'     => $color,
+            'background_kind'    => $backgroundKind,
+            'background_value'   => $backgroundValue,
+            'image_url'          => $image['url'],
+            'image_fallback_url' => $image['fallback_url'],
         ];
     }
 
