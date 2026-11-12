@@ -236,6 +236,31 @@ final class ScoreOverrideUndoIntegrationTest extends TestCase
         self::assertNull($this->mod->latestUndoableOverride(self::OWNER), 'nothing was recorded to undo');
     }
 
+    /**
+     * F-193: the notice reports the STORED tier, never a second PHP
+     * derivation. A real divergence: the page was evaluated NOT elite
+     * eligible, so applyPenalty()'s tierSql stores 'trusted'; the Elite grant
+     * then sets the flag, and with no recalc subscriber in this harness the
+     * stored tier stays 'trusted' while tierFor() on the re-read row would
+     * say 'elite'. The notice must say what is stored.
+     */
+    public function testTheNoticeReportsTheStoredTierNotARecomputedOne(): void
+    {
+        global $wpdb;
+        self::assertNotFalse($wpdb->update($wpdb->prefix . 'bcc_trust_page_scores', [
+            'elite_eligible'    => 0,
+            'elite_eligible_at' => '2026-11-01 00:00:00',
+        ], ['page_id' => self::PAGE]), $wpdb->last_error);
+        $this->scores->applyPenalty(self::PAGE, 0.0);
+
+        [$result, $notice] = $this->quietWithOutput(fn () => $this->mod->overrideScore(self::OWNER, 90, 'grant'));
+
+        $stored = $this->storedTier();
+        self::assertSame('trusted', $stored, 'precondition: the formula stored trusted (gate failed at write time)');
+        self::assertSame($stored, $result['tier'] ?? null, 'the notice reports what is stored');
+        self::assertStringContainsString('(' . $stored . ')', $notice);
+    }
+
     private function storedTier(): string
     {
         global $wpdb;
