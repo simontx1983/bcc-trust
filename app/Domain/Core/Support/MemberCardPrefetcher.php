@@ -144,6 +144,12 @@ final class MemberCardPrefetcher
                 : [];
         }
 
+        // F-255: the viewer's watch (follow) handle per member card — one
+        // bounded IN() for the page. Same key the page-card bundle uses.
+        $map['viewer_watches'] = $viewerId > 0 && $idList !== []
+            ? \BCC\Trust\Core\Plugin::instance()->viewerWatchResolver()->forMembers($viewerId, $idList)
+            : [];
+
         // F-246: the viewer's can_message for every card on the page, so
         // the /messages/new recipient picker can say "can't message"
         // before the user writes anything. canMessageMany is the batch

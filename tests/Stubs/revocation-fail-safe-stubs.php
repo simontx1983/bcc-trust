@@ -546,6 +546,34 @@ namespace BCC\Core\Repositories {
             {
                 return [];
             }
+
+            /** F-271: the join gate's ban check. Banned rows carry role 'banned'. */
+            public static function getMembershipStatus(int $userId, int $groupId): ?string
+            {
+                foreach (\BccRevokeWorld::$members[$groupId] ?? [] as $row) {
+                    if ((int) $row->user_id === $userId) {
+                        return (string) $row->role;
+                    }
+                }
+                return null;
+            }
+
+            /**
+             * F-271: discovery's banned set.
+             *
+             * @param int[] $groupIds
+             * @return list<int>
+             */
+            public static function findUserBannedGroupIds(int $userId, array $groupIds): array
+            {
+                $out = [];
+                foreach ($groupIds as $gid) {
+                    if (self::getMembershipStatus($userId, (int) $gid) === 'banned') {
+                        $out[] = (int) $gid;
+                    }
+                }
+                return $out;
+            }
         }
     }
 }

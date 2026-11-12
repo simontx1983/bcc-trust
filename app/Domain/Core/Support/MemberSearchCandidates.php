@@ -6,7 +6,8 @@
  *
  * `q` → user ids whose DISPLAY NAME or @HANDLE (bcc_handle meta) contains
  * it. Never user_login, user_nicename (WordPress derives it from the
- * login) or email (F-175). A member who hides their real name (§K2
+ * login) or email (F-175), and never a display name that equals the
+ * login (F-302). A member who hides their real name (§K2
  * real_name_hidden) is NOT matched by display name, only by handle
  * (F-28), or a name search would link it to their @handle. A leading "@"
  * is ignored, so "@alice" finds handle "alice".
@@ -64,6 +65,23 @@ final class MemberSearchCandidates
                 ['key' => 'bcc_privacy_real_name_hidden', 'value' => '1', 'compare' => '!='],
             ],
         ]);
+
+        // A display_name that IS the login (wp-admin / WP-CLI accounts, and a
+        // member renamed before F-280 whose display_name still holds their
+        // u_<original handle> login) is not a public name: matching it would
+        // make every caller a login probe (F-302 review). Such a member is
+        // still found by their handle below. One primed batch, then cache
+        // reads; the login is compared, never searched.
+        if ($byName !== []) {
+            $nameIds = array_map('intval', $byName);
+            cache_users($nameIds);
+            $byName = array_values(array_filter($nameIds, static function (int $id): bool {
+                $user = get_userdata($id);
+                return $user !== false
+                    && strcasecmp(trim((string) $user->display_name), trim((string) $user->user_login)) !== 0;
+            }));
+        }
+
         $byHandle = $handle === '' ? [] : get_users([
             'meta_key'     => 'bcc_handle',
             'meta_value'   => $handle,

@@ -95,7 +95,37 @@ final class JwtToken
     public const ERR_LOGGED_OUT    = 'jwt_logged_out';
 
     /**
-     * Encode a token for the given user + handle.
+     * F-253: mint the token for a REAL sign-in (password + 2FA, OAuth,
+     * wallet sign-in / sign-up, email-verification sign-in). Stamps
+     * `auth_time` = now: the moment this session began.
+     */
+    public static function encodeNewSession(int $userId, string $handle): string
+    {
+        return self::encode($userId, $handle, ['auth_time' => time()]);
+    }
+
+    /**
+     * F-253: mint a token that CONTINUES the caller's session (refresh, and
+     * the re-mints after a credential change or a wallet unlink). It keeps
+     * the session's `auth_time`, so an in-session re-mint can never move
+     * "when did this sign-in happen?" forward — otherwise a wallet linked
+     * mid-session would count as linked before the sign-in, and could
+     * confirm account changes (AccountCredentialCheck).
+     *
+     * @param int $sessionStartedAt from sessionStartedAt() of the token being
+     *                              continued, or presentedSessionStartedAt()
+     *                              read BEFORE any revocation; 0 when unknown
+     *                              (fails closed: no wallet predates it).
+     */
+    public static function encodeContinuation(int $userId, string $handle, int $sessionStartedAt): string
+    {
+        return self::encode($userId, $handle, ['auth_time' => max(0, $sessionStartedAt)]);
+    }
+
+    /**
+     * Encode a token for the given user + handle. Low level: app code mints
+     * through encodeNewSession() or encodeContinuation(), which set
+     * `auth_time` (a guard test pins that).
      *
      * @param array<string, mixed> $extraClaims optional additional payload claims.
      */
@@ -301,6 +331,43 @@ final class JwtToken
         }
 
         return ['ok' => true, 'payload' => $payload];
+    }
+
+    /**
+     * When the session behind this token began: the `auth_time` claim, set
+     * at a real sign-in and kept by every in-session re-mint (F-253). Unlike
+     * `iat` it can't be moved forward by refreshing or re-minting, so "was
+     * this wallet linked before this sign-in?" can't be laundered.
+     *
+     * A token without the claim (minted before it existed) answers 0, NOT its
+     * `iat`: a pre-claim refresh re-minted `iat` = now, so it could postdate
+     * a wallet linked mid-session. 0 fails closed — no wallet predates it —
+     * and a wallet-only member simply signs in once after the deploy.
+     *
+     * @param array<string, mixed> $payload
+     */
+    public static function sessionStartedAt(array $payload): int
+    {
+        return (int) ($payload['auth_time'] ?? 0);
+    }
+
+    /**
+     * The session start of the bearer token PRESENTED with this request, if
+     * it is a valid token for $userId; else 0. Read it BEFORE
+     * revokeAllForUser() (which would make the presented token fail decode)
+     * and pass it to encodeContinuation().
+     */
+    public static function presentedSessionStartedAt(int $userId): int
+    {
+        $token = BearerAuth::readBearerToken();
+        if ($token === null) {
+            return 0;
+        }
+        $decoded = self::decode($token);
+        if ($decoded['ok'] !== true || (int) ($decoded['payload']['user_id'] ?? 0) !== $userId) {
+            return 0;
+        }
+        return self::sessionStartedAt($decoded['payload']);
     }
 
     /** User-meta key holding the user's single-token-logout denylist. */

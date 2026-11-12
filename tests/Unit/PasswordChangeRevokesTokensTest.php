@@ -100,6 +100,30 @@ final class PasswordChangeRevokesTokensTest extends TestCase
         self::assertSame(0, $this->tokenVersion(7), 'a non-password profile edit must NOT log the user out');
     }
 
+    private static function hasPasswordFlag(int $userId): ?string
+    {
+        return $GLOBALS['__bcc_user_meta'][$userId][\BCC\Trust\Core\Services\AccountRecoveryService::META_HAS_PASSWORD] ?? null;
+    }
+
+    public function testSettingAPasswordMarksTheAccountAsHavingOne(): void
+    {
+        // F-253: wp_set_password() (in-app change, core reset) means the
+        // member now knows their password.
+        $this->service()->onPasswordSet('plaintext-never-stored', 7);
+        self::assertSame('1', self::hasPasswordFlag(7));
+    }
+
+    public function testAWpAdminPasswordChangeMarksTheAccountAndAnotherEditDoesNot(): void
+    {
+        $GLOBALS['__bcc_pw_fresh_user'] = $this->user(7, 'same-hash');
+        $this->service()->onProfileUpdate(7, $this->user(7, 'same-hash'));
+        self::assertNull(self::hasPasswordFlag(7), 'a non-password edit says nothing about a password');
+
+        $GLOBALS['__bcc_pw_fresh_user'] = $this->user(7, 'hash-AFTER');
+        $this->service()->onProfileUpdate(7, $this->user(7, 'hash-BEFORE'));
+        self::assertSame('1', self::hasPasswordFlag(7));
+    }
+
     public function testProfileUpdateWithoutOldDataDoesNotRevoke(): void
     {
         // No pre-update snapshot supplied → cannot diff → no bump.

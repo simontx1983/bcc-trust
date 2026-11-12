@@ -43,6 +43,8 @@ final class RetentionHealthRepository
             'fingerprints'    => $this->countTable(TableRegistry::fingerprints()),
             'patterns'        => $this->countTable(TableRegistry::patterns()),
             'content_reports' => $this->countTable(TableRegistry::contentReports()),
+            'post_reach'      => $this->countTable(TableRegistry::postReachDaily()),
+            'post_dedupe'     => $this->countTable(TableRegistry::postViewDedupe()),
         ];
     }
 
