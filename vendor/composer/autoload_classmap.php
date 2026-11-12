@@ -32,6 +32,7 @@ return array(
     'BCC\\Trust\\Core\\Application\\TrustReadService' => $baseDir . '/app/Domain/Core/Application/TrustReadService.php',
     'BCC\\Trust\\Core\\Application\\WalletVerificationReadService' => $baseDir . '/app/Domain/Core/Application/WalletVerificationReadService.php',
     'BCC\\Trust\\Core\\CLI\\BackfillActivityModuleIdsCommand' => $baseDir . '/app/Domain/Core/CLI/BackfillActivityModuleIdsCommand.php',
+    'BCC\\Trust\\Core\\CLI\\BackfillPageOwnersCommand' => $baseDir . '/app/Domain/Core/CLI/BackfillPageOwnersCommand.php',
     'BCC\\Trust\\Core\\CLI\\PushCommand' => $baseDir . '/app/Domain/Core/CLI/PushCommand.php',
     'BCC\\Trust\\Core\\Controllers\\GitHubController' => $baseDir . '/app/Domain/Core/Controllers/GitHubController.php',
     'BCC\\Trust\\Core\\Controllers\\TrustRestController' => $baseDir . '/app/Domain/Core/Controllers/TrustRestController.php',

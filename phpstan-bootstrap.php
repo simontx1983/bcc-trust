@@ -237,6 +237,25 @@ if (!class_exists('PeepSoUrlSegments')) {
     }
 }
 
+// F-299: the page-membership model PeepSoIntegration uses to record a
+// claimer as the page's `member_owner` (peepso-pages classes/models/pageuser.php).
+if (!class_exists('PeepSoPageUser')) {
+    class PeepSoPageUser {
+        /** @var string|false */
+        public $role = false;
+        /** @var bool */
+        public $is_member = false;
+        /** @var bool */
+        public $is_owner = false;
+        public function __construct(int $page_id, ?int $user_id = null) {}
+        // Both re-read the row and reset $role / $is_member / $is_owner (PeepSo's _init()).
+        /** @phpstan-impure */
+        public function member_join(): bool { return true; }
+        /** @phpstan-impure */
+        public function member_modify(string $role): bool { return true; }
+    }
+}
+
 if (!class_exists('PeepSoPagesShortcode')) {
     class PeepSoPagesShortcode {
         /** @var int|false */
