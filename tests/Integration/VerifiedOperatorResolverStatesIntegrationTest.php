@@ -73,6 +73,23 @@ final class VerifiedOperatorResolverStatesIntegrationTest extends TestCase
     private const META_PAGE_TWO = 5504;
     private const CHAIN_ID = 8;
 
+    /**
+     * The ambiguous-operator path writes an audit row, and AuditLogger calls
+     * get_current_user_id() unqualified from BCC\Trust\Core\Security. This
+     * suite used to lean on AuditLoggerMetaWriteIntegrationTest declaring
+     * that shim at file level: it passed under `--filter` (PHPUnit loads
+     * every test file during discovery) and fataled when this file ran on its
+     * own. Same guarded shim, same body, so whichever loads first behaves
+     * identically.
+     */
+    public static function setUpBeforeClass(): void
+    {
+        parent::setUpBeforeClass();
+        if (!function_exists('BCC\Trust\Core\Security\get_current_user_id')) {
+            eval('namespace BCC\Trust\Core\Security; function get_current_user_id(): int { return $GLOBALS[\'bcc_itest_current_user\'] ?? 0; }');
+        }
+    }
+
     protected function setUp(): void
     {
         global $wpdb;
