@@ -1600,8 +1600,9 @@ final class Plugin
         // V1 contract: §K2 privacy toggles — GET + PATCH /me/privacy.
         // Storage in wp_usermeta.bcc_privacy_*; UserViewService applies
         // the seven profile flags to non-self responses; the eighth
-        // (discovery_optout) hooks PeepSo's search via the filter
-        // registered in registerHooks().
+        // (discovery_optout) is an alias of hide_from_search since F-257,
+        // which PeepSo's search excludes on via the filter registered in
+        // registerHooks().
         \BCC\Trust\Core\REST\MyPrivacyEndpoint::register();
 
         // V1 contract: §K1 Phase A blocks — GET / POST / DELETE /me/blocks.
