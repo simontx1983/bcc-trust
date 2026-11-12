@@ -953,6 +953,11 @@ class CronService
             'bcc_attestor_reliability_sweep'   => 'daily',           // Slice 3: nightly operator-reliability recompute
             'bcc_trust_elite_eligibility_sweep' => 'daily',          // §J.12: nightly elite-gate recompute
             'bcc_trust_feed_hot_warm'          => 'bcc_one_minute',  // anon /feed/hot first-page payload warm
+            // F-324: the 48-hour TTL on post-view dedupe rows. Hourly, not
+            // daily — the retention IS the privacy promise the user-facing
+            // copy makes, so the sweep must run far more often than the
+            // window it enforces, or a single missed run breaks the promise.
+            'bcc_trust_post_reach_dedupe_sweep' => 'hourly',
         ];
 
         /**
