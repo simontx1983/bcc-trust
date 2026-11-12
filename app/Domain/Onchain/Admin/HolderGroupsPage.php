@@ -103,8 +103,8 @@ final class HolderGroupsPage
         try {
             $stats = OnchainPlugin::instance()->nftGroupReconcileSweepService()->sweep();
         } catch (\Throwable $e) {
-            // A per-user failure is contained inside the tick; this is the
-            // batch read (or the lock) failing. Log it and show a notice
+            // A per-user failure is contained inside the tick; anything that
+            // still escapes it lands here. Log it and show a notice
             // instead of a fatal admin page. The cursor only moves past
             // users that were processed, so nobody is skipped.
             \BCC\Core\Log\Logger::error('[bcc-trust] Holder-group reconcile sweep (manual) failed', [
@@ -224,7 +224,7 @@ final class HolderGroupsPage
         if ($op === 'sweep') {
             if (isset($_GET['failed']) && (int) $_GET['failed'] === 1) {
                 echo '<div class="notice notice-error is-dismissible"><p>'
-                    . '<strong>Sweep failed.</strong> The opt-in user list could not be read, so nothing ran. '
+                    . '<strong>Sweep failed.</strong> The sweep hit an error; see the log. '
                     . 'The error is in the log. No user was skipped; the next run starts where the last one stopped.</p></div>';
                 return;
             }

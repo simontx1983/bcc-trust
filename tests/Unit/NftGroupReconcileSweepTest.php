@@ -203,7 +203,7 @@ final class NftGroupReconcileSweepTest extends TestCase
         self::assertStringContainsString('->nftGroupReconcileSweepService()->sweep()', $handler, 'the manual run shares the lock');
         self::assertStringNotContainsString('reconcileForUser', $handler, 'no second, unlocked loop');
 
-        // A throw from the tick (the batch read) is caught: a notice, not a fatal page.
+        // A throw escaping the tick is caught: a notice, not a fatal page.
         $flat = (string) preg_replace('/\s+/', ' ', $handler);
         self::assertStringContainsString('try { $stats = OnchainPlugin::instance()->nftGroupReconcileSweepService()->sweep(); } catch (\Throwable $e) {', $flat);
         self::assertStringContainsString("'failed' => 1,", $flat);
