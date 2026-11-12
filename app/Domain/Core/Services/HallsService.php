@@ -575,6 +575,11 @@ final class HallsService
             ];
         }
 
+        // F-271: a PeepSo ban is a moderator removal: 403, not a 503.
+        if (PeepSoGroupRepository::getMembershipStatus($viewerId, $groupId) === 'banned') {
+            return ['error' => 'bcc_forbidden', 'message' => 'A moderator removed you from this Hall, so you cannot rejoin it.'];
+        }
+
         $ok = PeepSoGroupWriter::join($viewerId, $groupId);
         if (!$ok) {
             return ['error' => 'bcc_unavailable', 'message' => 'Group membership service is unavailable.'];

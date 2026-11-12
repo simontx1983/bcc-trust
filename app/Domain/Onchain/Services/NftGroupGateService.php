@@ -72,6 +72,12 @@ final class NftGroupGateService {
         if ($this->isPermanentOptOut($userId, $groupId)) {
             return JoinResult::optOutActive($config->minBalance);
         }
+        // A PeepSo ban is a moderator removal too (F-271): refuse it with the
+        // same 403 "a moderator removed you" before any provider call, not a
+        // 503 "try again" after the writer refuses it.
+        if ($this->isBannedFrom($userId, $groupId)) {
+            return JoinResult::optOutActive($config->minBalance);
+        }
 
         $memberships = \BCC\Core\Repositories\PeepSoGroupRepository::findUserMemberships(
             $userId,
@@ -306,9 +312,53 @@ final class NftGroupGateService {
 
     /**
      * Record a voluntary opt-out (timestamped, TTL applies on read).
+     *
+     * Never downgrades a PERMANENT opt-out (F-267). A moderator-removed
+     * member who then pressed Leave used to overwrite the permanent marker
+     * with time(), which made it a voluntary leave that an explicit Join
+     * overrides: the removal was undone by Leave then Join.
      */
     public function recordOptOut(int $userId, int $groupId): void {
+        if ($this->isPermanentOptOut($userId, $groupId)) {
+            return;
+        }
         $this->writeOptOutTimestamp($userId, $groupId, time());
+    }
+
+    /**
+     * Is the user BANNED from this group (a PeepSo gm_user_status =
+     * 'banned' row)? A ban reads as a moderator removal everywhere a user
+     * is offered Join (F-271): the join door refuses it anyway, and before
+     * this the refusal surfaced as a misleading 503 "try again".
+     *
+     * Display and UX only. The ban itself is enforced in bcc-core's
+     * PeepSoGroupWriter::join(), which also refuses on a failed read.
+     */
+    public function isBannedFrom(int $userId, int $groupId): bool {
+        if ($userId <= 0 || $groupId <= 0) {
+            return false;
+        }
+        return \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatus($userId, $groupId) === 'banned';
+    }
+
+    /**
+     * The subset of $groupIds the user is banned from, as a set. One
+     * bounded read (bcc-core findUserBannedGroupIds, F-266 — DEPLOY ORDER:
+     * bcc-core #108 must be live first). A failed read is [] — no group is
+     * shown as removed, still safe: the join door refuses the ban.
+     *
+     * @param list<int> $groupIds
+     * @return array<int, true>
+     */
+    public function bannedGroupIdSet(int $userId, array $groupIds): array {
+        if ($userId <= 0 || $groupIds === []) {
+            return [];
+        }
+        $set = [];
+        foreach (\BCC\Core\Repositories\PeepSoGroupRepository::findUserBannedGroupIds($userId, $groupIds) as $gid) {
+            $set[(int) $gid] = true;
+        }
+        return $set;
     }
 
     /**
