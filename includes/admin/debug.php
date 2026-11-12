@@ -45,7 +45,18 @@ add_action('wp_ajax_bcc_trust_debug_fraud', function () {
         wp_send_json_error(['message' => 'Missing user_id']);
     }
 
-    $result = TrustDebugService::runLiveFraudAnalysis($userId);
+    // The analysis fails CLOSED on a read it cannot trust (it throws rather
+    // than score a failed read as clean), so answer an error instead of an
+    // uncaught fatal.
+    try {
+        $result = TrustDebugService::runLiveFraudAnalysis($userId);
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::error('[bcc-trust] live fraud analysis failed', [
+            'user_id' => $userId,
+            'error'   => $e->getMessage(),
+        ]);
+        wp_send_json_error(['message' => 'Fraud analysis could not read its data. Try again shortly.'], 503);
+    }
     wp_send_json_success($result);
 });
 

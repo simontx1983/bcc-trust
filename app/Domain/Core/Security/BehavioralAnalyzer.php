@@ -88,8 +88,18 @@ class BehavioralAnalyzer {
     /**
      * Analyze user behavior and return risk score and flags
      *
+     * ⚠ A FAILED read throws; it never scores. Every sub-analysis below
+     * answers "too little data, not suspicious" for an empty read, so a
+     * failed read used to produce behaviour score 0 — which this method
+     * then PERSISTED over the stored score (updateBehaviorScore) and cached
+     * for CACHE_TTL (stale copy 2×). The reads now throw
+     * RepositoryReadFailure / RepositoryException before any write or cache,
+     * and the callers' retry (post-vote fraud retry, daily cron per-user
+     * catch, admin reanalyse) takes it from there.
+     *
      * @param int $userId
      * @return array<string, mixed> Behavior analysis results
+     * @throws \RuntimeException when a read fails (nothing written or cached)
      */
     public function analyzeUserBehavior(int $userId): array {
         // Check cache first
@@ -118,7 +128,8 @@ class BehavioralAnalyzer {
             // behaviour score, not 0 — a throttled call used to read as
             // "clean" (score 0, minimal risk), so a bot burst that kept
             // missing the cache was scored as harmless during its burst.
-            $info        = $this->userInfoRepo->getByUserId($userId);
+            // ...OrThrow: a FAILED read must not fall back to 0 either.
+            $info        = $this->userInfoRepo->getByUserIdOrThrow($userId);
             $storedScore = $info !== null ? (int) ($info->behavior_score ?? 0) : 0;
             return [
                 'behavior_score' => $storedScore,
