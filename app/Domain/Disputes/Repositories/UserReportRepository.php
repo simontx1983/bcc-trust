@@ -371,6 +371,31 @@ class UserReportRepository
         return $result !== false && $result > 0;
     }
 
+    /**
+     * F-310 (M1): give back a claim this request took. Penalize claims the
+     * report (open → penalized) BEFORE applying the penalty, so two admins
+     * cannot both penalize; when the penalty then does not land, the report
+     * returns to `open` instead of reading as penalized. Guarded on the
+     * claimed status, so it can only undo this claim.
+     */
+    public static function reopenReport(int $reportId, string $fromStatus): bool
+    {
+        global $wpdb;
+        $table = self::user_reports_table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table} SET status = 'open', reviewed_at = NULL WHERE id = %d AND status = %s",
+            $reportId,
+            $fromStatus
+        ));
+
+        if ($result !== false && $result > 0) {
+            wp_cache_delete('report_status_counts', self::CACHE_GROUP);
+        }
+
+        return $result !== false && $result > 0;
+    }
+
     // ── Notification idempotency ───────────────────────────────────────────
 
     /**

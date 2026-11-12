@@ -1554,8 +1554,14 @@ add_action('bcc.trust.recalculate_score', function (int $pageId): void {
     \BCC\Trust\Core\Plugin::instance()->voteService()->recalculateScoreOrRequeue($pageId);
 });
 
-// Admin report penalty — fired by the disputes admin panel.
-add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points, string $reason): void {
+// Admin report penalty — asked for by the disputes admin panel.
+//
+// F-310 (M1): a FILTER that answers whether the penalty landed. It was an
+// action that caught and logged every failure, so the panel reported
+// "Report marked as penalized" while the score was unchanged. With no
+// listener the filter's default (false) is returned, so Penalize fails
+// closed.
+add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, int $userId, int $points, string $reason): bool {
     try {
         // Architecture A: the penalty lands on the member's self-page.
         // applyPenalty accumulates penalty_adjustment (a negative delta) and
@@ -1564,9 +1570,28 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
         $pageId = \BCC\Trust\Core\Plugin::instance()
             ->memberSelfPageService()
             ->ensureSelfPage($userId);
-        \BCC\Trust\Core\Plugin::instance()
+        if ($pageId <= 0) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] admin_report_penalty_failed', [
+                'user_id' => $userId,
+                'points'  => $points,
+                'error'   => 'no self-page for the reported member',
+            ]);
+            return false;
+        }
+        $updated = \BCC\Trust\Core\Plugin::instance()
             ->scoreRepository()
             ->applyPenalty($pageId, (float) (-1 * abs($points)));
+        if ($updated <= 0) {
+            // No score row: nothing landed. Say so instead of "penalized".
+            \BCC\Core\Log\Logger::error('[bcc-trust] admin_report_penalty_failed', [
+                'user_id' => $userId,
+                'points'  => $points,
+                'page_id' => $pageId,
+                'error'   => 'no score row was updated',
+            ]);
+            return false;
+        }
+        return true;
     } catch (\Throwable $e) {
         \BCC\Core\Log\Logger::error('[bcc-trust] admin_report_penalty_failed', [
             'user_id' => $userId,
@@ -1574,8 +1599,9 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
             'reason'  => $reason,
             'error'   => $e->getMessage(),
         ]);
+        return false;
     }
-}, 10, 3);
+}, 10, 4);
 
 /*
 |--------------------------------------------------------------------------

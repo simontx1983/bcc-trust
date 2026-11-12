@@ -391,6 +391,7 @@ class DisputeAdmin
         $errors = [
             'already_resolved' => __('That report was already resolved, so nothing changed. Another moderator may have acted on it.', 'bcc-disputes'),
             'invalid_penalty'  => __('The penalty must be between 1 and 20 points. Nothing changed.', 'bcc-disputes'),
+            'penalty_failed'   => __('The penalty could not be applied, so the report was left open and the score is unchanged. The details are in the bcc-trust log.', 'bcc-disputes'),
         ];
         $error = isset($_GET['error']) ? sanitize_key((string) $_GET['error']) : '';
         if (isset($errors[$error])) {
@@ -518,13 +519,30 @@ class DisputeAdmin
         // Status claimed — now safe to apply penalty (only runs once).
         $report = UserReportRepository::getReportById($report_id);
         if (!$report) {
-            wp_die(__('Report data could not be loaded.', 'bcc-disputes'));
+            // F-310 (M1): give the claim back rather than leave a report
+            // marked penalized with no penalty behind it.
+            UserReportRepository::reopenReport($report_id, 'penalized');
+            wp_safe_redirect(self::reportsReturnUrl(['error' => 'penalty_failed']));
+            exit;
         }
         $reported_user_id = (int) $report->reported_id;
 
-        // Fire a hook so the trust-engine can apply the penalty through its
-        // own service layer, rather than reaching into its internal repository.
-        do_action('bcc.trust.admin_report_penalty', $reported_user_id, abs($penalty_points), $penalty_reason);
+        // The trust engine applies the penalty through its own service
+        // layer and ANSWERS whether it landed (F-310 M1: this was an action
+        // whose listener swallowed every failure, so the panel reported
+        // success on an unchanged score). No answer = not applied.
+        $applied = (bool) apply_filters(
+            'bcc.trust.admin_report_penalty_applied',
+            false,
+            $reported_user_id,
+            abs($penalty_points),
+            $penalty_reason
+        );
+        if (!$applied) {
+            UserReportRepository::reopenReport($report_id, 'penalized');
+            wp_safe_redirect(self::reportsReturnUrl(['error' => 'penalty_failed']));
+            exit;
+        }
 
         \BCC\Core\Log\Logger::audit('[Disputes] admin_report_penalty', [
             'report_id'  => $report_id,
