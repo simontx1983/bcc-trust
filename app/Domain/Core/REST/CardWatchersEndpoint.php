@@ -119,13 +119,26 @@ final class CardWatchersEndpoint
         }
 
         $response = ApiResponse::ok($data);
-        if ($viewer > 0) {
-            $response->header('Cache-Control', 'private, max-age=30');
-            $response->header('Vary', 'Authorization, Cookie');
-        } else {
-            $response->header('Cache-Control', 'public, max-age=30');
+        foreach (self::cacheHeaders($viewer) as $name => $value) {
+            $response->header($name, $value);
         }
         return $response;
+    }
+
+    /**
+     * Cache posture. ⚠ `Vary: Authorization, Cookie` on the ANONYMOUS
+     * response too: the body depends on the viewer (F-26 profile gate, and
+     * each member card's viewer-relative fields), and without Vary a shared
+     * cache may hand the public anonymous copy to a signed-in request.
+     *
+     * @return array<string, string>
+     */
+    private static function cacheHeaders(int $viewerId): array
+    {
+        return [
+            'Cache-Control' => $viewerId > 0 ? 'private, max-age=30' : 'public, max-age=30',
+            'Vary'          => 'Authorization, Cookie',
+        ];
     }
 
     private static function noStore(WP_REST_Response $response): WP_REST_Response
