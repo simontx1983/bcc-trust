@@ -90,7 +90,7 @@ final class NftGroupReconcileSweepTest extends TestCase
             'cursor:0', // short batch: the end of the walk, wrapped only now
             self::UNLOCK,
         ], $GLOBALS['__rs']['events']);
-        self::assertSame(['checked' => 3, 'users_touched' => 1, 'joins_total' => 2, 'errored' => 0, 'skipped_overlap' => false], $stats);
+        self::assertSame(['checked' => 3, 'users_touched' => 1, 'joins_total' => 2, 'errored' => 0, 'skipped_overlap' => false, 'lock_unavailable' => false], $stats);
         self::assertSame([[40, NftGroupReconcileSweepService::BATCH_SIZE]], $GLOBALS['__rs']['reads']);
     }
 
@@ -146,6 +146,7 @@ final class NftGroupReconcileSweepTest extends TestCase
 
         self::assertSame(['busy:' . NftGroupReconcileSweepService::SWEEP_LOCK], $GLOBALS['__rs']['events'], 'no read, no reconcile, no cursor write');
         self::assertTrue($stats['skipped_overlap']);
+        self::assertFalse($stats['lock_unavailable'], 'a real overlap is not reported as a missing lock');
         self::assertSame(40, $GLOBALS['__rs']['options'][NftGroupReconcileSweepService::CURSOR_OPTION]);
     }
 
@@ -178,6 +179,7 @@ final class NftGroupReconcileSweepTest extends TestCase
 
         self::assertSame([], $GLOBALS['__rs']['events']);
         self::assertTrue($stats['skipped_overlap']);
+        self::assertTrue($stats['lock_unavailable'], 'the admin page states the real reason');
         self::assertCount(1, $GLOBALS['__rs']['errors']);
         self::assertStringContainsString('cannot be serialized', $GLOBALS['__rs']['errors'][0][0]);
     }
@@ -200,6 +202,23 @@ final class NftGroupReconcileSweepTest extends TestCase
         $handler = substr($page, $from, (int) strpos($page, 'public static function', $from + 10) - $from);
         self::assertStringContainsString('->nftGroupReconcileSweepService()->sweep()', $handler, 'the manual run shares the lock');
         self::assertStringNotContainsString('reconcileForUser', $handler, 'no second, unlocked loop');
+
+        // A throw from the tick (the batch read) is caught: a notice, not a fatal page.
+        $flat = (string) preg_replace('/\s+/', ' ', $handler);
+        self::assertStringContainsString('try { $stats = OnchainPlugin::instance()->nftGroupReconcileSweepService()->sweep(); } catch (\Throwable $e) {', $flat);
+        self::assertStringContainsString("'failed' => 1,", $flat);
+        self::assertStringContainsString("'nolock' => \$stats['lock_unavailable'] ? 1 : 0,", $flat);
+
+        $from    = strpos($page, 'private static function renderResultNotices(): void');
+        self::assertNotFalse($from);
+        $notices = substr($page, $from, (int) strpos($page, "if (\$op === 'hall')", $from) - $from);
+        self::assertStringContainsString('<strong>Sweep failed.</strong>', $notices);
+        self::assertStringContainsString('<strong>Sweep did not run.</strong> The sweep lock (bcc-core AdvisoryLock) is unavailable', $notices);
+        self::assertLessThan(
+            strpos($notices, "\$_GET['overlap']"),
+            strpos($notices, "\$_GET['nolock']"),
+            'the missing-lock notice wins over the generic overlap one'
+        );
     }
 
     public function testTheLockIsItsOwnNotARevokeSweeps(): void
