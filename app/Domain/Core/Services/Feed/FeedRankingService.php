@@ -38,6 +38,8 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Services\GroupContextResolver;
+use BCC\Trust\Core\Support\PeepSoFriendGate;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\RestrictedGroups;
 
 if (!defined('ABSPATH')) {
@@ -212,6 +214,24 @@ final class FeedRankingService
         //
         // Passing null makes that the single visible story. Nothing about
         // what this feed returns changes.
+        // §F-02 per-post visibility, in its ANONYMOUS posture, and
+        // UNCONDITIONALLY — no viewer id, no friend list, no admin
+        // exemption.
+        //
+        // ⚠⚠ THIS IS THE ONE CALL SITE WHERE THE EXEMPTION MUST NOT BE
+        // CONSULTED. This payload is written to a cache shared by every
+        // reader (see hotFeedPayload()'s docblock) and warmed by cron. An
+        // admin request that reached the exemption here would store an
+        // UNGATED hot feed and serve it to everyone — strictly worse than
+        // the hole F-02 closes, and invisible in testing unless an admin
+        // happens to be the one to miss the cache. Hard-coded `true` is
+        // what makes that impossible rather than merely unlikely.
+        //
+        // The cost is honest and accepted: a signed-in reader's own
+        // non-public posts are ABSENT from /feed/hot, because the shared
+        // payload knows no viewer. That is a property of the cache, not
+        // of the gate — the same reason §K1 block filtering had to move
+        // out of here and run per request.
         $payload = $this->activityFeed->getFeed(
             0,
             ActivityFeedService::SCOPE_FOR_YOU,
@@ -220,7 +240,9 @@ final class FeedRankingService
             $excluded === [] ? null : $excluded,
             $hidden === []   ? null : $hidden,
             null,
-            null
+            null,
+            viewerFriendIds: null,
+            enforcePostVisibility: true
         );
 
         // viewerId=0 — anonymous; reaction hydration fills counts but
@@ -261,14 +283,27 @@ final class FeedRankingService
      *     invariant breaks.
      *   - neither passes the real viewer's memberships, which would WIDEN the
      *     candidate set to the viewer's own gated-group posts — something the
-     *     public hot feed never shows. The tag feed's visible set is thus a
-     *     strict subset of the hot feed's.
+     *     public hot feed never shows.
+     *   - same §F-02 per-post visibility posture: BOTH enforce, and both
+     *     enforce UNCONDITIONALLY — neither consults the admin exemption.
+     *     The hot feed cannot (its payload is shared by every reader, so
+     *     an exempt read would be cached for all), so the tag feed does
+     *     not either; see both call sites.
+     *     ⚠ This is the one place the subset relation is no longer
+     *     literal. The tag feed passes the REAL `$viewerId` — the same
+     *     argument the query already needed — so §F-02's own-post branch
+     *     admits the VIEWER'S OWN restricted posts here, which the
+     *     anonymous hot feed withholds, plus level-30 posts by authors
+     *     who friended them (none in production: peepso-friends is not
+     *     installed). What the invariant protects is unchanged: no
+     *     STRANGER's restricted post can appear here and not there.
      *   - same global-feed visibility gate: `onlyForGroupId = null` →
      *     PeepSoActivityRepository applies the `public_all` LEFT JOIN gate
      *     (group posts surface only when `_bcc_post_visibility = 'public_all'`;
      *     non-group posts pass through).
      *
-     * The ONLY difference from getHotFeed is the trailing `$hashtag` argument
+     * Beyond the §F-02 viewer id noted above, the only difference from
+     * getHotFeed is the trailing `$hashtag` argument
      * forwarded to `activityFeed->getFeed(...)`, which is a pure NARROWING
      * predicate (`post_content LIKE '%#tag%'`). A narrowing predicate can only
      * remove rows from the already-gated candidate set — it can never add one
@@ -298,6 +333,25 @@ final class FeedRankingService
         $excluded = $this->reputationRepo->getCautionAndRiskyUserIds();
         $hidden   = $this->hiddenRepo->getAllHiddenIds();
 
+        // §F-02 per-post visibility, enforced UNCONDITIONALLY here too —
+        // deliberately NOT through postVisibilityArgs(), so no admin exemption
+        // applies on this surface.
+        //
+        // The reason is the hot-feed parity invariant in the docblock: an
+        // exempt reader seeing a restricted post here that /feed/hot
+        // withholds would break it, and the hot feed cannot grant the
+        // same exemption (its payload is shared — see buildHotFeed()).
+        // Of the two ways to make the surfaces agree, this is the one
+        // that cannot leak.
+        //
+        // ⚠ The real `$viewerId` still reaches the gate, because it is
+        // the same argument the query already takes. So this feed widens
+        // by exactly two things relative to the anonymous hot feed: the
+        // viewer's OWN posts, and level-30 posts by authors who friended
+        // them (none in production — see ProfileAccess). Neither is a
+        // stranger's restricted post, which is what the invariant
+        // protects; the docblock above states this rather than leaving
+        // the literal wording to carry it.
         $payload = $this->activityFeed->getFeed(
             $viewerId,
             ActivityFeedService::SCOPE_FOR_YOU,
@@ -308,7 +362,11 @@ final class FeedRankingService
             null,
             null,
             null,
-            $hashtag
+            $hashtag,
+            viewerFriendIds: $viewerId > 0
+                ? (PeepSoFriendGate::viewerFriendIdList($viewerId) ?: null)
+                : null,
+            enforcePostVisibility: true
         );
 
         // ⚠⚠ F-54: THIS SURFACE HAD NO BLOCK FILTERING AT ALL, which is a
@@ -358,6 +416,13 @@ final class FeedRankingService
         // short-circuits the SQL exclude branch entirely.
         $excludedGroups = self::resolveRestrictedGroupIds($viewerId);
 
+        // §F-02 per-post visibility — a post is readable only at the
+        // STRICTER of its own act_access and its author's profile level,
+        // so turning a profile to "friends" or "only me" narrows posts
+        // already written under it. Admins read unenforced; see
+        // ProfileAccess::postVisibilityArgs().
+        [$friendIds, $enforceF02] = ProfileAccess::postVisibilityArgs($viewerId);
+
         $payload = $this->activityFeed->getFeed(
             $viewerId,
             $scope,
@@ -366,7 +431,9 @@ final class FeedRankingService
             $excluded === [] ? null : $excluded,
             $hidden === []   ? null : $hidden,
             null,
-            $excludedGroups === [] ? null : $excludedGroups
+            $excludedGroups === [] ? null : $excludedGroups,
+            viewerFriendIds: $friendIds,
+            enforcePostVisibility: $enforceF02
         );
 
         // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
@@ -404,11 +471,19 @@ final class FeedRankingService
         );
         $hidden = $this->hiddenRepo->getAllHiddenIds();
 
+        // §F-02 — load-bearing HERE above all. A permalink that served
+        // what the feed withholds is the whole reason bcc-core puts this
+        // predicate in both readers; enforcing on the feed alone would
+        // move the leak rather than close it.
+        [$friendIds, $enforceF02] = ProfileAccess::postVisibilityArgs($viewerId);
+
         $item = $this->activityFeed->getActivityById(
             $actId,
             $viewerId,
             $excluded === [] ? null : $excluded,
-            $hidden === []   ? null : $hidden
+            $hidden === []   ? null : $hidden,
+            viewerFriendIds: $friendIds,
+            enforcePostVisibility: $enforceF02
         );
         if ($item === null) {
             return null;
@@ -456,6 +531,13 @@ final class FeedRankingService
         // group the viewer can't see must be filtered out here too.
         $excludedGroups = self::resolveRestrictedGroupIds($viewerId);
 
+        // §F-02 per-post visibility. The wall is where the setting is
+        // most likely to be TESTED by its owner — and note that this gate
+        // and the profile gate are independent: a level-20 profile stays
+        // openable by any signed-in viewer while its level-40 posts do
+        // not appear on it.
+        [$friendIds, $enforceF02] = ProfileAccess::postVisibilityArgs($viewerId);
+
         $payload = $this->activityFeed->getActivityForAuthor(
             $authorId,
             $viewerId,
@@ -463,7 +545,9 @@ final class FeedRankingService
             $limit,
             $excluded === [] ? null : $excluded,
             $hidden === []   ? null : $hidden,
-            $excludedGroups === [] ? null : $excludedGroups
+            $excludedGroups === [] ? null : $excludedGroups,
+            viewerFriendIds: $friendIds,
+            enforcePostVisibility: $enforceF02
         );
 
         // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
@@ -511,13 +595,21 @@ final class FeedRankingService
 
         $hidden = $this->hiddenRepo->getAllHiddenIds();
 
+        // §F-02 per-post visibility. A page stream is keyed on the post
+        // marker, not on who owns the page, so it carries posts by
+        // whoever was operator at the time — each one still answers to
+        // its own author's profile level.
+        [$friendIds, $enforceF02] = ProfileAccess::postVisibilityArgs($viewerId);
+
         $payload = $this->activityFeed->getActivityForPage(
             $pageId,
             $viewerId,
             $cursor,
             $limit,
             $excluded === [] ? null : $excluded,
-            $hidden === []   ? null : $hidden
+            $hidden === []   ? null : $hidden,
+            viewerFriendIds: $friendIds,
+            enforcePostVisibility: $enforceF02
         );
 
         // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
@@ -611,6 +703,37 @@ final class FeedRankingService
         // members_only ⇒ hidden).
         $visibilityIn = $publicOnly ? ['public_group', 'public_all'] : null;
 
+        // ⚠⚠ §F-02 IS DELIBERATELY NOT ENFORCED ON THIS SURFACE, and this
+        // is the one judgment call in the F-02 posts wiring rather than a
+        // mechanical application of it. Flagged for review; it is one
+        // argument to reverse.
+        //
+        // Inside a group the AUDIENCE IS THE ROOM, and the room already
+        // has its own gate: membership (resolved by the endpoint — secret
+        // + non-member is a 404) plus the per-post `public_group` /
+        // `public_all` filter above for non-members. A profile level is a
+        // statement about a PROFILE and its stream, not about a room its
+        // owner deliberately joined and posted into.
+        //
+        // Enforcing here would also be loud rather than subtle, because
+        // BCC's own writer stores `act_access = 0`: the effective level
+        // of a BCC-written post is its author's PROFILE level alone. A
+        // member whose profile reads "only me" would have every post they
+        // ever made vanish from the room for everyone else — the "empty
+        // room" failure the NFT-group reputation carve-out above already
+        // argues against, arriving by a different door.
+        //
+        // ⚠ PeepSo offers no precedent to defer to: `usr_profile_acc`
+        // appears in PeepSo's USER SEARCH only (`usersearch.php`), never
+        // in its activity queries, so the stricter-of-the-two ladder is
+        // BCC's own policy and this is BCC's own decision.
+        //
+        // ⚠ KNOWN ASYMMETRY that follows from it: a group post's
+        // PERMALINK does enforce (getActivityById above), so a post a
+        // fellow member reads in the room can 404 by link when its
+        // author's profile is restricted. Failing closed on the permalink
+        // is the safe side of that trade, but the two have to be changed
+        // together — whichever way this is decided.
         $payload = $this->activityFeed->getFeed(
             $viewerId,
             ActivityFeedService::SCOPE_GROUP,
