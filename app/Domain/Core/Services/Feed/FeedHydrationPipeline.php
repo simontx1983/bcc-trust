@@ -611,6 +611,12 @@ final class FeedHydrationPipeline
                 $item['body'] = $watchBatchBodies[$watchBatchExtToSid[$extId]];
             } elseif ($kind === 'page_claim' && isset($pageClaimExtToSid[$extId], $pageClaimBodies[$pageClaimExtToSid[$extId]])) {
                 $item['body'] = $pageClaimBodies[$pageClaimExtToSid[$extId]];
+            } elseif ($kind === 'page_claim' && isset($pageClaimExtToSid[$extId])) {
+                // F-89: the claim resolved but is no longer verified (revoked,
+                // or gone — findManyByIds returns verified rows only). Drop the
+                // item rather than keep announcing "Claimed this page". Read
+                // time, like F-88's reviews, so a re-claim brings it back.
+                continue;
             } elseif ($kind === 'review' && isset($reviewExtToSid[$extId], $reviewBodies[$reviewExtToSid[$extId]])) {
                 $item['body'] = $reviewBodies[$reviewExtToSid[$extId]];
             } elseif ($kind === 'review' && isset($reviewExtToSid[$extId])) {
