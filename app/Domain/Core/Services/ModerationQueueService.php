@@ -408,7 +408,12 @@ final class ModerationQueueService
                 $this->reportRepo->listIdsForTargetByStatus($targetKind, $targetId, self::STATUS_PENDING),
                 static fn (int $id): bool => $id !== $reportId
             ));
-            $this->reportRepo->transitionStatus($upheldIds, self::STATUS_PENDING, self::STATUS_RESOLVED, $resolverUserId);
+            $upheldIds = $this->actuallyMoved(
+                $upheldIds,
+                $this->reportRepo->transitionStatus($upheldIds, self::STATUS_PENDING, self::STATUS_RESOLVED, $resolverUserId),
+                self::STATUS_RESOLVED,
+                $resolverUserId
+            );
             // listIdsForTargetByStatus() is bounded at 500; anything still
             // pending after the bulk close means the target had more.
             $stillPending = $this->reportRepo->countPendingForTarget($targetKind, $targetId);
@@ -568,6 +573,40 @@ final class ModerationQueueService
             'currently_hidden' => $this->hiddenRepo->exists($targetId),
             'undo'             => $undo,
         ];
+    }
+
+    /**
+     * F-306 review — the candidates a guarded transitionStatus() actually
+     * moved, so the Rank credit, the audit row and the undo token never name
+     * a report this action did not change.
+     *
+     * transitionStatus() is ONE guarded UPDATE: -1 (a DB error) moved
+     * nothing, and a full count moved every candidate. Only a PARTIAL count —
+     * another moderator acted on some of them in between — needs a re-read,
+     * and a row counts only if it now carries $toStatus AND this resolver.
+     *
+     * @param list<int> $candidates
+     * @return list<int>
+     */
+    private function actuallyMoved(array $candidates, int $moved, int $toStatus, int $resolverUserId): array
+    {
+        if ($candidates === [] || $moved <= 0) {
+            return [];
+        }
+        if ($moved >= count($candidates)) {
+            return $candidates;
+        }
+        $out = [];
+        foreach ($candidates as $id) {
+            $row = $this->reportRepo->findById($id);
+            if ($row !== null
+                && (int) $row->status === $toStatus
+                && (int) ($row->resolved_by ?? 0) === $resolverUserId
+            ) {
+                $out[] = $id;
+            }
+        }
+        return $out;
     }
 
     /**

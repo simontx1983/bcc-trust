@@ -112,6 +112,30 @@ final class HideUpholdsAllReportsIntegrationTest extends TestCase
         self::assertSame([[self::ACT_ID, self::ADMIN, $r1, [$r2]]], $this->firedArgs('bcc_content_hidden_by_admin'));
     }
 
+    /**
+     * F-306 review: a failed sibling UPDATE moved nothing, so nothing is
+     * credited or recorded as upheld, and undo has nothing of theirs to
+     * reopen. The clicked report itself is still resolved.
+     */
+    public function testAFailedSiblingUpdateCreditsAndRecordsNoSibling(): void
+    {
+        [$r1, $r2] = $this->report([953061, 953062]);
+        $GLOBALS['wpdb']->clearFaultInjection();
+        $GLOBALS['wpdb']->failQueriesMatching = '/WHERE status = 0 AND id IN/';
+
+        $hide = $this->service->resolve($r1, ModerationQueueService::ACTION_HIDE, self::ADMIN);
+        $GLOBALS['wpdb']->clearFaultInjection();
+
+        self::assertTrue($hide['ok'] ?? false, json_encode($hide) ?: '');
+        self::assertSame(ModerationQueueService::STATUS_RESOLVED, $this->reportStatus($r1));
+        self::assertSame(ModerationQueueService::STATUS_PENDING, $this->reportStatus($r2), 'the failed UPDATE moved nothing');
+        self::assertSame(
+            [[self::ACT_ID, self::ADMIN, $r1, []]],
+            $this->firedArgs('bcc_content_hidden_by_admin'),
+            'no sibling is credited when none was upheld'
+        );
+    }
+
     public function testHideNeverTouchesAReportAnotherModeratorAlreadyClosed(): void
     {
         [$r1, $r2, $r3] = $this->report([953061, 953062, 953063]);
