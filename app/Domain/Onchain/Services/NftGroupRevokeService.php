@@ -76,10 +76,20 @@ final class NftGroupRevokeService
      * running when the next cron fires, or a manual run beside the cron)
      * read the same members, both revoke them, and both write the audit
      * row — duplicated audit history. Session-scoped MySQL advisory lock,
-     * the same primitive gated-group provisioning uses; non-blocking, so
-     * the overlapping tick skips instead of queueing.
+     * the same primitive gated-group provisioning uses. The sweep waits up
+     * to SWEEP_LOCK_WAIT for it, then skips instead of queueing.
      */
     public const SWEEP_LOCK = 'bcc_gated_group_revoke_sweep';
+
+    /**
+     * Seconds the twice-daily sweep waits for SWEEP_LOCK (F-278). A
+     * holding-lost re-check holds the lock for one member's check, which the
+     * SURFACE_REVOKE budget stops at 20 s; with no wait, a sweep firing
+     * during a re-check skipped its whole tick, a 12 h delay that the
+     * sweep-only Cosmos gates feel most. The re-check itself never waits:
+     * it is the one that yields and retries.
+     */
+    public const SWEEP_LOCK_WAIT = 30;
 
     /**
      * F-278: single-event re-check of ONE member after the indexer saw one of
@@ -127,8 +137,9 @@ final class NftGroupRevokeService
      *     many members as were removed;
      *   - `skipped_reasons` counts skips by bounded reason code.
      *
-     * F-69: the whole tick runs under SWEEP_LOCK. When another tick holds
-     * it, this one does nothing and reports `skipped_overlap: true`. When
+     * F-69: the whole tick runs under SWEEP_LOCK. When another tick or a
+     * re-check still holds it after SWEEP_LOCK_WAIT seconds, this one does
+     * nothing and reports `skipped_overlap: true`. When
      * the lock primitive itself is missing it also does nothing (fail
      * closed: an unserialized sweep is the bug) and logs an error.
      *
@@ -142,7 +153,7 @@ final class NftGroupRevokeService
             ]);
             return self::emptyStats(true);
         }
-        if (!\BCC\Core\DB\AdvisoryLock::acquire(self::SWEEP_LOCK, 0)) {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire(self::SWEEP_LOCK, self::SWEEP_LOCK_WAIT)) {
             return self::emptyStats(true); // Another tick is running — never overlap.
         }
 

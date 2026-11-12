@@ -752,6 +752,22 @@ namespace BCC\Trust\Tests\Integration {
             self::assertSame(0, $this->revokeAuditRows());
         }
 
+        public function testARecheckKeepsAMemberWhoMovedTheNftToTheirOtherWallet(): void
+        {
+            // Lost on wallet A, now held on the same member's wallet B, which
+            // the index has not seen yet. The re-check reads every linked
+            // wallet live, so the move is not a sale.
+            $this->seedGroup(1); // wallet A answers 0
+            $walletB = self::cosmosAddress(self::FIRST_USER + 500);
+            $this->insertWallet(self::FIRST_USER, $this->chainId('cosmos'), $walletB);
+            RevocationScriptedFetcher::$answers[$walletB] = 1;
+
+            self::assertSame('kept', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP));
+            self::assertContains($walletB, RevocationScriptedFetcher::$asked, 'wallet B was read live');
+            self::assertSame([self::FIRST_USER], $this->remainingMembers());
+            self::assertSame(0, $this->revokeAuditRows());
+        }
+
         public function testARecheckNeverRemovesOnAnUnknownAnswer(): void
         {
             $this->seedGroup(1);
