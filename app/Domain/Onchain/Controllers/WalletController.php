@@ -136,6 +136,10 @@ class WalletController
             'recovery' => [
                 'has_recovery_email'    => AccountRecoveryService::hasRecoveryEmail($userId),
                 'verified_wallet_count' => WalletRepository::getVerifiedCountsForUsers([$userId])[$userId] ?? 0,
+                // F-253: true / false / null (unknown, older account). Picks
+                // the confirmation the account forms ask for: the current
+                // password, or a signature from a verified wallet.
+                'has_password'          => AccountRecoveryService::hasPassword($userId),
             ],
         ]);
         $resp->header('Cache-Control', 'no-store');

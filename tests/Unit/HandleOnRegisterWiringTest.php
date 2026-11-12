@@ -38,23 +38,48 @@ final class HandleOnRegisterWiringTest extends TestCase
         );
     }
 
-    /** @return array<string, array{string}> */
+    /**
+     * The second value is F-253's has-password flag each path writes: only
+     * a password signup knows its password; wallet and OAuth signups get a
+     * random, never-shown one.
+     *
+     * @return array<string, array{string, string}>
+     */
     public static function signupControllers(): array
     {
         return [
-            'password' => ['app/Domain/Core/REST/Auth/PasswordAuthController.php'],
-            'wallet'   => ['app/Domain/Core/REST/Auth/WalletAuthController.php'],
-            'oauth'    => ['app/Domain/Core/REST/Auth/OAuthController.php'],
+            'password' => ['app/Domain/Core/REST/Auth/PasswordAuthController.php', '1'],
+            'wallet'   => ['app/Domain/Core/REST/Auth/WalletAuthController.php', '0'],
+            'oauth'    => ['app/Domain/Core/REST/Auth/OAuthController.php', '0'],
         ];
     }
 
-    #[DataProvider('signupControllers')]
-    public function testSignupPassesItsHandleViaMetaInput(string $rel): void
+    /** The wp_insert_user([...]) call's meta_input array, as source. */
+    private static function metaInput(string $src): string
     {
-        $src = self::src($rel);
+        self::assertSame(
+            1,
+            preg_match("/wp_insert_user\(\[(?:(?!\]\);).)*'meta_input'\s*=>\s*\[(.*?)\]\s*,?\s*\]\);/s", $src, $m),
+            'one wp_insert_user call with a meta_input array'
+        );
+        return $m[1];
+    }
+
+    #[DataProvider('signupControllers')]
+    public function testSignupPassesItsHandleViaMetaInput(string $rel, string $hasPassword): void
+    {
         self::assertMatchesRegularExpression(
-            "/wp_insert_user\(\[(?:(?!\]\);).)*'meta_input'\s*=>\s*\[HandleService::META_HANDLE\s*=>\s*\\\$handle\]/s",
-            $src
+            "/^\s*HandleService::META_HANDLE\s*=>\s*\\\$handle\s*,/",
+            self::metaInput(self::src($rel))
+        );
+    }
+
+    #[DataProvider('signupControllers')]
+    public function testSignupRecordsWhetherTheMemberKnowsTheirPassword(string $rel, string $hasPassword): void
+    {
+        self::assertMatchesRegularExpression(
+            "/AccountRecoveryService::META_HAS_PASSWORD\s*=>\s*'" . $hasPassword . "'\s*,/",
+            self::metaInput(self::src($rel))
         );
     }
 }

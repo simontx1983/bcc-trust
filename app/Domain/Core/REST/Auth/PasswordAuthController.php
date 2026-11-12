@@ -219,7 +219,11 @@ final class PasswordAuthController
             // Core saves meta_input BEFORE firing user_register, so the
             // handle-assignment hook in Plugin.php sees the chosen handle
             // and leaves it alone.
-            'meta_input'   => [HandleService::META_HANDLE => $handle],
+            'meta_input'   => [
+                HandleService::META_HANDLE => $handle,
+                // F-253: the member chose this password.
+                \BCC\Trust\Core\Services\AccountRecoveryService::META_HAS_PASSWORD => '1',
+            ],
         ]);
 
         if (is_wp_error($userId)) {
