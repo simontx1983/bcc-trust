@@ -1576,6 +1576,12 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
 \BCC\Trust\Core\Support\CorsHandler::register();
 \BCC\Trust\Infrastructure\EdgeCache::init();
 
+// F-305: suspended members are signed in READ-ONLY. One gate refuses every
+// BCC write from a known-suspended member, except an explicit allow-list
+// (auth, appeal, prefs, push unsubscribe, blocks, password change); see
+// SuspendedWriteGate.
+\BCC\Trust\Core\Security\SuspendedWriteGate::register();
+
 // Validator announcements, unit A1 (api-contract-v1.md §4.32): the private
 // `bcc_announcement` post type plus the four guards that stop WordPress's
 // own comment surfaces serving announcement comments.
