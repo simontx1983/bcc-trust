@@ -58,6 +58,33 @@ final class NotificationRepository
     }
 
     /**
+     * F-296: the members on the other side of a block with $userId (either
+     * direction), as an SQL exclusion on `not_from_user_id`. A block hides a
+     * member's old bell rows too: they used to stay in the list, count
+     * toward the badge and go out in the digest. Applied in SQL, before
+     * LIMIT, for the same reason as the type scope (a post-filter makes
+     * short pages and pagination dead-ends). Same two bounded reads the feed
+     * uses (FeedRankingService). System rows (from user 0) are never
+     * excluded.
+     *
+     * @return array{0: string, 1: list<int>} [" AND `not_from_user_id` NOT IN (…)" or "", its ids]
+     */
+    private static function blockedActorClause(int $userId): array
+    {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', array_merge(
+                \BCC\Core\Repositories\PeepSoBlockRepository::getBlockedIds($userId),
+                \BCC\Core\Repositories\PeepSoBlockRepository::getBlockerIds($userId)
+            )),
+            static fn (int $id): bool => $id > 0
+        )));
+        if ($ids === []) {
+            return ['', []];
+        }
+        return [' AND `not_from_user_id` NOT IN (' . implode(',', array_fill(0, count($ids), '%d')) . ')', $ids];
+    }
+
+    /**
      * List BCC notifications for a user, newest first. Cursor is
      * exclusive (the row matching $beforeId is NOT included; pass 0
      * to start from the top).
@@ -85,6 +112,7 @@ final class NotificationRepository
 
         $types        = \BCC\Trust\Core\Support\NotificationType::ALL;
         $placeholders = implode(',', array_fill(0, count($types), '%s'));
+        [$blockedSql, $blockedIds] = self::blockedActorClause($userId);
 
         if ($beforeId > 0) {
             $sql = "SELECT " . self::COLUMNS . " FROM `{$table}`"
@@ -92,22 +120,24 @@ final class NotificationRepository
                 . " AND `not_module_id` = %d"
                 . " AND `not_id` < %d"
                 . " AND `not_type` IN ({$placeholders})"
+                . $blockedSql
                 . " ORDER BY `not_id` DESC"
                 . " LIMIT %d";
             /** @var list<object>|null $rows */
             $rows = $wpdb->get_results(
-                $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, $beforeId, ...array_merge($types, [$limit]))
+                $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, $beforeId, ...array_merge($types, $blockedIds, [$limit]))
             );
         } else {
             $sql = "SELECT " . self::COLUMNS . " FROM `{$table}`"
                 . " WHERE `not_user_id` = %d"
                 . " AND `not_module_id` = %d"
                 . " AND `not_type` IN ({$placeholders})"
+                . $blockedSql
                 . " ORDER BY `not_id` DESC"
                 . " LIMIT %d";
             /** @var list<object>|null $rows */
             $rows = $wpdb->get_results(
-                $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, ...array_merge($types, [$limit]))
+                $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, ...array_merge($types, $blockedIds, [$limit]))
             );
         }
 
@@ -138,13 +168,17 @@ final class NotificationRepository
         $types        = \BCC\Trust\Core\Support\NotificationType::ALL;
         $placeholders = implode(',', array_fill(0, count($types), '%s'));
 
+        // F-296: a blocked member's rows are not listed, so not counted.
+        [$blockedSql, $blockedIds] = self::blockedActorClause($userId);
+
         $sql = "SELECT COUNT(*) FROM `{$table}`"
             . " WHERE `not_user_id` = %d"
             . " AND `not_module_id` = %d"
             . " AND `not_read` = 0"
-            . " AND `not_type` IN ({$placeholders})";
+            . " AND `not_type` IN ({$placeholders})"
+            . $blockedSql;
         $count = $wpdb->get_var(
-            $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, ...$types)
+            $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, ...array_merge($types, $blockedIds))
         );
         return $count !== null ? (int) $count : 0;
     }
@@ -237,18 +271,22 @@ final class NotificationRepository
         ));
         $placeholders = implode(',', array_fill(0, count($types), '%s'));
 
+        // F-296: never email a blocked member's rows either.
+        [$blockedSql, $blockedIds] = self::blockedActorClause($userId);
+
         $sql = "SELECT " . self::COLUMNS . " FROM `{$table}`"
             . " WHERE `not_user_id` = %d"
             . " AND `not_module_id` = %d"
             . " AND `not_read` = 0"
             . " AND `not_type` IN ({$placeholders})"
+            . $blockedSql
             . " AND `not_timestamp` >= %s"
             . " ORDER BY `not_timestamp` ASC"
             . " LIMIT %d";
 
         /** @var list<object>|null $rows */
         $rows = $wpdb->get_results(
-            $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, ...array_merge($types, [$sinceMysql, $limit]))
+            $wpdb->prepare($sql, $userId, BCC_NOTIFICATION_MODULE_ID, ...array_merge($types, $blockedIds, [$sinceMysql, $limit]))
         );
         return is_array($rows) ? $rows : [];
     }
