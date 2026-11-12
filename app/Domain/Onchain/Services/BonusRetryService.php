@@ -184,6 +184,20 @@ final class BonusRetryService
                 } else {
                     $failed[$pageId] = ($entry['attempts'] ?? 0) + 1;
                 }
+            } catch (\Throwable $e) {
+                // F-240: one page's failure is that page's failed attempt.
+                // An escaping throw used to abort the whole loop BEFORE the
+                // step-3 write-back: pages that had already succeeded stayed
+                // queued, and the throwing page never had its attempts bumped,
+                // so it never reached quarantine and broke every later run.
+                if (class_exists('BCC\\Core\\Log\\Logger')) {
+                    \BCC\Core\Log\Logger::error('[bcc-onchain-signals] bonus_retry_entry_failed', [
+                        'page_id' => $pageId,
+                        'type'    => get_class($e),
+                        'error'   => $e->getMessage(),
+                    ]);
+                }
+                $failed[$pageId] = ($entry['attempts'] ?? 0) + 1;
             } finally {
                 \BCC\Core\DB\AdvisoryLock::release('bcc_onchain_bonus_' . $pageIdInt);
             }
