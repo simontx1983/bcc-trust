@@ -96,3 +96,16 @@ namespace BCC\Trust\Core\Services\Feed {
         }
     }
 }
+
+// F-28: reactor names now go through PublicIdentity::visibleName, which
+// reads the "Hide my real name" flag via PrivacySettings (in this
+// namespace). No reactor here hides it, so the flag reads as unset.
+namespace BCC\Trust\Core\Support {
+    if (!function_exists(__NAMESPACE__ . '\get_user_meta')) {
+        /** @return mixed */
+        function get_user_meta(int $userId, string $key = '', bool $single = false)
+        {
+            return '';
+        }
+    }
+}

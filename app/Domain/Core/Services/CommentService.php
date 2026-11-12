@@ -695,14 +695,15 @@ final class CommentService
     private function shapeCommentRow(object $row, int $viewerId, string $parentFeedId, ?array $badge = null, ?array $vouch = null, ?array $stoke = null, ?array $media = null, ?string $canonicalHandle = null, ?int $replyCount = null, ?string $avatarUrl = null): array
     {
         $authorId = (int) $row->author_id;
-        $authorHandle = $canonicalHandle ?? (string) $row->author_login;
-        $displayName  = (string) $row->author_display_name;
+        // Never the login (#517); "Hide my real name" honoured (F-28).
+        $authorHandle = $canonicalHandle ?? \BCC\Trust\Core\Support\PublicIdentity::handle($authorId, get_user_meta($authorId, 'bcc_handle', true));
+        $displayName  = \BCC\Trust\Core\Support\PublicIdentity::visibleName($authorId, $row->author_display_name, $row->author_login ?? '', $authorHandle, $viewerId);
         $body         = (string) $row->body;
 
         $author = [
             'id'           => $authorId,
             'handle'       => $authorHandle,
-            'display_name' => $displayName !== '' ? $displayName : $authorHandle,
+            'display_name' => $displayName,
             // Prefer the page's bulk-resolved avatar; the single-comment
             // echo path passes null and falls back to the cached seam.
             'avatar_url'   => $avatarUrl ?? self::resolveAvatarUrl($authorId),

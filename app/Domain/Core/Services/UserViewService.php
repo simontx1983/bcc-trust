@@ -144,10 +144,9 @@ final class UserViewService
         // §K2: when the viewer isn't the owner, apply each toggle to the
         // outgoing fields. Owner always sees full data so the settings
         // surface can show "you've hidden X" without lying to itself.
-        $displayName  = \BCC\Trust\Core\Support\PublicIdentity::displayName($user->display_name, $user->user_login, $handle);
-        $effectiveName = (!$isSelf && $privacy['real_name_hidden'])
-            ? '@' . $handle
-            : $displayName;
+        // "Hide my real name" (§K2): the shared rule, so the profile and
+        // every other surface agree (F-28).
+        $effectiveName = \BCC\Trust\Core\Support\PublicIdentity::visibleName($userId, $user->display_name, $user->user_login, $handle, $viewerId);
 
         $payload = [
             'id'                  => $userId,
@@ -399,10 +398,9 @@ final class UserViewService
         $state = $prefetched['member_states'][$userId]
             ?? $this->rankStateService->memberState($userId);
 
-        $displayName  = \BCC\Trust\Core\Support\PublicIdentity::displayName($user->display_name, $user->user_login, $handle);
-        $effectiveName = (!$isSelf && $privacy['real_name_hidden'])
-            ? '@' . $handle
-            : $displayName;
+        // "Hide my real name" (§K2): the shared rule, so the profile and
+        // every other surface agree (F-28).
+        $effectiveName = \BCC\Trust\Core\Support\PublicIdentity::visibleName($userId, $user->display_name, $user->user_login, $handle, $viewerId);
 
         // Followers count — prefer prefetched batch, fall back to the
         // single-user repo call so non-list callers (admin tools,

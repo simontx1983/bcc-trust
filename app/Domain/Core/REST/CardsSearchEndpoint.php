@@ -511,7 +511,8 @@ final class CardsSearchEndpoint
 
         return [
             'id'                    => $id,
-            'name'                  => $display !== '' ? $display : $username,
+            // "Hide my real name" honoured (F-28); $username is the handle.
+            'name'                  => \BCC\Trust\Core\Support\PublicIdentity::visibleName($id, $display, '', $username),
             'handle'                => $username,
             'card_kind'             => 'member',
             'reputation_tier'       => $tier,

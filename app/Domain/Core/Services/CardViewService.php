@@ -765,7 +765,7 @@ final class CardViewService
 
         return [
             'id'                  => $userId,
-            'name'                => \BCC\Trust\Core\Support\PublicIdentity::displayName($user->display_name, $user->user_login, $resolvedHandle),
+            'name'                => \BCC\Trust\Core\Support\PublicIdentity::visibleName($userId, $user->display_name, $user->user_login, $resolvedHandle, $viewerId),
             'handle'              => $resolvedHandle,
             'card_kind'           => 'member',
             'bio'                 => self::resolveMemberBio($user),
@@ -825,7 +825,7 @@ final class CardViewService
             // Emitted for shape uniformity.
             'messaging'           => ['destination' => 'none', 'operator' => null],
             'crest'               => self::buildCrest(
-                \BCC\Trust\Core\Support\PublicIdentity::displayName($user->display_name, $user->user_login, $resolvedHandle),
+                \BCC\Trust\Core\Support\PublicIdentity::visibleName($userId, $user->display_name, $user->user_login, $resolvedHandle, $viewerId),
                 'tier',
                 $tier,
                 self::resolveMemberAvatarUrl($userId)

@@ -952,11 +952,19 @@ final class UsersEndpoint
         $needle = trim($needle);
         $handle = ltrim($needle, '@');
 
+        // F-28: a member who hides their real name must not be FINDABLE by
+        // it either, or searching a name would link it to their @handle.
+        // They stay findable by handle (below).
         $byName = get_users([
             'search'         => '*' . $needle . '*',
             'search_columns' => ['display_name'],
             'fields'         => 'ID',
             'number'         => self::MEMBER_SEARCH_MAX_CANDIDATES,
+            'meta_query'     => [
+                'relation' => 'OR',
+                ['key' => 'bcc_privacy_real_name_hidden', 'compare' => 'NOT EXISTS'],
+                ['key' => 'bcc_privacy_real_name_hidden', 'value' => '1', 'compare' => '!='],
+            ],
         ]);
         $byHandle = $handle === '' ? [] : get_users([
             'meta_key'     => 'bcc_handle',

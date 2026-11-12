@@ -110,7 +110,7 @@ final class MyBlocksService
     {
         // Prefer bcc_handle; PublicIdentity never falls back to user_login.
         $handle      = \BCC\Trust\Core\Support\PublicIdentity::handle($userId, get_user_meta($userId, 'bcc_handle', true));
-        $displayName = \BCC\Trust\Core\Support\PublicIdentity::displayName($row->display_name, $row->user_login, $handle);
+        $displayName = \BCC\Trust\Core\Support\PublicIdentity::visibleName($userId, $row->display_name, $row->user_login, $handle);
 
         return [
             'user_id'      => $userId,
