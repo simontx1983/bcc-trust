@@ -424,6 +424,23 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => 'bcc_trust_scanner_schema_dropped',
                 'callback'    => 'bcc_trust_drop_scanner_schema',
             ],
+            // Public handles that equal the member's login get a new
+            // handle; the old one is kept as a retired handle so old
+            // /u/ links still resolve. See rotate-login-handles.php.
+            // Runs BEFORE display_name_placeholders_v3, so that one
+            // rewrites login-equal display names to the NEW handle.
+            [
+                'id'          => 'rotate_login_handles_v1',
+                'done_option' => 'bcc_trust_login_handles_rotated',
+                'callback'    => 'bcc_trust_rotate_login_handles',
+            ],
+            // v3 of the display-name hygiene backfill: v2's predicate
+            // plus display_name = user_login for any login.
+            [
+                'id'          => 'display_name_placeholders_v3',
+                'done_option' => 'bcc_trust_display_name_placeholders_backfilled_v3',
+                'callback'    => 'bcc_trust_backfill_display_name_placeholders',
+            ],
         ];
     }
 

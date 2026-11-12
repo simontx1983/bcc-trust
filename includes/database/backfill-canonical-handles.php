@@ -235,7 +235,13 @@ if (!function_exists('bcc_trust_backfill_canonical_handles')) {
         $name = trim($displayName);
         if ($name !== '' && strcasecmp($name, trim($userLogin)) !== 0) {
             $fromDisplay = bcc_trust_bch_normalize(sanitize_title($name));
-            if (strlen($fromDisplay) >= \BCC\Trust\Core\Services\HandleService::MIN_LENGTH) {
+            // A slug that normalises to the same string as the login
+            // ("JSmith 77" vs login "jsmith-77") would still spell it out.
+            $loginSlug = bcc_trust_bch_normalize(sanitize_title($userLogin));
+            if (
+                strlen($fromDisplay) >= \BCC\Trust\Core\Services\HandleService::MIN_LENGTH
+                && $fromDisplay !== $loginSlug
+            ) {
                 return $fromDisplay;
             }
         }

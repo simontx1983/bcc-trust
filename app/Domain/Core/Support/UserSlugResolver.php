@@ -69,6 +69,16 @@ final class UserSlugResolver
             return (int) $userIds[0];
         }
 
+        // A handle retired by the login-handle rotation resolves to the
+        // member who held it, so old /u/<handle> links keep working. The
+        // response carries the member's CURRENT handle; the client
+        // redirects to it (contract §4, retired handles). Exact match on
+        // the retired-handle meta only, never a login lookup.
+        $retiredOwner = \BCC\Trust\Core\Services\HandleService::retiredOwner($slug);
+        if ($retiredOwner !== null) {
+            return $retiredOwner;
+        }
+
         // Fallback: try wp_users.user_login. WordPress is case-
         // insensitive on most collations; combined with the
         // strtolower above this matches the §B6 lowercase-only

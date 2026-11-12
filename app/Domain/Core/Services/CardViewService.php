@@ -1350,7 +1350,11 @@ final class CardViewService
         ]);
 
         if (empty($userIds)) {
-            return 0;
+            // A handle retired by the login-handle rotation still finds
+            // its member (exact retired-handle match, never a login
+            // lookup). The gate and the payload both come through here,
+            // so they still agree.
+            return \BCC\Trust\Core\Services\HandleService::retiredOwner($handle) ?? 0;
         }
         return (int) $userIds[0];
     }
