@@ -688,6 +688,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Support\\EndpointDescriptor' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/EndpointDescriptor.php',
         'BCC\\Trust\\Onchain\\Support\\ExplorerLinkBuilder' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/ExplorerLinkBuilder.php',
         'BCC\\Trust\\Onchain\\Support\\HeliusEndpoint' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/HeliusEndpoint.php',
+        'BCC\\Trust\\Onchain\\Support\\LocalUploadUrl' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/LocalUploadUrl.php',
         'BCC\\Trust\\Onchain\\Support\\MarketplaceLinkBuilder' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/MarketplaceLinkBuilder.php',
         'BCC\\Trust\\Onchain\\Support\\NftChainCapability' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/NftChainCapability.php',
         'BCC\\Trust\\Onchain\\Support\\NftCollectionIdentifier' => __DIR__ . '/../..' . '/app/Domain/Onchain/Support/NftCollectionIdentifier.php',

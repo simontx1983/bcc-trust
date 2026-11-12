@@ -75,4 +75,21 @@ namespace {
             return true;
         }
     }
+
+    if (!function_exists('wp_cache_add')) {
+        /**
+         * Set-if-absent; CacheGeneration seeds a missing generation with it.
+         *
+         * @param string $key
+         * @param mixed  $value
+         */
+        function wp_cache_add($key, $value, string $group = '', int $expire = 0): bool
+        {
+            if (array_key_exists(BccHotFeedCacheStore::id((string) $key, $group), BccHotFeedCacheStore::$store)) {
+                return false;
+            }
+
+            return wp_cache_set($key, $value, $group, $expire);
+        }
+    }
 }

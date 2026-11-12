@@ -33,6 +33,7 @@ use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\PostShortcodeRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\GroupAttribution;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\RestrictedGroups;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
@@ -187,6 +188,8 @@ final class BlogService
                 : RestrictedGroups::memberGroupsForViewer($sessionViewerId);
         }
 
+        [$friendIds, $enforceF02] = ProfileAccess::postVisibilityArgs($sessionViewerId);
+
         // Over-fetch by 1 to detect has_more without a separate count.
         // The group filter is applied in SQL, so the page is filled AFTER
         // exclusion and has_more stays truthful — a PHP-side filter here
@@ -210,7 +213,24 @@ final class BlogService
             $memberGroups,
             // The SESSION viewer, so the repository's author-scope proof is
             // anchored to who is actually signed in.
-            $sessionViewerId
+            $sessionViewerId,
+            // §F-02 per-post visibility. This tab reads post CONTENT and
+            // does not go through FeedRankingService, so the gate has to
+            // be wired here as well — the blog tab is the surface built
+            // to list an author's long-form posts, which makes it the
+            // worst one to leave ungated.
+            //
+            // ⚠ The viewer is `$sessionViewerId`, NOT the `$viewerId`
+            // argument, for the reason already logged above: a caller's
+            // viewer argument is ignored here on purpose. Using the
+            // argument would let a caller choose whose friend list and
+            // whose own-post exemption the gate applies.
+            //
+            // Stacks with the group gate rather than replacing it: a post
+            // must clear BOTH its group's visibility and its author's
+            // profile level. The two answer different questions.
+            viewerFriendIds: $friendIds,
+            enforcePostVisibility: $enforceF02
         );
 
         $hasMore = count($rows) > $limit;

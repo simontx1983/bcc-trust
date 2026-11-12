@@ -353,7 +353,8 @@ final class HallsService
             $validators[] = [
                 'id'                => (int) ($v->id ?? 0),
                 'moniker'           => (string) ($v->moniker ?? ''),
-                'logo_url'          => self::nonEmptyString($v->logo_url ?? null),
+                // Stored absolute; a sibling-host upload is re-based (2026-11-12).
+                'logo_url'          => \BCC\Trust\Onchain\Support\LocalUploadUrl::rebase(self::nonEmptyString($v->logo_url ?? null)),
                 'total_stake'       => self::nonEmptyString($v->total_stake ?? null),
                 'delegator_count'   => isset($v->delegator_count) ? (int) $v->delegator_count : null,
                 'uptime_30d'        => self::nonEmptyString($v->uptime_30d ?? null),

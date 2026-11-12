@@ -532,6 +532,7 @@ return array(
     'BCC\\Trust\\Onchain\\Support\\EndpointDescriptor' => $baseDir . '/app/Domain/Onchain/Support/EndpointDescriptor.php',
     'BCC\\Trust\\Onchain\\Support\\ExplorerLinkBuilder' => $baseDir . '/app/Domain/Onchain/Support/ExplorerLinkBuilder.php',
     'BCC\\Trust\\Onchain\\Support\\HeliusEndpoint' => $baseDir . '/app/Domain/Onchain/Support/HeliusEndpoint.php',
+    'BCC\\Trust\\Onchain\\Support\\LocalUploadUrl' => $baseDir . '/app/Domain/Onchain/Support/LocalUploadUrl.php',
     'BCC\\Trust\\Onchain\\Support\\MarketplaceLinkBuilder' => $baseDir . '/app/Domain/Onchain/Support/MarketplaceLinkBuilder.php',
     'BCC\\Trust\\Onchain\\Support\\NftChainCapability' => $baseDir . '/app/Domain/Onchain/Support/NftChainCapability.php',
     'BCC\\Trust\\Onchain\\Support\\NftCollectionIdentifier' => $baseDir . '/app/Domain/Onchain/Support/NftCollectionIdentifier.php',

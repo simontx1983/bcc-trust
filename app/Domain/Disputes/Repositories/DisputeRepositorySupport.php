@@ -104,39 +104,26 @@ final class DisputeRepositorySupport
      * deleting panel_queue:{userId}:* (impossible with wp_cache), we
      * increment the generation and all old keys become unreachable,
      * expiring naturally via TTL.
+     *
+     * A missing (evicted) counter is seeded from the clock, never a small
+     * constant, so it cannot restart at a generation whose entries are
+     * still cached (see CacheGeneration).
      */
     public static function getGeneration(string $genKey): int
     {
-        $gen = wp_cache_get($genKey, self::CACHE_GROUP);
-        if ($gen === false) {
-            $gen = 1;
-            wp_cache_set($genKey, $gen, self::CACHE_GROUP, 0);
-        }
-        return (int) $gen;
+        return \BCC\Trust\Core\Support\CacheGeneration::get($genKey, self::CACHE_GROUP);
     }
 
     /**
-     * Atomically increment a generation counter, invalidating all keys that embed it.
+     * Increment a generation counter, invalidating all keys that embed it.
      *
-     * Uses wp_cache_incr() which maps to Redis INCR — a single atomic operation
-     * when a persistent object cache is available. The fallback (no object cache)
-     * uses set-if-missing which is not fully atomic but acceptable for cache
-     * invalidation (worst case: one extra DB query).
+     * CacheGeneration::bump() increments atomically, and re-seeds from the
+     * clock when the key was evicted: Redis INCRBY re-creates a missing key
+     * at 1, and a non-persistent cache's incr fails on it.
      */
     public static function bumpGeneration(string $genKey): void
     {
-        $result = wp_cache_incr($genKey, 1, self::CACHE_GROUP);
-        if ($result === false) {
-            // incr failed — key may not exist. Verify before overwriting.
-            $current = wp_cache_get($genKey, self::CACHE_GROUP);
-            if ($current === false) {
-                // Key truly doesn't exist — set to 2 (first bump from implicit gen=1).
-                wp_cache_set($genKey, 2, self::CACHE_GROUP, 0);
-            } else {
-                // Key exists but incr failed (transient backend issue) — force set incremented value.
-                wp_cache_set($genKey, (int) $current + 1, self::CACHE_GROUP, 0);
-            }
-        }
+        \BCC\Trust\Core\Support\CacheGeneration::bump($genKey, self::CACHE_GROUP);
     }
 
     /**

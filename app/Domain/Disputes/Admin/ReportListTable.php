@@ -16,6 +16,14 @@ if (!class_exists('WP_List_Table')) {
 
 class ReportListTable extends WP_List_Table
 {
+    /**
+     * F-308: per-row POST forms, printed by renderRowForms() after the
+     * outer GET form closes.
+     *
+     * @var list<string>
+     */
+    private array $rowForms = [];
+
     public function __construct()
     {
         parent::__construct([
@@ -208,62 +216,107 @@ class ReportListTable extends WP_List_Table
                     return '<em>' . esc_html($label) . '</em>';
                 }
 
-                $penalize_nonce = wp_create_nonce('bcc_report_penalize_' . $item->id);
+                $reportId = (int) $item->id;
 
-                // SECURITY: Use POST forms instead of GET anchor tags to prevent
-                // CSRF via nonce extraction from cached/prefetched page source.
-                $reviewed_form = sprintf(
-                    '<form method="post" action="%s" style="display:inline" onsubmit="return confirm(\'%s\');">'
-                    . '<input type="hidden" name="page" value="bcc-reports">'
-                    . '<input type="hidden" name="report_id" value="%d">'
-                    . '<input type="hidden" name="report_action" value="reviewed">'
-                    . '%s'
-                    . '<button type="submit" class="button button-small">%s</button>'
-                    . '</form> ',
-                    esc_url(admin_url('admin.php')),
-                    esc_js(__('Mark this report as reviewed?', 'bcc-disputes')),
-                    $item->id,
-                    wp_nonce_field('bcc_report_action_' . $item->id, '_wpnonce', true, false),
+                // F-308: this table renders INSIDE DisputeAdmin's outer
+                // <form method="get">. The HTML parser drops a <form> nested in
+                // a form, and the dropped form's </form> then closes the OUTER
+                // one, so the first row's Reviewed button submitted the GET
+                // filter form instead: no confirm, no action, report still open.
+                // The cell now holds only the controls, bound with the form=""
+                // attribute to POST forms that renderRowForms() prints AFTER the
+                // outer form closes. Same pattern as the Verify Collections
+                // description review (renderDescriptionReviewForms).
+                //
+                // SECURITY: POST forms, never GET anchors, so a nonce cannot be
+                // lifted from cached or prefetched page source.
+                $reviewedId  = 'bcc-report-reviewed-' . $reportId;
+                $dismissedId = 'bcc-report-dismissed-' . $reportId;
+                $penalizeId  = 'bcc-report-penalize-' . $reportId;
+
+                $this->rowForms[] = self::actionForm(
+                    $reviewedId,
+                    $reportId,
+                    'reviewed',
+                    wp_nonce_field('bcc_report_action_' . $reportId, '_wpnonce', true, false),
+                    __('Mark this report as reviewed?', 'bcc-disputes')
+                );
+                $this->rowForms[] = self::actionForm(
+                    $dismissedId,
+                    $reportId,
+                    'dismissed',
+                    wp_nonce_field('bcc_report_action_' . $reportId, '_wpnonce', true, false),
+                    __('Dismiss this report?', 'bcc-disputes')
+                );
+                $this->rowForms[] = self::actionForm(
+                    $penalizeId,
+                    $reportId,
+                    'penalize',
+                    sprintf(
+                        '<input type="hidden" name="_wpnonce" value="%s" />',
+                        esc_attr(wp_create_nonce('bcc_report_penalize_' . $reportId))
+                    ),
+                    __("Reduce this user's reputation score?", 'bcc-disputes')
+                );
+
+                return sprintf(
+                    '<button type="submit" form="%s" class="button button-small">%s</button> ',
+                    esc_attr($reviewedId),
                     esc_html__('Reviewed', 'bcc-disputes')
-                );
-
-                $dismissed_form = sprintf(
-                    '<form method="post" action="%s" style="display:inline" onsubmit="return confirm(\'%s\');">'
-                    . '<input type="hidden" name="page" value="bcc-reports">'
-                    . '<input type="hidden" name="report_id" value="%d">'
-                    . '<input type="hidden" name="report_action" value="dismissed">'
-                    . '%s'
-                    . '<button type="submit" class="button button-small">%s</button>'
-                    . '</form>',
-                    esc_url(admin_url('admin.php')),
-                    esc_js(__('Dismiss this report?', 'bcc-disputes')),
-                    $item->id,
-                    wp_nonce_field('bcc_report_action_' . $item->id, '_wpnonce', true, false),
+                ) . sprintf(
+                    '<button type="submit" form="%s" class="button button-small">%s</button>',
+                    esc_attr($dismissedId),
                     esc_html__('Dismiss', 'bcc-disputes')
-                );
-
-                return $reviewed_form . $dismissed_form . sprintf(
-                    '<form method="post" action="%s" style="display:inline-flex;align-items:center;gap:4px;margin-top:6px;" '
-                    . 'onsubmit="return confirm(\'Reduce this user\\\'s reputation score?\');">'
-                    . '<input type="hidden" name="page" value="bcc-reports" />'
-                    . '<input type="hidden" name="report_action" value="penalize" />'
-                    . '<input type="hidden" name="report_id" value="%d" />'
-                    . '<input type="hidden" name="_wpnonce" value="%s" />'
+                ) . sprintf(
+                    '<span style="display:inline-flex;align-items:center;gap:4px;margin-top:6px;">'
                     . '<label style="font-size:12px;white-space:nowrap;">Penalize:</label>'
-                    . '<input type="number" name="penalty_points" min="1" max="20" value="5" '
+                    . '<input type="number" form="%1$s" name="penalty_points" min="1" max="20" value="5" '
                     .   'style="width:55px;height:28px;padding:2px 4px;" title="Points to deduct (1-20)" />'
-                    . '<input type="text" name="penalty_reason" placeholder="Reason..." '
+                    . '<input type="text" form="%1$s" name="penalty_reason" placeholder="Reason..." '
                     .   'style="width:120px;height:28px;padding:2px 4px;font-size:12px;" />'
-                    . '<button type="submit" class="button button-small" style="color:var(--bcc-danger);">Apply</button>'
-                    . '</form>',
-                    esc_url(admin_url('admin.php')),
-                    $item->id,
-                    esc_attr($penalize_nonce)
+                    . '<button type="submit" form="%1$s" class="button button-small" style="color:var(--bcc-danger);">Apply</button>'
+                    . '</span>',
+                    esc_attr($penalizeId)
                 );
 
             default:
                 return '';
         }
+    }
+
+    /**
+     * Print the per-row POST forms collected while the table rendered.
+     *
+     * F-308: call this AFTER the list's outer GET form has closed. The row
+     * controls point at these forms by id (form=""), so they submit here
+     * with their own confirm, never through the outer form.
+     */
+    public function renderRowForms(): void
+    {
+        echo implode("\n", $this->rowForms);
+        $this->rowForms = [];
+    }
+
+    /**
+     * One empty POST form: hidden fields only, with the confirm prompt on
+     * submit. Its visible controls live in the table row.
+     */
+    private static function actionForm(string $id, int $reportId, string $action, string $nonceHtml, string $confirm): string
+    {
+        return sprintf(
+            '<form id="%s" method="post" action="%s" onsubmit="return confirm(\'%s\');">'
+            . '<input type="hidden" name="page" value="bcc-reports">'
+            . '<input type="hidden" name="report_id" value="%d">'
+            . '<input type="hidden" name="report_action" value="%s">'
+            . '%s'
+            . '</form>',
+            esc_attr($id),
+            esc_url(admin_url('admin.php')),
+            esc_js($confirm),
+            $reportId,
+            esc_attr($action),
+            $nonceHtml
+        );
     }
 
     public function no_items(): void
