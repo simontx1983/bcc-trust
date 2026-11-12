@@ -32,9 +32,16 @@ namespace BCC\Trust\Tests\Unit {
         /** @var list<string> */
         public static array $warnings = [];
 
+        /** @var list<int> every TTL set_transient() was given */
+        public static array $ttls = [];
+
+        /** @var array<string, int> key => absolute expiry (0 = none) */
+        public static array $expires = [];
+
         public static function reset(): void
         {
             self::$blocks = self::$asked = self::$scheduled = self::$transients = self::$warnings = [];
+            self::$ttls = self::$expires = [];
         }
 
         public static function key(int $a, int $b): string
@@ -101,10 +108,26 @@ namespace BCC\Trust\Core\Support {
 namespace {
     use BCC\Trust\Tests\Unit\PushBlockWorld;
 
+    // F-78: transients honour their TTL against the bootstrap's controllable
+    // clock (CronHealState, the same one PushDispatcher's namespaced time()
+    // reads), so a test can see a window expire.
+    if (!function_exists('bcc_push_test_now')) {
+        function bcc_push_test_now(): int
+        {
+            return \BCC\Trust\Tests\Support\CronHealState::$active
+                ? \BCC\Trust\Tests\Support\CronHealState::$now
+                : \time();
+        }
+    }
     if (!function_exists('get_transient')) {
         /** @return mixed */
         function get_transient(string $key)
         {
+            $expires = PushBlockWorld::$expires[$key] ?? 0;
+            if ($expires > 0 && bcc_push_test_now() >= $expires) {
+                unset(PushBlockWorld::$transients[$key], PushBlockWorld::$expires[$key]);
+                return false;
+            }
             return PushBlockWorld::$transients[$key] ?? false;
         }
     }
@@ -120,6 +143,8 @@ namespace {
         function set_transient(string $key, $value, int $ttl = 0): bool
         {
             PushBlockWorld::$transients[$key] = $value;
+            PushBlockWorld::$ttls[]           = $ttl;
+            PushBlockWorld::$expires[$key]    = $ttl > 0 ? bcc_push_test_now() + $ttl : 0;
             return true;
         }
     }
