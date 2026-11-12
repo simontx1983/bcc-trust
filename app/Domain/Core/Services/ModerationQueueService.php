@@ -377,6 +377,11 @@ final class ModerationQueueService
         }
 
         if ($action === self::ACTION_HIDE) {
+            // F-306 — Hide is also the "uphold" verdict on a post that is
+            // ALREADY hidden (an auto-hide, or an earlier admin hide). add()
+            // is idempotent there and keeps the original hider and reason;
+            // undo must then leave that hide in place, so remember it.
+            $wasAlreadyHidden = $this->hiddenRepo->exists($targetId);
             $added = $this->hiddenRepo->add(
                 $targetId,
                 $resolverUserId,
@@ -391,14 +396,35 @@ final class ModerationQueueService
                 return ['error' => 'bcc_unavailable', 'message' => 'Could not hide the post.'];
             }
             $this->reportRepo->updateStatus($reportId, self::STATUS_RESOLVED, $resolverUserId);
+
+            // F-306 — the verdict covers the whole target, the mirror of
+            // F-73's restore: EVERY other pending report on it closes as
+            // UPHELD (status 1). Before, only the clicked report closed; the
+            // rest stayed pending on a hidden post, where the queue offers
+            // only Restore and Dismiss, so the one way to clear them recorded
+            // them as NOT upheld (no report_upheld credit for the reporters,
+            // and hasUpheldForTarget() never saw them).
+            $upheldIds = array_values(array_filter(
+                $this->reportRepo->listIdsForTargetByStatus($targetKind, $targetId, self::STATUS_PENDING),
+                static fn (int $id): bool => $id !== $reportId
+            ));
+            $this->reportRepo->transitionStatus($upheldIds, self::STATUS_PENDING, self::STATUS_RESOLVED, $resolverUserId);
+            // listIdsForTargetByStatus() is bounded at 500; anything still
+            // pending after the bulk close means the target had more.
+            $stillPending = $this->reportRepo->countPendingForTarget($targetKind, $targetId);
             AuditLogger::log(
                 'admin_hide_report',
                 $reportId,
-                ['target_id' => $targetId],
+                [
+                    'target_id'          => $targetId,
+                    'already_hidden'     => $wasAlreadyHidden,
+                    'upheld_report_ids'  => $upheldIds,
+                    'upheld_has_more'    => $stillPending > 0,
+                ],
                 'content_report',
                 $resolverUserId
             );
-            do_action('bcc_content_hidden_by_admin', $targetId, $resolverUserId, $reportId);
+            do_action('bcc_content_hidden_by_admin', $targetId, $resolverUserId, $reportId, $upheldIds);
 
             $undo = $this->issueUndoToken(
                 $reportId,
@@ -408,7 +434,12 @@ final class ModerationQueueService
                 true,
                 $targetId,
                 null, // hide-undo doesn't need prior hidden-row metadata
-                null
+                null,
+                null,
+                [],
+                [],
+                $upheldIds,
+                $wasAlreadyHidden
             );
 
             return [
@@ -623,22 +654,39 @@ final class ModerationQueueService
         if ($action === self::ACTION_HIDE) {
             // Inverse: un-hide the activity AND return the report to
             // the queue (PENDING, resolved_at NULL).
-            $this->hiddenRepo->remove($targetId);
+            //
+            // F-306 — only a hide THIS action created is removed. When the
+            // post was already hidden (auto-hide, earlier admin hide), the
+            // forward action only upheld the reports, so the undo only
+            // reopens them: undo can never un-hide a post the forward
+            // action did not hide. The sibling reports it upheld go back to
+            // PENDING (from status 1 only, so one another moderator has
+            // since moved is left alone).
+            $wasAlreadyHidden = (bool) ($undo['was_already_hidden'] ?? false);
+            $upheldIds        = self::idList($undo['upheld_report_ids'] ?? []);
+            if (!$wasAlreadyHidden) {
+                $this->hiddenRepo->remove($targetId);
+            }
+            $this->reportRepo->transitionStatus($upheldIds, self::STATUS_RESOLVED, self::STATUS_PENDING, $adminUserId);
             $this->reportRepo->setPending($reportId);
             AuditLogger::log(
                 'admin_undo_hide',
                 $reportId,
-                ['target_id' => $targetId],
+                [
+                    'target_id'           => $targetId,
+                    'already_hidden'      => $wasAlreadyHidden,
+                    'reopened_report_ids' => $upheldIds,
+                ],
                 'content_report',
                 $adminUserId
             );
-            do_action('bcc_content_moderation_undone', $reportId, $adminUserId, self::ACTION_HIDE);
+            do_action('bcc_content_moderation_undone', $reportId, $adminUserId, self::ACTION_HIDE, $upheldIds);
 
             return [
                 'ok'               => true,
                 'report_id'        => $reportId,
                 'undone_action'    => self::ACTION_HIDE,
-                'currently_hidden' => false,
+                'currently_hidden' => $wasAlreadyHidden && $this->hiddenRepo->exists($targetId),
             ];
         }
 
@@ -751,6 +799,10 @@ final class ModerationQueueService
      *        restore moved from status 1 to 2, returned to 1 on undo
      * @param list<int> $closedPendingReportIds restore only — sibling reports
      *        the restore moved from status 0 to 2, returned to 0 on undo
+     * @param list<int> $upheldReportIds hide only (F-306) — sibling reports
+     *        the hide moved from status 0 to 1, returned to 0 on undo
+     * @param bool $wasAlreadyHidden hide only (F-306) — the post was hidden
+     *        before this hide, so undo must leave the hide in place
      * @return array{token: string, expires_at: string, ttl_seconds: int}|null
      */
     private function issueUndoToken(
@@ -764,7 +816,9 @@ final class ModerationQueueService
         ?string $priorReasonCode,
         ?int $priorRelatedReportId = null,
         array $unupheldReportIds = [],
-        array $closedPendingReportIds = []
+        array $closedPendingReportIds = [],
+        array $upheldReportIds = [],
+        bool $wasAlreadyHidden = false
     ): ?array {
         // 32 hex chars = 128 bits of randomness. wp_generate_password
         // with special_chars=false yields [A-Za-z0-9]; bin2hex(random_bytes(16))
@@ -793,6 +847,8 @@ final class ModerationQueueService
             'prior_related_report_id'   => $priorRelatedReportId,
             'unupheld_report_ids'       => $unupheldReportIds,
             'closed_pending_report_ids' => $closedPendingReportIds,
+            'upheld_report_ids'         => $upheldReportIds,
+            'was_already_hidden'        => $wasAlreadyHidden,
             'issued_at'                 => $now,
         ];
 
