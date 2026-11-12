@@ -125,12 +125,14 @@ class XController {
      * Handle X OAuth callback — validates state, then delegates to service
      */
     public static function handleCallback(WP_REST_Request $request): void {
-        // F-157: 10 attempts per minute through RateLimiter::allow(), not a
-        // raw-IP key. The callback requires a signed-in session (checked
-        // below), so a signed-in caller is limited per ACCOUNT plus a
-        // capped subnet bucket, and an anonymous one per subnet (IPv4 /24,
-        // IPv6 /48). A bare-IP key let IPv6 rotation inside one network
-        // escape the limit.
+        // F-157: rate-limited through RateLimiter::allow(), not a raw-IP key
+        // (a bare-IP key let IPv6 rotation inside one network escape it).
+        // ⚠ This runs BEFORE the session/state checks below, so in a REST
+        // request it sees user 0 and takes allow()'s ANONYMOUS branch: at
+        // most 5 attempts per minute per subnet (IPv4 /24, IPv6 /48), the
+        // anonymous cap overriding the 10 passed here. It is deliberately
+        // NOT moved after validateState(): that would leave state-token
+        // guessing unthrottled.
         if (!RateLimiter::allow('x_callback', 10, 60)) {
             wp_safe_redirect(add_query_arg('x_verified', 'error', home_url('/')));
             exit;

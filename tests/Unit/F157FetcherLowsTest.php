@@ -18,8 +18,9 @@ use PHPUnit\Framework\TestCase;
  *     their pages, so the two never mint concurrently. A live run refuses
  *     while the cron holds it; a dry run needs no lock.
  * (c) The X and GitHub OAuth callbacks rate-limit through
- *     RateLimiter::allow() (per account + capped subnet, or per subnet
- *     when anonymous), never a raw-IP allowByKey() key.
+ *     RateLimiter::allow(), never a raw-IP allowByKey() key. They run
+ *     before the session is resolved, so in practice it is allow()'s
+ *     anonymous branch: per subnet (IPv4 /24, IPv6 /48), capped at 5/min.
  *
  * Separate processes: the CLI test defines class doubles (AdvisoryLock,
  * the repositories, the minter, WP_CLI) before anything autoloads them.
