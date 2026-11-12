@@ -466,6 +466,7 @@ return array(
     'BCC\\Trust\\Onchain\\Services\\BonusService' => $baseDir . '/app/Domain/Onchain/Services/BonusService.php',
     'BCC\\Trust\\Onchain\\Services\\ChainReadService' => $baseDir . '/app/Domain/Onchain/Services/ChainReadService.php',
     'BCC\\Trust\\Onchain\\Services\\ChainRefreshService' => $baseDir . '/app/Domain/Onchain/Services/ChainRefreshService.php',
+    'BCC\\Trust\\Onchain\\Services\\ClaimReverifySweepService' => $baseDir . '/app/Domain/Onchain/Services/ClaimReverifySweepService.php',
     'BCC\\Trust\\Onchain\\Services\\ClaimService' => $baseDir . '/app/Domain/Onchain/Services/ClaimService.php',
     'BCC\\Trust\\Onchain\\Services\\CollectionDemandService' => $baseDir . '/app/Domain/Onchain/Services/CollectionDemandService.php',
     'BCC\\Trust\\Onchain\\Services\\CollectionPersistBatch' => $baseDir . '/app/Domain/Onchain/Services/CollectionPersistBatch.php',

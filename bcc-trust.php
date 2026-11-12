@@ -1114,6 +1114,10 @@ add_action('plugins_loaded', static function (): void {
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK)) {
         wp_schedule_event(time() + 120 * MINUTE_IN_SECONDS, 'twicedaily', \BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK);
     }
+    // F-14: weekly claim re-verify (report mode unless bcc_claim_reverify_mode = 'enforce').
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
+        wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
+    }
 
     // Holder-group provision + reconcile self-heal. Same silent-drift class
     // as the revoke sweep above: these two were scheduled only in
@@ -1237,6 +1241,22 @@ add_action(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK, functio
         ]);
     }
 });
+
+// F-14: weekly re-verify of verified claims. Report mode by default: it only
+// audits what it WOULD revoke (claim_revoke_would_apply) until an admin sets
+// bcc_claim_reverify_mode = 'enforce'. The continuation event finishes a
+// budget-cut tick; both run the same sweep, which holds its own lock.
+$bccClaimReverify = static function (): void {
+    try {
+        \BCC\Trust\Onchain\OnchainPlugin::instance()->claimReverifySweepService()->sweep();
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::warning('[bcc-trust] Claim re-verify sweep failed', [
+            'error' => $e->getMessage(),
+        ]);
+    }
+};
+add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK, $bccClaimReverify);
+add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CONTINUE_HOOK, $bccClaimReverify);
 
 // V2: when PeepSo evicts a user from a group via mod action, record a
 // permanent opt-out so our reconcile sweep won't re-add a banned user.
@@ -2276,6 +2296,10 @@ function bcc_trust_activate() {
     // still get this scheduled. DO NOT remove either as "redundant."
     if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK)) {
         wp_schedule_event(time() + 120 * MINUTE_IN_SECONDS, 'twicedaily', \BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK);
+    }
+    // F-14: weekly claim re-verify (report mode unless bcc_claim_reverify_mode = 'enforce').
+    if (!wp_next_scheduled(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK)) {
+        wp_schedule_event(time() + 180 * MINUTE_IN_SECONDS, 'bcc_weekly', \BCC\Trust\Onchain\Services\ClaimReverifySweepService::CRON_HOOK);
     }
 
     // PR-8b — daily divergence-state sweep. Detects targets that

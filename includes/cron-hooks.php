@@ -58,6 +58,7 @@ return [
         // is created one named chain at a time from ChainsPage.
         'bcc_gated_group_reconcile_sweep'       => ['interval' => 'twicedaily',                   'description' => 'holder-group reconcile sweep'],
         'bcc_gated_group_revoke_sweep'          => ['interval' => 'twicedaily',                   'description' => 'holder-group + delegator-community revoke re-verification sweeps'],
+        'bcc_onchain_claim_reverify_sweep'      => ['interval' => 'bcc_weekly',                   'description' => 'F-14 weekly re-verify of verified validator/collection claims (report mode by default)'],
         'bcc_nft_eth_indexer_tick'              => ['interval' => 'bcc_one_minute',               'description' => 'NFT EVM indexer per-chain tick'],
         'bcc_helius_dedupe_sweep'               => ['interval' => 'bcc_five_minutes',             'description' => 'Helius signature replay LRU eviction'],
         'bcc_helius_subscription_reconcile'     => ['interval' => 'twicedaily',                   'description' => 'Helius subscription address-list reconcile (covers dropped subscribe/unsubscribe)'],
@@ -96,6 +97,8 @@ return [
         // (RankScheduler). Fire-once; cleared here so a deactivate between
         // a sweep and its continuation leaves nothing queued.
         'bcc_rank_daily_evaluate_continue',
+        // F-14: same-tick continuation of a budget-cut claim re-verify sweep.
+        'bcc_onchain_claim_reverify_continue',
         'bcc_rank_daily_tier_snapshot_continue',
         // Retired automatic NFT collection discovery. These five ran
         // unattended chain-wide sweeps: `bcc_index_collections` walked
