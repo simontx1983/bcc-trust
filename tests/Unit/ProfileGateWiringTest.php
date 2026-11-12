@@ -207,18 +207,54 @@ final class ProfileGateWiringTest extends TestCase
                 $label = "{$file}::{$method}()";
                 $body  = GateOrder::body($code, $method);
 
+                // A service-layer gate refuses with null; its endpoint owns
+                // the 403 and is pinned in the next test.
+                $service = self::SERVICE_LAYER_GATES["{$file}::{$method}"] ?? null;
+                $refusal = $service === null ? 'return ProfileAccess::forbidden\(\);' : 'return null;';
+                $work    = $service === null ? ['ApiResponse::ok(', '->respond('] : $service['work'];
+
                 self::assertMatchesRegularExpression(
-                    '/if \(!ProfileAccess::canViewProfile\([^)]*\)\) \{\s*return ProfileAccess::forbidden\(\);/',
+                    '/if \(!ProfileAccess::canViewProfile\([^)]*\)\) \{\s*' . $refusal . '/',
                     $body,
                     "{$label}: the gate's refusal must be returned, not ignored"
                 );
-                GateOrder::assertNoWorkBefore(
-                    $body,
-                    'return ProfileAccess::forbidden();',
-                    ['ApiResponse::ok(', '->respond('],
-                    $label
-                );
+                GateOrder::assertNoWorkBefore($body, 'if (!ProfileAccess::canViewProfile(', $work, $label);
             }
+        }
+    }
+
+    /**
+     * F-96: inventory entries whose gate lives in a SERVICE. The service
+     * refuses with `null`, so the profile is only private if its endpoint
+     * turns that null into the 403 BEFORE it builds the success response.
+     * Each entry names the reads the gate must precede (the owner's data)
+     * and the endpoint method that maps the refusal.
+     *
+     * @var array<string, array{work: list<string>, endpoint: string, method: string, call: string}>
+     */
+    private const SERVICE_LAYER_GATES = [
+        '../Services/CardWatchersService.php::listWatchers' => [
+            'work'     => ['PeepSoFollowerRepository::', 'MemberCardPrefetcher::', 'cardViewService()'],
+            'endpoint' => 'CardWatchersEndpoint.php',
+            'method'   => 'list',
+            'call'     => '->listWatchers(',
+        ],
+    ];
+
+    public function testEveryServiceLayerRefusalBecomesThe403BeforeAnySuccessResponse(): void
+    {
+        foreach (self::SERVICE_LAYER_GATES as $key => $gate) {
+            [$file, $method] = explode('::', $key, 2);
+            self::assertContains($method, self::GATED_ROUTES[$file] ?? [], "{$key} is not in GATED_ROUTES");
+
+            $label = "{$gate['endpoint']}::{$gate['method']}()";
+            $body  = GateOrder::body(GateOrder::code('app/Domain/Core/REST/' . $gate['endpoint']), $gate['method']);
+
+            GateOrder::assertOrder(
+                $body,
+                [$gate['call'], 'if ($data === null) {', 'ProfileAccess::forbidden()', 'ApiResponse::ok('],
+                $label
+            );
         }
     }
 
