@@ -292,7 +292,64 @@ final class ProfileAccess
             return false;
         }
 
-        return (bool) \PeepSoUser::is_accessible_static((int) $acc, $ownerId);
+        // Snapped to a canonical rung first — see
+        // canonicalProfileLevel() for why a raw value cannot be trusted
+        // and why the feed and this gate would otherwise disagree.
+        return (bool) \PeepSoUser::is_accessible_static(
+            self::canonicalProfileLevel((int) $acc),
+            $ownerId
+        );
+    }
+
+    /**
+     * Snap a raw `usr_profile_acc` to the nearest STRICTER canonical rung
+     * before the ladder sees it: `<= 10` → 10, `<= 20` → 20, `<= 30` →
+     * 30, anything higher → 40.
+     *
+     * ⚠⚠ WHY THIS EXISTS: the column is not a validated enum, and the two
+     * ladders disagreed about that. PeepSo's
+     * `classes/profilepreferencesajax.php` writes
+     * `$data['usr_profile_acc'] = $this->_input->raw('value')` with no
+     * allow-list — only an owner / `edit_users` permission check — and the
+     * column is `TINYINT(1)`, so anything in -128..127 is storable.
+     *
+     * A stray value then behaved two ways at once. Verified against the
+     * shipped feed query on MySQL 8: an author with `usr_profile_acc = 15`
+     * and a post at `act_access = 10` had that post VISIBLE to any
+     * signed-in member (bcc-core's range ladder reads 15 as the members
+     * rung) while `PeepSoUser::is_accessible_static(15, …)` has no
+     * `case 15`, fell through to the `peepso_user_is_accessible` filter
+     * and — with peepso-friends gone — DENIED the profile. Posts readable,
+     * profile 403.
+     *
+     * Snapping here makes the two agree, in the direction the stray-level
+     * decision already chose for posts: a value nobody validated should
+     * land on the nearest stricter rung, not make something vanish.
+     *
+     * ⚠ THIS LOOSENS ONE BAND. A raw 11-20 is denied outright today
+     * (no matching `case`) and becomes members-visible. 21-30 → friends,
+     * which with no friend graph is owner-only; 31+ → 40, denied. So only
+     * 11-20 becomes more visible, and nothing that is denied at 40 today
+     * stops being denied.
+     *
+     * ⚠ `-1` is PeepSo's `ACCESS_FORCE_PUBLIC`, and `<= 10` maps it to 10
+     * — public, which is what it means. Non-numeric input never reaches
+     * here: the caller refuses it before this, because a non-numeric level
+     * cast to 0 would read as PUBLIC.
+     */
+    private static function canonicalProfileLevel(int $raw): int
+    {
+        if ($raw <= 10) {
+            return 10;
+        }
+        if ($raw <= 20) {
+            return 20;
+        }
+        if ($raw <= 30) {
+            return 30;
+        }
+
+        return 40;
     }
 
     /**
