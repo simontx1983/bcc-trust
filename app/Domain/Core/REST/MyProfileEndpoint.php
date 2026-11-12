@@ -184,6 +184,11 @@ final class MyProfileEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Per-ACCOUNT limit on cheap self-scoped writes (F-134).
+        if (!\BCC\Core\Security\Throttle::allow('me_write', \BCC\Trust\Core\REST\Auth\AuthSupport::ME_WRITE_RATE_LIMIT, 60, 'me_write:' . $userId)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please slow down.', 429);
+        }
+
         // §M suspension gate (F-109): bio and display name are public content.
         if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
             return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403);
@@ -469,6 +474,11 @@ final class MyProfileEndpoint
         $userId = get_current_user_id();
         if ($userId <= 0) {
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
+        }
+
+        // Per-ACCOUNT limit on cheap self-scoped writes (F-134).
+        if (!\BCC\Core\Security\Throttle::allow('me_write', \BCC\Trust\Core\REST\Auth\AuthSupport::ME_WRITE_RATE_LIMIT, 60, 'me_write:' . $userId)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please slow down.', 429);
         }
 
         // §M suspension gate (F-109): part of the public profile presentation.

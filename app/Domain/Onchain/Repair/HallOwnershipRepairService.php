@@ -194,8 +194,12 @@ final class HallOwnershipRepairService
             if (!user_can($id, 'manage_options')) {
                 continue;
             }
-            $suspended = get_user_meta($id, 'bcc_trust_suspended', true);
-            if ($suspended !== '' && $suspended !== '0' && $suspended !== false && $suspended !== null) {
+            // The canonical suspension read, admin bypass OFF (every
+            // candidate here is an admin). It used to read user meta
+            // `bcc_trust_suspended`, which nothing writes, so a suspended
+            // admin was never skipped. Unknown (null) also skips: a Hall is
+            // never handed to someone who cannot be confirmed unsuspended.
+            if (\BCC\Core\Permissions\Permissions::suspensionState($id, false) !== false) {
                 continue;
             }
 

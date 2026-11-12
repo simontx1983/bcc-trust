@@ -1071,7 +1071,14 @@ final class AttestationRepository
             $orderBy = 'created_at DESC, id DESC';
         } else {
             $decayedExpr = \BCC\Trust\Core\Services\DecayResolver::decayedWeightSqlExpression();
-            $orderBy = $decayedExpr . ' DESC, created_at DESC';
+            // F-143: `id DESC` makes the order TOTAL. Without it, rows tied on
+            // decayed weight and created_at (same-second casts) had no defined
+            // order, so an OFFSET page could repeat one and skip another.
+            // ⚠ It cannot make page-NUMBER paging stable across requests: the
+            // decayed weight is a function of NOW(), so ranks drift between
+            // page loads. That is a property of the page-number API, not a
+            // tiebreak; a keyset cursor cannot follow a time-varying key.
+            $orderBy = $decayedExpr . ' DESC, created_at DESC, id DESC';
         }
         if ($includeRevoked) {
             // Active-first secondary: rows with revoked_at IS NULL

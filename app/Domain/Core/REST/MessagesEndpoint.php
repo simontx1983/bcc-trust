@@ -335,6 +335,11 @@ final class MessagesEndpoint
             return self::unauth();
         }
 
+        // Per-ACCOUNT limit on cheap self-scoped writes (F-134).
+        if (!\BCC\Core\Security\Throttle::allow('me_write', \BCC\Trust\Core\REST\Auth\AuthSupport::ME_WRITE_RATE_LIMIT, 60, 'me_write:' . $viewerId)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please slow down.', 429);
+        }
+
         $rootMsgId = (int) $request->get_param('id');
         $result = $this->service()->markRead($viewerId, $rootMsgId);
         if (isset($result['error'])) {

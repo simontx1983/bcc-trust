@@ -312,6 +312,11 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
         self::runAdminHandler(fn () => $this->service()->handleBulkAction([4801], 'suspend'));
         self::assertSame(['bulk' => 1, 'bulk_skipped' => 0], $GLOBALS['__bcc_ms']['query'], 'counted as suspended');
         self::assertRevoked($bulk);
+        self::assertSame(
+            ['bcc_trust:user_info_' . self::UID, 'bcc_trust:user_info_4801'],
+            $GLOBALS['__bcc_ms']['cache_deleted'] ?? [],
+            '#538 review: a failed flush still drops the row cache the suspend guard reads'
+        );
     }
 
     public function testTheRingSuspensionKeepsTheAdminsReason(): void

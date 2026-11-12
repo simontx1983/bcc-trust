@@ -94,6 +94,11 @@ final class HighlightsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
+        // Per-ACCOUNT limit on cheap self-scoped writes (F-134).
+        if (!\BCC\Core\Security\Throttle::allow('me_write', \BCC\Trust\Core\REST\Auth\AuthSupport::ME_WRITE_RATE_LIMIT, 60, 'me_write:' . $viewerId)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please slow down.', 429);
+        }
+
         $id = (string) $request->get_param('id');
         if ($id === '') {
             return ApiResponse::error('bcc_invalid_request', 'Highlight id is required.', 400);

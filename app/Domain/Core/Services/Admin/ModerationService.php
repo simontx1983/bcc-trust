@@ -153,6 +153,13 @@ final class ModerationService
                 'user_id' => $userId,
                 'error'   => $e->getMessage(),
             ]);
+            if ($step === 'notify') {
+                // #538 review: the suspend guard reads the user_info row
+                // cache. If the full flush failed, at least drop that entry,
+                // so a stale "not suspended" row cannot let the same member
+                // be suspended a second time.
+                wp_cache_delete('user_info_' . $userId, 'bcc_trust');
+            }
         }
     }
 
