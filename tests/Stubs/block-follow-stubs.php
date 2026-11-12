@@ -26,9 +26,19 @@ namespace BCC\Trust\Tests\Unit {
         /** @var list<int> */
         public static array $metaDeleted = [];
 
+        /** @var list<string> "active:passive" follow-id reads that fail (M2) */
+        public static array $failReads = [];
+
+        /** @var list<string> "active:passive" unfollows that return false (M2) */
+        public static array $failUnfollows = [];
+
+        /** @var list<array{string, array<string, mixed>}> Logger::error calls */
+        public static array $errors = [];
+
         public static function reset(): void
         {
             self::$blocks = self::$follows = self::$followCalls = self::$unfollowCalls = self::$metaDeleted = [];
+            self::$failReads = self::$failUnfollows = self::$errors = [];
         }
 
         public static function pair(int $a, int $b): string
@@ -65,7 +75,31 @@ namespace BCC\Core\PeepSo {
         public static function unfollow(int $activeUserId, int $passiveUserId): bool
         {
             BlockFollowWorld::$unfollowCalls[] = [$activeUserId, $passiveUserId];
+            if (in_array($activeUserId . ':' . $passiveUserId, BlockFollowWorld::$failUnfollows, true)) {
+                return false;
+            }
             return isset(BlockFollowWorld::$follows[$activeUserId . ':' . $passiveUserId]);
+        }
+    }
+}
+
+namespace BCC\Core\Log {
+    use BCC\Trust\Tests\Unit\BlockFollowWorld;
+
+    if (!class_exists(__NAMESPACE__ . '\\Logger', false)) {
+        final class Logger
+        {
+            /** @param array<string, mixed> $c */
+            public static function error(string $m, array $c = []): void
+            {
+                BlockFollowWorld::$errors[] = [$m, $c];
+            }
+
+            /** @param array<string, mixed> $c */
+            public static function warning(string $m, array $c = []): void {}
+
+            /** @param array<string, mixed> $c */
+            public static function info(string $m, array $c = []): void {}
         }
     }
 }
