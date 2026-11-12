@@ -1608,6 +1608,11 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
 // time PeepSo's UserSearch fires — before any REST or AJAX request.
 \BCC\Trust\Core\Support\PrivacySettings::registerSearchFilter();
 
+// D1: PeepSo's computed member name never contains the login, so its
+// "use name everywhere" aggressive mode can't write the login back into
+// wp_users.display_name. See PeepSoNameParts.
+\BCC\Trust\Core\Support\PeepSoNameParts::register();
+
 // §F-182: drop suspended members out of PeepSo-driven user listings, so
 // the member directory cannot list someone whose profile answers 403.
 // ⚠ Top-level for the same reason as the line above and the publication
