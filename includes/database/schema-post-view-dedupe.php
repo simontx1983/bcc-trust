@@ -12,7 +12,7 @@
  *   viewer_hash = HMAC-SHA256(key = BCC_ENCRYPTION_KEY, msg = day || subject)
  *                 truncated to 16 bytes
  *
- * `subject` is the viewer's user id when signed in, and the /24-or-/64
+ * `subject` is the viewer's user id when signed in, and the /24-or-/48
  * subnet plus user-agent when signed out (signed-out views count, per the
  * product decision; bots are excluded by never firing the beacon).
  *
