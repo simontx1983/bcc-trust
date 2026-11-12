@@ -41,6 +41,7 @@ return [
         // by CronScheduleSelfHealTest.
         'bcc_trust_weekly_slow_ring_scan'       => ['interval' => 'bcc_weekly',                   'description' => 'slow endorsement-ring detection (scale hardening)'],
         'bcc_trust_deferred_rm_sync'            => ['interval' => 'bcc_thirty_seconds',           'description' => 'read-model deferred-rebuild for staleness recovery'],
+        'bcc_trust_post_reach_dedupe_sweep'     => ['interval' => 'hourly',                       'description' => 'post-view dedupe: 48h TTL + row-cap trim (F-324)'],
         'bcc_trust_divergence_state_sweep'      => ['interval' => 'daily',                        'description' => 'divergence-state classification + §J.7 notifications'],
         'bcc_trust_daily_attestation_decay'     => ['interval' => 'daily',                        'description' => 'attestation_bonus decay recompute sweep (Slice E)'],
         'bcc_attestor_reliability_sweep'        => ['interval' => 'daily',                        'description' => 'operator-reliability cache recompute (Slice 3)'],

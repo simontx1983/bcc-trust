@@ -48,9 +48,13 @@ final class FeedPostVisibilityWiringTest extends TestCase
         // \BCC\Core\Permissions\Permissions. See the stub's header.
         require_once __DIR__ . '/../Stubs/feed-f02-wiring-stubs.php';
         $GLOBALS['__bcc_f02feed'] = [
-            'is_admin'   => false,
-            'friend_ids' => [],
-            'calls'      => [],
+            'is_admin'         => false,
+            'friend_ids'       => [],
+            'calls'            => [],
+            // The group rule ALLOWS by default; the refusal test sets it
+            // false explicitly. See the stub header for why that way round.
+            'group_rule'       => true,
+            'group_rule_calls' => [],
         ];
     }
 
@@ -67,7 +71,11 @@ final class FeedPostVisibilityWiringTest extends TestCase
             new \BCC\Trust\Core\Repositories\ReputationRepository(),
             new \BCC\Trust\Core\Repositories\HiddenActivityRepository(),
             new \BCC\Trust\Core\Services\GroupContextResolver(),
-            new \BCC\Trust\Core\Services\Feed\FeedHydrationPipeline()
+            new \BCC\Trust\Core\Services\Feed\FeedHydrationPipeline(),
+            // The GROUP's own rule. Injected rather than lazily built, so
+            // the permalink's second look can be observed instead of
+            // reaching Plugin::instance() in a unit process.
+            new \BCC\Trust\Core\Services\FeedItemReportVisibility()
         );
     }
 
@@ -129,6 +137,10 @@ final class FeedPostVisibilityWiringTest extends TestCase
 
         self::assertSame($expectedMethod, $call['method']);
         self::assertTrue($call['enforce'], 'the §F-02 gate must be switched on');
+        self::assertFalse(
+            $call['defer'],
+            'only the permalink SECOND look may hand the group decision over'
+        );
         self::assertSame(self::VIEWER, $call['viewer']);
         self::assertSame([self::FRIEND], $call['friends']);
     }
@@ -432,6 +444,96 @@ final class FeedPostVisibilityWiringTest extends TestCase
      * deliberately left at its default ROW to show it is never consulted
      * — the second look does not happen at all.
      */
+    /**
+     * ⚠⚠ THE TRUST HALF OF THE GROUP-PERMALINK ALIGNMENT. The second look
+     * tells bcc-core to stop deciding the group-tagged case
+     * (`deferGroupVisibilityToCaller: true`), which is what lets a member
+     * open a `members_only` post by link at all — bcc-core's permalink
+     * admits only `public_all` on its own.
+     *
+     * ⚠ The FIRST read must not defer. It is an ordinary gated read, and
+     * deferring there would drop the group gate from the path that is
+     * supposed to answer most permalinks.
+     */
+    public function testOnlyTheSecondLookDefersTheGroupDecision(): void
+    {
+        $GLOBALS['__bcc_f02feed']['row_enforced']   = null;
+        $GLOBALS['__bcc_f02feed']['row_unenforced'] = ['external_id' => 5150];
+        $GLOBALS['__bcc_f02feed']['group_by_post']  = [5150 => 1138];
+
+        $this->service()->getActivityById(1138, self::VIEWER);
+
+        $calls = $this->calls();
+        self::assertCount(2, $calls);
+        self::assertFalse($calls[0]['defer'], 'the gated read is an ordinary read');
+        self::assertTrue($calls[1]['defer'], 'the second look owns the group decision');
+    }
+
+    /**
+     * ⭐⭐ THE FAIL-CLOSED TEST, and the one that matters most in this
+     * file. `deferGroupVisibilityToCaller: true` REMOVES bcc-core's group
+     * gate; the only thing left standing between that and a public
+     * permalink for every closed-group post is this layer applying the
+     * group's rule itself. Delete the `canSeeHydratedItem()` call and this
+     * is the test that fails.
+     *
+     * Modelled as a non-member: the post is group-tagged and bcc-core
+     * hands the row over, and the group says no.
+     */
+    public function testTheGroupRuleRefusingKeepsThePermalinkA404(): void
+    {
+        $GLOBALS['__bcc_f02feed']['row_enforced']   = null;
+        $GLOBALS['__bcc_f02feed']['row_unenforced'] = ['external_id' => 5150];
+        $GLOBALS['__bcc_f02feed']['group_by_post']  = [5150 => 1138];
+        $GLOBALS['__bcc_f02feed']['group_rule']     = false;
+
+        self::assertNull(
+            $this->service()->getActivityById(1138, self::VIEWER),
+            'a non-member must not reach a group post by link'
+        );
+    }
+
+    /**
+     * ⚠ The group rule is asked about the VIEWER and about the BACKING
+     * post. Asking about the act_id would read group meta off an
+     * unrelated low-numbered post (audit H-B1) and the answer would look
+     * plausible; asking about the author would answer a different
+     * question entirely.
+     */
+    public function testTheGroupRuleIsAskedAboutTheViewerAndTheBackingPost(): void
+    {
+        $GLOBALS['__bcc_f02feed']['row_enforced']   = null;
+        $GLOBALS['__bcc_f02feed']['row_unenforced'] = ['external_id' => 5150];
+        $GLOBALS['__bcc_f02feed']['group_by_post']  = [5150 => 1138];
+
+        $this->service()->getActivityById(1138, self::VIEWER);
+
+        $asked = $GLOBALS['__bcc_f02feed']['group_rule_calls'];
+        self::assertCount(1, $asked, 'asked exactly once');
+        self::assertSame(self::VIEWER, $asked[0]['viewer']);
+        self::assertSame(5150, $asked[0]['post_id'], 'the BACKING post, not the act_id');
+    }
+
+    /**
+     * A NON-group post is still refused, and the group rule is never even
+     * consulted for it — §F-02's answer stands. Without this, the second
+     * look would launder every profile-restricted post through a rule
+     * that answers "true" for anything ungrouped.
+     */
+    public function testANonGroupPostNeverReachesTheGroupRule(): void
+    {
+        $GLOBALS['__bcc_f02feed']['row_enforced']   = null;
+        $GLOBALS['__bcc_f02feed']['row_unenforced'] = ['external_id' => 5150];
+        $GLOBALS['__bcc_f02feed']['group_by_post']  = [];
+
+        self::assertNull($this->service()->getActivityById(1138, self::VIEWER));
+        self::assertSame(
+            [],
+            $GLOBALS['__bcc_f02feed']['group_rule_calls'],
+            'the group rule answers TRUE for a non-group post, so it must not be asked'
+        );
+    }
+
     public function testAnExemptReaderNeverTakesTheSecondLook(): void
     {
         $GLOBALS['__bcc_f02feed']['is_admin']       = true;

@@ -658,6 +658,16 @@ add_action('bcc_trust_daily_cleanup', function () {
 add_action('bcc_trust_hourly_recalc', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->hourlyRecalc();
 });
+// F-324: enforce the 48-hour TTL (and the row cap) on post-view dedupe rows.
+//
+// ⚠ Deliberately NOT added to the inert-mode $hooks_to_clear list above. This
+// sweep only DELETES; it needs no encryption key, and if a site goes inert
+// while dedupe rows exist, those rows must still age out on schedule — the
+// 48-hour deletion is a promise made in the user-facing privacy copy, not a
+// feature that should pause with the rest of trust.
+add_action('bcc_trust_post_reach_dedupe_sweep', function () {
+    \BCC\Trust\Core\Repositories\PostReachRepository::sweepDedupe();
+});
 add_action('bcc_trust_daily_ml_update', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->dailyFraudRefresh();
 });
