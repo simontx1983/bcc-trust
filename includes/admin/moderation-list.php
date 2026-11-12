@@ -72,15 +72,10 @@ function bcc_trust_render_user_list() {
     $total_items = $repo->getModerationUserCount( $where_clause, $params );
     $users       = $repo->getModerationUsers( $where_clause, $params, $per_page, $offset );
 
-    // ── Sync handler ──────────────────────────────────────────
-    if ( isset( $_GET['sync'] ) && $_GET['sync'] === '1' ) {
-        if ( ! isset( $_GET['_wpnonce'] ) || ! wp_verify_nonce( $_GET['_wpnonce'], 'bcc_sync_users' ) ) {
-            wp_die( __( 'Security check failed.', 'bcc-trust-engine' ) );
-        }
-        $synced = \BCC\Trust\Core\Plugin::instance()->userSyncService()->sync();
-        wp_safe_redirect( admin_url( 'admin.php?page=bcc-trust-moderation&synced=' . intval( $synced ) ) );
-        exit;
-    }
+    // F-312 (M7): the "Sync All Users" request is handled on admin_init by
+    // bcc_trust_handle_user_sync() (moderation.php), BEFORE any output. Here,
+    // inside the page render, the redirect could not send its headers and
+    // `exit` cut the page off with no "Synced N" message.
 
     // ── Flash messages ────────────────────────────────────────
     if ( isset( $_GET['bulk'] ) ) {

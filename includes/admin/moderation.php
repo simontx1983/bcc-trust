@@ -162,6 +162,27 @@ add_action( 'admin_post_bcc_trust_bulk_action', function () {
 // MENU REGISTRATION
 // ──────────────────────────────────────────────
 
+/**
+ * F-312 (M7): "Sync All Users" (GET, nonce-protected) runs here on
+ * admin_init, before WordPress prints the admin header, so its redirect
+ * actually happens and the list shows "Synced N users".
+ */
+function bcc_trust_handle_user_sync(): void {
+    if ( ( $_GET['page'] ?? '' ) !== 'bcc-trust-moderation' || ( $_GET['sync'] ?? '' ) !== '1' ) {
+        return;
+    }
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( __( 'Unauthorized.', 'bcc-trust-engine' ) );
+    }
+    if ( ! isset( $_GET['_wpnonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ), 'bcc_sync_users' ) ) {
+        wp_die( __( 'Security check failed.', 'bcc-trust-engine' ) );
+    }
+    $synced = \BCC\Trust\Core\Plugin::instance()->userSyncService()->sync();
+    wp_safe_redirect( admin_url( 'admin.php?page=bcc-trust-moderation&synced=' . intval( $synced ) ) );
+    exit;
+}
+add_action( 'admin_init', 'bcc_trust_handle_user_sync' );
+
 add_action( 'admin_menu', function () {
     add_submenu_page(
         \BCC\Trust\Core\Admin\AdminMenus::MODERATION,

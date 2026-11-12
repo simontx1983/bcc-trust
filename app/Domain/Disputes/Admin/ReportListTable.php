@@ -308,15 +308,34 @@ class ReportListTable extends WP_List_Table
             . '<input type="hidden" name="page" value="bcc-reports">'
             . '<input type="hidden" name="report_id" value="%d">'
             . '<input type="hidden" name="report_action" value="%s">'
-            . '%s'
+            . '%s%s'
             . '</form>',
             esc_attr($id),
             esc_url(admin_url('admin.php')),
             esc_js($confirm),
             $reportId,
             esc_attr($action),
-            $nonceHtml
+            $nonceHtml,
+            self::returnContextFields()
         );
+    }
+
+    /**
+     * F-312 (M2): the list's status filter and page, posted back so the
+     * handler's redirect lands on the same view instead of "All", page 1.
+     */
+    private static function returnContextFields(): string
+    {
+        $out    = '';
+        $status = isset($_GET['report_status']) ? sanitize_key((string) $_GET['report_status']) : '';
+        if ($status !== '') {
+            $out .= sprintf('<input type="hidden" name="report_status" value="%s">', esc_attr($status));
+        }
+        $paged = isset($_GET['paged']) ? absint($_GET['paged']) : 0;
+        if ($paged > 1) {
+            $out .= sprintf('<input type="hidden" name="paged" value="%d">', $paged);
+        }
+        return $out;
     }
 
     public function no_items(): void

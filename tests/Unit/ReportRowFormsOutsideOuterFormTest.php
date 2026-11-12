@@ -28,6 +28,25 @@ namespace {
             return 'https://example.test/wp-admin/' . $path;
         }
     }
+    if (!function_exists('add_query_arg')) {
+        /** @param array<string, string> $args */
+        function add_query_arg(array $args, string $url): string
+        {
+            return $url . '?' . http_build_query($args);
+        }
+    }
+    if (!function_exists('sanitize_key')) {
+        function sanitize_key(string $key): string
+        {
+            return preg_replace('/[^a-z0-9_\-]/', '', strtolower($key)) ?? '';
+        }
+    }
+    if (!function_exists('absint')) {
+        function absint($n): int
+        {
+            return abs((int) $n);
+        }
+    }
     if (!function_exists('wp_create_nonce')) {
         function wp_create_nonce(string $action = '-1'): string
         {
@@ -140,6 +159,50 @@ namespace BCC\Trust\Tests\Unit {
             ob_start();
             $table->renderRowForms();
             self::assertSame('', (string) ob_get_clean(), 'forms print once');
+        }
+
+        /**
+         * F-312 (M2): each row form posts the list's status filter and page
+         * back, so the handler's redirect lands on the same view rather than
+         * "All", page 1.
+         */
+        public function testEveryRowFormCarriesTheListFilterAndPage(): void
+        {
+            $_GET['report_status'] = 'open';
+            $_GET['paged']         = '3';
+            $table = new ReportListTable();
+            $table->column_default(self::openRow(41), 'actions');
+            ob_start();
+            $table->renderRowForms();
+            $forms = (string) ob_get_clean();
+            unset($_GET['report_status'], $_GET['paged']);
+
+            self::assertSame(3, substr_count($forms, '<input type="hidden" name="report_status" value="open">'));
+            self::assertSame(3, substr_count($forms, '<input type="hidden" name="paged" value="3">'));
+        }
+
+        public function testTheHandlersRedirectBackToTheSameFilterAndPage(): void
+        {
+            $_POST['report_status'] = 'open';
+            $_POST['paged']         = '3';
+            $url = (new \ReflectionMethod(\BCC\Trust\Disputes\Admin\DisputeAdmin::class, 'reportsReturnUrl'))
+                ->invoke(null, ['error' => 'already_resolved']);
+            unset($_POST['report_status'], $_POST['paged']);
+
+            parse_str((string) parse_url((string) $url, PHP_URL_QUERY), $q);
+            self::assertSame(
+                ['page' => 'bcc-reports', 'report_status' => 'open', 'paged' => '3', 'error' => 'already_resolved'],
+                $q
+            );
+        }
+
+        /** The refusals the handlers redirect with are rendered, not dropped. */
+        public function testTheReportsPageRendersTheErrorTheHandlersSend(): void
+        {
+            $body = GateOrder::body(GateOrder::code('app/Domain/Disputes/Admin/DisputeAdmin.php'), 'render_reports_page');
+            self::assertStringContainsString("\$_GET['error']", $body);
+            self::assertStringContainsString("'already_resolved'", $body);
+            self::assertStringContainsString("'invalid_penalty'", $body);
         }
 
         public function testThePagePrintsTheRowFormsAfterTheOuterFormCloses(): void
