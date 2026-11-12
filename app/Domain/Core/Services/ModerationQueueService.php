@@ -718,7 +718,14 @@ final class ModerationQueueService
             }
             $this->reportRepo->updateStatus($reportId, self::STATUS_RESOLVED, $resolverUserId);
             $upheldIds = $this->announcementReportIds($announcementId, self::STATUS_PENDING, $reportId);
-            $this->reportRepo->transitionStatus($upheldIds, self::STATUS_PENDING, self::STATUS_RESOLVED, $resolverUserId);
+            // Only what the guarded UPDATE really moved is credited, audited
+            // and reopened on undo (same rule as the feed hide).
+            $upheldIds = $this->actuallyMoved(
+                $upheldIds,
+                $this->reportRepo->transitionStatus($upheldIds, self::STATUS_PENDING, self::STATUS_RESOLVED, $resolverUserId),
+                self::STATUS_RESOLVED,
+                $resolverUserId
+            );
             AuditLogger::log(
                 'admin_hide_announcement',
                 $reportId,
@@ -775,8 +782,20 @@ final class ModerationQueueService
             if (!$this->announcements->restore($announcementId, $resolverUserId)) {
                 return ['error' => 'bcc_unavailable', 'message' => 'Could not restore the announcement.'];
             }
-            $this->reportRepo->transitionStatus($unupheldIds, self::STATUS_RESOLVED, self::STATUS_DISMISSED, $resolverUserId);
-            $this->reportRepo->transitionStatus($closedPendingIds, self::STATUS_PENDING, self::STATUS_DISMISSED, $resolverUserId);
+            // Only what the guarded UPDATEs really moved: the un-upheld list
+            // drives the Rank credit reversal, and both feed the undo token.
+            $unupheldIds = $this->actuallyMoved(
+                $unupheldIds,
+                $this->reportRepo->transitionStatus($unupheldIds, self::STATUS_RESOLVED, self::STATUS_DISMISSED, $resolverUserId),
+                self::STATUS_DISMISSED,
+                $resolverUserId
+            );
+            $closedPendingIds = $this->actuallyMoved(
+                $closedPendingIds,
+                $this->reportRepo->transitionStatus($closedPendingIds, self::STATUS_PENDING, self::STATUS_DISMISSED, $resolverUserId),
+                self::STATUS_DISMISSED,
+                $resolverUserId
+            );
             $this->reportRepo->updateStatus($reportId, self::STATUS_DISMISSED, $resolverUserId);
             AuditLogger::log(
                 'admin_restore_announcement',
