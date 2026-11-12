@@ -129,6 +129,54 @@ final class PushBlockGateTest extends TestCase
         self::assertSame([], $asked, 'a system event is never looked up');
     }
 
+    // ── F-78: a late flush still finds its window ──────────────────────
+
+    private function at(int $now): void
+    {
+        \BCC\Trust\Tests\Support\CronHealState::$active = true;
+        \BCC\Trust\Tests\Support\CronHealState::$now    = $now;
+    }
+
+    public function testAFlushTwentyMinutesLateStillSends(): void
+    {
+        $t0 = 1_800_000_000;
+        $this->at($t0);
+        $this->enqueueFrom(self::ACTOR, 'someone');
+
+        // Scheduled for t0 + 300; WP-cron gets to it 20 minutes after that.
+        $this->at($t0 + 300 + 1200);
+        self::assertSame(1, $this->flushQueue(), 'the window is still there, so the push goes out');
+    }
+
+    public function testLaterEventsDoNotSlideTheWindowsExpiry(): void
+    {
+        $t0 = 1_800_000_000;
+        $this->at($t0);
+        $this->enqueueFrom(self::ACTOR, 'a');
+        $this->at($t0 + 1000);
+        $this->enqueueFrom(7001, 'b');
+
+        self::assertSame([300 + 1800, 300 + 1800 - 1000], PushBlockWorld::$ttls, 'the second write keeps the end fixed at first_at + 2100');
+    }
+
+    public function testAnAbandonedWindowIsReplacedWithItsOwnFlush(): void
+    {
+        $t0 = 1_800_000_000;
+        $this->at($t0 + 5000);
+        // A window whose flush never ran, left behind with no expiry.
+        PushBlockWorld::$transients['bcc_push_q_' . self::RECIPIENT . '_mention'] = [
+            'count' => 3, 'first_payload' => [], 'first_at' => $t0,
+            'actors' => [7001 => ['n' => 3, 'payload' => []]],
+        ];
+
+        $this->enqueueFrom(self::ACTOR, 'fresh');
+
+        $queued = PushBlockWorld::$transients['bcc_push_q_' . self::RECIPIENT . '_mention'];
+        self::assertSame(1, $queued['count'], 'a fresh window, not a pile-up nobody will send');
+        self::assertSame($t0 + 5000, $queued['first_at']);
+        self::assertCount(1, PushBlockWorld::$scheduled, 'with its own flush scheduled');
+    }
+
     public function testAnActorBeyondTheTrackedCapIsNotCounted(): void
     {
         for ($a = 1; $a <= 50; $a++) {
