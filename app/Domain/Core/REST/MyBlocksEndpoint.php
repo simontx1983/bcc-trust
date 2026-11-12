@@ -175,6 +175,22 @@ final class MyBlocksEndpoint
             AuditLogger::log('user_blocked', $targetId, [], 'user', $viewerId);
         }
 
+        // F-29 (user decision): a block removes follows in BOTH directions,
+        // with their watch sidecars; unblocking restores nothing. Run on an
+        // existing block too, so a block that predates this change is
+        // cleaned up on the next attempt. The block itself is already
+        // recorded, so a failure here is logged, never surfaced as a failed
+        // block.
+        try {
+            Plugin::instance()->watchingService()->severFollowsBetween($viewerId, $targetId);
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] block: removing follows failed', [
+                'viewer_id' => $viewerId,
+                'target_id' => $targetId,
+                'error'     => $e->getMessage(),
+            ]);
+        }
+
         $resp = ApiResponse::ok([
             'ok'      => true,
             'user_id' => $targetId,

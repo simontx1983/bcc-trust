@@ -123,9 +123,39 @@ final class IndexRunPartialSkipsDestructiveStepsTest extends TestCase
 
         self::assertSame([40], \IndexRunRecorder::callsOf('validators.bulkUpsert'));
         self::assertSame(['bcc_onchain_indexer_stats'], \IndexRunRecorder::callsOf('update_option'));
-        self::assertCount(1, \IndexRunRecorder::callsOf('markDeadValidators'));
+        self::assertSame([[self::CHAIN_A]], \IndexRunRecorder::callsOf('markDeadValidators'));
         self::assertSame([self::CHAIN_A], \IndexRunRecorder::callsOf('mintMissing'));
         self::assertSame([self::CHAIN_A], \IndexRunRecorder::callsOf('breaker.recordSuccess'));
+    }
+
+    /**
+     * F-157: a chain the run SKIPPED (breaker resting) is not in the sweep.
+     * Its rows were not refreshed, so another chain's clean run must not
+     * mark them dead.
+     */
+    public function testASkippedChainIsNotSweptByAnotherChainsCleanRun(): void
+    {
+        $this->chain(self::CHAIN_A, 'chain-a');
+        $this->chain(self::CHAIN_B, 'chain-b');
+        \IndexRunRecorder::$fetchResults[self::CHAIN_A] = self::validators(40);
+        \IndexRunRecorder::$fetchResults[self::CHAIN_B] = self::validators(40);
+        \IndexRunRecorder::$resting = [self::CHAIN_B];
+
+        ChainRefreshService::index_validators();
+
+        self::assertSame([[self::CHAIN_A]], \IndexRunRecorder::callsOf('markDeadValidators'));
+    }
+
+    public function testEveryIndexedChainIsInTheSweep(): void
+    {
+        $this->chain(self::CHAIN_A, 'chain-a');
+        $this->chain(self::CHAIN_B, 'chain-b');
+        \IndexRunRecorder::$fetchResults[self::CHAIN_A] = self::validators(40);
+        \IndexRunRecorder::$fetchResults[self::CHAIN_B] = self::validators(40);
+
+        ChainRefreshService::index_validators();
+
+        self::assertSame([[self::CHAIN_A, self::CHAIN_B]], \IndexRunRecorder::callsOf('markDeadValidators'));
     }
 
     public function testOneEmptyChainWithholdsDeadMarkingForTheWholeRun(): void
@@ -149,19 +179,33 @@ final class IndexRunPartialSkipsDestructiveStepsTest extends TestCase
 
     // ── F-66: an Error from one chain is that chain's partial fetch ─────
 
-    /** @return array<string, array{0: \Throwable}> */
+    /**
+     * Class name + message, NOT a Throwable instance (F-214). This class runs
+     * in separate processes, so PHPUnit serialize()s every data set into the
+     * child. With zend.exception_ignore_args=Off (every Local-by-Flywheel PHP;
+     * CI's setup-php production ini has it On) a Throwable's trace keeps its
+     * frames' arguments, and the provider is called through reflection, so the
+     * trace holds a ReflectionClass: "Serialization of 'ReflectionClass' is not
+     * allowed" before the test even starts. Strings serialize everywhere; the
+     * Error is built inside the child.
+     *
+     * @return array<string, array{0: class-string<\Error>, 1: string}>
+     */
     public static function errors(): array
     {
         return [
-            'TypeError (typed mapper, non-array item)' => [new \TypeError('mapNode(): Argument #1 ($node) must be of type array, string given')],
-            'ValueError (bccomp, non-numeric amount)'  => [new \ValueError('bccomp(): Argument #1 ($num1) is not well-formed')],
-            'plain Error'                              => [new \Error('Cannot access offset of type string on string')],
+            'TypeError (typed mapper, non-array item)' => [\TypeError::class, 'mapNode(): Argument #1 ($node) must be of type array, string given'],
+            'ValueError (bccomp, non-numeric amount)'  => [\ValueError::class, 'bccomp(): Argument #1 ($num1) is not well-formed'],
+            'plain Error'                              => [\Error::class, 'Cannot access offset of type string on string'],
         ];
     }
 
+    /** @param class-string<\Error> $errorClass */
     #[\PHPUnit\Framework\Attributes\DataProvider('errors')]
-    public function testAnErrorOnOneChainDoesNotAbortTheRunForTheNext(\Throwable $error): void
+    public function testAnErrorOnOneChainDoesNotAbortTheRunForTheNext(string $errorClass, string $message): void
     {
+        $error = new $errorClass($message);
+
         // Chain A throws an Error, not an Exception. Before F-66 the
         // per-chain catch was \Exception, so this escaped the loop and chain
         // B was never indexed.

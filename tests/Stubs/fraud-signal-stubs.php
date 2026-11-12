@@ -144,6 +144,14 @@ namespace BCC\Trust\Core {
         public static array $mutualVotePairs = [];
         /** @var list<object> rows shaped like getVouchEdges() output */
         public static array $vouchEdges = [];
+        /** @var list<object> rows shaped like getMutualVouchPairsInWindow() output */
+        public static array $mutualVouchPairs = [];
+        /**
+         * F-209: when true, the three ring-edge reads (getMutualVotePairs,
+         * getVouchEdges, getMutualVouchPairsInWindow) fail the way the
+         * production fail-closed reads do: RepositoryReadFailure.
+         */
+        public static bool $ringReadFails = false;
 
         // ── inputs for detectFanInCoordination() ──────────────────────
         /** @var list<object> rows shaped like getRecentVotersWithRegistration() */
@@ -195,6 +203,8 @@ namespace BCC\Trust\Core {
             self::$logs            = [];
             self::$mutualVotePairs = [];
             self::$vouchEdges      = [];
+            self::$mutualVouchPairs = [];
+            self::$ringReadFails   = false;
             self::$recentVoters    = [];
             self::$otherPageVotes  = 0;
             self::$auditLog        = [];
@@ -369,6 +379,9 @@ namespace BCC\Trust\Core\Repositories {
             /** @return list<object> */
             public function getMutualVotePairs(int $minSize, int $pageLimit = 500, int $afterUserA = 0, int $afterUserB = 0): array
             {
+                if (W::$ringReadFails) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(self::class, __FUNCTION__, 'injected');
+                }
                 return W::$mutualVotePairs;
             }
 
@@ -449,7 +462,19 @@ namespace BCC\Trust\Core\Repositories {
             /** @return list<object> */
             public function getVouchEdges(int $limit = 10000): array
             {
+                if (W::$ringReadFails) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(self::class, __FUNCTION__, 'injected');
+                }
                 return W::$vouchEdges;
+            }
+
+            /** @return list<object> */
+            public function getMutualVouchPairsInWindow(int $windowDays, int $minSize = 1, int $pageLimit = 500, int $afterUserA = 0, int $afterUserB = 0): array
+            {
+                if (W::$ringReadFails) {
+                    throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(self::class, __FUNCTION__, 'injected');
+                }
+                return W::$mutualVouchPairs;
             }
 
             /**

@@ -189,7 +189,30 @@ final class PageDiscoveryRepository
             $count_sql = $wpdb->prepare($count_sql, ...$params);
         }
 
-        $total      = (int) $wpdb->get_var($count_sql);
+        self::clearLastError();
+        $total = (int) $wpdb->get_var($count_sql);
+
+        // ⚠⚠ F-197: THE SAME BLIND SPOT AS THE FALLBACK, ON THE PATH THAT
+        // ACTUALLY RUNS. `get_var()` answers null on failure, `(int) null` is
+        // 0, and the `$total === 0` branch below returns an empty page — so
+        // an unreadable read model reported "no page matches this filter"
+        // rather than failing. Identical to F-144, one method down.
+        //
+        // ⚠ This is the PRIMARY discovery path: `PageDiscoveryService` picks
+        // it whenever `PageReadModelRepository::hasData()` is true, which is
+        // the normal state. The posts-table method below is the legacy
+        // fallback.
+        //
+        // ⚠ Logs and still returns empty, deliberately: "empty on an
+        // unreadable table" is the RATIFIED behaviour for discovery, and
+        // changing it is a route-contract decision, not a repository one.
+        // What changes is that the failure is no longer silent.
+        if (self::readFailed()) {
+            self::logReadFailure('read-model count', ['verified_only' => $verified_only]);
+
+            return ['rows' => [], 'total' => 0, 'pages' => 0, 'page' => $page];
+        }
+
         $totalPages = $total > 0 ? (int) ceil($total / $limit) : 0;
 
         if ($total === 0) {
@@ -219,7 +242,19 @@ final class PageDiscoveryRepository
         // skipped or repeated pages that tied across a page boundary.
 
         $all_params = array_merge($params, [$limit, $offset]);
-        $rows       = $wpdb->get_results($wpdb->prepare($main_sql, ...$all_params));
+
+        self::clearLastError();
+        $rows = $wpdb->get_results($wpdb->prepare($main_sql, ...$all_params));
+
+        // ⚠ The COUNT can succeed while this fails — they are two
+        // statements, and only this one carries the ORDER BY, the LIMIT and
+        // the ranking expression. That combination is exactly how F-144's
+        // second defect hid: an honest non-zero total beside an empty row
+        // set. Checked separately for that reason, not as a formality.
+        if (self::readFailed()) {
+            self::logReadFailure('read-model rows', ['verified_only' => $verified_only]);
+            $rows = [];
+        }
 
         return [
             'rows'  => $rows,
@@ -402,7 +437,7 @@ final class PageDiscoveryRepository
         // repository fix. What changes here is that the next occurrence is
         // VISIBLE instead of silent.
         if (self::readFailed()) {
-            self::logReadFailure('discovery count', $verified_only);
+            self::logReadFailure('discovery count', ['verified_only' => $verified_only]);
 
             return ['rows' => [], 'total' => 0, 'pages' => 0, 'page' => $page];
         }
@@ -438,7 +473,7 @@ final class PageDiscoveryRepository
         // distinguishable from "no rows" to a caller — so the failure is
         // logged rather than inferred from the shape of the result.
         if (self::readFailed()) {
-            self::logReadFailure('discovery rows', $verified_only);
+            self::logReadFailure('discovery rows', ['verified_only' => $verified_only]);
             $rows = [];
         }
 
@@ -483,7 +518,7 @@ final class PageDiscoveryRepository
     }
 
     /**
-     * Record a failed discovery read.
+     * Record a failed read from any of this class's queries.
      *
      * ⚠⚠ THE STATEMENT IS DELIBERATELY NOT LOGGED. By the time either read
      * fails, `$count_sql` / `$main_sql` have been through
@@ -495,12 +530,23 @@ final class PageDiscoveryRepository
      * file intact. (An earlier revision of this method logged it, and the
      * docblock justifying that was simply wrong about `prepare()`.)
      *
-     * ⭐ `$what` and `$verifiedOnly` identify the query without carrying any
-     * of its values. This method assembles its joins from exactly those two
-     * facts, and `$verified_only` is the branch F-144 broke — so the pair is
-     * the whole diagnostic, and the one that matters is a bool.
+     * ⭐ `$what` plus a small `$context` identifies the query without
+     * carrying any of its values. The two list queries pass
+     * `verified_only`, which is the branch F-144 broke and is the one fact
+     * that changes their joins; the two finders pass the size of the
+     * caller's IN-list, which separates "a bounded lookup failed" from "an
+     * over-long IN-list was rejected".
+     *
+     * ⚠ F-216 widened this from a `bool $verifiedOnly` parameter to a
+     * context array, because the finders have no such notion and logging
+     * `verified_only: false` for them would have been a fabricated fact.
+     * `$context` is merged AFTER the fixed keys, so `what` and `error`
+     * cannot be shadowed by a caller.
+     *
+     * @param array<string, bool|int|string> $context bounded scalars only —
+     *        never a value drawn from the query's own parameters
      */
-    private static function logReadFailure(string $what, bool $verifiedOnly): void
+    private static function logReadFailure(string $what, array $context = []): void
     {
         global $wpdb;
 
@@ -509,10 +555,9 @@ final class PageDiscoveryRepository
         }
 
         \BCC\Core\Log\Logger::error('[bcc-trust] page-discovery read failed', [
-            'what'          => $what,
-            'error'         => (string) $wpdb->last_error,
-            'verified_only' => $verifiedOnly,
-        ]);
+            'what'  => $what,
+            'error' => (string) $wpdb->last_error,
+        ] + $context);
     }
 
     /**
@@ -548,6 +593,7 @@ final class PageDiscoveryRepository
         global $wpdb;
         $placeholders = implode(',', array_fill(0, count($pageIds), '%d'));
 
+        self::clearLastError();
         /** @var list<object{ID: int|numeric-string, post_title: string, post_name: string}>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT ID, post_title, post_name
@@ -558,6 +604,21 @@ final class PageDiscoveryRepository
               LIMIT %d",
             ...[...$pageIds, count($pageIds)]
         ));
+
+        // ⚠⚠ F-216: `$rows ?: []` below is the idiom GuardsReadFailures's own
+        // docblock names as the bug — it turns a failed read into "none of
+        // these pages is published". The caller then treats every id as
+        // absent, which for page-context hydration means the context is
+        // silently dropped from a whole feed page.
+        //
+        // ⚠ FAILS CLOSED, and that is left exactly as it was: callers get
+        // fewer pages, never more, so this is a visibility fix rather than a
+        // behaviour change.
+        if (self::readFailed()) {
+            self::logReadFailure('published pages by id', ['ids' => count($pageIds)]);
+
+            return [];
+        }
 
         $out = [];
         foreach ($rows ?: [] as $row) {
@@ -591,6 +652,7 @@ final class PageDiscoveryRepository
         $params   = $postIds;
         $params[] = $chainId;
 
+        self::clearLastError();
         /** @var list<object{post_id: numeric-string}>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT post_id
@@ -600,6 +662,21 @@ final class PageDiscoveryRepository
                 AND CAST(meta_value AS UNSIGNED) = %d",
             ...$params
         ));
+
+        // ⚠⚠ F-216: an unread failure here answers "no post is gated to this
+        // chain". ⭐ The single caller (GroupsDiscoveryEndpoint) uses the
+        // result as an ALLOW-LIST and returns [] when it is empty, so the
+        // failure FAILS CLOSED — fewer groups listed, never a gated group
+        // exposed. Verified at the call site rather than assumed, because
+        // the opposite reading would make this a gating defect instead of a
+        // quiet degradation.
+        //
+        // Behaviour is therefore unchanged on purpose; only the silence goes.
+        if (self::readFailed()) {
+            self::logReadFailure('chain-gated post ids', ['ids' => count($postIds)]);
+
+            return [];
+        }
 
         $out = [];
         foreach ($rows ?: [] as $row) {

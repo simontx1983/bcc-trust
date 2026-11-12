@@ -282,6 +282,8 @@ final class WatchingEndpoint
         if (isset($result['error'])) {
             $code   = (string) $result['error'];
             $status = match ($code) {
+                // F-29: a block between viewer and target (generic message).
+                'bcc_forbidden'        => 403,
                 'bcc_not_found'        => 404,
                 'bcc_invalid_request'  => 400,
                 'bcc_internal_error'   => 500,

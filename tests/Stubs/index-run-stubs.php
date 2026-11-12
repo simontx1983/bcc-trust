@@ -41,12 +41,16 @@ namespace {
         /** @var list<array{0: string, 1: mixed}> every call, in order */
         public static array $calls = [];
 
+        /** @var list<int> chain ids whose circuit breaker is resting (F-157) */
+        public static array $resting = [];
+
         public static function reset(): void
         {
             self::$chains       = [];
             self::$fetchResults = [];
             self::$options      = [];
             self::$calls        = [];
+            self::$resting      = [];
         }
 
         public static function record(string $what, mixed $detail = null): void
@@ -204,7 +208,7 @@ namespace BCC\Trust\Onchain\Support {
         {
             public static function isResting(int $chainId): bool
             {
-                return false;
+                return in_array($chainId, \IndexRunRecorder::$resting, true);
             }
 
             public static function recordFailure(int $chainId): void
@@ -224,9 +228,10 @@ namespace BCC\Trust\Onchain\Services {
     if (!class_exists(__NAMESPACE__ . '\\EnrichmentScheduler', false)) {
         final class EnrichmentScheduler
         {
-            public static function markDeadValidators(): int
+            /** @param list<int> $chainIds */
+            public static function markDeadValidators(array $chainIds): int
             {
-                \IndexRunRecorder::record('markDeadValidators');
+                \IndexRunRecorder::record('markDeadValidators', $chainIds);
                 return 0;
             }
         }

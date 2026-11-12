@@ -109,6 +109,13 @@ class ChainRefreshService
     private const LOCK_GROUP = 'bcc_cron';
 
     /**
+     * The advisory lock the validator index run (and its page-minting
+     * tail) holds. Public so the backfill CLI can take the SAME lock and
+     * never mint concurrently with the cron (F-157).
+     */
+    public const INDEX_VALIDATORS_LOCK = self::LOCK_GROUP . ':index_validators';
+
+    /**
      * Acquire a MySQL advisory lock for a cron job.
      * Advisory locks are cross-request and don't require persistent object cache.
      */
@@ -505,14 +512,17 @@ class ChainRefreshService
             $hasPartialFetch = false;
 
             // ⚠ PER-CHAIN, DELIBERATELY SEPARATE FROM $hasPartialFetch.
-            // $hasPartialFetch is run-wide and stays that way, because
-            // markDeadValidators() is a GLOBAL UPDATE with no chain_id
-            // predicate — one truncated chain can make another chain's live
-            // validators look absent, so that gate must see the whole run.
+            // $hasPartialFetch is run-wide and stays that way: dead-marking is
+            // destructive, so any doubt anywhere in the run skips it. Since
+            // F-157 the sweep is also scoped to $indexedChainIds (chains this
+            // run actually indexed), so a SKIPPED chain's rows are never
+            // swept by another chain's clean run. Both gates apply.
             // Page creation is the opposite shape: it acts on PRESENCE, so a
             // truncated fetch elsewhere can only mint a page LATER, never
             // wrongly. Hence a per-chain list for minting only.
             $healthyChainFetches = [];
+            /** @var array<int, true> $indexedChainIds */
+            $indexedChainIds = [];
 
             // ⚠ ONE SNAPSHOT, TAKEN BEFORE ANY CHAIN IN THIS RUN IS WRITTEN.
             // The baseline each chain is judged against must be the value from
@@ -658,8 +668,9 @@ class ChainRefreshService
                             //
                             // ⚠⚠ AND THE SKIP IS RUN-WIDE, NOT PER-CHAIN.
                             // $hasPartialFetch is a single run-wide flag and
-                            // markDeadValidators() has no chain_id, so ONE partial
-                            // chain withholds the sweep for EVERY chain. The old
+                            // the sweep keeps that run-wide gate (F-157 scoped it to
+                            // indexed chains, not loosened it), so ONE partial chain
+                            // withholds the sweep for EVERY chain. The old
                             // wording sent an operator looking for a per-chain skip
                             // that does not exist.
                             \BCC\Core\Log\Logger::warning(sprintf(
@@ -795,6 +806,15 @@ class ChainRefreshService
                                 );
                             }
                         }
+
+                        // F-157: this chain was actually indexed this run, so
+                        // its rows are eligible for the dead-marking sweep. A
+                        // chain that `continue`d above (breaker resting, no
+                        // driver, no validator support) never gets here and
+                        // its rows are never swept by another chain's run. A
+                        // partial fetch anywhere still skips the sweep for the
+                        // whole run (the $hasPartialFetch gate below).
+                        $indexedChainIds[$chainId] = true;
                     } else {
                         // Empty result from an active chain is suspicious
                         $hasPartialFetch = true;
@@ -853,7 +873,7 @@ class ChainRefreshService
             // so it does NOT reconcile validators that simply left the bonded set
             // (those sit at 0 attempts). It is not the tool for that problem.
             if (!$hasPartialFetch && self::deadMarkingEnabled()) {
-                EnrichmentScheduler::markDeadValidators();
+                EnrichmentScheduler::markDeadValidators(array_keys($indexedChainIds));
             } elseif ($hasPartialFetch) {
                 \BCC\Core\Log\Logger::info('[Onchain] Skipped markDeadValidators — partial fetch detected in this run.');
             } else {
@@ -873,9 +893,9 @@ class ChainRefreshService
             // validator that demonstrably EXISTS is safe regardless of another
             // chain's health; the worst case is that a page appears a run late.
             //
-            // ⛔ markDeadValidators() above is UNCHANGED and still gated on the
-            // run-wide $hasPartialFetch. It acts on ABSENCE and its UPDATE has
-            // no chain_id predicate, so it must keep seeing the whole run.
+            // ⛔ markDeadValidators() above is still gated on the
+            // run-wide $hasPartialFetch. It acts on ABSENCE (scoped to indexed
+            // chains since F-157), so it must keep seeing the whole run.
             if ($healthyChainFetches !== []) {
                 try {
                     $mintResult = self::mintForHealthyChains($healthyChainFetches, self::MINT_SCAN_BUDGET);

@@ -40,17 +40,16 @@ PHP="${PHP_BIN:-php}"
 PY="${PYTHON_BIN:-python}"
 MUTATE="scripts/tests/mutate.py"
 
-UNIT_FILTER='CollectionMetadataRulesTest|MarketplaceResearchUrlTest|DiscoveryScanAdminActionsTest'
+UNIT_FILTER='CollectionMetadataRulesTest|MarketplaceResearchUrlTest'
 INT_FILTER='CollectionCommunityMetadataMigrationTest|ChainDescriptionSeparationTest'
 
 RULES='app/Domain/Onchain/ValueObjects/CollectionMetadataRules.php'
 URL='app/Domain/Onchain/ValueObjects/MarketplaceResearchUrl.php'
 REPO='app/Domain/Onchain/Repositories/CollectionRepository.php'
-ACTIONS='app/Domain/Onchain/Admin/DiscoveryScanActions.php'
 SCHEMA='includes/database/schema-collections.php'
 STATE='app/Domain/Onchain/ValueObjects/ChainDescriptionState.php'
 
-FILES=("$RULES" "$URL" "$REPO" "$ACTIONS" "$SCHEMA" "$STATE")
+FILES=("$RULES" "$URL" "$REPO" "$SCHEMA" "$STATE")
 
 WORK="$(mktemp -d)"
 KILLED=0
@@ -359,37 +358,14 @@ EOF
 )
 control "publicly-visible becomes a NEGATED check" int "$STATE" "$N" "$R"
 
-# ── ⚠ administrator authorization ───────────────────────────────────────
-
-N=$(frag <<'EOF'
-        AdminActionSupport::requirePost();
-EOF
-)
-R=$(frag <<'EOF'
-        /* mutant: method gate removed */
-EOF
-)
-control "the POST-only gate is removed" unit "$ACTIONS" "$N" "$R"
-
-N=$(frag <<'EOF'
-        AdminActionSupport::requireCapability();
-EOF
-)
-R=$(frag <<'EOF'
-        /* mutant: capability gate removed */
-EOF
-)
-control "the capability gate is removed" unit "$ACTIONS" "$N" "$R"
-
-N=$(frag <<'EOF'
-        return $action . '_' . $chainId;
-EOF
-)
-R=$(frag <<'EOF'
-        return $action;
-EOF
-)
-control "the nonce is not chain-scoped" unit "$ACTIONS" "$N" "$R"
+# ── administrator authorization: CONTROLS REMOVED, WITH THEIR TARGET ────
+#
+# The POST-only, capability and chain-scoped-nonce controls mutated
+# DiscoveryScanActions, the administrator scan handlers. Those handlers were
+# deleted in the scanner retirement (S1-S4), with DiscoveryScanAdminActionsTest,
+# so there is no gate left for them to break. scanner-removal-mutation-
+# controls.sh and ScannerRemovedInventoryTest guard that the surface stays
+# gone. (2026-11-12)
 
 # ⚠ CONTROL REMOVED, WITH ITS TARGET.
 #
@@ -424,13 +400,20 @@ EOF
 )
 control "market retirement is scoped to nothing" int "$SCHEMA" "$N" "$R"
 
+# ⚠ The community-metadata verifier, which CollectionCommunityMetadataMigrationTest
+# covers. The metadata-STATE verifier has the same three lines, so the
+# anchor includes the blank line only this one has before its check.
 N=$(frag <<'EOF'
+        );
+
         if ($exists === null || $exists < 1) {
             return false;
         }
 EOF
 )
 R=$(frag <<'EOF'
+        );
+
         if (false) {
             return false;
         }

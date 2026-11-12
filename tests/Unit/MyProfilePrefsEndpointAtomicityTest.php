@@ -75,7 +75,7 @@ final class MyProfilePrefsEndpointAtomicityTest extends TestCase
     {
         yield 'bad default_post_audience after a valid profile_visibility and flags' => [
             ['profile_visibility' => 'private', 'hide_online' => true, 'default_post_audience' => 'everyone'],
-            '`default_post_audience` must be one of: public, members, private.',
+            '`default_post_audience` must be one of: public, members, friends, private.',
         ];
         yield 'bad post_visibility after a valid profile_visibility' => [
             ['profile_visibility' => 'members', 'post_visibility' => 'public'],
@@ -134,6 +134,96 @@ final class MyProfilePrefsEndpointAtomicityTest extends TestCase
     }
 
     /** Without PeepSo, a request that does not touch profile_visibility still saves. */
+    // ── §F-169: a stored 30 must round-trip as `friends` ────────────
+
+    /**
+     * ⚠⚠ THE SILENT LOOSENING THIS CLOSES. `peepso_last_used_post_privacy`
+     * can hold 30 — PeepSo's own posting UI sets it — but 30 had no token
+     * in the read map, so it was reported as `members`. A settings form
+     * GETs the value and PATCHes it back, which wrote 20: the user's
+     * default went from friends to members with no action and no notice.
+     *
+     * Nothing failed, which is why it survived. The test is a READ
+     * assertion because the read is where the information was lost.
+     */
+    public function testAStored30IsReportedAsFriendsAndNotAsMembers(): void
+    {
+        $GLOBALS['__bcc_prefs_meta'][self::USER_ID]['peepso_last_used_post_privacy'] = '30';
+
+        $data = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(['hide_online' => true]))
+            ->get_data()['data'];
+
+        self::assertSame('friends', $data['default_post_audience']);
+        self::assertNotSame('members', $data['default_post_audience'], 'the loosening was members');
+    }
+
+    /** The other side of the trip: `friends` must write 30, not 20. */
+    public function testPatchingFriendsWrites30(): void
+    {
+        require_once dirname(__DIR__) . '/Stubs/profile-prefs-peepso-stub.php';
+
+        $response = (new MyProfilePrefsEndpoint())->patch(
+            new \WP_REST_Request(['default_post_audience' => 'friends'])
+        );
+
+        self::assertSame(200, $response->get_status());
+        self::assertContains(
+            ['meta', 'peepso_last_used_post_privacy', '30'],
+            $GLOBALS['__bcc_prefs_writes']
+        );
+        self::assertSame('friends', $response->get_data()['data']['default_post_audience']);
+    }
+
+    /**
+     * The whole point, asserted end to end: GET the reported value, PATCH
+     * it straight back, and the stored int must not move. This is the
+     * shape a settings form actually performs, and it is what silently
+     * rewrote 30 to 20.
+     */
+    public function testAGetThenPatchRoundTripDoesNotChangeTheStoredValue(): void
+    {
+        require_once dirname(__DIR__) . '/Stubs/profile-prefs-peepso-stub.php';
+
+        $GLOBALS['__bcc_prefs_meta'][self::USER_ID]['peepso_last_used_post_privacy'] = '30';
+
+        $reported = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(['hide_online' => true]))
+            ->get_data()['data']['default_post_audience'];
+
+        $GLOBALS['__bcc_prefs_writes'] = [];
+        (new MyProfilePrefsEndpoint())->patch(
+            new \WP_REST_Request(['default_post_audience' => $reported])
+        );
+
+        self::assertSame(
+            '30',
+            $GLOBALS['__bcc_prefs_meta'][self::USER_ID]['peepso_last_used_post_privacy'],
+            'a round trip must preserve the stored level, not rewrite it'
+        );
+    }
+
+    /**
+     * Control: the three tokens that already worked must still map to the
+     * same ints. Adding a fourth entry to a map is exactly the change that
+     * can shift the others if someone reorders or mistypes it, and every
+     * assertion above would still pass.
+     */
+    public function testTheThreeOriginalTokensStillMapToTheSameInts(): void
+    {
+        require_once dirname(__DIR__) . '/Stubs/profile-prefs-peepso-stub.php';
+
+        foreach (['public' => '10', 'members' => '20', 'private' => '40'] as $token => $expected) {
+            $GLOBALS['__bcc_prefs_writes'] = [];
+            (new MyProfilePrefsEndpoint())->patch(
+                new \WP_REST_Request(['default_post_audience' => $token])
+            );
+            self::assertContains(
+                ['meta', 'peepso_last_used_post_privacy', $expected],
+                $GLOBALS['__bcc_prefs_writes'],
+                "{$token} must still write {$expected}"
+            );
+        }
+    }
+
     public function testFieldsThatDoNotNeedPeepSoStillSaveWithoutIt(): void
     {
         $response = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(['hide_online' => true]));

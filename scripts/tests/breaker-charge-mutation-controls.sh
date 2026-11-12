@@ -186,8 +186,8 @@ file_put_contents($f, str_replace($old, $new, $s));
 #    targets the leak that IS observable today.
 mutate "$WORKER" '
 $f = $argv[1]; $s = file_get_contents($f);
-$old = "        \$outcome = new ProviderOutcomeReceipt();\r\n        \$chain  = \$fetcher->get_chain();";
-$new = "        static \$leaked = null;\r\n        \$outcome = \$leaked ??= new ProviderOutcomeReceipt();\r\n        \$chain  = \$fetcher->get_chain();";
+$old = "        \$outcome = new ProviderOutcomeReceipt();\r\n        \$chain = \$fetcher->get_chain();";
+$new = "        static \$leaked = null;\r\n        \$outcome = \$leaked ??= new ProviderOutcomeReceipt();\r\n        \$chain = \$fetcher->get_chain();";
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
 ' 'BreakerChargePerLogicalRequestTest::testATickThatNeverReachesTheWireStillChargesAfterAFailingTick' 'M4 the head-poll receipt leaks between ticks'
@@ -195,8 +195,8 @@ file_put_contents($f, str_replace($old, $new, $s));
 # 5. FAIL TO RELEASE THE RECOVERY PROBE. The finally-block guarantee.
 mutate "$RETRY" '
 $f = $argv[1]; $s = file_get_contents($f);
-$old = "            if (\$chainId > 0) {\r\n                OnchainCircuitBreaker::releaseProbe(\$chainId);\r\n            }\r\n        }\r\n    }\r\n\r\n    /**\r\n     * Convenience: wp_remote_get with retry + SSRF hardening.";
-$new = "        }\r\n    }\r\n\r\n    /**\r\n     * Convenience: wp_remote_get with retry + SSRF hardening.";
+$old = "            if (\$chainId > 0) {\r\n                OnchainCircuitBreaker::releaseProbe(\$chainId);\r\n            }\r\n        }\r\n    }\r\n\r\n    /**\r\n     * The deadline these two convenience wrappers hand to";
+$new = "        }\r\n    }\r\n\r\n    /**\r\n     * The deadline these two convenience wrappers hand to";
 if (substr_count($s, $old) !== 1) { exit(1); }
 file_put_contents($f, str_replace($old, $new, $s));
 ' 'BreakerRetryAccountingTest::testTheProbeIsReleasedExactlyOncePerRequest' 'M5 the probe lock is never released'

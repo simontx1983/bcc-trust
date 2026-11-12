@@ -79,7 +79,8 @@ final class AttestationScoreSynthesis
             $this->attestationRepo->countActiveVouchesForTarget([$targetKind], $targetId)
         );
 
-        $this->scoreRepo->invalidateCache($pageId);
+        // No invalidateCache() here: both writers above bump the score-cache
+        // generation themselves (F-87), including when the second one throws.
         PageReadModelRepository::enqueueDirty($pageId);
     }
 

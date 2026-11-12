@@ -654,6 +654,24 @@ final class CollectionRepository
             return false;
         }
 
+        // F-115: refuse a write that would land on a DIFFERENT collection
+        // through the case-insensitive `uq_chain_contract` (see
+        // findChainContractKeyCollision). The ON DUPLICATE KEY UPDATE below
+        // is only for re-adding the SAME collection. An unreadable check
+        // refuses too: never write on an unknown.
+        try {
+            $collision = self::findChainContractKeyCollision($chainId, $contract, $identity->canonical());
+        } catch (RepositoryReadFailure $e) {
+            return false;
+        }
+        if ($collision !== null) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] addManual refused: the key is held by a different collection', [
+                'chain_id'      => $chainId,
+                'collides_with' => (int) $collision->id,
+            ]);
+            return false;
+        }
+
         global $wpdb;
         $table     = self::table();
         $expiresAt = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
@@ -1468,6 +1486,65 @@ final class CollectionRepository
             $chainId,
             trim($contract)
         ));
+    }
+
+    /**
+     * F-115: the row an INSERT of `$contract` would COLLIDE with on
+     * `uq_chain_contract` while being a DIFFERENT collection.
+     *
+     * `uq_chain_contract (chain_id, contract_address)` compares
+     * case-INSENSITIVELY, but identity (`canonical_identifier`, a binary
+     * collation) is case-SENSITIVE: Solana base58 mints that differ only in
+     * case are different collections, and a pre-PR-5a alias row has no
+     * canonical identity at all. {@see findByChainContract} (exact canonical)
+     * misses both, so the add's `INSERT … ON DUPLICATE KEY UPDATE` used to
+     * land on the OTHER row and overwrite its metadata and `source`.
+     *
+     * Returns that other row — key-equal `contract_address`, and a
+     * `canonical_identifier` that is NULL or not byte-equal to
+     * `$canonical` — or null when the key is free or held by this same
+     * collection (a legitimate re-add).
+     *
+     * Fail closed: a read that did not run throws, so a write path can
+     * refuse instead of trusting an empty answer. `query()` is called
+     * explicitly because wpdb has failure paths that return false without
+     * setting `last_error` and before `flush()`, leaving the previous
+     * query's rows in `last_result`.
+     *
+     * @return object{id: int|numeric-string, contract_address: string, canonical_identifier: ?string}|null
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public static function findChainContractKeyCollision(int $chainId, string $contract, string $canonical): ?object
+    {
+        $contract = trim($contract);
+        if ($chainId <= 0 || $contract === '' || $canonical === '') {
+            return null;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $wpdb->last_error = '';
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT id, contract_address, canonical_identifier
+               FROM {$table}
+              WHERE chain_id = %d
+                AND contract_address = %s
+                AND (canonical_identifier IS NULL OR canonical_identifier <> %s)
+              LIMIT 1",
+            $chainId,
+            $contract,
+            $canonical
+        ));
+        if ($ok === false) {
+            throw new RepositoryReadFailure(static::class, __FUNCTION__, (string) $wpdb->last_error);
+        }
+        self::guardReadOrThrow(__FUNCTION__);
+
+        $row = is_array($wpdb->last_result) ? ($wpdb->last_result[0] ?? null) : null;
+
+        /** @var object{id: int|numeric-string, contract_address: string, canonical_identifier: ?string}|null */
+        return is_object($row) ? $row : null;
     }
 
     /**

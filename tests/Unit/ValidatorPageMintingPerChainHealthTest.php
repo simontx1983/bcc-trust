@@ -372,7 +372,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
 
         self::assertSame(
             1,
-            substr_count($code, 'EnrichmentScheduler::markDeadValidators();'),
+            substr_count($code, 'EnrichmentScheduler::markDeadValidators(array_keys($indexedChainIds));'),
             'exactly one dead-marking call site'
         );
 
@@ -383,7 +383,7 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
         $branch = substr($code, $start, $end - $start);
 
         self::assertStringContainsString(
-            'EnrichmentScheduler::markDeadValidators();',
+            'EnrichmentScheduler::markDeadValidators(array_keys($indexedChainIds));',
             $branch,
             'dead marking must remain INSIDE the run-wide gate'
         );
@@ -424,25 +424,33 @@ final class ValidatorPageMintingPerChainHealthTest extends TestCase
         );
         self::assertNotFalse($repo);
 
-        // Pinned because the change is only safe while this stays run-wide:
-        // it has no chain_id predicate, so it can never be reasoned about
-        // per chain without re-deciding the whole design.
+        // Pinned because the per-chain minting change is only safe while the
+        // sweep stays gated RUN-WIDE on $hasPartialFetch (asserted above).
+        // F-157 re-decided the predicate on purpose: the sweep is now ALSO
+        // scoped to the chains the run actually indexed, so a skipped chain's
+        // rows are never swept by another chain's clean run. The run-wide
+        // gate is unchanged, so this narrows the sweep and never widens it.
         //
         // ⚠ Asserted over the METHOD BODY, located by brace matching, with no
         // multi-line needle. An earlier version used a multi-line
         // assertStringNotContainsString whose exact whitespace and line
         // endings could never match, so it passed whether or not the sweep
         // had been chain-scoped. A mutation control caught that.
-        [$mdStart, $mdEnd] = self::blockSpan((string) $repo, 'function markDeadValidators(int $maxAttempts)');
+        [$mdStart, $mdEnd] = self::blockSpan((string) $repo, 'function markDeadValidators(int $maxAttempts, array $chainIds)');
         $body = substr((string) $repo, $mdStart, $mdEnd - $mdStart);
 
         self::assertStringContainsString("SET status = 'inactive'", $body);
         self::assertStringContainsString('enrichment_attempts >= %d', $body);
         self::assertStringContainsString('INTERVAL 30 DAY', $body);
-        self::assertStringNotContainsString(
-            'chain_id',
+        self::assertStringContainsString(
+            'AND chain_id IN ({$placeholders})',
             $body,
-            'this change must not have chain-scoped the destructive sweep'
+            'F-157: the destructive sweep is scoped to the indexed chains'
+        );
+        self::assertStringContainsString(
+            'if ($ids === []) {',
+            $body,
+            'F-157: an empty chain list marks nothing'
         );
     }
 

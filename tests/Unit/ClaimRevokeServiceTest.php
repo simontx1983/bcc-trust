@@ -25,13 +25,7 @@ final class ClaimRevokeServiceTest extends TestCase
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/claim-revoke-service-stubs.php';
-        \ClaimRevokeWorld::$result      = null;
-        \ClaimRevokeWorld::$throw       = null;
-        \ClaimRevokeWorld::$revokeCalls = [];
-        \ClaimRevokeWorld::$ownerPage   = 77;
-        \ClaimRevokeWorld::$recomputes  = [];
-        \ClaimRevokeWorld::$actions     = [];
-        \ClaimRevokeWorld::$audits      = [];
+        \ClaimRevokeWorld::reset();
     }
 
     private static function revoked(): void
@@ -39,7 +33,56 @@ final class ClaimRevokeServiceTest extends TestCase
         \ClaimRevokeWorld::$result = [
             'revoked' => true, 'user_id' => 5, 'entity_type' => 'validator',
             'entity_id' => 12, 'claim_role' => 'operator', 'mirror_page_ids' => [77],
+            'bound_page_ids' => [77, 88],
         ];
+    }
+
+    public function testEveryBoundPageReadModelIsMarkedDirty(): void
+    {
+        // `bcc_trust_verification_changed` resyncs only the claimant's OWN
+        // page; the claimed page's has_verified_claim lives on the bound page.
+        self::revoked();
+
+        ClaimService::revokeClaim(41, 'wallet_link_gone');
+
+        self::assertSame([77, 88], \ClaimRevokeWorld::$dirty);
+    }
+
+    /** @return array<string, array{string}> */
+    public static function postCommitSteps(): array
+    {
+        return [
+            'audit'                => ['audit'],
+            'bonus'                => ['bonus'],
+            'read model'           => ['read_model'],
+            'verification_changed' => ['bcc_trust_verification_changed'],
+            'claim_revoked event'  => ['bcc_onchain_claim_revoked'],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('postCommitSteps')]
+    public function testAFailingFollowUpStepNeitherThrowsNorStopsTheOthers(string $failing): void
+    {
+        // #561 review: a throw after the commit escaped, and the next sweep
+        // saw the claim as already revoked — the lost step never retried.
+        self::revoked();
+        \ClaimRevokeWorld::$fail[$failing] = true;
+
+        self::assertTrue(ClaimService::revokeClaim(41, 'wallet_link_gone'), 'a committed revoke reports success');
+
+        $ran = [
+            'audit'                          => \ClaimRevokeWorld::$audits !== [],
+            'bonus'                          => \ClaimRevokeWorld::$recomputes !== [],
+            'read_model'                     => \ClaimRevokeWorld::$dirty !== [],
+            'bcc_trust_verification_changed' => in_array('bcc_trust_verification_changed', array_column(\ClaimRevokeWorld::$actions, 0), true),
+            'bcc_onchain_claim_revoked'      => in_array('bcc_onchain_claim_revoked', array_column(\ClaimRevokeWorld::$actions, 0), true),
+        ];
+        foreach ($ran as $step => $didRun) {
+            self::assertSame($step !== $failing, $didRun, $step === $failing ? "{$step} failed" : "{$step} still ran");
+        }
+
+        self::assertNotSame([], \ClaimRevokeWorld::$errors, 'the failure is logged');
+        self::assertSame('[bcc-trust] claim_revoke_followup_failed', \ClaimRevokeWorld::$errors[0][0]);
     }
 
     public function testARevokeUndoesWhatTheClaimGranted(): void

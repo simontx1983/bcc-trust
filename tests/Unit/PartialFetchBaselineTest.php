@@ -437,13 +437,13 @@ final class PartialFetchBaselineTest extends TestCase
         );
         self::assertSame(
             1,
-            substr_count($code, 'EnrichmentScheduler::markDeadValidators();'),
+            substr_count($code, 'EnrichmentScheduler::markDeadValidators(array_keys($indexedChainIds));'),
             'exactly one dead-marking call site'
         );
 
         [$start, $end] = self::blockSpan($code, 'if (!$hasPartialFetch && self::deadMarkingEnabled())');
         $branch = substr($code, $start, $end - $start);
-        self::assertStringContainsString('EnrichmentScheduler::markDeadValidators();', $branch);
+        self::assertStringContainsString('EnrichmentScheduler::markDeadValidators(array_keys($indexedChainIds));', $branch);
     }
 
     public function testTheSwitchDefaultsOff(): void
@@ -600,11 +600,12 @@ final class PartialFetchBaselineTest extends TestCase
         );
         self::assertNotFalse($repo);
 
-        [$s, $e] = self::blockSpan((string) $repo, 'function markDeadValidators(int $maxAttempts)');
+        [$s, $e] = self::blockSpan((string) $repo, 'function markDeadValidators(int $maxAttempts, array $chainIds)');
         $body = substr((string) $repo, $s, $e - $s);
 
         self::assertStringContainsString("SET status = 'inactive'", $body);
-        self::assertStringNotContainsString('chain_id', $body);
+        // F-157: the sweep is scoped to the chains the run actually indexed.
+        self::assertStringContainsString('AND chain_id IN ({$placeholders})', $body);
     }
 
     // ── (2) sudden and gradual drops are still detected ─────────────────

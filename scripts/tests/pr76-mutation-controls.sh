@@ -53,6 +53,9 @@ control () {
 
   snapshot "$file"
   before="$(md5sum "$file" | cut -d' ' -f1)"
+  # ⚠ LINE ENDINGS ARE PRESERVED. Reading in text mode turned CRLF into LF,
+  # so an anchor that matched nothing still moved the bytes past the md5
+  # check below and an UNMUTATED tree could be reported as SURVIVED.
   python - "$file" <<PY
 import io, sys
 p = sys.argv[1]
@@ -136,6 +139,10 @@ PYMUT
 
 CLASSIFIER="app/Domain/Onchain/Services/CosmwasmClassifier.php"
 BREAKER="app/Domain/Onchain/Support/OnchainCircuitBreaker.php"
+# The CosmWasm discovery worker and its pass stop-reason were deleted in the
+# scanner retirement (S1-S8), with EnumerationTelemetryTest, CircuitOpenReason-
+# Test and MixedEvidencePersistenceIntegrationTest. Controls 5, 6, 11 and 12
+# went with them (2026-11-12).
 RETRY="app/Domain/Onchain/Support/ApiRetry.php"
 FETCHER="app/Domain/Onchain/Fetchers/CosmosFetcher.php"
 
@@ -158,13 +165,13 @@ control "http_4xx and malformed become node-caused faults" "$CLASSIFIER" \
   "s = s.replace(\"return \$kind === self::KIND_NODE_ERROR || \$kind === self::KIND_TRANSPORT;\", \"return self::isTransientFault(\$kind);\")"
 
 # ── 4. Fetcher: a recognised contract rejection blamed on the provider ──
+# The `$smartQuery` branch is live: wasmSmartQueryResult() calls
+# lcdGetResult(..., true) for the CW721 probes. Its S8-deleted tests are
+# replaced by Cw721ProbeSmartQueryOptInTest (probeCw721) and
+# CollectionMetadataApplicationErrorTest (cw721CollectionInfoQuery).
 control "recognised unknown-variant 500 treated as a provider failure" "$FETCHER" \
   "Cw721ProbeSmartQueryOptInTest|CollectionMetadataApplicationErrorTest|ApiRetryApplicationErrorTest" \
   "s = s.replace(\"        if (\$smartQuery) {\", \"        if (false) {\")"
-
-# Controls 5, 6, 11 and 12 were removed with their targets: S8 deleted
-# CosmwasmDiscoveryWorker, CosmwasmPassStopReason, the cw_last_error
-# enumeration-failure guard and every test they named.
 
 # ── 7. Breaker: the threshold is raised out of reach ────────────────────
 control "failure threshold 5 becomes 50" "$BREAKER" \
