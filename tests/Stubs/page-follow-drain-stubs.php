@@ -181,6 +181,32 @@ namespace BCC\Core\PeepSo {
     }
 }
 
+/**
+ * F-29: the drain asks bcc-core whether the viewer and the claimer are
+ * blocked (either direction) BEFORE following. bcc-core is not autoloaded
+ * in the unit suite, so the read is stubbed here. Default: not blocked.
+ *   blocked        list<int>  viewer ids whose pair with the claimer is blocked
+ *   block_unknown  list<int>  viewer ids whose block state is unreadable (null)
+ *   block_reads    int        call count
+ */
+namespace BCC\Core\Repositories {
+    if (!class_exists(PeepSoBlockRepository::class, false)) {
+        final class PeepSoBlockRepository
+        {
+            public static function isMutuallyBlockedOrUnknown(int $userA, int $userB): ?bool
+            {
+                $GLOBALS['__bcc_drain']['block_reads']++;
+
+                if (in_array($userA, $GLOBALS['__bcc_drain']['block_unknown'] ?? [], true)) {
+                    return null;
+                }
+
+                return in_array($userA, $GLOBALS['__bcc_drain']['blocked'] ?? [], true);
+            }
+        }
+    }
+}
+
 namespace BCC\Core\Log {
     if (!class_exists(Logger::class, false)) {
         final class Logger

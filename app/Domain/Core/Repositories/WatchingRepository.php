@@ -181,6 +181,30 @@ final class WatchingRepository
     }
 
     /**
+     * The uf_id of the $activeUserId → $passiveUserId follow row (active or
+     * not), or 0 when there is none. F-29: a block severs follows in both
+     * directions, and the bcc_watch_meta sidecar is keyed by this id.
+     * Bounded by the unique (active, passive) pair.
+     */
+    public function findFollowIdForPair(int $activeUserId, int $passiveUserId): int
+    {
+        if ($activeUserId <= 0 || $passiveUserId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $follows = $wpdb->prefix . 'peepso_user_followers';
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT uf_id FROM {$follows}
+              WHERE uf_active_user_id = %d AND uf_passive_user_id = %d
+              LIMIT 1",
+            $activeUserId,
+            $passiveUserId
+        ));
+    }
+
+    /**
      * Look up the passive_user_id (followee) for a follow row owned
      * by $userId. Used by the unwatch handler to get the followee
      * before the PeepSo unfollow call.

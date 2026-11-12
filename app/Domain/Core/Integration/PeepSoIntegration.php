@@ -422,6 +422,24 @@ class PeepSoIntegration
                     continue;
                 }
 
+                // F-29: a block between the two (either direction) means
+                // this pre-claim follow must never become a real one.
+                // PeepSoFollowWriter::follow() refuses it too, but with a
+                // bare 0 the row would be retried on every claim forever:
+                // it is HANDLED (skipped and removed). An unreadable block
+                // state is not a decision: the row stays and retries.
+                $blocked = \BCC\Core\Repositories\PeepSoBlockRepository::isMutuallyBlockedOrUnknown($viewerId, $newAuthorId);
+                if ($blocked === true) {
+                    $skipped++;
+                    $handledIds[] = $rowId;
+                    continue;
+                }
+                if ($blocked === null) {
+                    $erroredIds[$rowId] = true;
+                    $erroredInRun++;
+                    continue;
+                }
+
                 try {
                     $followId = \BCC\Core\PeepSo\PeepSoFollowWriter::follow($viewerId, $newAuthorId);
                     if ($followId === 0) {
