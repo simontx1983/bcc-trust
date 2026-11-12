@@ -48,13 +48,34 @@ final class TrustReadServiceSuspensionTest extends TestCase
     #[DataProvider('rows')]
     public function testSuspensionIsReadFromTheRowAndAMissingRowIsNotSuspended(?object $row, bool $expected): void
     {
-        $repo = new class ($row) extends UserInfoRepository {
-            public function __construct(private ?object $row)
+        self::assertSame($expected, self::service($row, false)->isSuspended(140));
+    }
+
+    /**
+     * A READ FAILURE is neither suspended nor not: isSuspended() throws
+     * bcc-core's SuspensionUnknownException, which Permissions turns into an
+     * UNKNOWN state it never caches. It used to read as "no row", so every
+     * gate failed open.
+     */
+    public function testAReadFailureIsUnknownNotNotSuspended(): void
+    {
+        $this->expectException(\BCC\Core\Contracts\SuspensionUnknownException::class);
+
+        self::service(null, true)->isSuspended(140);
+    }
+
+    private static function service(?object $row, bool $readFails): TrustReadService
+    {
+        $repo = new class ($row, $readFails) extends UserInfoRepository {
+            public function __construct(private ?object $row, private bool $readFails)
             {
             }
 
-            public function getByUserId(int $userId): ?object
+            public function getByUserIdOrThrow(int $userId): ?object
             {
+                if ($this->readFails) {
+                    throw new \BCC\Trust\Core\Exceptions\RepositoryException('simulated user_info read failure');
+                }
                 return $this->row;
             }
         };
@@ -62,10 +83,8 @@ final class TrustReadServiceSuspensionTest extends TestCase
         $property = (new ReflectionClass(Plugin::class))->getProperty('userInfoRepository');
         $property->setValue(Plugin::instance(), $repo);
 
-        $service = new TrustReadService(
+        return new TrustReadService(
             (new ReflectionClass(VoteRepository::class))->newInstanceWithoutConstructor()
         );
-
-        self::assertSame($expected, $service->isSuspended(140));
     }
 }

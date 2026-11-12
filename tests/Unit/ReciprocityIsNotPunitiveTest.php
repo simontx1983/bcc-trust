@@ -211,11 +211,11 @@ final class ReciprocityIsNotPunitiveTest extends TestCase
         self::assertContains('in_vote_ring', $r['triggers']);
     }
 
-    public function testMultiAccountAndSharedDeviceStillScoreOnTheirOwnTerms(): void
+    public function testMultiAccountStillScoresOnItsOwnTermsAndSharedDeviceIsRecorded(): void
     {
-        // Explicitly pinned: these remain fraud signals in their own right.
-        // What changed is only that they are not the corroboration that makes
-        // a reciprocity observation punishable — a different question.
+        // Multi-account (same IP) remains a fraud signal in its own right; it
+        // is just not the corroboration that makes a reciprocity observation
+        // punishable. A shared DEVICE is recorded but scores 0 (F-184).
         W::$mutualVotePages             = self::MUTUAL_PAGES;
         W::$lastIpBinary                = inet_pton('8.8.8.8');
         W::$distinctUsersForIp          = 6;
@@ -223,7 +223,7 @@ final class ReciprocityIsNotPunitiveTest extends TestCase
 
         $r = $this->analyse();
 
-        self::assertSame(45, $r['score'], 'multi_account 25 + shared_device 20, reciprocity 0');
+        self::assertSame(25, $r['score'], 'multi_account 25; shared_device and reciprocity 0');
         self::assertContains('multi_account', $r['triggers']);
         self::assertContains('shared_device_4_users', $r['triggers']);
     }

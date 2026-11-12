@@ -433,12 +433,16 @@ final class CollectionStanceService
                     $groupId = GatedGroupRepository::findGroupForCollection($chainId, $contract);
                 }
 
+                // F-165: the holdings image was emitted raw; sanitize + gateway.
+                $image = \BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules::presentImage($meta['image_url']);
+
                 $rows[] = [
                     'chain_id'            => $chainId,
                     'chain_slug'          => $chainSlugs[$chainId] ?? '',
                     'contract_address'    => $contract,
                     'name'                => $meta['name'],
-                    'image_url'           => $meta['image_url'],
+                    'image_url'           => $image['url'],
+                    'image_fallback_url'  => $image['fallback_url'],
                     'collection_verified' => $verified,
                     'state'               => $groupId !== null ? 'live' : 'waitlist',
                     'group_id'            => $groupId,

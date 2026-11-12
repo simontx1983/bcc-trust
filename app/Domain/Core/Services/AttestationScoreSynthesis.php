@@ -83,6 +83,103 @@ final class AttestationScoreSynthesis
         PageReadModelRepository::enqueueDirty($pageId);
     }
 
+    /** wp_option holding the decay sweep's resume cursor ("kind|id"). */
+    public const DECAY_CURSOR_OPTION = 'bcc_trust_attestation_decay_cursor';
+
+    /** Advisory-lock name: one decay sweep at a time, server-wide. */
+    public const DECAY_LOCK = 'bcc_trust_attestation_decay';
+
+    /**
+     * The daily decay recompute (Slice E): re-synthesize every target that
+     * holds an active attestation, since decay moves a score with no new
+     * events.
+     *
+     * F-93 — two fixes over the inline loop this replaces:
+     *   1. KEYSET paging (listTargetsWithActiveAttestationsAfter). OFFSET
+     *      paging assumed a stable work-list, but casts and revokes during
+     *      the run shift every later window, skipping or repeating targets.
+     *   2. A non-blocking advisory lock, so an overlapping wp-cron run skips
+     *      instead of sweeping the same targets in parallel.
+     *
+     * Bounded: at most $maxBatches × $batch targets per run. A run that hits
+     * the bound persists its cursor and the next run resumes after it (the
+     * StewardshipSweepService wrap-around model); a run that reaches the end
+     * clears the cursor so the next starts from the beginning. A failed read
+     * stops the run and saves the cursor at the last target processed, so it
+     * is never mistaken for the end of the list.
+     *
+     * @param (callable(string, int): void)|null $recompute test seam; defaults to recomputeFor()
+     * @return array{status: string, processed: int, failed: int, reached_end: bool}
+     */
+    public function runDecaySweep(?callable $recompute = null, int $batch = 500, int $maxBatches = 200): array
+    {
+        $recompute ??= function (string $kind, int $id): void {
+            $this->recomputeFor($kind, $id);
+        };
+
+        $summary = ['status' => 'locked', 'processed' => 0, 'failed' => 0, 'reached_end' => false];
+
+        if (!class_exists('\\BCC\\Core\\DB\\AdvisoryLock')
+            || !\BCC\Core\DB\AdvisoryLock::acquire(self::DECAY_LOCK, 0)
+        ) {
+            return $summary;
+        }
+
+        try {
+            [$afterKind, $afterId] = self::readDecayCursor();
+            $summary['status'] = 'ok';
+
+            for ($i = 0; $i < $maxBatches; $i++) {
+                $targets = $this->attestationRepo->listTargetsWithActiveAttestationsAfter($afterKind, $afterId, $batch);
+                if ($targets === null) {
+                    $summary['status'] = 'read_failed';
+                    break;
+                }
+
+                foreach ($targets as $t) {
+                    try {
+                        $recompute($t->target_kind, (int) $t->target_id);
+                        $summary['processed']++;
+                    } catch (\Throwable $e) {
+                        $summary['failed']++;
+                        \BCC\Core\Observability\DegradationMetrics::record('attestation_synthesis', 'decay_recompute_failed');
+                    }
+                    $afterKind = $t->target_kind;
+                    $afterId   = (int) $t->target_id;
+                }
+
+                if (count($targets) < $batch) {
+                    $summary['reached_end'] = true;
+                    break;
+                }
+            }
+
+            if ($summary['reached_end']) {
+                delete_option(self::DECAY_CURSOR_OPTION);
+            } elseif ($afterKind !== '') {
+                update_option(self::DECAY_CURSOR_OPTION, $afterKind . '|' . $afterId, false);
+            }
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release(self::DECAY_LOCK);
+        }
+
+        return $summary;
+    }
+
+    /** @return array{0: string, 1: int} */
+    private static function readDecayCursor(): array
+    {
+        $raw = (string) get_option(self::DECAY_CURSOR_OPTION, '');
+        $sep = strrpos($raw, '|');
+        if ($sep === false) {
+            return ['', 0];
+        }
+        $kind = substr($raw, 0, $sep);
+        $id   = (int) substr($raw, $sep + 1);
+
+        return in_array($kind, AttestationRepository::TARGET_KINDS, true) && $id > 0 ? [$kind, $id] : ['', 0];
+    }
+
     /**
      * The bounded attestation_bonus for one target (read-time synthesis). Pure
      * of side effects; resolves the live tuning + elite-attestor set + entity

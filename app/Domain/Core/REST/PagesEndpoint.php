@@ -735,12 +735,10 @@ final class PagesEndpoint
      */
     private static function buildClaimedBy(int $userId): array
     {
-        $user   = get_userdata($userId);
-        $handle = (string) get_user_meta($userId, 'bcc_handle', true);
-
-        if ($handle === '' && $user !== false) {
-            $handle = (string) $user->user_login;
-        }
+        // A deleted account keeps an empty handle, as before.
+        $handle = get_userdata($userId) === false
+            ? ''
+            : \BCC\Trust\Core\Support\PublicIdentity::handle($userId, get_user_meta($userId, 'bcc_handle', true));
 
         return [
             'user_id' => $userId,

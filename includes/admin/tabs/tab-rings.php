@@ -46,18 +46,36 @@ function bcc_trust_render_rings_tab(): void {
                 _n( 'Ring votes invalidated. %d page was rescored.', 'Ring votes invalidated. %d pages were rescored.', (int) $m[1], 'bcc-trust' ),
                 (int) $m[1]
             );
-        } elseif ( preg_match( '/^suspended_(\d+)$/', $ring_msg, $m ) ) {
+        } elseif ( preg_match( '/^suspended_(\d+)(?:_skipped_(\d+))?$/', $ring_msg, $m ) ) {
+            $ring_suspended = (int) $m[1];
+            $ring_skipped   = isset( $m[2] ) ? (int) $m[2] : 0;
             $notice_text = sprintf(
                 /* translators: %d is a count of users. */
-                _n( '%d ring member was suspended.', '%d ring members were suspended.', (int) $m[1], 'bcc-trust' ),
-                (int) $m[1]
+                _n( '%d ring member was suspended.', '%d ring members were suspended.', $ring_suspended, 'bcc-trust' ),
+                $ring_suspended
             );
-            // ⚠ Zero suspended is not a success. Every member's transaction
-            // failing is a database problem, and it used to be
-            // indistinguishable from having worked.
-            if ( (int) $m[1] === 0 ) {
+            // ⚠ Zero suspended with nothing skipped is not a success: every
+            // member's transaction failed, a database problem that used to
+            // be indistinguishable from having worked.
+            if ( $ring_suspended === 0 && $ring_skipped === 0 ) {
                 $notice_class = 'notice-error';
                 $notice_text  = __( 'No ring member was suspended. Every attempt failed — check the application log.', 'bcc-trust' );
+            }
+            // F-114: the acting admin, administrators and already-suspended
+            // members are skipped, never re-suspended. Say who.
+            if ( $ring_skipped > 0 ) {
+                if ( $ring_suspended === 0 ) {
+                    $notice_class = 'notice-warning';
+                }
+                $notice_text .= ' ' . sprintf(
+                    /* translators: %d is a count of users. */
+                    _n( '%d member was skipped:', '%d members were skipped:', $ring_skipped, 'bcc-trust' ),
+                    $ring_skipped
+                );
+                $ring_skip_lines = \BCC\Trust\Core\Plugin::instance()->moderationService()->takeSuspendSkips();
+                $notice_text    .= $ring_skip_lines !== []
+                    ? ' ' . implode( '; ', $ring_skip_lines ) . '.'
+                    : ' ' . __( 'see the audit log for who and why.', 'bcc-trust' );
             }
         } elseif ( $ring_msg === 'ring_not_found' ) {
             $notice_class = 'notice-error';

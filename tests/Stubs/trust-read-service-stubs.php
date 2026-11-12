@@ -34,4 +34,11 @@ namespace BCC\Core\Contracts {
             public function lockActiveVoteForDispute(int $voteId): bool;
         }
     }
+
+    // Mirrors bcc-core src/Contracts/SuspensionUnknownException.php (#84).
+    if (!class_exists(__NAMESPACE__ . '\\SuspensionUnknownException', false)) {
+        final class SuspensionUnknownException extends \RuntimeException
+        {
+        }
+    }
 }

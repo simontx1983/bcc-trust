@@ -15,14 +15,16 @@
 
   "response": {
     "items": {
-      "changed": false,
-      "note": "Unchanged, field for field. An older frontend keeps working.",
+      "changed": true,
+      "kind": "additive",
+      "note": "F-165 adds image_fallback_url (nullable): when image_url is an IPFS image on the configured gateway, the ipfs.io URL to load if it fails; null otherwise. image_url is now always https or null. An older frontend ignores the new field and keeps working.",
       "fields": [
         "chain_id",
         "chain_slug",
         "contract_address",
         "name",
         "image_url",
+        "image_fallback_url",
         "collection_verified",
         "state",
         "group_id",

@@ -27,7 +27,7 @@ if (!class_exists('PeepSoUser', false)) {
         /** @param array<string, mixed> $row */
         public function update_peepso_user(array $row): void
         {
-            $GLOBALS['__bcc_prefs_writes'][]      = ['peepso', 'usr_profile_acc', $row['usr_profile_acc']];
+            \bcc_prefs_write(['peepso', 'usr_profile_acc', $row['usr_profile_acc']]);
             $GLOBALS['__bcc_prefs_profile_acc'] = $row['usr_profile_acc'];
         }
 

@@ -767,7 +767,7 @@ final class CardViewService
 
         return [
             'id'                  => $userId,
-            'name'                => $user->display_name !== '' ? $user->display_name : $user->user_login,
+            'name'                => \BCC\Trust\Core\Support\PublicIdentity::displayName($user->display_name, $user->user_login, $resolvedHandle),
             'handle'              => $resolvedHandle,
             'card_kind'           => 'member',
             'bio'                 => self::resolveMemberBio($user),
@@ -827,7 +827,7 @@ final class CardViewService
             // Emitted for shape uniformity.
             'messaging'           => ['destination' => 'none', 'operator' => null],
             'crest'               => self::buildCrest(
-                (string) $user->display_name ?: $user->user_login,
+                \BCC\Trust\Core\Support\PublicIdentity::displayName($user->display_name, $user->user_login, $resolvedHandle),
                 'tier',
                 $tier,
                 self::resolveMemberAvatarUrl($userId)
@@ -1357,8 +1357,10 @@ final class CardViewService
 
     private static function resolveMemberHandle(\WP_User $user): string
     {
-        $handle = (string) get_user_meta($user->ID, 'bcc_handle', true);
-        return $handle !== '' ? $handle : $user->user_login;
+        return \BCC\Trust\Core\Support\PublicIdentity::handle(
+            (int) $user->ID,
+            get_user_meta($user->ID, 'bcc_handle', true)
+        );
     }
 
     private static function isPageClaimed(int $pageId): bool
@@ -1967,6 +1969,25 @@ final class CardViewService
             'can_report'       => self::attestationPermToCardPerm($attestationPerms['can_report']),
         ];
 
+        // UNCLAIMED page (post_author 0 — nobody has claimed it yet): vouch,
+        // back and report are structurally unavailable, for EVERY viewer,
+        // anon included. The cast write refuses the same target
+        // (AttestationService::checkCastEligibility → resolveTargetOwnerUserId
+        // reads the same post_author → 404), so offering the action only
+        // produced a button whose write always failed. Hidden per §N7 (no
+        // hint); `unclaimed` tells the client WHY, so it can show Message
+        // in its place. Decided here, not in getViewerActionPermissions():
+        // that resolver treats target 0 as "viewer gates only" for the
+        // endorse gate (EndorsementService::resolveViewerVouchGate).
+        if ($pageOwnerUserId <= 0) {
+            $unclaimed = ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'unclaimed'];
+            $attestationFields = [
+                'can_vouch'        => $unclaimed,
+                'can_stand_behind' => $unclaimed,
+                'can_report'       => $unclaimed,
+            ];
+        }
+
         if ($viewerId <= 0) {
             // Legacy permissions stay in their existing locked shape;
             // attestation fields use the service's anon copy.
@@ -2120,15 +2141,11 @@ final class CardViewService
         if ($user === false) {
             return null;
         }
-        $handle = (string) get_user_meta($userId, 'bcc_handle', true);
-        if ($handle === '') {
-            $handle = (string) $user->user_login;
-        }
-        $name = (string) $user->display_name;
+        $identity = \BCC\Trust\Core\Support\PublicIdentity::forUser($user);
 
         return [
-            'handle' => $handle,
-            'name'   => $name !== '' ? $name : $handle,
+            'handle' => $identity['handle'],
+            'name'   => $identity['display_name'],
         ];
     }
 

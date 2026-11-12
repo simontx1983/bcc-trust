@@ -57,6 +57,23 @@ class RankPromotionEngine
     /** Wall-clock budget for one daily sweep, seconds. */
     private const TIME_BUDGET_SECONDS = 30;
 
+    /**
+     * F-13: the daily evaluate sweep's cursor — the last user evaluated. A
+     * pending cursor means a cycle is in progress (see runDailyEvaluate()).
+     */
+    private const EVALUATE_CURSOR_OPTION = 'bcc_rank_daily_evaluate_cursor';
+
+    /** Seconds before a budget-cut sweep's continuation runs. */
+    private const CONTINUATION_DELAY = 60;
+
+    /**
+     * F-13 follow-up: the single-flight lock (DB::table() prefix applied).
+     * The daily event and a same-day continuation could otherwise overlap,
+     * read the same cursor, and evaluate the same members twice — which
+     * can send a decay warning twice.
+     */
+    private const EVALUATE_LOCK = 'rank_daily_evaluate';
+
     /** Recovery-reminder marks: fire when exactly this many whole days remain. */
     private const REMINDER_DAYS = [30, 7];
 
@@ -95,7 +112,8 @@ class RankPromotionEngine
      *     outcome_types: int,
      *     windows: array<string, array{qualifying: int, required: int, window: int, min_tier: string}>,
      *     satisfied: array<string, bool>,
-     *     target: string
+     *     target: string,
+     *     suspension_unknown: bool
      * }|null
      */
     public function assess(int $userId): ?array
@@ -183,7 +201,14 @@ class RankPromotionEngine
             ];
         }
 
-        $suspensionClear = \BCC\Core\Permissions\Permissions::is_not_suspended($userId, false);
+        // ⚠ Tri-state. An UNKNOWN suspension (null: it could not be read)
+        // reads as not-clear for this assessment, but is FLAGGED so that
+        // evaluate()/evaluateImmediate() persist NOTHING for this member this
+        // run: an unmet rung is saved and can start recovery or demote, and a
+        // DB blip must never do that. Read-only callers (progressionFor) still
+        // get a full assessment.
+        $suspension      = \BCC\Core\Permissions\Permissions::suspensionState($userId, false);
+        $suspensionClear = $suspension === false;
 
         // §15.3 ceiling AND-term (mirrors $suspensionClear): any rung
         // ABOVE the lowest active finding ceiling is unsatisfiable.
@@ -240,7 +265,26 @@ class RankPromotionEngine
             'windows'            => $windows,
             'satisfied'          => $satisfied,
             'target'             => $target,
+            'suspension_unknown' => $suspension === null,
         ];
+    }
+
+    /**
+     * True when the assessment could not read the member's suspension. The
+     * persisting paths then skip this member for this run (logged); the
+     * next run re-reads.
+     *
+     * @param array{suspension_unknown: bool} $assessment
+     */
+    private static function skipForUnknownSuspension(int $userId, array $assessment): bool
+    {
+        if (!$assessment['suspension_unknown']) {
+            return false;
+        }
+        \BCC\Core\Log\Logger::warning('[RankPromotionEngine] suspension state unknown; member skipped this run', [
+            'user_id' => $userId,
+        ]);
+        return true;
     }
 
     /**
@@ -251,7 +295,7 @@ class RankPromotionEngine
     public function evaluate(int $userId): void
     {
         $assessment = $this->assess($userId);
-        if ($assessment === null) {
+        if ($assessment === null || self::skipForUnknownSuspension($userId, $assessment)) {
             return;
         }
 
@@ -372,7 +416,7 @@ class RankPromotionEngine
     public function evaluateImmediate(int $userId): void
     {
         $assessment = $this->assess($userId);
-        if ($assessment === null) {
+        if ($assessment === null || self::skipForUnknownSuspension($userId, $assessment)) {
             return;
         }
 
@@ -418,20 +462,51 @@ class RankPromotionEngine
     }
 
     /**
-     * The daily evaluate sweep — every ranked member, cursor-paged
-     * within a time budget (missed members caught next day).
+     * The daily evaluate sweep — every ranked member, cursor-paged within a
+     * time budget, RESUMED rather than restarted.
+     *
+     * ⚠ F-13. This used to start every run at cursor 0, so on a population
+     * larger than one budget's worth the same leading members were evaluated
+     * every day and everyone past them NEVER was. Now (the
+     * StewardshipSweepService pattern, F-40):
+     *   - the cursor is persisted and is the last user EVALUATED — it
+     *     advances after each user, so a budget cut resumes on the next one;
+     *   - a budget-cut run schedules ONE same-day continuation, so the whole
+     *     population is still evaluated daily rather than over many days;
+     *   - reaching the end clears the cursor (the cycle is complete); the
+     *     next daily run starts a fresh cycle;
+     *   - a user whose evaluate() throws is logged and moved past, so one
+     *     bad member cannot stall the sweep on itself;
+     *   - a failed read throws (RankStateRepository::listUserIdsAfter is
+     *     fail-closed) and leaves the cursor where it was.
      */
     public function runDailyEvaluate(): void
     {
-        $deadline = time() + self::TIME_BUDGET_SECONDS;
-        $cursor   = 0;
+        if (!$this->acquireEvaluateLock()) {
+            \BCC\Core\Log\Logger::info('[bcc-trust] rank daily evaluate already running; skipping this tick');
+            return;
+        }
 
-        while (time() < $deadline) {
+        try {
+            $this->sweepDailyEvaluate();
+        } finally {
+            $this->releaseEvaluateLock();
+        }
+    }
+
+    /** The daily evaluate sweep body; runs only under the single-flight lock. */
+    private function sweepDailyEvaluate(): void
+    {
+        $deadline = $this->now() + self::TIME_BUDGET_SECONDS;
+        $cursor   = $this->readEvaluateCursor();
+
+        while (true) {
             $userIds = $this->rankState->listUserIdsAfter($cursor, self::BATCH_SIZE);
             if ($userIds === []) {
+                $this->clearEvaluateCursor();
+                \BCC\Core\Log\Logger::info('[bcc-trust] rank daily evaluate complete', ['cursor' => $cursor]);
                 return;
             }
-            $cursor = max($userIds);
 
             foreach ($userIds as $userId) {
                 try {
@@ -442,14 +517,73 @@ class RankPromotionEngine
                         'error'   => $e->getMessage(),
                     ]);
                 }
-                if (time() >= $deadline) {
-                    break;
+                // Evaluated (or failed and logged): the cursor moves past it.
+                $cursor = $userId;
+
+                if ($this->now() >= $deadline) {
+                    $this->writeEvaluateCursor($cursor);
+                    $this->scheduleEvaluateContinuation();
+                    \BCC\Core\Log\Logger::warning('[bcc-trust] rank daily evaluate: time budget hit, continuing shortly', [
+                        'cursor' => $cursor,
+                    ]);
+                    return;
                 }
             }
-        }
 
-        \BCC\Core\Log\Logger::warning('[bcc-trust] rank daily evaluate: time budget hit, partial pass', [
-            'cursor' => $cursor,
-        ]);
+            if (count($userIds) < self::BATCH_SIZE) {
+                $this->clearEvaluateCursor();
+                \BCC\Core\Log\Logger::info('[bcc-trust] rank daily evaluate complete', ['cursor' => $cursor]);
+                return;
+            }
+        }
+    }
+
+    // ── F-13 sweep collaborators (overridden by RankSweepCursorTest) ──
+
+    protected function now(): int
+    {
+        return time();
+    }
+
+    protected function readEvaluateCursor(): int
+    {
+        return (int) get_option(self::EVALUATE_CURSOR_OPTION, 0);
+    }
+
+    protected function writeEvaluateCursor(int $userId): void
+    {
+        update_option(self::EVALUATE_CURSOR_OPTION, $userId, false);
+    }
+
+    protected function clearEvaluateCursor(): void
+    {
+        delete_option(self::EVALUATE_CURSOR_OPTION);
+    }
+
+    protected function scheduleEvaluateContinuation(): void
+    {
+        if (!wp_next_scheduled(RankScheduler::EVENT_DAILY_EVALUATE_CONTINUE)) {
+            wp_schedule_single_event(time() + self::CONTINUATION_DELAY, RankScheduler::EVENT_DAILY_EVALUATE_CONTINUE);
+        }
+    }
+
+    /** Zero wait, like the tier snapshot: a held lock means skip this tick. */
+    protected function acquireEvaluateLock(): bool
+    {
+        return \BCC\Core\DB\AdvisoryLock::acquire(self::evaluateLockName(), 0);
+    }
+
+    protected function releaseEvaluateLock(): void
+    {
+        \BCC\Core\DB\AdvisoryLock::release(self::evaluateLockName());
+    }
+
+    /**
+     * `{prefix}bcc_rank_daily_evaluate`. GET_LOCK names are server-wide, so
+     * the table prefix scopes the lock to this site.
+     */
+    public static function evaluateLockName(): string
+    {
+        return substr(\BCC\Core\DB\DB::table(self::EVALUATE_LOCK), 0, 64);
     }
 }

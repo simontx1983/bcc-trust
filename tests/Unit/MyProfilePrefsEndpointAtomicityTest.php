@@ -38,8 +38,11 @@ final class MyProfilePrefsEndpointAtomicityTest extends TestCase
         require_once dirname(__DIR__) . '/Stubs/profile-prefs-stubs.php';
 
         $GLOBALS['__bcc_prefs_user']   = self::USER_ID;
-        $GLOBALS['__bcc_prefs_writes'] = [];
-        $GLOBALS['__bcc_prefs_meta']   = [];
+        $GLOBALS['__bcc_prefs_writes']      = [];
+        $GLOBALS['__bcc_prefs_meta']        = [];
+        $GLOBALS['__bcc_prefs_write_count'] = 0;
+        $GLOBALS['__bcc_prefs_fail_on']     = 0;
+        $GLOBALS['__bcc_prefs_logs']        = [];
 
         $mentor = new class extends MentorListingService {
             public function __construct()
@@ -48,7 +51,7 @@ final class MyProfilePrefsEndpointAtomicityTest extends TestCase
 
             public function setOptIn(int $userId, bool $optIn): void
             {
-                $GLOBALS['__bcc_prefs_writes'][] = ['mentor', 'opt_in', $optIn];
+                \bcc_prefs_write(['mentor', 'opt_in', $optIn]);
             }
 
             /** @return array{opted_in: bool, listed: bool, reason: string|null} */
@@ -170,5 +173,84 @@ final class MyProfilePrefsEndpointAtomicityTest extends TestCase
         self::assertSame('private', $data['profile_visibility']);
         self::assertTrue($data['hide_birthday_year']);
         self::assertSame('members', $data['default_post_audience']);
+    }
+
+    // ── M1: a write that fails AFTER validation passed ────────────────
+
+    /** @return array<string, mixed> */
+    private static function allFields(): array
+    {
+        return [
+            'profile_visibility' => 'private',
+            'post_visibility'    => 'private',
+            'hide_online'        => true,
+            'mentor_opt_in'      => true,
+        ];
+    }
+
+    /**
+     * The 2nd write (post_visibility, after profile_visibility) fails at the
+     * database. Phase 2 must stop there, answer 500, and say exactly which
+     * fields persisted, never report the request as saved.
+     */
+    public function testASecondWriteFailureStopsAndReportsWhatWasSaved(): void
+    {
+        require_once dirname(__DIR__) . '/Stubs/profile-prefs-peepso-stub.php';
+        $GLOBALS['__bcc_prefs_fail_on'] = 2;
+
+        $response = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(self::allFields()));
+
+        self::assertSame(500, $response->get_status());
+        $error = $response->get_data()['error'];
+        self::assertSame('bcc_internal_error', $error['code']);
+        self::assertSame(['profile_visibility'], $error['data']['saved']);
+        self::assertSame('post_visibility', $error['data']['failed']);
+        self::assertSame(
+            [['peepso', 'usr_profile_acc', 40]],
+            $GLOBALS['__bcc_prefs_writes'],
+            'nothing after the failed write may run'
+        );
+        self::assertCount(1, $GLOBALS['__bcc_prefs_logs'], 'the failure is logged');
+    }
+
+    public function testAFailureOnTheFirstWriteReportsNothingSaved(): void
+    {
+        require_once dirname(__DIR__) . '/Stubs/profile-prefs-peepso-stub.php';
+        $GLOBALS['__bcc_prefs_fail_on'] = 1;
+
+        $response = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(self::allFields()));
+
+        self::assertSame(500, $response->get_status());
+        self::assertSame([], $response->get_data()['error']['data']['saved']);
+        self::assertSame('profile_visibility', $response->get_data()['error']['data']['failed']);
+        self::assertSame([], $GLOBALS['__bcc_prefs_writes']);
+    }
+
+    public function testAMentorOptInFailureReportsEveryEarlierField(): void
+    {
+        require_once dirname(__DIR__) . '/Stubs/profile-prefs-peepso-stub.php';
+        $GLOBALS['__bcc_prefs_fail_on'] = 4; // peepso, post_visibility, hide_online, then mentor
+
+        $response = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(self::allFields()));
+
+        self::assertSame(500, $response->get_status());
+        self::assertSame(
+            ['profile_visibility', 'post_visibility', 'hide_online'],
+            $response->get_data()['error']['data']['saved']
+        );
+        self::assertSame('mentor_opt_in', $response->get_data()['error']['data']['failed']);
+    }
+
+    /**
+     * update_user_meta() returns false for an UNCHANGED value too. That must
+     * not read as a failure: the signal is $wpdb->last_error, not the return.
+     */
+    public function testAnUnchangedValueIsNotAFailure(): void
+    {
+        $GLOBALS['__bcc_prefs_meta'][self::USER_ID]['peepso_hide_online_status'] = '1';
+
+        $response = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(['hide_online' => true]));
+
+        self::assertSame(200, $response->get_status());
     }
 }

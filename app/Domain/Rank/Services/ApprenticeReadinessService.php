@@ -113,6 +113,15 @@ class ApprenticeReadinessService
                 (int) $row->content_act_id
             );
 
+            if ($voidReason === self::SUSPENSION_UNKNOWN) {
+                // Suspension could not be read: neither void nor award.
+                // The row stays pending and the next sweep re-checks.
+                \BCC\Core\Log\Logger::warning('[bcc-trust] apprentice confirmation deferred: suspension state unknown', [
+                    'user_id' => $userId,
+                ]);
+                continue;
+            }
+
             if ($voidReason !== null) {
                 $this->pending->resolve($userId, 'voided', $voidReason);
                 \BCC\Core\Log\Logger::info('[bcc-trust] apprentice confirmation voided', [
@@ -163,13 +172,23 @@ class ApprenticeReadinessService
 
         // Condition 5: formal findings — Phase 8 machinery; none exist yet.
 
-        // Condition 6: suspension.
-        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
+        // Condition 6: suspension. ⚠ Tri-state: an UNKNOWN state (it could
+        // not be read) is NOT 'suspended'. A void is persisted, so a DB blip
+        // would void a legitimate confirmation; unknown leaves it pending for
+        // the next sweep instead.
+        $suspension = \BCC\Core\Permissions\Permissions::suspensionState($userId, false);
+        if ($suspension === null) {
+            return self::SUSPENSION_UNKNOWN;
+        }
+        if ($suspension === true) {
             return 'suspended';
         }
 
         return null;
     }
+
+    /** confirmationBlocker() sentinel: leave the row pending, retry next sweep. Never persisted. */
+    private const SUSPENSION_UNKNOWN = 'suspension_unknown';
 
     /**
      * §5.1 readiness snapshot for the /me/progression New Member view.

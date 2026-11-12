@@ -41,6 +41,9 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-import-type ChainRow from \BCC\Core\Contracts\ChainReadInterface
+ */
 final class WalletAuthController
 {
     public static function register(): void
@@ -441,11 +444,15 @@ final class WalletAuthController
             return ApiResponse::error('bcc_invalid_request', 'wallet_address and signature are required.', 400);
         }
 
-        // Atomically consume the challenge. Chain metadata comes from
-        // the stored payload (server-known), never caller input — this
-        // is the same nonce-replay guard that verifyAndLink uses.
-        $challenge = WalletIdentityService::consumeAnonymousChallenge($walletAddress);
-        if ($challenge === null) {
+        // F-25: VERIFY BEFORE CONSUMING. Anyone can request a nonce for any
+        // address, so consuming first let a junk request burn the challenge a
+        // wallet owner was about to sign. The live challenges for this address
+        // (at most one per chain) are read without consuming; the signature
+        // picks the one it was made for; only that one is consumed —
+        // atomically, so a replay or a concurrent duplicate still loses. Chain
+        // metadata comes from the stored challenge, never caller input.
+        $candidates = WalletIdentityService::peekAnonymousChallenges($walletAddress);
+        if ($candidates === []) {
             return ApiResponse::error(
                 'bcc_invalid_request',
                 'Challenge not found or expired. Please request a new nonce.',
@@ -453,56 +460,45 @@ final class WalletAuthController
             );
         }
 
-        $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getById((int) ($challenge['chain_id'] ?? 0));
-        if ($chain === null) {
-            return ApiResponse::error('bcc_invalid_request', 'Chain not found.', 400);
-        }
-
         // Throttle per WALLET (+ a route-wide ceiling), still BEFORE the
         // CPU-bound signature verification (F-123). Not per IP: this route is
         // called server-side by the frontend, so every request shares one IP
-        // and a per-IP bucket let anyone lock out all wallet logins. Placed
-        // AFTER the nonce consume on purpose: only a request carrying a
-        // server-issued nonce for this address counts against its bucket, so
-        // a bare junk request costs the attacker nothing against it. This
-        // RAISES the cost of draining a victim's bucket, it does not prevent
-        // it: the anonymous /auth/wallet-nonce issues a nonce for any address
-        // (per-IP throttled), so an attacker rotating IPs can still mint
-        // nonces for a victim's address and spend that wallet's 5/min.
-        // Lower-casing makes case-distinct base58/SS58 addresses share a
-        // bucket: fail-closed (stricter), never looser.
+        // and a per-IP bucket let anyone lock out all wallet logins. Keyed on
+        // the address alone (F-25): the chain is only known once a signature
+        // verifies. Placed AFTER the live-challenge check: only an address with
+        // a server-issued challenge counts against its bucket, so a bare junk
+        // request costs the attacker nothing against it. This RAISES the cost
+        // of draining a victim's bucket, it does not prevent it: the anonymous
+        // /auth/wallet-nonce issues a challenge for any address (per-IP
+        // throttled), so an attacker rotating IPs can still spend that
+        // wallet's 5/min. Lower-casing makes case-distinct base58/SS58
+        // addresses share a bucket: fail-closed (stricter), never looser.
         if (!AuthSupport::allowIdentityAttempt(
             'wallet_login',
-            (string) $chain->id . "\n" . strtolower($walletAddress),
+            strtolower($walletAddress),
             AuthSupport::WALLET_LOGIN_RATE_LIMIT,
             AuthSupport::WALLET_LOGIN_GLOBAL_LIMIT
         )) {
             return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
 
-        $challengeMessage = (string) ($challenge['message'] ?? '');
-        if ($challengeMessage === '') {
-            Logger::error('[bcc-trust] wallet-login challenge malformed', [
-                'chain'   => (string) $chain->slug,
-                'address' => $walletAddress,
-            ]);
-            return ApiResponse::error('bcc_internal_error', 'Challenge malformed.', 500);
-        }
-
-        $valid = WalletVerifier::verify(
-            (string) $chain->chain_type,
-            $challengeMessage,
-            $signature,
-            $walletAddress,
-            $extra
-        );
-
-        if (!$valid) {
+        $match = self::verifiedCandidate($candidates, $walletAddress, $signature, $extra);
+        if ($match === null) {
             Logger::warning('[bcc-trust] wallet-login signature invalid', [
-                'chain'   => (string) $chain->slug,
-                'address' => $walletAddress,
+                'address'    => $walletAddress,
+                'candidates' => count($candidates),
             ]);
             return ApiResponse::error('bcc_signature_invalid', 'Signature verification failed.', 401);
+        }
+        [, $chain] = $match;
+
+        if (WalletIdentityService::consumeAnonymousChallenge($walletAddress, (int) $chain->id) === null) {
+            // Replayed, or a concurrent request with the same signature won.
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'Challenge not found or expired. Please request a new nonce.',
+                400
+            );
         }
 
         // For Polkadot, swap to the canonical prefix-0 SS58 form. The
@@ -599,11 +595,11 @@ final class WalletAuthController
             return ApiResponse::error('bcc_conflict', 'That handle is already taken.', 409);
         }
 
-        // Peek (non-destructive) to resolve chain + validate address
-        // format before the atomic consume. Same race-safety contract as
-        // /auth/wallet-link's peekChallenge → verifyAndLink pair.
-        $challengePeek = WalletIdentityService::peekAnonymousChallenge($walletAddress);
-        if ($challengePeek === null) {
+        // F-25: verify BEFORE consuming (see walletLogin). The signature picks
+        // the live challenge it was made for, which also resolves the chain;
+        // nothing is consumed until every cheap check below has passed.
+        $candidates = WalletIdentityService::peekAnonymousChallenges($walletAddress);
+        if ($candidates === []) {
             return ApiResponse::error(
                 'bcc_invalid_request',
                 'Challenge not found or expired. Please request a new nonce.',
@@ -611,10 +607,15 @@ final class WalletAuthController
             );
         }
 
-        $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getById((int) ($challengePeek['chain_id'] ?? 0));
-        if ($chain === null) {
-            return ApiResponse::error('bcc_invalid_request', 'Chain not found.', 400);
+        $match = self::verifiedCandidate($candidates, $walletAddress, $signature, $extra);
+        if ($match === null) {
+            Logger::warning('[bcc-trust] wallet-signup signature invalid', [
+                'address'    => $walletAddress,
+                'candidates' => count($candidates),
+            ]);
+            return ApiResponse::error('bcc_signature_invalid', 'Signature verification failed.', 401);
         }
+        [, $chain] = $match;
 
         if (!WalletAddressValidator::validate($walletAddress, (string) $chain->chain_type)) {
             return ApiResponse::error('bcc_invalid_request', 'Invalid wallet address format.', 400);
@@ -667,41 +668,15 @@ final class WalletAuthController
             }
         }
 
-        // Point of no return for the nonce: atomic consume + verify.
-        $challenge = WalletIdentityService::consumeAnonymousChallenge($walletAddress);
-        if ($challenge === null) {
-            // Lost the consume race against another request — same
-            // nonce can't be replayed.
+        // Point of no return for the nonce: consume the challenge the
+        // signature verified against (above). Null = replayed, or a concurrent
+        // request with the same signature won.
+        if (WalletIdentityService::consumeAnonymousChallenge($walletAddress, (int) $chain->id) === null) {
             return ApiResponse::error(
                 'bcc_invalid_request',
                 'Challenge not found or expired. Please request a new nonce.',
                 400
             );
-        }
-
-        $challengeMessage = (string) ($challenge['message'] ?? '');
-        if ($challengeMessage === '') {
-            Logger::error('[bcc-trust] wallet-signup challenge malformed', [
-                'chain'   => (string) $chain->slug,
-                'address' => $walletAddress,
-            ]);
-            return ApiResponse::error('bcc_internal_error', 'Challenge malformed.', 500);
-        }
-
-        $valid = WalletVerifier::verify(
-            (string) $chain->chain_type,
-            $challengeMessage,
-            $signature,
-            $walletAddress,
-            $extra
-        );
-
-        if (!$valid) {
-            Logger::warning('[bcc-trust] wallet-signup signature invalid', [
-                'chain'   => (string) $chain->slug,
-                'address' => $walletAddress,
-            ]);
-            return ApiResponse::error('bcc_signature_invalid', 'Signature verification failed.', 401);
         }
 
         // For Polkadot, swap to the canonical prefix-0 SS58 form so the
@@ -726,6 +701,10 @@ final class WalletAuthController
             'user_pass'    => $password,
             'display_name' => $displayName !== '' ? $displayName : $handle,
             'role'         => 'subscriber',
+            // Core saves meta_input BEFORE firing user_register, so the
+            // handle-assignment hook in Plugin.php sees the chosen handle
+            // and leaves it alone.
+            'meta_input'   => [HandleService::META_HANDLE => $handle],
         ]);
 
         if (is_wp_error($userId)) {
@@ -825,5 +804,34 @@ final class WalletAuthController
         $response->header('Cache-Control', 'no-store');
 
         return $response;
+    }
+    /**
+     * The live anonymous challenge this signature was made for, with its
+     * chain — or null when it verifies against none of them (F-25).
+     *
+     * At most one candidate per chain (WalletIdentityService stores them per
+     * address + chain). Each is checked against its own STORED message with
+     * its own chain's verifier; a candidate whose chain is gone or whose
+     * message is empty is skipped. Returns on the first match, so
+     * PolkadotSignatureVerifier::$lastCanonicalAddress still belongs to the
+     * matching signature when the caller reads it.
+     *
+     * @param list<array<string, mixed>> $candidates
+     * @param array<string, mixed>       $extra
+     * @return array{0: array<string, mixed>, 1: ChainRow}|null
+     */
+    private static function verifiedCandidate(array $candidates, string $walletAddress, string $signature, array $extra): ?array
+    {
+        foreach ($candidates as $candidate) {
+            $chain = \BCC\Core\ServiceLocator::resolveChainRead()->getById((int) ($candidate['chain_id'] ?? 0));
+            $message = (string) ($candidate['message'] ?? '');
+            if ($chain === null || $message === '') {
+                continue;
+            }
+            if (WalletVerifier::verify((string) $chain->chain_type, $message, $signature, $walletAddress, $extra)) {
+                return [$candidate, $chain];
+            }
+        }
+        return null;
     }
 }

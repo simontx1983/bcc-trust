@@ -22,6 +22,15 @@ final class NftSelectionController
 {
     private const NS = 'bcc/v1';
 
+    /**
+     * F-30: most ids one reorder request may carry. The reorder runs one
+     * UPDATE per id, so an unbounded list let a single request issue
+     * ~150k writes. 200 is the most selections the profile list ever
+     * loads (NftSelectionRepository::getForUser default), so a real
+     * reorder never needs more.
+     */
+    public const REORDER_MAX_IDS = 200;
+
     public static function register_rest_routes(): void
     {
         $auth = function (): bool {
@@ -101,7 +110,7 @@ final class NftSelectionController
     public static function rest_list(\WP_REST_Request $req): \WP_REST_Response
     {
         $userId = get_current_user_id();
-        $items  = NftSelectionRepository::getForUser($userId);
+        $items  = NftSelectionService::presentSelections(NftSelectionRepository::getForUser($userId));
         return ApiResponse::ok([
             'items' => $items,
         ]);
@@ -178,9 +187,22 @@ final class NftSelectionController
 
     public static function rest_reorder(\WP_REST_Request $req): \WP_REST_Response
     {
+        // F-30: throttle like the sibling select/deselect routes (per user
+        // for authed requests), and cap the list BEFORE any write.
+        if (!\BCC\Core\Security\Throttle::allow('nft_reorder', 30, 60)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
+        }
+
         $userId     = get_current_user_id();
         $orderedIds = (array) $req->get_param('ordered_ids');
-        $ids        = array_values(array_map('intval', $orderedIds));
+        if (count($orderedIds) > self::REORDER_MAX_IDS) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                sprintf('ordered_ids may contain at most %d ids.', self::REORDER_MAX_IDS),
+                422
+            );
+        }
+        $ids = array_values(array_map('intval', $orderedIds));
 
         $count = NftSelectionService::reorder($userId, $ids);
         return ApiResponse::ok(['ok' => true, 'updated' => $count]);

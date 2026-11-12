@@ -179,6 +179,33 @@ final class TwoFactorAttemptCapTest extends TestCase
         self::assertSame([401, 'bcc_invalid_2fa_token'], [$status, $code]);
     }
 
+    /**
+     * L2: every attempt is counted BEFORE the compare. Simulates the state
+     * concurrent guesses leave behind — MAX attempts already counted, none of
+     * them counted as wrong yet — and shows even the RIGHT code is refused
+     * without being compared, and the code and challenge are burned.
+     */
+    public function testAttemptsBeyondTheCapAreRefusedBeforeAnyCompare(): void
+    {
+        $c = self::login();
+        $GLOBALS['__bcc_ph']['throttle_hits']['2fa_attempt:' . self::USER . ':' . substr(hash('sha256', $c), 0, 32)] = AuthSupport::TWO_FA_MAX_FAILURES;
+
+        [$status, $code] = self::verify($c, self::RIGHT);
+
+        self::assertSame([401, 'bcc_invalid_2fa_token'], [$status, $code], 'refused, not compared');
+        self::assertArrayNotHasKey(self::otpKey($c), $GLOBALS['__bcc_ph']['transients'], 'OTP burned');
+        self::assertArrayNotHasKey('bcc_2fa_ct_' . $c, $GLOBALS['__bcc_ph']['transients'], 'challenge burned');
+    }
+
+    public function testEveryAttemptIsCountedIncludingTheRightOne(): void
+    {
+        $c = self::login();
+
+        self::verify($c, self::RIGHT);
+
+        self::assertSame(1, $GLOBALS['__bcc_ph']['throttle_hits']['2fa_attempt:' . self::USER . ':' . substr(hash('sha256', $c), 0, 32)] ?? 0);
+    }
+
     public function testTheCounterBucketIsAnExplicitUserAndChallengeKey(): void
     {
         $c = self::login();

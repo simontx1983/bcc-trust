@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Tests\Integration;
 
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -85,6 +86,7 @@ final class CollectionCommunityMetadataMigrationTest extends TestCase
         }
     }
 
+    #[Group('mariadb')]
     public function testTheApprovalStateColumnIsNotNullAndDefaultsToNone(): void
     {
         $t = $this->table();
@@ -97,7 +99,11 @@ final class CollectionCommunityMetadataMigrationTest extends TestCase
         self::assertIsObject($meta);
         self::assertSame('NO', $meta->IS_NULLABLE);
         // ⚠ information_schema returns the literal string for a string default.
-        self::assertSame('none', $meta->COLUMN_DEFAULT);
+        // F-180: MariaDB 11.8 reports a string default QUOTED ("'none'"),
+        // MySQL unquoted ("none"). Strip one pair of surrounding quotes so the
+        // same assertion holds on both engines. A NULL default stays the bare
+        // string "NULL" on either, so it still fails.
+        self::assertSame('none', preg_replace("/^'(.*)'$/s", '$1', (string) $meta->COLUMN_DEFAULT));
     }
 
     public function testANewRowStartsWithNoImportedDescription(): void

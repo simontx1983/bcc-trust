@@ -209,22 +209,7 @@ final class CollectionPersistMetricsTest extends TestCase
      */
     public function testTheEmittedNamesMatchBccCoresCanonicalMap(): void
     {
-        $path = dirname(__DIR__, 3) . '/bcc-core/bcc-core.php';
-        if (!is_file($path)) {
-            if ((string) getenv('GITHUB_ACTIONS') !== '') {
-                self::fail(
-                    'bcc-core sibling missing at ' . $path . ' while running in CI. '
-                    . 'Every ci.yml job checks it out beside bcc-trust; if that step '
-                    . 'moved or was removed, this reconciliation stops running and a '
-                    . 'subsystem/event rename on either side ships silently.'
-                );
-            }
-
-            self::markTestSkipped(
-                'bcc-core sibling not present at ' . $path
-                . ' — expected outside CI (a bare git worktree has no sibling).'
-            );
-        }
+        $path = \BCC\Trust\Tests\Support\CoreSibling::require('bcc-core.php');
 
         $src = (string) file_get_contents($path);
 

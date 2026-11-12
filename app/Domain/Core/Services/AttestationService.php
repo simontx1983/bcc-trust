@@ -1204,8 +1204,7 @@ final class AttestationService
             if (!($user instanceof \WP_User)) {
                 return $empty;
             }
-            $handleMeta = (string) get_user_meta($targetId, 'bcc_handle', true);
-            $handle     = $handleMeta !== '' ? $handleMeta : (string) $user->user_login;
+            $handle     = \BCC\Trust\Core\Support\PublicIdentity::handle($targetId, get_user_meta($targetId, 'bcc_handle', true));
             if ($handle === '') {
                 return $empty;
             }
@@ -1442,13 +1441,9 @@ final class AttestationService
             return null;
         }
 
-        $handleMeta = (string) get_user_meta($userId, 'bcc_handle', true);
-        $handle     = $handleMeta !== '' ? $handleMeta : (string) $user->user_login;
-
-        $displayName = (string) $user->display_name;
-        if ($displayName === '') {
-            $displayName = (string) $user->user_login;
-        }
+        $identity    = \BCC\Trust\Core\Support\PublicIdentity::forUser($user);
+        $handle      = $identity['handle'];
+        $displayName = $identity['display_name'];
 
         // Cached seam (honors the avatar-change bust hook), not raw get_avatar_url.
         $avatarUrl = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrl($userId);

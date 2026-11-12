@@ -1382,6 +1382,12 @@ final class GatedGroupProvisioningService {
         // gm_user_id = 0 owner row nobody can ever act as. So the requester
         // is made the current user for the constructor alone, and the
         // previous identity is restored on every path, including a throw.
+        //
+        // ⚠ Safe HERE only because $ownerId is a re-verified administrator
+        // (resolveRequesterAsOwner: get_userdata + user_can manage_options)
+        // and the swap spans one PeepSo constructor. Do not copy this pattern
+        // for a non-admin owner: every hook fired inside the window runs AS
+        // that user, with their capabilities (#457 review L2).
         $previousUserId = get_current_user_id();
         $swapped        = $previousUserId !== $ownerId;
 

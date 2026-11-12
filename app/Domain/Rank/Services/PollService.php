@@ -91,6 +91,12 @@ class PollService
 
     private const CHOICES = ['for', 'against'];
 
+    /** Closure-audit exclusion reason: a non-representative member of a confirmed cluster (§18). */
+    public const EXCLUDED_CLUSTER_MEMBER = 'cluster_member';
+
+    /** Closure-audit exclusion reason: counted weight was 0 (zero-weight voter, or capped to 0) — F-39. */
+    public const EXCLUDED_ZERO_WEIGHT = 'zero_weight';
+
     public function __construct(
         private readonly PollRepository $polls,
         private readonly BallotRepository $ballots,
@@ -607,6 +613,19 @@ class PollService
             }
         }
 
+        // F-39 (user decision): only WEIGHTED ballots count toward quorum.
+        // A ballot whose counted weight is 0 — a zero-weight voter, or a
+        // suspected-cluster ballot the cap scaled to nothing — used to add
+        // to the quorum HEADCOUNT while adding no weight, so a crowd of
+        // weightless accounts could satisfy the voter floor. It is marked
+        // not counted here, so the headcount, the persisted closure audit
+        // and the closed tally all agree.
+        foreach ($evaluated as $i => $entry) {
+            if ($entry['counted'] && $entry['counted_weight'] <= 0.0) {
+                $evaluated[$i]['counted'] = false;
+            }
+        }
+
         $countedVoters = 0;
         $weightFor     = 0.0;
         $weightAgainst = 0.0;
@@ -664,6 +683,77 @@ class PollService
     }
 
     // ── helpers ──────────────────────────────────────────────────────
+
+    /**
+     * WHY each ballot of a poll was excluded at close, derived from the
+     * persisted closure audit — no schema column carries a reason.
+     *
+     * @return array<int, 'cluster_member'|'zero_weight'|null> ballot id => reason
+     *         (null = counted, or not evaluated yet)
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure
+     */
+    public function closureExclusionReasons(int $pollId): array
+    {
+        $rows = $this->ballots->listActiveForPoll($pollId);
+
+        $findingIds = [];
+        foreach ($rows as $row) {
+            if (($row->confirmed_cluster_id ?? null) !== null) {
+                $findingIds[] = (int) $row->confirmed_cluster_id;
+            }
+        }
+        $representatives = $this->clusters->representativesByIds($findingIds);
+
+        $reasons = [];
+        foreach ($rows as $row) {
+            $findingId = ($row->confirmed_cluster_id ?? null) !== null ? (int) $row->confirmed_cluster_id : 0;
+            $reasons[(int) $row->id] = self::exclusionReason($row, $representatives[$findingId] ?? null);
+        }
+        return $reasons;
+    }
+
+    /**
+     * The derivation rule for one ballot's closure-audit exclusion.
+     *
+     * evaluatePoll() excludes a ballot (counted = 0) for exactly two
+     * reasons, applied in this order:
+     *   1. it is a member of a CONFIRMED cluster but not the finding's
+     *      representative (§18) → 'cluster_member';
+     *   2. otherwise its counted weight is 0 — a zero-weight voter, or a
+     *      suspected-cluster ballot the §19 cap scaled to nothing (F-39)
+     *      → 'zero_weight'.
+     *
+     * Both persist counted = 0 and counted_weight = 0, and a cluster's own
+     * representative carries the same confirmed_cluster_id as its members,
+     * so the representative id is required to tell (1) from a
+     * representative who was excluded for zero weight (2). Pass the
+     * finding's representative_user_id (ClusterFindingsRepository::
+     * representativesByIds, reversed findings included); null when the
+     * ballot has no confirmed cluster OR the finding row is gone — then a
+     * clustered ballot is reported as 'cluster_member', the rule applied
+     * first at close.
+     *
+     * Returns null when the ballot counted, or has not been evaluated yet
+     * (the audit columns are NULL until the close sweep runs).
+     *
+     * @phpstan-param BallotRow $row
+     * @return 'cluster_member'|'zero_weight'|null
+     */
+    public static function exclusionReason(object $row, ?int $representativeUserId): ?string
+    {
+        $counted = $row->counted ?? null;
+        if ($counted === null || (int) $counted === 1) {
+            return null;
+        }
+
+        if (($row->confirmed_cluster_id ?? null) !== null
+            && ($representativeUserId === null || $representativeUserId !== (int) $row->voter_user_id)
+        ) {
+            return self::EXCLUDED_CLUSTER_MEMBER;
+        }
+
+        return self::EXCLUDED_ZERO_WEIGHT;
+    }
 
     /**
      * Closed-poll tally (§17.3) from the persisted closure audit.
