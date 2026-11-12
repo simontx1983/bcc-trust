@@ -29,6 +29,7 @@ others are **manual**: run them when you change the code they cover.
 | `announcement-read-mutation-controls.sh` | announcement visibility predicates (§4.32.1) | no | `php` job |
 | `announcement-reporting-mutation-controls.sh` | reporting does not disclose drafts or author ids | no | `php` job |
 | `operator-resolver-meta-leg-mutation-controls.sh` | the verified-operator resolver's post_meta leg | yes | `mutation-controls-db` job |
+| `pr714-mutation-controls.sh` | NFT holder-community membership revocation fails safe (access control) | yes | `mutation-controls-revocation` job |
 
 ## Manual scripts: status
 
@@ -48,7 +49,6 @@ for that run.
 | `pr6-mutation-controls.sh` | PR 6 provisioning and intake | yes | ✅ 17/17 killed (compensation re-anchored after F-160) |
 | `pr7-mutation-controls.sh` | collection metadata rules, research URLs, description review | yes | ✅ 19/19 killed (3 scan-action controls removed with their target, 1 re-anchored) |
 | `pr71-mutation-controls.sh` | the retired enrichment cron stays retired | no | ✅ 5/5 killed (15 discovery-readiness controls removed with their targets) |
-| `pr714-mutation-controls.sh` | NFT holder-community membership revocation fails safe | yes | ✅ 39/39 killed |
 | `pr78-mutation-controls.sh` | centralized breaker failure attribution | no | ✅ 23/23 killed (5 re-anchored; see the CRLF note below) |
 | `pr76-mutation-controls.sh` | CosmWasm classification and the breaker lifecycle | no | ❌ 11 killed, **1 survived** (a real gap, below) |
 
