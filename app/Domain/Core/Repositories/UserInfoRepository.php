@@ -1419,6 +1419,49 @@ class UserInfoRepository {
     }
 
     /**
+     * §F-182 — the JOIN and WHERE fragments that exclude suspended
+     * members from a `WP_User_Query` listing.
+     *
+     * Lives here rather than in the caller because this repository owns
+     * `user_info`, and the arch guardrail is right to insist: a `$wpdb`
+     * in the Support layer is a second place that knows the schema.
+     * {@see \BCC\Trust\Core\Support\ProfileAccess::filterSuspendedFromListing}
+     * only appends the strings.
+     *
+     * ⚠ The join is LEFT and the NULL arm is load-bearing: a member with
+     * no row here is NOT suspended and must stay listed. An INNER JOIN
+     * would silently drop everyone who has never been scored.
+     *
+     * ⚠ The alias is part of the contract with the caller, which uses it
+     * to detect a double append — `pre_user_query` can fire more than
+     * once on one query, and a second join would fail the whole listing
+     * with "Not unique table/alias".
+     *
+     * @return array{from: string, where: string, alias: string}
+     */
+    public function listingSuspensionClause(int $viewerId): array
+    {
+        global $wpdb;
+
+        $alias = 'bcc_f182';
+
+        return [
+            'alias' => $alias,
+            'from'  => " LEFT JOIN {$this->table} {$alias}"
+                . " ON {$alias}.user_id = {$wpdb->users}.ID",
+            // The viewer id is already an int, but it goes through
+            // prepare() anyway: the one place a reader checks for
+            // interpolation is a string built by hand.
+            'where' => (string) $wpdb->prepare(
+                " AND ({$alias}.is_suspended IS NULL"
+                . " OR {$alias}.is_suspended = 0"
+                . " OR {$wpdb->users}.ID = %d)",
+                $viewerId
+            ),
+        ];
+    }
+
+    /**
      * Get suspended user IDs from a set of user IDs.
      *
      * @param int[] $userIds
