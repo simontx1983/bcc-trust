@@ -2695,13 +2695,18 @@ final class Plugin
         // dedicated restoration notice; other reconsiderations to the
         // appeal-outcome notice — one bell per event, never both.
         // F-307 — tell the author when an administrator takes their
-        // announcement down, and when it is restored. Bell only.
+        // announcement down, and when it is restored. Bell only, and DEFERRED
+        // past the 30 s undo window (review): the cron handler re-reads the
+        // state, so an undone misclick tells the author nothing.
         add_action('bcc_announcement_moderation_hidden', function (int $announcementId): void {
-            $this->notificationDispatcher()->onAnnouncementModerated($announcementId, true);
+            Services\AnnouncementModerationService::scheduleOutcomeNotice($announcementId, true);
         }, 30, 1);
         add_action('bcc_announcement_moderation_restored', function (int $announcementId): void {
-            $this->notificationDispatcher()->onAnnouncementModerated($announcementId, false);
+            Services\AnnouncementModerationService::scheduleOutcomeNotice($announcementId, false);
         }, 30, 1);
+        add_action(Services\AnnouncementModerationService::NOTICE_HOOK, function ($announcementId, $hidden): void {
+            $this->announcementModerationService()->deliverOutcomeNotice((int) $announcementId, (bool) $hidden);
+        }, 10, 2);
 
         add_action('bcc_rank_recovery_started', function (int $userId, string $deadline): void {
             $this->notificationDispatcher()->onRankRecoveryStarted($userId, $deadline);

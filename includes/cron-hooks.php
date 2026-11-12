@@ -100,6 +100,11 @@ return [
         // F-14: same-tick continuation of a budget-cut claim re-verify sweep.
         'bcc_onchain_claim_reverify_continue',
         'bcc_rank_daily_tier_snapshot_continue',
+        // F-307: the deferred author bell for an announcement takedown or
+        // restore. Fire-once, scheduled WITH args (notice id, action), so it
+        // is cleared with wp_unschedule_hook (see the deactivate/uninstall
+        // loops); wp_clear_scheduled_hook() would miss arg-carrying events.
+        'bcc_announcement_moderation_notice',
         // Retired automatic NFT collection discovery. These five ran
         // unattended chain-wide sweeps: `bcc_index_collections` walked
         // every active EVM/Solana/Cosmos chain for "top collections", and

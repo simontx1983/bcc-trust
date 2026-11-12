@@ -2421,8 +2421,11 @@ function bcc_trust_deactivate() {
         $cron_lists['cleanup_only']
     );
 
+    // wp_unschedule_hook(), not wp_clear_scheduled_hook(): the latter, called
+    // without args, only clears events scheduled WITHOUT args, and some
+    // fire-once hooks carry them (F-307's per-notice moderation bell).
     foreach ($cron_hooks as $hook) {
-        wp_clear_scheduled_hook($hook);
+        wp_unschedule_hook($hook);
     }
 
     // Clear chain-refresh + enrichment crons owned by ChainRefreshService.

@@ -49,6 +49,19 @@ final class AnnouncementModerationService
     /** Reason code on the projected activity's hidden row. */
     public const REASON_TAKEDOWN = 'announcement_takedown';
 
+    /**
+     * F-307 review — the author's bell is DEFERRED past the queue's 30 s undo
+     * window, then sent only if the notice's state still warrants it. An
+     * admin's misclick + undo therefore tells the author nothing, instead
+     * of "hidden" followed by "restored" (or, with a bare no-notify undo, a
+     * "hidden" bell about a notice that is in fact up).
+     */
+    public const NOTICE_HOOK          = 'bcc_announcement_moderation_notice';
+    public const NOTICE_DELAY_SECONDS = 35;
+
+    /** The last bell actually sent to the author: 'hidden' | 'restored'. */
+    public const META_LAST_NOTICE = '_bcc_announcement_moderation_last_notice';
+
     public function __construct(
         private readonly HiddenActivityRepository $hiddenRepo,
         private readonly PeepSoActivityWriter $activityWriter
@@ -171,6 +184,69 @@ final class AnnouncementModerationService
         }
 
         do_action('bcc_announcement_moderation_restored', $announcementId, $adminUserId);
+        return true;
+    }
+
+    /**
+     * Queue the author's bell for after the undo window. One single event per
+     * (notice, action), deduped with wp_next_scheduled(), so hide → restore →
+     * re-hide inside the window queues one "hidden" and one "restored".
+     */
+    public static function scheduleOutcomeNotice(int $announcementId, bool $hidden): void
+    {
+        if ($announcementId <= 0) {
+            return;
+        }
+        $args = [$announcementId, $hidden ? 1 : 0];
+        if (wp_next_scheduled(self::NOTICE_HOOK, $args) !== false) {
+            return;
+        }
+        wp_schedule_single_event(time() + self::NOTICE_DELAY_SECONDS, self::NOTICE_HOOK, $args);
+    }
+
+    /**
+     * Cron handler: send the bell only if the state, RE-READ NOW, still
+     * warrants it. Late cron is harmless for the same reason.
+     *
+     *   - "hidden"   — the notice is taken down AND the author's last bell
+     *                  was not already "hidden";
+     *   - "restored" — the notice is up AND the author's last bell was
+     *                  "hidden". An author who was never told it went down
+     *                  (the hide was undone inside the window) is not told
+     *                  it came back.
+     *
+     * Fails closed: a notice that cannot be read (gone, not an announcement)
+     * gets no bell, and the skip is logged.
+     *
+     * @param (callable(int, bool): void)|null $send test seam; defaults to
+     *        NotificationDispatcher::onAnnouncementModerated()
+     * @return bool true when a bell was sent
+     */
+    public function deliverOutcomeNotice(int $announcementId, bool $hidden, ?callable $send = null): bool
+    {
+        if (!self::isAnnouncement($announcementId)) {
+            Logger::warning('[AnnouncementModerationService] deferred moderation bell skipped: notice unreadable', [
+                'announcement_id' => $announcementId,
+                'hidden'          => $hidden,
+            ]);
+            return false;
+        }
+
+        $isHidden = $this->isHidden($announcementId);
+        $last     = (string) get_post_meta($announcementId, self::META_LAST_NOTICE, true);
+
+        $warranted = $hidden
+            ? ($isHidden && $last !== 'hidden')
+            : (!$isHidden && $last === 'hidden');
+        if (!$warranted) {
+            return false;
+        }
+
+        update_post_meta($announcementId, self::META_LAST_NOTICE, $hidden ? 'hidden' : 'restored');
+        $send ??= static function (int $id, bool $h): void {
+            \BCC\Trust\Core\Plugin::instance()->notificationDispatcher()->onAnnouncementModerated($id, $h);
+        };
+        $send($announcementId, $hidden);
         return true;
     }
 
