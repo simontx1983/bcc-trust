@@ -31,7 +31,7 @@ use PHPUnit\Framework\TestCase;
  *
  * ## Isolation
  * Subprocess-only; setUp() loads tests/Stubs/auth-session-stubs.php, then
- * tests/Stubs/account-prehijack-stubs.php, then the suspension stub below.
+ * tests/Stubs/account-prehijack-stubs.php (its Permissions reads __bcc_susp).
  */
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
@@ -44,7 +44,6 @@ final class RefreshRetiresOldTokenTest extends TestCase
         parent::setUp();
         require_once __DIR__ . '/../Stubs/auth-session-stubs.php';
         require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
-        require_once __DIR__ . '/../Stubs/refresh-suspension-stub.php';
         $GLOBALS['__bcc_ph'] = [
             'users'      => [self::USER => ['email' => 'u81@example.com', 'login' => 'u81', 'display' => 'U81']],
             'meta'       => [self::USER => ['bcc_handle' => 'handle81']],
@@ -53,7 +52,6 @@ final class RefreshRetiresOldTokenTest extends TestCase
             'actions'    => [],
             'options'    => [],
         ];
-        $GLOBALS['__bcc_suspended'] = false;
         $GLOBALS['wpdb'] = new class {
             public string $prefix = 'wp_';
 
@@ -170,14 +168,28 @@ final class RefreshRetiresOldTokenTest extends TestCase
 
     public function testARefusedRefreshRetiresNothing(): void
     {
-        $GLOBALS['__bcc_suspended'] = true;
+        // Refused: the token was revoked (sign out everywhere, a password
+        // change). Nothing new is minted, so nothing is retired.
         $old = JwtToken::encode(self::USER, 'handle81');
+        JwtToken::revokeAllForUser(self::USER);
 
         [$status] = self::refresh($old);
 
-        self::assertSame(403, $status);
+        self::assertSame(401, $status);
         self::assertSame([], self::retired());
-        self::assertTrue(JwtToken::decode($old)['ok']);
+    }
+
+    public function testASuspendedMembersRefreshStillRetiresTheOldToken(): void
+    {
+        // F-305: a suspended member keeps a read-only session and may refresh.
+        $GLOBALS['__bcc_susp'] = [self::USER => true];
+        $old = JwtToken::encode(self::USER, 'handle81');
+
+        [$status, $data] = self::refresh($old);
+
+        self::assertSame(200, $status);
+        self::assertTrue($data['suspended']);
+        self::assertArrayHasKey(self::hashOf($old), self::retired());
     }
 
     public function testAMalformedEntryIsIgnored(): void
