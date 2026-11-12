@@ -70,6 +70,10 @@ verify_clean () {
   fi
 }
 
+# ⚠ A mutation that matched nothing writes NOTHING, so the md5 check reports
+# BROKEN. Writing the round-tripped text anyway can still move the bytes
+# (a file with mixed line endings comes back uniform) and pass an unmutated
+# tree off as SURVIVED.
 apply () {
   python - "$1" <<PY || { echo "FATAL: mutation script errored"; exit 2; }
 import io, sys
@@ -77,7 +81,10 @@ p = sys.argv[1]
 s = io.open(p, encoding='utf-8', newline='').read()
 nl = '\r\n' if '\r\n' in s else '\n'
 s = s.replace('\r\n', '\n')
+orig = s
 ${2}
+if s == orig:
+    sys.exit(0)
 io.open(p, 'w', encoding='utf-8', newline='').write(s.replace('\n', nl))
 PY
 }

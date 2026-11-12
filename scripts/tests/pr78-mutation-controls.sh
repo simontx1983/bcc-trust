@@ -84,6 +84,10 @@ verify_clean () {
 # UNMUTATED tree was reported as SURVIVED (five false survivors, 2026-11-12).
 # The mutation now runs on LF text and the original endings are written back,
 # so the md5 check sees only the mutation itself.
+# ⚠ A mutation that matched nothing writes NOTHING, so the md5 check reports
+# BROKEN. Writing the round-tripped text anyway can still move the bytes
+# (a file with mixed line endings comes back uniform) and pass an unmutated
+# tree off as SURVIVED.
 apply () {
   python - "$1" <<PY || { echo "FATAL: mutation script errored"; exit 2; }
 import io, sys
@@ -91,7 +95,10 @@ p = sys.argv[1]
 raw = io.open(p, encoding='utf-8', newline='').read()
 crlf = '\r\n' in raw
 s = raw.replace('\r\n', '\n')
+orig = s
 ${2}
+if s == orig:
+    sys.exit(0)
 if crlf:
     s = s.replace('\n', '\r\n')
 io.open(p, 'w', encoding='utf-8', newline='').write(s)
