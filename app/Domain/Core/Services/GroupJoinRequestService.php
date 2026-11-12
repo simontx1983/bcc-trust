@@ -82,12 +82,35 @@ final class GroupJoinRequestService
             return self::error('bcc_permission_denied', "You can't ask to join this community again yet.", 403);
         }
 
+        // USER DECISION (2026-11-12): a block either way between the
+        // requester and the group's OWNER silently refuses the request — the
+        // same generic copy as any other refusal, nothing written, nobody
+        // told. A block read that could not run refuses too.
+        $roster = self::adminRoster($groupId);
+        foreach ($roster as $adminId => $role) {
+            if ($role === 'member_owner' && self::blockedEitherWay($userId, $adminId)) {
+                return self::refused();
+            }
+        }
+
         $outcome = $this->locked($userId, $groupId, static fn (): string => PeepSoGroupWriter::requestJoin($userId, $groupId));
+        if ($outcome === PeepSoGroupWriter::OUTCOME_REFUSED) {
+            // The writer refuses a banned row: say so (F-271 wording).
+            return self::error('bcc_permission_denied', 'A moderator removed you from this community, so you cannot rejoin it.', 403);
+        }
         if ($outcome !== PeepSoGroupWriter::OUTCOME_DONE) {
             return self::fromOutcome($outcome, 'You are already a member, invited, or waiting on a request here.');
         }
 
-        Plugin::instance()->notificationDispatcher()->onGroupJoinRequested($userId, $groupId, self::adminIds($groupId));
+        // Never ring the bell of an admin blocked either way with the
+        // requester (or whose block state could not be read).
+        $recipients = [];
+        foreach (array_keys($roster) as $adminId) {
+            if (!self::blockedEitherWay($userId, $adminId)) {
+                $recipients[] = $adminId;
+            }
+        }
+        Plugin::instance()->notificationDispatcher()->onGroupJoinRequested($userId, $groupId, $recipients);
         AuditLogger::log('group_join_requested', $groupId, [], 'group', $userId);
 
         return self::ok(['status' => 'requested', 'group_id' => $groupId]);
@@ -176,6 +199,12 @@ final class GroupJoinRequestService
         if ($inviteeId <= 0 || get_userdata($inviteeId) === false
             || !\BCC\Core\Permissions\Permissions::is_not_suspended($inviteeId, false)) {
             return self::error('bcc_invalid_request', 'Member not found.', 404);
+        }
+        // USER DECISION (2026-11-12): a block either way (or an unreadable
+        // block state) silently refuses the invitation — the same generic
+        // copy as any refused invite, so it reveals nothing about the block.
+        if (self::blockedEitherWay($actorId, $inviteeId)) {
+            return self::error('bcc_permission_denied', "This member can't be invited.", 403);
         }
         $openInvites = PeepSoGroupRepository::countPendingMembers($groupId, PeepSoGroupRepository::PENDING_INVITE);
         if ($openInvites === null) {
@@ -500,7 +529,7 @@ final class GroupJoinRequestService
         return match ($outcome) {
             PeepSoGroupWriter::OUTCOME_CONFLICT => self::error('bcc_conflict', $conflictMessage, 409),
             // A ban (or a row that blocks this) — no detail beyond "can't".
-            PeepSoGroupWriter::OUTCOME_REFUSED  => self::error('bcc_permission_denied', "You can't join this community.", 403),
+            PeepSoGroupWriter::OUTCOME_REFUSED  => self::refused(),
             'busy'                              => self::error('bcc_conflict', 'Please retry.', 409),
             default                             => self::unavailable(),
         };
@@ -512,18 +541,35 @@ final class GroupJoinRequestService
         return self::error('bcc_unavailable', 'Group membership service is unavailable.', 503);
     }
 
-    /** @return list<int> owners and managers, for the request bell */
-    private static function adminIds(int $groupId): array
+    /**
+     * Owners and managers → their role. listGroupMembers orders by role rank
+     * in SQL (owner 1, manager/moderator 2, everyone else 3), so the first
+     * 100 rows hold every owner and manager unless a group has more than 99
+     * managers + moderators.
+     *
+     * @return array<int, string>
+     */
+    private static function adminRoster(int $groupId): array
     {
-        // listGroupMembers sorts owner → manager/moderator → member, so the
-        // first page holds every admin of any realistic group.
-        $ids = [];
+        $roster = [];
         foreach (PeepSoGroupRepository::listGroupMembers($groupId, 0, 100) as $row) {
             if (in_array((string) $row->role, self::ADMIN_ROLES, true)) {
-                $ids[] = (int) $row->user_id;
+                $roster[(int) $row->user_id] = (string) $row->role;
             }
         }
-        return $ids;
+        return $roster;
+    }
+
+    /** A block either way, or a block read that did not run (fail closed). */
+    private static function blockedEitherWay(int $userA, int $userB): bool
+    {
+        return \BCC\Core\Repositories\PeepSoBlockRepository::isMutuallyBlockedOrUnknown($userA, $userB) !== false;
+    }
+
+    /** @return array{error: string, message: string, status: int} */
+    private static function refused(): array
+    {
+        return self::error('bcc_permission_denied', "You can't join this community.", 403);
     }
 
     /** @return array<int, int> group id → denied-at */

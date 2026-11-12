@@ -250,6 +250,31 @@ namespace BCC\Core\Repositories {
     }
 }
 
+namespace BCC\Core\Repositories {
+    if (!class_exists(PeepSoBlockRepository::class, false)) {
+        /**
+         * Fixture: blocks = list<[blocker, blocked]> (either direction counts),
+         * block_unknown = list<int> users whose block read cannot run.
+         */
+        final class PeepSoBlockRepository
+        {
+            public static function isMutuallyBlockedOrUnknown(int $userA, int $userB): ?bool
+            {
+                $unknown = $GLOBALS['__bcc_gjr']['block_unknown'] ?? [];
+                if (in_array($userA, $unknown, true) || in_array($userB, $unknown, true)) {
+                    return null;
+                }
+                foreach ($GLOBALS['__bcc_gjr']['blocks'] ?? [] as [$a, $b]) {
+                    if (($a === $userA && $b === $userB) || ($a === $userB && $b === $userA)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
+    }
+}
+
 namespace BCC\Core\PeepSo {
     if (!class_exists(PeepSoGroupWriter::class, false)) {
         final class PeepSoGroupWriter

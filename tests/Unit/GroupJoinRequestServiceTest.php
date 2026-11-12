@@ -181,6 +181,100 @@ final class GroupJoinRequestServiceTest extends TestCase
         self::assertSame([], self::writes());
     }
 
+    // ── USER DECISION: system groups (BCC-created) take requests too ──
+
+    public function testAClosedSystemGroupAcceptsRequests(): void
+    {
+        $GLOBALS['__bcc_gjr']['contexts'][4205] = self::ctx(4205, PeepSoPrivacy::Closed, GroupType::System);
+
+        [$status] = self::call('postRequestJoin', ['id' => 4205], self::REQUESTER);
+
+        self::assertSame(200, $status);
+        self::assertSame([['requestJoin', self::REQUESTER, 4205, null, true]], self::writes());
+    }
+
+    public function testABannedRequesterIsToldAModeratorRemovedThem(): void
+    {
+        $GLOBALS['__bcc_gjr']['outcome'] = 'refused';
+
+        [$status, $data] = self::call('postRequestJoin', ['id' => self::CLOSED], self::REQUESTER);
+
+        self::assertSame(403, $status);
+        self::assertSame('A moderator removed you from this community, so you cannot rejoin it.', $data['error']['message'] ?? null);
+        self::assertSame([], $GLOBALS['__bcc_gjr']['notes']);
+    }
+
+    // ── USER DECISION: a block either way silently refuses ─────────
+
+    /** @return array<string, array{list<array{int, int}>, list<int>}> */
+    public static function ownerBlocks(): array
+    {
+        return [
+            'requester blocked the owner' => [[[self::REQUESTER, self::OWNER]], []],
+            'owner blocked the requester' => [[[self::OWNER, self::REQUESTER]], []],
+            'block state unreadable'      => [[], [self::OWNER]],
+        ];
+    }
+
+    /** @param list<array{int, int}> $blocks @param list<int> $unknown */
+    #[DataProvider('ownerBlocks')]
+    public function testABlockWithTheOwnerSilentlyRefusesTheRequest(array $blocks, array $unknown): void
+    {
+        $GLOBALS['__bcc_gjr']['blocks']        = $blocks;
+        $GLOBALS['__bcc_gjr']['block_unknown'] = $unknown;
+
+        [$status, $data] = self::call('postRequestJoin', ['id' => self::CLOSED], self::REQUESTER);
+
+        self::assertSame(403, $status);
+        self::assertSame("You can't join this community.", $data['error']['message'] ?? null, 'the generic refusal: nothing about a block');
+        self::assertSame([], self::writes());
+        self::assertSame([], $GLOBALS['__bcc_gjr']['notes'], 'nobody is told');
+    }
+
+    public function testAManagerBlockedWithTheRequesterIsNotNotified(): void
+    {
+        $GLOBALS['__bcc_gjr']['blocks'] = [[self::MANAGER, self::REQUESTER]];
+
+        [$status] = self::call('postRequestJoin', ['id' => self::CLOSED], self::REQUESTER);
+
+        self::assertSame(200, $status, 'only a block with the OWNER refuses the request');
+        self::assertSame([self::OWNER], $GLOBALS['__bcc_gjr']['notes'][0][3]);
+    }
+
+    public function testAManagerWhoseBlockStateIsUnreadableIsNotNotified(): void
+    {
+        $GLOBALS['__bcc_gjr']['block_unknown'] = [self::MANAGER];
+
+        self::call('postRequestJoin', ['id' => self::CLOSED], self::REQUESTER);
+
+        self::assertSame([self::OWNER], $GLOBALS['__bcc_gjr']['notes'][0][3]);
+    }
+
+    /** @return array<string, array{list<array{int, int}>, list<int>}> */
+    public static function inviteBlocks(): array
+    {
+        return [
+            'inviter blocked the invitee' => [[[self::OWNER, self::INVITEE]], []],
+            'invitee blocked the inviter' => [[[self::INVITEE, self::OWNER]], []],
+            'block state unreadable'      => [[], [self::INVITEE]],
+        ];
+    }
+
+    /** @param list<array{int, int}> $blocks @param list<int> $unknown */
+    #[DataProvider('inviteBlocks')]
+    public function testABlockEitherWaySilentlyRefusesTheInvitation(array $blocks, array $unknown): void
+    {
+        $GLOBALS['__bcc_gjr']['blocks']        = $blocks;
+        $GLOBALS['__bcc_gjr']['block_unknown'] = $unknown;
+
+        [$status, $data] = self::call('postInvite', ['id' => self::CLOSED, 'user_id' => self::INVITEE], self::OWNER);
+
+        self::assertSame(403, $status);
+        self::assertSame("This member can't be invited.", $data['error']['message'] ?? null, 'the generic refusal copy');
+        self::assertSame([], self::writes());
+        self::assertSame([], $GLOBALS['__bcc_gjr']['notes']);
+    }
+
     // ── D3: a deny is silent, and blocks a re-request for 7 days ─────
 
     public function testADenyIsSilentAndArmsTheReRequestCooldown(): void
