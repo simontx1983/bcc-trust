@@ -1641,17 +1641,10 @@ final class NotificationDispatcher
             return;
         }
         try {
-            $name = trim($entityName) !== ''
-                ? mb_strimwidth(trim($entityName), 0, 80, '…', 'UTF-8')
-                : ($reason === 'no_longer_holder' ? 'this collection' : 'this');
-            $template = $reason === 'no_longer_holder'
-                ? self::CLAIM_HOLDER_BADGE_REMOVED_MESSAGE
-                : self::CLAIM_BADGE_REMOVED_MESSAGE;
-
             $this->dispatch(
                 $userId,
                 $userId,
-                sprintf($template, $name),
+                self::claimBadgeRemovedMessage($entityName, $reason),
                 NotificationType::CLAIM_BADGE_REMOVED,
                 $claimId,
                 0
@@ -1672,6 +1665,35 @@ final class NotificationDispatcher
     /** F-14 copy (holder reason) — approved with the F-14 PR B plan 2026-11-11. */
     public const CLAIM_HOLDER_BADGE_REMOVED_MESSAGE =
         "We couldn't confirm your linked wallets still hold %s, so the holder badge was removed. Claim again once a linked wallet holds it.";
+
+    /**
+     * F-14 copy (validator_row_gone) — the validator itself is no longer in
+     * our records, so the wallet wording does not fit (#594 review).
+     */
+    public const CLAIM_VALIDATOR_GONE_MESSAGE =
+        "We can no longer find the validator behind your %s claim, so the verified badge was removed. If it's still running, claim it again to restore the badge.";
+
+    /**
+     * The bell text for a revoked claim. An empty entity name drops the
+     * name from the sentence ("your claim") rather than producing
+     * "your this claim" (#594 review).
+     */
+    public static function claimBadgeRemovedMessage(string $entityName, string $reason): string
+    {
+        $name = trim($entityName) !== '' ? mb_strimwidth(trim($entityName), 0, 80, '…', 'UTF-8') : '';
+
+        if ($reason === 'no_longer_holder') {
+            return sprintf(self::CLAIM_HOLDER_BADGE_REMOVED_MESSAGE, $name !== '' ? $name : 'this collection');
+        }
+
+        $template = $reason === 'validator_row_gone'
+            ? self::CLAIM_VALIDATOR_GONE_MESSAGE
+            : self::CLAIM_BADGE_REMOVED_MESSAGE;
+
+        return $name !== ''
+            ? sprintf($template, $name)
+            : str_replace('your %s claim', 'your claim', $template);
+    }
 
     /**
      * F-73 — the author's post was hidden AUTOMATICALLY (credible-report
