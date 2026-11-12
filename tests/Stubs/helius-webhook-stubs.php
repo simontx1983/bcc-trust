@@ -79,10 +79,12 @@ namespace BCC\Trust\Onchain\Services {
             public const OUTCOME_AUTH_FAILED = 'auth_failed';
             public const OUTCOME_NO_PAYLOAD  = 'no_payload';
             public const OUTCOME_NO_CHAIN    = 'no_chain';
+            public const OUTCOME_DEDUPE_FAILED = 'dedupe_failed';
 
             /** @param array<string, mixed> $data */
             public static function record(array $data): void
             {
+                $GLOBALS['__bcc_helius_fixture']['delivery_log'][] = $data;
             }
         }
     }

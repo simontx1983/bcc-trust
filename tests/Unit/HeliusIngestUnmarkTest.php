@@ -47,7 +47,21 @@ final class HeliusIngestUnmarkTest extends TestCase
             'ingest_calls'  => 0,
             'metrics'       => [],
             'fail_on'       => [],
+            'delivery_log'  => [],
         ];
+    }
+
+    /**
+     * The outcomes recorded in the delivery log, in order.
+     *
+     * @return list<mixed>
+     */
+    private static function outcomes(): array
+    {
+        return array_map(
+            static fn(array $row): mixed => $row['outcome'] ?? null,
+            $GLOBALS['__bcc_helius_fixture']['delivery_log']
+        );
     }
 
     /** @param list<string> $signatures */
@@ -98,6 +112,7 @@ final class HeliusIngestUnmarkTest extends TestCase
         self::assertSame(1, $f['ingest_calls']);
         self::assertSame([], $f['deleted_args']);
         self::assertSame([], $f['metrics']);
+        self::assertSame(['processed'], self::outcomes());
     }
 
     /**
@@ -123,6 +138,11 @@ final class HeliusIngestUnmarkTest extends TestCase
         self::assertNotContains('sig-c', $f['marked'], 'the batch stops at the failure');
         self::assertContains(['helius_dedup', 'ingest_failed_unmarked'], $f['metrics']);
         self::assertNotContains(['helius_dedup', 'replay_skipped'], $f['metrics'], 'a failure is never counted as a replay');
+        self::assertSame(['dedupe_failed'], self::outcomes(), 'the 503 leaves one dedupe_failed row on the admin page, never a processed one');
+        $row = $f['delivery_log'][0];
+        self::assertTrue($row['auth_passed']);
+        self::assertSame(3, $row['tx_count']);
+        self::assertSame(0, $row['events'], 'nothing was ingested');
     }
 
     public function testADedupeFailureOnTheFirstSignatureMarksAndIngestsNothing(): void
@@ -137,6 +157,7 @@ final class HeliusIngestUnmarkTest extends TestCase
         self::assertSame([], $f['marked']);
         self::assertSame([], $f['deleted_args'], 'nothing to reopen');
         self::assertContains(['helius_dedup', 'ingest_failed_unmarked'], $f['metrics']);
+        self::assertSame(['dedupe_failed'], self::outcomes());
     }
 
     public function testADedupeFailureWhoseReopenFailsIsReportedAsUnmarkFailed(): void
@@ -150,6 +171,7 @@ final class HeliusIngestUnmarkTest extends TestCase
         self::assertSame(503, $resp->get_status(), 'still asks for redelivery; the unmark failure is logged separately');
         self::assertSame(0, $f['ingest_calls']);
         self::assertContains(['helius_dedup', 'unmark_failed'], $f['metrics']);
+        self::assertSame(['dedupe_failed'], self::outcomes());
     }
 
     public function testAllReplayDeliveryNeverIngestsOrUnmarks(): void
