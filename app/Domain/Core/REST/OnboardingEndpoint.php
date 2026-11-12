@@ -166,10 +166,6 @@ final class OnboardingEndpoint
         if (!\BCC\Core\Security\Throttle::allow('me_write', \BCC\Trust\Core\REST\Auth\AuthSupport::ME_WRITE_RATE_LIMIT, 60, 'me_write:' . $userId)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please slow down.', 429);
         }
-        // A handle change is rarer and costlier: its own per-account hourly cap.
-        if (!\BCC\Core\Security\Throttle::allow('me_handle', \BCC\Trust\Core\REST\Auth\AuthSupport::HANDLE_CHANGE_RATE_LIMIT, 3600, 'me_handle:' . $userId)) {
-            return ApiResponse::error('bcc_rate_limited', 'Too many handle changes. Try again later.', 429);
-        }
 
         // §M suspension gate (F-109): a suspended account must not rename
         // itself, which would sidestep reports and mentions keyed on the handle.
@@ -213,6 +209,14 @@ final class OnboardingEndpoint
             ]);
             $resp->header('Cache-Control', 'no-store');
             return $resp;
+        }
+
+        // A handle CHANGE is rarer and costlier: its own per-account hourly
+        // cap (F-134), charged only here — after suspension, cooldown,
+        // validation, availability and the no-op check — so attempts on taken
+        // or invalid names don't burn it.
+        if (!\BCC\Core\Security\Throttle::allow('me_handle', \BCC\Trust\Core\REST\Auth\AuthSupport::HANDLE_CHANGE_RATE_LIMIT, 3600, 'me_handle:' . $userId)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many handle changes. Try again later.', 429);
         }
 
         $now = time();

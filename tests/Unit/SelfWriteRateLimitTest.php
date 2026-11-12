@@ -100,27 +100,28 @@ final class SelfWriteRateLimitTest extends TestCase
         );
     }
 
-    public function testAHandleChangeAlsoHasItsOwnHourlyCap(): void
+    public function testAHandleChangeAlsoHasItsOwnHourlyCapChargedOnlyOnARealChange(): void
     {
-        // Nothing denied: record which buckets the handler takes, in order,
-        // before it reaches its own validation.
-        $GLOBALS['__bcc_susp_fixture']['throttled'] = false;
-        $calls    = &$GLOBALS['__bcc_susp_fixture']['throttle_calls'];
-        $endpoint = (new ReflectionClass(OnboardingEndpoint::class))->newInstanceWithoutConstructor();
+        $src = self::methodSource(OnboardingEndpoint::class, 'updateHandle');
+        $at  = static fn(string $needle): int => (int) strpos($src, $needle);
 
-        try {
-            $endpoint->updateHandle(new \WP_REST_Request());
-        } catch (\Throwable) {
-            // Past the throttles the handler needs collaborators this stub
-            // set does not provide; only the buckets taken matter here.
-        }
-
-        self::assertSame(['me_write', 'me_write:7'], [$calls[0][0] ?? null, $calls[0][3] ?? null]);
-        self::assertSame(
-            ['me_handle', AuthSupport::HANDLE_CHANGE_RATE_LIMIT, 3600, 'me_handle:7'],
-            $calls[1] ?? null,
-            'the handle bucket: per account, per hour'
+        self::assertStringContainsString(
+            "Throttle::allow('me_handle', \BCC\Trust\Core\REST\Auth\AuthSupport::HANDLE_CHANGE_RATE_LIMIT, 3600, 'me_handle:' . \$userId)",
+            $src,
+            'per account, per hour'
         );
+        foreach (['is_not_suspended(', 'cooldownExpiresAt(', '->validate(', '->isAvailable(', '$current === $handle'] as $check) {
+            self::assertGreaterThan($at($check), $at("'me_handle'"), "me_handle is charged only after $check");
+        }
+        self::assertLessThan($at('update_user_meta($userId, HandleService::META_HANDLE,'), $at("'me_handle'"), '…and before the write');
+    }
+
+    private static function methodSource(string $class, string $method): string
+    {
+        $m     = new \ReflectionMethod($class, $method);
+        $lines = file((string) $m->getFileName());
+        self::assertIsArray($lines);
+        return implode('', array_slice($lines, $m->getStartLine() - 1, $m->getEndLine() - $m->getStartLine() + 1));
     }
 
     public function testTheLimitsAreTheApprovedOnes(): void
