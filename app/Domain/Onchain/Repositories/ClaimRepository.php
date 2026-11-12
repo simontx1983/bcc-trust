@@ -1254,18 +1254,53 @@ class ClaimRepository {
      */
     private static function otherVerifiedClaimBoundToPage(int $userId, int $exceptClaimId, int $pageId): bool
     {
+        return self::verifiedClaimsBoundToPage($userId, $exceptClaimId, $pageId) > 0;
+    }
+
+    /**
+     * F-334: does ANY user still hold a verified operator/creator claim bound
+     * to this page — through the page's wallet link OR its placeholder
+     * binding (`_bcc_onchain_validator_id`), the same rule revoke() uses? A
+     * multi-chain page binds several validators, so another operator can still
+     * hold it after one claim is revoked. Read FAIL-CLOSED: a caller about to
+     * free a page must not read a failure as "nobody holds it".
+     *
+     * @throws RepositoryReadFailure
+     */
+    public static function anyPrimaryClaimBoundToPage(int $pageId): bool
+    {
+        if ($pageId <= 0) {
+            return false;
+        }
+
+        return self::verifiedClaimsBoundToPage(null, 0, $pageId) > 0;
+    }
+
+    /**
+     * Verified validator/collection claims bound to $pageId (wallet-link leg,
+     * or the placeholder postmeta leg for validators). With $userId, that
+     * user's claims of any role except $exceptClaimId; without, any user's
+     * OPERATOR/CREATOR claims (a holder never holds a page).
+     *
+     * @throws RepositoryReadFailure
+     */
+    private static function verifiedClaimsBoundToPage(?int $userId, int $exceptClaimId, int $pageId): int
+    {
         global $wpdb;
         $table       = self::table();
         $wallets     = \BCC\Core\DB\DB::table('wallet_links');
         $validators  = \BCC\Core\DB\DB::table('onchain_validators');
         $collections = \BCC\Core\DB\DB::table('onchain_collections');
 
+        $who = $userId !== null
+            ? $wpdb->prepare('cl.user_id = %d AND cl.id <> %d', $userId, $exceptClaimId)
+            : "cl.claim_role IN ('operator','creator')";
+
         /** @var list<object{n: numeric-string}> $rows */
         $rows = self::runRead($wpdb->prepare(
             "SELECT COUNT(*) AS n
                FROM {$table} cl
-              WHERE cl.user_id = %d
-                AND cl.id <> %d
+              WHERE {$who}
                 AND cl.status = 'verified'
                 AND (
                      (cl.entity_type = 'validator' AND (
@@ -1279,14 +1314,12 @@ class ClaimRepository {
                           EXISTS (SELECT 1 FROM {$collections} c JOIN {$wallets} w ON w.id = c.wallet_link_id
                                    WHERE c.id = cl.entity_id AND w.post_id = %d))
                 )",
-            $userId,
-            $exceptClaimId,
             $pageId,
             $pageId,
             $pageId
         ), __FUNCTION__, true);
 
-        return (int) ($rows[0]->n ?? 0) > 0;
+        return (int) ($rows[0]->n ?? 0);
     }
 
     /**

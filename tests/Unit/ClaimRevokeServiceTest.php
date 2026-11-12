@@ -54,6 +54,7 @@ final class ClaimRevokeServiceTest extends TestCase
         return [
             'audit'                => ['audit'],
             'bonus'                => ['bonus'],
+            'page release'         => ['page_release'],
             'read model'           => ['read_model'],
             'verification_changed' => ['bcc_trust_verification_changed'],
             'claim_revoked event'  => ['bcc_onchain_claim_revoked'],
@@ -73,6 +74,7 @@ final class ClaimRevokeServiceTest extends TestCase
         $ran = [
             'audit'                          => \ClaimRevokeWorld::$audits !== [],
             'bonus'                          => \ClaimRevokeWorld::$recomputes !== [],
+            'page_release'                   => \ClaimRevokeWorld::$released !== [],
             'read_model'                     => \ClaimRevokeWorld::$dirty !== [],
             'bcc_trust_verification_changed' => in_array('bcc_trust_verification_changed', array_column(\ClaimRevokeWorld::$actions, 0), true),
             'bcc_onchain_claim_revoked'      => in_array('bcc_onchain_claim_revoked', array_column(\ClaimRevokeWorld::$actions, 0), true),
@@ -102,6 +104,8 @@ final class ClaimRevokeServiceTest extends TestCase
         self::assertSame(['claim_revoked', 41, 'claim', 5], [$action, $target, $type, $user]);
         self::assertSame('wallet_link_gone', $meta['reason']);
         self::assertSame([77], $meta['mirror_page_ids']);
+        // F-334: exactly the pages the user LOST are released, for that user.
+        self::assertSame([[77, 5]], \ClaimRevokeWorld::$released);
     }
 
     public function testAClaimantWithNoOwnPageSkipsOnlyTheRecompute(): void
