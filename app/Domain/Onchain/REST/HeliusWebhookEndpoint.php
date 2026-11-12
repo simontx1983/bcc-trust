@@ -31,7 +31,10 @@ if (!defined('ABSPATH')) {
  *     delivery; verify with hash_equals.
  *   - **Always returns 200** regardless of signature validity to avoid
  *     leaking secret state through response behavior. This is a
- *     crypto-facing endpoint and WILL be probed.
+ *     crypto-facing endpoint and WILL be probed. The single exception
+ *     (F-67) is a 503 for an AUTHENTICATED delivery whose dedupe write
+ *     failed, so Helius redelivers it; an unauthenticated request can
+ *     never reach that branch.
  *   - Signature failures are logged via a per-source-IP rate-limited
  *     bucket (60s window): only the first failure in a window writes
  *     a detailed log row; subsequent failures bump a counter.
@@ -198,18 +201,18 @@ final class HeliusWebhookEndpoint
             $seen = HeliusSeenSignaturesRepository::markSeen($signature);
             if ($seen === null) {
                 // Unknown is NOT "already seen". Skipping it as a replay
-                // lost the transaction for good (always-200, no Solana
-                // walker). Fail closed for the whole delivery: ingest
-                // nothing, and reopen the signatures this delivery already
-                // marked — exactly the failed-ingest path below — so a
-                // redelivery is processed rather than refused.
-                \BCC\Core\Log\Logger::error('[HeliusWebhookEndpoint] dedupe write failed — delivery not ingested; signatures reopened for redelivery', [
+                // lost the transaction for good (no Solana walker). Fail
+                // closed for the whole delivery: ingest nothing, reopen the
+                // signatures this delivery already marked (the failed-ingest
+                // path's reopen), and answer 503 so Helius REDELIVERS the
+                // batch. The only non-200 this endpoint sends, and only
+                // after auth passed, so it reveals nothing about the secret.
+                \BCC\Core\Log\Logger::error('[HeliusWebhookEndpoint] dedupe write failed — delivery not ingested; answering 503 so Helius redelivers; signatures this delivery marked are reopened', [
                     'transactions'  => count($transactions),
                     'marked_before' => count($markedThisDelivery),
                 ]);
                 self::reopenDedupe($markedThisDelivery);
-                $allEvents = [];
-                break;
+                return self::retryLater();
             }
             if ($seen === false) {
                 $totalReplays++;
@@ -313,6 +316,17 @@ final class HeliusWebhookEndpoint
     {
         // Always-200, minimal body — never leak processing detail.
         $response = new WP_REST_Response(['ok' => true], 200);
+        $response->header('Cache-Control', 'no-store');
+        return $response;
+    }
+
+    /**
+     * F-67: the ONE non-200. Sent only for an authenticated delivery whose
+     * dedupe write failed, so Helius redelivers it. Same minimal body shape.
+     */
+    private static function retryLater(): WP_REST_Response
+    {
+        $response = new WP_REST_Response(['ok' => false], 503);
         $response->header('Cache-Control', 'no-store');
         return $response;
     }

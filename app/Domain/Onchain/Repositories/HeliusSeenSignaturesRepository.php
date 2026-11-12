@@ -78,15 +78,17 @@ final class HeliusSeenSignaturesRepository
         // INSERT IGNORE returns 1 on insert, 0 when the unique key
         // (signature) already exists. $wpdb->query returns affected rows,
         // or false on failure — and can fail WITHOUT last_error (the silent
-        // !ready path), so both are checked.
-        $wpdb->last_error = '';
+        // !ready path), so both are checked. last_error is cleared and read
+        // through helpers so static analysis cannot narrow it to '' across
+        // the query() that sets it.
+        self::clearLastError();
         $result = $wpdb->query($wpdb->prepare(
             "INSERT IGNORE INTO {$table} (signature, seen_at) VALUES (%s, %s)",
             $signature,
             $now
         ));
 
-        if ($result === false || $wpdb->last_error !== '' || !is_int($result)) {
+        if ($result === false || self::lastReadError() !== '' || !is_int($result)) {
             return null;
         }
 
@@ -256,6 +258,13 @@ final class HeliusSeenSignaturesRepository
         }
         update_option(self::SIZE_OPTION, $count, false);
         return $count;
+    }
+
+    /** Pairs with GuardsReadFailures::lastReadError() (bcc-core's helper shape). */
+    private static function clearLastError(): void
+    {
+        global $wpdb;
+        $wpdb->last_error = '';
     }
 
     /** COUNT(*) of the table, or NULL when the read did not run (logged). */

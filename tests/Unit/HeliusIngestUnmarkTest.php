@@ -16,7 +16,8 @@ use PHPUnit\Framework\TestCase;
  * batch ingest. If ingest throws, the marked signatures must be unmarked
  * so Helius's redelivery can re-process — otherwise the batch is lost
  * permanently (Solana has no polling walker; a resend is refused as a
- * replay). Endpoint stays always-200 throughout.
+ * replay). A failed INGEST stays 200; only a failed DEDUPE WRITE (F-67)
+ * answers 503 so Helius redelivers.
  *
  * ## Isolation
  * Subprocess-only; setUp() pulls in tests/Stubs/helius-webhook-stubs.php
@@ -115,7 +116,8 @@ final class HeliusIngestUnmarkTest extends TestCase
 
         $resp = HeliusWebhookEndpoint::handle(self::request(['sig-a', 'sig-b', 'sig-c']));
 
-        self::assertSame(200, $resp->get_status(), 'the always-200 posture is unchanged');
+        self::assertSame(503, $resp->get_status(), 'a failed dedupe write asks Helius to redeliver');
+        self::assertSame(['ok' => false], $resp->data, 'minimal body, no processing detail');
         self::assertSame(0, $f['ingest_calls'], 'nothing is ingested from a delivery whose dedupe failed');
         self::assertSame([['sig-a']], $f['deleted_args'], 'only what this delivery marked is reopened');
         self::assertNotContains('sig-c', $f['marked'], 'the batch stops at the failure');
@@ -128,8 +130,9 @@ final class HeliusIngestUnmarkTest extends TestCase
         $f = &$GLOBALS['__bcc_helius_fixture'];
         $f['fail_on']['sig-a'] = true;
 
-        HeliusWebhookEndpoint::handle(self::request(['sig-a', 'sig-b']));
+        $resp = HeliusWebhookEndpoint::handle(self::request(['sig-a', 'sig-b']));
 
+        self::assertSame(503, $resp->get_status());
         self::assertSame(0, $f['ingest_calls']);
         self::assertSame([], $f['marked']);
         self::assertSame([], $f['deleted_args'], 'nothing to reopen');
@@ -142,8 +145,9 @@ final class HeliusIngestUnmarkTest extends TestCase
         $f['fail_on']['sig-b'] = true;
         $f['delete_result']    = null;
 
-        HeliusWebhookEndpoint::handle(self::request(['sig-a', 'sig-b']));
+        $resp = HeliusWebhookEndpoint::handle(self::request(['sig-a', 'sig-b']));
 
+        self::assertSame(503, $resp->get_status(), 'still asks for redelivery; the unmark failure is logged separately');
         self::assertSame(0, $f['ingest_calls']);
         self::assertContains(['helius_dedup', 'unmark_failed'], $f['metrics']);
     }
