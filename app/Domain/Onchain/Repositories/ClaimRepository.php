@@ -66,6 +66,8 @@ if (!defined('ABSPATH')) {
  */
 class ClaimRepository {
 
+    use GuardsReadFailures;
+
     /** @var string Explicit column list — must match schema-claims.php. */
     private const COLUMNS = 'id, user_id, entity_type, entity_id, wallet_address,
                  chain_id, claim_role, status, verified_at, created_at';
@@ -285,6 +287,10 @@ class ClaimRepository {
      *
      * Bounded by LIMIT 100 — feed pages cap at 50, with margin.
      *
+     * F-89: VERIFIED claims only. A revoked claim's feed card must not keep
+     * saying "Claimed this page"; the feed drops the item (read time, so
+     * it comes back if the claim is made again).
+     *
      * @param list<int> $ids
      * @return array<int, ClaimRow>
      */
@@ -301,6 +307,7 @@ class ClaimRepository {
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$table}
               WHERE id IN ({$placeholders})
+                AND status = 'verified'
               LIMIT 100",
             ...$ids
         ));
@@ -1061,5 +1068,210 @@ class ClaimRepository {
         ));
 
         return $rows ?: [];
+    }
+
+    /**
+     * F-14: revoke a verified claim — `verified` → `revoked`, never a DELETE,
+     * so history is kept and a re-claim (upsert ON DUPLICATE) restores it.
+     *
+     * The claim's PAGE MIRROR rows (entity_type 'page', which drive
+     * `is_claimed` and the page capabilities) flip in the same transaction —
+     * but only for pages BOUND to this claim's entity (the two legs of
+     * ClaimService::isEntityBoundToPage), and only when no OTHER verified
+     * claim of the same user is still bound to that page. A mirror only
+     * shares user/wallet/chain/role with its claim, and one wallet can claim
+     * several collections on different pages, so matching on those alone
+     * would revoke the wrong page.
+     *
+     * Every read is FAIL-CLOSED (runRead): the existing binding readers
+     * (ValidatorRepository::findAllByPageId, WalletRepository::
+     * getPostIdForEntity) answer "no page" on a DB error, which here would
+     * silently leave a revoked user able to edit the page. A failed read or
+     * write rolls back and throws; the caller treats that as UNKNOWN.
+     *
+     * Idempotent: a claim that is not (or no longer) verified is a no-op.
+     *
+     * @return array{revoked: bool, user_id: int, entity_type: string, entity_id: int, claim_role: string, mirror_page_ids: list<int>}
+     * @throws RepositoryReadFailure on a failed read
+     * @throws \RuntimeException on a failed transaction or write
+     */
+    public static function revoke(int $claimId): array
+    {
+        global $wpdb;
+        $table = self::table();
+        $none  = ['revoked' => false, 'user_id' => 0, 'entity_type' => '', 'entity_id' => 0, 'claim_role' => '', 'mirror_page_ids' => []];
+
+        if ($claimId <= 0) {
+            return $none;
+        }
+
+        if ($wpdb->query('START TRANSACTION') === false) {
+            throw new \RuntimeException('START TRANSACTION failed');
+        }
+
+        try {
+            /** @var list<object{id: numeric-string, user_id: numeric-string, entity_type: string, entity_id: numeric-string, wallet_address: string, chain_id: numeric-string, claim_role: string, status: string}> $rows */
+            $rows = self::runRead($wpdb->prepare(
+                "SELECT id, user_id, entity_type, entity_id, wallet_address, chain_id, claim_role, status
+                   FROM {$table} WHERE id = %d FOR UPDATE",
+                $claimId
+            ), __FUNCTION__, true);
+
+            $claim = $rows[0] ?? null;
+            if ($claim === null
+                || $claim->status !== ClaimStatus::VERIFIED
+                || !in_array($claim->entity_type, ['validator', 'collection'], true)) {
+                $wpdb->query('COMMIT');
+                return $none;
+            }
+
+            $userId     = (int) $claim->user_id;
+            $entityType = (string) $claim->entity_type;
+            $entityId   = (int) $claim->entity_id;
+
+            $mirrorIds  = [];
+            $mirrorPages = [];
+            foreach (self::boundPageIds($entityType, $entityId) as $pageId) {
+                if (self::otherVerifiedClaimBoundToPage($userId, $claimId, $pageId)) {
+                    continue; // the user still holds this page through another claim
+                }
+                /** @var list<object{id: numeric-string}> $mirrors */
+                $mirrors = self::runRead($wpdb->prepare(
+                    "SELECT id FROM {$table}
+                      WHERE user_id = %d AND entity_type = 'page' AND entity_id = %d
+                        AND status = 'verified'
+                        AND wallet_address = %s AND chain_id = %d AND claim_role = %s",
+                    $userId,
+                    $pageId,
+                    (string) $claim->wallet_address,
+                    (int) $claim->chain_id,
+                    (string) $claim->claim_role
+                ), __FUNCTION__, true);
+                foreach ($mirrors as $m) {
+                    $mirrorIds[]   = (int) $m->id;
+                    $mirrorPages[] = $pageId;
+                }
+            }
+
+            $ids = array_merge([$claimId], $mirrorIds);
+            $ph  = implode(',', array_fill(0, count($ids), '%d'));
+            $ok  = $wpdb->query($wpdb->prepare(
+                "UPDATE {$table} SET status = 'revoked' WHERE id IN ({$ph}) AND status = 'verified'",
+                ...$ids
+            ));
+            if ($ok === false || (string) $wpdb->last_error !== '') {
+                throw new \RuntimeException('claim revoke UPDATE failed: ' . (string) $wpdb->last_error);
+            }
+
+            if ($wpdb->query('COMMIT') === false) {
+                throw new \RuntimeException('COMMIT failed');
+            }
+
+            return [
+                'revoked'         => true,
+                'user_id'         => $userId,
+                'entity_type'     => $entityType,
+                'entity_id'       => $entityId,
+                'claim_role'      => (string) $claim->claim_role,
+                'mirror_page_ids' => array_values(array_unique($mirrorPages)),
+            ];
+        } catch (\Throwable $e) {
+            $wpdb->query('ROLLBACK');
+            throw $e;
+        }
+    }
+
+    /**
+     * Pages bound to a claimed entity — the two legs of
+     * ClaimService::isEntityBoundToPage, read FAIL-CLOSED.
+     *
+     * @return list<int>
+     * @throws RepositoryReadFailure
+     */
+    private static function boundPageIds(string $entityType, int $entityId): array
+    {
+        global $wpdb;
+        $wallets = \BCC\Core\DB\DB::table('wallet_links');
+
+        if ($entityType === 'validator') {
+            $validators = \BCC\Core\DB\DB::table('onchain_validators');
+            $sql = $wpdb->prepare(
+                "SELECT w.post_id AS page_id
+                   FROM {$validators} v
+                   JOIN {$wallets} w ON w.id = v.wallet_link_id
+                  WHERE v.id = %d AND w.post_id > 0
+                 UNION
+                 SELECT pm.post_id AS page_id
+                   FROM {$wpdb->postmeta} pm
+                  WHERE pm.meta_key = '_bcc_onchain_validator_id'
+                    AND CAST(pm.meta_value AS UNSIGNED) = %d
+                    AND pm.post_id > 0
+                  LIMIT 32",
+                $entityId,
+                $entityId
+            );
+        } else {
+            $collections = \BCC\Core\DB\DB::table('onchain_collections');
+            $sql = $wpdb->prepare(
+                "SELECT w.post_id AS page_id
+                   FROM {$collections} c
+                   JOIN {$wallets} w ON w.id = c.wallet_link_id
+                  WHERE c.id = %d AND w.post_id > 0
+                  LIMIT 32",
+                $entityId
+            );
+        }
+
+        /** @var list<object{page_id: numeric-string}> $rows */
+        $rows = self::runRead($sql, __FUNCTION__, true);
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[] = (int) $row->page_id;
+        }
+        return array_values(array_unique($out));
+    }
+
+    /**
+     * Does the user hold another VERIFIED validator/collection claim that is
+     * bound to this page? Then the page mirror stays. Read FAIL-CLOSED.
+     *
+     * @throws RepositoryReadFailure
+     */
+    private static function otherVerifiedClaimBoundToPage(int $userId, int $exceptClaimId, int $pageId): bool
+    {
+        global $wpdb;
+        $table       = self::table();
+        $wallets     = \BCC\Core\DB\DB::table('wallet_links');
+        $validators  = \BCC\Core\DB\DB::table('onchain_validators');
+        $collections = \BCC\Core\DB\DB::table('onchain_collections');
+
+        /** @var list<object{n: numeric-string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT COUNT(*) AS n
+               FROM {$table} cl
+              WHERE cl.user_id = %d
+                AND cl.id <> %d
+                AND cl.status = 'verified'
+                AND (
+                     (cl.entity_type = 'validator' AND (
+                          EXISTS (SELECT 1 FROM {$validators} v JOIN {$wallets} w ON w.id = v.wallet_link_id
+                                   WHERE v.id = cl.entity_id AND w.post_id = %d)
+                       OR EXISTS (SELECT 1 FROM {$wpdb->postmeta} pm
+                                   WHERE pm.meta_key = '_bcc_onchain_validator_id'
+                                     AND pm.post_id = %d
+                                     AND CAST(pm.meta_value AS UNSIGNED) = cl.entity_id)))
+                  OR (cl.entity_type = 'collection' AND
+                          EXISTS (SELECT 1 FROM {$collections} c JOIN {$wallets} w ON w.id = c.wallet_link_id
+                                   WHERE c.id = cl.entity_id AND w.post_id = %d))
+                )",
+            $userId,
+            $exceptClaimId,
+            $pageId,
+            $pageId,
+            $pageId
+        ), __FUNCTION__, true);
+
+        return (int) ($rows[0]->n ?? 0) > 0;
     }
 }
