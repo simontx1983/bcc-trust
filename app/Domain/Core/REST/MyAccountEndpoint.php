@@ -14,7 +14,9 @@
  *   DELETE /me/account           — delete account (requires current password)
  *
  * Every route requires the user's current password as a write-amplification
- * gate. We do NOT rely on a session-elevation flag — every sensitive
+ * gate, or (F-253) a fresh signature from one of their verified wallets over
+ * a purpose-bound challenge (AccountCredentialCheck) - wallet-only members
+ * never had a password. We do NOT rely on a session-elevation flag — every sensitive
  * mutation re-verifies. This matches PeepSo's profile-delete pattern at
  * `peepso/classes/profile.php::delete_profile`.
  *
@@ -127,7 +129,7 @@ final class MyAccountEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        // Rate-limit BEFORE verifyCurrentPassword. The endpoint is gated on
+        // Rate-limit BEFORE the credential check. The endpoint is gated on
         // the current_password check — without a throttle, an attacker with
         // a session token but not the password could brute-force the gate
         // unboundedly. 5/60s per user mirrors the wallet_verify ceiling
@@ -136,11 +138,10 @@ final class MyAccountEndpoint
             return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
-        $passwordCheck = self::verifyCurrentPassword($request, $userId);
-        if ($passwordCheck instanceof WP_REST_Response) {
-            return $passwordCheck;
-        }
-
+        // Format check BEFORE the credential check (F-253): it reveals
+        // nothing, and a typo must not burn a signed wallet challenge. The
+        // "already in use" check stays AFTER it — it says whether an address
+        // is registered, which a session alone must not learn.
         $emailRaw = $request->get_param('email');
         if (!is_string($emailRaw)) {
             return ApiResponse::error('bcc_invalid_request', 'Field `email` is required.', 422);
@@ -148,6 +149,15 @@ final class MyAccountEndpoint
         $email = sanitize_email($emailRaw);
         if ($email === '' || !is_email($email)) {
             return ApiResponse::error('bcc_invalid_request', 'Email address is not valid.', 422);
+        }
+
+        $confirmedBy = AccountCredentialCheck::confirm(
+            $request,
+            $userId,
+            AccountCredentialCheck::PURPOSE_EMAIL_CHANGE
+        );
+        if ($confirmedBy instanceof WP_REST_Response) {
+            return $confirmedBy;
         }
 
         // Ensure no other user owns this email (WP enforces uniqueness too,
@@ -184,7 +194,7 @@ final class MyAccountEndpoint
 
         // We do NOT record the new email in meta/audit to avoid duplicating
         // PII; the canary mails go out when the change is confirmed.
-        AuditLogger::log('account_email_change_requested', $userId, [], 'user', $userId);
+        AuditLogger::log('account_email_change_requested', $userId, ['confirmed_by' => $confirmedBy], 'user', $userId);
 
         $resp = ApiResponse::ok([
             'ok'           => true,
@@ -246,10 +256,13 @@ final class MyAccountEndpoint
 
         // Revoke FIRST, then mint — the fresh token carries the bumped
         // version; every session minted before the change now fails
-        // ERR_REVOKED. (Same order and reason as patchPassword.)
+        // ERR_REVOKED. (Same order and reason as patchPassword.) The fresh
+        // token CONTINUES this session (F-253): read when it began before
+        // the revoke invalidates the presented token.
+        $sessionStart = \BCC\Trust\Core\Support\JwtToken::presentedSessionStartedAt($userId);
         \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
         $handle     = (string) get_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE, true);
-        $freshToken = \BCC\Trust\Core\Support\JwtToken::encode($userId, $handle);
+        $freshToken = \BCC\Trust\Core\Support\JwtToken::encodeContinuation($userId, $handle, $sessionStart);
 
         // Account-state mutation — log after the write commits.
         AuditLogger::log('account_email_changed', $userId, [], 'user', $userId);
@@ -290,18 +303,16 @@ final class MyAccountEndpoint
         }
 
         // Credential-rotation surface — must rate-limit BEFORE the
-        // verifyCurrentPassword brute-force surface. Without this, a
+        // credential-check brute-force surface. Without this, a
         // session-hijacked attacker could brute-force the current_password
         // gate at machine speed.
         if (!\BCC\Core\Security\Throttle::allow('account_password:' . $userId, 5, 60)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
         }
 
-        $passwordCheck = self::verifyCurrentPassword($request, $userId);
-        if ($passwordCheck instanceof WP_REST_Response) {
-            return $passwordCheck;
-        }
-
+        // New-password checks BEFORE the credential check (F-253): they
+        // reveal nothing, and a too-short password must not burn a signed
+        // wallet challenge.
         $newPassword = $request->get_param('password');
         if (!is_string($newPassword) || $newPassword === '') {
             return ApiResponse::error('bcc_invalid_request', 'Field `password` is required.', 422);
@@ -312,6 +323,17 @@ final class MyAccountEndpoint
                 sprintf('Password must be at least %d characters.', self::PASSWORD_MIN_LENGTH),
                 422
             );
+        }
+
+        // A wallet-only member SETS their first password here, confirming
+        // with a wallet signature (they have no current one).
+        $confirmedBy = AccountCredentialCheck::confirm(
+            $request,
+            $userId,
+            AccountCredentialCheck::PURPOSE_PASSWORD_CHANGE
+        );
+        if ($confirmedBy instanceof WP_REST_Response) {
+            return $confirmedBy;
         }
         // wp_set_password rotates the hash AND clears the user's session
         // tokens, which logs them out everywhere except the current
@@ -333,10 +355,12 @@ final class MyAccountEndpoint
         // Order matters: revoke FIRST, then mint, so the fresh token carries
         // the bumped version and survives; every OTHER token now fails
         // ERR_REVOKED. The new token is returned below so the caller's own
-        // session stays alive. [audit H-2]
+        // session stays alive. [audit H-2] It CONTINUES this session (F-253):
+        // read when it began before the revoke.
+        $sessionStart = \BCC\Trust\Core\Support\JwtToken::presentedSessionStartedAt($userId);
         \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
         $handle    = (string) get_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE, true);
-        $freshToken = \BCC\Trust\Core\Support\JwtToken::encode($userId, $handle);
+        $freshToken = \BCC\Trust\Core\Support\JwtToken::encodeContinuation($userId, $handle, $sessionStart);
 
         // A rotation cuts off every other token, so it must also cut off
         // every device's push subscription — including the caller's own,
@@ -344,7 +368,7 @@ final class MyAccountEndpoint
         (new \BCC\Trust\Core\Repositories\PushSubscriptionRepository())->deleteAllForUser($userId);
 
         // Credential rotation — log without the password value (obviously).
-        AuditLogger::log('account_password_changed', $userId, [], 'user', $userId);
+        AuditLogger::log('account_password_changed', $userId, ['confirmed_by' => $confirmedBy], 'user', $userId);
 
         // Side-channel notification: tell the user via email out-of-band
         // so a session-hijack-then-rotate attack is detectable.
@@ -377,7 +401,7 @@ final class MyAccountEndpoint
         // Account deletion is irreversible — tightest bucket of the three
         // account routes. 3/60s per user is more than enough for legit
         // typos on the confirmation flow but blunt for any brute-force.
-        // BEFORE verifyCurrentPassword so the credential gate is also
+        // BEFORE the credential check so the credential gate is also
         // brute-force protected.
         if (!\BCC\Core\Security\Throttle::allow('account_delete:' . $userId, 3, 60)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many requests.', 429);
@@ -391,11 +415,9 @@ final class MyAccountEndpoint
             );
         }
 
-        $passwordCheck = self::verifyCurrentPassword($request, $userId);
-        if ($passwordCheck instanceof WP_REST_Response) {
-            return $passwordCheck;
-        }
-
+        // The typed confirmation BEFORE the credential check (F-253): it
+        // reveals nothing, and a missed word must not burn a signed wallet
+        // challenge.
         $confirm = $request->get_param('confirm');
         if (!is_string($confirm) || $confirm !== self::DELETE_CONFIRMATION_TOKEN) {
             return ApiResponse::error(
@@ -403,6 +425,15 @@ final class MyAccountEndpoint
                 sprintf('Send `confirm: "%s"` to confirm account deletion.', self::DELETE_CONFIRMATION_TOKEN),
                 422
             );
+        }
+
+        $confirmedBy = AccountCredentialCheck::confirm(
+            $request,
+            $userId,
+            AccountCredentialCheck::PURPOSE_ACCOUNT_DELETE
+        );
+        if ($confirmedBy instanceof WP_REST_Response) {
+            return $confirmedBy;
         }
 
         // wp_delete_user lives in wp-admin/includes/user.php — REST
@@ -432,7 +463,7 @@ final class MyAccountEndpoint
         // passed because the wp_users row is already gone — AuditLogger writes
         // the integer id directly to its own audit_log table, which persists
         // independently of the now-deleted user record.
-        AuditLogger::log('account_deleted', $userId, [], 'user', $userId);
+        AuditLogger::log('account_deleted', $userId, ['confirmed_by' => $confirmedBy], 'user', $userId);
 
         // Side-channel notification using the email captured before deletion.
         // The user record is gone but the audit_log row + this email are the
@@ -456,39 +487,6 @@ final class MyAccountEndpoint
     // ──────────────────────────────────────────────────────────────────
     // Helpers
     // ──────────────────────────────────────────────────────────────────
-
-    /**
-     * Verify the request's `current_password` field against the user's
-     * stored hash. Returns null on success, an error envelope on failure.
-     *
-     * @param WP_REST_Request<array<string, mixed>> $request
-     */
-    private static function verifyCurrentPassword(WP_REST_Request $request, int $userId): ?WP_REST_Response
-    {
-        $current = $request->get_param('current_password');
-        if (!is_string($current) || $current === '') {
-            return ApiResponse::error(
-                'bcc_invalid_request',
-                'Field `current_password` is required.',
-                422
-            );
-        }
-
-        $user = get_user_by('id', $userId);
-        if (!($user instanceof \WP_User)) {
-            return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
-        }
-
-        if (!wp_check_password($current, $user->user_pass, $user->ID)) {
-            return ApiResponse::error(
-                'bcc_invalid_request',
-                'Current password is incorrect.',
-                422
-            );
-        }
-
-        return null;
-    }
 
     /**
      * Mirror PeepSo's `site_registration_allowdelete` setting — when the

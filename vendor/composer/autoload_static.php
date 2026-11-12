@@ -203,6 +203,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Exceptions\\VoteEligibilityException' => __DIR__ . '/../..' . '/app/Domain/Core/Exceptions/VoteEligibilityException.php',
         'BCC\\Trust\\Core\\Integration\\PeepSoIntegration' => __DIR__ . '/../..' . '/app/Domain/Core/Integration/PeepSoIntegration.php',
         'BCC\\Trust\\Core\\Plugin' => __DIR__ . '/../..' . '/app/Domain/Core/Plugin.php',
+        'BCC\\Trust\\Core\\REST\\AccountCredentialCheck' => __DIR__ . '/../..' . '/app/Domain/Core/REST/AccountCredentialCheck.php',
         'BCC\\Trust\\Core\\REST\\AdminDigestEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/AdminDigestEndpoint.php',
         'BCC\\Trust\\Core\\REST\\AdminReportsEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/AdminReportsEndpoint.php',
         'BCC\\Trust\\Core\\REST\\AnnouncementCommentsEndpoint' => __DIR__ . '/../..' . '/app/Domain/Core/REST/AnnouncementCommentsEndpoint.php',

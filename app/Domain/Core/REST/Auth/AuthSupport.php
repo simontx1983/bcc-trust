@@ -339,7 +339,7 @@ final class AuthSupport
         // Revoke FIRST, then mint: the token below carries the bumped
         // version and is the verifier's working session.
         JwtToken::revokeAllForUser($userId);
-        $token = JwtToken::encode($userId, $handle);
+        $token = JwtToken::encodeNewSession($userId, $handle);
 
         Logger::audit('email_verified', [
             'user_id' => $userId,

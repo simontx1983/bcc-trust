@@ -71,6 +71,13 @@ final class WalletAuthController
                         'type'              => 'string',
                         'sanitize_callback' => 'sanitize_text_field',
                     ],
+                    // F-253: what the signature will approve. Omitted =
+                    // 'verify' (wallet linking, claims, recovery email).
+                    'purpose' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'sanitize_callback' => 'sanitize_key',
+                    ],
                 ],
             ]
         );
@@ -251,14 +258,34 @@ final class WalletAuthController
             return ApiResponse::error('bcc_invalid_request', 'Invalid wallet address format.', 400);
         }
 
+        // F-253: a challenge for confirming an account change (email,
+        // password, delete) says so in the wallet, and can only be spent on
+        // that change. Needs bcc-core with purpose-bound challenges; an older
+        // core would issue a plain "verify your wallet" message instead, so
+        // refuse rather than ask the member to sign the wrong words.
+        $purpose = (string) ($request->get_param('purpose') ?? '');
+        if ($purpose === '') {
+            $purpose = \BCC\Trust\Core\REST\AccountCredentialCheck::PURPOSE_VERIFY;
+        }
+        if (!\BCC\Trust\Core\REST\AccountCredentialCheck::isAuthedPurpose($purpose)) {
+            return ApiResponse::error('bcc_invalid_request', 'Unknown purpose.', 422);
+        }
+        if ($purpose !== \BCC\Trust\Core\REST\AccountCredentialCheck::PURPOSE_VERIFY
+            && !\BCC\Trust\Core\REST\AccountCredentialCheck::coreHasPurposes()
+        ) {
+            return ApiResponse::error('bcc_unavailable', 'Confirming with a wallet is not available yet. Please try again later.', 503);
+        }
+
         $challenge = WalletIdentityService::generateChallenge(
             $userId,
             $chainSlug,
             $chainId,
-            $walletAddress
+            $walletAddress,
+            $purpose
         );
 
         $response = ApiResponse::ok([
+            'purpose'        => $purpose,
             'nonce'          => $challenge['nonce'],
             'message'        => $challenge['message'],
             'chain_slug'     => $challenge['chain_slug'],
@@ -542,7 +569,7 @@ final class WalletAuthController
         wp_set_current_user($userId);
         wp_set_auth_cookie($userId, true);
 
-        $token = JwtToken::encode($userId, $handle);
+        $token = JwtToken::encodeNewSession($userId, $handle);
 
         Logger::audit('user_login', [
             'user_id' => $userId,
@@ -704,7 +731,11 @@ final class WalletAuthController
             // Core saves meta_input BEFORE firing user_register, so the
             // handle-assignment hook in Plugin.php sees the chosen handle
             // and leaves it alone.
-            'meta_input'   => [HandleService::META_HANDLE => $handle],
+            'meta_input'   => [
+                HandleService::META_HANDLE => $handle,
+                // F-253: the password above is random and never shown.
+                \BCC\Trust\Core\Services\AccountRecoveryService::META_HAS_PASSWORD => '0',
+            ],
         ]);
 
         if (is_wp_error($userId)) {
@@ -769,6 +800,15 @@ final class WalletAuthController
             );
         }
 
+        // F-253: remember WHICH link this account was created with — the
+        // only wallet its signup-wallet exception (adding the first recovery
+        // email right after sign-up) can ever apply to.
+        update_user_meta(
+            $userIdInt,
+            \BCC\Trust\Core\Services\AccountRecoveryService::META_SIGNUP_WALLET_LINK,
+            (string) (int) $walletLinkId
+        );
+
         // Fire the canonical domain event so trust-engine and
         // onchain-signals seed scoring/holdings rows. Same action as
         // verifyAndLink, so listeners don't need to care which path the
@@ -782,7 +822,7 @@ final class WalletAuthController
         wp_set_current_user($userIdInt);
         wp_set_auth_cookie($userIdInt, true);
 
-        $token = JwtToken::encode($userIdInt, $handle);
+        $token = JwtToken::encodeNewSession($userIdInt, $handle);
 
         Logger::audit('user_signup', [
             'user_id' => $userIdInt,

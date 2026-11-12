@@ -47,6 +47,7 @@ return array(
     'BCC\\Trust\\Core\\Exceptions\\VoteEligibilityException' => $baseDir . '/app/Domain/Core/Exceptions/VoteEligibilityException.php',
     'BCC\\Trust\\Core\\Integration\\PeepSoIntegration' => $baseDir . '/app/Domain/Core/Integration/PeepSoIntegration.php',
     'BCC\\Trust\\Core\\Plugin' => $baseDir . '/app/Domain/Core/Plugin.php',
+    'BCC\\Trust\\Core\\REST\\AccountCredentialCheck' => $baseDir . '/app/Domain/Core/REST/AccountCredentialCheck.php',
     'BCC\\Trust\\Core\\REST\\AdminDigestEndpoint' => $baseDir . '/app/Domain/Core/REST/AdminDigestEndpoint.php',
     'BCC\\Trust\\Core\\REST\\AdminReportsEndpoint' => $baseDir . '/app/Domain/Core/REST/AdminReportsEndpoint.php',
     'BCC\\Trust\\Core\\REST\\AnnouncementCommentsEndpoint' => $baseDir . '/app/Domain/Core/REST/AnnouncementCommentsEndpoint.php',
