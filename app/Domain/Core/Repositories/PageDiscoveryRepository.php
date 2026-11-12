@@ -189,7 +189,30 @@ final class PageDiscoveryRepository
             $count_sql = $wpdb->prepare($count_sql, ...$params);
         }
 
-        $total      = (int) $wpdb->get_var($count_sql);
+        self::clearLastError();
+        $total = (int) $wpdb->get_var($count_sql);
+
+        // ⚠⚠ F-197: THE SAME BLIND SPOT AS THE FALLBACK, ON THE PATH THAT
+        // ACTUALLY RUNS. `get_var()` answers null on failure, `(int) null` is
+        // 0, and the `$total === 0` branch below returns an empty page — so
+        // an unreadable read model reported "no page matches this filter"
+        // rather than failing. Identical to F-144, one method down.
+        //
+        // ⚠ This is the PRIMARY discovery path: `PageDiscoveryService` picks
+        // it whenever `PageReadModelRepository::hasData()` is true, which is
+        // the normal state. The posts-table method below is the legacy
+        // fallback.
+        //
+        // ⚠ Logs and still returns empty, deliberately: "empty on an
+        // unreadable table" is the RATIFIED behaviour for discovery, and
+        // changing it is a route-contract decision, not a repository one.
+        // What changes is that the failure is no longer silent.
+        if (self::readFailed()) {
+            self::logReadFailure('read-model count', $verified_only);
+
+            return ['rows' => [], 'total' => 0, 'pages' => 0, 'page' => $page];
+        }
+
         $totalPages = $total > 0 ? (int) ceil($total / $limit) : 0;
 
         if ($total === 0) {
@@ -219,7 +242,19 @@ final class PageDiscoveryRepository
         // skipped or repeated pages that tied across a page boundary.
 
         $all_params = array_merge($params, [$limit, $offset]);
-        $rows       = $wpdb->get_results($wpdb->prepare($main_sql, ...$all_params));
+
+        self::clearLastError();
+        $rows = $wpdb->get_results($wpdb->prepare($main_sql, ...$all_params));
+
+        // ⚠ The COUNT can succeed while this fails — they are two
+        // statements, and only this one carries the ORDER BY, the LIMIT and
+        // the ranking expression. That combination is exactly how F-144's
+        // second defect hid: an honest non-zero total beside an empty row
+        // set. Checked separately for that reason, not as a formality.
+        if (self::readFailed()) {
+            self::logReadFailure('read-model rows', $verified_only);
+            $rows = [];
+        }
 
         return [
             'rows'  => $rows,
