@@ -137,13 +137,15 @@ final class ValidatorGroupsEndpoint
         $activity    = Plugin::instance()->groupActivityHeatService()->forGroups($groupIds);
 
         $optOuts = OnchainPlugin::instance()->nftGroupGateService();
+        // F-271: a banned group is shown as removed, never offered as Join.
+        $banned  = $optOuts->bannedGroupIdSet($userId, $groupIds);
 
         // Non-member, non-opted-out groups need a live verdict for the
         // eligible bucket — batch them so each wallet's LCD fetch is
         // shared across every config on that chain.
         $verdictCandidates = [];
         foreach ($configs as $cfg) {
-            if (isset($memberships[$cfg->groupId])) {
+            if (isset($memberships[$cfg->groupId]) || isset($banned[$cfg->groupId])) {
                 continue;
             }
             if ($optOuts->isOptOutActive($userId, $cfg->groupId)) {
@@ -172,6 +174,13 @@ final class ValidatorGroupsEndpoint
 
             if (isset($memberships[$cfg->groupId])) {
                 $joined[] = $item;
+                continue;
+            }
+
+            if (isset($banned[$cfg->groupId])) {
+                // A PeepSo ban: a moderator removal, Join is refused.
+                $item['opt_out_kind'] = HolderGroupsEndpoint::OPT_OUT_KIND_REMOVED;
+                $optedOut[] = $item;
                 continue;
             }
 
@@ -300,7 +309,9 @@ final class ValidatorGroupsEndpoint
         if ($refusal !== null) {
             return $refusal;
         }
-        $wasMember = $status !== null;
+        // ACTIVE membership only (F-267): a 'banned' row is not membership,
+        // and counting it wrote a voluntary opt-out over a moderator's.
+        $wasMember = HolderGroupsEndpoint::isActiveMemberStatus($status);
 
         if (!\BCC\Core\PeepSo\PeepSoGroupWriter::leave($userId, $groupId)) {
             return \BCC\Trust\Core\Support\GroupLeaveGuard::unavailable();

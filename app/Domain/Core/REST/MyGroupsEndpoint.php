@@ -283,10 +283,20 @@ final class MyGroupsEndpoint
         // bcc-core/src/PeepSo/PeepSoGroupWriter.php:46-50). Determine the
         // actual state transition BEFORE the writer call so the audit log
         // captures only real joins, not idempotent re-attempts.
-        $wasAlreadyMember = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatus(
+        $priorStatus = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatus(
             $userId,
             $groupId
-        ) !== null;
+        );
+        // F-271: a PeepSo ban is a moderator removal. Say so (403) instead
+        // of the writer's refusal surfacing as a 503 "unavailable".
+        if ($priorStatus === 'banned') {
+            return ApiResponse::error(
+                'bcc_permission_denied',
+                'A moderator removed you from this community, so you cannot rejoin it.',
+                403
+            );
+        }
+        $wasAlreadyMember = $priorStatus !== null;
 
         // Honor the writer's verdict: false = PeepSo absent OR an existing
         // banned membership row (the writer refuses to flip a group-level
@@ -365,7 +375,10 @@ final class MyGroupsEndpoint
         if ($refusal !== null) {
             return $refusal;
         }
-        $wasMember = $status !== null;
+        // ACTIVE membership only (F-267): pending_*, banned and
+        // block_invites are not a membership, so leaving one is not
+        // audited as a leave. Same predicate as the holder/delegator leaves.
+        $wasMember = \BCC\Trust\Onchain\REST\HolderGroupsEndpoint::isActiveMemberStatus($status);
 
         // A non-owner's false is a busy lock, a failed write or PeepSo
         // absent — never "you are the owner".

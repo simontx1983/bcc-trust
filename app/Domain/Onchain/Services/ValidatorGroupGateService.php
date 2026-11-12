@@ -91,6 +91,10 @@ final class ValidatorGroupGateService {
         if ($this->optOuts->isPermanentOptOut($userId, $groupId)) {
             return JoinResult::optOutActive($minWire);
         }
+        // A PeepSo ban is a moderator removal too (F-271): 403, not a 503.
+        if ($this->optOuts->isBannedFrom($userId, $groupId)) {
+            return JoinResult::optOutActive($minWire);
+        }
 
         $memberships = \BCC\Core\Repositories\PeepSoGroupRepository::findUserMemberships(
             $userId,

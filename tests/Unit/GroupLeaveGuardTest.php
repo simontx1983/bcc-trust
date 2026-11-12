@@ -115,6 +115,28 @@ final class GroupLeaveGuardTest extends TestCase
         self::assertSame([[self::USER, self::GROUP]], $GLOBALS['__bcc_lg']['leaves']);
     }
 
+    /**
+     * F-267 (with #635): a banned caller has no ACTIVE membership. Their
+     * Leave keeps the ban row (bcc-core) and must write neither an opt-out
+     * nor a leave audit: a voluntary opt-out would sit over the moderator's
+     * permanent one, and an explicit Join overrides a voluntary opt-out.
+     * Both live in the same `if ($wasMember)` block, so the audit stands in
+     * for the opt-out here (the opt-out service is not faked).
+     *
+     * @param class-string $endpoint
+     */
+    #[DataProvider('routes')]
+    public function testABannedCallersLeaveWritesNoOptOutAndNoAudit(string $endpoint): void
+    {
+        $GLOBALS['__bcc_lg']['status'] = 'banned';
+
+        [$status] = self::leave($endpoint);
+
+        self::assertSame(200, $status);
+        self::assertSame([[self::USER, self::GROUP]], $GLOBALS['__bcc_lg']['leaves']);
+        self::assertSame([], $GLOBALS['__bcc_lg']['audits'], 'no opt-out / leave audit for a banned caller');
+    }
+
     public function testAPlainGroupMemberStillLeavesAndTheLeaveIsAudited(): void
     {
         [$status] = self::leave(MyGroupsEndpoint::class);
