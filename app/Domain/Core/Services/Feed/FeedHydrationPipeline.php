@@ -85,7 +85,47 @@ final class FeedHydrationPipeline
      * the `group` block group contexts attach). This is the exact chain
      * every feed surface ran inline before the Phase-11 extraction.
      *
-     * @param list<array<string, mixed>> $items
+     * ── THE ITEM SHAPE, AND WHAT IT DOES AND DOES NOT BUY ───────────────
+     * The three keys below are the ones this chain reads with a type
+     * expectation: `external_id` as a post id, `author.id` as a user id, and
+     * `post_kind` as a module name. Declaring them gives PHPStan something
+     * to check and tells the next reader what an item is required to carry.
+     *
+     * ⚠⚠ IT DOES NOT YET CONSTRAIN THE REAL PRODUCERS, and the annotation
+     * should not be read as a guarantee that it does. Every item reaching
+     * here comes from bcc-core's `ActivityFeedService`, whose three feed
+     * methods declare `@return array{items: list<array<string, mixed>>, …}`
+     * (and `getActivityById(): array<string, mixed>|null`).
+     * `array<string, mixed>` IS assignable to an unsealed shape with
+     * optional keys, so PHPStan accepts those call sites without checking
+     * them. What this catches today is an item built INLINE with the wrong
+     * type — measured: a literal `'external_id' => 'abc'` is reported as
+     * "Offset 'external_id' (int) does not accept type string."
+     *
+     * ⚠ The keys are OPTIONAL and the shape UNSEALED on purpose. Requiring
+     * them (`external_id: int`) makes PHPStan reject all seven `hydrate()`
+     * call sites in `FeedRankingService` — not because the data is wrong,
+     * but because the producer's declared type is too loose to prove it
+     * right. Measured before writing this: 7 errors, every one at a call
+     * site, none on the `is_int()` guards below.
+     *
+     * ⭐ Full enforcement therefore has to start in bcc-core: tighten those
+     * four return docblocks to declare the item shape, THEN require it
+     * here. That is a two-repo change in the forced order core → trust,
+     * because bcc-trust CI checks out bcc-core's default branch at run time.
+     * Deliberately not bundled in.
+     *
+     * ⚠ The `is_int()` reads below are NOT redundant and are left alone.
+     * They are never reported as always-true (the optional keys make
+     * `$item['external_id'] ?? null` an `int|null`), and they are the only
+     * thing standing between a non-conforming producer and a silent 0.
+     *
+     * @param list<array{
+     *     external_id?: int,
+     *     post_kind?: string,
+     *     author?: array{id?: int},
+     *     ...<string, mixed>
+     * }> $items
      * @return list<array<string, mixed>>
      */
     public function hydrate(array $items, int $viewerId): array
