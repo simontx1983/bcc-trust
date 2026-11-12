@@ -368,16 +368,53 @@ final class PostReachRepository
         global $wpdb;
         $table = self::dedupeTable();
 
-        $wpdb->last_error = '';
+        self::clearLastError();
         $ok = $wpdb->query("SELECT COUNT(*) AS n FROM {$table}");
 
-        if ($ok === false || ($wpdb->last_error ?? '') !== '') {
+        if ($ok === false || self::readFailed()) {
             return null;
         }
 
+        /** @var list<object{n?: int|numeric-string}>|mixed $rows */
         $rows = $wpdb->last_result;
 
         return is_array($rows) && isset($rows[0]) ? (int) ($rows[0]->n ?? 0) : 0;
+    }
+
+    /**
+     * Clear `$wpdb->last_error` before a read.
+     *
+     * ⚠⚠ This is a METHOD, not an inline assignment, and that is the whole
+     * point. Assigning `$wpdb->last_error = ''` inline narrows the property
+     * to the literal `''` for PHPStan, which then proves the later
+     * `!== ''` check is always false and fails level 8 with "Strict
+     * comparison using !== between '' and '' will always evaluate to
+     * false". It cannot see that `query()` mutates the property in between.
+     * Routing the clear and the check through separate methods makes the
+     * property opaque to that narrowing — the same shape `PageDiscoveryRepository`
+     * uses (F-230), which is why that class passes level 8.
+     */
+    private static function clearLastError(): void
+    {
+        global $wpdb;
+
+        $wpdb->last_error = '';
+    }
+
+    /**
+     * Did the read just performed fail?
+     *
+     * ⚠ `$wpdb->query()` returning false is NOT an exhaustive failure
+     * signal — it returns false without setting `last_error` on the
+     * `! $this->ready` reconnect guard and on an empty `query`-filter
+     * result. Callers therefore test BOTH (`$ok === false || readFailed()`),
+     * which is the F-230 lesson.
+     */
+    private static function readFailed(): bool
+    {
+        global $wpdb;
+
+        return (string) $wpdb->last_error !== '';
     }
 
     /**
@@ -399,7 +436,7 @@ final class PostReachRepository
 
         \BCC\Core\Log\Logger::error('[bcc-trust] post-reach write failed', [
             'what'  => $what,
-            'error' => (string) ($wpdb->last_error ?? ''),
+            'error' => (string) $wpdb->last_error,
         ]);
     }
 }
