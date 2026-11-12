@@ -11,6 +11,8 @@
 namespace BCC\Trust\Core\Repositories;
 
 use BCC\Trust\Core\Exceptions\RepositoryException;
+use BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
@@ -39,6 +41,8 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class DeviceFingerprintRepository {
 
+    use GuardsReadFailures;
+
     private string $table;
 
     public function __construct() {
@@ -64,16 +68,42 @@ class DeviceFingerprintRepository {
      * @phpstan-return list<FingerprintUserRow>
      */
     public function getUserFingerprints( int $userId ): array {
+        return $this->readUserFingerprints( $userId, false );
+    }
+
+    /**
+     * getUserFingerprints(), but a FAILED read throws instead of answering
+     * "no fingerprints".
+     *
+     * For the post-vote fraud analysis (F-208), where an empty list means
+     * "no device evidence" and drops the device-fraud signal from the stored
+     * score. The admin user view keeps the fail-open variant.
+     *
+     * @phpstan-return list<FingerprintUserRow>
+     * @throws RepositoryReadFailure when the read failed
+     */
+    public function getUserFingerprintsOrFail( int $userId ): array {
+        return $this->readUserFingerprints( $userId, true );
+    }
+
+    /**
+     * One query, two failure policies.
+     *
+     * @phpstan-return list<FingerprintUserRow>
+     * @throws RepositoryReadFailure when $failClosed and the read failed
+     */
+    private function readUserFingerprints( int $userId, bool $failClosed ): array {
         global $wpdb;
 
-        return $wpdb->get_results( $wpdb->prepare(
+        /** @var list<FingerprintUserRow> */
+        return self::runRead( $wpdb->prepare(
             "SELECT id, user_id, fingerprint, automation_score, risk_level, last_seen
              FROM {$this->table}
              WHERE user_id = %d
              ORDER BY last_seen DESC
              LIMIT 100",
             $userId
-        ) );
+        ), 'getUserFingerprints', $failClosed );
     }
 
     /**
