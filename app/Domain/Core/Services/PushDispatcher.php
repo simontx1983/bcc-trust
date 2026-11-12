@@ -58,7 +58,17 @@ final class PushDispatcher
     public const FLUSH_HOOK    = 'bcc_trust_push_flush';
     private const AS_GROUP     = 'bcc-push';
     private const DEBOUNCE_SECS = 300;  // P1.E2 — 5-min per-(recipient, type) window
-    private const QUEUE_TTL    = 360;   // 1 min more than debounce so a slightly-late flush still finds the queue
+    /**
+     * How late the flush may run and still find its window (F-78).
+     *
+     * The window used to live 360s, re-set on every event, while its flush
+     * is scheduled ONCE at first event + 300s: a flush more than ~60s after
+     * the window's last event found nothing, and the push was silently lost.
+     * WP-cron on a quiet site runs on page loads, so minutes late is normal.
+     * The window now lives first_at + DEBOUNCE_SECS + this grace, measured
+     * from its START, never sliding with later events.
+     */
+    private const LATE_FLUSH_GRACE = 1800;
 
     /** Transient key prefix. Keys are bcc_push_q_{user_id}_{event_type}. */
     private const QUEUE_KEY_PREFIX = 'bcc_push_q_';
@@ -169,7 +179,10 @@ final class PushDispatcher
         $key      = self::queueKey($recipientId, $eventType);
         $existing = get_transient($key);
 
-        if (!is_array($existing)) {
+        // F-78: a window past its lifetime is abandoned (its flush was lost
+        // or never ran); the next event starts a fresh window with its own
+        // flush instead of piling into one nobody will send.
+        if (!is_array($existing) || self::windowRemaining($existing) <= 0) {
             set_transient(
                 $key,
                 [
@@ -179,7 +192,7 @@ final class PushDispatcher
                     // F-189: who contributed, so flush() can re-check blocks.
                     'actors'        => [$actorId => ['n' => 1, 'payload' => $payload]],
                 ],
-                self::QUEUE_TTL
+                self::DEBOUNCE_SECS + self::LATE_FLUSH_GRACE
             );
             AsyncDispatcher::scheduleSingle(
                 time() + self::DEBOUNCE_SECS,
@@ -208,7 +221,25 @@ final class PushDispatcher
         if (!isset($existing['first_payload'])) {
             $existing['first_payload'] = $payload;
         }
-        set_transient($key, $existing, self::QUEUE_TTL);
+        // The REMAINING lifetime, so a busy window cannot outlive its flush
+        // by sliding its own expiry forward event after event.
+        set_transient($key, $existing, self::windowRemaining($existing));
+    }
+
+    /**
+     * Seconds a queued window has left: first_at + DEBOUNCE_SECS +
+     * LATE_FLUSH_GRACE − now. A window without a usable first_at is treated
+     * as already over, so it is replaced rather than extended.
+     *
+     * @param array<string, mixed> $window
+     */
+    private static function windowRemaining(array $window): int
+    {
+        $firstAt = isset($window['first_at']) && is_int($window['first_at']) ? $window['first_at'] : 0;
+        if ($firstAt <= 0) {
+            return 0;
+        }
+        return $firstAt + self::DEBOUNCE_SECS + self::LATE_FLUSH_GRACE - time();
     }
 
     /** F-189: distinct actors one debounce window tracks for the flush-time block re-check. */

@@ -96,11 +96,41 @@ final class NftPieceViewModelBuilder
      */
     private const UPSTREAM_DEADLINE = 35;
 
+    /**
+     * F-57 — a COUNT budget for upstream calls, separate from F-154's
+     * per-request throttle.
+     *
+     * F-154's `Throttle::allow('nft_piece', 60, 60)` in the endpoint counts
+     * every request, cache hits included, per caller. It does not bound
+     * what reaches a provider: an indexed-chain MISS on a token that does
+     * not exist writes nothing, so every repeat of a bogus token_id is a
+     * fresh Alchemy / Helius call, and Cosmos goes to the LCD every time.
+     * Spread over many callers there was no ceiling at all.
+     *
+     * Charged ONLY immediately before an upstream fetch (cache hits stay
+     * free), in two layers using the same Throttle primitive:
+     *   1. per caller (Throttle's default key: user id, or the /24 or /64
+     *      subnet when anonymous) → `bcc_rate_limited` (429);
+     *   2. site-wide (one fixed key) → `bcc_upstream_unavailable` (503),
+     *      §4.17's documented "retry with backoff" answer.
+     * The per-caller layer runs first, so one caller cannot drain the
+     * site-wide budget. When either layer refuses and a STALE cache row
+     * exists, the stale row is served instead (§4.17 SWR), exactly as for
+     * an upstream failure.
+     */
+    private const UPSTREAM_THROTTLE_ACTION  = 'nft_piece_upstream';
+    private const UPSTREAM_PER_CALLER_LIMIT = 20;
+    private const UPSTREAM_GLOBAL_LIMIT     = 300;
+    private const UPSTREAM_THROTTLE_WINDOW  = 60;
+    private const UPSTREAM_GLOBAL_KEY       = 'nft_piece_upstream:global';
+
     /** Error codes mapped 1:1 to §4.17 error codes. */
     public const ERROR_INVALID_CHAIN         = 'bcc_invalid_chain';
     public const ERROR_NOT_FOUND             = 'bcc_not_found';
     public const ERROR_UNSUPPORTED_STANDARD  = 'bcc_unsupported_standard';
     public const ERROR_UPSTREAM_UNAVAILABLE  = 'bcc_upstream_unavailable';
+    /** F-57: the caller's own upstream budget is spent (429). */
+    public const ERROR_RATE_LIMITED          = 'bcc_rate_limited';
 
     /** Cache provenance — surfaced as `X-BCC-Cache` per §4.17. */
     public const CACHE_FRESH = 'FRESH';
@@ -346,6 +376,12 @@ final class NftPieceViewModelBuilder
         ?int $deadlineAt = null
     ): array {
         if ($isCosmos) {
+            // Cosmos has no pieces cache, so every request goes upstream
+            // and every request is charged (F-57). Nothing stale to serve.
+            $refusal = self::upstreamBudgetRefusal();
+            if ($refusal !== null) {
+                throw new PieceBuilderException($refusal, self::upstreamRefusalMessage($refusal));
+            }
             $fetcher = FetcherFactory::make_for_chain($chain);
             if (!($fetcher instanceof CosmosFetcher)) {
                 throw new PieceBuilderException(
@@ -403,6 +439,26 @@ final class NftPieceViewModelBuilder
         // request entry (STALE) vs no row at all (MISS).
         $cacheState = $cached !== null ? self::CACHE_STALE : self::CACHE_MISS;
 
+        // F-57: an upstream call is about to happen, so charge the budget
+        // now — not earlier, which would bill cache hits. A refusal with a
+        // stale row serves the stale row (same as an upstream failure).
+        $refusal = self::upstreamBudgetRefusal();
+        if ($refusal !== null) {
+            if ($cached !== null) {
+                return [
+                    [
+                        'name'            => $cached->name,
+                        'description'     => $cached->description,
+                        'image_url'       => $cached->image_url,
+                        'image_url_thumb' => $cached->image_url_thumb ?? $cached->image_url,
+                        'attributes'      => self::decodeAttributes($cached->attributes_json),
+                    ],
+                    self::CACHE_STALE,
+                ];
+            }
+            throw new PieceBuilderException($refusal, self::upstreamRefusalMessage($refusal));
+        }
+
         $fetched = self::fetchUpstreamMetadata($chain, $chainType, $contract, $tokenId, $deadlineAt);
         if ($fetched === null) {
             // If we have a stale row but the upstream failed, fall
@@ -451,6 +507,47 @@ final class NftPieceViewModelBuilder
             ],
             $cacheState,
         ];
+    }
+
+    /**
+     * F-57 — charge one upstream call against both budgets.
+     *
+     * Returns null when the call may proceed, or the PieceBuilderException
+     * code to refuse with. The per-caller layer is checked first and, when
+     * it refuses, the site-wide counter is NOT charged, so one caller
+     * cannot spend the shared budget past their own limit.
+     *
+     * @return self::ERROR_RATE_LIMITED|self::ERROR_UPSTREAM_UNAVAILABLE|null
+     */
+    private static function upstreamBudgetRefusal(): ?string
+    {
+        if (!\BCC\Core\Security\Throttle::allow(
+            self::UPSTREAM_THROTTLE_ACTION,
+            self::UPSTREAM_PER_CALLER_LIMIT,
+            self::UPSTREAM_THROTTLE_WINDOW
+        )) {
+            return self::ERROR_RATE_LIMITED;
+        }
+        if (!\BCC\Core\Security\Throttle::allow(
+            self::UPSTREAM_THROTTLE_ACTION,
+            self::UPSTREAM_GLOBAL_LIMIT,
+            self::UPSTREAM_THROTTLE_WINDOW,
+            self::UPSTREAM_GLOBAL_KEY
+        )) {
+            return self::ERROR_UPSTREAM_UNAVAILABLE;
+        }
+        return null;
+    }
+
+    /**
+     * Fixed copy for an F-57 refusal. Never includes the limits, the key
+     * or which layer refused beyond what the error code already says.
+     */
+    private static function upstreamRefusalMessage(string $code): string
+    {
+        return $code === self::ERROR_RATE_LIMITED
+            ? 'Too many requests. Please wait.'
+            : 'Piece data is temporarily unavailable. Retry with backoff.';
     }
 
     /**

@@ -25,10 +25,14 @@
  * The gate now also asks bcc-core whether the TARGET is suspended, so
  * this file stubs `\BCC\Core\Permissions\Permissions` too — again a
  * class whose real version must never be shadowed outside a subprocess.
- * `is_not_suspended` is a SPY as well: the test pins which user id is
+ * `suspensionState` is a SPY as well: the test pins which user id is
  * asked about (the target, never the viewer) and that admin bypass is
  * left at its default, both of which are deliberate choices that a
- * return-value assertion alone would not catch.
+ * return-value assertion alone would not catch. ⚠ It is the spy because
+ * it is what the gate CALLS; `is_not_suspended` is defined here as
+ * `suspensionState(...) === false`, mirroring bcc-core #84 so the
+ * harness reproduces its deny-on-unknown behaviour instead of a
+ * friendlier fiction, and it records nothing of its own.
  *
  * `get_current_user_id()` is shadowed INSIDE `BCC\Trust\Core\Support`
  * rather than declared globally — PHP resolves an unqualified call to

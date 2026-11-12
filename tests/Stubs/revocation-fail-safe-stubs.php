@@ -140,8 +140,12 @@ namespace {
             /** @var list<int> walletLinkIds whose stored rows were read */
             public static array $storedReads = [];
 
+            /** F-69: make GatedGroupRepository::listAllGatedGroupIds() throw mid-sweep. */
+            public static bool $throwOnGroupList = false;
+
             public static function reset(): void
             {
+                self::$throwOnGroupList = false;
                 self::$currentUser    = 0;
                 self::$userMeta       = [];
                 self::$stanceWrites   = [];
@@ -336,6 +340,39 @@ namespace {
     foreach (['DAY_IN_SECONDS' => 86400, 'HOUR_IN_SECONDS' => 3600, 'MINUTE_IN_SECONDS' => 60] as $c => $v) {
         if (!defined($c)) {
             define($c, $v);
+        }
+    }
+}
+
+namespace BCC\Core\DB {
+    // F-69: NftGroupRevokeService::sweep() now runs under an advisory lock.
+    // Records every acquire/release; a key in $heldElsewhere behaves as held
+    // by another session (acquire returns false), as GET_LOCK(…, 0) would.
+    if (!class_exists(__NAMESPACE__ . '\\AdvisoryLock', false)) {
+        class AdvisoryLock
+        {
+            /** @var list<string> */
+            public static array $heldElsewhere = [];
+
+            /** @var list<string> "acquire:<key>" / "release:<key>", in order */
+            public static array $calls = [];
+
+            public static function acquire(string $key, int $timeout = 0): bool
+            {
+                self::$calls[] = 'acquire:' . $key;
+                return !in_array($key, self::$heldElsewhere, true);
+            }
+
+            public static function release(string $key): void
+            {
+                self::$calls[] = 'release:' . $key;
+            }
+
+            public static function reset(): void
+            {
+                self::$heldElsewhere = [];
+                self::$calls         = [];
+            }
         }
     }
 }
@@ -730,6 +767,9 @@ namespace BCC\Trust\Onchain\Repositories {
             /** @return list<int> */
             public static function listAllGatedGroupIds(int $limit = 500): array
             {
+                if (\BccRevokeWorld::$throwOnGroupList) {
+                    throw new \RuntimeException('scripted group-list failure');
+                }
                 $ids = array_keys(\BccRevokeWorld::$gateConfigs);
                 sort($ids);
 
