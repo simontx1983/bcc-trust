@@ -110,4 +110,23 @@ final class PeepSoNamePartsNeverLoginTest extends TestCase
         self::assertSame(['Simon', 'Tx', ' - Profile reported'], PeepSoNameParts::filter(['Simon', 'Tx', ' - Profile reported'], 9));
         self::assertSame(['simon-t', ' - Profile reported'], PeepSoNameParts::filter(['simon', '(simon)', ' - Profile reported'], 9));
     }
+    /**
+     * Review LOW on #602: PeepSo's 'real_name_first' style shows first_name
+     * ALONE. "Simon" with login "simon" is a real name, not the fallback, so
+     * it is kept when it equals the member's own first_name meta.
+     */
+    public function testASingleRealFirstNameEqualToTheLoginIsKept(): void
+    {
+        $GLOBALS['__pn_meta'][9]['first_name'] = 'Simon';
+        self::assertSame(['Simon'], PeepSoNameParts::filter(['Simon'], 9));
+        self::assertSame(['Simon', ' - Profile reported'], PeepSoNameParts::filter(['Simon', ' - Profile reported'], 9));
+    }
+
+    public function testTheLoginFallbackIsStillReplacedWhenAFirstNameExists(): void
+    {
+        // PeepSo's fallback is get_username() = the login, exactly; it is
+        // not the first_name even though they match case-insensitively.
+        $GLOBALS['__pn_meta'][9]['first_name'] = 'Simon';
+        self::assertSame(['simon-t'], PeepSoNameParts::filter(['simon'], 9));
+    }
 }

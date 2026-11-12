@@ -147,9 +147,19 @@ final class RealNameHiddenEverywhereTest extends TestCase
             if (!$file->isFile() || $file->getExtension() !== 'php') {
                 continue;
             }
+            // Code only: comments are dropped first, so a docblock writing
+            // getSummary($_, $_, $map) as a placeholder is not a finding.
+            $code = '';
+            foreach (token_get_all((string) file_get_contents($file->getPathname())) as $tok) {
+                if (is_array($tok) && in_array($tok[0], [T_COMMENT, T_DOC_COMMENT], true)) {
+                    continue;
+                }
+                $code .= is_array($tok) ? $tok[1] : $tok;
+            }
+            // [,)] also catches the 3-arg form getSummary($x, $x, $prefetched).
             self::assertDoesNotMatchRegularExpression(
-                '/getSummary\(\s*(\$\w+)\s*,\s*\1\s*\)/',
-                (string) file_get_contents($file->getPathname()),
+                '/getSummary\(\s*(\$\w+)\s*,\s*\1\s*[,)]/',
+                $code,
                 basename($file->getPathname()) . ' resolves a member as their own viewer'
             );
         }
