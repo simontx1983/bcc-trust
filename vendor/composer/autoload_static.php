@@ -620,6 +620,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Services\\BonusService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/BonusService.php',
         'BCC\\Trust\\Onchain\\Services\\ChainReadService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ChainReadService.php',
         'BCC\\Trust\\Onchain\\Services\\ChainRefreshService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ChainRefreshService.php',
+        'BCC\\Trust\\Onchain\\Services\\ClaimReverifySweepService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ClaimReverifySweepService.php',
         'BCC\\Trust\\Onchain\\Services\\ClaimService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/ClaimService.php',
         'BCC\\Trust\\Onchain\\Services\\CollectionDemandService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/CollectionDemandService.php',
         'BCC\\Trust\\Onchain\\Services\\CollectionPersistBatch' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/CollectionPersistBatch.php',

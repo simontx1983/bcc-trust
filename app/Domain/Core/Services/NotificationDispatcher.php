@@ -1630,6 +1630,50 @@ final class NotificationDispatcher
     }
 
     /**
+     * F-14 — the weekly re-verify sweep revoked a verified claim. A plain,
+     * factual notice: what changed and how to restore it. Names no reason
+     * code and no provider. Sent by the sweep only (not on the revoke hook,
+     * so other revoke callers do not ring the bell).
+     */
+    public function onClaimBadgeRemoved(int $userId, int $claimId, string $entityName, string $reason): void
+    {
+        if ($userId <= 0 || $claimId <= 0) {
+            return;
+        }
+        try {
+            $name = trim($entityName) !== ''
+                ? mb_strimwidth(trim($entityName), 0, 80, '…', 'UTF-8')
+                : ($reason === 'no_longer_holder' ? 'this collection' : 'this');
+            $template = $reason === 'no_longer_holder'
+                ? self::CLAIM_HOLDER_BADGE_REMOVED_MESSAGE
+                : self::CLAIM_BADGE_REMOVED_MESSAGE;
+
+            $this->dispatch(
+                $userId,
+                $userId,
+                sprintf($template, $name),
+                NotificationType::CLAIM_BADGE_REMOVED,
+                $claimId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] claim badge removal bell failed', [
+                'user_id'  => $userId,
+                'claim_id' => $claimId,
+                'error'    => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /** F-14 copy (wallet / validator reasons) — approved by the product owner 2026-11-11. */
+    public const CLAIM_BADGE_REMOVED_MESSAGE =
+        "We couldn't confirm you still control the wallet behind your %s claim, so the verified badge was removed. Reconnect the wallet and claim again to restore it.";
+
+    /** F-14 copy (holder reason) — approved with the F-14 PR B plan 2026-11-11. */
+    public const CLAIM_HOLDER_BADGE_REMOVED_MESSAGE =
+        "We couldn't confirm your linked wallets still hold %s, so the holder badge was removed. Claim again once a linked wallet holds it.";
+
+    /**
      * F-73 — the author's post was hidden AUTOMATICALLY (credible-report
      * threshold). Subscriber for `bcc_content_auto_hidden`
      * ($actId, $count, $threshold, $reportId); only the act id is used.

@@ -1274,4 +1274,51 @@ class ClaimRepository {
 
         return (int) ($rows[0]->n ?? 0) > 0;
     }
+
+    /**
+     * F-14 PR B2: the re-verify sweep's keyset read — verified validator and
+     * collection claims after a cursor, with what the sweep needs to decide
+     * each one. FAIL-CLOSED (runRead): a DB error throws instead of reading
+     * as "no more claims".
+     *
+     * The entity rows are LEFT JOINed, so an absent `entity_row_id` on a row
+     * that WAS returned is a definite "the validator/collection row is gone"
+     * — unlike ValidatorRepository::getByIdWithChain(), which reads a DB
+     * error as null too.
+     *
+     * @return list<object{id: numeric-string, user_id: numeric-string, entity_type: string, entity_id: numeric-string, wallet_address: string, chain_id: numeric-string, claim_role: string, entity_row_id: numeric-string|null, operator_address: string|null, contract_address: string|null, entity_name: string|null, chain_slug: string|null, chain_type: string|null}>
+     * @throws RepositoryReadFailure
+     */
+    public static function listVerifiedEntityClaimsAfter(int $afterId, int $limit): array
+    {
+        global $wpdb;
+        $table       = self::table();
+        $validators  = \BCC\Core\DB\DB::table('onchain_validators');
+        $collections = \BCC\Core\DB\DB::table('onchain_collections');
+        $chains      = \BCC\Core\DB\DB::table('chains');
+
+        /** @var list<object{id: numeric-string, user_id: numeric-string, entity_type: string, entity_id: numeric-string, wallet_address: string, chain_id: numeric-string, claim_role: string, entity_row_id: numeric-string|null, operator_address: string|null, contract_address: string|null, entity_name: string|null, chain_slug: string|null, chain_type: string|null}> $rows */
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT cl.id, cl.user_id, cl.entity_type, cl.entity_id, cl.wallet_address, cl.chain_id, cl.claim_role,
+                    COALESCE(v.id, c.id)                 AS entity_row_id,
+                    v.operator_address                   AS operator_address,
+                    c.contract_address                   AS contract_address,
+                    COALESCE(v.moniker, c.collection_name) AS entity_name,
+                    ch.slug                              AS chain_slug,
+                    ch.chain_type                        AS chain_type
+               FROM {$table} cl
+               LEFT JOIN {$validators}  v ON cl.entity_type = 'validator'  AND v.id = cl.entity_id
+               LEFT JOIN {$collections} c ON cl.entity_type = 'collection' AND c.id = cl.entity_id
+               LEFT JOIN {$chains}     ch ON ch.id = COALESCE(v.chain_id, c.chain_id)
+              WHERE cl.id > %d
+                AND cl.status = 'verified'
+                AND cl.entity_type IN ('validator', 'collection')
+              ORDER BY cl.id ASC
+              LIMIT %d",
+            max(0, $afterId),
+            max(1, $limit)
+        ), __FUNCTION__, true);
+
+        return $rows;
+    }
 }
