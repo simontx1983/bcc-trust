@@ -837,7 +837,7 @@ final class CardViewService
                 (int) $summary['following_count'],
                 $prefetched
             ),
-            'permissions'         => $this->resolveMemberPermissions($userId, $viewerId),
+            'permissions'         => $this->resolveMemberPermissions($userId, $viewerId, $prefetched),
             // STUB: social_proof composition deferred (§O4). Field is
             // ALWAYS emitted (nullable) per the contract.
             'social_proof'        => null,
@@ -2165,9 +2165,10 @@ final class CardViewService
     }
 
     /**
+     * @param array<string, mixed>|null $prefetched MemberCardPrefetcher bundle on list paths
      * @return array<string, Permission>
      */
-    private function resolveMemberPermissions(int $targetUserId, int $viewerId): array
+    private function resolveMemberPermissions(int $targetUserId, int $viewerId, ?array $prefetched = null): array
     {
         // §J.6 attestation permissions on member cards (target_kind=
         // user_profile per §J.1). Service handles anon ("Sign in to…")
@@ -2207,10 +2208,14 @@ final class CardViewService
                 // only. Members are followed/reviewed via different surfaces.
                 'can_endorse'        => self::deny(null, 'not_applicable'),
                 'can_post_as_entity' => self::deny(null, 'not_applicable'),
-                // Entity-addressed messaging is validator-only at V1 —
-                // members are messaged through the DM surface itself
-                // (the profile view-model carries the live gate).
-                'can_message'        => self::deny(null, 'not_applicable'),
+                // F-246: the live DM gate for this viewer → this member,
+                // so the /messages/new recipient picker and its ?to_user
+                // pin can say "can't message" before the user writes. The
+                // same evaluator as POST /me/conversations and the
+                // profile's permissions.can_message; batched on list
+                // paths (MemberCardPrefetcher), single read otherwise.
+                // Self → self_action_blocked.
+                'can_message'        => self::memberMessagePermission($targetUserId, $viewerId, $prefetched),
                 'can_edit_bio'       => $isSelf ? self::allow() : self::deny(null, 'not_owner'),
                 // Page-image editing applies to claimed validator/project/
                 // creator pages; member self-avatars use /me/profile/avatar.
@@ -2266,6 +2271,29 @@ final class CardViewService
             'can_edit_bio'       => $sign,
             'can_edit_image'     => $sign,
         ];
+    }
+
+    /**
+     * F-246: a signed-in viewer's can_message on a member card. Prefers
+     * the MemberCardPrefetcher batch (canMessageMany) and falls back to
+     * the single read (canMessage) — the two are pinned identical for the
+     * same pair (MessagesService docblock + its test).
+     *
+     * @param array<string, mixed>|null $prefetched
+     * @return Permission
+     */
+    private static function memberMessagePermission(int $targetUserId, int $viewerId, ?array $prefetched): array
+    {
+        if ($prefetched !== null
+            && isset($prefetched['message_eligibility'])
+            && is_array($prefetched['message_eligibility'])
+            && isset($prefetched['message_eligibility'][$targetUserId])
+        ) {
+            /** @var Permission $perm */
+            $perm = $prefetched['message_eligibility'][$targetUserId];
+            return $perm;
+        }
+        return MessagesService::canMessage($viewerId, $targetUserId);
     }
 
     /**
