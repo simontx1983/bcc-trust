@@ -22,8 +22,9 @@ use PHPUnit\Framework\TestCase;
  *   - a stranger on another network exhausts only that network's budget;
  *     the owner, from theirs, still reaches the password check;
  *   - from one network the budget still caps a guesser at 20 / 15 min;
- *   - `@alice`, `alice`, `ALICE` and her email share one budget (no more
- *     "type your email instead" escape, no more quadrupled guesses);
+ *   - a handle and an email never share a budget, so a 429 can't link a
+ *     guessed email to a public handle;
+ *   - networks the owner signed in from lately skip the account ceiling;
  *   - an account-wide ceiling caps a guess spread over many networks;
  *   - an unknown identifier is throttled the same way and answers 401.
  *
@@ -84,15 +85,19 @@ final class LoginLockoutPerNetworkTest extends TestCase
         self::assertSame(429, self::attempt('alice', 'guess', '203.0.113.200'), 'the same /24');
     }
 
-    public function testEveryWayOfNamingTheAccountSharesOneBudget(): void
+    public function testAHandleAndAnEmailNeverShareABudgetSoA429LinksNothing(): void
     {
-        $names = ['@alice', 'alice', 'ALICE', 'alice@example.test', 'Alice@Example.test'];
+        // The probe: exhaust the public handle's budget, then try a guessed
+        // email. If they shared a bucket, a 429 would reveal that the email
+        // is that account's. The guessed (right) email answers exactly like
+        // an email that belongs to nobody.
         for ($i = 0; $i < AuthSupport::LOGIN_ACCOUNT_RATE_LIMIT; $i++) {
-            self::attempt($names[$i % count($names)], 'guess' . $i, self::STRANGER);
+            self::attempt('@alice', 'guess' . $i, self::STRANGER);
         }
-        foreach ($names as $name) {
-            self::assertSame(429, self::attempt($name, 'guess', self::STRANGER), $name);
-        }
+        self::assertSame(429, self::attempt('alice', 'guess', self::STRANGER), '@alice and alice are the same typed text');
+
+        self::assertSame(401, self::attempt('alice@example.test', 'guess', self::STRANGER));
+        self::assertSame(401, self::attempt('nobody@example.test', 'guess', self::STRANGER));
     }
 
     public function testAGuessSpreadOverManyNetworksHitsTheAccountCeiling(): void
@@ -105,6 +110,53 @@ final class LoginLockoutPerNetworkTest extends TestCase
             }
         }
         self::assertSame(429, self::attempt('alice', 'right', self::HOME), 'account-wide ceiling reached');
+    }
+
+    private static function hitTheCeilingFromElsewhere(): void
+    {
+        $per = AuthSupport::LOGIN_ACCOUNT_RATE_LIMIT;
+        for ($n = 0; $n < intdiv(AuthSupport::LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT, $per); $n++) {
+            for ($i = 0; $i < $per; $i++) {
+                self::attempt('alice', 'guess', '192.0.' . $n . '.1');
+            }
+        }
+    }
+
+    public function testANetworkTheOwnerSignedInFromSkipsTheCeiling(): void
+    {
+        // The owner completed a sign-in from home earlier.
+        $GLOBALS['__bcc_ph']['client_ip'] = self::HOME;
+        AuthSupport::recordTrustedLoginNetwork(self::ALICE);
+
+        self::hitTheCeilingFromElsewhere();
+
+        self::assertSame(403, self::attempt('alice', 'right', '198.51.100.77'), 'home /24: past the throttle');
+        self::assertSame(429, self::attempt('alice', 'right', '100.64.9.9'), 'a network never signed in from hits the ceiling');
+    }
+
+    public function testTrustedNetworksAreBoundedAndExpire(): void
+    {
+        for ($i = 0; $i < AuthSupport::TRUSTED_LOGIN_NETWORKS_MAX + 3; $i++) {
+            $GLOBALS['__bcc_ph']['client_ip'] = '10.' . $i . '.0.1';
+            AuthSupport::recordTrustedLoginNetwork(self::ALICE);
+        }
+        $list = (array) get_user_meta(self::ALICE, AuthSupport::META_TRUSTED_LOGIN_NETWORKS, true);
+        self::assertCount(AuthSupport::TRUSTED_LOGIN_NETWORKS_MAX, $list);
+
+        $hash = hash('sha256', '203.0.113.0');
+        $GLOBALS['__bcc_ph']['meta'][self::ALICE][AuthSupport::META_TRUSTED_LOGIN_NETWORKS] = [$hash => time() - AuthSupport::TRUSTED_LOGIN_NETWORKS_TTL - 1];
+        self::assertFalse(AuthSupport::isTrustedLoginNetwork(self::ALICE, '203.0.113.0'), 'older than 30 days');
+    }
+
+    public function testOnlyACompletedSignInRecordsTheNetwork(): void
+    {
+        // A right password stops at the second factor here (unverified
+        // account → 403): nothing is recorded by the password step itself.
+        self::assertSame(403, self::attempt('alice', 'right', self::HOME));
+        self::assertEmpty(get_user_meta(self::ALICE, AuthSupport::META_TRUSTED_LOGIN_NETWORKS, true));
+
+        $src = (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Core/REST/Auth/TwoFactorController.php');
+        self::assertSame(1, substr_count($src, 'AuthSupport::recordTrustedLoginNetwork($userId)'), 'recorded where the second factor completes');
     }
 
     public function testAnUnknownIdentifierIsThrottledAndAnswers401(): void

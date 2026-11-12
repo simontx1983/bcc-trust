@@ -317,29 +317,33 @@ final class PasswordAuthController
             $user    = $ownerId !== null ? get_userdata($ownerId) : false;
         }
 
-        // Per-account throttles (F-281), still before the CPU-bound bcrypt
-        // compare. Keyed on the resolved account, so every way of naming it
-        // shares one budget; an unknown identifier gets a bucket of its own
-        // all the same (no enumeration oracle). Two buckets: this network's
-        // share, so a stranger elsewhere can't lock the owner out, and an
-        // account-wide ceiling for a guess spread over many networks. See
-        // AuthSupport::LOGIN_ACCOUNT_*.
-        $accountKey = $user !== false
-            ? 'user:' . (int) $user->ID
-            : 'id:' . hash('sha256', is_email($identifier)
-                ? strtolower(sanitize_email($identifier))
-                : ltrim(strtolower($identifier), '@'));
-        $network = \BCC\Trust\Core\Security\RateLimiter::normalizeIpToSubnet(\BCC\Core\Security\Throttle::clientIp());
+        // Login throttles (F-281), still before the CPU-bound bcrypt compare.
+        // See AuthSupport::LOGIN_ACCOUNT_*.
+        //  - This network's budget for what was TYPED (normalized), so a
+        //    stranger elsewhere can't lock the owner out — and a handle and an
+        //    email never share it, so a 429 can't link them to one account.
+        //  - An account-wide ceiling on the RESOLVED account (an unknown
+        //    identifier: on what was typed) against a guess spread over many
+        //    networks, which networks the account recently signed in from
+        //    skip: the owner at home is never locked out by it.
+        $typedKey = 'id:' . hash('sha256', is_email($identifier)
+            ? strtolower(sanitize_email($identifier))
+            : ltrim(strtolower($identifier), '@'));
+        $network = AuthSupport::loginNetwork();
         if (!\BCC\Core\Security\Throttle::allow(
             'login_account_net',
             AuthSupport::LOGIN_ACCOUNT_RATE_LIMIT,
             AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
-            'bcc_throttle_login_account_net_' . hash('sha256', $accountKey . '|' . $network)
-        ) || !\BCC\Core\Security\Throttle::allow(
+            'bcc_throttle_login_account_net_' . hash('sha256', $typedKey . '|' . $network)
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
+        }
+        $trustedNetwork = $user !== false && AuthSupport::isTrustedLoginNetwork((int) $user->ID, $network);
+        if (!$trustedNetwork && !\BCC\Core\Security\Throttle::allow(
             'login_account',
             AuthSupport::LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT,
             AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
-            'bcc_throttle_login_account_' . hash('sha256', $accountKey)
+            'bcc_throttle_login_account_' . hash('sha256', $user !== false ? 'user:' . (int) $user->ID : $typedKey)
         )) {
             return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
@@ -419,6 +423,7 @@ final class PasswordAuthController
             wp_set_auth_cookie($userId, true);
 
             $token = JwtToken::encodeNewSession($userId, $handle);
+            AuthSupport::recordTrustedLoginNetwork($userId); // F-281: a completed sign-in
 
             Logger::audit('user_login', [
                 'user_id' => $userId,
