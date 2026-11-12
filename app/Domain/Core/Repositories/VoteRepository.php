@@ -1915,11 +1915,15 @@ class VoteRepository {
      *   page_id: int|numeric-string,
      *   weight: float|numeric-string
      * }>
+     * @throws RepositoryReadFailure when the read failed. Its one caller
+     *         (BehavioralAnalyzer) PERSISTS a score built from it, so an
+     *         empty answer from a failed read must not pass as "no votes".
      */
     public function getRecentVotesForUser( int $userId, int $limit = 100 ): array {
         global $wpdb;
 
-        return $wpdb->get_results( $wpdb->prepare(
+        /** @var list<object{vote_type: int|numeric-string, created_at: string, page_id: int|numeric-string, weight: float|numeric-string}> */
+        return self::runRead( $wpdb->prepare(
             "SELECT vote_type, created_at, page_id, weight
              FROM {$this->table}
              WHERE voter_user_id = %d AND status = 1
@@ -1927,7 +1931,7 @@ class VoteRepository {
              LIMIT %d",
             $userId,
             $limit
-        ) );
+        ), __FUNCTION__, true );
     }
 
     /**
@@ -1936,13 +1940,15 @@ class VoteRepository {
      * @param int $userId
      * @param int $limit
      * @return object[]
+     * @throws RepositoryReadFailure when the read failed (one caller,
+     *         BehavioralAnalyzer, which persists the score it builds)
      */
     public function getVotedPagesWithOwners( int $userId, int $limit = 500 ): array {
         global $wpdb;
 
         $scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
 
-        return $wpdb->get_results( $wpdb->prepare(
+        return self::runRead( $wpdb->prepare(
             "SELECT DISTINCT v.page_id, s.page_owner_id
              FROM {$this->table} v
              JOIN {$scoresTable} s ON v.page_id = s.page_id AND s.category_id = 0
@@ -1950,7 +1956,7 @@ class VoteRepository {
              LIMIT %d",
             $userId,
             $limit
-        ) );
+        ), __FUNCTION__, true );
     }
 
     /**
@@ -1989,14 +1995,16 @@ class VoteRepository {
      *
      * @param int $userId
      * @return int
+     * @throws RepositoryReadFailure when the read failed (one caller,
+     *         BehavioralAnalyzer, which persists the score it builds)
      */
     public function countReciprocalVotes( int $userId ): int {
         global $wpdb;
 
         $scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
 
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*)
+        $rows = self::runRead( $wpdb->prepare(
+            "SELECT COUNT(*) AS n
              FROM {$this->table} v1
              JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id AND s1.category_id = 0
              JOIN {$this->table} v2 ON v2.voter_user_id = s1.page_owner_id
@@ -2008,7 +2016,9 @@ class VoteRepository {
                AND v2.status = 1",
             $userId,
             $userId
-        ) );
+        ), __FUNCTION__, true );
+
+        return isset( $rows[0]->n ) ? (int) $rows[0]->n : 0;
     }
 
     /**
@@ -2069,6 +2079,8 @@ class VoteRepository {
      *
      * @param int[] $pageIds
      * @return string[]
+     * @throws RepositoryReadFailure when the read failed (one caller,
+     *         BehavioralAnalyzer, which persists the score it builds)
      */
     public function getPageScoresForPageIds( array $pageIds ): array {
         global $wpdb;
@@ -2080,11 +2092,13 @@ class VoteRepository {
         $scoresTable   = \BCC\Trust\Core\Database\TableRegistry::scores();
         $placeholders  = implode( ',', array_fill( 0, count( $pageIds ), '%d' ) );
 
-        return $wpdb->get_col( $wpdb->prepare(
+        $rows = self::runRead( $wpdb->prepare(
             "SELECT total_score FROM {$scoresTable}
              WHERE page_id IN ({$placeholders})",
             ...$pageIds
-        ) );
+        ), __FUNCTION__, true );
+
+        return array_map( static fn( object $row ): string => (string) ( $row->total_score ?? '0' ), $rows );
     }
 
     /**
