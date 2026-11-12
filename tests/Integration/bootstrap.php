@@ -130,6 +130,35 @@ if (!class_exists('BCC\\Core\\Log\\Logger')) {
     }');
 }
 
+// ── Capability shim ──────────────────────────────────────────────────────
+//
+// bcc-core's REAL Permissions::is_admin() is `current_user_can('manage_options')`
+// and nothing here defined that function, so any integration test reaching
+// it died with "Call to undefined function" — a fatal, not an assertion.
+//
+// ⚠ It arrived via §F-02: the posts gate asks
+// ProfileAccess::viewerIsExemptFromVisibility() on every feed and blog read,
+// so a capability check that used to be reached only by admin-screen tests is
+// now on the hot read path of the whole suite. The shim belongs in the
+// bootstrap rather than in one test's stubs for exactly that reason.
+//
+// Default FALSE — a test that wants the admin path says so by listing the
+// capability. Defaulting true would silently exempt every integration test
+// from every capability gate, which is the shape of bug that makes a suite
+// prove the opposite of what it claims.
+if (!function_exists('current_user_can')) {
+    /**
+     * @param mixed ...$args Extra object-id args WP allows; ignored here.
+     */
+    function current_user_can(string $capability, ...$args): bool
+    {
+        unset($args);
+        $caps = $GLOBALS['__bcc_test_caps'] ?? [];
+
+        return is_array($caps) && in_array($capability, $caps, true);
+    }
+}
+
 // Minimal WP option + sanitizer stubs used by schema migrations + repositories.
 if (!function_exists('get_option')) {
     /** @param mixed $default @return mixed */
