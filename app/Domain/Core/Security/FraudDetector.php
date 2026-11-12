@@ -75,14 +75,24 @@ class FraudDetector {
      * VoteService gate and the +30 `rapid_voting` fraud signal were dead.
      * It now counts the votes table itself (every status, so a burst that is
      * immediately retracted still counts). No new writes.
+     *
+     * $failClosed (F-208): the post-vote analysis passes true, so a FAILED
+     * read throws instead of reading as "not rapid" in the stored score. The
+     * vote-request gate (VoteService) keeps the default on purpose: a
+     * database blip must never block a vote.
+     *
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure when
+     *         $failClosed and the read failed
      */
-    public static function detectRapidVoting(int $userId): bool {
+    public static function detectRapidVoting(int $userId, bool $failClosed = false): bool {
 
         // created_at is written with current_time('mysql') (site-local), so
         // the cutoff is computed in the same frame.
         $since = gmdate('Y-m-d H:i:s', (int) current_time('timestamp') - BCC_TRUST_RAPID_VOTE_WINDOW * 60);
 
-        $count = self::voteRepo()->countByVoterSince($userId, $since, false);
+        $count = $failClosed
+            ? self::voteRepo()->countByVoterSinceOrFail($userId, $since, false)
+            : self::voteRepo()->countByVoterSince($userId, $since, false);
 
         return $count > BCC_TRUST_RAPID_VOTE_LIMIT;
     }
@@ -117,7 +127,9 @@ class FraudDetector {
             return false;
         }
 
-        $users = self::auditLogRepo()->countDistinctUsersForIp($ipBinary, $userId, BCC_TRUST_MULTI_ACCOUNT_WINDOW);
+        // ...OrFail (F-208): only the post-vote analysis calls this, and a
+        // failed read must not store "no other accounts on this network".
+        $users = self::auditLogRepo()->countDistinctUsersForIpOrFail($ipBinary, $userId, BCC_TRUST_MULTI_ACCOUNT_WINDOW);
 
         return $users > BCC_TRUST_MULTI_ACCOUNT_LIMIT;
     }
@@ -168,8 +180,19 @@ class FraudDetector {
             return $cached;
         }
 
-        // Get user info from user_info table
-        $userInfo = self::userInfoRepo()->getByUserId($userId);
+        // ⚠ F-208: every read in this analysis FAILS CLOSED. A failed read
+        // looks like "no data", which here means "no signal" — a smaller
+        // score that getEnhancedFraudScore() then stores and this method
+        // caches. So the reads throw before anything is cached, into the
+        // callers' retry (post-vote retry, cron per-user catch, admin
+        // reanalyse). Deliberately left fail-open: the 0-point observations
+        // (uniform voting, pairwise reciprocity, shared device, ring
+        // membership) and get_userdata(), which cannot tell a failure from
+        // "no such user".
+        //
+        // Get user info from user_info table. ...OrThrow: null from a failed
+        // read used to score as "profile not provisioned" (+15).
+        $userInfo = self::userInfoRepo()->getByUserIdOrThrow($userId);
 
         $results = [
             'triggers' => [],
@@ -184,7 +207,7 @@ class FraudDetector {
         // 1. Legacy fraud detection (existing methods)
         // ======================================================
 
-        if (self::detectRapidVoting($userId)) {
+        if (self::detectRapidVoting($userId, true)) {
             $results['triggers'][] = 'rapid_voting';
             $results['score'] += 30;
             $results['details']['rapid_voting'] = true;
@@ -601,13 +624,21 @@ class FraudDetector {
 
     /**
      * Enhanced fraud score calculation using all systems and user_info table
+     *
+     * @throws \BCC\Trust\Core\Exceptions\RepositoryException when the
+     *         user_info read fails (F-107): blending a FAILED read as
+     *         "existing 0, peak 0" under-counts the score. Callers already
+     *         handle a throw: the post-vote retry, the daily cron (per-user
+     *         catch) and the admin reanalyse (documented @throws).
      */
     public static function getEnhancedFraudScore(int $userId): int {
 
         $analysis = self::analyzeFraud($userId);
 
-        // Get existing fraud score from user_info
-        $userInfo = self::userInfoRepo()->getByUserId($userId);
+        // Get existing fraud score from user_info. ...OrThrow: a failed read
+        // must not blend as 0 (the monotonic write keeps it from LOWERING the
+        // stored score, but it would under-raise it).
+        $userInfo = self::userInfoRepo()->getByUserIdOrThrow($userId);
         $existingScore = $userInfo ? (int) $userInfo->fraud_score : 0;
 
         // Blend with new analysis (70% new, 30% existing to smooth changes)

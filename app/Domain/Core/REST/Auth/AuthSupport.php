@@ -197,6 +197,17 @@ final class AuthSupport
      */
     public const META_EMAIL_VERIFIED = '_bcc_email_verified';
 
+    /**
+     * Per-ACCOUNT limit (per 60 s) on cheap self-scoped writes — profile, prefs,
+     * privacy, onboarding, mark-read, highlights, primary hall… (F-134). One
+     * shared 'me_write' bucket; generous, because mark-read and celebrations
+     * fire from ordinary UI use.
+     */
+    public const ME_WRITE_RATE_LIMIT = 120;
+
+    /** Per-ACCOUNT handle changes per HOUR (F-134), on top of ME_WRITE_RATE_LIMIT. */
+    public const HANDLE_CHANGE_RATE_LIMIT = 10;
+
     /** OTP transient TTL: 15 minutes. */
     public const OTP_TTL = 900;
 

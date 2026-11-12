@@ -277,6 +277,11 @@ final class GroupsService
             $viewerId
         );
 
+        // F-187: an IPFS collection image (stored canonical on ipfs.io) is
+        // served on BCC_IPFS_GATEWAY, with the ipfs.io copy as the fallback.
+        // present() only — a non-IPFS URL passes through unchanged.
+        $image = \BCC\Trust\Onchain\ValueObjects\IpfsImageUrl::present($imageUrl);
+
         return [
             'id'                => $groupId,
             'slug'              => (string) $row->post_name,
@@ -284,7 +289,8 @@ final class GroupsService
             'type'              => $ctx->type->value,
             'privacy'           => $ctx->privacy->value,
             'description'       => $description,
-            'image_url'         => $imageUrl,
+            'image_url'         => $image['url'],
+            'image_fallback_url' => $image['fallback_url'],
             'member_count'      => (int) $row->member_count,
             'verification'      => $ctx->verification?->toApiResponse(),
             'activity'          => $activity,

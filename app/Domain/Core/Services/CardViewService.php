@@ -650,15 +650,13 @@ final class CardViewService
      * Resolve a member-card handle to a user id, for a CALLER THAT MUST
      * GATE on the same user this service will render.
      *
-     * ⚠⚠ EXISTS SO THE GATE AND THE PAYLOAD CANNOT DISAGREE, and that is
-     * not hypothetical. This service's `resolveHandle()` matches ONLY the
-     * `bcc_handle` meta, whereas {@see UserSlugResolver::resolve()} also
-     * falls back to `user_login` and then to a sluggified
-     * `user_nicename`. The two therefore resolve DIFFERENT sets: a legacy
-     * account with no `bcc_handle` resolves through UserSlugResolver and
-     * not through this one. A gate built on the other resolver would
-     * judge one user's privacy and then render — or 404 — a different
-     * one, which is how a gate ends up protecting the wrong person.
+     * ⚠⚠ EXISTS SO THE GATE AND THE PAYLOAD CANNOT DISAGREE. Both go
+     * through this service's `resolveHandle()`, which now delegates to
+     * {@see UserSlugResolver::resolve()}: one resolver for every per-user
+     * route (exact handle, exact retired handle, member-{id} for a
+     * handle-less member; never user_login or user_nicename). Earlier the
+     * two resolved DIFFERENT sets, which is how a gate ends up judging one
+     * user's privacy and rendering another's card.
      *
      * @see \BCC\Trust\Core\REST\CardsEndpoint::handle()
      */
@@ -1335,24 +1333,14 @@ final class CardViewService
         );
     }
 
+    /**
+     * The member-card resolver IS UserSlugResolver: one rule set for
+     * every per-user route, so the card gate and the payload (both
+     * through here) and the /users/* routes all resolve the same user.
+     */
     private static function resolveHandle(string $handle): int
     {
-        $handle = strtolower(trim($handle));
-        if ($handle === '') {
-            return 0;
-        }
-
-        $userIds = get_users([
-            'meta_key'   => 'bcc_handle',
-            'meta_value' => $handle,
-            'number'     => 1,
-            'fields'     => 'ID',
-        ]);
-
-        if (empty($userIds)) {
-            return 0;
-        }
-        return (int) $userIds[0];
+        return \BCC\Trust\Core\Support\UserSlugResolver::resolve($handle);
     }
 
     private static function resolveMemberHandle(\WP_User $user): string
@@ -1833,7 +1821,7 @@ final class CardViewService
      * the entity has no custom crest image — frontend falls back to
      * `initials + monogram_color` inside the hex.
      *
-     * @return array{initials: string, monogram_color: string, background_kind: string, background_value: string, image_url: string|null}
+     * @return array{initials: string, monogram_color: string, background_kind: string, background_value: string, image_url: string|null, image_fallback_url: string|null}
      */
     private static function buildCrest(string $name, string $backgroundKind, string $backgroundValue, string $imageUrl = ''): array
     {
@@ -1866,12 +1854,19 @@ final class CardViewService
         $hash    = crc32($name);
         $color   = $palette[$hash % count($palette)];
 
+        // F-187: an IPFS image (NFT collection art, stored canonical on
+        // ipfs.io) is served on BCC_IPFS_GATEWAY with the ipfs.io copy as
+        // `image_fallback_url`. present() only, NOT sanitize: the crest also
+        // carries uploaded page/user art, which passes through unchanged.
+        $image = \BCC\Trust\Onchain\ValueObjects\IpfsImageUrl::present($imageUrl !== '' ? $imageUrl : null);
+
         return [
-            'initials'         => $initials,
-            'monogram_color'   => $color,
-            'background_kind'  => $backgroundKind,
-            'background_value' => $backgroundValue,
-            'image_url'        => $imageUrl !== '' ? $imageUrl : null,
+            'initials'           => $initials,
+            'monogram_color'     => $color,
+            'background_kind'    => $backgroundKind,
+            'background_value'   => $backgroundValue,
+            'image_url'          => $image['url'],
+            'image_fallback_url' => $image['fallback_url'],
         ];
     }
 

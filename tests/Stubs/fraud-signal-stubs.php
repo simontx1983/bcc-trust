@@ -125,6 +125,8 @@ namespace BCC\Trust\Core {
         /** @var array<int, array<string, mixed>> */
         public static array $rings = [];
         public static ?object $userInfo = null;
+        /** When true, UserInfoRepository::getByUserIdOrThrow() fails like a DB error. */
+        public static bool $userInfoReadFails = false;
         public static ?string $userRegistered = '2020-01-01 00:00:00';
 
         // ── recorded writes ───────────────────────────────────────────
@@ -189,6 +191,7 @@ namespace BCC\Trust\Core {
 
         public static function reset(): void
         {
+            self::$userInfoReadFails = false;
             self::$logs            = [];
             self::$mutualVotePairs = [];
             self::$vouchEdges      = [];
@@ -308,6 +311,15 @@ namespace BCC\Trust\Core\Repositories {
                 return W::$userInfo;
             }
 
+            /** Real one throws on a FAILED read; W::$userInfoReadFails simulates it. */
+            public function getByUserIdOrThrow(int $userId): ?object
+            {
+                if (W::$userInfoReadFails) {
+                    throw new \BCC\Trust\Core\Exceptions\RepositoryException('simulated user_info read failure');
+                }
+                return W::$userInfo;
+            }
+
             public function incrementFraudScore(int $userId, int $increment, string $reason): void
             {
                 W::$increments[] = [
@@ -331,6 +343,12 @@ namespace BCC\Trust\Core\Repositories {
             public function countByVoterSince(int $voterId, string $sinceMysql, bool $activeOnly = true): int
             {
                 return $activeOnly ? 0 : W::$rapidVotes;
+            }
+
+            /** F-208: the analysis reads the fail-closed variant; same answer here. */
+            public function countByVoterSinceOrFail(int $voterId, string $sinceMysql, bool $activeOnly = true): int
+            {
+                return $this->countByVoterSince($voterId, $sinceMysql, $activeOnly);
             }
 
             public function getVoteTypeStats(int $userId, int $days): ?object
@@ -374,6 +392,12 @@ namespace BCC\Trust\Core\Repositories {
             public function countDistinctUsersForIp(string $ipBinary, int $userId, int $hours): int
             {
                 return W::$distinctUsersForIp;
+            }
+
+            /** F-208: the analysis reads the fail-closed variant; same answer here. */
+            public function countDistinctUsersForIpOrFail(string $ipBinary, int $userId, int $hours): int
+            {
+                return $this->countDistinctUsersForIp($ipBinary, $userId, $hours);
             }
 
             public function getLastIpForUser(int $userId): ?string

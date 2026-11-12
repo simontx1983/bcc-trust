@@ -269,6 +269,10 @@ final class CreatorGalleryEndpoint
         $imageUrl = isset($row->image_url) && is_string($row->image_url) && $row->image_url !== ''
             ? $row->image_url
             : null;
+        // F-187: an IPFS collection image (stored canonical on ipfs.io) is
+        // served on BCC_IPFS_GATEWAY, with the ipfs.io copy as the fallback.
+        // present() only — a non-IPFS URL passes through unchanged.
+        $image = \BCC\Trust\Onchain\ValueObjects\IpfsImageUrl::present($imageUrl);
 
         $chainName = isset($row->chain_name) && is_string($row->chain_name)
             ? $row->chain_name
@@ -296,7 +300,8 @@ final class CreatorGalleryEndpoint
             'chain_slug'           => $chainSlug,
             'chain_name'           => $chainName,
             'name'                 => $name,
-            'image_url'            => $imageUrl,
+            'image_url'            => $image['url'],
+            'image_fallback_url'   => $image['fallback_url'],
             'total_supply'         => $totalSupply,
             'floor_price_label'    => $floorPriceLabel,
             'total_volume_label'   => $totalVolumeLabel,

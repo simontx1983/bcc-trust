@@ -134,6 +134,21 @@ namespace BCC\Trust\Core\Support {
     }
 }
 
+namespace BCC\Core\Security {
+    // MyProfilePrefsEndpoint::patch takes the per-account 'me_write' bucket
+    // (F-134) before validating; these tests are about atomicity, so it
+    // always allows. Guarded, and declared before the endpoint class loads.
+    if (!class_exists(Throttle::class, false)) {
+        final class Throttle
+        {
+            public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null): bool
+            {
+                return true;
+            }
+        }
+    }
+}
+
 namespace BCC\Core\Log {
     // M1: a failed write is logged; record it instead.
     if (!class_exists(Logger::class, false)) {

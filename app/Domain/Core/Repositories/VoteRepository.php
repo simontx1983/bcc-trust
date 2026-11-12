@@ -251,6 +251,24 @@ class VoteRepository {
      * @phpstan-return VoteRow|null
      */
     public function getById( int $voteId ): ?object {
+        try {
+            return $this->getByIdOrFail($voteId);
+        } catch (RepositoryReadFailure) {
+            // F-101: fail open, uncached; the next call retries.
+            return null;
+        }
+    }
+
+    /**
+     * getById() for callers that must tell "no such vote" from "could not
+     * read": a failed read THROWS. VoteFraudAnalyzer::run() needs this —
+     * reading null after a DB blip ended the run as if it had succeeded,
+     * so the F-107 retry never fired for exactly the case it targets.
+     *
+     * @phpstan-return VoteRow|null
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public function getByIdOrFail( int $voteId ): ?object {
         $cacheKey = "vote_{$voteId}";
         $cached   = wp_cache_get($cacheKey, self::CACHE_GROUP);
         if ($cached !== false) {
@@ -259,15 +277,11 @@ class VoteRepository {
 
         global $wpdb;
         // F-101: a failed read used to be cached as "no such vote" ('') for
-        // CACHE_TTL. It now reads as null for this call only.
-        try {
-            $rows = self::runRead((string) $wpdb->prepare(
-                "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE id = %d",
-                $voteId
-            ), __FUNCTION__, true);
-        } catch (RepositoryReadFailure) {
-            return null;
-        }
+        // CACHE_TTL. runRead() now throws before anything is cached.
+        $rows = self::runRead((string) $wpdb->prepare(
+            "SELECT " . self::COLUMNS . " FROM {$this->table} WHERE id = %d",
+            $voteId
+        ), 'getById', true);
         /** @var VoteRow|null $row */
         $row = $rows[0] ?? null;
 
@@ -1414,30 +1428,47 @@ class VoteRepository {
      * (Re-casting a retracted vote resets its created_at, so it counts too.)
      */
     public function countByVoterSince( int $voterId, string $sinceMysql, bool $activeOnly = true ): int {
+        return $this->countVoterRowsSince( $voterId, $sinceMysql, $activeOnly, false );
+    }
+
+    /**
+     * countByVoterSince(), but a FAILED read throws instead of counting 0.
+     *
+     * For the post-vote fraud analysis (F-208), where 0 means "not rapid
+     * voting" and is stored as the user's fraud score. The vote-request gate
+     * keeps the fail-open variant on purpose: a database blip must never
+     * block a vote.
+     *
+     * @throws RepositoryReadFailure when the read failed
+     */
+    public function countByVoterSinceOrFail( int $voterId, string $sinceMysql, bool $activeOnly = true ): int {
+        return $this->countVoterRowsSince( $voterId, $sinceMysql, $activeOnly, true );
+    }
+
+    /**
+     * One query, two failure policies.
+     *
+     * @throws RepositoryReadFailure when $failClosed and the read failed
+     */
+    private function countVoterRowsSince( int $voterId, string $sinceMysql, bool $activeOnly, bool $failClosed ): int {
         if ($voterId <= 0 || $sinceMysql === '') {
             return 0;
         }
 
         global $wpdb;
 
-        if ( ! $activeOnly ) {
-            return (int) $wpdb->get_var( $wpdb->prepare(
-                "SELECT COUNT(*) FROM {$this->table}
-                 WHERE voter_user_id = %d
-                   AND created_at   >= %s",
-                $voterId,
-                $sinceMysql
-            ) );
-        }
+        $statusClause = $activeOnly ? 'AND status = 1' : '';
 
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM {$this->table}
+        $rows = self::runRead( $wpdb->prepare(
+            "SELECT COUNT(*) AS n FROM {$this->table}
              WHERE voter_user_id = %d
-               AND status        = 1
+               {$statusClause}
                AND created_at   >= %s",
             $voterId,
             $sinceMysql
-        ) );
+        ), 'countByVoterSince', $failClosed );
+
+        return isset( $rows[0]->n ) ? (int) $rows[0]->n : 0;
     }
 
     /**
@@ -1901,11 +1932,15 @@ class VoteRepository {
      *   page_id: int|numeric-string,
      *   weight: float|numeric-string
      * }>
+     * @throws RepositoryReadFailure when the read failed. Its one caller
+     *         (BehavioralAnalyzer) PERSISTS a score built from it, so an
+     *         empty answer from a failed read must not pass as "no votes".
      */
     public function getRecentVotesForUser( int $userId, int $limit = 100 ): array {
         global $wpdb;
 
-        return $wpdb->get_results( $wpdb->prepare(
+        /** @var list<object{vote_type: int|numeric-string, created_at: string, page_id: int|numeric-string, weight: float|numeric-string}> */
+        return self::runRead( $wpdb->prepare(
             "SELECT vote_type, created_at, page_id, weight
              FROM {$this->table}
              WHERE voter_user_id = %d AND status = 1
@@ -1913,7 +1948,7 @@ class VoteRepository {
              LIMIT %d",
             $userId,
             $limit
-        ) );
+        ), __FUNCTION__, true );
     }
 
     /**
@@ -1922,13 +1957,15 @@ class VoteRepository {
      * @param int $userId
      * @param int $limit
      * @return object[]
+     * @throws RepositoryReadFailure when the read failed (one caller,
+     *         BehavioralAnalyzer, which persists the score it builds)
      */
     public function getVotedPagesWithOwners( int $userId, int $limit = 500 ): array {
         global $wpdb;
 
         $scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
 
-        return $wpdb->get_results( $wpdb->prepare(
+        return self::runRead( $wpdb->prepare(
             "SELECT DISTINCT v.page_id, s.page_owner_id
              FROM {$this->table} v
              JOIN {$scoresTable} s ON v.page_id = s.page_id AND s.category_id = 0
@@ -1936,7 +1973,7 @@ class VoteRepository {
              LIMIT %d",
             $userId,
             $limit
-        ) );
+        ), __FUNCTION__, true );
     }
 
     /**
@@ -1975,14 +2012,16 @@ class VoteRepository {
      *
      * @param int $userId
      * @return int
+     * @throws RepositoryReadFailure when the read failed (one caller,
+     *         BehavioralAnalyzer, which persists the score it builds)
      */
     public function countReciprocalVotes( int $userId ): int {
         global $wpdb;
 
         $scoresTable = \BCC\Trust\Core\Database\TableRegistry::scores();
 
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*)
+        $rows = self::runRead( $wpdb->prepare(
+            "SELECT COUNT(*) AS n
              FROM {$this->table} v1
              JOIN {$scoresTable} s1 ON v1.page_id = s1.page_id AND s1.category_id = 0
              JOIN {$this->table} v2 ON v2.voter_user_id = s1.page_owner_id
@@ -1994,7 +2033,9 @@ class VoteRepository {
                AND v2.status = 1",
             $userId,
             $userId
-        ) );
+        ), __FUNCTION__, true );
+
+        return isset( $rows[0]->n ) ? (int) $rows[0]->n : 0;
     }
 
     /**
@@ -2028,12 +2069,15 @@ class VoteRepository {
      * @param int $userId
      * @param int $minutes
      * @return int
+     * @throws RepositoryReadFailure when the read failed (F-208). One
+     *         caller, the post-vote fraud analysis, where 0 means "no
+     *         flip-flopping" and is stored as the fraud score.
      */
     public function countVoteChanges( int $userId, int $minutes = 30 ): int {
         global $wpdb;
 
-        return (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*)
+        $rows = self::runRead( $wpdb->prepare(
+            "SELECT COUNT(*) AS n
              FROM {$this->table} v1
              JOIN {$this->table} v2 ON v1.page_id = v2.page_id
              WHERE v1.voter_user_id = %d
@@ -2047,7 +2091,9 @@ class VoteRepository {
             $userId,
             $userId,
             $minutes
-        ) );
+        ), __FUNCTION__, true );
+
+        return isset( $rows[0]->n ) ? (int) $rows[0]->n : 0;
     }
 
     /**
@@ -2055,6 +2101,8 @@ class VoteRepository {
      *
      * @param int[] $pageIds
      * @return string[]
+     * @throws RepositoryReadFailure when the read failed (one caller,
+     *         BehavioralAnalyzer, which persists the score it builds)
      */
     public function getPageScoresForPageIds( array $pageIds ): array {
         global $wpdb;
@@ -2066,11 +2114,13 @@ class VoteRepository {
         $scoresTable   = \BCC\Trust\Core\Database\TableRegistry::scores();
         $placeholders  = implode( ',', array_fill( 0, count( $pageIds ), '%d' ) );
 
-        return $wpdb->get_col( $wpdb->prepare(
+        $rows = self::runRead( $wpdb->prepare(
             "SELECT total_score FROM {$scoresTable}
              WHERE page_id IN ({$placeholders})",
             ...$pageIds
-        ) );
+        ), __FUNCTION__, true );
+
+        return array_map( static fn( object $row ): string => (string) ( $row->total_score ?? '0' ), $rows );
     }
 
     /**

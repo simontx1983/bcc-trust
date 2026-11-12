@@ -88,6 +88,12 @@ class TrustGraph {
      * (written by batchCalculateAllRanks() each hour) rather than running a
      * full O(n²) PageRank iteration inline.  A full recalculation is only
      * triggered when no stored rank exists yet (first-ever vote).
+     *
+     * @throws \BCC\Trust\Core\Exceptions\RepositoryException when the
+     *         user_info read fails. getByUserId() answered null on a failed
+     *         read, which reached the "no stored rank yet" branch below and
+     *         WROTE the 0.5 default over the member's real rank (and cached
+     *         it). A failed read now writes and caches nothing.
      */
     public function calculateTrustRank(int $userId, int $iterations = 10, float $damping = 0.85): float {
 
@@ -98,7 +104,7 @@ class TrustGraph {
         }
 
         // Read pre-computed rank from user_info — written hourly by batchCalculateAllRanks()
-        $stored = $this->userInfoRepo->getByUserId($userId);
+        $stored = $this->userInfoRepo->getByUserIdOrThrow($userId);
         if ($stored && !empty($stored->trust_rank) && (float) $stored->trust_rank > 0) {
             $rank = (float) $stored->trust_rank;
             wp_cache_set('trust_rank_' . $userId, $rank, self::CACHE_GROUP, self::CACHE_TTL);

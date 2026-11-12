@@ -360,6 +360,25 @@ class SignalFetcher
             /** @var list<\stdClass> */
             return $raw->result;
         }
+
+        // F-42: an address with NO transactions is a valid, empty answer —
+        // Etherscan reports it as status "0", message "No transactions
+        // found", result []. Treating it as a failure (null) meant the
+        // zero-tx wallet was never cached and was refetched on every
+        // cycle, spending the API budget on the one answer that never
+        // changes until the wallet is used. Every OTHER status "0"
+        // (NOTOK: rate limit, bad key, bad address) is still a failure.
+        if ($raw !== null
+            && isset($raw->status, $raw->message)
+            && $raw->status === '0'
+            && is_string($raw->message)
+            && preg_match('/^No (transactions|records) found$/i', trim($raw->message)) === 1
+            && isset($raw->result)
+            && $raw->result === []
+        ) {
+            return [];
+        }
+
         return null;
     }
 

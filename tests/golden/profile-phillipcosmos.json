@@ -71,6 +71,7 @@
     "crest": {
       "background_kind": "tier",
       "background_value": "neutral",
+      "image_fallback_url": null,
       "image_url": "{{ORIGIN}}/wp-content/plugins/peepso/assets/images/avatar/user-neutral.png?mt={{MT}}",
       "initials": "P",
       "monogram_color": "#3e3a0f"

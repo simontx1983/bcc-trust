@@ -292,7 +292,89 @@ final class ProfileAccess
             return false;
         }
 
-        return (bool) \PeepSoUser::is_accessible_static((int) $acc, $ownerId);
+        // Snapped to a canonical rung first — see
+        // canonicalProfileLevel() for why a raw value cannot be trusted
+        // and why the feed and this gate would otherwise disagree.
+        return (bool) \PeepSoUser::is_accessible_static(
+            self::canonicalProfileLevel((int) $acc),
+            $ownerId
+        );
+    }
+
+    /**
+     * Snap a raw `usr_profile_acc` to the nearest STRICTER canonical rung
+     * before the ladder sees it: `<= 10` → 10, `<= 20` → 20, `<= 30` →
+     * 30, anything higher → 40.
+     *
+     * ⚠⚠ WHY THIS EXISTS: the column is not a validated enum, and the two
+     * ladders disagreed about that. PeepSo's
+     * `classes/profilepreferencesajax.php` writes
+     * `$data['usr_profile_acc'] = $this->_input->raw('value')` with no
+     * allow-list — only an owner / `edit_users` permission check — and the
+     * column is `TINYINT(1)`, so anything in -128..127 is storable.
+     *
+     * A stray value then behaved two ways at once. Verified against the
+     * shipped feed query on MySQL 8: an author with `usr_profile_acc = 15`
+     * and a post at `act_access = 10` had that post VISIBLE to any
+     * signed-in member (bcc-core's range ladder reads 15 as the members
+     * rung) while `PeepSoUser::is_accessible_static(15, …)` has no
+     * `case 15`, fell through to the `peepso_user_is_accessible` filter
+     * and — with peepso-friends gone — DENIED the profile. Posts readable,
+     * profile 403.
+     *
+     * Snapping here makes the two agree, in the direction the stray-level
+     * decision already chose for posts: a value nobody validated should
+     * land on the nearest stricter rung, not make something vanish.
+     *
+     * ⚠ THIS LOOSENS ONE BAND. A raw 11-20 is denied outright today
+     * (no matching `case`) and becomes members-visible. 21-30 → friends,
+     * which with no friend graph is owner-only; 31+ → 40, denied. So only
+     * 11-20 becomes more visible, and nothing that is denied at 40 today
+     * stops being denied.
+     *
+     * ⚠ `-1` is PeepSo's `ACCESS_FORCE_PUBLIC`, and `<= 10` maps it to 10
+     * — public, which is what it means. Non-numeric input never reaches
+     * here: the caller refuses it before this, because a non-numeric level
+     * cast to 0 would read as PUBLIC.
+     */
+    private static function canonicalProfileLevel(int $raw): int
+    {
+        if ($raw <= 10) {
+            return 10;
+        }
+        if ($raw <= 20) {
+            return 20;
+        }
+        if ($raw <= 30) {
+            return 30;
+        }
+
+        return 40;
+    }
+
+    /**
+     * Is the CURRENT viewer exempt from §F-02 visibility filtering?
+     *
+     * One definition, used by this class's own gates and by the services
+     * that opt bcc-core's list gates in, because the exemptions have to
+     * agree: a viewer who can open a hidden profile must also see its row
+     * in a listing, and the reverse. Two inline `is_admin()` calls that
+     * later drifted apart would produce exactly the listed-but-unopenable
+     * state F-02 exists to remove.
+     *
+     * ⚠ "Admin" is `Permissions::is_admin()` = `manage_options`, NARROWER
+     * than the `PeepSo::is_admin()` the privacy ladder uses (which also
+     * admits the PeepSo role `admin`). Deliberately not widened: it errs
+     * toward hiding.
+     *
+     * ⚠ bcc-core's list gates hold NO capability check, by design, so an
+     * admin read is expressed by the CALLER passing `enforce = false`.
+     * That is why this is public.
+     */
+    public static function viewerIsExemptFromVisibility(): bool
+    {
+        return class_exists('\\BCC\\Core\\Permissions\\Permissions')
+            && \BCC\Core\Permissions\Permissions::is_admin();
     }
 
     /**
@@ -384,14 +466,25 @@ final class ProfileAccess
      * state counts as "not suspended", so the profile stays visible: it
      * is a read path, and the alternative — treating unknown as
      * suspended — blacks out every profile on the site the moment the
-     * state cannot be read. Two consequences worth knowing:
-     *   - `UserInfoRepository::getByUserId()` CACHES a null row as "no
-     *     row" for 5 minutes, so a transient read fault becomes a
-     *     5-minute "not suspended" (see bcc-core #84, which exists
-     *     because an unknown state must never be cached).
-     *   - when bcc-core #84 lands, this should become
-     *     `Permissions::suspensionState($ownerId)` with `null` mapped to
-     *     VISIBLE — i.e. `=== true` for hidden, never `!== false`.
+     * state cannot be read.
+     *
+     * ⚠ "Unreadable" is now a REAL, OBSERVABLE state rather than
+     * something indistinguishable from "no row", and the whole chain has
+     * to hold for that to be true:
+     *   - `UserInfoRepository::getByUserIdOrThrow()` THROWS on a failed
+     *     read and does NOT cache the failure, so the next call retries.
+     *     ⚠ Note it is that method, not the 5-minute-cached
+     *     `getByUserId()`, that the suspension path uses — an audit that
+     *     assumed the row cache applied here would be wrong. (Before
+     *     that existed, `get_row()` returned null for a database error
+     *     exactly as for "no row", and the null was cached as "no row"
+     *     for five minutes: one blip read as NOT suspended, everywhere.)
+     *   - `TrustReadService::isSuspended()` turns that into
+     *     `\BCC\Core\Contracts\SuspensionUnknownException`.
+     *   - bcc-core's `suspensionState()` turns THAT into `null`, and
+     *     never caches it.
+     * So a fault surfaces as `null` here, which this method maps to
+     * VISIBLE on purpose — not by losing the information.
      */
     private static function hiddenBySuspension(int $ownerId): bool
     {
@@ -405,7 +498,7 @@ final class ProfileAccess
             return false;
         }
 
-        if (\BCC\Core\Permissions\Permissions::is_admin()) {
+        if (self::viewerIsExemptFromVisibility()) {
             return false;
         }
 
@@ -483,8 +576,7 @@ final class ProfileAccess
         if (!array_key_exists('_peepso_user_id', $query->query_vars)) {
             return;
         }
-        if (class_exists('\\BCC\\Core\\Permissions\\Permissions')
-            && \BCC\Core\Permissions\Permissions::is_admin()) {
+        if (self::viewerIsExemptFromVisibility()) {
             return;
         }
 

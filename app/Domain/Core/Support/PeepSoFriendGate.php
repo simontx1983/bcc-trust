@@ -86,6 +86,39 @@ final class PeepSoFriendGate
     }
 
     /**
+     * The viewer's friend ids as a LIST, for bcc-core's §F-02 visibility
+     * gates (`$viewerFriendIds` on `PeepSoActivityRepository` and
+     * `PeepSoFollowerRepository`).
+     *
+     * ⚠⚠ USE THIS, NOT `friendIdsOf()`, when passing to bcc-core.
+     * `friendIdsOf()` returns a MAP keyed by friend id with `true`
+     * values, and bcc-core's cleaning loop iterates VALUES:
+     * `foreach ($viewerFriendIds as $fid) { $f = (int) $fid; … }`. Hand
+     * it the map and every entry casts to `(int) true` = 1, so USER 1
+     * becomes "a friend" and the real friends are dropped. Nothing would
+     * throw; the gate would just admit and deny the wrong people.
+     *
+     * ⚠ In production this currently returns `[]` for everyone, always.
+     * `friendIdsOf()` short-circuits on
+     * `class_exists('PeepSoFriendsModel')` and peepso-friends was removed
+     * from production (F-178), so there is no friend graph to read.
+     * bcc-core documents `[]` as "a friend of nobody", which makes the
+     * level-30 rung resolve to owner-only. That matches the product
+     * decision — BCC has no friends feature — but it means a caller
+     * passing this is passing something that cannot currently be
+     * non-empty. It is still the right thing to pass: the day a friend
+     * graph returns, every gate starts honouring it without a code
+     * change, and the alternative (hardcoding `null`) would bake the
+     * absence into each call site instead.
+     *
+     * @return list<int>
+     */
+    public static function viewerFriendIdList(int $viewerId): array
+    {
+        return array_keys(self::friendIdsOf($viewerId));
+    }
+
+    /**
      * Batch sibling of areFriends — the viewer's whole friend set as an
      * O(1) lookup map, for eligibility passes that would otherwise call
      * areFriends once per candidate (card lists resolve up to 50 page

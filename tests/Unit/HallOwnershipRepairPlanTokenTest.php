@@ -173,6 +173,27 @@ final class HallOwnershipRepairPlanTokenTest extends TestCase
         self::assertNotSame(self::digestOf($a), self::digestOf($b));
     }
 
+    /**
+     * The resolver reads suspension through the canonical tri-state
+     * (Permissions::suspensionState) with the ADMIN BYPASS OFF, because
+     * every candidate is an admin. It used to read user meta
+     * `bcc_trust_suspended`, which nothing writes, so a suspended admin was
+     * never skipped. An UNKNOWN answer also skips: a Hall is never handed to
+     * someone who cannot be confirmed unsuspended.
+     */
+    public function testTheOwnerResolverSkipsSuspendedAndUnknownAdminsWithoutTheAdminBypass(): void
+    {
+        $this->boot();
+        \BCC\Core\Permissions\Permissions::$calls = [];
+        \HallRepairTestState::$suspended[1] = 'unknown';
+        \HallRepairTestState::$suspended[2] = '1';
+
+        self::assertSame(4, HallOwnershipRepairService::resolveIntendedOwner(), 'admin 1 unknown, admin 2 suspended → admin 4');
+        foreach (\BCC\Core\Permissions\Permissions::$calls as [, $bypass]) {
+            self::assertFalse($bypass, 'the admin bypass would make every admin read as unsuspended');
+        }
+    }
+
     public function testChangingTheEnvironmentChangesTheDigestNotJustTheLabel(): void
     {
         $this->boot();

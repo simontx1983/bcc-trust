@@ -131,6 +131,22 @@ class PolkadotFetcher implements FetcherInterface
                 'page'       => $page,
             ], $outcome);
 
+            // F-68: a page that FAILED (transport error, non-200, Subscan
+            // error code, missing key) is not the end of the list. apiPost()
+            // returns null for every one of those, and the loop used to read
+            // that as "no more validators" and index a truncated set as if
+            // it were complete. Throw instead, so the run fails: both callers
+            // catch it (ChainRefreshService marks the chain a partial fetch,
+            // skips its write and the dead-validator sweep; the admin refresh
+            // reports a failure).
+            if ($data === null) {
+                throw new \RuntimeException(sprintf(
+                    'Polkadot validator page %d failed (%d validators fetched before it); refusing to index a truncated list.',
+                    $page,
+                    count($validators)
+                ));
+            }
+
             $list = $data['list'] ?? [];
             if (empty($list)) {
                 break;
@@ -571,10 +587,13 @@ class PolkadotFetcher implements FetcherInterface
      * Make a POST request to the Subscan API.
      * Requires BCC_SUBSCAN_API_KEY defined in wp-config.php.
      *
+     * Returns null on ANY failure; callers must not read null as "empty".
+     * Protected (not private) only as a test seam for the paging loop.
+     *
      * @param array<string, mixed> $body
      * @return array<string, mixed>|null
      */
-    private function apiPost(string $path, array $body, ?ProviderOutcomeReceipt $outcome = null): ?array
+    protected function apiPost(string $path, array $body, ?ProviderOutcomeReceipt $outcome = null): ?array
     {
         $apiKey = defined('BCC_SUBSCAN_API_KEY') ? BCC_SUBSCAN_API_KEY : '';
 
@@ -611,13 +630,37 @@ class PolkadotFetcher implements FetcherInterface
             return null;
         }
 
-        $json = json_decode(wp_remote_retrieve_body($response), true);
+        return self::parseSubscanBody(wp_remote_retrieve_body($response), $path);
+    }
+
+    /**
+     * Decode one Subscan response body. Null = failure; [] = an empty answer.
+     *
+     * @return array<string, mixed>|null
+     */
+    private static function parseSubscanBody(string $body, string $path): ?array
+    {
+        $json = json_decode($body, true);
 
         if (!is_array($json) || ($json['code'] ?? -1) !== 0) {
-            \BCC\Core\Log\Logger::error('[Polkadot Fetcher] API error for ' . $path . ': ' . ($json['message'] ?? 'unknown'));
+            \BCC\Core\Log\Logger::error('[Polkadot Fetcher] API error for ' . $path . ': ' . (is_array($json) ? ($json['message'] ?? 'unknown') : 'unknown'));
             return null;
         }
 
-        return $json['data'] ?? null;
+        // A SUCCESSFUL response (code 0) can carry "data": null — e.g. the
+        // page past the end when the validator count is an exact multiple of
+        // the page size. That is an EMPTY answer, not a failure: returning
+        // null here would make fetch_all_validators() throw (F-68) and mark
+        // the chain partial on every such run. Anything else that is not an
+        // array is malformed and stays a failure.
+        $data = $json['data'] ?? null;
+        if ($data === null) {
+            return [];
+        }
+        if (!is_array($data)) {
+            \BCC\Core\Log\Logger::error('[Polkadot Fetcher] Malformed data for ' . $path . ': expected an object, got ' . gettype($data));
+            return null;
+        }
+        return $data;
     }
 }

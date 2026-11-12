@@ -254,7 +254,9 @@ final class FraudInputFixesTest extends TestCase
         $ba  = $ref->newInstanceWithoutConstructor();
         $repo = new class extends UserInfoRepository {
             public function __construct() {}
-            public function getByUserId(int $userId): ?object
+            // The throttle fallback reads ...OrThrow (a failed read must
+            // not fall back to 0); the real getByUserId() delegates here too.
+            public function getByUserIdOrThrow(int $userId): ?object
             {
                 return (object) ['behavior_score' => 64];
             }

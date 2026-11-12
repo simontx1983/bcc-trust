@@ -39,9 +39,11 @@ final class WalletRepository
      * Atomic insert-or-find using INSERT ... ON DUPLICATE KEY UPDATE.
      *
      * Relies on the UNIQUE KEY user_chain_wallet (user_id, chain_id, wallet_address).
-     * If the row already exists, returns ['id' => existing_id, 'inserted' => false].
+     * If the caller's row already exists, returns ['id' => existing_id, 'inserted' => false].
      * If newly inserted, returns ['id' => new_id, 'inserted' => true].
-     * Returns ['id' => 0, 'inserted' => false] on hard failure.
+     * Returns ['id' => 0, 'inserted' => false] on hard failure, AND when the
+     * duplicate is another user's row (uq_chain_address: the address is
+     * already linked to someone else). See F-37.
      *
      * @param array<string, mixed> $data
      * @return array{id: int, inserted: bool}
@@ -73,12 +75,29 @@ final class WalletRepository
             return ['id' => 0, 'inserted' => false];
         }
 
-        $id = (int) $wpdb->insert_id;
-
+        $id       = (int) $wpdb->insert_id;
         // $wpdb->rows_affected: 1 = inserted, 2 = duplicate key triggered update
+        $inserted = ((int) $wpdb->rows_affected === 1);
+
+        if (!$inserted && $id > 0) {
+            // F-37: the table has TWO unique keys. A duplicate on
+            // uq_chain_address (chain_id, wallet_address) means ANOTHER
+            // user already holds this address (e.g. two users racing to
+            // link it), and LAST_INSERT_ID(id) then hands back THEIR row.
+            // Confirm the found row is the caller's; otherwise fail closed
+            // so the caller never verifies or returns someone else's link.
+            $owner = $wpdb->get_var($wpdb->prepare(
+                "SELECT user_id FROM {$table} WHERE id = %d",
+                $id
+            ));
+            if ($wpdb->last_error !== '' || $owner === null || (int) $owner !== $userId) {
+                return ['id' => 0, 'inserted' => false];
+            }
+        }
+
         return [
             'id'       => $id,
-            'inserted' => ((int) $wpdb->rows_affected === 1),
+            'inserted' => $inserted,
         ];
     }
 

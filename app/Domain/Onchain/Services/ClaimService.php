@@ -60,6 +60,12 @@ class ClaimService {
     private const EXCLUSIVE_ROLES = ['operator', 'creator'];
 
     /**
+     * F-14: why a claim was revoked. A closed list — it is written to the
+     * audit log and handed to `bcc_onchain_claim_revoked` listeners.
+     */
+    public const REVOKE_REASONS = ['wallet_link_gone', 'validator_row_gone', 'no_longer_holder', 'no_longer_creator'];
+
+    /**
      * Max wallets checked per claim match (Phase 8). Each wallet on the
      * entity's chain costs a synchronous on-chain RPC in matchCollection;
      * the linked-wallet count is attacker-controllable, so this caps the
@@ -480,5 +486,68 @@ class ClaimService {
             'holder'   => 'Verified as holder',
         ];
         return $labels[$role] ?? 'Claim verified';
+    }
+
+    /**
+     * F-14: revoke a verified claim and undo what it granted.
+     *
+     *  - the claim and its bound page mirror flip to `revoked`
+     *    ({@see ClaimRepository::revoke()}, one transaction, fail-closed);
+     *  - the trust bonus is recomputed from the claims that remain;
+     *  - `bcc_trust_verification_changed` resyncs the page read model, so the
+     *    card's `is_claim_verified` badge (and its rank composite) drops;
+     *  - `bcc_onchain_claim_revoked` is fired for listeners, and the revoke
+     *    is audited with its reason.
+     *
+     * What stays, by design: the page's `post_author` (reassignment is an
+     * explicit admin action) and the original feed activity row, which the
+     * feed now hides at read time (F-89).
+     *
+     * Returns false when there was nothing to revoke (unknown id, or already
+     * not verified). A failed read or write THROWS — the caller must treat
+     * that as UNKNOWN and never as a completed revoke.
+     *
+     * @throws \InvalidArgumentException for a reason outside REVOKE_REASONS
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure|\RuntimeException
+     */
+    public static function revokeClaim(int $claimId, string $reason): bool
+    {
+        if (!in_array($reason, self::REVOKE_REASONS, true)) {
+            throw new \InvalidArgumentException('Unknown claim revoke reason: ' . $reason);
+        }
+
+        $result = ClaimRepository::revoke($claimId);
+        if (!$result['revoked']) {
+            return false;
+        }
+
+        $userId = $result['user_id'];
+
+        // The bonus is claimant-centric: it lives on the claimant's own page.
+        $pageId = \BCC\Core\ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($userId);
+        if ($pageId) {
+            BonusService::recomputeAndApply($pageId, $userId);
+        }
+
+        do_action('bcc_trust_verification_changed', $userId);
+        do_action(
+            'bcc_onchain_claim_revoked',
+            $claimId,
+            $userId,
+            $result['entity_type'],
+            $result['entity_id'],
+            $result['claim_role'],
+            $reason
+        );
+
+        \BCC\Trust\Core\Security\AuditLogger::log('claim_revoked', $claimId, [
+            'reason'          => $reason,
+            'entity_type'     => $result['entity_type'],
+            'entity_id'       => $result['entity_id'],
+            'role'            => $result['claim_role'],
+            'mirror_page_ids' => $result['mirror_page_ids'],
+        ], 'claim', $userId);
+
+        return true;
     }
 }

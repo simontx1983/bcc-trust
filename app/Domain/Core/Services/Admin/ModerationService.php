@@ -153,6 +153,13 @@ final class ModerationService
                 'user_id' => $userId,
                 'error'   => $e->getMessage(),
             ]);
+            if ($step === 'notify') {
+                // #538 review: the suspend guard reads the user_info row
+                // cache. If the full flush failed, at least drop that entry,
+                // so a stale "not suspended" row cannot let the same member
+                // be suspended a second time.
+                wp_cache_delete('user_info_' . $userId, 'bcc_trust');
+            }
         }
     }
 
@@ -541,6 +548,7 @@ final class ModerationService
         }
 
         $updated  = 0;
+        $unreadable = 0;
         $now      = gmdate('Y-m-d H:i:s');
         $adminId  = (int) get_current_user_id();
         $ledgerId = '';
@@ -560,7 +568,24 @@ final class ModerationService
                 //    reproduce — not against a stale row.
                 do_action('bcc.trust.recalculate_score', $pid);
 
-                $row     = $this->scoreRepository->getByPageId($pid);
+                // F-101: the delta is measured against this read, so it must
+                // be the write-path read. getByPageId() turned a FAILED read
+                // into null, and null into "current = 50", so applyPenalty
+                // wrote a delta computed from a score the page never had. A
+                // failed read now skips the page (no delta, no pin change, no
+                // ledger entry) and the notice says so; a genuinely missing
+                // row still means the neutral 50.
+                try {
+                    $row = $this->scoreRepository->getByPageIdOrFail($pid);
+                } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] score override skipped page: score read failed', [
+                        'page_id' => $pid,
+                        'user_id' => $userId,
+                        'error'   => $e->getMessage(),
+                    ]);
+                    $unreadable++;
+                    continue;
+                }
                 $current = $row !== null ? $row->getTotalScore() : 50.0;
                 $delta   = (float) $newScore - $current;
 
@@ -626,6 +651,7 @@ final class ModerationService
             'page_tiers'    => $pageTiers,
             'reason'        => $reason,
             'pages_updated' => $updated,
+            'pages_unread'  => $unreadable,
             'ledger_id'     => $ledgerId,
             'elite_pinned'  => $grantElite,
         ]);
@@ -645,32 +671,33 @@ final class ModerationService
         $undoNote  = ($ledgerPages !== [] && $ledgerId === '')
             ? ' ⚠ The undo record could not be saved, so this override cannot be undone.'
             : '';
-        echo '<div class="notice notice-success"><p>Trust score overridden to <strong>' . $newScore . '</strong> (' . esc_html($tierSummary) . ') for ' . intval($updated) . ' page(s). Reason: ' . esc_html($reason) . '.' . esc_html($eliteNote . $undoNote) . '</p></div>';
-        return ['success' => true, 'message' => 'Trust score overridden.', 'tier' => $tierSummary, 'page_tiers' => $pageTiers, 'pages_updated' => $updated, 'ledger_id' => $ledgerId];
+        $unreadNote = $unreadable > 0
+            ? sprintf(' ⚠ %d page(s) were NOT changed: their current score could not be read. Try again.', $unreadable)
+            : '';
+        echo '<div class="notice notice-success"><p>Trust score overridden to <strong>' . $newScore . '</strong> (' . esc_html($tierSummary) . ') for ' . intval($updated) . ' page(s). Reason: ' . esc_html($reason) . '.' . esc_html($eliteNote . $undoNote . $unreadNote) . '</p></div>';
+        return ['success' => true, 'message' => 'Trust score overridden.', 'tier' => $tierSummary, 'page_tiers' => $pageTiers, 'pages_updated' => $updated, 'pages_unread' => $unreadable, 'ledger_id' => $ledgerId];
     }
 
     /**
-     * The tier a page has NOW, by the canonical ladder with the same inputs
-     * the stored tier uses (F-177): the total score, the NATIVE score
-     * (without onchain_bonus, clamped independently: computeNative) and the
-     * resolved elite gate. Read back after the override's recompute, so the
-     * admin notice can never claim a tier the page did not get.
+     * The tier a page has NOW (F-177): its stored reputation_tier, read back
+     * after the override's recompute, so the admin notice can never claim a
+     * tier the page did not get (F-193: read, not re-derived).
      */
     private function resultingTier(int $pageId): string
     {
-        $row = $this->scoreRepository->getByPageId($pageId);
-        if ($row === null) {
+        // F-193: the STORED reputation_tier, read back after the override's
+        // recompute, not a second derivation in PHP. Re-deriving with
+        // tierFor() could drift from what tierSql() actually stored (two
+        // implementations of one ladder), and then the notice would describe
+        // a tier the page does not have. The strict write-path read: a
+        // failed read reports 'unknown', never a guessed tier.
+        try {
+            $row = $this->scoreRepository->getByPageIdOrFail($pageId);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
             return 'unknown';
         }
-        $native = TrustScoreService::computeNative(
-            $row->getPositiveScore(),
-            $row->getNegativeScore(),
-            $row->getContributionBonus(),
-            $row->getPenaltyAdjustment(),
-            $row->getAttestationBonus()
-        );
-        // isEliteEligible() already resolves the never-evaluated grandfather case.
-        return TrustScoreService::tierFor($row->getTotalScore(), $native, $row->isEliteEligible());
+        $tier = $row !== null ? $row->getReputationTier() : '';
+        return $tier !== '' ? $tier : 'unknown';
     }
 
     /**

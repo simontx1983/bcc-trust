@@ -337,25 +337,30 @@ final class PrivacySettings
             ],
         ];
 
-        // ⚠ ADMINS ARE EXEMPT FROM hide_from_search, per the user's
+        // ⚠ ADMINS ARE EXEMPT FROM BOTH BCC CLAUSES, per the user's
         // "admins exempt" rule — otherwise a moderator cannot find a
-        // hidden member in member search, which is the one job that rule
-        // exists for. Mirrors `PeepSo::is_admin()`, the same predicate
-        // `is_accessible_static` and the level-30 clause use, so the three
-        // cannot drift.
+        // hidden or opted-out member in member search, which is the one
+        // job that rule exists for. Mirrors `PeepSo::is_admin()`, the
+        // same predicate `is_accessible_static` and the level-30 clause
+        // use, so the three cannot drift.
         //
-        // ⛔ SCOPED TO THE HIDE CLAUSE ONLY, NOT AN EARLY RETURN FROM
-        // THIS METHOD. A blanket exemption would also drop
-        // `bcc_privacy_discovery_optout`, which is a DIFFERENT setting
-        // with its own history and which has always applied to admins
-        // too. Loosening it is a product decision nobody has made, so it
-        // is deliberately left alone and raised separately rather than
-        // changed under cover of an admin fix.
+        // §F-190 widened this. #475 scoped it to the hide clause and
+        // said why: `bcc_privacy_discovery_optout` is a DIFFERENT setting
+        // that had always applied to admins too, and loosening it was a
+        // product decision nobody had made. The decision has since been
+        // made, so the exemption is now blanket.
+        //
+        // ⚠ An EARLY RETURN, not an empty clause list: with no bcc
+        // clauses to add there is nothing to merge, and any `meta_query`
+        // the caller already set (PeepSo's own VIP filter, for one) must
+        // be handed back exactly as it arrived rather than rewrapped in
+        // an `AND` around nothing.
         $isAdmin = class_exists('\\PeepSo') && \PeepSo::is_admin();
+        if ($isAdmin) {
+            return $args;
+        }
 
-        $bccClauses = $isAdmin
-            ? ['relation' => 'AND', $optoutClause]
-            : ['relation' => 'AND', $optoutClause, $hideClause];
+        $bccClauses = ['relation' => 'AND', $optoutClause, $hideClause];
 
         if (isset($args['meta_query']) && is_array($args['meta_query'])) {
             $existing = $args['meta_query'];

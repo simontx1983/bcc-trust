@@ -188,11 +188,7 @@ final class PageCardPrefetcher
         $idsByTargetKind  = [];
         $validatorPageIds = [];
         foreach ($pageIds as $pageId) {
-            $pageType = (string) get_post_meta($pageId, '_bcc_page_type', true);
-            if ($pageType === '') {
-                $pageType = 'builder';
-            }
-            $kind = PageTypeMap::kindForPageType($pageType);
+            $kind = PageTypeMap::kindForStoredPageType((string) get_post_meta($pageId, '_bcc_page_type', true));
             if ($kind === null) {
                 // Unknown page_type — the card build will 404 the row
                 // anyway; no batches needed for it.

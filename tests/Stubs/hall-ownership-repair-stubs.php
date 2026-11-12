@@ -163,6 +163,28 @@ namespace {
     }
 }
 
+namespace BCC\Core\Permissions {
+    // The canonical tri-state suspension read the owner resolver uses.
+    // `$suspended[$id]`: '1' → suspended; 'unknown' → the read failed (null).
+    if (!class_exists(Permissions::class, false)) {
+        final class Permissions
+        {
+            /** @var list<array{int, bool}> */
+            public static array $calls = [];
+
+            public static function suspensionState(?int $userId = null, bool $allowAdminBypass = true): ?bool
+            {
+                self::$calls[] = [(int) $userId, $allowAdminBypass];
+                $v = \HallRepairTestState::$suspended[(int) $userId] ?? '';
+                if ($v === 'unknown') {
+                    return null;
+                }
+                return $v !== '' && $v !== '0';
+            }
+        }
+    }
+}
+
 namespace BCC\Core\Log {
     if (!class_exists(Logger::class, false)) {
         final class Logger

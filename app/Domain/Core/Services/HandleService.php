@@ -38,6 +38,15 @@ final class HandleService
     /** wp_usermeta key for the last-change timestamp (epoch seconds). */
     public const META_HANDLE_LAST_CHANGED = 'bcc_handle_last_changed';
 
+    /**
+     * wp_usermeta key (non-unique, one row per handle) recording a handle
+     * this member held before it was retired, because it equalled their
+     * login. Written only by the login-handle rotation migration. A
+     * retired handle resolves to its member (old links keep working) and
+     * is never available again.
+     */
+    public const META_HANDLE_RETIRED = 'bcc_handle_retired';
+
     /** §B6 cooldown window — 7 days in seconds. */
     public const COOLDOWN_SECONDS = 604800; // 7 * 24 * 60 * 60
 
@@ -135,6 +144,14 @@ final class HandleService
      */
     public function isAvailable(string $handle, ?int $excludeUserId = null): bool
     {
+        // A retired handle stays reserved for good. Old /u/<retired>
+        // links resolve to the member who held it, so handing it to
+        // anyone (even that member, since it was their login) would
+        // hijack those links or put the login back on show.
+        if (self::retiredOwner($handle) !== null) {
+            return false;
+        }
+
         $users = get_users([
             'meta_key'   => self::META_HANDLE,
             'meta_value' => $handle,
@@ -173,5 +190,29 @@ final class HandleService
     public function getHandle(int $userId): string
     {
         return (string) get_user_meta($userId, self::META_HANDLE, true);
+    }
+
+    /**
+     * The user who held $handle before it was retired, or null when it
+     * was never retired. Exact match only: this resolves the specific
+     * handles the login-handle rotation retired, never a login lookup.
+     */
+    public static function retiredOwner(string $handle): ?int
+    {
+        $handle = strtolower(trim($handle));
+        if ($handle === '') {
+            return null;
+        }
+        $users = get_users([
+            'meta_key'   => self::META_HANDLE_RETIRED,
+            'meta_value' => $handle,
+            'fields'     => 'ID',
+            'number'     => 1,
+        ]);
+        if ($users === []) {
+            return null;
+        }
+        $id = (int) $users[0];
+        return $id > 0 ? $id : null;
     }
 }

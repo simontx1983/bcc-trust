@@ -208,7 +208,19 @@ function bcc_trust_render_moderation(): void {
             $mod->resetFraudScore( absint( $_POST['user_id'] ?? 0 ) );
         },
         'reanalyze_user'     => static function () use ( $mod ) {
-            $mod->reanalyzeUser( absint( $_POST['user_id'] ?? 0 ) );
+            $userId = absint( $_POST['user_id'] ?? 0 );
+            // Fraud analysis fails CLOSED on a read it cannot trust (it
+            // throws rather than score a failed read as clean). Show that as
+            // a notice, not WordPress's critical-error screen.
+            try {
+                $mod->reanalyzeUser( $userId );
+            } catch ( \Throwable $e ) {
+                \BCC\Core\Log\Logger::error( '[bcc-trust] admin reanalyse failed', [
+                    'user_id' => $userId,
+                    'error'   => $e->getMessage(),
+                ] );
+                echo '<div class="notice notice-error"><p>Reanalysis failed: the fraud data could not be read. Nothing was changed. Try again shortly.</p></div>';
+            }
         },
         'override_score'     => static function () use ( $mod ) {
             $userId   = absint( $_POST['user_id'] ?? 0 );

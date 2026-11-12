@@ -795,27 +795,6 @@ final class GatedGroupProvisioningService {
     }
 
     /**
-     * Remove a community that was created but could not be gated.
-     *
-     * ── WHY THIS IS NOT JUST `wp_trash_post()` ──────────────────────────
-     * Trashing leaves the post, its meta, the membership row and the album
-     * directory in place, and PeepSo's own `findGroupForCollection()` used to
-     * match a trashed group — so "trashed" was not provably "gone". This
-     * mirrors PeepSo's OWN supported delete cascade
-     * (peepso-groups/classes/api/groupajax.php:169-185 and
-     * classes/admin/groupslisttable.php:257-270): remove the uploads
-     * directory, hard-delete the post, then clean the orphan the cascade
-     * leaves behind.
-     *
-     * ── THE ONE THING THAT CANNOT BE UNDONE ─────────────────────────────
-     * `peepso_action_group_create` has already fired. If the site has
-     * `groups_create_notify_admin` enabled, an administrator notification
-     * e-mail was sent and cannot be recalled. That is reported, not hidden:
-     * the compensation audit records whether the notify option was on, so an
-     * operator reading the trail knows an e-mail exists for a community that
-     * does not.
-     */
-    /**
      * The per-collection advisory lock name.
      *
      * Keyed by collection, not by chain and not globally: two administrators
@@ -887,6 +866,27 @@ final class GatedGroupProvisioningService {
         ];
     }
 
+    /**
+     * Remove a community that was created but could not be gated.
+     *
+     * ── WHY THIS IS NOT JUST `wp_trash_post()` ──────────────────────────
+     * Trashing leaves the post, its meta, the membership row and the album
+     * directory in place, and PeepSo's own `findGroupForCollection()` used to
+     * match a trashed group — so "trashed" was not provably "gone". This
+     * mirrors PeepSo's OWN supported delete cascade
+     * (peepso-groups/classes/api/groupajax.php:169-185 and
+     * classes/admin/groupslisttable.php:257-270): remove the uploads
+     * directory, hard-delete the post, then clean the orphan the cascade
+     * leaves behind.
+     *
+     * ── THE ONE THING THAT CANNOT BE UNDONE ─────────────────────────────
+     * `peepso_action_group_create` has already fired. If the site has
+     * `groups_create_notify_admin` enabled, an administrator notification
+     * e-mail was sent and cannot be recalled. That is reported, not hidden:
+     * the compensation audit records whether the notify option was on, so an
+     * operator reading the trail knows an e-mail exists for a community that
+     * does not.
+     */
     private function compensate(int $groupId, int $collectionId, int $ownerId, int $chainId): bool
     {
         $notes = [];

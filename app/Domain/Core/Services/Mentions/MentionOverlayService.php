@@ -143,10 +143,9 @@ final class MentionOverlayService
     }
 
     /**
-     * Resolve a user_id to the §3.3.12 view-model fields. Reads handle
-     * from `bcc_handle` user-meta (canonical) with a `user_login`
-     * fallback for legacy accounts (mirrors UsersEndpoint::resolveHandle's
-     * inverse direction).
+     * Resolve a user_id to the §3.3.12 view-model fields. Handle and
+     * display name come from PublicIdentity: `bcc_handle` user-meta, else
+     * the `member-{id}` fallback. Never `user_login`.
      *
      * @return array{user_id: int, handle: string, display_name: string, avatar_url: string}|null
      */

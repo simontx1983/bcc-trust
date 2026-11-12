@@ -65,6 +65,7 @@ final class NftRevocationFailSafeTest extends TestCase
         require_once __DIR__ . '/../Stubs/revocation-fail-safe-stubs.php';
         \BccRevokeWorld::reset();
         \BCC\Core\Log\Logger::reset();
+        \BCC\Core\DB\AdvisoryLock::reset();
 
         \BccRevokeWorld::seedChain(self::COSMOS_CHAIN, 'cosmos', 'cosmos');
         \BccRevokeWorld::seedChain(self::EVM_CHAIN, 'ethereum', 'evm');
@@ -644,6 +645,66 @@ final class NftRevocationFailSafeTest extends TestCase
 
         self::assertSame([self::GROUP . ':' . self::USER], \BccRevokeWorld::$leaves);
         self::assertSame(1, $stats['revoked']);
+    }
+
+    // ── F-69: one sweep at a time ────────────────────────────────────
+
+    /** A gate with one member whose holdings are a proven zero (would be revoked). */
+    private function revocableMember(): void
+    {
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $this->linkCosmos();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 0);
+        \BccRevokeWorld::$members[self::GROUP] = [$this->member(self::OWNER, 'member_owner'), $this->member(self::USER)];
+    }
+
+    public function testAnOverlappingSweepDoesNothingWhileAnotherHoldsTheLock(): void
+    {
+        $this->revocableMember();
+        \BCC\Core\DB\AdvisoryLock::$heldElsewhere = [NftGroupRevokeService::SWEEP_LOCK];
+
+        $stats = (new NftGroupRevokeService())->sweep();
+
+        self::assertTrue($stats['skipped_overlap']);
+        self::assertSame(0, $stats['checked']);
+        self::assertSame([], \BccRevokeWorld::$leaves, 'the overlapping tick revokes nobody, so it writes no audit row');
+        self::assertSame(
+            ['acquire:' . NftGroupRevokeService::SWEEP_LOCK],
+            \BCC\Core\DB\AdvisoryLock::$calls,
+            'a lock it never got is never released'
+        );
+    }
+
+    public function testASweepRunsUnderTheLockAndReleasesIt(): void
+    {
+        $this->revocableMember();
+
+        $stats = (new NftGroupRevokeService())->sweep();
+
+        self::assertFalse($stats['skipped_overlap']);
+        self::assertSame(1, $stats['revoked']);
+        self::assertSame(
+            ['acquire:' . NftGroupRevokeService::SWEEP_LOCK, 'release:' . NftGroupRevokeService::SWEEP_LOCK],
+            \BCC\Core\DB\AdvisoryLock::$calls
+        );
+    }
+
+    public function testTheLockIsReleasedWhenTheSweepThrows(): void
+    {
+        $this->revocableMember();
+        \BccRevokeWorld::$throwOnGroupList = true;
+
+        try {
+            (new NftGroupRevokeService())->sweep();
+            self::fail('the scripted failure must propagate');
+        } catch (\RuntimeException $e) {
+            self::assertSame('scripted group-list failure', $e->getMessage());
+        }
+        self::assertSame(
+            ['acquire:' . NftGroupRevokeService::SWEEP_LOCK, 'release:' . NftGroupRevokeService::SWEEP_LOCK],
+            \BCC\Core\DB\AdvisoryLock::$calls,
+            'a throw must not leave the lock held for the rest of the request'
+        );
     }
 
     public function testTheSweepKeepsAProvenHolder(): void
