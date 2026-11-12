@@ -133,6 +133,13 @@ final class NotificationDispatcher
             return;
         }
         try {
+            // F-265: no bell for a reaction on a post (or a comment under a
+            // post) that is deleted or moderation-hidden. Same rule as the
+            // write gate the reaction came through.
+            if (\BCC\Trust\Core\Support\GroupInteractionGate::resolveLiveTarget($actId) === null) {
+                return;
+            }
+
             $authorId = $this->resolveActAuthor($actId);
             if ($authorId <= 0 || $authorId === $actorId) {
                 return;
@@ -977,6 +984,15 @@ final class NotificationDispatcher
             // the author for the dispatch payload.
             $parentAct = PeepSoActivityRepository::getById($parentActId);
             if ($parentAct === null) {
+                return;
+            }
+            // F-265: no comment, reply or mention bell for a post that is
+            // deleted (get_post() below still returns a trashed post) or
+            // moderation-hidden. Shared liveness rule.
+            if (!\BCC\Trust\Core\Services\FeedItemReportVisibility::isLiveWith(
+                $parentAct,
+                \BCC\Trust\Core\Plugin::instance()->hiddenActivityRepository()
+            )) {
                 return;
             }
             $parentPostId = isset($parentAct->act_external_id) ? (int) $parentAct->act_external_id : 0;

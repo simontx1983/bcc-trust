@@ -75,6 +75,16 @@ final class FeedRankingService
     public const HOT_WARM_LIMIT = 20;
 
     /**
+     * Largest first-page size whose anon hot-feed payload is CACHED. The
+     * cache key folds in the limit, so a first page is cached once per size
+     * asked for; F-277's {@see forgetDeletedPost()} has to reach every one
+     * of them, and it can only do that over a known range. A larger page
+     * (not reachable today: FeedEndpoint caps `limit` at 50) is built
+     * uncached rather than cached somewhere a delete cannot find it.
+     */
+    public const HOT_CACHE_MAX_LIMIT = 50;
+
+    /**
      * Candidate-batch size for the exact mutual-block probe.
      *
      * Well under `getMutuallyBlockedSetOrUnknown()`'s own candidate cap, so
@@ -152,7 +162,7 @@ final class FeedRankingService
      */
     private function hotFeedPayload(?string $cursor, int $limit): array
     {
-        if ($cursor !== null) {
+        if ($cursor !== null || $limit < 1 || $limit > self::HOT_CACHE_MAX_LIMIT) {
             return $this->buildHotFeed($cursor, $limit);
         }
 
@@ -179,6 +189,53 @@ final class FeedRankingService
     {
         $payload = $this->buildHotFeed(null, $limit);
         wp_cache_set(self::hotFeedCacheKey($limit), $payload, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
+    }
+
+    /**
+     * F-277: a post its author (or an admin) just deleted must not stay on
+     * the cached anon hot-feed first page until the next warm tick or the
+     * TTL. Moderation hides are already instant (the key folds in the
+     * hidden-list generation); a delete changes no generation, so it is
+     * handled here, on `bcc_post_deleted`.
+     *
+     * Removes the deleted item from the warmed page and writes it back,
+     * ONLY when the page actually holds it, so ordinary deletes (almost
+     * never on page one) cost one cache read. Nothing is rebuilt inside the
+     * delete request: the page is one item short until the next warm tick
+     * refills it. What is written back is the shared anonymous page minus
+     * a post nobody may see any more, so it stays viewer-independent.
+     * Without a persistent object cache the entry never outlives a request,
+     * the read misses, and this is a no-op.
+     *
+     * ⚠ What this cannot reach: the HTTP cache. /feed/hot answers
+     * `Cache-Control: public, max-age=60, stale-while-revalidate=120`, so a
+     * browser or proxy that already holds the page may show the post for
+     * that long. Shortening it is a product/perf call, not made here.
+     */
+    public function forgetDeletedPost(int $actId): void
+    {
+        if ($actId <= 0) {
+            return;
+        }
+        // Every first-page size that can be cached (the key folds in the
+        // limit; see HOT_CACHE_MAX_LIMIT), not only the warmed one.
+        $deletedId = 'feed_' . $actId;
+        for ($limit = 1; $limit <= self::HOT_CACHE_MAX_LIMIT; $limit++) {
+            $key    = self::hotFeedCacheKey($limit);
+            $cached = wp_cache_get($key, self::HOT_CACHE_GROUP);
+            if (!is_array($cached) || !isset($cached['items'], $cached['pagination']) || !is_array($cached['items'])) {
+                continue;
+            }
+            $kept = array_values(array_filter(
+                $cached['items'],
+                static fn ($item): bool => !(is_array($item) && ($item['id'] ?? null) === $deletedId)
+            ));
+            if (count($kept) === count($cached['items'])) {
+                continue; // not on this cached page
+            }
+            $cached['items'] = $kept;
+            wp_cache_set($key, $cached, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
+        }
     }
 
     /**

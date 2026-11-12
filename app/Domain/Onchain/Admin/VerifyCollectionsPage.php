@@ -1553,13 +1553,15 @@ final class VerifyCollectionsPage
      * ⚠⚠ OPENING IT MUST NOT FETCH OR MUTATE ANYTHING. There is exactly one
      * collection read, one community lookup, one member-count read and one
      * hide-rule read. No provider is contacted, no option or transient is
-     * written, no cache is primed, and nothing here takes a nonce — because
-     * nothing here acts.
+     * written, no cache is primed, and nothing here acts on GET.
      *
      * The ONE set of controls it surfaces is the existing description
      * review, through the existing {@see renderDescriptionReview()} with its
      * own per-row nonce and its own handler. Permissions and behaviour are
      * untouched; the buttons simply become reachable from here as well.
+     * F-309: that needs the forms they point at, so this view prints them
+     * with {@see renderDescriptionReviewForms()} for its one row. Minting
+     * those nonces writes nothing; acting still takes a POST to the handler.
      *
      * ── PERMISSIONS ─────────────────────────────────────────────────────
      * Reuses `render_page()`'s gate — this renders from inside it, after
@@ -1685,6 +1687,21 @@ final class VerifyCollectionsPage
             // ⚠ The EXISTING renderer, with its existing per-row nonce and
             // its existing handler. Reachable from here; unchanged.
             self::renderDescriptionReview($row);
+
+            // F-309: its Approve / Reject buttons submit by form="" id, and
+            // only the LIST page printed those forms. Here the ids pointed at
+            // nothing: the confirm prompt showed, then nothing happened. Print
+            // the same forms for this one row. Their return context is the
+            // list the admin came from (the Back link's), and the handler's
+            // PRG notice lands there.
+            $ctx = self::listContextArgs();
+            self::renderDescriptionReviewForms(
+                [$row],
+                (int) ($ctx['paged'] ?? 1),
+                (string) ($ctx['chain'] ?? ''),
+                (string) ($ctx['token_standard'] ?? ''),
+                (string) ($ctx['vstate'] ?? '')
+            );
         }
 
         // ── 4. community linkage ────────────────────────────────────────
