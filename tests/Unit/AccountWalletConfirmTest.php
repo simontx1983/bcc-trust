@@ -18,10 +18,12 @@ use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 /**
- * F-253 (user decision 2026-11-12): a member confirms an email change, a
- * password change or an account delete with their current password OR a
- * signature from one of their own verified wallets. Wallet-only members
- * never had a password, so before this they could do none of the three.
+ * F-253 (user decisions 2026-11-12): a member confirms an email change, a
+ * password change or an account delete with their current password. A
+ * member with NO password (a wallet/OAuth signup that never set one) can't,
+ * so they confirm with a signature from one of their own verified wallets —
+ * an ESTABLISHED one: verified 48h+ ago and before the current sign-in, so
+ * a stolen session can't link its own wallet and take the account.
  *
  * Pinned, running the REAL MyAccountEndpoint, RecoveryEmailEndpoint,
  * WalletAuthController::nonce and AccountCredentialCheck over bcc-core's
@@ -35,6 +37,9 @@ use PHPUnit\Framework\TestCase;
  *   - cheap input errors are answered before the challenge is spent;
  *   - the password path is unchanged; neither credential is a clear 422;
  *   - the audit row records which credential confirmed;
+ *   - an account with a password (or possibly one) must type it;
+ *   - the proving wallet is verified 48h+ ago and before the sign-in
+ *     (auth_time, kept across refresh); a relinked wallet starts over;
  *   - GET /auth/nonce issues per purpose, defaults to verify, refuses an
  *     unknown one;
  *   - recovery-email refuses once the account has a real email (#16);
@@ -86,9 +91,9 @@ final class AccountWalletConfirmTest extends TestCase
             'issued'     => [],
             'deleted'    => [],
             'links'      => [
-                ['id' => 1, 'user_id' => self::USER, 'chain_id' => 1, 'address' => self::WALLET, 'verified' => true],
-                ['id' => 2, 'user_id' => self::OTHER, 'chain_id' => 1, 'address' => self::FOREIGN, 'verified' => true],
-                ['id' => 3, 'user_id' => self::USER, 'chain_id' => 1, 'address' => self::UNVERIFIED, 'verified' => false],
+                ['id' => 1, 'user_id' => self::USER, 'chain_id' => 1, 'address' => self::WALLET, 'verified_at' => time() - 3 * 86400],
+                ['id' => 2, 'user_id' => self::OTHER, 'chain_id' => 1, 'address' => self::FOREIGN, 'verified_at' => time() - 3 * 86400],
+                ['id' => 3, 'user_id' => self::USER, 'chain_id' => 1, 'address' => self::UNVERIFIED, 'verified_at' => null],
             ],
         ];
         $GLOBALS['wpdb'] = new class {
@@ -109,6 +114,25 @@ final class AccountWalletConfirmTest extends TestCase
 
         $this->user(self::USER, 'me@example.com');
         $this->user(self::OTHER, 'other@example.com');
+        // The member under test signed up with a wallet: no password.
+        $GLOBALS['__bcc_ph']['meta'][self::USER][AccountRecoveryService::META_HAS_PASSWORD] = '0';
+        // ... and signed in just now (the wallet predates this sign-in).
+        self::signIn();
+    }
+
+    /** Present a bearer token for the member, as the frontend does. */
+    private static function signIn(array $claims = []): void
+    {
+        $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . \BCC\Trust\Core\Support\JwtToken::encode(self::USER, 'handle' . self::USER, $claims);
+    }
+
+    private static function verifiedAgo(int $linkId, int $seconds): void
+    {
+        foreach ($GLOBALS['__bcc_wc']['links'] as $i => $l) {
+            if ($l['id'] === $linkId) {
+                $GLOBALS['__bcc_wc']['links'][$i]['verified_at'] = time() - $seconds;
+            }
+        }
     }
 
     private function user(int $id, string $email): void
@@ -167,6 +191,7 @@ final class AccountWalletConfirmTest extends TestCase
 
     public function testThePasswordPathIsUnchangedAndAudited(): void
     {
+        $GLOBALS['__bcc_ph']['meta'][self::USER][AccountRecoveryService::META_HAS_PASSWORD] = '1';
         $GLOBALS['__bcc_ph']['passwords'][self::USER] = self::PASSWORD;
 
         [$status] = self::call([new MyAccountEndpoint(), 'patchEmail'], ['email' => 'new@example.com', 'current_password' => self::PASSWORD]);
@@ -179,13 +204,143 @@ final class AccountWalletConfirmTest extends TestCase
         self::assertSame('Current password is incorrect.', $err['message']);
     }
 
-    public function testNeitherCredentialIsAClear422(): void
+    public function testNeitherCredentialIsAClear422NamingTheOneThisAccountUses(): void
     {
         [$status, $err] = self::call([new MyAccountEndpoint(), 'patchEmail'], ['email' => 'new@example.com']);
-
         self::assertSame(422, $status);
         self::assertSame('bcc_invalid_request', $err['code']);
-        self::assertStringContainsString('current password or a signature', $err['message']);
+        self::assertSame('Confirm with a signature from one of your verified wallets.', $err['message']);
+
+        $GLOBALS['__bcc_ph']['meta'][self::USER][AccountRecoveryService::META_HAS_PASSWORD] = '1';
+        [$status, $err] = self::call([new MyAccountEndpoint(), 'patchEmail'], ['email' => 'new@example.com']);
+        self::assertSame(422, $status);
+        self::assertSame('Confirm with your current password.', $err['message']);
+    }
+
+    // ── Who may use the wallet path (session-theft guard) ───────────────
+
+    public function testAnAccountWithAPasswordMustTypeIt(): void
+    {
+        // A stolen session links the thief's own wallet; it must not then
+        // stand in for the password.
+        $GLOBALS['__bcc_ph']['meta'][self::USER][AccountRecoveryService::META_HAS_PASSWORD] = '1';
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_ACCOUNT_DELETE);
+
+        [$status, $err] = self::call([new MyAccountEndpoint(), 'deleteAccount'], ['confirm' => 'DELETE'] + self::walletProof($sig));
+
+        self::assertSame(403, $status);
+        self::assertSame('bcc_forbidden', $err['code']);
+        self::assertSame('Your account has a password. Confirm with your current password.', $err['message']);
+        self::assertSame([], $GLOBALS['__bcc_wc']['deleted']);
+        self::assertTrue(self::challengeIsLive(), 'refused before anything is spent');
+    }
+
+    public function testAnAccountThatMightHaveAPasswordIsTreatedAsHavingOne(): void
+    {
+        // has_password null: an older account with a real email.
+        unset($GLOBALS['__bcc_ph']['meta'][self::USER][AccountRecoveryService::META_HAS_PASSWORD]);
+        self::assertNull(AccountRecoveryService::hasPassword(self::USER));
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_PASSWORD_CHANGE);
+
+        [$status] = self::call([new MyAccountEndpoint(), 'patchPassword'], ['password' => 'a brand new passphrase'] + self::walletProof($sig));
+
+        self::assertSame(403, $status);
+        self::assertSame('random-never-shown', $GLOBALS['__bcc_ph']['passwords'][self::USER]);
+    }
+
+    public function testAWalletVerifiedAnHourAgoCannotConfirmYet(): void
+    {
+        self::verifiedAgo(1, 3600);
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_ACCOUNT_DELETE);
+
+        $res = (new MyAccountEndpoint())->deleteAccount(new \WP_REST_Request(['confirm' => 'DELETE'] + self::walletProof($sig)));
+        $err = $res->get_data()['error'];
+
+        self::assertSame(403, $res->get_status());
+        self::assertSame('bcc_forbidden', $err['code']);
+        self::assertStringContainsString('verified too recently', $err['message']);
+        self::assertSame(gmdate('Y-m-d\TH:i:s\Z', time() - 3600 + 48 * 3600), $err['data']['usable_at']);
+        self::assertSame([], $GLOBALS['__bcc_wc']['deleted']);
+        self::assertTrue(self::challengeIsLive(), 'checked before the challenge is spent');
+    }
+
+    public function testAWalletVerified49HoursAgoBeforeThisSignInConfirms(): void
+    {
+        self::verifiedAgo(1, 49 * 3600);
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_ACCOUNT_DELETE);
+
+        [$status] = self::call([new MyAccountEndpoint(), 'deleteAccount'], ['confirm' => 'DELETE'] + self::walletProof($sig));
+
+        self::assertSame(200, $status);
+        self::assertSame([self::USER], $GLOBALS['__bcc_wc']['deleted']);
+    }
+
+    public function testAWalletVerifiedAfterThisSignInCannotConfirmEvenWhenOld(): void
+    {
+        // The thief's session began 60h ago; they linked their wallet 49h
+        // ago. Old enough, but newer than the sign-in it is used from.
+        self::verifiedAgo(1, 49 * 3600);
+        self::signIn(['auth_time' => time() - 60 * 3600]);
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_PASSWORD_CHANGE);
+
+        [$status, $err] = self::call([new MyAccountEndpoint(), 'patchPassword'], ['password' => 'a brand new passphrase'] + self::walletProof($sig));
+
+        self::assertSame(403, $status);
+        self::assertSame('This wallet was verified after you signed in. Sign out, sign back in, and try again.', $err['message']);
+        self::assertSame('random-never-shown', $GLOBALS['__bcc_ph']['passwords'][self::USER]);
+    }
+
+    public function testATokenWithoutAuthTimeFallsBackToItsIssuedAt(): void
+    {
+        self::verifiedAgo(1, 49 * 3600);
+        self::signIn(['auth_time' => null, 'iat' => time() - 50 * 3600, 'exp' => time() + 3600]);
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_ACCOUNT_DELETE);
+
+        [$status] = self::call([new MyAccountEndpoint(), 'deleteAccount'], ['confirm' => 'DELETE'] + self::walletProof($sig));
+
+        self::assertSame(403, $status, 'issued 50h ago, the wallet came after');
+    }
+
+    public function testUnlinkingAndRelinkingAWalletRestartsItsClock(): void
+    {
+        // Relinking creates a new row with a fresh verified_at: the old
+        // row's age is not inherited.
+        $GLOBALS['__bcc_wc']['links'] = array_values(array_filter($GLOBALS['__bcc_wc']['links'], static fn (array $l): bool => $l['id'] !== 1));
+        $GLOBALS['__bcc_wc']['links'][] = ['id' => 9, 'user_id' => self::USER, 'chain_id' => 1, 'address' => self::WALLET, 'verified_at' => time() - 60];
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_EMAIL_CHANGE);
+
+        [$status, $err] = self::call([new MyAccountEndpoint(), 'patchEmail'], ['email' => 'new@example.com'] + self::walletProof($sig));
+
+        self::assertSame(403, $status);
+        self::assertStringContainsString('verified too recently', $err['message']);
+    }
+
+    public function testNoBearerSessionMeansNoWalletConfirmation(): void
+    {
+        unset($_SERVER['HTTP_AUTHORIZATION']);
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_EMAIL_CHANGE);
+
+        [$status] = self::call([new MyAccountEndpoint(), 'patchEmail'], ['email' => 'new@example.com'] + self::walletProof($sig));
+
+        self::assertSame(401, $status);
+        self::assertTrue(self::challengeIsLive());
+    }
+
+    public function testARefreshKeepsWhenTheSessionBegan(): void
+    {
+        $src = (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Core/REST/Auth/SessionController.php');
+        $body = substr($src, (int) strpos($src, 'public function refresh('));
+        self::assertMatchesRegularExpression(
+            "/JwtToken::encode\(\\\$userId, \\\$handle, \['auth_time' => JwtToken::sessionStartedAt\(\\\$payload\)\]\)/",
+            $body,
+            'a refresh must not move auth_time forward'
+        );
+
+        $payload = \BCC\Trust\Core\Support\JwtToken::decode(\BCC\Trust\Core\Support\JwtToken::encode(self::USER, 'h', ['auth_time' => 1234]))['payload'];
+        self::assertSame(1234, \BCC\Trust\Core\Support\JwtToken::sessionStartedAt($payload));
+        self::assertSame(time(), \BCC\Trust\Core\Support\JwtToken::sessionStartedAt(
+            \BCC\Trust\Core\Support\JwtToken::decode(\BCC\Trust\Core\Support\JwtToken::encode(self::USER, 'h'))['payload']
+        ), 'a fresh sign-in starts now');
     }
 
     public function testAChallengeForAnotherChangeIsRefused(): void
@@ -224,6 +379,24 @@ final class AccountWalletConfirmTest extends TestCase
         self::assertSame('bcc_signature_invalid', $err['code']);
         self::assertFalse(self::challengeIsLive(), 'single-use');
         self::assertSame([], $GLOBALS['__bcc_ph']['audit']);
+    }
+
+    public function testAChallengeForOneChainIsNotSpentOnAnother(): void
+    {
+        // The same EVM address, linked and verified on both chains; the
+        // challenge (and the message the member signed) names ethereum.
+        $GLOBALS['__bcc_wc']['links'][] = ['id' => 4, 'user_id' => self::USER, 'chain_id' => 2, 'address' => self::WALLET, 'verified_at' => time() - 3 * 86400];
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_EMAIL_CHANGE);
+
+        [$status, $err] = self::call(
+            [new MyAccountEndpoint(), 'patchEmail'],
+            ['email' => 'new@example.com', 'wallet_address' => self::WALLET, 'chain_slug' => 'base', 'signature' => $sig]
+        );
+
+        self::assertSame(400, $status);
+        self::assertSame('Challenge was issued for another chain. Please request a new nonce.', $err['message']);
+        self::assertSame([], $GLOBALS['__bcc_ph']['audit']);
+        self::assertSame([], $GLOBALS['__bcc_ph']['mail']);
     }
 
     public function testAnInvalidEmailIsAnsweredBeforeTheChallengeIsSpent(): void
@@ -361,6 +534,24 @@ final class AccountWalletConfirmTest extends TestCase
         self::assertStringContainsString('already has an email address', $err['message']);
         self::assertTrue(self::challengeIsLive(), 'refused before the challenge is spent');
         self::assertSame([], $GLOBALS['__bcc_ph']['mail']);
+    }
+
+    public function testRecoveryEmailNeedsAnEstablishedWalletToo(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+        self::verifiedAgo(1, 3600);
+        $sig = self::sign(WalletChallenge::PURPOSE_VERIFY);
+
+        [$status, $err] = self::call([new RecoveryEmailEndpoint(), 'requestRecoveryEmail'], ['email' => 'first@example.com'] + self::walletProof($sig));
+
+        self::assertSame(403, $status);
+        self::assertStringContainsString('verified too recently', $err['message']);
+        self::assertSame([], $GLOBALS['__bcc_ph']['mail']);
+
+        self::verifiedAgo(1, 49 * 3600);
+        self::signIn(['auth_time' => time() - 60 * 3600]);
+        [$status] = self::call([new RecoveryEmailEndpoint(), 'requestRecoveryEmail'], ['email' => 'first@example.com'] + self::walletProof($sig));
+        self::assertSame(403, $status, 'and verified before this sign-in');
     }
 
     public function testRecoveryEmailStillAttachesAFirstEmailToAPlaceholderAccount(): void

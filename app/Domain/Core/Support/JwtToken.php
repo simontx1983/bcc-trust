@@ -112,6 +112,9 @@ final class JwtToken
             'iss'     => self::issuer(),
             'sub'     => (string) $userId,
             'iat'     => $now,
+            // When this sign-in happened. A refresh carries it forward
+            // (sessionStartedAt), so it survives the token being re-minted.
+            'auth_time' => $now,
             'exp'     => $now + self::TTL_SECONDS,
             'ver'     => self::TOKEN_VERSION,
             'jti'     => wp_generate_uuid4(),
@@ -301,6 +304,20 @@ final class JwtToken
         }
 
         return ['ok' => true, 'payload' => $payload];
+    }
+
+    /**
+     * When the session behind this token began: the `auth_time` claim, which
+     * POST /auth/refresh carries forward, else (a token minted before the
+     * claim existed) its `iat`. Unlike `iat` it can't be moved forward by
+     * refreshing, so "was this wallet linked before this sign-in?" can't be
+     * laundered through a refresh (F-253).
+     *
+     * @param array<string, mixed> $payload
+     */
+    public static function sessionStartedAt(array $payload): int
+    {
+        return (int) ($payload['auth_time'] ?? $payload['iat'] ?? 0);
     }
 
     /** User-meta key holding the user's single-token-logout denylist. */

@@ -4,16 +4,25 @@
  * changes: email change, password change, account delete (MyAccountEndpoint),
  * and the wallet half of the recovery-email flow (RecoveryEmailEndpoint).
  *
- * F-253 (user decision 2026-11-12): a member confirms with EITHER
- *   - their current password (`current_password`), or
- *   - a fresh signature from one of their own VERIFIED linked wallets
- *     (`wallet_address`, `chain_slug`, `signature`, optional `extra`), over a
- *     challenge from GET /auth/nonce issued for THAT change's purpose.
- * Wallet-only members never had a password (wallet/OAuth signup mints a
- * random one), so before this they could not change their email or
- * password, or delete their account, at all. Any account with a verified
- * wallet may use the wallet path: wallet sign-in already grants that holder
- * a full session, so it is no weaker than the password.
+ * F-253 (user decisions 2026-11-12): a member confirms with
+ *   - their current password (`current_password`) — REQUIRED for any account
+ *     that has one, or might (has_password true or unknown), or
+ *   - only when the account has NO password (has_password === false: a
+ *     wallet/OAuth signup that never set one), a fresh signature from one of
+ *     their own VERIFIED linked wallets (`wallet_address`, `chain_slug`,
+ *     `signature`, optional `extra`), over a challenge from GET /auth/nonce
+ *     issued for THAT change's purpose.
+ *
+ * Why the wallet path is so narrow: whoever holds a stolen session can link
+ * THEIR OWN wallet (linking needs no password). If that wallet could then
+ * confirm a password change or a delete, a stolen token would be a stolen
+ * account. So the proving wallet must also be ESTABLISHED: verified at least
+ * WALLET_MIN_AGE_SECONDS ago AND before the current session began
+ * (JwtToken::sessionStartedAt — the sign-in time, which a refresh carries
+ * forward). `verified_at` is stamped once and never moved (WalletRepository::
+ * verify); unlinking and relinking creates a new row with a new stamp, so
+ * the clock can't be reset in the attacker's favour. The same rule guards
+ * the recovery-email route (RecoveryEmailEndpoint).
  *
  * The signed message is the SERVER-stored challenge, never the caller's;
  * the challenge is single-use and bound to its purpose (bcc-core
@@ -33,7 +42,10 @@ namespace BCC\Trust\Core\REST;
 use BCC\Core\Crypto\WalletChallenge;
 use BCC\Core\Crypto\WalletVerifier;
 use BCC\Core\Wallet\WalletIdentityService;
+use BCC\Trust\Core\Services\AccountRecoveryService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\BearerAuth;
+use BCC\Trust\Core\Support\JwtToken;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -59,6 +71,9 @@ final class AccountCredentialCheck
     public const PURPOSE_PASSWORD_CHANGE = 'confirm_password_change';
     public const PURPOSE_ACCOUNT_DELETE  = 'confirm_account_delete';
 
+    /** A proving wallet must have been verified at least this long ago. */
+    public const WALLET_MIN_AGE_SECONDS = 48 * 3600;
+
     /**
      * Confirm the caller with their password or a wallet signature.
      *
@@ -75,13 +90,28 @@ final class AccountCredentialCheck
             return self::checkPassword($current, $userId) ?? self::BY_PASSWORD;
         }
 
+        // Only an account KNOWN to have no password may confirm with a
+        // wallet. Unknown (null: an older account with a real email) is
+        // treated as password-protected; it can set a known password through
+        // forgot-password.
+        $walletOnly = AccountRecoveryService::hasPassword($userId) === false;
+
         if (self::hasWalletProof($request)) {
+            if (!$walletOnly) {
+                return ApiResponse::error(
+                    'bcc_forbidden',
+                    'Your account has a password. Confirm with your current password.',
+                    403
+                );
+            }
             return self::verifyOwnWallet($request, $userId, $walletPurpose) ?? self::BY_WALLET;
         }
 
         return ApiResponse::error(
             'bcc_invalid_request',
-            'Confirm with your current password or a signature from one of your verified wallets.',
+            $walletOnly
+                ? 'Confirm with a signature from one of your verified wallets.'
+                : 'Confirm with your current password.',
             422
         );
     }
@@ -166,12 +196,26 @@ final class AccountCredentialCheck
             return ApiResponse::error('bcc_invalid_request', 'That wallet is not verified.', 400);
         }
 
+        // Established wallets only (see the class docblock). Checked before
+        // the challenge is spent: the member can't fix it by re-signing.
+        $establishedError = self::establishedWalletError((string) $link->verified_at);
+        if ($establishedError !== null) {
+            return $establishedError;
+        }
+
         // Point of no return for the nonce: atomic consume (refused when it
         // was issued for another purpose), then verify the signature against
         // the SERVER-stored challenge message, never the caller's input.
         $challenge = WalletIdentityService::consumeChallenge($userId, $walletAddress, $purpose);
         if ($challenge === null) {
             return ApiResponse::error('bcc_invalid_request', 'Challenge not found or expired. Please request a new nonce.', 400);
+        }
+        // The challenge is keyed by (user, address), not chain, and an EVM
+        // address is the same on every EVM chain: a challenge issued for one
+        // chain must not be spent claiming another (the signed message names
+        // its chain, so the member never approved this one).
+        if (strtolower((string) ($challenge['chain_slug'] ?? '')) !== $chainSlug) {
+            return ApiResponse::error('bcc_invalid_request', 'Challenge was issued for another chain. Please request a new nonce.', 400);
         }
         $message = (string) ($challenge['message'] ?? '');
         if ($message === '') {
@@ -180,6 +224,49 @@ final class AccountCredentialCheck
 
         if (!WalletVerifier::verify((string) $chain->chain_type, $message, $signature, $walletAddress, $extra)) {
             return ApiResponse::error('bcc_signature_invalid', 'Signature verification failed.', 401);
+        }
+
+        return null;
+    }
+
+    /**
+     * Null when the proving wallet is ESTABLISHED: verified at least
+     * WALLET_MIN_AGE_SECONDS ago and before the current session began.
+     * Otherwise a 403 that says when (or how) it will be usable.
+     *
+     * `verified_at` is UTC (WalletRepository::verify stamps it with
+     * current_time('mysql', true)). The session start comes from the
+     * PRESENTED bearer token; a request with no valid bearer token (no
+     * session to date) is refused.
+     */
+    private static function establishedWalletError(string $verifiedAt): ?WP_REST_Response
+    {
+        $verifiedTs = strtotime($verifiedAt . ' UTC');
+        if ($verifiedTs === false) {
+            return ApiResponse::error('bcc_invalid_request', 'That wallet is not verified.', 400);
+        }
+
+        $usableAt = $verifiedTs + self::WALLET_MIN_AGE_SECONDS;
+        if (time() < $usableAt) {
+            return ApiResponse::error(
+                'bcc_forbidden',
+                'This wallet was verified too recently to confirm account changes. It can be used 48 hours after it was verified.',
+                403,
+                ['usable_at' => gmdate('Y-m-d\TH:i:s\Z', $usableAt)]
+            );
+        }
+
+        $token   = BearerAuth::readBearerToken();
+        $decoded = $token !== null ? JwtToken::decode($token) : null;
+        if ($decoded === null || $decoded['ok'] !== true) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in again to confirm with a wallet.', 401);
+        }
+        if ($verifiedTs >= JwtToken::sessionStartedAt($decoded['payload'])) {
+            return ApiResponse::error(
+                'bcc_forbidden',
+                'This wallet was verified after you signed in. Sign out, sign back in, and try again.',
+                403
+            );
         }
 
         return null;

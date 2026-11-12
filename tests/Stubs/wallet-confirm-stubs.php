@@ -8,7 +8,8 @@
  *               keyed "user:lowercased address": what GET /auth/nonce issued
  *   consumed    list<array{user: int, address: string, purpose: string}>
  *   issued      list<array{user: int, address: string, purpose: string}>
- *   links       list<array{id: int, user_id: int, chain_id: int, address: string, verified: bool}>
+ *   links       list<array{id: int, user_id: int, chain_id: int, address: string, verified_at: int|null}>
+ *               (verified_at: a unix time, rendered as WalletRepository's UTC DATETIME)
  *   deleted     list<int>  wp_delete_user() calls
  *
  * WalletIdentityService::consumeChallenge mirrors core's contract (pinned
@@ -61,7 +62,7 @@ namespace BCC\Core\Wallet {
             {
                 $GLOBALS['__bcc_wc']['issued'][] = ['user' => $userId, 'address' => strtolower($walletAddress), 'purpose' => $purpose];
                 $message = 'msg:' . $purpose . ':' . bin2hex(random_bytes(4));
-                $GLOBALS['__bcc_wc']['challenges'][$userId . ':' . strtolower($walletAddress)] = ['purpose' => $purpose, 'message' => $message];
+                $GLOBALS['__bcc_wc']['challenges'][$userId . ':' . strtolower($walletAddress)] = ['purpose' => $purpose, 'message' => $message, 'chain_slug' => $chainSlug];
                 return [
                     'purpose' => $purpose, 'nonce' => 'n', 'message' => $message, 'chain_slug' => $chainSlug,
                     'chain_id' => $chainId, 'wallet_address' => strtolower($walletAddress), 'expires_at' => time() + 300,
@@ -93,9 +94,12 @@ namespace BCC\Core {
                 return new class {
                     public function getBySlug(string $slug): ?object
                     {
-                        return $slug === 'ethereum'
-                            ? (object) ['id' => 1, 'slug' => 'ethereum', 'chain_type' => 'evm']
-                            : null;
+                        return match ($slug) {
+                            'ethereum' => (object) ['id' => 1, 'slug' => 'ethereum', 'chain_type' => 'evm'],
+                            // Another EVM chain: the same address is valid on both.
+                            'base'     => (object) ['id' => 2, 'slug' => 'base', 'chain_type' => 'evm'],
+                            default    => null,
+                        };
                     }
 
                     public function resolveId(string $slug): ?int
@@ -181,7 +185,8 @@ namespace BCC\Trust\Onchain\Repositories {
                     if ($l['id'] === $walletLinkId) {
                         return (object) [
                             'id' => $l['id'], 'user_id' => $l['user_id'], 'wallet_address' => $l['address'],
-                            'chain_id' => $l['chain_id'], 'verified_at' => $l['verified'] ? '2026-11-12 00:00:00' : null,
+                            'chain_id' => $l['chain_id'],
+                            'verified_at' => $l['verified_at'] === null ? null : gmdate('Y-m-d H:i:s', $l['verified_at']),
                         ];
                     }
                 }
