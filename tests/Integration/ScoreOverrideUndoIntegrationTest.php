@@ -173,6 +173,65 @@ final class ScoreOverrideUndoIntegrationTest extends TestCase
         self::assertSame(0, $this->eliteFlag(), 'a failed pin read fails CLOSED to not pinned');
     }
 
+    /**
+     * F-177: the notice reports the tier the page really gets. A page whose
+     * score leans on its on-chain bonus stays below Elite (the native floor
+     * counts conduct only, user decision), even though the admin's Elite
+     * grant is pinned. The old preview treated native = score and said
+     * "elite".
+     */
+    public function testTheNoticeReportsTheRealTierWhenTheOnchainBonusKeepsNativeBelowTheFloor(): void
+    {
+        global $wpdb;
+        $wpdb->update($wpdb->prefix . 'bcc_trust_page_scores', ['onchain_bonus' => 30], ['page_id' => self::PAGE]);
+        $this->scores->applyPenalty(self::PAGE, 0.0);
+
+        [$result, $notice] = $this->quietWithOutput(fn () => $this->mod->overrideScore(self::OWNER, 90, 'grant'));
+
+        self::assertSame(90.0, round($this->total(), 2), 'control: the score itself lands on the target');
+        self::assertTrue($this->pin->isElitePinned(self::PAGE), 'the admin grant is still pinned');
+        self::assertSame('trusted', $result['tier'] ?? null, 'native 60 is under the floor of 71');
+        self::assertSame([self::PAGE => 'trusted'], $result['page_tiers'] ?? null);
+        self::assertStringContainsString('(trusted)', $notice);
+        self::assertStringContainsString('1 page(s) stay below Elite until their native score (without the on-chain bonus) reaches 71', $notice);
+
+        $this->scores->applyPenalty(self::PAGE, 0.0); // the canonical recompute
+        self::assertSame('trusted', $this->storedTier(), 'the notice agrees with the tier the formula stores');
+    }
+
+    public function testWithoutAnOnchainBonusTheEliteOverrideReportsElite(): void
+    {
+        [$result, $notice] = $this->quietWithOutput(fn () => $this->mod->overrideScore(self::OWNER, 90, 'grant'));
+
+        self::assertSame('elite', $result['tier'] ?? null);
+        self::assertStringContainsString('(elite)', $notice);
+        self::assertStringNotContainsString('stay below Elite', $notice);
+
+        $this->scores->applyPenalty(self::PAGE, 0.0);
+        self::assertSame('elite', $this->storedTier(), 'the notice agrees with the tier the formula stores');
+    }
+
+    private function storedTier(): string
+    {
+        global $wpdb;
+        return (string) $wpdb->get_var($wpdb->prepare(
+            'SELECT reputation_tier FROM ' . $wpdb->prefix . 'bcc_trust_page_scores WHERE page_id = %d',
+            self::PAGE
+        ));
+    }
+
+    /** @return array{0: array<string, mixed>, 1: string} */
+    private function quietWithOutput(callable $fn): array
+    {
+        ob_start();
+        try {
+            $result = $fn();
+        } finally {
+            $out = (string) ob_get_clean();
+        }
+        return [$result, $out];
+    }
+
     /** The admin Undo button shows exactly what the next undo will undo. */
     public function testTheUndoButtonTracksTheStack(): void
     {
