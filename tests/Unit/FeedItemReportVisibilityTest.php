@@ -193,6 +193,129 @@ final class FeedItemReportVisibilityTest extends TestCase
         self::assertFalse($this->gate()->canSee(self::VIEWER, $this->activity()), 'moderation-hidden');
     }
 
+    // ── canSeeHydratedItem(): the group-permalink entry point ───────
+    //
+    // ⚠⚠ WHY THESE EXIST. FeedRankingService's wiring suite STUBS this
+    // class, so it proves the permalink CONSULTS the rule and nothing
+    // more. A mutation that made this method `return true` unconditionally
+    // survived that suite — it is the real implementation, exercised
+    // through the real GroupsService, that these assertions pin.
+    //
+    // The permalink calls this after asking bcc-core with
+    // `deferGroupVisibilityToCaller: true`, i.e. after bcc-core has
+    // STOPPED applying the group gate. So a wrong answer here is a public
+    // permalink for a closed-group post, not a cosmetic bug.
+
+    /**
+     * ⭐ THE CASE THE WHOLE CHANGE EXISTS FOR. A `members_only` post —
+     * the default for a group post — is readable by a fellow member.
+     * bcc-core's permalink alone admits only `public_all`, so before the
+     * alignment this 404'd for the very members reading it in the room.
+     */
+    public function testHydratedMembersOnlyPostIsVisibleToAFellowMember(): void
+    {
+        $this->group(self::PRIVACY['closed']);
+        $this->post(['peepso_group_id' => (string) self::GROUP, '_bcc_post_visibility' => 'members_only']);
+        $this->wpdb()->members[self::VIEWER . ':' . self::GROUP] = 'member';
+
+        self::assertTrue($this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => self::POST]));
+    }
+
+    /** ⚠ And a NON-member of that same group still cannot. */
+    public function testHydratedMembersOnlyPostIsHiddenFromANonMember(): void
+    {
+        $this->group(self::PRIVACY['closed']);
+        $this->post(['peepso_group_id' => (string) self::GROUP, '_bcc_post_visibility' => 'members_only']);
+
+        self::assertFalse($this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => self::POST]));
+        self::assertFalse($this->gate()->canSeeHydratedItem(0, ['external_id' => self::POST]));
+    }
+
+    /** A secret group's post stays invisible to a non-member. */
+    public function testHydratedSecretGroupPostIsHiddenFromANonMember(): void
+    {
+        $this->group(self::PRIVACY['secret']);
+        $this->post(['peepso_group_id' => (string) self::GROUP, '_bcc_post_visibility' => 'members_only']);
+
+        self::assertFalse($this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => self::POST]));
+    }
+
+    /**
+     * The non-member teaser filter applies here too: `public_group` is
+     * readable by someone who can see the group, `members_only` is not.
+     */
+    public function testHydratedPublicGroupPostIsVisibleToANonMember(): void
+    {
+        $this->group(self::PRIVACY['open']);
+        $this->post(['peepso_group_id' => (string) self::GROUP, '_bcc_post_visibility' => 'public_group']);
+
+        self::assertTrue($this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => self::POST]));
+    }
+
+    /** A globally syndicated post is visible to anyone, as in the feed. */
+    public function testHydratedPublicAllPostIsVisibleToAnyone(): void
+    {
+        $this->group(self::PRIVACY['secret']);
+        $this->post(['peepso_group_id' => (string) self::GROUP, '_bcc_post_visibility' => 'public_all']);
+
+        self::assertTrue($this->gate()->canSeeHydratedItem(0, ['external_id' => self::POST]));
+    }
+
+    /** A post with no group marker is a global-feed post: visible. */
+    public function testHydratedNonGroupPostIsVisible(): void
+    {
+        $this->post([]);
+
+        self::assertTrue($this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => self::POST]));
+    }
+
+    /**
+     * ⚠ FAIL-CLOSED on a malformed item. `external_id` must be a real
+     * int: a string, a missing key or a non-positive id cannot be
+     * privacy-classified, and answering "visible" would hand back a row
+     * bcc-core deferred.
+     */
+    public function testHydratedItemWithoutAUsableBackingPostIsRefused(): void
+    {
+        $this->post([]);
+
+        self::assertFalse($this->gate()->canSeeHydratedItem(self::VIEWER, []));
+        self::assertFalse($this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => 0]));
+        self::assertFalse($this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => -1]));
+        self::assertFalse(
+            $this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => (string) self::POST]),
+            'a numeric STRING is not an int; bcc-core hands back ints'
+        );
+    }
+
+    /**
+     * ⭐ SCOPE CONTROL, and deliberately asserting the OPPOSITE of what
+     * `canSee()` does. This entry point does NOT re-check the
+     * hidden-activity list or the module allowlist, because the same
+     * bcc-core call that produced the item already applied them — only
+     * the group branch is deferred. Re-checking would cost an extra
+     * HiddenActivityRepository read per permalink.
+     *
+     * So a moderation-hidden activity still answers TRUE here while
+     * `canSee()` answers false for it. That asymmetry is intentional and
+     * documented on the method; this test is what stops someone
+     * "fixing" it and silently adding a query to every permalink.
+     */
+    public function testHydratedEntryPointDoesNotRecheckTheHiddenList(): void
+    {
+        $this->post([]);
+        $this->wpdb()->hidden = [self::ACT];
+
+        self::assertFalse(
+            $this->gate()->canSee(self::VIEWER, $this->activity()),
+            'canSee() DOES consult the hidden list'
+        );
+        self::assertTrue(
+            $this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => self::POST]),
+            'the hydrated entry point deliberately does not — bcc-core already did'
+        );
+    }
+
     /** @return array<string, array{0: string}> */
     public static function nonFeedModules(): array
     {

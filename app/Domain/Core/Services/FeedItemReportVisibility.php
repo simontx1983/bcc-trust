@@ -105,6 +105,64 @@ class FeedItemReportVisibility
             return false; // moderation-hidden: no feed shows it
         }
 
+        return $this->groupRuleAllows($viewerId, $postId);
+    }
+
+    /**
+     * The same GROUP rule, for a caller that already holds a HYDRATED feed
+     * item and has already had the cheap gates applied by bcc-core.
+     *
+     * Added for the group-permalink alignment: when
+     * `ActivityFeedService::getActivityById()` is called with
+     * `deferGroupVisibilityToCaller: true`, bcc-core stops deciding the
+     * group-tagged case and THIS is the rule the caller owes it. Without
+     * this call that flag would turn closed-group posts into public
+     * permalinks.
+     *
+     * ⚠ WHAT IT DELIBERATELY DOES NOT RE-CHECK, and why that is safe
+     * rather than sloppy: the module allowlist, `act_status = publish` and
+     * the hidden-activity list are all applied INSIDE the same
+     * `getActivityById()` call that produced `$item` — they are not
+     * deferred by that flag, only the group branch is. Repeating them here
+     * would cost a second `HiddenActivityRepository` read per permalink to
+     * re-derive an answer bcc-core already gave.
+     *
+     * ⚠ So this is NOT a general-purpose entry point. Use
+     * {@see canSee()} for a raw row from anywhere else; this one is only
+     * correct for an item that came back from a bcc-core feed read.
+     *
+     * @param array<string, mixed> $item A hydrated feed item (`external_id`
+     *        is the BACKING wp_post, never the act_id).
+     */
+    public function canSeeHydratedItem(int $viewerId, array $item): bool
+    {
+        $postId = is_int($item['external_id'] ?? null) ? $item['external_id'] : 0;
+        if ($postId <= 0) {
+            return false;
+        }
+
+        return $this->groupRuleAllows($viewerId, $postId);
+    }
+
+    /**
+     * "May this viewer see a post in the group it is tagged to?" — the
+     * group half of the rule, shared by both entry points above so they
+     * cannot drift.
+     *
+     * A post that is NOT group-tagged, or is tagged but marked
+     * `public_all`, is visible in the global feed and returns true here
+     * (mirrors bcc-core `ActivityFeedService::isVisibleGlobally()`, which
+     * is private — keep in lockstep). Otherwise
+     * {@see GroupsService::gateGroupFeed()} decides exactly as the group
+     * feed does.
+     *
+     * ⚠ A non-group post returning TRUE is why a permalink caller must
+     * ALSO check that the post is group-tagged before letting this rescue
+     * an item §F-02 refused — this method answers a group question and
+     * says nothing about profile visibility.
+     */
+    private function groupRuleAllows(int $viewerId, int $postId): bool
+    {
         $groupRaw   = get_post_meta($postId, 'peepso_group_id', true);
         $visibility = (string) get_post_meta($postId, '_bcc_post_visibility', true);
 
@@ -115,7 +173,7 @@ class FeedItemReportVisibility
 
         $gate = $this->groups->gateGroupFeed($viewerId, (int) $groupRaw);
         if (($gate['kind'] ?? '') !== 'allowed') {
-            return false;
+            return false; // missing group, or secret + non-member
         }
         if (!($gate['public_only'] ?? true)) {
             return true; // member — sees every post in the group

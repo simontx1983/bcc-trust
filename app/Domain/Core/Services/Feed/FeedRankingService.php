@@ -35,8 +35,10 @@ namespace BCC\Trust\Core\Services\Feed;
 use BCC\Core\Feed\ActivityFeedService;
 use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
+use BCC\Trust\Core\Services\FeedItemReportVisibility;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Support\PeepSoFriendGate;
 use BCC\Trust\Core\Support\ProfileAccess;
@@ -88,8 +90,24 @@ final class FeedRankingService
         private readonly ReputationRepository $reputationRepo,
         private readonly HiddenActivityRepository $hiddenRepo,
         private readonly GroupContextResolver $groupContextResolver,
-        private readonly FeedHydrationPipeline $hydrationPipeline
+        private readonly FeedHydrationPipeline $hydrationPipeline,
+        private ?FeedItemReportVisibility $reportVisibility = null
     ) {
+    }
+
+    /**
+     * The GROUP's own visibility rule, for the permalink's second look.
+     *
+     * Injected by tests; built lazily in production so no Plugin.php
+     * wiring changes — exactly as CommentService, ContentReportService
+     * and PostsService already obtain it.
+     */
+    private function reportVisibility(): FeedItemReportVisibility
+    {
+        return $this->reportVisibility ??= new FeedItemReportVisibility(
+            Plugin::instance()->groupsService(),
+            Plugin::instance()->hiddenActivityRepository()
+        );
     }
 
     /**
@@ -529,22 +547,36 @@ final class FeedRankingService
      * either — otherwise a post a fellow member is reading in the room
      * 404s the moment they share the link to it.
      *
-     * ⚠ THIS IS NOT AN UNGATED READ, and the fail-closed property is
-     * worth stating precisely. The re-ask drops exactly ONE predicate
-     * (§F-02) and keeps every other gate bcc-core applies to a
-     * permalink, because they all live inside the same call: the module
-     * allowlist, `act_status = publish`, the excluded-author and
-     * hidden-activity lists, and — the load-bearing one here —
-     * `ActivityFeedService::isVisibleGlobally()`, which admits a
-     * group-tagged post only when it is marked `public_all` and the
-     * group-syndication rule allows it. A `members_only` or
-     * `public_group` post therefore still 404s by link for everyone,
-     * member or not, exactly as it did before this method existed. What
-     * changes is only that the AUTHOR'S PROFILE LEVEL no longer
-     * overrides the group's own answer.
+     * ⚠⚠ THIS IS NOT AN UNGATED READ, and the fail-closed property is
+     * the whole of it, so state it precisely. The re-ask drops TWO
+     * bcc-core predicates and replaces the second with this layer's own:
      *
-     * A post with no `peepso_group_id` is returned as null, so §F-02's
-     * refusal stands untouched on every non-group surface.
+     *   1. §F-02 (`enforcePostVisibility: false`) — dropped, and NOT
+     *      replaced. That is the point of the method. It is contained by
+     *      the `peepso_group_id` check below: a non-group post is
+     *      refused, so §F-02's answer stands on every other surface.
+     *   2. the group-tagged branch of
+     *      `ActivityFeedService::isVisibleGlobally()`
+     *      (`deferGroupVisibilityToCaller: true`) — dropped, and
+     *      REPLACED by `canSeeHydratedItem()`, which applies the group's
+     *      own rule: membership for a closed group, a refusal for a
+     *      secret non-member, and the `public_group`/`public_all` teaser
+     *      filter for a non-member who can see the group at all. That is
+     *      the same rule the room applies, which is the entire objective.
+     *
+     * ⚠ Passing (2) WITHOUT that replacement would turn every
+     * closed-group post into a public permalink. The two belong together
+     * and neither is safe alone.
+     *
+     * Everything else bcc-core applies is untouched and still runs inside
+     * the same call: the module allowlist, `act_status = publish`, and
+     * the excluded-author and hidden-activity lists.
+     *
+     * ⭐ WHAT THIS FIXED, for the record: before it, a `members_only`
+     * post — the DEFAULT for a group post — 404'd by link for everyone
+     * including the members reading it in the room, because bcc-core's
+     * permalink admitted only `public_all`. Members can now open their
+     * own group's posts by link; a non-member still cannot.
      *
      * @param list<int> $excluded
      * @param list<int> $hidden
@@ -564,7 +596,13 @@ final class FeedRankingService
             // Explicitly inert: bcc-core reads the friend list only when
             // the gate below is true.
             viewerFriendIds: null,
-            enforcePostVisibility: false
+            enforcePostVisibility: false,
+            // ⚠⚠ THE DEBT THIS TAKES ON. bcc-core now stops deciding the
+            // group-tagged case and hands the row over, which means the
+            // group's OWN rule is owed below. Passing this without the
+            // `canSeeHydratedItem()` check would turn every closed-group
+            // post into a public permalink.
+            deferGroupVisibilityToCaller: true
         );
         if ($candidate === null) {
             return null;
@@ -579,7 +617,19 @@ final class FeedRankingService
             return null;
         }
 
-        return (int) get_post_meta($postId, 'peepso_group_id', true) > 0
+        // Not group-tagged ⇒ §F-02's refusal stands. This check cannot be
+        // folded into the group rule below, because that rule answers TRUE
+        // for a non-group post — it is a group question and says nothing
+        // about profile visibility.
+        if ((int) get_post_meta($postId, 'peepso_group_id', true) <= 0) {
+            return null;
+        }
+
+        // The group's full rule, the same one the room applies: membership
+        // for closed groups, 404 for a secret non-member, and the
+        // `public_group`/`public_all` teaser filter for a non-member who
+        // can see the group at all.
+        return $this->reportVisibility()->canSeeHydratedItem($viewerId, $candidate)
             ? $candidate
             : null;
     }
@@ -830,14 +880,19 @@ final class FeedRankingService
         // Those three surfaces pass `enforcePostVisibility: true` and
         // are deliberately untouched by the permalink's second look.
         //
-        // ⚠ What the permalink still refuses, because it is the GROUP's
-        // own rule and not a profile one: a `members_only` /
-        // `public_group` post 404s by link for everyone, member or not
-        // (bcc-core's `isVisibleGlobally()` admits only `public_all`).
-        // The room shows such a post to members; its link does not. That
-        // residual gap is bcc-core's permalink-syndication policy, NOT
-        // §F-02, and closing it would be a deliberate widening of what
-        // the permalink serves.
+        // ⭐ THE PERMALINK NOW APPLIES THIS SAME ROOM RULE. It used to
+        // admit only `public_all`, so a `members_only` post — the
+        // DEFAULT here — 404'd by link even for the members reading it
+        // in this room. It now defers the group-tagged case to
+        // `FeedItemReportVisibility::canSeeHydratedItem()`, which asks
+        // `GroupsService::gateGroupFeed()` exactly as the query below
+        // does. So the room and the link agree: members see the post,
+        // non-members get the teaser filter, secret non-members get
+        // nothing.
+        //
+        // ⚠ Keep the two in lockstep. If this surface's rule changes,
+        // the permalink's second look changes with it — they are now
+        // two callers of one decision, not two decisions.
         $payload = $this->activityFeed->getFeed(
             $viewerId,
             ActivityFeedService::SCOPE_GROUP,
