@@ -361,7 +361,15 @@ final class SessionController
         // Mid-session compromise mitigation: a user flagged suspended
         // can no longer refresh, forcing them through the canonical
         // signOut → re-login path where the suspension is surfaced.
-        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId)) {
+        //
+        // ⚠ Only a KNOWN suspension refuses. An UNKNOWN state (null: the
+        // suspension could not be read) lets the refresh through. A refused
+        // refresh SIGNS THE USER OUT (the frontend's tryRefresh treats any
+        // non-OK answer as a dead session), so a DB blip must never refuse
+        // it. A genuinely suspended user is still caught by every write gate
+        // and by the next refresh once the read works.
+        $suspension = \BCC\Core\Permissions\Permissions::suspensionState($userId);
+        if ($suspension === true) {
             return ApiResponse::error('bcc_forbidden', 'Account is not in good standing.', 403);
         }
 

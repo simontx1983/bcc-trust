@@ -43,6 +43,8 @@ if (!defined('ABSPATH')) {
  */
 class RankStateRepository
 {
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+
     /** Cache group for per-user rank-state generation counters (§5). */
     private const CACHE_GROUP = 'bcc_rank_state';
 
@@ -221,13 +223,22 @@ class RankStateRepository
     {
         global $wpdb;
 
-        $ids = $wpdb->get_col($wpdb->prepare(
+        // ⚠ F-13: FAIL-CLOSED. get_col() returned [] on a DB error, which the
+        // daily evaluate sweep read as "no more members" and ended its pass.
+        // runRead (the runProbe shape) throws instead, and cannot return a
+        // stale last_result either.
+        /** @var list<object{user_id: int|numeric-string}> $rows */
+        $rows = self::runRead($wpdb->prepare(
             "SELECT user_id FROM {$this->table} WHERE user_id > %d ORDER BY user_id ASC LIMIT %d",
             max(0, $cursor),
             max(1, $limit)
-        ));
+        ), 'listUserIdsAfter', true);
 
-        return array_values(array_map('intval', $ids ?: []));
+        $ids = [];
+        foreach ($rows as $row) {
+            $ids[] = (int) $row->user_id;
+        }
+        return $ids;
     }
 
     /** §5 generation-counter bump for rank-state read caches. */

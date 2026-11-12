@@ -196,20 +196,18 @@ final class NoReactionsGateTest extends TestCase
         self::assertSame('none', (self::GATE)::GRAMMAR_NONE_WIRE);
 
         $fqcn = 'BCC\\Core\\Feed\\ReactionGrammarMap';
-        $path = dirname(__DIR__, 3) . '/bcc-core/src/Feed/ReactionGrammarMap.php';
-        if (!is_file($path)) {
-            self::markTestSkipped(
-                'bcc-core is not checked out beside this plugin — cannot reconcile the wire literal'
-            );
-        }
+        // F-94: fails in CI when the sibling or the file is missing (was a
+        // skip, which a green run hides).
+        $path = \BCC\Trust\Tests\Support\CoreSibling::require('src/Feed/ReactionGrammarMap.php');
 
+        // bcc-core #57 has merged, so GRAMMAR_NONE missing is now DRIFT, not
+        // the ordering gap this used to skip for.
         $src = (string) file_get_contents($path);
-        if (!str_contains($src, 'GRAMMAR_NONE')) {
-            self::markTestSkipped(
-                'bcc-core does not declare GRAMMAR_NONE yet (bcc-core #57 unmerged) — '
-                . 'this is the documented cross-repo ordering dependency, not a failure'
-            );
-        }
+        self::assertStringContainsString(
+            'GRAMMAR_NONE',
+            $src,
+            'bcc-core no longer declares ReactionGrammarMap::GRAMMAR_NONE — the announcement no-reactions gate has lost its counterpart'
+        );
 
         self::assertMatchesRegularExpression(
             '/GRAMMAR_NONE\s*=\s*\x27none\x27/',

@@ -33,8 +33,6 @@ final class FraudDiscountCalculator
      *
      * @param array<string, mixed> $signals    Fraud signals array with keys:
      *   - automation: ['is_automated' => bool, 'confidence' => int]
-     *   - multi_account_risk: bool
-     *   - device_fraud_probability: float (0.0–1.0)
      *   - behavior_score: int (0–100)
      *   - trust_rank: float (0.0–1.0)
      * @param int   $fraudScore  User's fraud_score (0–100).
@@ -57,16 +55,11 @@ final class FraudDiscountCalculator
             $penalties['automation_suspected'] = ($signals['automation']['confidence'] / 200);
         }
 
-        // ── Multi-account: shared device fingerprint ──
-        if ($signals['multi_account_risk'] ?? false) {
-            $penalties['multi_account'] = BCC_TRUST_FRAUD_PENALTY_MULTI_ACCOUNT;
-        }
-
-        // ── Device fraud probability (0.0–1.0, only penalize above threshold) ──
-        $deviceFraud = $signals['device_fraud_probability'] ?? 0.0;
-        if ($deviceFraud > BCC_TRUST_FRAUD_DEVICE_THRESHOLD) {
-            $penalties['device_fraud'] = $deviceFraud * BCC_TRUST_FRAUD_DEVICE_WEIGHT;
-        }
+        // Shared-device signals (multi-account on one fingerprint, device
+        // fraud probability) no longer reduce vote weight (F-184, user
+        // decision): a household or office sharing one computer votes at
+        // full weight. They are still recorded for admins by
+        // DeviceFingerprinter and FraudDetector.
 
         // ── Behavior score (0-100, only penalize above MEDIUM threshold) ──
         // Comparator is >= to match FraudDetector::getRiskLevel and every
@@ -81,7 +74,19 @@ final class FraudDiscountCalculator
             $penalties['fraud_score'] = ($fraudScore / 100) * BCC_TRUST_FRAUD_SCORE_WEIGHT;
         }
 
+        // ── Hard block is decided BEFORE any rank relief (F-82) ──
+        // User decision: a confirmed bot's hard block ALWAYS beats rank.
+        // The trust-rank boost used to be summed in first, so a confirmed
+        // bot (automation penalty 0.90 = the block threshold) with a high
+        // trust_rank landed at 0.75 and escaped the block — the boost is
+        // exactly what a bot that farmed reputation would have.
+        $penaltyBeforeRelief = max(0.0, array_sum($penalties));
+        $hardBlocked = ($signals['automation']['is_automated'] ?? false)
+            || $penaltyBeforeRelief >= BCC_TRUST_FRAUD_BLOCK_THRESHOLD;
+
         // ── Trust rank boost (good actors get a slight reduction in penalty) ──
+        // Relief only — it can soften a penalty below the block, never lift
+        // an account out of it.
         $trustRank = $signals['trust_rank'] ?? 0.0;
         if ($trustRank > BCC_TRUST_FRAUD_RANK_BOOST_THRESHOLD) {
             $penalties['trust_rank_boost'] = -min(BCC_TRUST_FRAUD_RANK_BOOST_CAP, ($trustRank - BCC_TRUST_FRAUD_RANK_BOOST_THRESHOLD) * 0.5);
@@ -90,9 +95,10 @@ final class FraudDiscountCalculator
         $rawPenalty = max(0.0, array_sum($penalties));
 
         // Severity tiers:
-        //   >= block threshold = malicious → hard block (discount = 0.00)
-        //   < block threshold  = suspicious → reduced influence (floor = $minWeight)
-        if ($rawPenalty >= BCC_TRUST_FRAUD_BLOCK_THRESHOLD) {
+        //   hard-blocked (confirmed bot, or the pre-relief penalty reaches the
+        //   block threshold) = malicious → discount 0.00, whatever the rank
+        //   otherwise = suspicious → reduced influence (floor = $minWeight)
+        if ($hardBlocked) {
             $discount = 0.0;
         } else {
             $cappedPenalty = min(1.0 - $minWeight, $rawPenalty);
@@ -154,43 +160,4 @@ final class FraudDiscountCalculator
         return $currentFactor / $originalFactor;
     }
 
-    /**
-     * Normalize disparate fraud signal formats into the standard shape
-     * expected by compute().
-     *
-     * EndorsementService passes fraud data as separate arrays; this bridges
-     * to the unified format without changing the caller's interface.
-     *
-     * @param array<string, mixed> $fraudAnalysis   ['score' => int, ...]
-     * @param array<string, mixed> $automationData  ['is_automated' => bool, 'confidence' => int]
-     * @param bool                 $multiAccountRisk
-     * @param array<string, mixed> $behavior        ['behavior_score' => int, ...]
-     * @param float                $trustRank       0.0–1.0
-     * @return array<string, mixed>  Normalized signals array.
-     */
-    public static function normalizeSignals(
-        array $fraudAnalysis,
-        array $automationData,
-        bool $multiAccountRisk,
-        array $behavior,
-        float $trustRank
-    ): array {
-        // Validate automation shape — if malformed, treat as no automation data
-        // rather than silently defaulting to "not automated" with high confidence.
-        if (!isset($automationData['is_automated']) || !isset($automationData['confidence'])) {
-            $automationData = ['is_automated' => false, 'confidence' => 0];
-        }
-
-        // Clamp trust_rank to valid range — out-of-range values would produce
-        // incorrect boost/penalty in compute().
-        $trustRank = max(0.0, min(1.0, $trustRank));
-
-        return [
-            'automation'               => $automationData,
-            'multi_account_risk'       => $multiAccountRisk,
-            'device_fraud_probability' => (float) ($fraudAnalysis['device_fraud_probability'] ?? 0.0),
-            'behavior_score'           => (int) ($behavior['behavior_score'] ?? 0),
-            'trust_rank'               => $trustRank,
-        ];
-    }
 }

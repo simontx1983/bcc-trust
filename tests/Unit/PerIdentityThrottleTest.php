@@ -18,12 +18,13 @@ use PHPUnit\Framework\TestCase;
  * wallet login (5/min) or every Google/X sign-in (10/min).
  *
  * Now (REAL controllers, counting Throttle stub):
- *   - per IDENTITY buckets: wallet = chain + lower-cased address (5/min),
+ *   - per IDENTITY buckets: wallet = lower-cased address (5/min; the chain is
+ *     only known once a signature verifies — F-25),
  *     oauth = provider + provider_id (10/min), each with an EXPLICIT key
  *     (never split or merged by IP), plus a 300/min route-wide ceiling;
  *   - exhausting one identity's bucket does not touch another's;
- *   - wallet-login counts only requests that carry a server-issued nonce for
- *     that address (a bare junk request does not count — though nonces for
+ *   - wallet-login counts only requests for an address with a live,
+ *     server-issued challenge (a bare junk request does not count — though nonces for
  *     any address can be minted via /auth/wallet-nonce); /auth/oauth counts
  *     only requests that pass the signed bridge gate.
  *
@@ -124,7 +125,7 @@ final class PerIdentityThrottleTest extends TestCase
 
     private static function walletKey(string $address): string
     {
-        return 'wallet_login:' . substr(hash('sha256', "4\n" . strtolower($address)), 0, 32);
+        return 'wallet_login:' . substr(hash('sha256', strtolower($address)), 0, 32);
     }
 
     public function testWalletLoginIsThrottledPerWalletNotShared(): void

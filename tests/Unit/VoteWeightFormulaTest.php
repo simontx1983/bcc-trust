@@ -47,8 +47,6 @@ final class VoteWeightFormulaTest extends TestCase
     {
         return [
             'automation'               => ['is_automated' => false, 'confidence' => 0],
-            'multi_account_risk'       => false,
-            'device_fraud_probability' => 0.0,
             'behavior_score'           => 0,
             'trust_rank'               => 0.0,
         ];

@@ -42,6 +42,8 @@ if (!defined('ABSPATH')) {
  */
 class ClusterFindingsRepository
 {
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
+
     private const COLUMNS_READ = 'id, level, member_user_ids, representative_user_id, selection_method, effective_at';
 
     /** Formal findings are rare by construction; hard read ceiling. */
@@ -183,6 +185,49 @@ class ClusterFindingsRepository
         ));
 
         return $rows ?: [];
+    }
+
+    /**
+     * Representative user id of each finding id, REVERSED findings
+     * included. Backs PollService::closureExclusionReasons(): a closed
+     * poll's audit must be explained against the finding it was closed
+     * under, even if that finding has since been reversed.
+     *
+     * Bounded by the id list (callers pass the distinct confirmed-cluster
+     * ids of one poll's ballots); FAIL-CLOSED via runRead — a failed read
+     * throws instead of answering "no representatives".
+     *
+     * @param list<int> $findingIds
+     * @return array<int, int> finding id => representative user id
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure
+     */
+    public function representativesByIds(array $findingIds): array
+    {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', $findingIds),
+            static fn (int $id): bool => $id > 0
+        )));
+        if ($ids === []) {
+            return [];
+        }
+        $ids = array_slice($ids, 0, self::MAX_ACTIVE_FINDINGS);
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+
+        /** @var list<object{id: int|numeric-string, representative_user_id: int|numeric-string}> $rows */
+        $rows = self::runRead((string) $wpdb->prepare(
+            "SELECT id, representative_user_id FROM {$this->table}
+              WHERE id IN ({$placeholders})
+              LIMIT %d",
+            ...array_merge($ids, [count($ids)])
+        ), 'representativesByIds', true);
+
+        $map = [];
+        foreach ($rows as $row) {
+            $map[(int) $row->id] = (int) $row->representative_user_id;
+        }
+        return $map;
     }
 
     /**

@@ -56,10 +56,46 @@ namespace BCC\Trust\Core\Support {
 namespace BCC\Trust\Core\Security {
     final class TransactionManager
     {
+        private static int $depth = 0;
+
         /** @return mixed */
         public static function run(callable $callback, ?int $retryAttempts = null)
         {
-            return $callback();
+            self::$depth++;
+            try {
+                return $callback();
+            } finally {
+                self::$depth--;
+            }
+        }
+
+        /** F-114: lets a test see whether a cache flush ran INSIDE the transaction. */
+        public static function isInRunTransaction(): bool
+        {
+            return self::$depth > 0;
+        }
+    }
+
+    /** F-114: bulk reanalyze must recompute AND persist, like the single action. */
+    final class FraudDetector
+    {
+        public static function clearCache(int $userId): void
+        {
+            $GLOBALS['__bcc_ms']['fd_cleared'][] = $userId;
+        }
+
+        public static function getEnhancedFraudScore(int $userId): int
+        {
+            if (in_array($userId, $GLOBALS['__bcc_ms']['fd_fail'] ?? [], true)) {
+                throw new \RuntimeException('analysis failed for ' . $userId);
+            }
+            return 40 + $userId % 10;
+        }
+
+        /** @return array<string, mixed> */
+        public static function analyzeFraud(int $userId): array
+        {
+            return ['risk_level' => 'medium', 'details' => ['behavior_score' => 7]];
         }
     }
 
@@ -160,7 +196,26 @@ namespace BCC\Trust\Core\Services\Admin {
     /** @param mixed ...$args */
     function add_query_arg(...$args): string
     {
+        if (is_array($args[0] ?? null)) {
+            $GLOBALS['__bcc_ms']['query'] = $args[0];
+        }
         return '';
+    }
+    // F-114 suspend guard: administrators are listed in the test world.
+    function user_can(int $userId, string $cap): bool
+    {
+        return in_array($userId, $GLOBALS['__bcc_ms']['admins'] ?? [], true);
+    }
+    /** @param mixed $value */
+    function set_transient(string $key, $value, int $ttl = 0): bool
+    {
+        $GLOBALS['__bcc_ms']['transients'][$key] = $value;
+        return true;
+    }
+    function delete_transient(string $key): bool
+    {
+        unset($GLOBALS['__bcc_ms']['transients'][$key]);
+        return true;
     }
     function wp_safe_redirect(string $url): bool
     {

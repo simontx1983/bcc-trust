@@ -4,7 +4,10 @@
  *
  * Spoof-proof client IP detection.
  *
- * - CF-Connecting-IP is only trusted when REMOTE_ADDR is a verified Cloudflare IP.
+ * - CF-Connecting-IP is only trusted when the site has OPTED IN to being behind
+ *   Cloudflare (BCC_BEHIND_CLOUDFLARE / the bcc_behind_cloudflare filter — the
+ *   same switch bcc-core's Throttle uses) AND REMOTE_ADDR is a verified
+ *   Cloudflare IP.
  * - X-Forwarded-For is never trusted (any client can set it).
  * - Falls back to REMOTE_ADDR as the authoritative source.
  * - Supports IPv4 and IPv6 throughout.
@@ -59,7 +62,12 @@ class IpResolver {
      * Get the real client IP address.
      *
      * Trust priority:
-     *   1. CF-Connecting-IP  — only when REMOTE_ADDR is a verified Cloudflare IP.
+     *   1. CF-Connecting-IP  — only when the site opted in to Cloudflare
+     *                          (behindCloudflare()) AND REMOTE_ADDR is a
+     *                          verified Cloudflare IP. Without the opt-in a
+     *                          site that merely EGRESSES through Cloudflare
+     *                          (shared hosts, Workers/WARP) would trust a
+     *                          header any client on that egress can set (F-54).
      *   2. REMOTE_ADDR       — always authoritative when CF check fails.
      *
      * X-Forwarded-For and X-Real-IP are deliberately ignored: any client or
@@ -72,7 +80,7 @@ class IpResolver {
         $remoteAddr = self::sanitizeIp($remoteAddr);
 
         // Only honour CF-Connecting-IP when the request genuinely came from Cloudflare.
-        if (!empty($_SERVER['HTTP_CF_CONNECTING_IP']) && self::isCloudflareIp($remoteAddr)) {
+        if (!empty($_SERVER['HTTP_CF_CONNECTING_IP']) && self::behindCloudflare() && self::isCloudflareIp($remoteAddr)) {
             $cfIp = self::sanitizeIp($_SERVER['HTTP_CF_CONNECTING_IP']);
             if ($cfIp !== '') {
                 return $cfIp;
@@ -80,6 +88,19 @@ class IpResolver {
         }
 
         return $remoteAddr !== '' ? $remoteAddr : '0.0.0.0';
+    }
+
+    /**
+     * Has the operator declared this site is behind Cloudflare? Mirrors
+     * bcc-core Throttle's opt-in exactly, so the two resolvers agree.
+     * Unset (the default, and production's state) means CF-Connecting-IP is
+     * never trusted.
+     */
+    public static function behindCloudflare(): bool {
+        if (defined('BCC_BEHIND_CLOUDFLARE') && BCC_BEHIND_CLOUDFLARE) {
+            return true;
+        }
+        return function_exists('apply_filters') && (bool) apply_filters('bcc_behind_cloudflare', false);
     }
 
     /**

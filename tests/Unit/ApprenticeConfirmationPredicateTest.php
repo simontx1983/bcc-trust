@@ -53,6 +53,7 @@ final class ApprenticeConfirmationPredicateTest extends TestCase
     {
         RankUnitWpFakes::reset();
         \BCC\Core\Permissions\Permissions::$suspended = [];
+        $GLOBALS['__bcc_suspension_unknown'] = [];
 
         // Fake $wpdb for the real ContentReportRepository.
         global $wpdb;
@@ -219,5 +220,22 @@ final class ApprenticeConfirmationPredicateTest extends TestCase
         self::assertSame(0, $service->runConfirmationSweep());
         self::assertSame([], $state->awarded);
         self::assertSame([[self::USER, 'voided', 'suspended']], $pending->resolved);
+    }
+
+    /**
+     * An UNKNOWN suspension (it could not be read) is NOT a suspension. A
+     * void is persisted, so a DB blip must not void a legitimate
+     * confirmation: the row is neither voided nor awarded, and stays pending
+     * for the next sweep.
+     */
+    public function testAnUnknownSuspensionLeavesTheConfirmationPending(): void
+    {
+        [$service, $pending, $state] = $this->service();
+        $GLOBALS['__bcc_suspension_unknown'] = [self::USER];
+
+        self::assertSame(0, $service->runConfirmationSweep());
+        self::assertSame([], $state->awarded, 'not awarded');
+        self::assertSame([], $pending->resolved, 'not voided: still pending');
+        self::assertNotContains('bcc_rank_awarded', RankUnitWpFakes::firedHooks());
     }
 }

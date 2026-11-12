@@ -26,6 +26,19 @@ namespace BCC\Core\Permissions {
                 }
                 return !in_array($userId, self::$suspended, true);
             }
+
+            /**
+             * Tri-state mirror of bcc-core Permissions::suspensionState() (#84):
+             * TRUE suspended, FALSE not, NULL unknown. Ids listed in
+             * $GLOBALS['__bcc_suspension_unknown'] read as UNKNOWN.
+             */
+            public static function suspensionState(?int $userId = null, bool $allowAdminBypass = true): ?bool
+            {
+                if (in_array($userId, $GLOBALS['__bcc_suspension_unknown'] ?? [], true)) {
+                    return null;
+                }
+                return !self::is_not_suspended((int) $userId, $allowAdminBypass);
+            }
         }
     }
 }

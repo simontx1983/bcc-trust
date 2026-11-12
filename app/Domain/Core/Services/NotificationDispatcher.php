@@ -212,7 +212,7 @@ final class NotificationDispatcher
                 'actor_handle' => $actorHandle,
                 'page_id'      => $pageId,
                 'page_name'    => $pageName,
-            ]);
+            ], $authorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] review dispatch failed', [
                 'author_id' => $authorId,
@@ -748,7 +748,7 @@ final class NotificationDispatcher
                 'post_id'      => $postId,
                 'act_id'       => $actId,
                 'is_comment'   => $isComment,
-            ]);
+            ], $authorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] mention dispatch failed', [
                 'author_id'    => $authorId,
@@ -915,7 +915,7 @@ final class NotificationDispatcher
                 'hall_name'    => $hallName,
                 'hall_slug'    => $hallSlug,
                 'act_id'       => $actId,
-            ]);
+            ], $authorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] hall-post dispatch failed', [
                 'author_id'    => $authorId,
@@ -1125,7 +1125,7 @@ final class NotificationDispatcher
             // PushPayload::forCommentReceived branches its copy on this.
             $payload['is_reply'] = true;
         }
-        $this->pushDispatcher->enqueue($recipientId, 'comment_received', $payload);
+        $this->pushDispatcher->enqueue($recipientId, 'comment_received', $payload, $commenterId);
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1182,14 +1182,16 @@ final class NotificationDispatcher
                 ? 'attestation_vouch_received'
                 : 'attestation_stand_behind_received';
 
-            $this->dispatch(
-                $attestorId,
-                $targetOwnerId,
-                $message,
-                $type,
-                $attestationId, // external_id → attestation row id
-                0               // no associated activity row
-            );
+            if ($this->attestationBellOpen('created', $attestorId, $targetOwnerId, $kind)) {
+                $this->dispatch(
+                    $attestorId,
+                    $targetOwnerId,
+                    $message,
+                    $type,
+                    $attestationId, // external_id → attestation row id
+                    0               // no associated activity row
+                );
+            }
 
             // Parallel push enqueue — debounced to one push per
             // (recipient, eventType) per 5 min, count-aggregated.
@@ -1199,7 +1201,7 @@ final class NotificationDispatcher
                 'target_kind'     => $targetKind,
                 'target_id'       => $targetId,
                 'kind'            => $kind,
-            ]);
+            ], $attestorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] attestation-created dispatch failed', [
                 'attestor_id'    => $attestorId,
@@ -1210,6 +1212,33 @@ final class NotificationDispatcher
                 'error'          => $e->getMessage(),
             ]);
         }
+    }
+
+    /** F-78: one bell per (event, attestor, recipient, kind) per window. */
+    private const ATTESTATION_BELL_WINDOW_SECS = 86400;
+
+    /**
+     * F-78 — bell coalescing for attestation toggles. Every cast is a NEW
+     * row, so vouch → unvouch → vouch used to write a fresh bell row each
+     * time ("vouched for you", "revoked their vouch", "vouched for you", …).
+     * Push already self-debounces (PushDispatcher, 5 min); the bell did not.
+     *
+     * Same shape as the hall-post and comment-received bell gates: a
+     * transient set BEFORE the write, so a concurrent toggle sees it. Keyed
+     * per EVENT, so a storm leaves at most one "vouched" and one "revoked"
+     * bell per attestor→recipient pair and kind per day, while a genuine
+     * first vouch and a genuine revoke still each notify. The profile, not
+     * the bell, is the source of truth for the current state.
+     */
+    private function attestationBellOpen(string $event, int $attestorId, int $recipientId, string $kind): bool
+    {
+        $key = sprintf('bcc_attest_bell_%s_%s_%d_%d', $event, $kind, $attestorId, $recipientId);
+        if (get_transient($key) !== false) {
+            return false;
+        }
+        set_transient($key, 1, self::ATTESTATION_BELL_WINDOW_SECS);
+
+        return true;
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1245,14 +1274,16 @@ final class NotificationDispatcher
                 ? sprintf('@%s is no longer backing you.', $actorHandle)
                 : sprintf('@%s revoked their vouch.', $actorHandle);
 
-            $this->dispatch(
-                $attestorId,
-                $targetOwnerId,
-                $message,
-                NotificationType::ATTESTATION_REVOKED,
-                $attestationId,
-                0
-            );
+            if ($this->attestationBellOpen('revoked', $attestorId, $targetOwnerId, $kind)) {
+                $this->dispatch(
+                    $attestorId,
+                    $targetOwnerId,
+                    $message,
+                    NotificationType::ATTESTATION_REVOKED,
+                    $attestationId,
+                    0
+                );
+            }
 
             $this->pushDispatcher->enqueue($targetOwnerId, 'attestation_revoked', [
                 'actor_handle'    => $actorHandle,
@@ -1260,7 +1291,7 @@ final class NotificationDispatcher
                 'target_kind'     => $targetKind,
                 'target_id'       => $targetId,
                 'kind'            => $kind,
-            ]);
+            ], $attestorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] attestation-revoked dispatch failed', [
                 'attestor_id'    => $attestorId,
@@ -1317,7 +1348,7 @@ final class NotificationDispatcher
                 'target_kind'     => $targetKind,
                 'target_id'       => $targetId,
                 'kind'            => $kind,
-            ]);
+            ], $attestorId);
         } catch (\Throwable $e) {
             Logger::warning('[NotificationDispatcher] attestation-reaffirmed dispatch failed', [
                 'attestor_id'    => $attestorId,

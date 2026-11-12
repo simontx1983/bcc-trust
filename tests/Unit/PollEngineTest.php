@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Rank\Support\RankScoringConfig;
+use BCC\Trust\Rank\Services\PollService;
 use BCC\Trust\Tests\Stubs\InMemoryBallotRepository;
 use BCC\Trust\Tests\Stubs\InMemoryPollRepository;
 use BCC\Trust\Tests\Stubs\RankUnitWpFakes;
@@ -232,6 +233,37 @@ final class PollEngineTest extends TestCase
         );
     }
 
+    // ── F-39: only WEIGHTED ballots count toward the headcount ────────
+
+    public function testZeroWeightBallotsDoNotCountTowardTheVoterQuorum(): void
+    {
+        $pollId = $this->openPoll();
+        $this->castMany($pollId, $this->voterRange(1, 9), 'for', 1.0);  // 9 weighted, 9.0 ≥ 7.5
+        $this->castMany($pollId, $this->voterRange(10, 5), 'for', 0.0); // 5 weightless
+
+        $result = $this->service->closeDuePolls($this->at(self::SWEEP_AT));
+
+        self::assertSame(['closed' => 0, 'inconclusive' => 0], $result, 'weightless ballots must not lift 9 voters to the 10-voter floor');
+        self::assertSame('open', $this->polls->rows[$pollId]->status);
+    }
+
+    public function testZeroWeightBallotsAreLeftOutOfTheClosedTally(): void
+    {
+        $pollId = $this->openPoll();
+        $this->castMany($pollId, $this->voterRange(1, 10), 'for', 1.0);
+        $this->castMany($pollId, $this->voterRange(11, 3), 'against', 0.0);
+        $this->service->closeDuePolls($this->at(self::SWEEP_AT));
+
+        $state = $this->service->viewerState($pollId, 1, $this->at(self::SWEEP_AT));
+
+        self::assertSame('passed', $state['outcome']);
+        self::assertSame(
+            ['counted_voters' => 10, 'weight_for' => 10.0, 'weight_against' => 0.0],
+            $state['tally'],
+            'the shown headcount matches the one the decision used'
+        );
+    }
+
     // ── majority (invariant 23: ≥ 60.00% of counted weight) ──────────
 
     public function testExactlySixtyPercentMajorityPasses(): void
@@ -378,6 +410,98 @@ final class PollEngineTest extends TestCase
         self::assertSame('1', $byVoter[104]->counted, 'representative counts for headcount');
         self::assertSame('1.0000', $byVoter[104]->counted_weight, 'representative counts full weight');
         self::assertSame('11', $byVoter[104]->confirmed_cluster_id);
+    }
+
+    // ── closure-audit exclusion reasons (F-39 follow-up) ─────────────
+
+    /** Confirmed cluster 11 = {101,102,103,104}, representative 104. */
+    private function clusterEleven(): object
+    {
+        return (object) [
+            'id'                     => '11',
+            'level'                  => 'confirmed',
+            'member_user_ids'        => '[101,102,103,104]',
+            'representative_user_id' => '104',
+            'selection_method'       => 'auto_oldest_account',
+            'effective_at'           => self::T0,
+        ];
+    }
+
+    /** @return array<int, string|null> voter id => reason */
+    private function reasonsByVoter(int $pollId): array
+    {
+        $byBallot = $this->service->closureExclusionReasons($pollId);
+        $out = [];
+        foreach ($this->ballots->rows as $ballot) {
+            $id = (int) $ballot->id;
+            $out[(int) $ballot->voter_user_id] = array_key_exists($id, $byBallot) ? $byBallot[$id] : 'MISSING';
+        }
+        return $out;
+    }
+
+    public function testClosureExclusionReasonsNameEveryExcludedBallot(): void
+    {
+        $this->clusters->confirmed = [$this->clusterEleven()];
+
+        $pollId = $this->openPoll();
+        $this->castMany($pollId, [101, 102, 103], 'for', 1.0);      // non-representative members
+        $this->castMany($pollId, [104], 'for', 0.0);                // the representative, but weightless
+        $this->castMany($pollId, [50], 'against', 0.0);             // a weightless independent
+        $this->castMany($pollId, $this->voterRange(1, 10), 'for', 1.0);
+        $this->service->closeDuePolls($this->at(self::SWEEP_AT));
+
+        $reasons = $this->reasonsByVoter($pollId);
+
+        foreach ([101, 102, 103] as $member) {
+            self::assertSame(PollService::EXCLUDED_CLUSTER_MEMBER, $reasons[$member]);
+        }
+        self::assertSame(PollService::EXCLUDED_ZERO_WEIGHT, $reasons[104], 'a weightless REPRESENTATIVE is excluded for weight, not membership');
+        self::assertSame(PollService::EXCLUDED_ZERO_WEIGHT, $reasons[50]);
+        foreach ($this->voterRange(1, 10) as $independent) {
+            self::assertNull($reasons[$independent], 'a counted ballot has no exclusion reason');
+        }
+        self::assertSame([[11, 11, 11, 11]], $this->clusters->representativeLookups, 'one bounded lookup per call');
+    }
+
+    public function testExclusionReasonsSurviveTheFindingBeingReversedAfterClose(): void
+    {
+        $this->clusters->confirmed = [$this->clusterEleven()];
+
+        $pollId = $this->openPoll();
+        $this->castMany($pollId, [101], 'for', 1.0);
+        $this->castMany($pollId, [104], 'for', 0.0);
+        $this->castMany($pollId, $this->voterRange(1, 10), 'for', 1.0);
+        $this->service->closeDuePolls($this->at(self::SWEEP_AT));
+
+        // Reversed after the poll closed: no longer in the active lists.
+        $this->clusters->reversed  = [$this->clusterEleven()];
+        $this->clusters->confirmed = [];
+
+        $reasons = $this->reasonsByVoter($pollId);
+        self::assertSame(PollService::EXCLUDED_CLUSTER_MEMBER, $reasons[101]);
+        self::assertSame(PollService::EXCLUDED_ZERO_WEIGHT, $reasons[104]);
+    }
+
+    public function testAnOpenPollHasNoExclusionReasons(): void
+    {
+        $pollId = $this->openPoll();
+        $this->castMany($pollId, [1, 2], 'for', 0.0);
+
+        self::assertSame([null, null], array_values($this->service->closureExclusionReasons($pollId)));
+    }
+
+    public function testExclusionReasonDerivationRule(): void
+    {
+        $row = static fn (?string $counted, ?string $cluster, string $voter = '7'): object => (object) [
+            'counted' => $counted, 'confirmed_cluster_id' => $cluster, 'voter_user_id' => $voter,
+        ];
+
+        self::assertNull(PollService::exclusionReason($row(null, null), null), 'not evaluated yet');
+        self::assertNull(PollService::exclusionReason($row('1', '11'), 7), 'counted');
+        self::assertSame('zero_weight', PollService::exclusionReason($row('0', null), null));
+        self::assertSame('cluster_member', PollService::exclusionReason($row('0', '11', '7'), 9));
+        self::assertSame('zero_weight', PollService::exclusionReason($row('0', '11', '9'), 9), 'the representative itself');
+        self::assertSame('cluster_member', PollService::exclusionReason($row('0', '11'), null), 'finding row gone: the first rule applies');
     }
 
     // ── suspected cap (§19: pro-rata, split-proof) ───────────────────

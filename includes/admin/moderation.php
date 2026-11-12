@@ -119,7 +119,11 @@ add_action( 'admin_post_bcc_trust_ring_action', function () {
     }
 
     \BCC\Trust\Core\Plugin::instance()->moderationService()
-        ->handleRingAction( $resolved['user_ids'], $resolved['action'] );
+        ->handleRingAction(
+            $resolved['user_ids'],
+            $resolved['action'],
+            sanitize_textarea_field( wp_unslash( (string) ( $_POST['reason'] ?? '' ) ) )
+        );
 } );
 
 /**
@@ -211,6 +215,9 @@ function bcc_trust_render_moderation(): void {
             $newScore = absint( $_POST['override_score_value'] ?? 0 );
             $reason   = sanitize_textarea_field( $_POST['override_reason'] ?? '' );
             $mod->overrideScore( $userId, $newScore, $reason );
+        },
+        'undo_score_override' => static function () use ( $mod ) {
+            $mod->undoScoreOverride( absint( $_POST['user_id'] ?? 0 ) );
         },
         'add_whitelist'      => static function () use ( $mod ) {
             $type  = sanitize_text_field( $_POST['whitelist_type'] ?? '' );

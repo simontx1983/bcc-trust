@@ -699,8 +699,14 @@ add_action('bcc_trust_feed_hot_warm', function () {
     \BCC\Trust\Core\Plugin::instance()->cronService()->warmHotFeed();
 });
 add_action('bcc_trust_weekly_digest', function () {
-    \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest();
+    \BCC\Trust\Core\Plugin::instance()->digestService()->sendWeeklyDigest(
+        \BCC\Trust\Core\Services\DigestService::TRIGGER_CRON
+    );
+    // Keep the slot on the chosen local weekday + hour across DST.
+    \BCC\Trust\Core\Services\DigestScheduler::realign();
 });
+// Admin-chosen digest weekday/hour + on/off (Email Digest page).
+\BCC\Trust\Core\Services\DigestScheduler::register();
 // Scale-hardening Phase 3 (2026-05-13): weekly slow-ring endorsement
 // scan. Catches paced reciprocity patterns the burst gates miss.
 add_action('bcc_trust_weekly_slow_ring_scan', function () {
@@ -1157,44 +1163,13 @@ add_action('bcc_trust_divergence_state_sweep', static function (): void {
 // so a target's score drifts even with no new attestation events; this sweep
 // re-synthesizes every target that holds an active attestation. Paginated +
 // per-target isolated (a single failure → an `attestation_synthesis`
-// DegradationMetric, never aborts the sweep). The work-list (a GROUP BY over
-// active rows) is stable during the run because recomputeFor() touches only the
-// score table, never the attestation table — so OFFSET paging is safe.
+// DegradationMetric, never aborts the sweep). Keyset-paged and run under an
+// advisory lock (F-93) — see AttestationScoreSynthesis::runDecaySweep().
 add_action('bcc_trust_daily_attestation_decay', static function (): void {
     try {
-        $plugin     = \BCC\Trust\Core\Plugin::instance();
-        $repo       = $plugin->attestationRepository();
-        $synthesis  = $plugin->attestationScoreSynthesis();
-        $offset     = 0;
-        $batch      = 500;
-        $maxBatches = 200; // safety bound — up to 100k targets per run
-        $processed  = 0;
-        $failed     = 0;
+        $summary = \BCC\Trust\Core\Plugin::instance()->attestationScoreSynthesis()->runDecaySweep();
 
-        for ($i = 0; $i < $maxBatches; $i++) {
-            $targets = $repo->listTargetsWithActiveAttestations($offset, $batch);
-            if ($targets === []) {
-                break;
-            }
-            foreach ($targets as $t) {
-                try {
-                    $synthesis->recomputeFor($t->target_kind, (int) $t->target_id);
-                    $processed++;
-                } catch (\Throwable $e) {
-                    $failed++;
-                    \BCC\Core\Observability\DegradationMetrics::record('attestation_synthesis', 'decay_recompute_failed');
-                }
-            }
-            if (count($targets) < $batch) {
-                break;
-            }
-            $offset += $batch;
-        }
-
-        \BCC\Core\Log\Logger::info('[bcc-trust] Attestation decay sweep complete', [
-            'processed' => $processed,
-            'failed'    => $failed,
-        ]);
+        \BCC\Core\Log\Logger::info('[bcc-trust] Attestation decay sweep complete', $summary);
     } catch (\Throwable $e) {
         \BCC\Core\Log\Logger::warning('[bcc-trust] Attestation decay sweep callback failed', [
             'error' => $e->getMessage(),
@@ -2619,4 +2594,7 @@ if (is_admin()) {
     // remain on the per-user Moderation page.
     \BCC\Trust\Core\Admin\WalletAuditPage::register();
     \BCC\Trust\Core\Admin\SessionsPage::register();
+    \BCC\Trust\Core\Admin\EmailDigestPage::register();
+    // One-off cleanup of removed add-ons' data (hidden page, dry run first).
+    \BCC\Trust\Core\Admin\PeepSoLeftoversPage::register();
 }

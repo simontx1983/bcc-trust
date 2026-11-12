@@ -210,6 +210,37 @@ final class SuspensionGateParityTest extends TestCase
         self::assertSuspendedRejection(self::endpoint(MyProfileEndpoint::class)->uploadCover(new \WP_REST_Request()));
     }
 
+    // F-58: profile image uploads were unthrottled.
+
+    public function testProfileAvatarUploadThrottleRunsBeforeSuspension(): void
+    {
+        $GLOBALS['__bcc_susp_fixture']['throttled'] = true;
+        self::assertThrottledBeforeSuspension(self::endpoint(MyProfileEndpoint::class)->uploadAvatar(new \WP_REST_Request()));
+    }
+
+    public function testProfileCoverUploadThrottleRunsBeforeSuspension(): void
+    {
+        $GLOBALS['__bcc_susp_fixture']['throttled'] = true;
+        self::assertThrottledBeforeSuspension(self::endpoint(MyProfileEndpoint::class)->uploadCover(new \WP_REST_Request()));
+    }
+
+    /**
+     * Avatar and cover share ONE per-user budget (a burst bucket and an
+     * hourly bucket), so alternating the two routes cannot double the rate.
+     */
+    public function testAvatarAndCoverShareOnePerUserBudget(): void
+    {
+        $GLOBALS['__bcc_susp_fixture']['suspended'] = true; // stop right after the throttle
+        self::endpoint(MyProfileEndpoint::class)->uploadAvatar(new \WP_REST_Request());
+        self::endpoint(MyProfileEndpoint::class)->uploadCover(new \WP_REST_Request());
+
+        $keys = array_map(static fn (array $c): string => (string) $c[0], $GLOBALS['__bcc_susp_fixture']['throttle_calls']);
+        self::assertSame(
+            ['profile_image:7:burst', 'profile_image:7:hourly', 'profile_image:7:burst', 'profile_image:7:hourly'],
+            $keys
+        );
+    }
+
     public function testProfileCoverPositionRejectsSuspendedUser(): void
     {
         self::assertSuspendedRejection(self::endpoint(MyProfileEndpoint::class)->patchCoverPosition(new \WP_REST_Request()));

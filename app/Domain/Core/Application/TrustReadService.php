@@ -88,9 +88,31 @@ final class TrustReadService implements TrustReadServiceInterface
     // getEligiblePanelistUserIds() + selectWithSoftIpDiversity() deleted
     // (Rank Phase 6, D-7): panel seat allocation retired with the panel.
 
+    /**
+     * No user_info row → NOT suspended (a missing row is not a suspension;
+     * production has users without one).
+     *
+     * ⚠ A READ FAILURE → SuspensionUnknownException, never a guess. It used
+     * to read as "no row", so a DB fault made every gate, the F-109 write
+     * gates included, answer "not suspended". bcc-core Permissions turns the
+     * exception into an UNKNOWN state that it never caches:
+     *   - is_not_suspended() denies that one call (write gates fail closed);
+     *   - suspensionState() returns null, so paths whose deny would be
+     *     persistent (session refresh, the validator message worker, the rank
+     *     sweep) decline to act instead.
+     *
+     * ⚠ REQUIRES the bcc-core version that catches SuspensionUnknownException
+     * (bcc-core #84). Against an older bcc-core this exception is uncaught.
+     *
+     * @throws \BCC\Core\Contracts\SuspensionUnknownException when user_info cannot be read
+     */
     public function isSuspended(int $userId): bool
     {
-        $userInfo = \BCC\Trust\Core\Plugin::instance()->userInfoRepository()->getByUserId($userId);
+        try {
+            $userInfo = \BCC\Trust\Core\Plugin::instance()->userInfoRepository()->getByUserIdOrThrow($userId);
+        } catch (\BCC\Trust\Core\Exceptions\RepositoryException $e) {
+            throw new \BCC\Core\Contracts\SuspensionUnknownException($e->getMessage(), 0, $e);
+        }
 
         return $userInfo ? (bool) $userInfo->is_suspended : false;
     }

@@ -5,21 +5,24 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Security\Tests;
 
 use BCC\Trust\Core\Repositories\AuditLogRepository;
+use BCC\Trust\Core\Repositories\DeviceFingerprintRepository;
+use BCC\Trust\Core\Repositories\FraudAnalysisRepository;
 use BCC\Trust\Core\Repositories\UserInfoRepository;
+use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\BehavioralAnalyzer;
 use BCC\Trust\Core\Security\DeviceFingerprinter;
-use BCC\Trust\Core\Security\DeviceSharingPenaltyLedger;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 /**
- * F-103 + F-128 — fraud-score inputs that penalised ordinary members.
+ * F-103/F-184 + F-108 + F-128 — fraud-score inputs that penalised ordinary
+ * members.
  *
- * F-103: the shared-device penalty added to fraud_score on EVERY vote
- * (two accounts behind one laptop were blocked from voting after ~3 votes)
- * and ignored the admin whitelists. Now: once per (reason, device) per
- * window, capped in total, never for a whitelisted device or IP.
+ * Shared devices: the penalty added to fraud_score on EVERY vote (two
+ * accounts behind one laptop were blocked after ~3 votes). F-103 capped it;
+ * F-184 (user decision) removed it: a shared device — client or server
+ * fingerprint — is recorded for admins and adds nothing.
  *
  * F-128: the night-owl check judged everyone in UTC (no timezone is ever
  * recorded) → now dormant unless a timezone is known; a throttled analysis
@@ -68,33 +71,7 @@ final class FraudInputFixesTest extends TestCase
         }
     }
 
-    // ── F-103: the ledger ────────────────────────────────────────────────
-
-    public function testTheSameDevicePenalisesOncePerWindow(): void
-    {
-        $t = 1_800_000_000;
-        self::assertSame(10, DeviceSharingPenaltyLedger::allowance(self::USER, 'device_sharing', 'fpA', 10, $t));
-        DeviceSharingPenaltyLedger::record(self::USER, 'device_sharing', 'fpA', 10, $t);
-
-        self::assertSame(0, DeviceSharingPenaltyLedger::allowance(self::USER, 'device_sharing', 'fpA', 10, $t + 3600), 'same device, same window: nothing more');
-
-        $afterWindow = $t + (BCC_TRUST_DEVICE_SHARING_WINDOW_DAYS * 86400) + 1;
-        self::assertSame(10, DeviceSharingPenaltyLedger::allowance(self::USER, 'device_sharing', 'fpA', 10, $afterWindow), 'a new window may penalise again');
-    }
-
-    public function testAllSharedDeviceSignalsTogetherAreCapped(): void
-    {
-        $t = 1_800_000_000;
-        DeviceSharingPenaltyLedger::record(self::USER, 'device_sharing', 'fpA', 10, $t);
-
-        self::assertSame(
-            BCC_TRUST_DEVICE_SHARING_MAX_POINTS - 10,
-            DeviceSharingPenaltyLedger::allowance(self::USER, 'server_fingerprint_sharing', 'srv_x', 30, $t),
-            'a second device only gets what is left under the cap'
-        );
-    }
-
-    // ── F-103: the fingerprinter's penalty path ──────────────────────────
+    // ── F-184: shared devices are recorded, never penalised ─────────────
 
     private function fingerprinter(): DeviceFingerprinter
     {
@@ -108,53 +85,120 @@ final class FraudInputFixesTest extends TestCase
                 FraudInputFixesTest::$increments[] = [$userId, $increment, $reason];
             }
         };
-        $p = $ref->getProperty('userInfoRepo');
-        $p->setAccessible(true);
-        $p->setValue($fp, $repo);
+        $ref->getProperty('userInfoRepo')->setValue($fp, $repo);
+        $ref->getProperty('automationHigh')->setValue($fp, BCC_TRUST_AUTOMATION_HIGH);
+        $ref->getProperty('automationMedium')->setValue($fp, BCC_TRUST_AUTOMATION_MEDIUM);
+        $ref->getProperty('ringMinSize')->setValue($fp, BCC_TRUST_RING_MIN_SIZE);
         return $fp;
     }
 
-    private function penalise(DeviceFingerprinter $fp, string $reason, string $device, int $requested): int
+    private function stubStorePathFunctions(): void
     {
-        $m = new \ReflectionMethod(DeviceFingerprinter::class, 'applySharingPenalty');
-        $m->setAccessible(true);
-        return (int) $m->invoke($fp, self::USER, $reason, $device, $requested);
+        $ns    = 'BCC\\Trust\\Core\\Security';
+        $stubs = [
+            'wp_salt'       => 'function wp_salt(string $s = "auth"): string { return "salt"; }',
+            'wp_list_pluck' => 'function wp_list_pluck(array $l, string $f): array { return array_map(static fn ($o) => is_object($o) ? $o->$f : $o[$f], $l); }',
+            'current_time'  => 'function current_time(string $t, $g = 0) { return gmdate("Y-m-d H:i:s"); }',
+        ];
+        foreach ($stubs as $name => $code) {
+            if (!function_exists($ns . '\\' . $name)) {
+                eval('namespace ' . $ns . '; ' . $code);
+            }
+        }
+        // hasConsent() calls these fully qualified (global namespace).
+        if (!function_exists('get_option')) {
+            eval('function get_option(string $k, $d = false) { return $GLOBALS["__fi_options"][$k] ?? $d; }');
+        }
+        if (!function_exists('get_user_meta')) {
+            eval('function get_user_meta(int $u, string $k = "", bool $s = false) { return $GLOBALS["__fi_usermeta"][$u][$k] ?? ($s ? "" : []); }');
+        }
+        // AuditLogger::log() returns early when its table is absent.
+        (new \ReflectionProperty(AuditLogger::class, 'tableExists'))->setValue(null, false);
     }
 
-    public function testTenVotesFromASharedDeviceAddOnePenaltyNotTen(): void
+    public function testADeviceSharedByFourAccountsAddsNoFraudPoints(): void
     {
-        $fp = $this->fingerprinter();
+        $this->stubStorePathFunctions();
+        $GLOBALS['__fi_usermeta'][self::USER]['_bcc_fingerprint_consent'] = '1';
+
+        $fp   = $this->fingerprinter();
+        $repo = new class extends DeviceFingerprintRepository {
+            /** @var list<array<string, mixed>> */
+            public array $inserted = [];
+            public function __construct() {}
+            public function getOtherUsersForFingerprint(string $fingerprint, int $excludeUserId): array
+            {
+                return [(object) ['user_id' => 11], (object) ['user_id' => 12], (object) ['user_id' => 13]];
+            }
+            public function findByUserAndFingerprint(int $userId, string $fingerprint): ?object
+            {
+                // First visit inserts; every later one updates the same row.
+                return $this->inserted === [] ? null : (object) ['id' => 77];
+            }
+            public function insert(array $data, array $formats): int|false { $this->inserted[] = $data; return 77; }
+            public function updateById(int $id, array $data, array $formats): int|false { return 1; }
+            public function getFingerprintUserCount(string $fingerprint): int { return 1; }
+            public function upsertServerFingerprint(int $userId, string $fingerprint, string $ipHash, string $userAgent): void {}
+        };
+        $analysis = new class extends FraudAnalysisRepository {
+            public int $stored = 0;
+            public function __construct() {}
+            public function storeAnalysis(int $userId, int $fraudScore, string $riskLevel, float $confidence, array $triggers, array $details = [], ?string $expiresAt = null): int
+            {
+                $this->stored++;
+                return 1;
+            }
+        };
+        $ref = new \ReflectionClass(DeviceFingerprinter::class);
+        $ref->getProperty('fpRepo')->setValue($fp, $repo);
+        $ref->getProperty('fraudAnalysisRepo')->setValue($fp, $analysis);
+
+        // Ten votes from the family laptop: the first inserts the row, the
+        // other nine take the update branch. Neither branch may add points.
         for ($vote = 0; $vote < 10; $vote++) {
-            $this->penalise($fp, 'device_sharing', 'family-laptop', 10);
+            self::assertSame(77, $fp->storeFingerprint(self::USER, 'family-laptop', ['confidence' => 0, 'signals' => []]));
         }
 
-        self::assertSame([[self::USER, 10, 'device_sharing']], self::$increments, 'once per window, not per vote');
+        self::assertCount(1, $repo->inserted, 'precondition: one insert, then updates');
+        self::assertSame([], self::$increments, 'four accounts on one device: no fraud points (F-184)');
+        self::assertSame('medium', $repo->inserted[0]['risk_level'], 'still flagged for admins');
+        self::assertSame(1, $analysis->stored, 'still recorded for admin review');
     }
 
-    public function testTheCapHoldsAcrossBothSignals(): void
+    public function testSharingNoLongerRaisesDeviceFraudProbability(): void
     {
-        $fp = $this->fingerprinter();
-        $this->penalise($fp, 'device_sharing', 'family-laptop', 20);
-        $applied = $this->penalise($fp, 'server_fingerprint_sharing', 'srv_household', 30);
+        // A shared device's stored risk_level is 'medium' (the admin flag);
+        // with no automation evidence the probability must stay 0.
+        $fp  = $this->fingerprinter();
+        $row = (object) ['id' => 1, 'user_id' => self::USER, 'fingerprint' => 'family-laptop', 'automation_score' => 0, 'risk_level' => 'medium', 'last_seen' => '2026-11-11 00:00:00'];
 
-        self::assertSame(0, $applied, 'the cap is already reached');
-        self::assertSame([[self::USER, 20, 'device_sharing']], self::$increments);
+        self::assertSame(0.0, (float) $fp->calculateDeviceFraudProbability(self::USER, [$row]));
+
+        // Automation evidence still counts, exactly as before.
+        $bot = (object) ['id' => 2, 'user_id' => self::USER, 'fingerprint' => 'x', 'automation_score' => BCC_TRUST_AUTOMATION_HIGH, 'risk_level' => 'high', 'last_seen' => '2026-11-11 00:00:00'];
+        $expected = ((BCC_TRUST_AUTOMATION_HIGH / 100 * 0.4) + 0.3) * 0.7 + (BCC_TRUST_AUTOMATION_HIGH / 100) * 0.3;
+        self::assertEqualsWithDelta($expected, $fp->calculateDeviceFraudProbability(self::USER, [$bot]), 1e-9);
     }
 
-    public function testAWhitelistedDeviceIsNeverPenalised(): void
+    // ── F-108: a shared SERVER fingerprint is logged, not penalised ─────
+
+    public function testASharedServerFingerprintAddsNoFraudPoints(): void
     {
-        $GLOBALS['__fi_options']['bcc_trust_whitelist_fingerprint'] = ['office-pc' => ['note' => 'front desk']];
+        $this->stubStorePathFunctions();
 
-        self::assertSame(0, $this->penalise($this->fingerprinter(), 'device_sharing', 'office-pc', 20));
-        self::assertSame([], self::$increments);
-    }
+        $fp   = $this->fingerprinter();
+        $repo = new class extends DeviceFingerprintRepository {
+            public int $upserts = 0;
+            public function __construct() {}
+            public function getFingerprintUserCount(string $fingerprint): int { return 4; }
+            public function upsertServerFingerprint(int $userId, string $fingerprint, string $ipHash, string $userAgent): void { $this->upserts++; }
+        };
+        (new \ReflectionProperty(DeviceFingerprinter::class, 'fpRepo'))->setValue($fp, $repo);
 
-    public function testAWhitelistedIpIsNeverPenalised(): void
-    {
-        $GLOBALS['__fi_options']['bcc_trust_whitelist_ip'] = ['203.0.113.9' => ['note' => 'office NAT']];
+        (new \ReflectionMethod(DeviceFingerprinter::class, 'storeServerSideFingerprint'))->invoke($fp, self::USER);
 
-        self::assertSame(0, $this->penalise($this->fingerprinter(), 'server_fingerprint_sharing', 'srv_any', 30));
-        self::assertSame([], self::$increments);
+        self::assertSame([], self::$increments, 'four accounts on one server fingerprint: recorded, no points (F-108)');
+        self::assertSame(1, $repo->upserts, 'the fingerprint is still stored for review');
     }
 
     // ── F-128: night owl only with a known timezone ──────────────────────
