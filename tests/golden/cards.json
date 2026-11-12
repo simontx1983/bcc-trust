@@ -31,6 +31,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-96-logo.jpg",
         "initials": "C",
         "monogram_color": "#1a0f3e"
@@ -190,6 +191,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": null,
         "initials": "BN",
         "monogram_color": "#1a0f3e"
@@ -336,6 +338,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": null,
         "initials": "F",
         "monogram_color": "#3e3a0f"
@@ -482,6 +485,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": null,
         "initials": "WS",
         "monogram_color": "#0f3e3e"
@@ -632,6 +636,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-97-logo.jpg",
         "initials": "US",
         "monogram_color": "#0f3e3e"
@@ -792,6 +797,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-99-logo.jpg",
         "initials": "K",
         "monogram_color": "#0f3e3e"
@@ -952,6 +958,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-98-logo-1.jpg",
         "initials": "C",
         "monogram_color": "#0f3e2a"
@@ -1112,6 +1119,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-100-logo.jpg",
         "initials": "K",
         "monogram_color": "#0f3e2a"
@@ -1272,6 +1280,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-101-logo.jpg",
         "initials": "E",
         "monogram_color": "#0f3e3e"
@@ -1432,6 +1441,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-102-logo.jpg",
         "initials": "LB",
         "monogram_color": "#3e1a0f"
@@ -1592,6 +1602,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": null,
         "initials": "D",
         "monogram_color": "#0f3e2a"
@@ -1752,6 +1763,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": null,
         "initials": "BN",
         "monogram_color": "#3e0f1a"
@@ -1912,6 +1924,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-105-logo.jpg",
         "initials": "B",
         "monogram_color": "#1a0f3e"
@@ -2072,6 +2085,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-106-logo.jpg",
         "initials": "A",
         "monogram_color": "#3e3a0f"
@@ -2232,6 +2246,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": null,
         "initials": "F",
         "monogram_color": "#3e3a0f"
@@ -2392,6 +2407,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-107-logo.jpg",
         "initials": "S",
         "monogram_color": "#1a0f3e"
@@ -2552,6 +2568,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-108-logo.jpg",
         "initials": "BO",
         "monogram_color": "#3e3a0f"
@@ -2712,6 +2729,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-110-logo.jpg",
         "initials": "C",
         "monogram_color": "#3e3a0f"
@@ -2872,6 +2890,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": null,
         "initials": "🐠",
         "monogram_color": "#0f3e3e"
@@ -3032,6 +3051,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-114-logo.jpg",
         "initials": "IS",
         "monogram_color": "#3e3a0f"
@@ -3192,6 +3212,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": null,
         "initials": "N|",
         "monogram_color": "#0f3e2a"
@@ -3352,6 +3373,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-112-logo.jpg",
         "initials": "P",
         "monogram_color": "#0f3e3e"
@@ -3512,6 +3534,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-115-logo.jpg",
         "initials": "G",
         "monogram_color": "#3e0f1a"
@@ -3672,6 +3695,7 @@
       "crest": {
         "background_kind": "tier",
         "background_value": "neutral",
+        "image_fallback_url": null,
         "image_url": "{{ORIGIN}}/wp-content/uploads/2026/06/validator-118-logo.jpg",
         "initials": "K",
         "monogram_color": "#3e3a0f"
