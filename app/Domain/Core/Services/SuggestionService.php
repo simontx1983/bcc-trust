@@ -324,7 +324,7 @@ final class SuggestionService
                     continue;
                 }
                 $sampleAvatarsByUser[$id] = [
-                    'handle'     => $user->user_login,
+                    'handle'     => \BCC\Trust\Core\Support\PublicIdentity::handle($id, get_user_meta($id, 'bcc_handle', true)),
                     'avatar_url' => $avatarUrlById[$id] ?? '',
                 ];
             }

@@ -503,6 +503,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Support\\PrivacySettings' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PrivacySettings.php',
         'BCC\\Trust\\Core\\Support\\ProfileAccess' => __DIR__ . '/../..' . '/app/Domain/Core/Support/ProfileAccess.php',
         'BCC\\Trust\\Core\\Support\\PublicAllPolicy' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PublicAllPolicy.php',
+        'BCC\\Trust\\Core\\Support\\PublicIdentity' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PublicIdentity.php',
         'BCC\\Trust\\Core\\Support\\PushMetrics' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PushMetrics.php',
         'BCC\\Trust\\Core\\Support\\PushPayload' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PushPayload.php',
         'BCC\\Trust\\Core\\Support\\RankCatalog' => __DIR__ . '/../..' . '/app/Domain/Core/Support/RankCatalog.php',

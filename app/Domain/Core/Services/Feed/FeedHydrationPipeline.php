@@ -1120,14 +1120,8 @@ final class FeedHydrationPipeline
             if ($id <= 0) {
                 continue;
             }
-            $handleMeta = get_user_meta($id, 'bcc_handle', true);
-            $handle = is_string($handleMeta) && $handleMeta !== ''
-                ? $handleMeta
-                : (string) $u->user_login;
-
-            $displayName = is_string($u->display_name) && $u->display_name !== ''
-                ? $u->display_name
-                : (string) $u->user_login;
+            $handle      = \BCC\Trust\Core\Support\PublicIdentity::handle($id, get_user_meta($id, 'bcc_handle', true));
+            $displayName = \BCC\Trust\Core\Support\PublicIdentity::displayName($u->display_name, $u->user_login, $handle);
 
             // Cached, shared seam (§11). get_avatar_url() here runs through
             // PeepSo's get_avatar_url filter, which constructs a PeepSoUser

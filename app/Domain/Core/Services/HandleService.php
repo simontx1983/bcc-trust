@@ -75,8 +75,13 @@ final class HandleService
      *
      * Pre-condition: $handle should already be lowercased + trimmed by
      * the caller. The validator does NOT mutate input.
+     *
+     * $assignForUserId is for the INTERNAL handle-assignment path only
+     * (bcc_trust_bch_find_free_variant): it lets that path write the
+     * reserved 'member-{id}' form for that same user. User-facing
+     * callers (signup, rename) never pass it.
      */
-    public function validate(string $handle): ?string
+    public function validate(string $handle, ?int $assignForUserId = null): ?string
     {
         $len = strlen($handle);
         if ($len < self::MIN_LENGTH || $len > self::MAX_LENGTH) {
@@ -99,6 +104,17 @@ final class HandleService
         }
 
         if ($this->isReserved($handle)) {
+            return self::ERR_RESERVED;
+        }
+
+        // 'member-{id}' is the system fallback handle for member {id}
+        // (PublicIdentity). Nobody may CHOOSE one, or they could squat
+        // another member's fallback handle and links. Only the internal
+        // assignment path may write it, and only for its own id
+        // ($assignForUserId).
+        if (preg_match('/^member-(\d+)$/', $handle, $m) === 1
+            && ($assignForUserId === null || (int) $m[1] !== $assignForUserId)
+        ) {
             return self::ERR_RESERVED;
         }
 

@@ -245,8 +245,13 @@ if (!function_exists('bcc_trust_pending_migrations')) {
     {
         return [
             [
-                'id'          => 'canonical_handles_v1',
-                'done_option' => 'bcc_trust_canonical_handles_backfilled',
+                // v2 re-arms the backfill once: v1 completed long ago and
+                // never saw accounts created outside BCC signup since then
+                // (wp-admin, WP-CLI). The derivation no longer uses
+                // user_login. New accounts are covered at creation by the
+                // user_register hook in Plugin.php.
+                'id'          => 'canonical_handles_v2',
+                'done_option' => 'bcc_trust_canonical_handles_backfilled_v2',
                 'callback'    => 'bcc_trust_backfill_canonical_handles',
             ],
             [

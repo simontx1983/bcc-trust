@@ -1773,11 +1773,10 @@ final class NotificationDispatcher
         if ($handle !== '') {
             return $handle;
         }
-        $user = get_userdata($userId);
-        if ($user === false) {
+        if (get_userdata($userId) === false) {
             return 'someone';
         }
-        return $user->user_login !== '' ? $user->user_login : 'someone';
+        return \BCC\Trust\Core\Support\PublicIdentity::handle($userId, '');
     }
 
     private static function resolvePageName(int $pageId): string

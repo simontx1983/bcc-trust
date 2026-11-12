@@ -365,7 +365,8 @@ final class WatchingRepository
      * subscribers (feed writer, notification dispatcher) don't
      * re-fetch handles for content the aggregator already touched.
      *
-     * Resolution: bcc_handle preferred; user_login fallback.
+     * Resolution: bcc_handle preferred; PublicIdentity fallback
+     * ('member-{id}'), never user_login.
      *
      * Bounded by LIMIT 50 — the §C3 contract caps top-cards
      * display at 3, and even allowing for a generous future cap
@@ -387,11 +388,11 @@ final class WatchingRepository
 
         $placeholders = implode(',', array_fill(0, count($followIds), '%d'));
 
-        /** @var list<object{follow_id: int|numeric-string, bcc_handle: string|null, user_login: string}>|null $rows */
+        /** @var list<object{follow_id: int|numeric-string, bcc_handle: string|null, user_id: int|numeric-string}>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT uf.uf_id           AS follow_id,
-                    handle.meta_value  AS bcc_handle,
-                    u.user_login       AS user_login
+            "SELECT uf.uf_id              AS follow_id,
+                    handle.meta_value     AS bcc_handle,
+                    uf.uf_passive_user_id AS user_id
                FROM {$follows} uf
                INNER JOIN {$users} u
                   ON u.ID = uf.uf_passive_user_id
@@ -405,10 +406,10 @@ final class WatchingRepository
 
         $map = [];
         foreach ($rows ?: [] as $row) {
-            $handle = $row->bcc_handle !== null && $row->bcc_handle !== ''
-                ? $row->bcc_handle
-                : $row->user_login;
-            $map[(int) $row->follow_id] = $handle;
+            $map[(int) $row->follow_id] = \BCC\Trust\Core\Support\PublicIdentity::handle(
+                (int) $row->user_id,
+                $row->bcc_handle
+            );
         }
         return $map;
     }
