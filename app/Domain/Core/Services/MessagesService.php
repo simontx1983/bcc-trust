@@ -764,7 +764,7 @@ final class MessagesService
             'Recipient not found.',
             // ⚠ WRITE path: refuse with a retryable 503 if the block
             // table cannot be read. See evaluatePolicy().
-            true
+            refuseOnUnknownBlock: true
         );
         if ($gate !== null) {
             return ['error' => $gate['error'], 'message' => $gate['message']];
@@ -1810,7 +1810,10 @@ final class MessagesService
             $viewerId,
             $peerId,
             'Conversation not found.',
-            true
+            // ⚠ WRITE path: refuse with a retryable 503 if the block
+            // table cannot be read. See evaluatePolicy(). (can_reply
+            // shares this, so it answers `unavailable` then.)
+            refuseOnUnknownBlock: true
         );
     }
 
