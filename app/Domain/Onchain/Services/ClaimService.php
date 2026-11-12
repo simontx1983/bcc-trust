@@ -76,6 +76,20 @@ class ClaimService {
     private const MAX_WALLETS_PER_CLAIM_MATCH = 25;
 
     /**
+     * F-303: the much tighter cap for COLLECTION matching, which the fix makes
+     * LIVE for the first time. Validator matching is a local address
+     * comparison; a collection check is synchronous RPC per wallet —
+     * getEthRole() is an owner() eth_call (15 s timeout) then, when that is
+     * not the wallet, a holder lookup (10–15 s). At 25 wallets one claim
+     * request could hold a PHP worker for minutes; at 3 the worst case is
+     * bounded and a creator's wallet on the collection's chain is still
+     * found (wallets are already filtered to that chain). The provider
+     * circuit breakers stop sustained failures; this bounds a slow-but-up
+     * provider, which they do not.
+     */
+    private const MAX_WALLETS_PER_COLLECTION_MATCH = 3;
+
+    /**
      * Attempt to claim an on-chain entity.
      *
      * Checks if the user has a connected wallet that matches the entity's
@@ -87,7 +101,10 @@ class ClaimService {
         // §M suspension gate at the SERVICE boundary (F-109), admin bypass
         // OFF. PagesEndpoint gates first; this holds for any future caller.
         if (!\BCC\Core\Permissions\Permissions::is_not_suspended($userId, false)) {
-            return ['success' => false, 'error' => 'bcc_forbidden', 'message' => 'Your account is suspended.'];
+            // An explicit sentinel (v1.NEXT): the claim route maps exactly this
+            // to reason `suspended`, so a future forbidden cause can never be
+            // mislabelled as a suspension.
+            return ['success' => false, 'error' => 'suspended', 'message' => 'Your account is suspended.'];
         }
 
         if (!in_array($entityType, self::ENTITY_TYPES, true)) {
@@ -279,7 +296,10 @@ class ClaimService {
         }
 
         if ($entityType === 'collection') {
-            return self::matchCollection($chainWallets, $entity);
+            return self::matchCollection(
+                array_slice($chainWallets, 0, self::MAX_WALLETS_PER_COLLECTION_MATCH),
+                $entity
+            );
         }
 
         return null;

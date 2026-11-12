@@ -815,7 +815,7 @@ final class PagesEndpoint
         // ClaimService::claim()'s own §M suspension gate (F-109). It used to
         // fall through to the wallet-mismatch default below, so a suspended
         // member was told their wallet did not match.
-        if (($result['error'] ?? '') === 'bcc_forbidden') {
+        if (($result['error'] ?? '') === 'suspended') {
             return ApiResponse::error('bcc_forbidden', 'Your account is suspended.', 403, ['reason' => 'suspended']);
         }
 

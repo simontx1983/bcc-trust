@@ -162,6 +162,35 @@ final class CollectionHolderCannotClaimPageIntegrationTest extends TestCase
             [['collection', $collectionId, 'creator'], ['page', self::PAGE, 'creator']],
             $this->verifiedClaims(self::USER_ID)
         );
+        // Prove the scenario: the holder wallet really was looked up FIRST.
+        self::assertSame(self::HOLDER_WALLET, $GLOBALS['__bcc_bqs_calls'][0][1] ?? null);
+    }
+
+    /**
+     * The fix makes collection matching LIVE: a synchronous RPC per wallet.
+     * The per-attempt fan-out is capped at 3 wallets on the collection's
+     * chain, so one request cannot hold a worker for minutes.
+     */
+    public function testCollectionMatchingChecksAtMostThreeWallets(): void
+    {
+        $collectionId = $this->boundCollection();
+        $wallets = [
+            '0x3333333333333333333333333333333333333333',
+            '0x4444444444444444444444444444444444444444',
+            '0x5555555555555555555555555555555555555555',
+            self::CREATOR_WALLET, // 4th: past the cap
+        ];
+        foreach ($wallets as $w) {
+            $this->insertWallet(self::USER_ID, $w);
+        }
+        $GLOBALS['__bcc_bqs_roles'][self::CREATOR_WALLET] = 'creator';
+
+        $response = $this->claim($collectionId);
+
+        self::assertCount(3, $GLOBALS['__bcc_bqs_calls'], 'exactly three role lookups');
+        self::assertSame(403, $response->get_status());
+        self::assertSame('not_operator', $this->errorOf($response)['data']['reason'] ?? null);
+        self::assertSame([], $this->verifiedClaims(self::USER_ID));
     }
 
     // ── data.reason on the service-side refusals (v1.127) ───────────────
@@ -178,11 +207,16 @@ final class CollectionHolderCannotClaimPageIntegrationTest extends TestCase
         $map->setAccessible(true);
 
         $cases = [
-            'suspended'        => [['success' => false, 'error' => 'bcc_forbidden', 'message' => 'Your account is suspended.'], 'Your account is suspended.'],
+            'suspended'        => [['success' => false, 'error' => 'suspended', 'message' => 'Your account is suspended.'], 'Your account is suspended.'],
             'holder_not_owner' => [['success' => false, 'error' => 'holder_not_owner', 'message' => 'x'], "Holding an NFT doesn't make you this collection's creator."],
             'not_operator'     => [['success' => false, 'message' => 'No match.'], 'Your connected wallet does not match the operator for this entity.'],
         ];
-        foreach ($cases as $reason => [$result, $message]) {
+        // A forbidden cause that is NOT the explicit sentinel must not be
+        // labelled a suspension: it falls to the wallet-mismatch default.
+        $cases['not_operator (unknown forbidden)'] = [['success' => false, 'error' => 'bcc_forbidden', 'message' => 'x'], 'Your connected wallet does not match the operator for this entity.'];
+
+        foreach ($cases as $label => [$result, $message]) {
+            $reason = explode(' ', $label)[0];
             /** @var \WP_REST_Response $response */
             $response = $map->invoke(null, $result);
             $error    = $this->errorOf($response);
@@ -235,9 +269,18 @@ final class CollectionHolderCannotClaimPageIntegrationTest extends TestCase
         return $collectionId;
     }
 
+    private int $walletSeq = 0;
+
+    /**
+     * WalletRepository orders a user's wallets `is_primary DESC, created_at
+     * ASC`. Fixtures inserted in the same second would TIE and come back in
+     * any order, so each one gets a strictly later created_at: insertion order
+     * is the order the matcher sees.
+     */
     private function insertWallet(int $userId, string $address): void
     {
         global $wpdb;
+        $this->walletSeq++;
         $ok = $wpdb->insert($wpdb->prefix . 'bcc_wallet_links', [
             'user_id'        => $userId,
             'post_id'        => 0,
@@ -245,6 +288,7 @@ final class CollectionHolderCannotClaimPageIntegrationTest extends TestCase
             'chain_id'       => $this->evmChain,
             'wallet_type'    => 'user',
             'verified_at'    => gmdate('Y-m-d H:i:s'),
+            'created_at'     => gmdate('Y-m-d H:i:s', time() - 3600 + $this->walletSeq * 60),
         ]);
         self::assertNotFalse($ok, 'wallet fixture: ' . $wpdb->last_error);
     }

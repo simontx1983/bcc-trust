@@ -108,7 +108,7 @@ final class ClaimFailureMappingTest extends TestCase
 
         // v1.127: the service's suspension refusal maps to reason `suspended`,
         // never to the wallet-mismatch default.
-        $suspended = strpos($body, "=== 'bcc_forbidden'");
+        $suspended = strpos($body, "=== 'suspended'");
         self::assertNotFalse($suspended, 'the service suspension refusal has no branch');
         self::assertLessThan($default, $suspended, 'the suspension branch is unreachable');
         self::assertStringContainsString("['reason' => 'not_operator']", $body, 'the default names its cause');
