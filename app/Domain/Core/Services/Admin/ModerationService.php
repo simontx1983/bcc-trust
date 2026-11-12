@@ -63,6 +63,7 @@ final class ModerationService
         'self'              => 'you cannot suspend yourself',
         'admin'             => 'an administrator cannot be suspended; remove their admin role first',
         'already_suspended' => 'already suspended',
+        'unverifiable'      => 'could not check whether they are already suspended; try again',
     ];
 
     /** Per-admin, short-lived: the names a bulk or ring suspend skipped, for the next page view. */
@@ -75,11 +76,17 @@ final class ModerationService
      *  - 'self': the acting admin;
      *  - 'admin': a manage_options account (demote first, user decision);
      *  - 'already_suspended': re-suspending wrote a SECOND suspensions row and
-     *    overwrote the original reason in fraud_triggers.
+     *    overwrote the original reason in fraud_triggers;
+     *  - 'unverifiable': the suspended read FAILED (#488 review L2). It used
+     *    to collapse to "not suspended" and re-suspend; now that member is
+     *    skipped and named, and the admin retries.
      *
-     * The suspended read goes to the table, not the row cache.
+     * The suspended read is UserInfoRepository::getByUserIdOrThrow() (#523):
+     * "no row" is null, a failed read THROWS and is never cached. It goes
+     * through the 5-minute row cache, which every suspend/unsuspend clears
+     * after its commit (F-114), so a cached row reflects the latest change.
      *
-     * @return 'self'|'admin'|'already_suspended'|null
+     * @return 'self'|'admin'|'already_suspended'|'unverifiable'|null
      */
     private function suspensionRefusal(int $userId, int $adminId): ?string
     {
@@ -89,7 +96,12 @@ final class ModerationService
         if (user_can($userId, 'manage_options')) {
             return 'admin';
         }
-        if ($this->userInfoRepository->getSuspendedUserIds([$userId]) !== []) {
+        try {
+            $row = $this->userInfoRepository->getByUserIdOrThrow($userId);
+        } catch (\BCC\Trust\Core\Exceptions\RepositoryException) {
+            return 'unverifiable';
+        }
+        if ($row !== null && (int) $row->is_suspended === 1) {
             return 'already_suspended';
         }
         return null;
@@ -119,8 +131,29 @@ final class ModerationService
             $this->userInfoRepository->suspendUser($userId, $reason);
         });
 
-        $this->userInfoRepository->notifySuspensionChanged($userId);
-        $this->revokeSessions($userId);
+        // COMMITTED. Nothing below may report the suspension as failed
+        // (#488 review L1): a throw here used to escape to the caller's
+        // catch, which logged suspend_failed and did not count a suspension
+        // that had landed.
+        $this->afterCommit('notify', $userId, fn () => $this->userInfoRepository->notifySuspensionChanged($userId));
+        $this->afterCommit('revoke_sessions', $userId, fn () => $this->revokeSessions($userId));
+    }
+
+    /**
+     * Run one after-commit step of a suspension change. A failure is logged
+     * and swallowed: the database change is already committed and stands.
+     */
+    private function afterCommit(string $step, int $userId, \Closure $work): void
+    {
+        try {
+            $work();
+        } catch (\Throwable $e) {
+            Logger::error('[bcc-trust] suspend_followup_failed', [
+                'step'    => $step,
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -135,7 +168,7 @@ final class ModerationService
             $this->userInfoRepository->unsuspendUser($userId);
         });
 
-        $this->userInfoRepository->notifySuspensionChanged($userId);
+        $this->afterCommit('notify', $userId, fn () => $this->userInfoRepository->notifySuspensionChanged($userId));
     }
 
     /**
