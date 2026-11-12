@@ -98,9 +98,12 @@ final class ValidatorLogoService
             return;
         }
 
-        // Source unchanged AND we already have a local copy → just re-stamp.
-        $haveLocal = is_string($state->logo_url ?? null) && (string) $state->logo_url !== '';
-        if ($haveLocal && $remoteUrl === ($state->logo_source_ref ?? null)) {
+        // Source unchanged AND we already have a WORKING local copy → just
+        // re-stamp. See needsResideload(): a stored logo on another host or
+        // with its file gone is re-downloaded even when the source is the same.
+        $storedUrl = is_string($state->logo_url ?? null) ? (string) $state->logo_url : null;
+        $sourceRef = is_string($state->logo_source_ref ?? null) ? (string) $state->logo_source_ref : null;
+        if (!self::needsResideload($storedUrl, $sourceRef, $remoteUrl)) {
             ValidatorRepository::markLogoChecked($validatorId);
             return;
         }
@@ -183,6 +186,25 @@ final class ValidatorLogoService
      * and everything else returns null. Phase 2 (Solana validator-info)
      * introduces chain-keyed selection here.
      */
+    /**
+     * Whether a validator's logo must be (re-)downloaded.
+     *
+     * Skipped ONLY when the Keybase source is unchanged AND the stored URL is
+     * on this site's upload baseurl AND its file exists. The old check skipped
+     * whenever any logo_url existed, so a URL carried in from another host
+     * (the 2026-11-12 staging-restore incident: 73 broken logos) or a file
+     * that had gone missing never healed itself.
+     *
+     * @param array{baseurl?: string, basedir?: string}|null $uploadDir test seam; defaults to wp_upload_dir()
+     */
+    public static function needsResideload(?string $storedUrl, ?string $sourceRef, string $remoteUrl, ?array $uploadDir = null): bool
+    {
+        if ($storedUrl === null || $storedUrl === '' || $remoteUrl !== $sourceRef) {
+            return true;
+        }
+        return !\BCC\Trust\Onchain\Support\LocalUploadUrl::isCurrentAndPresent($storedUrl, $uploadDir);
+    }
+
     private static function resolverFor(): LogoResolver
     {
         return new KeybaseLogoResolver();
