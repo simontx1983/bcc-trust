@@ -98,6 +98,11 @@ return [
         // (RankScheduler). Fire-once; cleared here so a deactivate between
         // a sweep and its continuation leaves nothing queued.
         'bcc_rank_daily_evaluate_continue',
+        // F-278: per-member re-check after a holding is lost. It carries
+        // [user_id, group_id] args, so deactivate/uninstall ALSO call
+        // wp_unschedule_hook() for it (wp_clear_scheduled_hook() without
+        // args leaves events that have args).
+        'bcc_gated_group_member_recheck',
         // F-14: same-tick continuation of a budget-cut claim re-verify sweep.
         'bcc_onchain_claim_reverify_continue',
         'bcc_rank_daily_tier_snapshot_continue',

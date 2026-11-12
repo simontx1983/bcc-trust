@@ -506,6 +506,7 @@ return array(
     'BCC\\Trust\\Onchain\\Services\\NftGroupGateService' => $baseDir . '/app/Domain/Onchain/Services/NftGroupGateService.php',
     'BCC\\Trust\\Onchain\\Services\\NftGroupReconcileSweepService' => $baseDir . '/app/Domain/Onchain/Services/NftGroupReconcileSweepService.php',
     'BCC\\Trust\\Onchain\\Services\\NftGroupRevokeService' => $baseDir . '/app/Domain/Onchain/Services/NftGroupRevokeService.php',
+    'BCC\\Trust\\Onchain\\Services\\NftHoldingLostListener' => $baseDir . '/app/Domain/Onchain/Services/NftHoldingLostListener.php',
     'BCC\\Trust\\Onchain\\Services\\NftHoldingsIndexer' => $baseDir . '/app/Domain/Onchain/Services/NftHoldingsIndexer.php',
     'BCC\\Trust\\Onchain\\Services\\NftIndexerHealthSnapshot' => $baseDir . '/app/Domain/Onchain/Services/NftIndexerHealthSnapshot.php',
     'BCC\\Trust\\Onchain\\Services\\NftPieceViewModelBuilder' => $baseDir . '/app/Domain/Onchain/Services/NftPieceViewModelBuilder.php',

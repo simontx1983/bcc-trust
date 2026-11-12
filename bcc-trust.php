@@ -1223,6 +1223,17 @@ add_action('bcc_gated_group_reconcile_sweep', function () {
 // breaker-open) members are SKIPPED — never revoked on a hiccup. Bounded
 // + rotated (see NftGroupRevokeService) so a single tick never does
 // unbounded RPC and every member is eventually covered.
+// F-278: a gated-group member who sells is re-checked within a minute.
+// The indexer announces each lost holding; the listener schedules one
+// re-check per affected (member, holder group). Zero-arg-safe closures:
+// do_action can hand '' to a typed [class, method] callback.
+add_action('bcc_nft_holding_lost', static function ($walletLinkId = 0, $chainId = 0, $contract = ''): void {
+    \BCC\Trust\Onchain\Services\NftHoldingLostListener::onHoldingLost((int) $walletLinkId, (int) $chainId, (string) $contract);
+}, 10, 3);
+add_action(\BCC\Trust\Onchain\Services\NftGroupRevokeService::RECHECK_HOOK, static function ($userId = 0, $groupId = 0, $attempt = 0): void {
+    \BCC\Trust\Onchain\Services\NftHoldingLostListener::runRecheck((int) $userId, (int) $groupId, (int) $attempt);
+}, 10, 3);
+
 add_action(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK, function () {
     try {
         $stats = \BCC\Trust\Onchain\OnchainPlugin::instance()
@@ -2442,6 +2453,11 @@ function bcc_trust_deactivate() {
 
     foreach ($cron_hooks as $hook) {
         wp_clear_scheduled_hook($hook);
+    }
+    // F-278: the member re-check carries [user_id, group_id] args;
+    // wp_clear_scheduled_hook() above only clears arg-less events.
+    if (function_exists('wp_unschedule_hook')) {
+        wp_unschedule_hook('bcc_gated_group_member_recheck');
     }
 
     // Clear chain-refresh + enrichment crons owned by ChainRefreshService.
