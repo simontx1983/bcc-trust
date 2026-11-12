@@ -87,6 +87,13 @@ final class GroupJoinRequestService
         // same generic copy as any other refusal, nothing written, nobody
         // told. A block read that could not run refuses too.
         $roster = self::adminRoster($groupId);
+        // Fail closed: listGroupMembers() answers [] for a failed read, and
+        // every group has an owner, so a roster without one means the read
+        // did not run (or the group is ownerless — broken either way). The
+        // owner-block check must not be skipped: refuse, retryably.
+        if (!in_array('member_owner', $roster, true)) {
+            return self::unavailable();
+        }
         foreach ($roster as $adminId => $role) {
             if ($role === 'member_owner' && self::blockedEitherWay($userId, $adminId)) {
                 return self::refused();
@@ -94,10 +101,8 @@ final class GroupJoinRequestService
         }
 
         $outcome = $this->locked($userId, $groupId, static fn (): string => PeepSoGroupWriter::requestJoin($userId, $groupId));
-        if ($outcome === PeepSoGroupWriter::OUTCOME_REFUSED) {
-            // The writer refuses a banned row: say so (F-271 wording).
-            return self::error('bcc_permission_denied', 'A moderator removed you from this community, so you cannot rejoin it.', 403);
-        }
+        // A banned row (OUTCOME_REFUSED) gets the same generic refusal as a
+        // block, so neither can be inferred from the other by elimination.
         if ($outcome !== PeepSoGroupWriter::OUTCOME_DONE) {
             return self::fromOutcome($outcome, 'You are already a member, invited, or waiting on a request here.');
         }

@@ -218,6 +218,9 @@ namespace BCC\Core\Repositories {
             /** @return list<object> owners/managers etc. of the group, from memberships */
             public static function listGroupMembers(int $groupId, int $offset, int $limit): array
             {
+                if (!empty($GLOBALS['__bcc_gjr']['roster_fails'])) {
+                    return []; // the real read answers [] when it fails
+                }
                 $out = [];
                 foreach ($GLOBALS['__bcc_gjr']['memberships'] ?? [] as $userId => $groups) {
                     $status = $groups[$groupId] ?? null;

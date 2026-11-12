@@ -186,6 +186,7 @@ final class GroupJoinRequestServiceTest extends TestCase
     public function testAClosedSystemGroupAcceptsRequests(): void
     {
         $GLOBALS['__bcc_gjr']['contexts'][4205] = self::ctx(4205, PeepSoPrivacy::Closed, GroupType::System);
+        $GLOBALS['__bcc_gjr']['memberships'][self::OWNER][4205] = 'member_owner';
 
         [$status] = self::call('postRequestJoin', ['id' => 4205], self::REQUESTER);
 
@@ -193,14 +194,19 @@ final class GroupJoinRequestServiceTest extends TestCase
         self::assertSame([['requestJoin', self::REQUESTER, 4205, null, true]], self::writes());
     }
 
-    public function testABannedRequesterIsToldAModeratorRemovedThem(): void
+    /** A ban and a block answer identically, so neither is inferable by elimination. */
+    public function testABannedRequesterGetsTheSameGenericRefusalAsABlock(): void
     {
         $GLOBALS['__bcc_gjr']['outcome'] = 'refused';
+        $banned = self::call('postRequestJoin', ['id' => self::CLOSED], self::REQUESTER);
 
-        [$status, $data] = self::call('postRequestJoin', ['id' => self::CLOSED], self::REQUESTER);
+        $GLOBALS['__bcc_gjr']['outcome'] = 'done';
+        $GLOBALS['__bcc_gjr']['blocks']  = [[self::OWNER, self::REQUESTER]];
+        $blocked = self::call('postRequestJoin', ['id' => self::CLOSED], self::REQUESTER);
 
-        self::assertSame(403, $status);
-        self::assertSame('A moderator removed you from this community, so you cannot rejoin it.', $data['error']['message'] ?? null);
+        self::assertSame(403, $banned[0]);
+        self::assertSame("You can't join this community.", $banned[1]['error']['message'] ?? null);
+        self::assertSame($blocked, $banned);
         self::assertSame([], $GLOBALS['__bcc_gjr']['notes']);
     }
 
@@ -229,6 +235,23 @@ final class GroupJoinRequestServiceTest extends TestCase
         self::assertSame("You can't join this community.", $data['error']['message'] ?? null, 'the generic refusal: nothing about a block');
         self::assertSame([], self::writes());
         self::assertSame([], $GLOBALS['__bcc_gjr']['notes'], 'nobody is told');
+    }
+
+    /**
+     * The roster read answers [] when it fails; without an owner row the
+     * owner-block check would be silently skipped. Refuse, retryably.
+     */
+    public function testAFailedRosterReadRefusesTheRequestRetryably(): void
+    {
+        $GLOBALS['__bcc_gjr']['roster_fails'] = true;
+        $GLOBALS['__bcc_gjr']['blocks']       = [[self::OWNER, self::REQUESTER]];
+
+        [$status, $data] = self::call('postRequestJoin', ['id' => self::CLOSED], self::REQUESTER);
+
+        self::assertSame(503, $status);
+        self::assertSame('bcc_unavailable', $data['error']['code'] ?? null);
+        self::assertSame([], self::writes());
+        self::assertSame([], $GLOBALS['__bcc_gjr']['notes']);
     }
 
     public function testAManagerBlockedWithTheRequesterIsNotNotified(): void
