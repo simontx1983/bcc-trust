@@ -58,6 +58,8 @@ final class CollectionHolderCannotClaimPageIntegrationTest extends TestCase
         $GLOBALS['__bcc_current_user'] = self::USER_ID;
         $GLOBALS['__bcc_bqs_roles']    = [];
         $GLOBALS['__bcc_bqs_calls']    = [];
+        $GLOBALS['__bcc_bqs_owner']       = [];
+        $GLOBALS['__bcc_bqs_owner_calls'] = [];
         Logger::reset();
 
         global $wpdb;
@@ -171,6 +173,44 @@ final class CollectionHolderCannotClaimPageIntegrationTest extends TestCase
      * The per-attempt fan-out is capped at 3 wallets on the collection's
      * chain, so one request cannot hold a worker for minutes.
      */
+    /**
+     * F-14 PR C: creator comes ONLY from owner() on the collection's own
+     * chain. A renounced owner (zero address: 'unknown') or one that moved to
+     * another address is no claim, even where the legacy mainnet-only lookup
+     * still says "creator".
+     */
+    public function testARenouncedOrMovedOwnerIsNotACreatorClaim(): void
+    {
+        $collectionId = $this->boundCollection();
+        $this->insertWallet(self::USER_ID, self::CREATOR_WALLET);
+        $GLOBALS['__bcc_bqs_roles'][self::CREATOR_WALLET] = 'creator'; // the legacy lookup's answer
+
+        foreach (['unknown', 'not_owner'] as $verdict) {
+            $GLOBALS['__bcc_bqs_owner'][self::CREATOR_WALLET] = $verdict;
+
+            $response = $this->claim($collectionId);
+
+            self::assertSame(403, $response->get_status(), $verdict);
+            self::assertSame([], $this->verifiedClaims(self::USER_ID), $verdict);
+        }
+        self::assertNotSame([], $GLOBALS['__bcc_bqs_owner_calls'], 'the owner() verdict was asked');
+        self::assertSame(
+            $this->chainSlug(),
+            $GLOBALS['__bcc_bqs_owner_calls'][0][0] ?? null,
+            "asked on the collection's own chain"
+        );
+    }
+
+    private function chainSlug(): string
+    {
+        global $wpdb;
+
+        return (string) $wpdb->get_var($wpdb->prepare(
+            "SELECT slug FROM `{$wpdb->prefix}bcc_chains` WHERE id = %d",
+            $this->evmChain
+        ));
+    }
+
     public function testCollectionMatchingChecksAtMostThreeWallets(): void
     {
         $collectionId = $this->boundCollection();
