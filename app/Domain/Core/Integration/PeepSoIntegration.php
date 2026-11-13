@@ -352,6 +352,38 @@ class PeepSoIntegration
                 return true;
             }
 
+            // F-299 live guard — the SAME decision the backfill makes
+            // (PageOwnerDecision): a claim never lifts a ban and never adds
+            // a second owner. Either case is skipped, logged and recorded in
+            // the admin audit log for manual review. An unreadable owner
+            // check writes nothing (never risk a second owner).
+            $otherOwner = \BCC\Trust\Core\Repositories\PeepSoQueryRepository::otherPageOwnerId($pageId, $userId);
+            if ($otherOwner === null) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] page owner membership not written - owner check failed', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                ]);
+                return false;
+            }
+            $decision = \BCC\Trust\Core\Support\PageOwnerDecision::decide(
+                is_string($member->role) ? $member->role : null,
+                $otherOwner
+            );
+            if (\BCC\Trust\Core\Support\PageOwnerDecision::isSkip($decision)) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] page owner membership skipped for manual review', [
+                    'page_id'     => $pageId,
+                    'user_id'     => $userId,
+                    'reason'      => $decision,
+                    'other_owner' => $otherOwner,
+                ]);
+                AuditLogger::log('page_owner_membership_skipped', $pageId, [
+                    'user_id'     => $userId,
+                    'reason'      => $decision,
+                    'other_owner' => $otherOwner,
+                ], 'page', $userId);
+                return false;
+            }
+
             if ($member->role === false && $member->member_join() !== true) {
                 \BCC\Core\Log\Logger::error('[bcc-trust] page owner membership: member_join failed', [
                     'page_id' => $pageId,

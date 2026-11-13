@@ -216,6 +216,36 @@ final class PeepSoQueryRepository
         return $out;
     }
 
+    /**
+     * F-299 live guard: a DIFFERENT user holding `member_owner` on the page
+     * (0 = none), so a verified claim never creates a second owner. NULL =
+     * the read did not run; the caller then writes nothing.
+     */
+    public static function otherPageOwnerId(int $pageId, int $userId): ?int
+    {
+        if ($pageId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $members = $wpdb->prefix . 'peepso_page_members';
+
+        self::clearLastError();
+        $owner = $wpdb->get_var($wpdb->prepare(
+            "SELECT pm_user_id FROM {$members}
+              WHERE pm_page_id = %d AND pm_user_status = 'member_owner' AND pm_user_id <> %d
+              ORDER BY pm_id ASC
+              LIMIT 1",
+            $pageId,
+            $userId
+        ));
+        if (self::lastError() !== '') {
+            return null;
+        }
+
+        return $owner === null ? 0 : (int) $owner;
+    }
+
     // Separate helpers (bcc-core's shape) so static analysis does not narrow
     // last_error to '' across the query() call that sets it.
     private static function clearLastError(): void

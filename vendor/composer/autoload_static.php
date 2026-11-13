@@ -506,6 +506,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Support\\NotificationPrefs' => __DIR__ . '/../..' . '/app/Domain/Core/Support/NotificationPrefs.php',
         'BCC\\Trust\\Core\\Support\\NotificationType' => __DIR__ . '/../..' . '/app/Domain/Core/Support/NotificationType.php',
         'BCC\\Trust\\Core\\Support\\PageCardPrefetcher' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PageCardPrefetcher.php',
+        'BCC\\Trust\\Core\\Support\\PageOwnerDecision' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PageOwnerDecision.php',
         'BCC\\Trust\\Core\\Support\\PageTypeMap' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PageTypeMap.php',
         'BCC\\Trust\\Core\\Support\\PeepSoAlbumAccess' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PeepSoAlbumAccess.php',
         'BCC\\Trust\\Core\\Support\\PeepSoFriendGate' => __DIR__ . '/../..' . '/app/Domain/Core/Support/PeepSoFriendGate.php',

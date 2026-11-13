@@ -187,6 +187,19 @@ final class PageOwnerBackfillCandidatesIntegrationTest extends TestCase
     }
 
     /** A read that did not run is NULL — never "nothing to repair". */
+    /** The live claim path's guard reads the same table (F-299 live guard). */
+    public function testTheLivePathSeesADifferentOwnerButNotTheClaimerThemself(): void
+    {
+        $page = $this->page(self::USER_A);
+        $this->member(self::USER_B, $page, 'member_owner');
+
+        self::assertSame(self::USER_B, PeepSoQueryRepository::otherPageOwnerId($page, self::USER_A), 'a different owner is found');
+        self::assertSame(0, PeepSoQueryRepository::otherPageOwnerId($page, self::USER_B), 'the owner themself is not "another" owner');
+
+        $empty = $this->page(self::USER_A);
+        self::assertSame(0, PeepSoQueryRepository::otherPageOwnerId($empty, self::USER_A), 'no owner row: 0');
+    }
+
     public function testAFailedReadIsNullNotEmpty(): void
     {
         global $wpdb;

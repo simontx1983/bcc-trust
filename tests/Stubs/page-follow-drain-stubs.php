@@ -271,6 +271,43 @@ namespace BCC\Core\Repositories {
     }
 }
 
+namespace BCC\Trust\Core\Repositories {
+    // F-299 live guard's other-owner read, from the in-memory page members.
+    // `owner_read_fails` makes it answer "unreadable" (null).
+    if (!class_exists(PeepSoQueryRepository::class, false)) {
+        final class PeepSoQueryRepository
+        {
+            public static function otherPageOwnerId(int $pageId, int $userId): ?int
+            {
+                if (!empty($GLOBALS['__bcc_drain']['owner_read_fails'])) {
+                    return null;
+                }
+                foreach ($GLOBALS['__bcc_drain']['page_members'][$pageId] ?? [] as $uid => $status) {
+                    if ((int) $uid !== $userId && $status === 'member_owner') {
+                        return (int) $uid;
+                    }
+                }
+
+                return 0;
+            }
+        }
+    }
+}
+
+namespace BCC\Trust\Core\Security {
+    // The admin audit log, recorded instead of written.
+    if (!class_exists(AuditLogger::class, false)) {
+        final class AuditLogger
+        {
+            /** @param array<string, mixed> $meta */
+            public static function log(string $action, ?int $targetId = null, array $meta = [], ?string $targetType = null, ?int $userId = null): void
+            {
+                $GLOBALS['__bcc_drain']['audits'][] = ['action' => $action, 'target' => $targetId, 'meta' => $meta];
+            }
+        }
+    }
+}
+
 namespace BCC\Core\Log {
     if (!class_exists(Logger::class, false)) {
         final class Logger

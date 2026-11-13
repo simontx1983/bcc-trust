@@ -186,4 +186,74 @@ final class PageClaimOwnerMembershipTest extends TestCase
         self::assertFalse(PeepSoIntegration::ensurePageOwnerMembership(self::PAGE, 0));
         self::assertSame([], $GLOBALS['__bcc_drain']['page_writes']);
     }
+// ── F-299 live guard: the backfill's decision, on the claim path ──────
+
+    public function testABannedClaimerStaysBannedAndIsFlaggedForReview(): void
+    {
+        $GLOBALS['__bcc_drain']['post_author'][self::PAGE]                = self::USER;
+        $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::USER] = 'banned';
+
+        $this->integration()->onClaimFollowersDrain(self::USER, self::PAGE);
+
+        self::assertSame('banned', $this->ownerStatus(), 'a claim never lifts a ban');
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_writes'] ?? [], 'no join, no promote');
+        self::assertSame(
+            [['action' => 'page_owner_membership_skipped', 'target' => self::PAGE, 'meta' => ['user_id' => self::USER, 'reason' => 'skip_banned', 'other_owner' => 0]]],
+            $GLOBALS['__bcc_drain']['audits'] ?? [],
+            'recorded in the admin audit log for manual review'
+        );
+        self::assertNotSame([], $GLOBALS['__bcc_drain']['warnings'] ?? [], 'and logged');
+    }
+
+    public function testAPageWithADifferentOwnerNeverGetsASecondOne(): void
+    {
+        $GLOBALS['__bcc_drain']['post_author'][self::PAGE]           = self::USER;
+        $GLOBALS['__bcc_drain']['page_members'][self::PAGE][900]     = 'member_owner';
+
+        $this->integration()->onClaimFollowersDrain(self::USER, self::PAGE);
+
+        self::assertFalse($this->ownerStatus(), 'the claimer gets no row at all');
+        self::assertSame('member_owner', $GLOBALS['__bcc_drain']['page_members'][self::PAGE][900], 'the existing owner is untouched');
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_writes'] ?? []);
+        self::assertSame('skip_other_owner', $GLOBALS['__bcc_drain']['audits'][0]['meta']['reason'] ?? null);
+        self::assertSame(900, $GLOBALS['__bcc_drain']['audits'][0]['meta']['other_owner'] ?? null);
+    }
+
+    public function testAnUnreadableOwnerCheckWritesNothing(): void
+    {
+        $GLOBALS['__bcc_drain']['post_author'][self::PAGE] = self::USER;
+        $GLOBALS['__bcc_drain']['owner_read_fails']        = true;
+
+        $this->integration()->onClaimFollowersDrain(self::USER, self::PAGE);
+
+        self::assertFalse($this->ownerStatus(), 'never risk a second owner on a failed read');
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_writes'] ?? []);
+        self::assertSame(
+            ['[bcc-trust] page owner membership not written - owner check failed'],
+            array_column($GLOBALS['__bcc_drain']['errors'] ?? [], 'message'),
+            'refused by the owner-check guard itself, not by a later error'
+        );
+    }
+
+    /** The one decision both paths use (the backfill's plan() reads it too). */
+    public function testTheSharedDecision(): void
+    {
+        $d = \BCC\Trust\Core\Support\PageOwnerDecision::class;
+
+        self::assertSame($d::JOIN, $d::decide(null, 0));
+        self::assertSame($d::PROMOTE, $d::decide('member', 0));
+        self::assertSame($d::SKIP_BANNED, $d::decide('banned', 0));
+        self::assertSame($d::SKIP_OTHER_OWNER, $d::decide('member', 900));
+        self::assertSame($d::SKIP_OTHER_OWNER, $d::decide('banned', 900), 'another owner wins over a ban, as plan() always did');
+        self::assertSame($d::ALREADY_OWNER, $d::decide('member_owner', 0));
+        self::assertTrue($d::isSkip($d::SKIP_BANNED) && $d::isSkip($d::SKIP_OTHER_OWNER));
+        self::assertFalse($d::isSkip($d::JOIN) || $d::isSkip($d::PROMOTE));
+    }
+
+    public function testTheBackfillPlanUsesTheSharedDecision(): void
+    {
+        $src = (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Core/CLI/BackfillPageOwnersCommand.php');
+
+        self::assertStringContainsString('PageOwnerDecision::decide($row[\'current_role\'], $row[\'other_owner\'])', $src);
+    }
 }
