@@ -89,7 +89,15 @@ final class Envelope
         // bcc-core is a hard dependency and merges before bcc-trust (PR order),
         // so Throttle::lastDenial() is always present at runtime; class_exists
         // guards only the bcc-core-absent degradation case.
-        if ($status === 429 && class_exists(\BCC\Core\Security\Throttle::class)) {
+        //
+        // ⚠ Only for a 429 that did NOT set its own Retry-After. An endpoint
+        // that knows its exact wait (the 7-day handle cooldown, F-333) is not
+        // a throttle denial, and lastDenial() then describes some EARLIER
+        // throttle call in the request (the shared me_write bucket, 60 s),
+        // which used to overwrite the real wait with "60" (account-flows
+        // review, F-294).
+        $ownRetryAfter = isset($response->get_headers()['Retry-After']);
+        if ($status === 429 && !$ownRetryAfter && class_exists(\BCC\Core\Security\Throttle::class)) {
             $denial = \BCC\Core\Security\Throttle::lastDenial();
             if (is_array($denial)) {
                 $window = max(1, (int) ($denial['window'] ?? 60));

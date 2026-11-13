@@ -230,4 +230,39 @@ final class HandleRenameIdentityTest extends TestCase
 
         self::assertSame(403, self::signIn('alice@example.test', self::ALICE));
     }
+
+    // ── F-333: the cooldown is readable before and at submit ────────────
+
+    public function testNextChangeAtIsNullWithNoCooldownAndTheDateWithOne(): void
+    {
+        $svc = new HandleService();
+        self::assertNull($svc->nextChangeAt(self::ALICE), 'never renamed: can change now');
+
+        $changed = time() - 3600;
+        $GLOBALS['__bcc_ph']['meta'][self::ALICE][HandleService::META_HANDLE_LAST_CHANGED] = (string) $changed;
+
+        self::assertSame(
+            gmdate('Y-m-d\TH:i:s\Z', $changed + HandleService::COOLDOWN_SECONDS),
+            $svc->nextChangeAt(self::ALICE)
+        );
+    }
+
+    public function testTheCooldown429CarriesNextChangeAtInItsBody(): void
+    {
+        $changed = time() - 3600;
+        $GLOBALS['__bcc_ph']['current_user'] = self::ALICE;
+        $GLOBALS['__bcc_ph']['meta'][self::ALICE][HandleService::META_HANDLE_LAST_CHANGED] = (string) $changed;
+        $endpoint = (new \ReflectionClass(OnboardingEndpoint::class))->newInstanceWithoutConstructor();
+
+        $resp = $endpoint->updateHandle(new \WP_REST_Request(['handle' => 'bob']));
+
+        self::assertSame(429, $resp->get_status());
+        $body = $resp->get_data();
+        self::assertIsArray($body);
+        self::assertSame(
+            gmdate('Y-m-d\TH:i:s\Z', $changed + HandleService::COOLDOWN_SECONDS),
+            $body['error']['data']['next_change_at'] ?? null,
+            'the client error object does not surface Retry-After'
+        );
+    }
 }
