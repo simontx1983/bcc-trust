@@ -55,6 +55,7 @@ use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\CountPrivacy;
 use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\ProfileGroupVisibility;
+use BCC\Trust\Core\Support\ProfileSectionVisibility;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Core\Support\WalletAddressValidator;
@@ -177,11 +178,18 @@ final class UserViewService
             'current_rank_label'  => $state['rank_label'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::resolveFlags($userId),
-            'bio'                 => self::resolveBio($user),
+            // F-341 — the ABOUT section. A documented EMPTY (null), never
+            // an omitted key: a missing key breaks the client's shape, and
+            // a refusal would disclose that something is being withheld.
+            'bio'                 => ProfileSectionVisibility::hides(
+                ProfileSectionVisibility::SECTION_ABOUT,
+                $userId,
+                $viewerId
+            ) ? null : self::resolveBio($user),
             'primary_hall'        => $primaryHall,
             'halls'               => $halls,
             'wallets'             => self::resolveWallets($userId, $isSelf),
-            'counts'              => $this->resolveCounts($userId, $followCounts, $isSelf, $privacy, $prefetched),
+            'counts'              => $this->resolveCounts($userId, $followCounts, $isSelf, $privacy, $prefetched, $viewerId),
             'privacy'             => $privacy,
             'permissions'         => $this->resolvePermissions($userId, $viewerId, $isSelf),
             // §K1 Phase A — true when the viewer is currently blocking
@@ -523,6 +531,42 @@ final class UserViewService
             $walletsVerified = $prefetched['wallets_verified_counts'][$userId] ?? 0;
         } else {
             $walletsVerified = WalletRepository::getVerifiedCountsForUsers([$userId])[$userId] ?? 0;
+        }
+
+        // ── F-341 section privacy, applied to the INPUTS ───────────────
+        //
+        // ⚠ GATED HERE because this method feeds the member CARD (and its
+        // `member_dossier`) as well as the profile. The same fact on two
+        // surfaces has to be narrowed in one place, or it leaks on the one
+        // that was forgotten — which is exactly what F-283 was.
+        //
+        // ⭐ The INPUTS are narrowed rather than the array literal below,
+        // deliberately: nulling the connections makes the existing
+        // expressions yield precisely the hidden values (claims false,
+        // usernames null, count 0), so the emitted SHAPE is unchanged. A
+        // ternary per field instead made PHPStan infer a union of two array
+        // shapes and stop matching this method's declared return.
+        if (ProfileSectionVisibility::hides(
+            ProfileSectionVisibility::SECTION_OPERATOR,
+            $userId,
+            $viewerId
+        )) {
+            $ownedPagesCount  = 0;
+            // ⚠ NOT `[]`. The declared shape is sealed —
+            // array{validator: int, project: int, nft: int, dao: int} — so an
+            // empty array neither type-checks nor serves the client, which
+            // would have to special-case a different shape. Zeroes keep the
+            // documented-empty promise AND the wire shape.
+            $ownedPagesByType = ['validator' => 0, 'project' => 0, 'nft' => 0, 'dao' => 0];
+        }
+        if (ProfileSectionVisibility::hides(
+            ProfileSectionVisibility::SECTION_VERIFICATIONS,
+            $userId,
+            $viewerId
+        )) {
+            $xConnection      = null;
+            $githubConnection = null;
+            $walletsVerified  = 0;
         }
 
         return [
@@ -1037,7 +1081,7 @@ final class UserViewService
      * (Plus reviews_received + blog_posts_written — see the return
      * block; the phpstan shape above narrows only the legacy keys.)
      */
-    private function resolveCounts(int $userId, array $followCounts, bool $isSelf, array $privacy, ?array $prefetched = null): array
+    private function resolveCounts(int $userId, array $followCounts, bool $isSelf, array $privacy, ?array $prefetched = null, int $viewerId = 0): array
     {
         // Prefer the shared member batch where a key exists — identical
         // repository sources (countByVoters / countByReporters /
@@ -1088,7 +1132,13 @@ final class UserViewService
             // by the user. Sourced from peepso_activities rows where
             // act_module_id='blog' joined against wp_posts for the
             // published filter. Mirrors what /u/:handle/blog renders.
-            'blog_posts_written' => \BCC\Core\Repositories\PeepSoActivityRepository::countBlogsByAuthor($userId),
+            // F-341 — the BLOGS section. Zeroed rather than omitted, like
+            // every other governed count (§K2, F-283).
+            'blog_posts_written' => ProfileSectionVisibility::hides(
+                ProfileSectionVisibility::SECTION_BLOGS,
+                $userId,
+                $viewerId
+            ) ? 0 : \BCC\Core\Repositories\PeepSoActivityRepository::countBlogsByAuthor($userId),
         ], $privacy, $isSelf);
     }
 

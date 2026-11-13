@@ -16,6 +16,12 @@
  *     "hide_from_search":       bool,
  *     "default_post_audience":  "public" | "members" | "friends" | "private",
  *     "show_groups_on_profile": bool,
+ *     "show_about_on_profile":         bool,
+ *     "show_verifications_on_profile": bool,
+ *     "show_operator_on_profile":      bool,
+ *     "show_blogs_on_profile":         bool,
+ *     "show_reviews_on_profile":       bool,
+ *     "show_disputes_on_profile":      bool,
  *     "mentor_opt_in":          bool
  *   }
  *
@@ -70,6 +76,27 @@
  *                             non-members, and holder/delegator groups are
  *                             shown to signed-in viewers only, whatever
  *                             this says — see ProfileGroupVisibility.
+ *   - show_<section>_on_profile *(F-341)* → the profile SECTION switches.
+ *                             All default ON (absent user_meta = shown), so
+ *                             nothing changes until a member opts out.
+ *                             THREE storage conventions, deliberately:
+ *                               · about / verifications / operator / blogs →
+ *                                 new `bcc_show_*_on_profile` user_meta;
+ *                               · HALLS → `show_groups_on_profile`, F-270's
+ *                                 field. ⚠ It keeps that name rather than
+ *                                 becoming `show_halls_on_profile`: renaming
+ *                                 a live field breaks clients for no gain.
+ *                                 A deliberate exception to the pattern.
+ *                               · reviews / disputes → INVERTED views of the
+ *                                 §K2 `reviews_hidden` / `disputes_hidden`
+ *                                 flags, which remain the ONLY storage.
+ *                                 `show_* = true` means `*_hidden = false`.
+ *                                 One source of truth, no migration, and
+ *                                 /me/privacy keeps writing the same rows.
+ *                             ⚠ §K2's own ROUTE behaviour is UNCHANGED by
+ *                             F-341: /reviews and /disputes answer exactly
+ *                             as they did. Only the new sections follow the
+ *                             documented-empty rule.
  *   - mentor_opt_in          → `bcc_mentor_opt_in` user_meta, "1"/"0"
  *                               (Rank Phase 7 §21.4, via
  *                               MentorListingService). Opting in needs NO
@@ -96,6 +123,7 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Repositories\DbWriteCheck;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\ProfileAccess;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -303,10 +331,37 @@ final class MyProfilePrefsEndpoint
             'hide_online'            => 'peepso_hide_online_status',
             'hide_from_search'       => 'peepso_is_hide_profile_from_user_listing',
             'show_groups_on_profile' => ProfileAccess::META_SHOW_GROUPS,
+            // F-341 section switches with their own storage. Halls is the
+            // line above (F-270's key); reviews/disputes are handled after
+            // this loop, because their storage is a §K2 HIDE flag.
+            'show_about_on_profile'         => 'bcc_show_about_on_profile',
+            'show_verifications_on_profile' => 'bcc_show_verifications_on_profile',
+            'show_operator_on_profile'      => 'bcc_show_operator_on_profile',
+            'show_blogs_on_profile'         => 'bcc_show_blogs_on_profile',
         ] as $param => $metaKey) {
             $raw = $request->get_param($param);
             if ($raw !== null) {
                 $meta[$metaKey] = filter_var($raw, FILTER_VALIDATE_BOOLEAN) ? '1' : '0';
+            }
+        }
+
+        // F-341 — the two section switches whose storage is a §K2 HIDE
+        // flag. Collected here and written below through
+        // PrivacySettings::writePartial, the SAME writer /me/privacy uses,
+        // so these rows have one storage and one write path.
+        //
+        // ⚠ INVERTED: `show_reviews_on_profile = false` means
+        // `reviews_hidden = true`. The inversion lives here and in the
+        // contract and nowhere else — a second place that flipped it would
+        // silently disagree with /me/privacy.
+        $privacyFlags = [];
+        foreach ([
+            'show_reviews_on_profile'  => 'reviews_hidden',
+            'show_disputes_on_profile' => 'disputes_hidden',
+        ] as $param => $flag) {
+            $rawFlag = $request->get_param($param);
+            if ($rawFlag !== null) {
+                $privacyFlags[$flag] = !filter_var($rawFlag, FILTER_VALIDATE_BOOLEAN);
             }
         }
 
@@ -316,7 +371,7 @@ final class MyProfilePrefsEndpoint
         $mentorOptIn = $request->get_param('mentor_opt_in');
         $mentorValue = $mentorOptIn !== null ? filter_var($mentorOptIn, FILTER_VALIDATE_BOOLEAN) : null;
 
-        if ($profileAcc === null && $meta === [] && $mentorValue === null) {
+        if ($profileAcc === null && $meta === [] && $privacyFlags === [] && $mentorValue === null) {
             return ApiResponse::error(
                 'bcc_invalid_request',
                 'No profile preferences provided.',
@@ -350,6 +405,20 @@ final class MyProfilePrefsEndpoint
         foreach ($meta as $metaKey => $value) {
             $field = self::META_FIELDS[$metaKey];
             if (!self::checkedWrite(static fn () => update_user_meta($userId, $metaKey, $value))) {
+                return self::writeFailed($userId, $field, $saved);
+            }
+            $saved[] = $field;
+        }
+        foreach ($privacyFlags as $flag => $hidden) {
+            // One flag per call, so `saved`/`failed` can name the REQUEST
+            // field that failed — the v1.108 partial-failure contract.
+            $ok = self::checkedWrite(static function () use ($userId, $flag, $hidden): void {
+                PrivacySettings::writePartial($userId, [$flag => $hidden]);
+            });
+            $field = $flag === 'reviews_hidden'
+                ? 'show_reviews_on_profile'
+                : 'show_disputes_on_profile';
+            if (!$ok) {
                 return self::writeFailed($userId, $field, $saved);
             }
             $saved[] = $field;
@@ -428,6 +497,14 @@ final class MyProfilePrefsEndpoint
             // ⚠ default TRUE, unlike every other flag here — see the
             // header note and ProfileAccess::showsGroupsOnProfile().
             'show_groups_on_profile'    => self::flag($userId, ProfileAccess::META_SHOW_GROUPS, true),
+            // F-341 — all default ON. ⚠ The last two are INVERTED reads of
+            // §K2 flags, not their own storage; see the header.
+            'show_about_on_profile'         => self::flag($userId, 'bcc_show_about_on_profile', true),
+            'show_verifications_on_profile' => self::flag($userId, 'bcc_show_verifications_on_profile', true),
+            'show_operator_on_profile'      => self::flag($userId, 'bcc_show_operator_on_profile', true),
+            'show_blogs_on_profile'         => self::flag($userId, 'bcc_show_blogs_on_profile', true),
+            'show_reviews_on_profile'       => !PrivacySettings::flag($userId, 'reviews_hidden'),
+            'show_disputes_on_profile'      => !PrivacySettings::flag($userId, 'disputes_hidden'),
             'mentor_opt_in'             => $mentor['opted_in'],
             'mentor_listed'             => $mentor['listed'],
             'mentor_eligibility_reason' => $mentor['reason'],
@@ -474,6 +551,10 @@ final class MyProfilePrefsEndpoint
         'peepso_hide_online_status'                => 'hide_online',
         'peepso_is_hide_profile_from_user_listing' => 'hide_from_search',
         ProfileAccess::META_SHOW_GROUPS            => 'show_groups_on_profile',
+        'bcc_show_about_on_profile'                => 'show_about_on_profile',
+        'bcc_show_verifications_on_profile'        => 'show_verifications_on_profile',
+        'bcc_show_operator_on_profile'             => 'show_operator_on_profile',
+        'bcc_show_blogs_on_profile'                => 'show_blogs_on_profile',
     ];
 
     /**

@@ -34,6 +34,7 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
+use BCC\Trust\Core\Support\ProfileSectionVisibility;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 
@@ -275,7 +276,24 @@ final class MemberProfileComposer
         //   NOT count($base['wallets']), which is own-account-only and
         //   empty for visitors. github + x resolve via per-user repo
         //   lookups (cheap; single user).
-        $base['verifications'] = self::buildVerifications($userId, $walletCount, $prefetched);
+        // F-341 — the VERIFICATIONS section on the PROFILE. getUser's copy
+        // (which feeds the card) is gated in UserViewService; this is the
+        // profile page's own, richer block, built here, so it needs the
+        // same gate or the two surfaces disagree.
+        $base['verifications'] = ProfileSectionVisibility::hides(
+            ProfileSectionVisibility::SECTION_VERIFICATIONS,
+            $userId,
+            $viewerId
+        )
+            ? [
+                'x_verified'           => false,
+                'x_username'           => null,
+                'github_verified'      => false,
+                'github_username'      => null,
+                'wallets_verified'     => 0,
+                'profile_completeness' => 0,
+            ]
+            : self::buildVerifications($userId, $walletCount, $prefetched);
 
         // ── `profile_complete` — the SERVER's completeness verdict,
         //   own-view only (additive: the key is ABSENT for every other
@@ -297,6 +315,18 @@ final class MemberProfileComposer
                 $base['verifications']['profile_complete'] = false;
             }
         }
+
+        // F-341 — ADDITIVE `sections` block. Without it a client cannot
+        // tell a HIDDEN section from an EMPTY one, and would render an
+        // empty Reviews tab on someone's profile instead of omitting the
+        // tab. The owner always sees every section as true.
+        //
+        // ⚠ PR 1 SCOPE: this block and the payload narrowing above are the
+        // server's answer for the PROFILE. The per-user TAB ROUTES
+        // (/users/{handle}/blog, /reviews, …) are PR 2, so until that
+        // lands a hidden section is still reachable by calling its route
+        // directly. Not yet a complete privacy boundary.
+        $base['sections'] = ProfileSectionVisibility::visibilityMap($userId, $viewerId);
 
         return $base;
     }
