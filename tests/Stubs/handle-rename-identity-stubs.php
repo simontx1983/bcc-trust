@@ -219,6 +219,20 @@ namespace {
             public function get_error_message(): string { return $this->message; }
         }
     }
+    // F-294 timing parity: count the password hashes a request pays.
+    if (!function_exists('wp_hash_password')) {
+        function wp_hash_password(string $password): string
+        {
+            $GLOBALS['__bcc_ph']['hashes'] = ($GLOBALS['__bcc_ph']['hashes'] ?? 0) + 1;
+            return 'hash:' . $password;
+        }
+    }
+    if (!function_exists('wp_generate_password')) {
+        function wp_generate_password(int $length = 12, bool $special = true, bool $extra = false): string
+        {
+            return str_repeat('k', $length);
+        }
+    }
     if (!function_exists('wp_insert_user')) {
         /**
          * @param array<string, mixed> $data
