@@ -1073,6 +1073,18 @@ final class Plugin
         );
     }
 
+    /** F-345 — review replies (one response per review, by the reviewed party). */
+    private ?Services\ReviewReplyService $reviewReplyService = null;
+    public function reviewReplyService(): Services\ReviewReplyService
+    {
+        return $this->reviewReplyService ??= new Services\ReviewReplyService(
+            $this->voteRepository(),
+            new Repositories\ReviewReplyRepository(),
+            $this->activityStreamWriter(),
+            $this->pageOwnerResolver()
+        );
+    }
+
     /** §V1.5 — per-user disputes tab, paginated + privacy-honouring. */
     private ?Services\UserDisputesService $userDisputesService = null;
     public function userDisputesService(): Services\UserDisputesService
@@ -1761,6 +1773,7 @@ final class Plugin
         // table read + hydrates authors/flaggers/watchers via the shared
         // MemberSummaryPrefetcher.
         \BCC\Trust\Core\REST\CardReviewsEndpoint::register();
+        \BCC\Trust\Core\REST\ReviewRepliesEndpoint::register();
         \BCC\Trust\Core\REST\CardWatchersEndpoint::register();
 
         // V2 Trust Attestation Layer — PR-2 self-mirror surface:
@@ -2666,6 +2679,11 @@ final class Plugin
         add_action('bcc_review_published', function (int $authorId, int $pageId, int $voteId, string $explanation): void {
             $this->notificationDispatcher()->onReviewPublished($authorId, $pageId, $voteId, $explanation);
         }, 30, 4);
+
+        // F-345 — the reviewer's bell when the reviewed party replies.
+        add_action('bcc_review_reply_published', function (int $replierId, int $reviewerId, int $pageId, int $voteId, int $actId): void {
+            $this->notificationDispatcher()->onReviewReplyPublished($replierId, $reviewerId, $pageId, $voteId, $actId);
+        }, 30, 5);
 
         add_action('bcc_card_watched', function (int $viewerId, int $followId, string $targetKind, int $targetId): void {
             $this->notificationDispatcher()->onCardWatched($viewerId, $followId, $targetKind, $targetId);

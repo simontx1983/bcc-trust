@@ -75,6 +75,7 @@ final class NotificationPrefs
         NotificationType::GROUP_JOIN_REQUESTED,
         NotificationType::GROUP_JOIN_APPROVED,
         NotificationType::GROUP_INVITED,
+        NotificationType::REVIEW_REPLY,
     ];
 
     /**
@@ -141,6 +142,7 @@ final class NotificationPrefs
         'bell_bcc_group_join_requested'                      => true,
         'bell_bcc_group_join_approved'                       => true,
         'bell_bcc_group_invited'                             => true,
+        'bell_bcc_review_reply'                              => true,
         'push_master'                                        => false,
         'push_event_review'                                  => true,
         'push_event_dispute_outcome'                         => true,

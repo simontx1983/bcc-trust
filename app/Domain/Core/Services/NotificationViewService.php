@@ -249,6 +249,11 @@ final class NotificationViewService
         return match ($type) {
             NotificationType::REACTION    => $actId > 0 ? '/?focus=' . $actId : '/',
             NotificationType::REVIEW      => self::resolvePageLink($externalId),
+            // F-345: a member self-page has no wp_post; the replier IS that
+            // member, so the bell opens their profile.
+            NotificationType::REVIEW_REPLY => \BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($externalId) && $actorHandle !== ''
+                ? '/u/' . $actorHandle
+                : self::resolvePageLink($externalId),
             NotificationType::CARD_WATCHED => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
             // Rank standing changes + §15 findings all deep-link to the
             // member's own progression surface (/me/progression — the

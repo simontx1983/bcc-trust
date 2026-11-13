@@ -2501,6 +2501,46 @@ class VoteRepository {
     }
 
     /**
+     * F-345: the review a reply attaches to — an ACTIVE (status = 1) vote
+     * that is not moderation-hidden (same predicate as the review lists,
+     * hiddenReviewExclusion), or null. A removed or hidden review takes no
+     * reply, and the caller answers 404 without saying which.
+     *
+     * FAIL-CLOSED: a failed read throws RepositoryReadFailure rather than
+     * reading as "no such review".
+     *
+     * @return object{id: int|numeric-string, voter_user_id: int|numeric-string, page_id: int|numeric-string}|null
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public function findReviewForReply(int $voteId): ?object
+    {
+        if ($voteId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+
+        // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $sql = $wpdb->prepare(
+            "SELECT v.id, v.voter_user_id, v.page_id
+               FROM {$this->table} v
+              WHERE v.id = %d
+                AND v.status = 1
+                AND " . $this->hiddenReviewExclusion('v') . "
+              LIMIT 1",
+            $voteId
+        );
+        // phpcs:enable WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+
+        $rows = self::runRead((string) $sql, __FUNCTION__, true);
+
+        /** @var object{id: int|numeric-string, voter_user_id: int|numeric-string, page_id: int|numeric-string}|null $row */
+        $row = $rows[0] ?? null;
+
+        return $row;
+    }
+
+    /**
      * #69 failure class: `$wpdb->prepare()` returns '' (or null) on a
      * placeholder/argument mismatch, after which get_results()/query() run
      * NOTHING and leave last_error empty — a read that "succeeds" with no

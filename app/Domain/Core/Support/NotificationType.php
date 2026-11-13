@@ -169,6 +169,14 @@ final class NotificationType
     public const GROUP_INVITED                      = 'bcc_group_invited';
 
     /**
+     * F-345 — the reviewed party replied to the member's review. Recipient =
+     * the reviewer, actor = the replier. Bell only (no push, kept out of the
+     * digest). external_id is the reviewed page, so the row links to its
+     * reviews like REVIEW does.
+     */
+    public const REVIEW_REPLY                       = 'bcc_review_reply';
+
+    /**
      * Types that are delivered in-app ONLY: NotificationRepository's
      * weekly email digest excludes them. Push is opt-in per dispatch
      * (pushDispatcher->enqueue), and none of these dispatch one.
@@ -182,6 +190,7 @@ final class NotificationType
         self::GROUP_JOIN_REQUESTED,
         self::GROUP_JOIN_APPROVED,
         self::GROUP_INVITED,
+        self::REVIEW_REPLY,
     ];
 
     /**
@@ -224,6 +233,7 @@ final class NotificationType
         self::GROUP_JOIN_REQUESTED,
         self::GROUP_JOIN_APPROVED,
         self::GROUP_INVITED,
+        self::REVIEW_REPLY,
     ];
 
     public static function isValid(string $type): bool

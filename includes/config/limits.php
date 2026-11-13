@@ -25,6 +25,12 @@ define('BCC_TRUST_RATE_WINDOW_FLAG', 300);
 define('BCC_TRUST_RATE_LIMIT_COMMENT', 20);
 define('BCC_TRUST_RATE_WINDOW_COMMENT', 300);
 
+// F-345 review replies (ReviewReplyService): create + edit share one
+// per-user bucket. One reply per review bounds volume already; this only
+// clips scripted bursts across many reviews.
+define('BCC_TRUST_RATE_LIMIT_REVIEW_REPLY', 10);
+define('BCC_TRUST_RATE_WINDOW_REVIEW_REPLY', 300);
+
 define('BCC_TRUST_RATE_LIMIT_MESSAGE', 10);
 define('BCC_TRUST_RATE_WINDOW_MESSAGE', 60);
 

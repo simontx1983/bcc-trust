@@ -67,9 +67,16 @@ class FeedItemReportVisibility
     public const GLOBAL_VISIBILITY = 'public_all';
 
 
+    /**
+     * @param \BCC\Trust\Core\Repositories\VoteRepository|null $votes For the F-345
+     *        review-reply arm only (is the reply's review still showable?).
+     *        Optional and last so every existing two-argument construction
+     *        keeps working; null resolves the plugin's repository lazily.
+     */
     public function __construct(
         private readonly GroupsService $groups,
-        private readonly HiddenActivityRepository $hidden
+        private readonly HiddenActivityRepository $hidden,
+        private ?\BCC\Trust\Core\Repositories\VoteRepository $votes = null
     ) {
     }
 
@@ -120,6 +127,17 @@ class FeedItemReportVisibility
         if ($actId <= 0 || $postId <= 0) {
             return false;
         }
+        // F-345: a review reply is reportable although no feed shows it
+        // (module 206 is deliberately off the feed allowlist below). It is
+        // visible exactly where it renders: nested under its review on a
+        // Reviews tab. So: the reply itself is live (published, not hidden)
+        // AND its parent review is still active and not hidden. Reviews are
+        // never group-tagged, so the group rule does not apply.
+        if ((int) ($activity->act_module_id ?? 0)
+            === \BCC\Trust\Core\Repositories\PeepSoActivityWriter::getNumericId(\BCC\Trust\Core\Repositories\ReviewReplyRepository::MODULE_NAME)
+        ) {
+            return $this->isLive($activity) && $this->replyParentIsVisible($postId);
+        }
         // Only modules a feed or permalink can show at all: the SAME
         // allowlist bcc-core's feed and permalink paths enforce (§11 reuse).
         // An ALLOWLIST, not a denylist: it excludes private messages (6),
@@ -139,6 +157,25 @@ class FeedItemReportVisibility
         }
 
         return $this->groupRuleAllows($viewerId, $postId);
+    }
+
+    /**
+     * F-345: is the review a reply (backing post $postId) answers still
+     * showable — active and not moderation-hidden? Fails CLOSED: a failed
+     * read is "not visible", so a reply is never reportable on a guess.
+     */
+    private function replyParentIsVisible(int $postId): bool
+    {
+        $voteId = (int) get_post_meta($postId, '_bcc_activity_sidecar_id', true);
+        if ($voteId <= 0) {
+            return false;
+        }
+        $this->votes ??= \BCC\Trust\Core\Plugin::instance()->voteRepository();
+        try {
+            return $this->votes->findReviewForReply($voteId) !== null;
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            return false;
+        }
     }
 
     /**

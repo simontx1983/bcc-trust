@@ -69,15 +69,7 @@ final class UserReviewsService
      * Return paginated reviews authored by $userId.
      *
      * @return array{
-     *   items: list<array{
-     *     id: int,
-     *     grade: string,
-     *     subject: string,
-     *     subject_handle: string,
-     *     text: string,
-     *     scope_label: string,
-     *     posted_at_label: string
-     *   }>,
+     *   items: list<array<string, mixed>>,
      *   pagination: array{
      *     page: int,
      *     per_page: int,
@@ -131,10 +123,39 @@ final class UserReviewsService
             ? []
             : $this->userMiniRepository->getRowsByIds(array_keys($memberIds));
 
+        // F-345: each review's reply (by the reviewed party) and the
+        // viewer's can_reply, one batched read; reply authors are hydrated
+        // through the same member-summary prefetch the entity tab uses.
+        $replies = \BCC\Trust\Core\Plugin::instance()->reviewReplyService()->forReviews(
+            $viewerId,
+            array_map(
+                static fn (object $row): array => [
+                    'id'            => (int) $row->id,
+                    'page_id'       => (int) $row->page_id,
+                    'voter_user_id' => $userId,
+                ],
+                $rows
+            )
+        );
+        $replyAuthorIds = [];
+        foreach ($replies as $bundle) {
+            if ($bundle['reply'] !== null) {
+                $replyAuthorIds[$bundle['reply']['author_id']] = true;
+            }
+        }
+        $prefetched = $replyAuthorIds === []
+            ? null
+            : \BCC\Trust\Core\Support\MemberSummaryPrefetcher::primeFor(array_keys($replyAuthorIds));
+
         $items = [];
         $now   = time();
         foreach ($rows as $row) {
-            $items[] = self::shapeReview($row, $now, $members);
+            $items[] = CardReviewsService::withReply(
+                self::shapeReview($row, $now, $members),
+                $replies[(int) $row->id] ?? null,
+                $viewerId,
+                $prefetched
+            );
         }
 
         return [
@@ -249,15 +270,7 @@ final class UserReviewsService
 
     /**
      * @return array{
-     *   items: list<array{
-     *     id: int,
-     *     grade: string,
-     *     subject: string,
-     *     subject_handle: string,
-     *     text: string,
-     *     scope_label: string,
-     *     posted_at_label: string
-     *   }>,
+     *   items: list<array<string, mixed>>,
      *   pagination: array{
      *     page: int,
      *     per_page: int,

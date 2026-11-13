@@ -1142,6 +1142,15 @@ final class ModerationQueueService
         // POST KIND filter chips simultaneously.
         $module   = isset($activity->act_module_id) ? (string) $activity->act_module_id : '';
         $feedKind = FeedItemNormalizer::MODULE_TO_KIND[$module] ?? 'status';
+        // F-345: a review reply (206) is deliberately NOT in the canonical
+        // map (that map is the feed allowlist), so it would fall to 'status'
+        // here. Name it, so the queue shows what it is.
+        $replyModule = \BCC\Trust\Core\Repositories\PeepSoActivityWriter::getNumericId(
+            \BCC\Trust\Core\Repositories\ReviewReplyRepository::MODULE_NAME
+        );
+        if ($replyModule !== null && $module === (string) $replyModule) {
+            $feedKind = 'review_reply';
+        }
         $postId   = isset($activity->act_external_id) ? (int) $activity->act_external_id : 0;
 
         // Layer-2 GIF promotion — status and GIF share module 1; the
@@ -1157,7 +1166,9 @@ final class ModerationQueueService
             ? self::toIso8601((string) $activity->act_time)
             : null;
 
-        if ($authorHandle !== '' && $shortCode !== null && $shortCode !== '') {
+        // A reply has no permalink (it renders only under its review), so
+        // no post_url: a /p/ link would 404. The preview below carries it.
+        if ($feedKind !== 'review_reply' && $authorHandle !== '' && $shortCode !== null && $shortCode !== '') {
             $base['post_url'] = CardUrlMap::postUrl($authorHandle, $shortCode);
         }
 
@@ -1165,7 +1176,7 @@ final class ModerationQueueService
         // source — status, blog, and gif (a status post whose text may
         // legitimately be empty). Other kinds get an empty preview —
         // admin can click through via post_url to view in full.
-        if (in_array($feedKind, ['status', 'blog_excerpt', 'gif'], true) && $postId > 0) {
+        if (in_array($feedKind, ['status', 'blog_excerpt', 'gif', 'review_reply'], true) && $postId > 0) {
             $post = get_post($postId);
             if ($post instanceof \WP_Post) {
                 $excerpt = (string) $post->post_excerpt;

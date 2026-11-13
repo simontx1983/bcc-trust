@@ -59,13 +59,7 @@ final class CardReviewsService
 
     /**
      * @return array{
-     *   items: list<array{
-     *     id: int,
-     *     grade: string,
-     *     text: string,
-     *     posted_at_label: string,
-     *     author: array<string, mixed>
-     *   }>,
+     *   items: list<array<string, mixed>>,
      *   pagination: array{
      *     page: int,
      *     per_page: int,
@@ -108,6 +102,26 @@ final class CardReviewsService
                 $authorIds[] = $uid;
             }
         }
+
+        // F-345: each review's reply and the viewer's can_reply, one batched
+        // read for the page. Reply authors join the same author prefetch.
+        $replies = Plugin::instance()->reviewReplyService()->forReviews(
+            $viewerId,
+            array_map(
+                static fn (object $row): array => [
+                    'id'            => (int) $row->id,
+                    'page_id'       => $pageId,
+                    'voter_user_id' => (int) $row->voter_user_id,
+                ],
+                $rows
+            )
+        );
+        foreach ($replies as $bundle) {
+            if ($bundle['reply'] !== null) {
+                $authorIds[] = $bundle['reply']['author_id'];
+            }
+        }
+
         $authorIds  = array_values(array_unique($authorIds));
         $prefetched = $authorIds === [] ? null : MemberSummaryPrefetcher::primeFor($authorIds);
 
@@ -128,7 +142,12 @@ final class CardReviewsService
                 continue;
             }
 
-            $items[] = self::shapeReview($row, $author, $now);
+            $items[] = self::withReply(
+                self::shapeReview($row, $author, $now),
+                $replies[(int) $row->id] ?? null,
+                $viewerId,
+                $prefetched
+            );
         }
 
         return [
@@ -140,6 +159,29 @@ final class CardReviewsService
                 'total_pages' => (int) ceil($total / $perPage),
             ],
         ];
+    }
+
+    /**
+     * F-345: add `reply` (null when none, or hidden) and
+     * `permissions.can_reply` to a shaped review row.
+     *
+     * @param array<string, mixed> $item
+     * @param array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}|null $bundle
+     * @param array<string, mixed>|null $prefetched
+     * @return array<string, mixed>
+     */
+    public static function withReply(array $item, ?array $bundle, int $viewerId, ?array $prefetched): array
+    {
+        $reply = $bundle !== null && $bundle['reply'] !== null
+            ? Plugin::instance()->reviewReplyService()->withAuthor($bundle['reply'], $viewerId, $prefetched)
+            : null;
+
+        $item['reply']       = $reply;
+        $item['permissions'] = [
+            'can_reply' => $bundle['can_reply']
+                ?? ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'not_applicable'],
+        ];
+        return $item;
     }
 
     /**
@@ -185,13 +227,7 @@ final class CardReviewsService
 
     /**
      * @return array{
-     *   items: list<array{
-     *     id: int,
-     *     grade: string,
-     *     text: string,
-     *     posted_at_label: string,
-     *     author: array<string, mixed>
-     *   }>,
+     *   items: list<array<string, mixed>>,
      *   pagination: array{
      *     page: int,
      *     per_page: int,
