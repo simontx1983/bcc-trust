@@ -81,5 +81,23 @@ namespace BCC\Trust\Tests\Unit {
                 'report_user'
             );
         }
+
+        /**
+         * #669 review: user_not_found says whether an account id exists, so it
+         * sits BEHIND the per-minute throttle; ahead of it, anyone signed in
+         * could probe user ids at full speed.
+         */
+        public function testTheUserLookupIsBehindTheThrottle(): void
+        {
+            $body = GateOrder::body(
+                GateOrder::code('app/Domain/Disputes/Controllers/DisputeController.php'),
+                'report_user'
+            );
+            GateOrder::assertOrder(
+                $body,
+                ["\$this->throttle('report_user'", 'get_userdata( $reported_id )', "'user_not_found'"],
+                'report_user'
+            );
+        }
     }
 }
