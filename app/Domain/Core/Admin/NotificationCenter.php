@@ -172,7 +172,8 @@ final class NotificationCenter
             try {
                 $pending = $count !== null
                     ? (int) $count()
-                    : \BCC\Trust\Core\Plugin::instance()->contentReportRepository()->countForAdmin(0);
+                    : \BCC\Trust\Core\Plugin::instance()->contentReportRepository()
+                        ->countForAdmin(\BCC\Trust\Core\Services\ModerationQueueService::STATUS_PENDING);
             } catch (\Throwable $e) {
                 return null; // a banner is not worth a failed admin page
             }

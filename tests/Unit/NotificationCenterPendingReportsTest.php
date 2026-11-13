@@ -2,29 +2,6 @@
 
 declare(strict_types=1);
 
-namespace {
-    if (!defined('ABSPATH')) {
-        define('ABSPATH', sys_get_temp_dir() . '/');
-    }
-    if (!defined('BCC_FRONTEND_ORIGIN')) {
-        define('BCC_FRONTEND_ORIGIN', 'https://front.example, regex:^https://preview-.*$');
-    }
-    $GLOBALS['__f315_transients'] = [];
-    if (!function_exists('get_transient')) {
-        function get_transient(string $key)
-        {
-            return $GLOBALS['__f315_transients'][$key] ?? false;
-        }
-    }
-    if (!function_exists('set_transient')) {
-        function set_transient(string $key, $value, int $ttl = 0): bool
-        {
-            $GLOBALS['__f315_transients'][$key] = $value;
-            return true;
-        }
-    }
-}
-
 namespace BCC\Trust\Tests\Unit {
 
     use BCC\Trust\Core\Admin\NotificationCenter;
@@ -43,6 +20,8 @@ namespace BCC\Trust\Tests\Unit {
     {
         protected function setUp(): void
         {
+            // Child process only (see the stub file's header).
+            require_once dirname(__DIR__) . '/Stubs/notification-center-pending-reports-stubs.php';
             if (!class_exists(\BCC\Core\Support\FrontendOriginConfig::class)) {
                 require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Support/FrontendOriginConfig.php');
             }
