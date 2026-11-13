@@ -618,9 +618,9 @@ final class PasswordAuthController
      */
     public function forgotPassword(WP_REST_Request $request): WP_REST_Response
     {
-        // Throttle first — IP-bucketed, before any DB lookup or mail
-        // dispatch. Caps email-bomb spam against any one inbox from a
-        // single source.
+        // Throttle first — per network, before any DB lookup or mail
+        // dispatch (F-290: office scale, so a shared NAT doesn't lock
+        // members out of each other's resets).
         if (!\BCC\Core\Security\Throttle::allow('forgot_password', AuthSupport::FORGOT_PASSWORD_RATE_LIMIT, 3600)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many password-reset requests. Try again later.', 429);
         }
@@ -628,6 +628,18 @@ final class PasswordAuthController
         $email = sanitize_email((string) $request->get_param('email'));
         if ($email === '' || !is_email($email)) {
             return ApiResponse::error('bcc_invalid_request', 'A valid email is required.', 422);
+        }
+
+        // ... and per ADDRESS (AuthSupport::allowMailToAddress): tight per
+        // network, looser across networks unless this is a network the
+        // account signs in from — existence-blind either way.
+        if (!AuthSupport::allowMailToAddress(
+            'forgot_password',
+            $email,
+            AuthSupport::FORGOT_PASSWORD_EMAIL_RATE_LIMIT,
+            AuthSupport::FORGOT_PASSWORD_EMAIL_GLOBAL_RATE_LIMIT
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many password-reset requests. Try again later.', 429);
         }
 
         $user = get_user_by('email', $email);
