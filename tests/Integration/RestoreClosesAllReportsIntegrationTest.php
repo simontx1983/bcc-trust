@@ -193,6 +193,39 @@ final class RestoreClosesAllReportsIntegrationTest extends TestCase
         self::assertSame([], $this->auditedClosedPending($r1), 'the audit names no report the restore did not close');
     }
 
+    /**
+     * F-336 review: the UN-UPHELD half. Siblings that a hide upheld (status
+     * 1) are moved to dismissed by the restore, and their report_upheld
+     * credit is reversed through bcc_content_restored_by_admin. When that
+     * UPDATE fails, nothing moved: no credit may be reversed, and the audit
+     * must name no un-upheld report.
+     */
+    public function testAFailedUnupholdReversesNoCreditAndRecordsNothing(): void
+    {
+        [$r1, $r2] = $this->reportAndAutoHide([950001, 950002]);
+        $hide = $this->service->resolve($r1, ModerationQueueService::ACTION_HIDE, self::ADMIN);
+        self::assertTrue($hide['ok'] ?? false, json_encode($hide) ?: '');
+        $r3 = $this->reports->create(950003, 'feed_item', self::ACT_ID, 'spam', '');
+        self::assertGreaterThan(0, $r3);
+
+        $GLOBALS['__bcc_test_actions'] = [];
+        $GLOBALS['wpdb']->clearFaultInjection();
+        $GLOBALS['wpdb']->failQueriesMatching = '/WHERE status = 1 AND id IN/';
+        $restore = $this->service->resolve($r3, ModerationQueueService::ACTION_RESTORE, self::ADMIN);
+        $GLOBALS['wpdb']->clearFaultInjection();
+
+        self::assertTrue($restore['ok'] ?? false, json_encode($restore) ?: '');
+        foreach ([$r1, $r2] as $id) {
+            self::assertSame(ModerationQueueService::STATUS_RESOLVED, $this->reportStatus($id), "report {$id}: the failed UPDATE moved nothing");
+        }
+        $restored = array_values(array_filter(
+            $GLOBALS['__bcc_test_actions'],
+            static fn (array $a): bool => $a[0] === 'bcc_content_restored_by_admin'
+        ));
+        self::assertCount(1, $restored);
+        self::assertSame([], $restored[0][1][3], 'no credit is reversed for a report the restore did not un-uphold');
+    }
+
     public function testADismissStillClosesOnlyTheClickedReport(): void
     {
         $r1 = $this->reports->create(950001, 'feed_item', self::ACT_ID, 'spam', '');
