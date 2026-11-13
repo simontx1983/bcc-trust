@@ -435,6 +435,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Services\\PendingEmailService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/PendingEmailService.php',
         'BCC\\Trust\\Core\\Services\\PolarizationTransitionNotifier' => __DIR__ . '/../..' . '/app/Domain/Core/Services/PolarizationTransitionNotifier.php',
         'BCC\\Trust\\Core\\Services\\PostsService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/PostsService.php',
+        'BCC\\Trust\\Core\\Services\\ProfileVouchLineResolver' => __DIR__ . '/../..' . '/app/Domain/Core/Services/ProfileVouchLineResolver.php',
         'BCC\\Trust\\Core\\Services\\PushDispatcher' => __DIR__ . '/../..' . '/app/Domain/Core/Services/PushDispatcher.php',
         'BCC\\Trust\\Core\\Services\\Quest\\QuestProgressService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Quest/QuestProgressService.php',
         'BCC\\Trust\\Core\\Services\\Quest\\QuestRegistry' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Quest/QuestRegistry.php',
