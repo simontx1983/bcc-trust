@@ -89,7 +89,15 @@ final class Envelope
         // bcc-core is a hard dependency and merges before bcc-trust (PR order),
         // so Throttle::lastDenial() is always present at runtime; class_exists
         // guards only the bcc-core-absent degradation case.
-        if ($status === 429 && class_exists(\BCC\Core\Security\Throttle::class)) {
+        //
+        // ⚠ Only for a 429 that did NOT set its own Retry-After. An endpoint
+        // that knows its exact wait (the 7-day handle cooldown, F-333) is not
+        // a throttle denial, and lastDenial() then describes some EARLIER
+        // throttle call in the request (the shared me_write bucket, 60 s),
+        // which used to overwrite the real wait with "60" (account-flows
+        // review, F-294).
+        $ownRetryAfter = isset($response->get_headers()['Retry-After']);
+        if ($status === 429 && !$ownRetryAfter && class_exists(\BCC\Core\Security\Throttle::class)) {
             $denial = \BCC\Core\Security\Throttle::lastDenial();
             if (is_array($denial)) {
                 $window = max(1, (int) ($denial['window'] ?? 60));
@@ -107,6 +115,34 @@ final class Envelope
                     $data['error']['data'] = $errData;
                     $response->set_data($data);
                 }
+            }
+        }
+
+        // F-288: a 401 `bcc_unauthorized` on a request whose PRESENTED bearer
+        // token failed says why (contract §1.4.3): `bcc_token_expired` (a
+        // plain expiry — refresh and retry) or `bcc_token_invalid` (malformed,
+        // revoked, signed out, superseded — sign out). No token presented
+        // keeps `bcc_unauthorized`; a public route that served the anonymous
+        // view is untouched (it isn't a 401). Status and shape are unchanged.
+        // Not on POST /auth/refresh itself: its 401 means "this token can't
+        // be refreshed" — relabelling a past-grace expiry as
+        // bcc_token_expired ("refresh and retry") would send a
+        // contract-following client round in a loop. The route is
+        // lowercased first (F-337: REST routes match case-insensitively).
+        if ($status === 401
+            && rtrim(strtolower($route), '/') !== '/bcc/v1/auth/refresh'
+            && is_array($data)
+            && is_array($data['error'] ?? null)
+            && ($data['error']['code'] ?? null) === 'bcc_unauthorized'
+        ) {
+            $failure = \BCC\Trust\Core\Support\BearerAuth::presentedTokenFailure();
+            if ($failure !== null) {
+                $expired = $failure === \BCC\Trust\Core\Support\BearerAuth::TOKEN_EXPIRED;
+                $data['error']['code']    = $expired ? 'bcc_token_expired' : 'bcc_token_invalid';
+                $data['error']['message'] = $expired
+                    ? 'Your session has expired. Refresh it and try again.'
+                    : 'Your session is no longer valid. Please sign in again.';
+                $response->set_data($data);
             }
         }
 

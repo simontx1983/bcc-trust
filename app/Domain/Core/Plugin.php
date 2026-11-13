@@ -980,6 +980,15 @@ final class Plugin
     }
 
     private ?Services\WatchingService $watchingService = null;
+    private ?Services\BlockFollowBackfill $blockFollowBackfill = null;
+    public function blockFollowBackfill(): Services\BlockFollowBackfill
+    {
+        return $this->blockFollowBackfill ??= new Services\BlockFollowBackfill(
+            $this->watchingRepository(),
+            fn (int $a, int $b): int => $this->watchingService()->severFollowsBetween($a, $b)
+        );
+    }
+
     public function watchingService(): Services\WatchingService
     {
         return $this->watchingService ??= new Services\WatchingService(

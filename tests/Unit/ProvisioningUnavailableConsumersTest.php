@@ -395,6 +395,32 @@ final class ProvisioningUnavailableConsumersTest extends TestCase
         );
     }
 
+    /**
+     * F-313 (M9): another run holds the collection's lock, so NOTHING was
+     * created. It used to fall through to success and the row read
+     * "Community created". Now: an error carrying the server's message, no
+     * PeepSo call, no state write, and no durable failure audit row — the
+     * same posture as `unavailable`, because no conclusion was reached.
+     */
+    public function testABusyCollectionIsAnErrorNotACreatedCommunity(): void
+    {
+        $this->seedRequested(self::CID, self::ADDRESS);
+        \BCC\Core\DB\AdvisoryLock::$acquirable = false;
+        $this->armAjax(self::CID);
+
+        $response = $this->invokeAjax();
+
+        self::assertFalse($response->success, 'a busy collection must never read as "Community created"');
+        self::assertStringContainsString('nothing was created', $response->message());
+        self::assertSame(0, \BccPeepSoSpy::$created);
+        self::assertSame([], \BCC\Trust\Onchain\Repositories\CollectionRepository::$stateWrites);
+        self::assertNotContains(
+            'admin_vc_community_provision_failed',
+            \BCC\Trust\Core\Security\AuditLogger::actions(),
+            'a lock held by another run is not a refusal of this collection'
+        );
+    }
+
     /** The healthy AJAX path is unchanged. */
     public function testAHealthyAjaxProvisionStillReturnsSuccess(): void
     {

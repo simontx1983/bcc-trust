@@ -121,7 +121,58 @@ namespace BCC\Trust\Core\REST {
     }
 }
 
+namespace BCC\Trust\Core\Services {
+    // F-333: HandleService::nextChangeAt() (profile-prefs `handle_next_change_at`)
+    // reads the cooldown meta from this namespace; same store as above.
+    if (!function_exists(__NAMESPACE__ . '\get_user_meta')) {
+        /** @return mixed */
+        function get_user_meta(int $userId, string $key = '', bool $single = false)
+        {
+            return $GLOBALS['__bcc_prefs_meta'][$userId][$key] ?? '';
+        }
+    }
+}
+
 namespace BCC\Trust\Core\Support {
+    // ⚠ F-341: /me/profile-prefs now reads and writes the §K2 flags through
+    // PrivacySettings, which lives in THIS namespace — so its unqualified
+    // meta calls resolve here, not in BCC\Trust\Core\REST. Without these
+    // shims the whole suite fatals with "Call to undefined function".
+    //
+    // Deliberately backed by the SAME `__bcc_prefs_meta` fixture as the
+    // REST-namespace pair above, so a PrivacySettings write (e.g.
+    // `bcc_privacy_reviews_hidden`) lands where this suite already looks
+    // and the two namespaces cannot disagree about stored state.
+    if (!function_exists(__NAMESPACE__ . '\get_user_meta')) {
+        /** @return mixed */
+        function get_user_meta(int $userId, string $key = '', bool $single = false)
+        {
+            unset($single);
+
+            return $GLOBALS['__bcc_prefs_meta'][$userId][$key] ?? '';
+        }
+    }
+
+    if (!function_exists(__NAMESPACE__ . '\update_user_meta')) {
+        /** @param mixed $value */
+        function update_user_meta(int $userId, string $key, $value): bool
+        {
+            // Same semantics as the REST shim: an UNCHANGED value is not
+            // written and returns false, which is NOT an error — DbWriteCheck
+            // must not read it as one.
+            if (($GLOBALS['__bcc_prefs_meta'][$userId][$key] ?? null) === $value) {
+                return false;
+            }
+            \bcc_prefs_write(['meta', $key, $value]);
+            if ($GLOBALS['wpdb']->last_error !== '') {
+                return false;
+            }
+            $GLOBALS['__bcc_prefs_meta'][$userId][$key] = $value;
+
+            return true;
+        }
+    }
+
     if (!function_exists(__NAMESPACE__ . '\get_option')) {
         /**
          * @param  mixed $default

@@ -146,6 +146,20 @@ final class MyProfilePrefsEndpointAtomicityTest extends TestCase
      * Nothing failed, which is why it survived. The test is a READ
      * assertion because the read is where the information was lost.
      */
+    /** F-333: the owner's read says when the handle may next change. */
+    public function testTheReadCarriesHandleNextChangeAt(): void
+    {
+        $data = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(['hide_online' => true]))
+            ->get_data()['data'];
+        self::assertNull($data['handle_next_change_at'], 'never renamed: can change now');
+
+        $changed = time() - 3600;
+        $GLOBALS['__bcc_prefs_meta'][self::USER_ID]['bcc_handle_last_changed'] = (string) $changed;
+        $data = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(['hide_online' => false]))
+            ->get_data()['data'];
+        self::assertSame(gmdate('Y-m-d\TH:i:s\Z', $changed + 604800), $data['handle_next_change_at']);
+    }
+
     public function testAStored30IsReportedAsFriendsAndNotAsMembers(): void
     {
         $GLOBALS['__bcc_prefs_meta'][self::USER_ID]['peepso_last_used_post_privacy'] = '30';

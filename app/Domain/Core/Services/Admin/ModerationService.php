@@ -64,6 +64,7 @@ final class ModerationService
         'admin'             => 'an administrator cannot be suspended; remove their admin role first',
         'already_suspended' => 'already suspended',
         'unverifiable'      => 'could not check whether they are already suspended; try again',
+        'not_suspended'     => 'was not suspended',
     ];
 
     /** Per-admin, short-lived: the names a bulk or ring suspend skipped, for the next page view. */
@@ -166,16 +167,33 @@ final class ModerationService
     /**
      * Unsuspend atomically, then the after-commit cache flush (F-114).
      *
+     * The flush/fan-out runs UNCONDITIONALLY: the single Unsuspend uses this
+     * too, and a second click there is how a lost after-commit notify (the
+     * Permissions cache refresh + re-score fan-out) gets repaired. The
+     * returned bool only feeds the bulk count, audit and skip list (F-315
+     * L3), so a stale cached "not suspended" can at worst miscount, never
+     * skip the refresh (#670 review).
+     *
+     * @return bool whether the member WAS suspended (flag set or an open
+     *              suspension row)
      * @throws \Throwable when the transaction fails (nothing was written)
      */
-    private function unsuspendAtomically(int $userId, int $adminId): void
+    private function unsuspendAtomically(int $userId, int $adminId): bool
     {
-        \BCC\Trust\Core\Security\TransactionManager::run(function () use ($userId, $adminId) {
-            $this->suspensionRepository->closeActive($userId, $adminId);
+        $wasSuspended = (bool) \BCC\Trust\Core\Security\TransactionManager::run(function () use ($userId, $adminId) {
+            // Throws on a failed read: the transaction rolls back and the
+            // caller reports a failure instead of guessing the state.
+            $info   = $this->userInfoRepository->getByUserIdOrThrow($userId);
+            $flag   = $info !== null && (int) ($info->is_suspended ?? 0) === 1;
+            $closed = $this->suspensionRepository->closeActive($userId, $adminId);
             $this->userInfoRepository->unsuspendUser($userId);
+            // Non-false either way: TransactionManager treats `false` as a
+            // rollback request.
+            return ($flag || $closed > 0) ? 1 : 0;
         });
 
         $this->afterCommit('notify', $userId, fn () => $this->userInfoRepository->notifySuspensionChanged($userId));
+        return $wasSuspended;
     }
 
     /**
@@ -900,6 +918,8 @@ final class ModerationService
                     try {
                         $this->suspendAtomically($uid, $adminId, 'vote_ring', $note);
                         $suspended++;
+                        // F-315 (L2): per-member audit, as a single suspend.
+                        $this->logAction('admin_suspend', $uid, ['reason' => 'vote_ring', 'notes' => $note, 'via' => 'ring']);
                     } catch (\Throwable $e) {
                         // Skip this user but keep going; count only the ones
                         // that actually landed atomically.
@@ -916,6 +936,12 @@ final class ModerationService
                     'skipped'    => $skipped,
                     'note'       => $note,
                 ]);
+                if ($suspended > 0) {
+                    // F-315 (L2): the suspended flag rides on the anon
+                    // /members cards — drop the edge copies, as a single
+                    // suspend does.
+                    EdgeCache::purge(EdgeCache::TAG_MEMBERS);
+                }
                 $this->rememberSuspendSkips($adminId, $skipped);
 
                 $msg = 'suspended_' . $suspended . '_skipped_' . count($skipped);
@@ -1020,6 +1046,7 @@ final class ModerationService
         $processed = 0;
         /** @var array<int, string> $skipped */
         $skipped   = [];
+        $membersChanged = false;
 
         foreach ($userIds as $uid) {
             switch ($action) {
@@ -1032,6 +1059,10 @@ final class ModerationService
                     try {
                         $this->suspendAtomically($uid, $adminId, 'manual_suspension', '');
                         $processed++;
+                        $membersChanged = true;
+                        // F-315 (L2): the same per-member audit row a single
+                        // suspend writes, not only the aggregate below.
+                        $this->logAction('admin_suspend', $uid, ['reason' => 'manual_suspension', 'notes' => '', 'via' => 'bulk']);
                     } catch (\Throwable $e) {
                         // Log + skip; count only users who actually suspended,
                         // so the "N processed" report can't claim a swallowed
@@ -1045,8 +1076,13 @@ final class ModerationService
 
                 case 'unsuspend':
                     try {
-                        $this->unsuspendAtomically($uid, $adminId);
-                        $processed++;
+                        if ($this->unsuspendAtomically($uid, $adminId)) {
+                            $processed++;
+                            $membersChanged = true;
+                            $this->logAction('admin_unsuspend', $uid, ['via' => 'bulk']);
+                        } else {
+                            $skipped[$uid] = 'not_suspended';
+                        }
                     } catch (\Throwable $e) {
                         Logger::error('[bcc-trust] bulk_unsuspend_failed', [
                             'user_id'  => $uid,
@@ -1093,6 +1129,11 @@ final class ModerationService
             'skipped'   => $skipped,
         ]);
         $this->rememberSuspendSkips($adminId, $skipped);
+        if ($membersChanged) {
+            // F-315 (L2): once per bulk run, as a single suspend/unsuspend
+            // does per member — the anon /members cards carry the flag.
+            EdgeCache::purge(EdgeCache::TAG_MEMBERS);
+        }
 
         wp_safe_redirect(add_query_arg(
             ['bulk' => $processed, 'bulk_skipped' => count($skipped)],

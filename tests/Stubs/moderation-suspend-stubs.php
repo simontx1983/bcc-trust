@@ -116,6 +116,7 @@ namespace BCC\Trust\Infrastructure {
 
         public static function purge(string $tag): void
         {
+            $GLOBALS['__bcc_ms']['purged'][] = $tag;
         }
     }
 }

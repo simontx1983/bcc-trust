@@ -186,13 +186,19 @@ final class PasswordAuthController
             return ApiResponse::error($err, AuthSupport::handleErrorMessage($err), 422);
         }
 
+        // F-285: a sign-up that was never confirmed and can never sign in
+        // (see isAbandonedEmailSignup) stops holding this handle or email
+        // after ABANDONED_SIGNUP_SECONDS, so a mistyped address or an
+        // abandoned attempt does not block it forever.
+        self::reclaimAbandonedSignups($handle, $email);
+
         // Fast-path collision check — UX shortcut so 99% of duplicates
         // get a clean 409 without spinning up wp_insert_user. The
         // remaining race window (a winning concurrent signup that
         // claims this handle between here and our wp_insert_user)
         // is closed below by the wp_users.user_login UNIQUE constraint.
         if (!$handleService->isAvailable($handle)) {
-            return ApiResponse::error('bcc_conflict', 'That handle is already taken.', 409);
+            return ApiResponse::error('bcc_conflict', self::TAKEN_HANDLE, 409);
         }
 
         // wp_insert_user requires a unique user_login. We mint an internal
@@ -230,12 +236,12 @@ final class PasswordAuthController
             $code = $userId->get_error_code();
             if ($code === 'existing_user_login' || AuthSupport::isDuplicateKeyError($userId)) {
                 // Race lost on handle uniqueness.
-                return ApiResponse::error('bcc_conflict', 'That handle is already taken.', 409);
+                return ApiResponse::error('bcc_conflict', self::TAKEN_HANDLE, 409);
             }
             if ($code === 'existing_user_email') {
                 return ApiResponse::error(
                     'bcc_conflict',
-                    'An account with that email already exists.',
+                    self::TAKEN_EMAIL,
                     409
                 );
             }
@@ -277,6 +283,97 @@ final class PasswordAuthController
         $response->header('Cache-Control', 'no-store');
 
         return $response;
+    }
+
+    /**
+     * F-285: how long a never-confirmed email sign-up keeps its handle and
+     * email before another sign-up may take them (user-approved: 7 days).
+     */
+    public const ABANDONED_SIGNUP_SECONDS = 7 * 86400;
+
+    /** F-285 copy (user-approved) for a sign-up's handle / email 409. */
+    private const TAKEN_HANDLE = 'That handle is taken. If it\'s yours from an unfinished sign-up, check your email for the confirmation link; unconfirmed sign-ups free up after 7 days.';
+    private const TAKEN_EMAIL  = 'An account with that email already exists. If it\'s yours from an unfinished sign-up, check your email for the confirmation link; unconfirmed sign-ups free up after 7 days.';
+
+    /**
+     * A PURE email-signup account still waiting on email confirmation:
+     * created by password signup (bcc_has_password '1'), email never proven
+     * (_bcc_email_verified exactly '0'), and NO other way in — no OAuth
+     * link and no linked wallet. Such an account can never have signed in:
+     * the password sign-in gate refuses '0' and there is no other
+     * credential. Shared by F-285 (reclaim) and F-287 (a reset confirms it).
+     *
+     * Fails closed: an unreadable wallet list counts as "has a wallet".
+     */
+    private static function isPendingEmailSignup(int $userId): bool
+    {
+        if ($userId <= 0
+            || (string) get_user_meta($userId, AuthSupport::META_EMAIL_VERIFIED, true) !== '0'
+            || (string) get_user_meta($userId, \BCC\Trust\Core\Services\AccountRecoveryService::META_HAS_PASSWORD, true) !== '1'
+        ) {
+            return false;
+        }
+        foreach (array_keys((array) get_user_meta($userId)) as $metaKey) {
+            if (str_starts_with((string) $metaKey, AuthSupport::META_OAUTH_PREFIX)) {
+                return false;
+            }
+        }
+        try {
+            return \BCC\Trust\Onchain\Repositories\WalletRepository::getForUserOrThrow($userId) === [];
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /** isPendingEmailSignup(), registered more than ABANDONED_SIGNUP_SECONDS ago (F-285). */
+    private static function isAbandonedEmailSignup(int $userId): bool
+    {
+        $user = get_userdata($userId);
+        if (!($user instanceof \WP_User)) {
+            return false;
+        }
+        // user_registered is WordPress core's UTC column.
+        $registered = strtotime((string) $user->user_registered . ' UTC');
+        if ($registered === false || $registered > time() - self::ABANDONED_SIGNUP_SECONDS) {
+            return false;
+        }
+        return self::isPendingEmailSignup($userId);
+    }
+
+    /**
+     * F-285: delete the abandoned sign-up (if any) holding this handle — as
+     * its current handle or its u_<handle> login — or this email, so the
+     * sign-up in progress can take them. Hard delete (user-approved): the
+     * account never signed in, so nothing references it. Audited by user id
+     * only. A live account is never touched; the 409 below still applies.
+     */
+    private static function reclaimAbandonedSignups(string $handle, string $email): void
+    {
+        $candidates = [];
+        $byHandle = HandleService::currentOwner($handle);
+        if ($byHandle !== null) {
+            $candidates[] = $byHandle;
+        }
+        $byLogin = username_exists(AuthSupport::deriveLogin($handle));
+        if (is_int($byLogin) && $byLogin > 0) {
+            $candidates[] = $byLogin;
+        }
+        $byEmail = email_exists($email);
+        if (is_int($byEmail) && $byEmail > 0) {
+            $candidates[] = $byEmail;
+        }
+
+        foreach (array_unique($candidates) as $userId) {
+            if (!self::isAbandonedEmailSignup($userId)) {
+                continue;
+            }
+            if (!function_exists('wp_delete_user')) {
+                require_once ABSPATH . 'wp-admin/includes/user.php';
+            }
+            if (wp_delete_user($userId)) {
+                AuditLogger::log('abandoned_signup_reclaimed', $userId, [], 'user', $userId);
+            }
+        }
     }
 
     public function login(WP_REST_Request $request): WP_REST_Response
@@ -632,6 +729,24 @@ final class PasswordAuthController
         // user_activation_key (single-use), and fires the `password_reset`
         // action hook. Returns void.
         reset_password($user, $password);
+
+        // F-287: the reset key was mailed to user_email and came back, which
+        // proves the inbox — so a PURE email-signup account still waiting
+        // on confirmation is confirmed now, instead of the very next sign-in
+        // answering "verify your email". Deliberately NOT for an account
+        // with a wallet or OAuth link: its email may be one someone else
+        // typed (the pre-hijack case), and marking it verified would let the
+        // inbox owner's Google sign-in auto-link INTO an account the other
+        // person still controls. Sessions are revoked just below anyway.
+        if (self::isPendingEmailSignup($userId)) {
+            update_user_meta($userId, AuthSupport::META_EMAIL_VERIFIED, '1');
+            AuthSupport::burnEmailOtp($userId);
+            Logger::audit('email_verified', [
+                'user_id' => $userId,
+                'via'     => 'password_reset',
+            ]);
+            do_action('bcc_email_verified', $userId);
+        }
 
         // Revoke every outstanding bearer JWT for this user. reset_password()
         // clears WP session tokens, but BCC JWTs are self-contained and only

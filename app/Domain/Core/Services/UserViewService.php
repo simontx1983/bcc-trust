@@ -55,6 +55,7 @@ use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\CountPrivacy;
 use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\ProfileGroupVisibility;
+use BCC\Trust\Core\Support\ProfileSectionVisibility;
 use BCC\Trust\Core\Support\ReactionTypeRegistry;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Core\Support\WalletAddressValidator;
@@ -131,7 +132,7 @@ final class UserViewService
         $tier         = $this->reputationRepo->getTier($userId);
         $handle       = self::resolveHandle($user);
         $followCounts = PeepSoFollowerRepository::getCounts($userId);
-        $halls        = $this->resolveHalls($userId, $viewerId);
+        $halls        = $this->resolveHalls($userId, $viewerId, true);
         $primaryHall  = $this->resolvePrimaryHall($userId, $halls);
 
         // Member state (Rank redesign Phase 5) — prefer the prefetched
@@ -177,11 +178,18 @@ final class UserViewService
             'current_rank_label'  => $state['rank_label'],
             'is_in_good_standing' => self::isInGoodStanding($tier),
             'flags'               => self::resolveFlags($userId),
-            'bio'                 => self::resolveBio($user),
+            // F-341 — the ABOUT section. A documented EMPTY (null), never
+            // an omitted key: a missing key breaks the client's shape, and
+            // a refusal would disclose that something is being withheld.
+            'bio'                 => ProfileSectionVisibility::hides(
+                ProfileSectionVisibility::SECTION_ABOUT,
+                $userId,
+                $viewerId
+            ) ? null : self::resolveBio($user),
             'primary_hall'        => $primaryHall,
             'halls'               => $halls,
             'wallets'             => self::resolveWallets($userId, $isSelf),
-            'counts'              => $this->resolveCounts($userId, $followCounts, $isSelf, $privacy, $prefetched),
+            'counts'              => $this->resolveCounts($userId, $followCounts, $isSelf, $privacy, $prefetched, $viewerId),
             'privacy'             => $privacy,
             'permissions'         => $this->resolvePermissions($userId, $viewerId, $isSelf),
             // §K1 Phase A — true when the viewer is currently blocking
@@ -523,6 +531,42 @@ final class UserViewService
             $walletsVerified = $prefetched['wallets_verified_counts'][$userId] ?? 0;
         } else {
             $walletsVerified = WalletRepository::getVerifiedCountsForUsers([$userId])[$userId] ?? 0;
+        }
+
+        // ── F-341 section privacy, applied to the INPUTS ───────────────
+        //
+        // ⚠ GATED HERE because this method feeds the member CARD (and its
+        // `member_dossier`) as well as the profile. The same fact on two
+        // surfaces has to be narrowed in one place, or it leaks on the one
+        // that was forgotten — which is exactly what F-283 was.
+        //
+        // ⭐ The INPUTS are narrowed rather than the array literal below,
+        // deliberately: nulling the connections makes the existing
+        // expressions yield precisely the hidden values (claims false,
+        // usernames null, count 0), so the emitted SHAPE is unchanged. A
+        // ternary per field instead made PHPStan infer a union of two array
+        // shapes and stop matching this method's declared return.
+        if (ProfileSectionVisibility::hides(
+            ProfileSectionVisibility::SECTION_OPERATOR,
+            $userId,
+            $viewerId
+        )) {
+            $ownedPagesCount  = 0;
+            // ⚠ NOT `[]`. The declared shape is sealed —
+            // array{validator: int, project: int, nft: int, dao: int} — so an
+            // empty array neither type-checks nor serves the client, which
+            // would have to special-case a different shape. Zeroes keep the
+            // documented-empty promise AND the wire shape.
+            $ownedPagesByType = ['validator' => 0, 'project' => 0, 'nft' => 0, 'dao' => 0];
+        }
+        if (ProfileSectionVisibility::hides(
+            ProfileSectionVisibility::SECTION_VERIFICATIONS,
+            $userId,
+            $viewerId
+        )) {
+            $xConnection      = null;
+            $githubConnection = null;
+            $walletsVerified  = 0;
         }
 
         return [
@@ -895,12 +939,21 @@ final class UserViewService
      * for a non-owner viewer it is DROPPED rather than shown. Previously
      * such a group was listed unconditionally.
      *
-     * The OWNER's own view is deliberately byte-identical to before -
-     * no filter, and no resolver call at all.
+     * The OWNER's own view is deliberately unfiltered. Without $withRoles
+     * it makes no resolver call at all; with them, one batched call
+     * supplies each row's `type`.
      *
-     * @return list<array{id: int, slug: string, name: string, is_primary: bool}>
+     * $withRoles (the full profile only): each row also carries the
+     * member's `role` / `role_label` in that group (GroupRole, the roster's
+     * vocabulary) — but ONLY where this viewer could already see that
+     * group's roster (§4.7.7): the member themself, an open group or a
+     * Hall, or a group the viewer is an active member of. Elsewhere both
+     * are null, so a profile never reveals who moderates a closed group. A
+     * failed status read is null too, never a guessed role.
+     *
+     * @return list<array{id: int, slug: string, name: string, is_primary: bool, role?: string|null, role_label?: string|null, type?: string|null}>
      */
-    private function resolveHalls(int $userId, int $viewerId): array
+    private function resolveHalls(int $userId, int $viewerId, bool $withRoles = false): array
     {
         if ($userId <= 0) {
             return [];
@@ -919,9 +972,12 @@ final class UserViewService
 
         // F-270 / F-323 - what may THIS viewer see of them? Skipped
         // entirely for the owner, who always sees their own groups.
-        if ($viewerId <= 0 || $viewerId !== $userId) {
-            $visible = ProfileGroupVisibility::filter(
-                Plugin::instance()->groupContextResolver()->forManyGroups($myGroupIds),
+        $isSelf   = $viewerId > 0 && $viewerId === $userId;
+        $contexts = [];
+        if (!$isSelf) {
+            $contexts = Plugin::instance()->groupContextResolver()->forManyGroups($myGroupIds);
+            $visible  = ProfileGroupVisibility::filter(
+                $contexts,
                 $userId,
                 $viewerId
             );
@@ -939,20 +995,68 @@ final class UserViewService
         $primaryGroupId = self::loadPrimaryGroupId($userId);
         $groupInfo      = PeepSoGroupRepository::findManyByIds($myGroupIds);
 
+        // Roles: the member's status per group, and (for anyone but the
+        // member) the viewer's, each in ONE batched read. A failed read is
+        // null → no role shown for it.
+        $memberStatuses = $withRoles
+            ? PeepSoGroupRepository::findUserMembershipStatuses($userId, $myGroupIds)
+            : null;
+        $viewerStatuses = ($withRoles && !$isSelf && $viewerId > 0)
+            ? PeepSoGroupRepository::findUserMembershipStatuses($viewerId, $myGroupIds)
+            : null;
+        // The row's group kind (hall | user | system | nft | validator), so
+        // a client can tell a Hall from any other group. The owner's own
+        // view resolved no contexts above; one batched call here.
+        if ($withRoles && $contexts === []) {
+            $contexts = Plugin::instance()->groupContextResolver()->forManyGroups($myGroupIds);
+        }
+
         $items = [];
         foreach ($myGroupIds as $groupId) {
             $info = $groupInfo[$groupId] ?? null;
             if ($info === null) {
                 continue;
             }
-            $items[] = [
+            $item = [
                 'id'         => $groupId,
                 'slug'       => $info->post_name,
                 'name'       => $info->post_title,
                 'is_primary' => $primaryGroupId === $groupId,
             ];
+            if ($withRoles) {
+                $role = null;
+                $raw  = $memberStatuses[$groupId] ?? null;
+                if ($raw !== null && self::rosterVisible($isSelf, $contexts[$groupId] ?? null, $viewerStatuses[$groupId] ?? null)) {
+                    $role = \BCC\Trust\Core\Support\GroupRole::normalize($raw);
+                }
+                $item['role']       = $role;
+                $item['role_label'] = $role !== null ? \BCC\Trust\Core\Support\GroupRole::label($role) : null;
+                $item['type']       = isset($contexts[$groupId]) ? $contexts[$groupId]->type->value : null;
+            }
+            $items[] = $item;
         }
         return $items;
+    }
+
+    /**
+     * Could this viewer already see the group's roster? The member
+     * themself always; anyone else by the group page's OWN rule
+     * (GroupsService::resolveMembersVisible — open → everyone, closed /
+     * secret → active members only, no exception for Halls), so the badge
+     * and the member list can never disagree. An unresolved context fails
+     * closed (not visible).
+     */
+    private static function rosterVisible(bool $isSelf, ?\BCC\Trust\Core\ValueObjects\GroupContext $ctx, ?string $viewerStatus): bool
+    {
+        if ($isSelf) {
+            return true;
+        }
+        if ($ctx === null) {
+            return false;
+        }
+        $viewerIsMember = $viewerStatus !== null
+            && in_array($viewerStatus, CommentService::READ_ALLOWED_STATUSES, true);
+        return GroupsService::resolveMembersVisible($ctx, $viewerIsMember);
     }
 
     /**
@@ -1037,7 +1141,7 @@ final class UserViewService
      * (Plus reviews_received + blog_posts_written — see the return
      * block; the phpstan shape above narrows only the legacy keys.)
      */
-    private function resolveCounts(int $userId, array $followCounts, bool $isSelf, array $privacy, ?array $prefetched = null): array
+    private function resolveCounts(int $userId, array $followCounts, bool $isSelf, array $privacy, ?array $prefetched = null, int $viewerId = 0): array
     {
         // Prefer the shared member batch where a key exists — identical
         // repository sources (countByVoters / countByReporters /
@@ -1088,7 +1192,13 @@ final class UserViewService
             // by the user. Sourced from peepso_activities rows where
             // act_module_id='blog' joined against wp_posts for the
             // published filter. Mirrors what /u/:handle/blog renders.
-            'blog_posts_written' => \BCC\Core\Repositories\PeepSoActivityRepository::countBlogsByAuthor($userId),
+            // F-341 — the BLOGS section. Zeroed rather than omitted, like
+            // every other governed count (§K2, F-283).
+            'blog_posts_written' => ProfileSectionVisibility::hides(
+                ProfileSectionVisibility::SECTION_BLOGS,
+                $userId,
+                $viewerId
+            ) ? 0 : \BCC\Core\Repositories\PeepSoActivityRepository::countBlogsByAuthor($userId),
         ], $privacy, $isSelf);
     }
 

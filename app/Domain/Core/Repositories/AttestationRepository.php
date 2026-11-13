@@ -106,6 +106,134 @@ final class AttestationRepository
     private const COLUMNS = 'id, attestor_user_id, target_kind, target_id, kind, weight_at_time, context_note, attestation_order_in_target, created_at, reaffirmed_at, revoked_at';
 
     /**
+     * F-340: how many of the people `$viewerId` watches vouch for member
+     * `$ownerId` — "Vouched for by N people you watch" on the profile.
+     *
+     * Exact and uncapped: one COUNT(DISTINCT) over the eligible vouches
+     * (eligibleProfileVouchSql) joined to the viewer's ACTIVE PeepSo
+     * follows (watching a person = following them), never a page of
+     * either list. Also leaves out an attestor mutually blocked with the
+     * viewer, and the viewer.
+     *
+     * @throws RepositoryReadFailure when the read did not run (the line
+     *         then reads as unknown, never as a wrong number)
+     */
+    public function countProfileVouchesByWatched(int $ownerId, int $viewerId): int
+    {
+        if ($ownerId <= 0 || $viewerId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        [$from, $params] = self::eligibleProfileVouchSql($ownerId);
+        $follows = $wpdb->prefix . 'peepso_user_followers';
+        $blocks  = $wpdb->prefix . 'peepso_blocks';
+
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT COUNT(DISTINCT a.attestor_user_id) AS n
+               {$from}
+                AND a.attestor_user_id <> %d
+                AND EXISTS (
+                    SELECT 1 FROM `{$follows}` f
+                     WHERE f.uf_active_user_id  = %d
+                       AND f.uf_passive_user_id = a.attestor_user_id
+                       AND f.uf_follow = 1
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM `{$blocks}` b
+                     WHERE (b.blk_user_id = %d AND b.blk_blocked_id = a.attestor_user_id)
+                        OR (b.blk_user_id = a.attestor_user_id AND b.blk_blocked_id = %d)
+                )",
+            ...array_merge($params, [$viewerId, $viewerId, $viewerId, $viewerId])
+        ), __FUNCTION__, true);
+
+        /** @var list<object{n: int|numeric-string}> $rows */
+        return isset($rows[0]->n) ? (int) $rows[0]->n : 0;
+    }
+
+    /**
+     * F-340: the "Top vouched by" voucher ids for a SIGNED-OUT profile
+     * view — the eligible vouchers of member `$ownerId`, highest trust
+     * score first, then the newest vouch. At most $limit (≤ 10).
+     *
+     * @return list<int> attestor user ids, in display order
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public function topProfileVoucherIds(int $ownerId, int $limit = 3): array
+    {
+        if ($ownerId <= 0) {
+            return [];
+        }
+        $limit = max(1, min(10, $limit));
+
+        global $wpdb;
+        [$from, $params] = self::eligibleProfileVouchSql($ownerId);
+        $scores = TableRegistry::scores();
+
+        // A member's score lives on their self-page row (Architecture A):
+        // page_id = MemberSelfPageService::ID_BASE + user_id. No row reads
+        // as the neutral score, as ReputationRepository::getScore() does.
+        $rows = self::runRead($wpdb->prepare(
+            "SELECT a.attestor_user_id AS id
+               {$from}
+               ORDER BY COALESCE(
+                          (SELECT ps.total_score FROM `{$scores}` ps
+                            WHERE ps.page_id = %d + a.attestor_user_id AND ps.category_id = 0
+                            LIMIT 1),
+                          %d
+                        ) DESC,
+                        a.created_at DESC,
+                        a.id DESC
+               LIMIT %d",
+            ...array_merge($params, [
+                \BCC\Trust\Core\Services\MemberSelfPageService::ID_BASE,
+                (int) BCC_TRUST_NEUTRAL_SCORE,
+                $limit,
+            ])
+        ), __FUNCTION__, true);
+
+        /** @var list<object{id: int|numeric-string}> $rows */
+        return array_map(static fn (object $r): int => (int) $r->id, $rows);
+    }
+
+    /**
+     * The vouches a profile's vouch line may count (F-340) — a STRICT
+     * SUBSET of what the public attestation roster shows (getForTarget:
+     * active `vouch` rows whose attestor still exists), so the line can
+     * never reveal a vouch the roster would not:
+     *   - kind `vouch` only (a "back" / stand_behind is a separate signal);
+     *   - not revoked;
+     *   - the attestor exists (wp_users);
+     *   - the attestor is not suspended (user_info.is_suspended, F-182).
+     *
+     * A member who hid their real name still COUNTS: the roster lists them
+     * (as @handle), and a hidden name is not hidden participation, so the
+     * line must agree with the roster ("3 people you watch" while the
+     * roster shows 4 would be the surprise). Their name is masked where
+     * it is rendered (PublicIdentity), not here.
+     *
+     * @return array{0: string, 1: list<int|string>} FROM…WHERE SQL ending
+     *         in a WHERE clause (append `AND …`), and its bound params
+     */
+    private static function eligibleProfileVouchSql(int $ownerId): array
+    {
+        global $wpdb;
+        $att      = TableRegistry::trustAttestations();
+        $userInfo = TableRegistry::userInfo();
+
+        $sql = "FROM `{$att}` a
+               INNER JOIN {$wpdb->users} u ON u.ID = a.attestor_user_id
+               LEFT JOIN `{$userInfo}` ui ON ui.user_id = a.attestor_user_id
+              WHERE a.target_kind = 'user_profile'
+                AND a.target_id   = %d
+                AND a.kind        = 'vouch'
+                AND a.revoked_at IS NULL
+                AND COALESCE(ui.is_suspended, 0) = 0";
+
+        return [$sql, [$ownerId]];
+    }
+
+    /**
      * Find the viewer's active (non-revoked) attestations against a
      * specific target. Returns rows for both kinds in a single
      * round-trip — feeds the FE's `viewer_attestation` field which
