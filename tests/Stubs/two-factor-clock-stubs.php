@@ -92,6 +92,12 @@ namespace BCC\Core\Security {
          */
         final class Throttle
         {
+            /** F-281: login network recording on 2FA completion reads this. */
+            public static function clientIp(): string
+            {
+                return '203.0.113.7';
+            }
+
             public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null): bool
             {
                 $bucketKey = $key ?? $action;
