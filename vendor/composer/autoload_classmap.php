@@ -195,6 +195,7 @@ return array(
     'BCC\\Trust\\Core\\Services\\Admin\\RepairService' => $baseDir . '/app/Domain/Core/Services/Admin/RepairService.php',
     'BCC\\Trust\\Core\\Services\\Admin\\TrustDebugService' => $baseDir . '/app/Domain/Core/Services/Admin/TrustDebugService.php',
     'BCC\\Trust\\Core\\Services\\AnnouncementCommentService' => $baseDir . '/app/Domain/Core/Services/AnnouncementCommentService.php',
+    'BCC\\Trust\\Core\\Services\\AnnouncementModerationService' => $baseDir . '/app/Domain/Core/Services/AnnouncementModerationService.php',
     'BCC\\Trust\\Core\\Services\\AnnouncementViewService' => $baseDir . '/app/Domain/Core/Services/AnnouncementViewService.php',
     'BCC\\Trust\\Core\\Services\\AnnouncementWriteService' => $baseDir . '/app/Domain/Core/Services/AnnouncementWriteService.php',
     'BCC\\Trust\\Core\\Services\\AttestationException' => $baseDir . '/app/Domain/Core/Services/AttestationException.php',

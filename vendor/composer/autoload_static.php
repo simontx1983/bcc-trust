@@ -351,6 +351,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Services\\Admin\\RepairService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Admin/RepairService.php',
         'BCC\\Trust\\Core\\Services\\Admin\\TrustDebugService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Admin/TrustDebugService.php',
         'BCC\\Trust\\Core\\Services\\AnnouncementCommentService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/AnnouncementCommentService.php',
+        'BCC\\Trust\\Core\\Services\\AnnouncementModerationService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/AnnouncementModerationService.php',
         'BCC\\Trust\\Core\\Services\\AnnouncementViewService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/AnnouncementViewService.php',
         'BCC\\Trust\\Core\\Services\\AnnouncementWriteService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/AnnouncementWriteService.php',
         'BCC\\Trust\\Core\\Services\\AttestationException' => __DIR__ . '/../..' . '/app/Domain/Core/Services/AttestationException.php',
