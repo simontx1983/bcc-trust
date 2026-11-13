@@ -119,7 +119,7 @@ final class PageOwnerBackfillCandidatesIntegrationTest extends TestCase
     private function candidates(int $after = 0, int $limit = 500): array
     {
         $rows = PeepSoQueryRepository::claimedPagesMissingOwnerRow($after, $limit);
-        self::assertNotNull($rows, 'the read must run');
+        self::assertNotNull($rows, 'the read must run: ' . (string) $GLOBALS['wpdb']->last_error);
 
         return array_values(array_filter($rows, fn (array $r): bool => in_array($r['page_id'], $this->pages, true)));
     }

@@ -168,7 +168,7 @@ final class PeepSoQueryRepository
             "SELECT c.entity_id AS page_id, c.user_id,
                     (SELECT cur.pm_user_status FROM {$members} cur
                       WHERE cur.pm_page_id = c.entity_id AND cur.pm_user_id = c.user_id
-                      ORDER BY cur.pm_id ASC LIMIT 1) AS current_role,
+                      ORDER BY cur.pm_id ASC LIMIT 1) AS claimer_status,
                     (SELECT oth.pm_user_id FROM {$members} oth
                       WHERE oth.pm_page_id = c.entity_id AND oth.pm_user_status = 'member_owner'
                         AND oth.pm_user_id <> c.user_id
@@ -204,7 +204,10 @@ final class PeepSoQueryRepository
                 $out[] = [
                     'page_id'      => (int) $row->page_id,
                     'user_id'      => (int) $row->user_id,
-                    'current_role' => isset($row->current_role) && is_string($row->current_role) ? $row->current_role : null,
+                    // SQL alias `claimer_status`, NOT `current_role`: that is a
+                    // reserved word in MariaDB (CURRENT_ROLE()), a syntax error
+                    // there while MySQL 8 accepts it. Production is MariaDB.
+                    'current_role' => isset($row->claimer_status) && is_string($row->claimer_status) ? $row->claimer_status : null,
                     'other_owner'  => isset($row->other_owner) ? (int) $row->other_owner : 0,
                 ];
             }
