@@ -153,6 +153,21 @@ final class TokenErrorCodesTest extends TestCase
         self::assertSame([401, 'bcc_unauthorized', 'Sign in required.'], self::protectedRouteWith($bad, 401, 'bcc_unauthorized', '/wp/v2/users/me'), 'outside bcc/v1');
     }
 
+    public function testTheRefreshRoutesOwn401IsNotRelabelled(): void
+    {
+        // A token past the refresh grace: refresh refuses it. "Refresh and
+        // retry" would be a loop, so it stays bcc_unauthorized — whatever
+        // case the route arrives in.
+        foreach (['/bcc/v1/auth/refresh', '/BCC/v1/Auth/Refresh', '/bcc/v1/auth/refresh/'] as $route) {
+            self::assertSame(
+                [401, 'bcc_unauthorized', 'Sign in required.'],
+                self::protectedRouteWith(self::expiredToken(), 401, 'bcc_unauthorized', $route),
+                $route
+            );
+        }
+        self::assertSame('bcc_token_expired', self::protectedRouteWith(self::expiredToken(), 401, 'bcc_unauthorized', '/bcc/v1/auth/session')[1], 'other auth routes still say why');
+    }
+
     public function testAPublicRouteStillServesTheAnonymousView(): void
     {
         $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . self::expiredToken();

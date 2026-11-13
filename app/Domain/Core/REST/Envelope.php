@@ -116,7 +116,13 @@ final class Envelope
         // revoked, signed out, superseded — sign out). No token presented
         // keeps `bcc_unauthorized`; a public route that served the anonymous
         // view is untouched (it isn't a 401). Status and shape are unchanged.
+        // Not on POST /auth/refresh itself: its 401 means "this token can't
+        // be refreshed" — relabelling a past-grace expiry as
+        // bcc_token_expired ("refresh and retry") would send a
+        // contract-following client round in a loop. The route is
+        // lowercased first (F-337: REST routes match case-insensitively).
         if ($status === 401
+            && rtrim(strtolower($route), '/') !== '/bcc/v1/auth/refresh'
             && is_array($data)
             && is_array($data['error'] ?? null)
             && ($data['error']['code'] ?? null) === 'bcc_unauthorized'
