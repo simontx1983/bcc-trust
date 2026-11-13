@@ -166,11 +166,11 @@ final class MemberProfileComposer
         //   viewer follows (it used to be derived from the first 50 rows
         //   of /me/watching). false / null for anon and for one's own
         //   profile.
-        /** @var array{follow_id: int, source: 'peepso'|'page'}|null $viewerWatch */
-        $viewerWatch = is_array($prefetched['viewer_watches'] ?? null)
-            ? ($prefetched['viewer_watches'][$userId] ?? null)
-            : null;
-        $base += \BCC\Trust\Core\Services\ViewerWatchResolver::fields($viewerWatch);
+        //   viewer_is_watching is null (unknown) when the read failed.
+        $base += \BCC\Trust\Core\Services\ViewerWatchResolver::fieldsFor(
+            is_array($prefetched['viewer_watches'] ?? null) ? $prefetched['viewer_watches'] : [],
+            $userId
+        );
 
         // ── §J.6 viewer_attestation — does the viewer currently have a
         //   vouch / stand_behind cast against THIS operator? Drives the

@@ -272,11 +272,11 @@ final class CardViewService
         // how many things a member watches). Batched by the prefetcher;
         // one resolve on the single-card path.
         if ($viewerId <= 0) {
-            $viewerWatch = null;
+            $watchFields = ViewerWatchResolver::fieldsFor([], $pageId);
         } elseif ($prefetched !== null && isset($prefetched['viewer_watches'])) {
-            $viewerWatch = $prefetched['viewer_watches'][$pageId] ?? null;
+            $watchFields = ViewerWatchResolver::fieldsFor($prefetched['viewer_watches'], $pageId);
         } else {
-            $viewerWatch = $this->viewerWatches()->forPages($viewerId, [$pageId])[$pageId] ?? null;
+            $watchFields = ViewerWatchResolver::fieldsFor($this->viewerWatches()->forPages($viewerId, [$pageId]), $pageId);
         }
 
         if ($prefetched !== null && isset($prefetched['endorse_eligibility'])) {
@@ -417,10 +417,11 @@ final class CardViewService
             // F-255 — is the viewer watching this card, and the handle
             // `DELETE /me/watching/:follow_id[?source=page]` takes. The
             // source of truth for every watch button; never derive it from
-            // a page of /me/watching. null / false for anonymous viewers
-            // and for the viewer's own card.
-            'viewer_is_watching'  => $viewerWatch !== null,
-            'viewer_watch'        => $viewerWatch,
+            // a page of /me/watching. false / null for anonymous viewers
+            // and for the viewer's own card; viewer_is_watching is null
+            // (unknown) when the read that answers it failed.
+            'viewer_is_watching'  => $watchFields['viewer_is_watching'],
+            'viewer_watch'        => $watchFields['viewer_watch'],
             // §V1.5 — true when the current viewer has already vouched for
             // this page (= holds an active vouch attestation on it).
             // Drives the entity-page vouch button's idle → "REMOVE" CTA
@@ -806,11 +807,11 @@ final class CardViewService
         // F-255: the viewer's watch (follow) of this member — see the page
         // card branch.
         if ($viewerId <= 0) {
-            $viewerWatch = null;
+            $watchFields = ViewerWatchResolver::fieldsFor([], $userId);
         } elseif ($prefetched !== null && isset($prefetched['viewer_watches'])) {
-            $viewerWatch = $prefetched['viewer_watches'][$userId] ?? null;
+            $watchFields = ViewerWatchResolver::fieldsFor($prefetched['viewer_watches'], $userId);
         } else {
-            $viewerWatch = $this->viewerWatches()->forMembers($viewerId, [$userId])[$userId] ?? null;
+            $watchFields = ViewerWatchResolver::fieldsFor($this->viewerWatches()->forMembers($viewerId, [$userId]), $userId);
         }
 
         return [
@@ -845,10 +846,11 @@ final class CardViewService
             // F-255 — is the viewer watching this card, and the handle
             // `DELETE /me/watching/:follow_id[?source=page]` takes. The
             // source of truth for every watch button; never derive it from
-            // a page of /me/watching. null / false for anonymous viewers
-            // and for the viewer's own card.
-            'viewer_is_watching'  => $viewerWatch !== null,
-            'viewer_watch'        => $viewerWatch,
+            // a page of /me/watching. false / null for anonymous viewers
+            // and for the viewer's own card; viewer_is_watching is null
+            // (unknown) when the read that answers it failed.
+            'viewer_is_watching'  => $watchFields['viewer_is_watching'],
+            'viewer_watch'        => $watchFields['viewer_watch'],
             // v1.49 — the self-page id member reviews live on. This is
             // the id the FE passes to DELETE /me/reviews/:id; the FE
             // must never derive ID_BASE itself (§L5). The WRITE path

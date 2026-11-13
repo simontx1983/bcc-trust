@@ -49,6 +49,7 @@ use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\SuspensionRepository;
+use BCC\Trust\Core\Repositories\WatchingRepository;
 use BCC\Trust\Core\Support\MemberSummaryPrefetcher;
 use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\ReputationTierMap;
@@ -84,15 +85,18 @@ final class SuggestionService
     private UserViewService $userViewService;
     private ReputationRepository $reputationRepository;
     private SuspensionRepository $suspensionRepository;
+    private ?WatchingRepository $watchingRepository;
 
     public function __construct(
         UserViewService $userViewService,
         ReputationRepository $reputationRepository,
-        SuspensionRepository $suspensionRepository
+        SuspensionRepository $suspensionRepository,
+        ?WatchingRepository $watchingRepository = null
     ) {
         $this->userViewService      = $userViewService;
         $this->reputationRepository = $reputationRepository;
         $this->suspensionRepository = $suspensionRepository;
+        $this->watchingRepository   = $watchingRepository;
     }
 
     /**
@@ -263,6 +267,17 @@ final class SuggestionService
                 unset($pool[$cid]);
             }
         }
+        // EXACT already-following check over what is left (see
+        // dropAlreadyFollowing): `$following` above is capped at
+        // CANDIDATE_POOL_CAP, so a viewer following more than that would
+        // otherwise be suggested members they already watch.
+        $kept = array_fill_keys($this->dropAlreadyFollowing($viewerId, array_keys($pool)), true);
+        foreach (array_keys($pool) as $cid) {
+            if (!isset($kept[$cid])) {
+                unset($pool[$cid]);
+                $exclude[$cid] = true; // and never via the cold-start top-up
+            }
+        }
 
         // ── 3. Order by score desc (tiebreak: id asc for stability) ────
         $scored = [];
@@ -290,7 +305,10 @@ final class SuggestionService
         // ── 5. Cold-start top-up (reuse civic recent-operators source). ─
         if (count($chosenIds) < $limit) {
             $chosenSet = array_fill_keys($chosenIds, true);
-            $topUp     = $this->coldStartTopUp($viewerId, $exclude, $chosenSet, $limit - count($chosenIds));
+            $topUp     = $this->dropAlreadyFollowing(
+                $viewerId,
+                $this->coldStartTopUp($viewerId, $exclude, $chosenSet, $limit - count($chosenIds))
+            );
             foreach ($topUp as $cid) {
                 $chosenIds[]        = $cid;
                 $reasonByUser[$cid] = null; // civic fallback rows carry no reason
@@ -414,6 +432,49 @@ final class SuggestionService
             $reason['sample_user_ids'] = $sampleIds;
         }
         return $reason;
+    }
+
+    /**
+     * Drop the candidates the viewer already follows — EXACTLY, whatever
+     * the size of the viewer's follow graph.
+     *
+     * The exclusion set's "already following" list is getFollowing()
+     * capped at CANDIDATE_POOL_CAP (200): a viewer following more than 200
+     * members was suggested ones they already watch, with a "Watch" button
+     * that answered `already_watching`. User decision 2026-11-12: there is
+     * no cap on how many things a member watches, so this asks the
+     * question the other way round — "which of THESE candidates does the
+     * viewer follow" — bounded by the candidate list, not the follow graph
+     * (WatchingRepository::findActiveFollowIdsForFollowees, chunked IN()).
+     *
+     * A failed read leaves the capped exclusion in force and logs: a
+     * suggestion of someone already followed is a cosmetic miss the click
+     * corrects (`already_watching`), not a reason to fail the sidebar.
+     *
+     * @param list<int> $candidateIds
+     * @return list<int> the candidates the viewer does NOT follow, in order
+     */
+    private function dropAlreadyFollowing(int $viewerId, array $candidateIds): array
+    {
+        if ($viewerId <= 0 || $candidateIds === []) {
+            return $candidateIds;
+        }
+
+        try {
+            $followed = ($this->watchingRepository ??= new WatchingRepository())
+                ->findActiveFollowIdsForFollowees($viewerId, $candidateIds);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] suggestions: exact follow check failed, capped exclusion only', [
+                'viewer_id' => $viewerId,
+                'error'     => $e->getMessage(),
+            ]);
+            return $candidateIds;
+        }
+
+        return array_values(array_filter(
+            $candidateIds,
+            static fn (int $id): bool => !isset($followed[$id])
+        ));
     }
 
     /**
