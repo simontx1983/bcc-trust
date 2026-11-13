@@ -148,6 +148,15 @@ final class EnvelopeMetaTest extends TestCase
         self::assertArrayNotHasKey('_meta', self::body($r));
     }
 
+    /** F-337: WordPress routes case-insensitively, so the envelope must too. */
+    public function testAMixedCaseRouteIsEnvelopedLikeItsHandler(): void
+    {
+        foreach (['/BCC/v1/chains', '/Bcc-Trust/V1/health/read-model'] as $route) {
+            $r = self::wrap(['status' => 'ok'], 200, $route);
+            self::assertSame(['data' => ['status' => 'ok'], '_meta' => self::expectedMeta()], self::body($r), $route);
+        }
+    }
+
     public function testOtherNamespacesAreUntouched(): void
     {
         $raw = ['message' => 'core route'];

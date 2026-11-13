@@ -45,6 +45,7 @@ use BCC\Trust\Core\Repositories\PageReadModelRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
+use BCC\Trust\Core\Support\CountPrivacy;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\Permission as PermissionShape;
 use BCC\Trust\Core\Support\ReputationTierMap;
@@ -111,7 +112,10 @@ if (!defined('ABSPATH')) {
  *   trust_min: int|null,
  *   viewer_is_member: bool,
  *   posts_last_7d: int,
- *   active_members_7d?: int
+ *   active_members_7d?: int,
+ *   can_join?: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},
+ *   can_request_join?: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},
+ *   viewer_membership_status?: string|null
  * }
  */
 final class CardViewService
@@ -268,11 +272,11 @@ final class CardViewService
         // how many things a member watches). Batched by the prefetcher;
         // one resolve on the single-card path.
         if ($viewerId <= 0) {
-            $viewerWatch = null;
+            $watchFields = ViewerWatchResolver::fieldsFor([], $pageId);
         } elseif ($prefetched !== null && isset($prefetched['viewer_watches'])) {
-            $viewerWatch = $prefetched['viewer_watches'][$pageId] ?? null;
+            $watchFields = ViewerWatchResolver::fieldsFor($prefetched['viewer_watches'], $pageId);
         } else {
-            $viewerWatch = $this->viewerWatches()->forPages($viewerId, [$pageId])[$pageId] ?? null;
+            $watchFields = ViewerWatchResolver::fieldsFor($this->viewerWatches()->forPages($viewerId, [$pageId]), $pageId);
         }
 
         if ($prefetched !== null && isset($prefetched['endorse_eligibility'])) {
@@ -372,6 +376,8 @@ final class CardViewService
             $name = self::preferMoniker($moniker, $name);
         }
 
+        $claimTarget = self::resolveClaimTarget($kind, $pageId, $isClaimed, $validatorRows);
+
         $card = [
             'id'                  => $pageId,
             'name'                => $name,
@@ -411,10 +417,11 @@ final class CardViewService
             // F-255 — is the viewer watching this card, and the handle
             // `DELETE /me/watching/:follow_id[?source=page]` takes. The
             // source of truth for every watch button; never derive it from
-            // a page of /me/watching. null / false for anonymous viewers
-            // and for the viewer's own card.
-            'viewer_is_watching'  => $viewerWatch !== null,
-            'viewer_watch'        => $viewerWatch,
+            // a page of /me/watching. false / null for anonymous viewers
+            // and for the viewer's own card; viewer_is_watching is null
+            // (unknown) when the read that answers it failed.
+            'viewer_is_watching'  => $watchFields['viewer_is_watching'],
+            'viewer_watch'        => $watchFields['viewer_watch'],
             // §V1.5 — true when the current viewer has already vouched for
             // this page (= holds an active vouch attestation on it).
             // Drives the entity-page vouch button's idle → "REMOVE" CTA
@@ -439,7 +446,7 @@ final class CardViewService
             // to drive the four-step modal. Server resolves these from
             // the page id (per §A2/§L5 — frontend never derives). Null
             // for already-claimed pages or non-validator kinds.
-            'claim_target'        => self::resolveClaimTarget($kind, $pageId, $isClaimed, $validatorRows),
+            'claim_target'        => $claimTarget,
             // §K3 — chains an operator runs on. Null for single-chain
             // pages (the common case) so the frontend doesn't render
             // a dead one-tab strip. Validator-only in V1.5; creator
@@ -487,7 +494,12 @@ final class CardViewService
                 $cardTargetKind,
                 $pageId,
                 $messagingState['can_message']
-            ),
+            ) + [
+                // F-301: whether THIS viewer may claim the page. The claim
+                // CTA rendered on claim_target alone, so a suspended member
+                // was offered a claim the write always refuses (F-109).
+                'can_claim' => self::resolveCanClaim($viewerId, $claimTarget !== null),
+            ],
             // STUB: social_proof composition deferred (§O4). Field is
             // ALWAYS emitted (nullable) per the contract.
             'social_proof'        => null,
@@ -795,11 +807,11 @@ final class CardViewService
         // F-255: the viewer's watch (follow) of this member — see the page
         // card branch.
         if ($viewerId <= 0) {
-            $viewerWatch = null;
+            $watchFields = ViewerWatchResolver::fieldsFor([], $userId);
         } elseif ($prefetched !== null && isset($prefetched['viewer_watches'])) {
-            $viewerWatch = $prefetched['viewer_watches'][$userId] ?? null;
+            $watchFields = ViewerWatchResolver::fieldsFor($prefetched['viewer_watches'], $userId);
         } else {
-            $viewerWatch = $this->viewerWatches()->forMembers($viewerId, [$userId])[$userId] ?? null;
+            $watchFields = ViewerWatchResolver::fieldsFor($this->viewerWatches()->forMembers($viewerId, [$userId]), $userId);
         }
 
         return [
@@ -834,10 +846,11 @@ final class CardViewService
             // F-255 — is the viewer watching this card, and the handle
             // `DELETE /me/watching/:follow_id[?source=page]` takes. The
             // source of truth for every watch button; never derive it from
-            // a page of /me/watching. null / false for anonymous viewers
-            // and for the viewer's own card.
-            'viewer_is_watching'  => $viewerWatch !== null,
-            'viewer_watch'        => $viewerWatch,
+            // a page of /me/watching. false / null for anonymous viewers
+            // and for the viewer's own card; viewer_is_watching is null
+            // (unknown) when the read that answers it failed.
+            'viewer_is_watching'  => $watchFields['viewer_is_watching'],
+            'viewer_watch'        => $watchFields['viewer_watch'],
             // v1.49 — the self-page id member reviews live on. This is
             // the id the FE passes to DELETE /me/reviews/:id; the FE
             // must never derive ID_BASE itself (§L5). The WRITE path
@@ -876,14 +889,25 @@ final class CardViewService
                 $tier,
                 self::resolveMemberAvatarUrl($userId)
             ),
-            'stats'               => $this->buildMemberStats(
-                $userId,
+            'stats'               => self::buildMemberStats(
                 $trustScore,
+                // ⚠⚠ ALL THREE COUNTS COME FROM THE SUMMARY, ALREADY
+                // NARROWED (F-283 review). An earlier attempt passed
+                // `$summary['privacy']` and `$summary['is_self']` and let
+                // the card decide — but getSummary() returns NEITHER key
+                // (both are locals), so the card always received [] and
+                // false and narrowed nothing. Source-text wiring tests
+                // could not see it.
+                //
+                // Reading the narrowed values instead makes the whole class
+                // of bug impossible here: the card holds no privacy logic,
+                // so it cannot forget to apply it. It also drops a second
+                // read of the same count.
                 (int) $summary['followers_count'],
                 (int) $summary['following_count'],
-                $prefetched
+                (int) ($summary['engagement']['reviews_written'] ?? 0)
             ),
-            'permissions'         => $this->resolveMemberPermissions($userId, $viewerId),
+            'permissions'         => $this->resolveMemberPermissions($userId, $viewerId, $prefetched),
             // STUB: social_proof composition deferred (§O4). Field is
             // ALWAYS emitted (nullable) per the contract.
             'social_proof'        => null,
@@ -1049,6 +1073,12 @@ final class CardViewService
                 'trust_min'        => $groupData['trust_min'],
                 'collection_stats' => $groupData['collection_stats'],
                 'viewer_is_member' => $viewerIsMember,
+                // F-244: the server's join verdicts, computed by the caller
+                // through GroupsService (one source of truth with the group
+                // page). Passed through, never recomputed here.
+                'can_join'                 => $groupData['can_join'] ?? null,
+                'can_request_join'         => $groupData['can_request_join'] ?? null,
+                'viewer_membership_status' => $groupData['viewer_membership_status'] ?? null,
             ],
             'crest'               => self::buildCrest(
                 $name,
@@ -1948,27 +1978,30 @@ final class CardViewService
      * @param int $watchingCount Passed in from getSummary's
      *                           `following_count` — the active side of
      *                           the same graph, also already resolved.
-     * @param array<string, mixed>|null $prefetched MemberSummaryPrefetcher
-     *                           batch; its `reviews_written_counts` map is
-     *                           consulted before falling back to a
-     *                           per-member countByVoter() query.
+     * @param int $reviewsWritten Passed in from getSummary's
+     *                           `engagement.reviews_written`, which is
+     *                           where §K2 count privacy is applied. This
+     *                           method deliberately takes NO prefetch
+     *                           bundle: it used to read the count from
+     *                           `reviews_written_counts` itself, and that
+     *                           second source is exactly how the tile came
+     *                           to publish a number the profile hid
+     *                           (F-283). One source, narrowed once.
      * @return list<Stat>
      */
-    private function buildMemberStats(
-        int $userId,
+    private static function buildMemberStats(
         int $trustScore,
         int $watchersCount,
         int $watchingCount,
-        ?array $prefetched = null
+        int $reviewsWritten
     ): array {
-        // Same read pattern as UserViewService::getSummary — when the
-        // batch map is present, a missing key means zero (countByVoters
-        // GROUP BY omits zero-count voters), not "not prefetched".
-        if ($prefetched !== null && isset($prefetched['reviews_written_counts'])) {
-            $reviewsWritten = (int) ($prefetched['reviews_written_counts'][$userId] ?? 0);
-        } else {
-            $reviewsWritten = (int) $this->voteRepo->countByVoter($userId);
-        }
+        // ⚠ A PURE MAPPER, deliberately. Every count arrives ALREADY
+        // NARROWED by `UserViewService::getSummary()` (§K2 count privacy,
+        // F-283), so this method holds no privacy logic and reads no
+        // counts of its own. It used to read `reviews_written` from the
+        // prefetch bundle directly, which is exactly how that tile came
+        // to publish a number the profile hid — a second source is a
+        // second chance to forget the rule. Do not reintroduce one.
 
         return [
             ['key' => 'trust',           'label' => 'Trust',    'value' => (string) $trustScore,     'raw' => $trustScore,     'format' => 'score'],
@@ -2211,9 +2244,10 @@ final class CardViewService
     }
 
     /**
+     * @param array<string, mixed>|null $prefetched MemberCardPrefetcher bundle on list paths
      * @return array<string, Permission>
      */
-    private function resolveMemberPermissions(int $targetUserId, int $viewerId): array
+    private function resolveMemberPermissions(int $targetUserId, int $viewerId, ?array $prefetched = null): array
     {
         // §J.6 attestation permissions on member cards (target_kind=
         // user_profile per §J.1). Service handles anon ("Sign in to…")
@@ -2253,10 +2287,14 @@ final class CardViewService
                 // only. Members are followed/reviewed via different surfaces.
                 'can_endorse'        => self::deny(null, 'not_applicable'),
                 'can_post_as_entity' => self::deny(null, 'not_applicable'),
-                // Entity-addressed messaging is validator-only at V1 —
-                // members are messaged through the DM surface itself
-                // (the profile view-model carries the live gate).
-                'can_message'        => self::deny(null, 'not_applicable'),
+                // F-246: the live DM gate for this viewer → this member,
+                // so the /messages/new recipient picker and its ?to_user
+                // pin can say "can't message" before the user writes. The
+                // same evaluator as POST /me/conversations and the
+                // profile's permissions.can_message; batched on list
+                // paths (MemberCardPrefetcher), single read otherwise.
+                // Self → self_action_blocked.
+                'can_message'        => self::memberMessagePermission($targetUserId, $viewerId, $prefetched),
                 'can_edit_bio'       => $isSelf ? self::allow() : self::deny(null, 'not_owner'),
                 // Page-image editing applies to claimed validator/project/
                 // creator pages; member self-avatars use /me/profile/avatar.
@@ -2298,6 +2336,32 @@ final class CardViewService
     }
 
     /**
+     * §4.4 can_claim (F-301) — page cards only. Mirrors the claim write's
+     * viewer gates (POST /pages/:id/claim): signed in, and not suspended
+     * (admin bypass off, F-109). Whether the page is claimable at all is
+     * `claim_target` (null → `not_applicable`). The wallet proof and the
+     * page binding are checked by the write itself, never predicted here.
+     *
+     * An UNKNOWN suspension state (null) is allowed: display only, the
+     * write gate fails closed on its own.
+     *
+     * @return Permission
+     */
+    private static function resolveCanClaim(int $viewerId, bool $hasClaimTarget): array
+    {
+        if (!$hasClaimTarget) {
+            return self::deny(null, 'not_applicable');
+        }
+        if ($viewerId <= 0) {
+            return self::deny('Sign in to claim this page.', 'signin_required');
+        }
+        if (\BCC\Core\Permissions\Permissions::suspensionState($viewerId, false) === true) {
+            return self::deny('Your account is suspended, so you cannot claim pages.', 'suspended');
+        }
+        return self::allow();
+    }
+
+    /**
      * @return array<string, Permission>
      */
     private static function lockedPagePermissions(): array
@@ -2312,6 +2376,36 @@ final class CardViewService
             'can_edit_bio'       => $sign,
             'can_edit_image'     => $sign,
         ];
+    }
+
+    /**
+     * F-246: a signed-in viewer's can_message on a member card. Prefers
+     * the MemberCardPrefetcher batch (canMessageMany) and falls back to
+     * the single read (canMessage) — the two are pinned identical for the
+     * same pair (MessagesService docblock + its test).
+     *
+     * @param array<string, mixed>|null $prefetched
+     * @return Permission
+     */
+    private static function memberMessagePermission(int $targetUserId, int $viewerId, ?array $prefetched): array
+    {
+        // Anonymous viewers keep not_applicable (contract: unchanged for
+        // anon). resolveMemberPermissions() returns before reaching here
+        // for anon today; this guard keeps it true if that ever changes —
+        // canMessage(0, …) would answer auth_required instead.
+        if ($viewerId <= 0) {
+            return self::deny(null, 'not_applicable');
+        }
+        if ($prefetched !== null
+            && isset($prefetched['message_eligibility'])
+            && is_array($prefetched['message_eligibility'])
+            && isset($prefetched['message_eligibility'][$targetUserId])
+        ) {
+            /** @var Permission $perm */
+            $perm = $prefetched['message_eligibility'][$targetUserId];
+            return $perm;
+        }
+        return MessagesService::canMessage($viewerId, $targetUserId);
     }
 
     /**

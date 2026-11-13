@@ -179,6 +179,21 @@ namespace BCC\Trust\Onchain\Repositories {
                 return 0;
             }
 
+            /** @return list<object> verified-only when $verifiedOnly (all the tests ask for) */
+            public static function getForUser(int $userId, ?string $walletType = null, bool $verifiedOnly = false): array
+            {
+                $out = [];
+                foreach ($GLOBALS['__bcc_wc']['links'] as $l) {
+                    if ($l['user_id'] === $userId && (!$verifiedOnly || $l['verified_at'] !== null)) {
+                        $out[] = (object) [
+                            'id' => $l['id'], 'wallet_address' => $l['address'], 'chain_id' => $l['chain_id'],
+                            'verified_at' => $l['verified_at'] === null ? null : gmdate('Y-m-d H:i:s', $l['verified_at']),
+                        ];
+                    }
+                }
+                return $out;
+            }
+
             public static function oldestVerifiedAt(int $userId): ?string
             {
                 $times = [];

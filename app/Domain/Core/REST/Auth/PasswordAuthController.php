@@ -297,22 +297,6 @@ final class PasswordAuthController
             return ApiResponse::error('bcc_invalid_request', 'Email/handle and password are required.', 422);
         }
 
-        // Per-identifier throttle — the IP bucket above can't see a
-        // distributed brute-force (many IPs, one account). Keyed by a hash
-        // of the normalized identifier so it applies whether or not the
-        // account exists (no account-enumeration oracle) and fires before the
-        // CPU-bound bcrypt compare. See AuthSupport::LOGIN_ACCOUNT_RATE_* for
-        // the limit rationale + the targeted-lockout tradeoff.
-        $identifierKey = 'bcc_throttle_login_account_' . hash('sha256', strtolower($identifier));
-        if (!\BCC\Core\Security\Throttle::allow(
-            'login_account',
-            AuthSupport::LOGIN_ACCOUNT_RATE_LIMIT,
-            AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
-            $identifierKey
-        )) {
-            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
-        }
-
         // Accept either an email address or a handle on the same field.
         // Detect which by shape: a real email always contains '@' + a
         // valid domain per is_email(); anything else is treated as a
@@ -331,6 +315,38 @@ final class PasswordAuthController
         } else {
             $ownerId = HandleService::currentOwner(ltrim(strtolower($identifier), '@'));
             $user    = $ownerId !== null ? get_userdata($ownerId) : false;
+        }
+
+        // Login throttles (F-281), still before the CPU-bound bcrypt compare.
+        // See AuthSupport::LOGIN_ACCOUNT_*.
+        //  - This network's budget for what was TYPED (normalized), so a
+        //    stranger elsewhere can't lock the owner out.
+        //  - A ceiling for what was TYPED across all networks, against a
+        //    guess spread over many networks; networks the account recently
+        //    signed in from skip it, so the owner at home is never locked out.
+        //  Both are keyed on the typed text, NOT the resolved account: a
+        //  bucket shared by a handle and an email would make a 429 reveal
+        //  that the two are one account (see AuthSupport::LOGIN_ACCOUNT_*).
+        $typedKey = 'id:' . hash('sha256', is_email($identifier)
+            ? strtolower(sanitize_email($identifier))
+            : ltrim(strtolower($identifier), '@'));
+        $network = AuthSupport::loginNetwork();
+        if (!\BCC\Core\Security\Throttle::allow(
+            'login_account_net',
+            AuthSupport::LOGIN_ACCOUNT_RATE_LIMIT,
+            AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
+            'bcc_throttle_login_account_net_' . hash('sha256', $typedKey . '|' . $network)
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
+        }
+        $trustedNetwork = $user !== false && AuthSupport::isTrustedLoginNetwork((int) $user->ID, $network);
+        if (!$trustedNetwork && !\BCC\Core\Security\Throttle::allow(
+            'login_account',
+            AuthSupport::LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT,
+            AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
+            'bcc_throttle_login_account_' . hash('sha256', $typedKey)
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
 
         // Generic error for "not found" and "wrong password" alike —
@@ -408,6 +424,7 @@ final class PasswordAuthController
             wp_set_auth_cookie($userId, true);
 
             $token = JwtToken::encodeNewSession($userId, $handle);
+            AuthSupport::recordTrustedLoginNetwork($userId); // F-281: a completed sign-in
 
             Logger::audit('user_login', [
                 'user_id' => $userId,
@@ -424,6 +441,9 @@ final class PasswordAuthController
                 'expires_in'       => AuthSupport::JWT_TTL_SECONDS,
                 'token_type'       => 'Bearer',
                 'in_good_standing' => AuthSupport::resolveInGoodStanding($userId),
+                // F-305: a suspended member signs in READ-ONLY; the client shows
+                // the suspension notice from this flag. Every write gate refuses.
+                'suspended'        => AuthSupport::resolveSuspended($userId),
             ]);
             $response->header('Cache-Control', 'no-store');
 

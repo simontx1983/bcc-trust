@@ -45,12 +45,17 @@ namespace {
         }
     }
 
-    /** @return list<string> */
+    /** @return list<mixed> */
     function bcc_hri_values(int $userId, string $key): array
     {
         $v = $GLOBALS['__bcc_ph']['meta'][$userId][$key] ?? null;
         if ($v === null) {
             return [];
+        }
+        // A keyed array is ONE stored value (WP serializes it); a list models
+        // several rows of a multi-value key (add_user_meta).
+        if (is_array($v) && !array_is_list($v)) {
+            return [$v];
         }
         return is_array($v) ? array_values(array_map('strval', $v)) : [(string) $v];
     }

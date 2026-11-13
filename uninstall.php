@@ -75,6 +75,11 @@ $cron_hooks = array_merge(
 foreach ($cron_hooks as $hook) {
     wp_clear_scheduled_hook($hook);
 }
+// F-278: the member re-check carries [user_id, group_id] args;
+// wp_clear_scheduled_hook() above only clears arg-less events.
+if (function_exists('wp_unschedule_hook')) {
+    wp_unschedule_hook('bcc_gated_group_member_recheck');
+}
 
 // Dynamic per-chain hooks (bcc_chain_refresh_*) are registered at
 // runtime — ChainRefreshService clears them on deactivate, but it can't

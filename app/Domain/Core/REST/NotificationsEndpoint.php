@@ -117,11 +117,25 @@ final class NotificationsEndpoint
         $cursorRaw = $request->get_param('cursor');
         $cursor = is_string($cursorRaw) && $cursorRaw !== '' ? $cursorRaw : null;
 
-        $payload = Plugin::instance()
-            ->notificationViewService()
-            ->getNotifications($viewerId, $limit, $cursor);
+        try {
+            $payload = Plugin::instance()
+                ->notificationViewService()
+                ->getNotifications($viewerId, $limit, $cursor);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+            // F-296: the block read failed. Never list rows a block
+            // should hide; the client retries.
+            return self::unavailable();
+        }
 
         $response = ApiResponse::ok($payload);
+        $response->header('Cache-Control', 'private, no-store');
+        return $response;
+    }
+
+    /** 503 for a notification read that did not run (F-296), never cached. */
+    private static function unavailable(): WP_REST_Response
+    {
+        $response = ApiResponse::error('bcc_unavailable', 'Notifications are temporarily unavailable.', 503);
         $response->header('Cache-Control', 'private, no-store');
         return $response;
     }
@@ -135,9 +149,13 @@ final class NotificationsEndpoint
             return ApiResponse::error('bcc_unauthorized', 'Sign in required.', 401);
         }
 
-        $count = Plugin::instance()
-            ->notificationViewService()
-            ->getUnreadCount($viewerId);
+        try {
+            $count = Plugin::instance()
+                ->notificationViewService()
+                ->getUnreadCount($viewerId);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+            return self::unavailable();
+        }
 
         $response = ApiResponse::ok(['unread_count' => $count]);
         $response->header('Cache-Control', 'private, no-store');

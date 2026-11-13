@@ -13,12 +13,15 @@
  * This service centralises the "does a real recovery channel exist?"
  * question so the unlink guard, the (Phase 2) recovery-email endpoint,
  * and the (Phase 3) /me posture all agree on one definition rather than
- * re-deriving it. A "real" recovery email is any validly-formatted
- * address that is NOT the placeholder domain — that is enough for the
- * standard /auth/forgot-password → /auth/reset-password flow to reach
- * the user. (The email-verified flag is deliberately NOT part of the
- * test: wallet-signup marks every address verified, placeholder
- * included, so it carries no recovery signal.)
+ * re-deriving it. A recovery email is a validly-formatted address that
+ * is NOT the placeholder domain AND whose inbox is not still pending proof
+ * (F-332): an address typed at wallet sign-up starts unverified
+ * (`_bcc_email_verified` = '0', a code mailed to it) and only becomes the
+ * account's way back in once POST /auth/verify-email confirms it. Until
+ * then nobody has shown they read that inbox, so it can't count as a
+ * recovery channel — and the member can still replace a typo through the
+ * recovery-email route. A legacy account with no flag at all ('') keeps
+ * counting, as it always has.
  *
  * @package BCC\Trust\Core\Services
  * @since   2026-06-10 (wallet recovery, phase 1)
@@ -55,10 +58,10 @@ final class AccountRecoveryService
     }
 
     /**
-     * True when the user has a real (non-placeholder, well-formed)
-     * recovery email — i.e. a channel /auth/forgot-password can actually
-     * reach. This is the account's email-based way back in if every
-     * linked wallet is lost.
+     * True when the user has a real (non-placeholder, well-formed) email
+     * that is not pending verification — a channel /auth/forgot-password
+     * can actually reach, owned by the member. This is the account's
+     * email-based way back in if every linked wallet is lost.
      */
     public static function hasRecoveryEmail(int $userId): bool
     {
@@ -73,9 +76,13 @@ final class AccountRecoveryService
 
         $email = (string) $user->user_email;
 
-        return $email !== ''
-            && is_email($email) !== false
-            && !self::isPlaceholderEmail($email);
+        if ($email === '' || is_email($email) === false || self::isPlaceholderEmail($email)) {
+            return false;
+        }
+
+        // F-332: an address still awaiting its verification code ('0') is
+        // not a recovery channel yet. '1' (proven) and '' (legacy) are.
+        return (string) get_user_meta($userId, \BCC\Trust\Core\REST\Auth\AuthSupport::META_EMAIL_VERIFIED, true) !== '0';
     }
 
     /**

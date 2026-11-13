@@ -694,7 +694,8 @@ final class Plugin
     public function notificationViewService(): Services\NotificationViewService
     {
         return $this->notificationViewService ??= new Services\NotificationViewService(
-            $this->notificationRepository()
+            $this->notificationRepository(),
+            $this->hiddenActivityRepository()
         );
     }
 
@@ -745,6 +746,12 @@ final class Plugin
     public function groupMembersService(): Services\GroupMembersService
     {
         return $this->groupMembersService ??= new Services\GroupMembersService();
+    }
+
+    private ?Services\GroupJoinRequestService $groupJoinRequestService = null;
+    public function groupJoinRequestService(): Services\GroupJoinRequestService
+    {
+        return $this->groupJoinRequestService ??= new Services\GroupJoinRequestService();
     }
 
     private ?Services\ShiftLogService $shiftLogService = null;
@@ -1594,8 +1601,9 @@ final class Plugin
         // V1 contract: §K2 privacy toggles — GET + PATCH /me/privacy.
         // Storage in wp_usermeta.bcc_privacy_*; UserViewService applies
         // the seven profile flags to non-self responses; the eighth
-        // (discovery_optout) hooks PeepSo's search via the filter
-        // registered in registerHooks().
+        // (discovery_optout) is an alias of hide_from_search since F-257,
+        // which PeepSo's search excludes on via the filter registered in
+        // registerHooks().
         \BCC\Trust\Core\REST\MyPrivacyEndpoint::register();
 
         // V1 contract: §K1 Phase A blocks — GET / POST / DELETE /me/blocks.
@@ -1799,6 +1807,7 @@ final class Plugin
         // residual case. Holder groups → /me/holder-groups; Halls →
         // /me/halls; this endpoint covers user/system groups.
         \BCC\Trust\Core\REST\MyGroupsEndpoint::register();
+        \BCC\Trust\Core\REST\GroupJoinRequestsEndpoint::register();
 
         // V2: Group discovery surface — verified-first, then heat-aware
         // ranking. ?verified=1 filters to On-Chain Verified groups only.
@@ -2343,14 +2352,22 @@ final class Plugin
         // Report upheld (§11.1): the REPORTER earns the credit; the
         // hook carries the report id — resolve the reporter from the
         // report row. Moderation undo reverses the evidence (§14.1).
-        add_action('bcc_content_hidden_by_admin', function ($targetId, $resolverUserId, $reportId) use ($rankIngest): void {
-            $rankIngest(function (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) use ($reportId): void {
-                $report = $this->contentReportRepository()->findById((int) $reportId);
-                if ($report !== null) {
-                    $i->ingest((int) $report->reporter_user_id, 'report_upheld', (int) $reportId);
+        // F-306: a hide upholds every pending report on the target, so each
+        // of those reporters is credited too ($upheldIds, the siblings).
+        add_action('bcc_content_hidden_by_admin', function ($targetId, $resolverUserId, $reportId, $upheldIds = []) use ($rankIngest): void {
+            $ids = array_unique(array_merge([(int) $reportId], array_map('intval', (array) $upheldIds)));
+            $rankIngest(function (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) use ($ids): void {
+                foreach ($ids as $id) {
+                    if ($id <= 0) {
+                        continue;
+                    }
+                    $report = $this->contentReportRepository()->findById($id);
+                    if ($report !== null) {
+                        $i->ingest((int) $report->reporter_user_id, 'report_upheld', $id);
+                    }
                 }
             });
-        }, 20, 3);
+        }, 20, 4);
 
         // Restore (F-111): the content was judged fine, so no report
         // against it stands as upheld — reverse the report_upheld credit
@@ -2370,10 +2387,18 @@ final class Plugin
         // Args: ($reportId, $adminUserId, $action). Reversal is
         // unconditional across undo kinds — reversing an event that was
         // never ingested (e.g. a dismissed report's) matches zero rows.
-        add_action('bcc_content_moderation_undone', function ($reportId) use ($rankIngest): void {
-            $rankIngest(fn (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) =>
-                $i->reverse('report_upheld', (int) $reportId, 'moderation_undone'));
-        }, 20, 1);
+        // F-306: undoing a hide also reverses the credit of the sibling
+        // reports that hide upheld ($reopenedIds; empty for other undos).
+        add_action('bcc_content_moderation_undone', function ($reportId, $adminUserId = 0, $action = '', $reopenedIds = []) use ($rankIngest): void {
+            $ids = array_unique(array_merge([(int) $reportId], array_map('intval', (array) $reopenedIds)));
+            $rankIngest(function (\BCC\Trust\Rank\Services\RankEvidenceIngestor $i) use ($ids): void {
+                foreach ($ids as $id) {
+                    if ($id > 0) {
+                        $i->reverse('report_upheld', $id, 'moderation_undone');
+                    }
+                }
+            });
+        }, 20, 4);
 
         // Post deletion (PostsService::deletePost — owner self-delete or
         // admin trash) reverses the post's Rank evidence. Without this,

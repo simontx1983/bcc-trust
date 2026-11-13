@@ -76,7 +76,15 @@ final class MeBadgesEndpoint
 
         $openThreads = self::parseOpenThreads((string) ($request->get_param('open_threads') ?? ''));
 
-        $payload = Plugin::instance()->badgesService()->getBadges($viewerId, $openThreads);
+        try {
+            $payload = Plugin::instance()->badgesService()->getBadges($viewerId, $openThreads);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure) {
+            // F-296: the unread count's block read failed. Never show a
+            // count that includes rows a block hides; nothing was cached.
+            $resp = ApiResponse::error('bcc_unavailable', 'Badges are temporarily unavailable.', 503);
+            $resp->header('Cache-Control', 'private, no-store');
+            return $resp;
+        }
 
         $resp = ApiResponse::ok($payload);
         // Browser-side dedupe so a tab that fires two badge requests

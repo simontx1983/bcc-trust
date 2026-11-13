@@ -348,6 +348,55 @@ final class NftHoldingsEventOrderIntegrationTest extends TestCase
         }
     }
 
+    public function testAFailedCommitThrowsAndLeavesTheHoldingInPlace(): void
+    {
+        // F-278: the indexer announces lost holdings only after ingestBatch
+        // returns. A COMMIT that failed must not return as if it persisted.
+        $this->in(100);
+
+        $GLOBALS['wpdb']->failQueriesMatching = '/^COMMIT$/';
+        try {
+            $this->out(200);
+            self::fail('a failed COMMIT must throw');
+        } catch (\RuntimeException $e) {
+            self::assertStringContainsString('COMMIT failed', $e->getMessage());
+        } finally {
+            $GLOBALS['wpdb']->clearFaultInjection();
+        }
+
+        self::assertSame(1, $this->row()['balance'] ?? null, 'the transfer-out was rolled back');
+    }
+
+    public function testTheLatestLossIsTheNewestTransferOutOfThatWalletAndContract(): void
+    {
+        // F-278: the revoke sweep distrusts a cached "owns" observed before this.
+        $this->in(100);
+        self::assertNull(NftHoldingsRepository::latestLossAtOrThrow(self::WALLET, self::CONTRACT), 'a holding is not a loss');
+
+        $this->out(200);
+        $lostAt = NftHoldingsRepository::latestLossAtOrThrow(self::WALLET, self::CONTRACT);
+        self::assertIsInt($lostAt);
+        self::assertEqualsWithDelta(time(), $lostAt, 120, 'indexed_at is UTC and read back as UTC');
+
+        self::assertNull(NftHoldingsRepository::latestLossAtOrThrow(self::WALLET, self::OTHER), 'another collection');
+        self::assertNull(NftHoldingsRepository::latestLossAtOrThrow(self::WALLET2, self::CONTRACT), 'another wallet');
+        self::assertSame($lostAt, NftHoldingsRepository::latestLossAtOrThrow(self::WALLET, strtoupper(self::CONTRACT)), 'a folded needle matches');
+
+        $this->in(300);
+        self::assertNull(NftHoldingsRepository::latestLossAtOrThrow(self::WALLET, self::CONTRACT), 'bought back: no balance-0 row remains');
+    }
+
+    public function testAFailedLossReadThrowsRatherThanAnsweringNeverLost(): void
+    {
+        $GLOBALS['wpdb']->failQueriesMatching = '/MAX\(indexed_at\)/';
+        try {
+            $this->expectException(\BCC\Trust\Onchain\Repositories\RepositoryReadFailure::class);
+            NftHoldingsRepository::latestLossAtOrThrow(self::WALLET, self::CONTRACT);
+        } finally {
+            $GLOBALS['wpdb']->clearFaultInjection();
+        }
+    }
+
     public function testPruneIsBounded(): void
     {
         foreach (['a', 'b', 'c'] as $t) {

@@ -178,6 +178,7 @@ final class PageClaimBindingIntegrationTest extends TestCase
 
         self::assertSame(403, $response->get_status());
         self::assertStringContainsString('does not match the operator', $this->errorOf($response)['message']);
+        self::assertSame('not_operator', $this->errorOf($response)['data']['reason'] ?? null);
         $this->assertNoSideEffects($before);
     }
 
@@ -378,6 +379,7 @@ final class PageClaimBindingIntegrationTest extends TestCase
             self::assertSame(403, $response->get_status());
             self::assertSame('bcc_forbidden', $this->errorOf($response)['code']);
             self::assertSame('Your account is suspended.', $this->errorOf($response)['message']);
+            self::assertSame('suspended', $this->errorOf($response)['data']['reason'] ?? null, 'final: never "try another wallet"');
             $this->assertNoSideEffects($before);
             self::assertSame([], $this->verifiedClaims(self::USER_ID));
         } finally {
@@ -411,6 +413,7 @@ final class PageClaimBindingIntegrationTest extends TestCase
         $error = $this->errorOf($response);
         self::assertSame('bcc_forbidden', $error['code']);
         self::assertSame('That entity is not attached to this page.', $error['message']);
+        self::assertSame('entity_not_bound', $error['data']['reason'] ?? null, 'v1.127: every claim 403 names its cause');
     }
 
     /** @param array<string, mixed> $before */

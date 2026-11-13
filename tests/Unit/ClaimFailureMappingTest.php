@@ -38,6 +38,21 @@ final class ClaimFailureMappingTest extends TestCase
     }
 
     /**
+     * mapClaimFailure()'s body: from its signature to the next method.
+     * (A fixed-length slice silently cut off the 403 default once a branch
+     * was added — F-303.)
+     */
+    private static function mapperBody(string $src): string
+    {
+        $at = strpos($src, 'private static function mapClaimFailure(');
+        self::assertNotFalse($at, 'mapClaimFailure is gone');
+        $end = strpos($src, 'private static function ', $at + 10);
+        self::assertNotFalse($end, 'mapClaimFailure is the last method; bound the slice another way');
+
+        return substr($src, $at, $end - $at);
+    }
+
+    /**
      * The mapping table, asserted against the real method body.
      *
      * `mapClaimFailure()` is private static and builds a WP_REST_Response,
@@ -47,11 +62,7 @@ final class ClaimFailureMappingTest extends TestCase
      */
     public function testEachFailureKindMapsToItsOwnStatus(): void
     {
-        $src = self::source(self::SRC);
-        $at  = strpos($src, 'private static function mapClaimFailure(');
-        self::assertNotFalse($at, 'mapClaimFailure is gone');
-
-        $body = substr($src, $at, 2600);
+        $body = self::mapperBody(self::source(self::SRC));
 
         // Pre-existing branches, unchanged.
         self::assertStringContainsString("'needs_wallet'", $body);
@@ -65,6 +76,10 @@ final class ClaimFailureMappingTest extends TestCase
         self::assertStringContainsString("=== 'entity_not_found'", $body, 'a missing entity has no branch');
         self::assertStringContainsString('404', $body);
 
+        // F-303: a holder is refused with its OWN message, never "does not match".
+        self::assertStringContainsString("=== 'holder_not_owner'", $body, 'a holder refusal has no branch');
+        self::assertStringContainsString("Holding an NFT doesn't make you this collection's creator.", $body);
+
         // And the mismatch default survives — this fix must not swallow it.
         self::assertStringContainsString('403', $body);
         self::assertStringContainsString('does not match the operator', $body);
@@ -76,20 +91,27 @@ final class ClaimFailureMappingTest extends TestCase
      */
     public function testTheNewBranchesPrecedeTheMismatchDefault(): void
     {
-        $src = self::source(self::SRC);
-        $at  = strpos($src, 'private static function mapClaimFailure(');
-        self::assertNotFalse($at);
-        $body = substr($src, $at, 2600);
+        $body = self::mapperBody(self::source(self::SRC));
 
         $transient = strpos($body, "=== 'transient'");
         $notFound  = strpos($body, "=== 'entity_not_found'");
+        $holder    = strpos($body, "=== 'holder_not_owner'");
         $default   = strpos($body, 'does not match the operator');
 
         self::assertNotFalse($transient);
         self::assertNotFalse($notFound);
+        self::assertNotFalse($holder);
         self::assertNotFalse($default);
         self::assertLessThan($default, $transient, 'the transient branch is unreachable');
         self::assertLessThan($default, $notFound, 'the not-found branch is unreachable');
+        self::assertLessThan($default, $holder, 'the holder branch is unreachable');
+
+        // v1.127: the service's suspension refusal maps to reason `suspended`,
+        // never to the wallet-mismatch default.
+        $suspended = strpos($body, "=== 'suspended'");
+        self::assertNotFalse($suspended, 'the service suspension refusal has no branch');
+        self::assertLessThan($default, $suspended, 'the suspension branch is unreachable');
+        self::assertStringContainsString("['reason' => 'not_operator']", $body, 'the default names its cause');
     }
 
     /**
@@ -105,7 +127,10 @@ final class ClaimFailureMappingTest extends TestCase
         self::assertStringContainsString("'error' => 'transient', 'message' => 'Could not acquire claim lock", $repo);
         self::assertStringContainsString("'error' => 'transient', 'message' => 'Failed to save claim.'", $repo);
         self::assertStringContainsString("'error'   => 'transient',", $repo);
-        self::assertStringContainsString("'error' => 'transient', 'message' => 'Failed to save claim.'", $service);
+
+        // F-303: the holder upsert (and its transient producer) is gone from
+        // the service; a holder result now carries its own refusal sentinel.
+        self::assertStringContainsString("'error'   => 'holder_not_owner',", $service);
 
         // A missing entity is NOT transient — it gets its own sentinel.
         self::assertStringContainsString("'error' => 'entity_not_found'", $service);
@@ -119,10 +144,8 @@ final class ClaimFailureMappingTest extends TestCase
      */
     public function testTheSliceUnderTestIsTheMethodBody(): void
     {
-        $src = self::source(self::SRC);
-        $at  = strpos($src, 'private static function mapClaimFailure(');
-        self::assertNotFalse($at);
-        $body = substr($src, $at, 2600);
+        $src  = self::source(self::SRC);
+        $body = self::mapperBody($src);
 
         self::assertNotSame('', trim($body));
         self::assertLessThan(strlen($src), strlen($body), 'the slice is the whole file');

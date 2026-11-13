@@ -326,6 +326,9 @@ final class OAuthController
                 'expires_in'       => AuthSupport::JWT_TTL_SECONDS,
                 'token_type'       => 'Bearer',
                 'in_good_standing' => AuthSupport::resolveInGoodStanding($userId),
+                // F-305: a suspended member signs in READ-ONLY; the client shows
+                // the suspension notice from this flag. Every write gate refuses.
+                'suspended'        => AuthSupport::resolveSuspended($userId),
             ]);
             $response->header('Cache-Control', 'no-store');
             return $response;
@@ -533,6 +536,9 @@ final class OAuthController
             'expires_in'       => AuthSupport::JWT_TTL_SECONDS,
             'token_type'       => 'Bearer',
             'in_good_standing' => AuthSupport::resolveInGoodStanding($userIdInt),
+            // F-305: a suspended member signs in READ-ONLY; the client shows
+            // the suspension notice from this flag. Every write gate refuses.
+            'suspended'        => AuthSupport::resolveSuspended($userIdInt),
         ], 201);
         $response->header('Cache-Control', 'no-store');
         return $response;

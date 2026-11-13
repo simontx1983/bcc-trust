@@ -72,6 +72,7 @@ final class AuthorBadgeResolver
      * @return array<int, array{
      *   reputation_tier: string,
      *   reputation_tier_label: string,
+     *   trust_score: int,
      *   rank_label: string|null,
      *   member_state: string,
      * }>
@@ -97,6 +98,10 @@ final class AuthorBadgeResolver
 
         $tierByUser  = $this->reputationRepo->getTiersForUsers($ids);
         $stateByUser = $this->rankStateService->memberStatesFor($ids);
+        // trust_score: ONE bounded IN() for the whole page primes the
+        // request memo, so getDisplayScore() below costs no query per
+        // author (no N+1). Same value the profile hero shows.
+        $this->reputationRepo->primeByUserIds($ids);
 
         $out = [];
         foreach ($ids as $uid) {
@@ -107,6 +112,8 @@ final class AuthorBadgeResolver
             $out[$uid] = [
                 'reputation_tier'       => $rep['reputation_tier'],
                 'reputation_tier_label' => $rep['reputation_tier_label'],
+                // 0–100, the profile hero's number (shared display rule).
+                'trust_score'           => $this->reputationRepo->getDisplayScore($uid),
                 // Rank-chip label: an earned rung's label, or "New Member"
                 // for the pre-Apprentice status chip (§D-3) — never empty
                 // for a valid user. `member_state` lets the FE style the
@@ -132,6 +139,7 @@ final class AuthorBadgeResolver
      * @return array{
      *   reputation_tier: string,
      *   reputation_tier_label: string,
+     *   trust_score: int,
      *   rank_label: string|null,
      *   member_state: string,
      * }
@@ -147,6 +155,8 @@ final class AuthorBadgeResolver
             // v1.72), never 'ranked' with a null label.
             'reputation_tier'       => 'neutral',
             'reputation_tier_label' => ReputationTierMap::toReputationTierLabel('neutral'),
+            // The neutral default score, matching the neutral tier above.
+            'trust_score'           => (int) round(BCC_TRUST_NEUTRAL_SCORE),
             'rank_label'            => null,
             'member_state'          => 'new_member',
         ];

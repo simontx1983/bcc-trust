@@ -45,21 +45,37 @@
  * as 'feed'. This is a hard constraint, not a simplification — do not add
  * the value "for completeness".
  *
- * ── RETENTION ────────────────────────────────────────────────────────
- * Daily rows are kept 90 days, then collapsed into a lifetime totals row
- * and deleted.
+ * ── RETENTION: NONE, DELIBERATELY ────────────────────
+ * Daily rows are kept INDEFINITELY. There is no collapse and no prune.
  *
- * ⚠⚠ The collapse MUST be archive-then-delete inside ONE guarded method,
- * hung off the existing `CronService::dailyCleanup` under the
- * `bcc_cron_cleanup_lock` it already holds — never a standalone DELETE and
- * never a new cron. `docs/pattern-registry.md` states the rule
- * ("Retention belongs to archiveBatch(), not standalone DELETE") because a
- * standalone `AuditLogger::cleanOldLogs()` once preempted the archive path
- * and silently emptied the archive table in production. A naive
- * "collapse, then prune" here reproduces that exactly.
+ * An earlier draft planned a 90-day window collapsed into a lifetime
+ * totals row. Measured rather than assumed, the rows are too small to earn
+ * that complexity: ~70 bytes each with overhead, and a row exists only for
+ * a (day, source) pair that actually delivered a view. Modelled at a modest
+ * posting rate that is on the order of ~11 MB/year; even a pathological
+ * post viewed every single day through all six sources contributes ~2,200
+ * rows — well under a megabyte — per year.
  *
- * `idx_day` exists for the prune's `WHERE day < %s` cutoff; reads by post
- * use the PRIMARY KEY prefix and need no extra index.
+ * ⭐ Not collapsing is the SAFER design, not merely the cheaper one. A
+ * collapse would have to be archive-then-delete inside one guarded method,
+ * because docs/pattern-registry.md records that a standalone
+ * `AuditLogger::cleanOldLogs()` once preempted an archive path and silently
+ * emptied the archive table in production. Keeping the rows means that
+ * entire class of defect cannot arise here, and it preserves the per-day
+ * history, which is more useful than a collapsed total anyway.
+ *
+ * Growth is not unwatched: this table is registered in
+ * `RetentionHealthRepository`, so if the estimate above is wrong the row
+ * count surfaces in the overgrown-table alarm instead of being discovered
+ * as a disk problem.
+ *
+ * ⚠ The 48-hour purge on the DEDUPE table is unaffected and stays
+ * mandatory — see `schema-post-view-dedupe.php`. That retention is a
+ * privacy promise made in user-facing copy; this one was only ever
+ * housekeeping.
+ *
+ * `idx_day` stays: it serves day-ranged reads, and would serve a prune if
+ * one is ever added. Reads by post use the PRIMARY KEY prefix.
  *
  * ── PRIVACY ──────────────────────────────────────────────────────────
  * This table holds counts only. No viewer identity, no viewer list, and
