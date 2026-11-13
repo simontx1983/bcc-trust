@@ -224,6 +224,17 @@ final class EmailVerificationController
             return ApiResponse::error('bcc_invalid_request', 'A valid email is required.', 422);
         }
 
+        // F-290: the per-network bucket above is office scale; this caps mail
+        // to any one inbox, before the lookup and whether or not it exists.
+        if (!\BCC\Core\Security\Throttle::allow(
+            'resend_verification_email',
+            AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT,
+            3600,
+            AuthSupport::emailThrottleKey('resend_verification', $email)
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
+        }
+
         $user = get_user_by('email', $email);
 
         if ($user instanceof \WP_User) {
