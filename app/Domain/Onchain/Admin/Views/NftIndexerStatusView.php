@@ -625,7 +625,7 @@ final class NftIndexerStatusView
      * Both mutate state on Helius, not just locally — the copy says so,
      * because the labels alone read like local operations.
      *
-     * @return array{provision: string, resync: string}
+     * @return array{provision: string, resync: string, reregister: string}
      */
     public static function heliusConfirmations(): array
     {
