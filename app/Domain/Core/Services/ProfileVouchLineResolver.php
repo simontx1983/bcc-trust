@@ -27,6 +27,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Services;
 
 use BCC\Trust\Core\Repositories\AttestationRepository;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\PublicIdentity;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 
@@ -38,6 +39,14 @@ final class ProfileVouchLineResolver
 {
     /** "Top vouched by" avatars on a signed-out profile. */
     public const TOP_VOUCHERS = 3;
+
+    /**
+     * F-356: how many ordered candidates the SQL returns before the viewer
+     * visibility rule drops the ones this viewer may not see, so a few
+     * private top vouchers do not leave the line short when visible ones
+     * follow. Bounded (the repository caps it).
+     */
+    public const TOP_CANDIDATES = 30;
 
     public function __construct(private readonly AttestationRepository $attestations)
     {
@@ -66,7 +75,15 @@ final class ProfileVouchLineResolver
                 return $out;
             }
 
-            foreach ($this->attestations->topProfileVoucherIds($ownerId, self::TOP_VOUCHERS) as $voucherId) {
+            foreach ($this->attestations->topProfileVoucherIds($ownerId, self::TOP_CANDIDATES) as $voucherId) {
+                if (count($out['top_vouchers']) >= self::TOP_VOUCHERS) {
+                    break;
+                }
+                // F-356: the roster's own rule — never show a voucher whose
+                // profile this (anonymous) viewer may not see.
+                if (!ProfileAccess::canViewProfile($voucherId)) {
+                    continue;
+                }
                 $user = get_userdata($voucherId);
                 if (!$user instanceof \WP_User) {
                     continue;
