@@ -218,7 +218,9 @@ final class MyProfileEndpoint
                 );
             }
             $bio = sanitize_textarea_field($bioRaw);
-            if (strlen($bio) > self::BIO_MAX_LENGTH) {
+            // Characters, as the message says, not bytes (F-294): a bio in
+            // a non-Latin script hit the limit at a fraction of 500.
+            if (mb_strlen($bio) > self::BIO_MAX_LENGTH) {
                 return ApiResponse::error(
                     'bcc_invalid_request',
                     sprintf('Bio must be %d characters or fewer.', self::BIO_MAX_LENGTH),

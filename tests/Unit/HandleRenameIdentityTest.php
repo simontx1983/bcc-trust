@@ -224,6 +224,23 @@ final class HandleRenameIdentityTest extends TestCase
         self::assertNull(HandleService::currentOwner('alice'));
     }
 
+    public function testResubmittingTheCurrentHandleDuringTheCooldownIsTheNoOp200(): void
+    {
+        // F-294: it used to answer the cooldown 429. Resubmitting your own
+        // handle changes nothing and says nothing about any other handle.
+        $GLOBALS['__bcc_ph']['current_user'] = self::ALICE;
+        $GLOBALS['__bcc_ph']['meta'][self::ALICE][HandleService::META_HANDLE_LAST_CHANGED] = (string) (time() - 3600);
+        $endpoint = (new \ReflectionClass(OnboardingEndpoint::class))->newInstanceWithoutConstructor();
+
+        $same  = $endpoint->updateHandle(new \WP_REST_Request(['handle' => 'Alice']));
+        $other = $endpoint->updateHandle(new \WP_REST_Request(['handle' => 'bob']));
+
+        self::assertSame(200, $same->get_status());
+        self::assertNull($same->get_data()['data']['next_change_at'], 'nothing changed, nothing armed');
+        self::assertSame([], self::retired(self::ALICE));
+        self::assertSame(429, $other->get_status(), 'a real change is still held by the cooldown');
+    }
+
     public function testEmailSignInIsUnchanged(): void
     {
         self::rename(self::ALICE, 'bob');

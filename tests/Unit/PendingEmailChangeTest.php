@@ -225,6 +225,9 @@ final class PendingEmailChangeTest extends TestCase
         self::assertSame('Bearer', $data['token_type']);
         self::assertSame(['emailChanged:' . self::OLD . '>new@example.com'], $GLOBALS['__bcc_ph']['canary']);
         self::assertContains('account_email_changed', $GLOBALS['__bcc_ph']['audit']);
+        // F-294: ONE notice to the old address (BCC's), not core's second one too.
+        self::assertSame([false], $GLOBALS['__bcc_ph']['core_email_notice'] ?? null, 'the core Email Changed mail is off for this write');
+        self::assertSame([], $GLOBALS['__bcc_ph']['filters']['send_email_change_email'] ?? [], '...and only for this write');
         self::assertNull(PendingEmailService::pendingEmail(self::USER, PendingEmailService::PURPOSE_CHANGE));
     }
 
