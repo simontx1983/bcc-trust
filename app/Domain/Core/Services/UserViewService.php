@@ -977,9 +977,11 @@ final class UserViewService
     }
 
     /**
-     * Could this viewer already see the group's roster (§4.7.7 members
-     * route)? The member themself; anyone for an open group or a Hall; a
-     * group the viewer is an active member of. An unresolved context fails
+     * Could this viewer already see the group's roster? The member
+     * themself always; anyone else by the group page's OWN rule
+     * (GroupsService::resolveMembersVisible — open → everyone, closed /
+     * secret → active members only, no exception for Halls), so the badge
+     * and the member list can never disagree. An unresolved context fails
      * closed (not visible).
      */
     private static function rosterVisible(bool $isSelf, ?\BCC\Trust\Core\ValueObjects\GroupContext $ctx, ?string $viewerStatus): bool
@@ -987,13 +989,12 @@ final class UserViewService
         if ($isSelf) {
             return true;
         }
-        if ($ctx !== null
-            && ($ctx->privacy === \BCC\Trust\Core\ValueObjects\PeepSoPrivacy::Open
-                || $ctx->type === \BCC\Trust\Core\ValueObjects\GroupType::Hall)) {
-            return true;
+        if ($ctx === null) {
+            return false;
         }
-        return $viewerStatus !== null
+        $viewerIsMember = $viewerStatus !== null
             && in_array($viewerStatus, CommentService::READ_ALLOWED_STATUSES, true);
+        return GroupsService::resolveMembersVisible($ctx, $viewerIsMember);
     }
 
     /**

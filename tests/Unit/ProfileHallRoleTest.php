@@ -35,15 +35,17 @@ final class ProfileHallRoleTest extends TestCase
     private const HALL   = 102;
     private const CLOSED = 103;
     private const SECRET = 104;
+    private const CLOSED_HALL = 105;
 
     protected function setUp(): void
     {
         require_once dirname(__DIR__) . '/Stubs/profile-hall-role-stubs.php';
         $GLOBALS['__bcc_phr'] = [
-            'groups'   => [self::OPEN, self::HALL, self::CLOSED, self::SECRET],
+            'groups'   => [self::OPEN, self::HALL, self::CLOSED, self::SECRET, self::CLOSED_HALL],
             'contexts' => [
                 self::OPEN   => self::ctx(self::OPEN, PeepSoPrivacy::Open, GroupType::User),
-                self::HALL   => self::ctx(self::HALL, PeepSoPrivacy::Closed, GroupType::Hall),
+                self::HALL   => self::ctx(self::HALL, PeepSoPrivacy::Open, GroupType::Hall),
+                self::CLOSED_HALL => self::ctx(self::CLOSED_HALL, PeepSoPrivacy::Closed, GroupType::Hall),
                 self::CLOSED => self::ctx(self::CLOSED, PeepSoPrivacy::Closed, GroupType::User),
                 self::SECRET => self::ctx(self::SECRET, PeepSoPrivacy::Secret, GroupType::User),
             ],
@@ -53,6 +55,7 @@ final class ProfileHallRoleTest extends TestCase
                     self::HALL   => 'member',
                     self::CLOSED => 'member_manager',
                     self::SECRET => 'member_owner',
+                    self::CLOSED_HALL => 'member_owner',
                 ],
             ],
             'read_fails'   => [],
@@ -89,26 +92,41 @@ final class ProfileHallRoleTest extends TestCase
     public function testTheMemberSeesEveryOwnRole(): void
     {
         self::assertSame(
-            [self::OPEN => 'moderator', self::HALL => 'member', self::CLOSED => 'moderator', self::SECRET => 'owner'],
+            [self::OPEN => 'moderator', self::HALL => 'member', self::CLOSED => 'moderator', self::SECRET => 'owner', self::CLOSED_HALL => 'owner'],
             self::roles(self::halls(self::MEMBER))
         );
         self::assertNotContains(self::VIEWER, $GLOBALS['__bcc_phr']['status_reads'], 'no viewer read for the member themself');
     }
 
-    public function testAnOutsiderSeesRolesOnlyInOpenGroupsAndHalls(): void
+    public function testAnOutsiderSeesRolesOnlyWhereTheRosterIsPublic(): void
     {
         self::assertSame(
-            [self::OPEN => 'moderator', self::HALL => 'member', self::CLOSED => null, self::SECRET => null],
+            [self::OPEN => 'moderator', self::HALL => 'member', self::CLOSED => null, self::SECRET => null, self::CLOSED_HALL => null],
             self::roles(self::halls(self::VIEWER))
         );
     }
 
-    public function testAnonymousViewersSeeRolesOnlyInOpenGroupsAndHalls(): void
+    public function testAnonymousViewersSeeRolesOnlyWhereTheRosterIsPublic(): void
     {
         self::assertSame(
-            [self::OPEN => 'moderator', self::HALL => 'member', self::CLOSED => null, self::SECRET => null],
+            [self::OPEN => 'moderator', self::HALL => 'member', self::CLOSED => null, self::SECRET => null, self::CLOSED_HALL => null],
             self::roles(self::halls(0))
         );
+    }
+
+    /**
+     * Review LOW on #671: a closed (or secret) Hall's roster is private to
+     * its members on the group page (GroupsService::resolveMembersVisible
+     * has no Hall exception), so the profile must not show a non-member
+     * that Hall's owner/moderator badge either.
+     */
+    public function testAClosedHallsRoleIsHiddenFromANonMemberLikeItsRoster(): void
+    {
+        self::assertNull(self::halls(self::VIEWER)[self::CLOSED_HALL]['role']);
+        self::assertNull(self::halls(self::VIEWER)[self::CLOSED_HALL]['role_label']);
+
+        $GLOBALS['__bcc_phr']['statuses'][self::VIEWER] = [self::CLOSED_HALL => 'member'];
+        self::assertSame('owner', self::halls(self::VIEWER)[self::CLOSED_HALL]['role'], 'its active members do see it');
     }
 
     /** @return array<string, array{string, ?string}> */
@@ -178,7 +196,7 @@ final class ProfileHallRoleTest extends TestCase
      */
     public function testEveryRowSaysWhatKindOfGroupItIs(): void
     {
-        $expected = [self::OPEN => 'user', self::HALL => 'hall', self::CLOSED => 'user', self::SECRET => 'user'];
+        $expected = [self::OPEN => 'user', self::HALL => 'hall', self::CLOSED => 'user', self::SECRET => 'user', self::CLOSED_HALL => 'hall'];
 
         foreach ([self::MEMBER, self::VIEWER, 0] as $viewer) {
             self::assertSame(

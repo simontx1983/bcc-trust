@@ -240,7 +240,7 @@ final class GroupsService
         $permissions['can_request_join'] = $this->resolveCanRequestJoin($ctx, $viewerId, $isMember, $rawStatus, $groupId);
 
         $feedVisible    = $permissions['can_read_feed']['allowed'];
-        $membersVisible = $this->resolveMembersVisible($ctx, $isMember);
+        $membersVisible = self::resolveMembersVisible($ctx, $isMember);
 
         // Owners/managers see how many requests wait on them; everyone
         // else gets null (no disclosure of the queue size).
@@ -1031,7 +1031,12 @@ final class GroupsService
         ];
     }
 
-    private function resolveMembersVisible(GroupContext $ctx, bool $isMember): bool
+    /**
+     * May a viewer see this group's member roster? THE rule — the group
+     * page's `members_visible` and the profile's role disclosure
+     * (UserViewService) both call it, so the two cannot drift.
+     */
+    public static function resolveMembersVisible(GroupContext $ctx, bool $isMember): bool
     {
         if ($ctx->privacy === PeepSoPrivacy::Open) {
             return true;
