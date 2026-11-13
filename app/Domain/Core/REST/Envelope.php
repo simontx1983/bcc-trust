@@ -118,6 +118,34 @@ final class Envelope
             }
         }
 
+        // F-288: a 401 `bcc_unauthorized` on a request whose PRESENTED bearer
+        // token failed says why (contract §1.4.3): `bcc_token_expired` (a
+        // plain expiry — refresh and retry) or `bcc_token_invalid` (malformed,
+        // revoked, signed out, superseded — sign out). No token presented
+        // keeps `bcc_unauthorized`; a public route that served the anonymous
+        // view is untouched (it isn't a 401). Status and shape are unchanged.
+        // Not on POST /auth/refresh itself: its 401 means "this token can't
+        // be refreshed" — relabelling a past-grace expiry as
+        // bcc_token_expired ("refresh and retry") would send a
+        // contract-following client round in a loop. The route is
+        // lowercased first (F-337: REST routes match case-insensitively).
+        if ($status === 401
+            && rtrim(strtolower($route), '/') !== '/bcc/v1/auth/refresh'
+            && is_array($data)
+            && is_array($data['error'] ?? null)
+            && ($data['error']['code'] ?? null) === 'bcc_unauthorized'
+        ) {
+            $failure = \BCC\Trust\Core\Support\BearerAuth::presentedTokenFailure();
+            if ($failure !== null) {
+                $expired = $failure === \BCC\Trust\Core\Support\BearerAuth::TOKEN_EXPIRED;
+                $data['error']['code']    = $expired ? 'bcc_token_expired' : 'bcc_token_invalid';
+                $data['error']['message'] = $expired
+                    ? 'Your session has expired. Refresh it and try again.'
+                    : 'Your session is no longer valid. Please sign in again.';
+                $response->set_data($data);
+            }
+        }
+
         // Phase 6: ETag / If-None-Match for cacheable reads (cards, feed, …).
         // Any GET 200 that opted into caching (Cache-Control max-age>0) gets a
         // content-hash ETag; a matching If-None-Match short-circuits to 304 with
