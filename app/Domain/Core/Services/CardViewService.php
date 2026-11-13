@@ -112,7 +112,10 @@ if (!defined('ABSPATH')) {
  *   trust_min: int|null,
  *   viewer_is_member: bool,
  *   posts_last_7d: int,
- *   active_members_7d?: int
+ *   active_members_7d?: int,
+ *   can_join?: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},
+ *   can_request_join?: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},
+ *   viewer_membership_status?: string|null
  * }
  */
 final class CardViewService
@@ -1068,6 +1071,12 @@ final class CardViewService
                 'trust_min'        => $groupData['trust_min'],
                 'collection_stats' => $groupData['collection_stats'],
                 'viewer_is_member' => $viewerIsMember,
+                // F-244: the server's join verdicts, computed by the caller
+                // through GroupsService (one source of truth with the group
+                // page). Passed through, never recomputed here.
+                'can_join'                 => $groupData['can_join'] ?? null,
+                'can_request_join'         => $groupData['can_request_join'] ?? null,
+                'viewer_membership_status' => $groupData['viewer_membership_status'] ?? null,
             ],
             'crest'               => self::buildCrest(
                 $name,
