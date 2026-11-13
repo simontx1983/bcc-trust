@@ -370,12 +370,23 @@ final class HeliusSubscriptionManager
         ];
     }
 
+    /** F-314: what the remote side said about the stored webhook id. */
+    public const REMOTE_OK              = 'ok';
+    public const REMOTE_MISSING         = 'missing';
+    public const REMOTE_UNREACHABLE     = 'unreachable';
+    public const REMOTE_NOT_PROVISIONED = 'not_provisioned';
+
     /**
      * Operator-readable status. Used by the admin Helius panel.
      *
-     * @return array{webhook_id: string, remote_address_count: ?int, local_managed_count: int, callback_url: ?string}
+     * F-314: `remote_state` says WHY the remote fields may be empty — a 404
+     * (`missing`: deleted on Helius's side) is told apart from any other
+     * failure (`unreachable`), and `callback_matches` compares the remote
+     * webhookURL with $expectedCallback when both are known.
+     *
+     * @return array{webhook_id: string, remote_address_count: ?int, local_managed_count: int, callback_url: ?string, remote_state: string, callback_matches: ?bool}
      */
-    public static function status(): array
+    public static function status(?string $expectedCallback = null): array
     {
         $webhookId = (string) get_option(self::OPTION_WEBHOOK_ID, '');
         $solanaChain = ChainRepository::getBySlug('solana');
@@ -389,10 +400,13 @@ final class HeliusSubscriptionManager
                 'remote_address_count' => null,
                 'local_managed_count'  => $localManaged,
                 'callback_url'         => null,
+                'remote_state'         => self::REMOTE_NOT_PROVISIONED,
+                'callback_matches'     => null,
             ];
         }
 
-        $detail   = self::fetchWebhook($webhookId);
+        $result   = self::fetchWebhookResult($webhookId);
+        $detail   = $result['code'] === 200 ? $result['body'] : null;
         $remoteCt = is_array($detail) && isset($detail['accountAddresses']) && is_array($detail['accountAddresses'])
             ? count($detail['accountAddresses'])
             : null;
@@ -400,12 +414,131 @@ final class HeliusSubscriptionManager
             ? $detail['webhookURL']
             : null;
 
+        $state = $detail !== null
+            ? self::REMOTE_OK
+            : ($result['code'] === 404 ? self::REMOTE_MISSING : self::REMOTE_UNREACHABLE);
+
         return [
             'webhook_id'           => $webhookId,
             'remote_address_count' => $remoteCt,
             'local_managed_count'  => $localManaged,
             'callback_url'         => $callback,
+            'remote_state'         => $state,
+            'callback_matches'     => ($callback !== null && $expectedCallback !== null && $expectedCallback !== '')
+                ? $callback === $expectedCallback
+                : null,
         ];
+    }
+
+    /**
+     * F-314: point the stored webhook at $callbackUrl again, or recreate it
+     * when Helius no longer has it. Mutates EXTERNAL provider state.
+     *
+     *   - not configured / no stored id → nothing (`not_configured` /
+     *     `not_provisioned`; use Provision);
+     *   - remote 404 → the stored id names nothing: forget it, provision a
+     *     fresh webhook, refill its address list (`recreated`);
+     *   - remote 200, URL already right → nothing (`already_current`);
+     *   - remote 200, URL differs → a FULL-body PUT under the address-list
+     *     lock (`updated`; `busy` when the lock is held);
+     *   - anything else → nothing (`unreachable`). Only a 404 means missing:
+     *     a transport error or an auth failure must never orphan a live
+     *     webhook.
+     *
+     * @return array{outcome: string, webhook_id: string}
+     */
+    public static function reregisterSharedWebhook(string $callbackUrl): array
+    {
+        $webhookId = (string) get_option(self::OPTION_WEBHOOK_ID, '');
+        if (self::apiKey() === '' || self::authHeader() === '' || $callbackUrl === '') {
+            return ['outcome' => 'not_configured', 'webhook_id' => $webhookId];
+        }
+        if ($webhookId === '') {
+            return ['outcome' => 'not_provisioned', 'webhook_id' => ''];
+        }
+
+        $result = self::fetchWebhookResult($webhookId);
+
+        if ($result['code'] === 404) {
+            delete_option(self::OPTION_WEBHOOK_ID);
+            $newId = self::provisionSharedWebhook($callbackUrl);
+            if ($newId === null) {
+                return ['outcome' => 'recreate_failed', 'webhook_id' => ''];
+            }
+            // The fresh webhook watches nothing yet. Growing from empty is
+            // never a "shrink", so no override is needed.
+            self::resyncFromWalletLinks(false);
+            return ['outcome' => 'recreated', 'webhook_id' => $newId];
+        }
+
+        if ($result['code'] !== 200 || $result['body'] === null) {
+            return ['outcome' => 'unreachable', 'webhook_id' => $webhookId];
+        }
+        if (($result['body']['webhookURL'] ?? null) === $callbackUrl) {
+            return ['outcome' => 'already_current', 'webhook_id' => $webhookId];
+        }
+
+        // Under the address-list lock: the full body carries the address
+        // list, so an add/remove racing this PUT must not be overwritten.
+        $ok = self::withListLock(static fn (): bool => self::putWebhookUrl($webhookId, $callbackUrl));
+        if ($ok === null) {
+            return ['outcome' => 'busy', 'webhook_id' => $webhookId];
+        }
+        return ['outcome' => $ok ? 'updated' : 'update_failed', 'webhook_id' => $webhookId];
+    }
+
+    /**
+     * PUT the webhook with a FULL body (Helius's update takes every field as
+     * optional and does not document whether unsent ones are kept, so none
+     * are left out). The address list and filters are re-read under the
+     * caller's lock, so what is sent is the live configuration plus the new
+     * URL and our auth header.
+     */
+    private static function putWebhookUrl(string $webhookId, string $callbackUrl): bool
+    {
+        $current = self::fetchWebhookResult($webhookId);
+        if ($current['code'] !== 200 || $current['body'] === null) {
+            return false;
+        }
+        $live = $current['body'];
+
+        $body = wp_json_encode([
+            'webhookURL'       => $callbackUrl,
+            'transactionTypes' => isset($live['transactionTypes']) && is_array($live['transactionTypes'])
+                ? array_values($live['transactionTypes'])
+                : ['NFT_MINT', 'NFT_SALE', 'TRANSFER'],
+            'accountAddresses' => isset($live['accountAddresses']) && is_array($live['accountAddresses'])
+                ? array_values($live['accountAddresses'])
+                : [],
+            'webhookType'      => isset($live['webhookType']) && is_string($live['webhookType'])
+                ? $live['webhookType']
+                : 'enhanced',
+            'authHeader'       => self::authHeader(),
+        ]);
+        if ($body === false) {
+            return false;
+        }
+
+        $response = ApiRetry::post(
+            self::HELIUS_API_BASE . '/v0/webhooks/' . rawurlencode($webhookId)
+            . '?api-key=' . rawurlencode(self::apiKey()),
+            [
+                'method'    => 'PUT',
+                'timeout'   => self::HTTP_TIMEOUT,
+                'headers'   => ['Content-Type' => 'application/json'],
+                'body'      => $body,
+                'sslverify' => true,
+            ],
+            ['label' => 'Helius webhook re-register']
+        );
+        if (is_wp_error($response)) {
+            \BCC\Core\Log\Logger::error('[HeliusSubscriptionManager] re-register PUT failed', [
+                'error' => $response->get_error_message(),
+            ]);
+            return false;
+        }
+        $code = (int) wp_remote_retrieve_response_code($response);
+        return $code >= 200 && $code < 300;
     }
 
     // ── Internal HTTP helpers ───────────────────────────────────────
@@ -491,9 +624,22 @@ final class HeliusSubscriptionManager
      */
     private static function fetchWebhook(string $webhookId): ?array
     {
+        $result = self::fetchWebhookResult($webhookId);
+        return $result['code'] === 200 ? $result['body'] : null;
+    }
+
+    /**
+     * F-314: the GET with its HTTP status kept, so a 404 (gone on Helius's
+     * side) can be told apart from a transport or auth failure. `code` is
+     * null for a transport error or a missing API key.
+     *
+     * @return array{code: ?int, body: ?array<string, mixed>}
+     */
+    private static function fetchWebhookResult(string $webhookId): array
+    {
         $apiKey = self::apiKey();
         if ($apiKey === '') {
-            return null;
+            return ['code' => null, 'body' => null];
         }
 
         $response = ApiRetry::get(
@@ -504,14 +650,14 @@ final class HeliusSubscriptionManager
         );
 
         if (is_wp_error($response)) {
-            return null;
+            return ['code' => null, 'body' => null];
         }
-        $code = wp_remote_retrieve_response_code($response);
-        if ((int) $code !== 200) {
-            return null;
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code !== 200) {
+            return ['code' => $code, 'body' => null];
         }
         $json = json_decode(wp_remote_retrieve_body($response), true);
-        return is_array($json) ? $json : null;
+        return ['code' => 200, 'body' => is_array($json) ? $json : null];
     }
 
     /**
