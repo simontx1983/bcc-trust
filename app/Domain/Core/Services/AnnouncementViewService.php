@@ -539,6 +539,15 @@ final class AnnouncementViewService
     }
 
     /**
+     * The same permalink for callers outside this service (F-307: the admin
+     * moderation queue links a reported notice). One composer, not two.
+     */
+    public static function permalinkFor(string $validatorSlug, int $id): string
+    {
+        return self::permalink($validatorSlug, $id);
+    }
+
+    /**
      * Published so a test can assert the meta keys this projection reads
      * are the ones `AnnouncementVisibility` defines — two spellings of the
      * same key is how a projection silently stops reflecting reality.

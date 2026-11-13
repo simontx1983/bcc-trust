@@ -612,9 +612,6 @@ class DisputeController
     {
         $reporter_id      = get_current_user_id();
 
-        $throttled = $this->throttle('report_user', $reporter_id, 60);
-        if ($throttled) return $throttled;
-
         $reported_id      = (int) $req->get_param('reported_user_id');
         $reason_key       = $req->get_param('reason_key');
         $reason_detail    = (string) $req->get_param('reason_detail');
@@ -639,6 +636,13 @@ class DisputeController
         if ( UserReportRepository::hasActiveReport($reporter_id, $reported_id) ) {
             return $this->error('already_reported', 'You have already submitted an active report against this user.', 409);
         }
+
+        // F-311 (M5): the 60 s throttle is spent only by a submission that
+        // passed validation. It used to run first, so a refusal the member
+        // could fix (cannot_self_report, detail_required, already_reported)
+        // burned the window and the corrected resubmit got a 429.
+        $throttled = $this->throttle('report_user', $reporter_id, 60);
+        if ($throttled) return $throttled;
 
         // Protect targets from coordinated report campaigns.
         if ( UserReportRepository::countActiveReportsAgainst($reported_id) >= 10 ) {

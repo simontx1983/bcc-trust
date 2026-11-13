@@ -99,6 +99,20 @@ final class AnnouncementVisibility
     public const META_COMMENTS_ENABLED = '_bcc_announcement_comments_enabled';
 
     /**
+     * F-307 — an administrator took the notice down. Presence (non-empty)
+     * fails predicate 4 of {@see self::publicPredicateSql()}, so every public
+     * read drops the notice. Written and cleared ONLY by
+     * AnnouncementModerationService; never by auto-hide.
+     */
+    public const META_MODERATION_HIDDEN_AT = '_bcc_announcement_moderation_hidden_at';
+
+    /** F-307 — the administrator who took the notice down. */
+    public const META_MODERATION_HIDDEN_BY = '_bcc_announcement_moderation_hidden_by';
+
+    /** F-307 — the report the takedown resolved. */
+    public const META_MODERATION_HIDDEN_REPORT = '_bcc_announcement_moderation_hidden_report';
+
+    /**
      * The three predicates, plus type scoping, as a parenthesised SQL
      * boolean that ANDs onto any WHERE.
      *
@@ -182,6 +196,16 @@ final class AnnouncementVisibility
                 // CONSISTENT and passes both rungs above — must not satisfy
                 // this.
                 . " AND {$a}.post_author > 0"
+            . ')'
+            // F-307 — predicate 4: not taken down by an administrator. NOT
+            // EXISTS, for the same cardinality reason as the EXISTS above.
+            // Any non-empty marker counts: the takedown is in force until the
+            // marker is deleted, whatever its value.
+            . ' AND NOT EXISTS ('
+                . " SELECT 1 FROM {$meta} bcc_mh"
+                . " WHERE bcc_mh.post_id = {$a}.ID"
+                . " AND bcc_mh.meta_key = '" . self::META_MODERATION_HIDDEN_AT . "'"
+                . " AND bcc_mh.meta_value <> ''"
             . ')'
             . ')';
     }

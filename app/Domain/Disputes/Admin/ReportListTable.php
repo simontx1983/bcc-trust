@@ -176,19 +176,30 @@ class ReportListTable extends WP_List_Table
             case 'id':
                 return $item->id;
 
+            // F-311 (M14): both people link to their wp-admin moderation
+            // page (history, suspension, whitelist), so the admin can act on
+            // a report without hunting for the member by id.
             case 'reported_name':
-                return esc_html($item->reported_name ?: __('Unknown', 'bcc-disputes'))
-                     . ' <span class="description">(#' . $item->reported_id . ')</span>';
+                return self::memberLink($item->reported_id, $item->reported_name);
 
             case 'reporter_name':
-                return esc_html($item->reporter_name ?: __('Unknown', 'bcc-disputes'))
-                     . ' <span class="description">(#' . $item->reporter_id . ')</span>';
+                return self::memberLink($item->reporter_id, $item->reporter_name);
 
             case 'reason_key':
                 return esc_html($labels[$item->reason_key] ?? $item->reason_key);
 
             case 'reason_detail':
-                return esc_html(mb_strimwidth($item->reason_detail, 0, 80, '…'));
+                // F-311 (M14): up to 1000 characters are accepted, and the
+                // full text used to exist only in the admin email. Long
+                // details now expand in place; still plain escaped text.
+                if (mb_strlen($item->reason_detail) <= 80) {
+                    return esc_html($item->reason_detail);
+                }
+                return sprintf(
+                    '<details><summary>%s</summary><div style="white-space:pre-wrap;max-width:40em;">%s</div></details>',
+                    esc_html(mb_strimwidth($item->reason_detail, 0, 80, '…')),
+                    esc_html($item->reason_detail)
+                );
 
             case 'status':
                 $colors = [
@@ -336,6 +347,20 @@ class ReportListTable extends WP_List_Table
             $out .= sprintf('<input type="hidden" name="paged" value="%d">', $paged);
         }
         return $out;
+    }
+
+    /** F-311 (M14): a member's name linked to their wp-admin moderation page. */
+    private static function memberLink(int $userId, ?string $name): string
+    {
+        return sprintf(
+            '<a href="%s">%s</a> <span class="description">(#%d)</span>',
+            esc_url(add_query_arg(
+                ['page' => 'bcc-trust-moderation', 'user_id' => $userId],
+                admin_url('admin.php')
+            )),
+            esc_html($name ?: __('Unknown', 'bcc-disputes')),
+            $userId
+        );
     }
 
     public function no_items(): void

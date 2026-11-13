@@ -9,6 +9,8 @@ use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
+require_once __DIR__ . '/PeepSoBlocksTableFixture.php';
+
 /**
  * Regression net for retired bell types (v1.50 endorse retirement; same
  * class as the pull→watch rename's `bcc_card_pulled` leftovers).
@@ -28,6 +30,8 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(NotificationRepository::class)]
 final class NotificationLegacyTypeIntegrationTest extends TestCase
 {
+    use PeepSoBlocksTableFixture;
+
     private const DDL =
         "CREATE TABLE IF NOT EXISTS `wp_peepso_notifications` (
             not_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -52,6 +56,50 @@ final class NotificationLegacyTypeIntegrationTest extends TestCase
         }
         $GLOBALS['wpdb']->query(self::DDL);
         $GLOBALS['wpdb']->query('TRUNCATE TABLE `wp_peepso_notifications`');
+        // F-296: every read excludes blocked members, fail-closed.
+        $this->ensurePeepSoBlocksTable();
+    }
+
+    protected function tearDown(): void
+    {
+        $this->removePeepSoBlocksTable();
+    }
+
+    /**
+     * F-296 on a real server: a blocked member's rows (seed() writes every
+     * row FROM user 2) leave the list, the badge and the digest, in either
+     * block direction; another sender's rows and system rows stay.
+     */
+    public function testABlockedMembersRowsLeaveTheListTheBadgeAndTheDigest(): void
+    {
+        $repo = new NotificationRepository();
+        $this->seed(42, 'bcc_review');
+        $this->seed(42, 'bcc_welcome');
+        $GLOBALS['wpdb']->query($GLOBALS['wpdb']->prepare(
+            'INSERT INTO `wp_peepso_notifications`
+                (not_user_id, not_from_user_id, not_module_id, not_external_id, not_act_id, not_type, not_message, not_timestamp, not_read)
+             VALUES (%d, 0, %d, 0, 0, %s, %s, %s, 0)',
+            42,
+            BCC_NOTIFICATION_MODULE_ID,
+            'bcc_rank_up',
+            'system row',
+            '2026-07-20 12:00:00'
+        ));
+
+        self::assertSame(3, $repo->countUnreadForUser(42));
+
+        foreach ([[42, 2], [2, 42]] as [$blocker, $blocked]) {
+            $this->seedBlock($blocker, $blocked);
+
+            self::assertSame(['bcc_rank_up'], self::types($repo->findForUser(42, 20, 0)), "blocked {$blocker}→{$blocked}");
+            self::assertSame(1, $repo->countUnreadForUser(42));
+            self::assertSame(['bcc_rank_up'], self::types($repo->findUnreadSince(42, '2026-07-01 00:00:00', 25)));
+
+            $this->removePeepSoBlocksTable();
+            $this->ensurePeepSoBlocksTable();
+        }
+
+        self::assertSame(3, $repo->countUnreadForUser(42), 'unblocking brings the rows back');
     }
 
     private function seed(int $userId, string $type, int $read = 0): void

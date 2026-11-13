@@ -43,6 +43,23 @@ final class PublicIdentityTest extends TestCase
         self::assertSame('alice', PublicIdentity::displayName(' u_alice ', 'u_alice', 'alice'));
     }
 
+    public function testAnOldSignupLoginInDisplayNameFallsBackToTheHandle(): void
+    {
+        // F-328: display_name still holds a u_<handle> login that is NOT the
+        // member's current one; showing it ties that old handle to them.
+        self::assertSame('bob', PublicIdentity::displayName('u_alice', 'u_bob', 'bob'));
+        self::assertSame('bob', PublicIdentity::displayName('U_Old-Name', 'legacylogin', 'bob'));
+        self::assertSame('bob', PublicIdentity::displayName('u_alice', '', 'bob'), 'even with no login to compare');
+    }
+
+    public function testOnlyTheExactSignupLoginShapeIsRejected(): void
+    {
+        self::assertSame('u_ab', PublicIdentity::displayName('u_ab', 'u_bob', 'bob'), 'too short for a handle');
+        self::assertSame('Ursula u_alice', PublicIdentity::displayName('Ursula u_alice', 'u_bob', 'bob'));
+        self::assertSame('u_alice!', PublicIdentity::displayName('u_alice!', 'u_bob', 'bob'));
+        self::assertSame('ualice', PublicIdentity::displayName('ualice', 'u_bob', 'bob'));
+    }
+
     public function testEmptyDisplayNameFallsBackToHandle(): void
     {
         self::assertSame('member-9', PublicIdentity::displayName('', 'jsmith', 'member-9'));

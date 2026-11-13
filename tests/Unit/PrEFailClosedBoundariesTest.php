@@ -239,6 +239,30 @@ final class PrEFailClosedBoundariesTest extends TestCase
         self::assertSame(0, \BCC\Trust\Core\Security\TransactionManager::$rollbacks);
     }
 
+    /**
+     * F-313 (M11): nothing pending (another admin or tab decided it first)
+     * is an EXPECTED negative. The closure used to return `false`, which
+     * TransactionManager turns into an exception, so the operator saw
+     * "The operation failed" and a durable *_failed audit row was written
+     * for an ordinary stale tab. It must be the friendly warning instead.
+     */
+    public function testAnAlreadyReviewedDescriptionIsAWarningNotAFailure(): void
+    {
+        $this->primeReview(99);
+        \BCC\Trust\Onchain\Repositories\CollectionRepository::$setDescriptionStateResult = false;
+
+        $this->runApprove();
+
+        $notices = $this->notices();
+        self::assertNotEmpty($notices);
+        self::assertSame('warning', $notices[0]['type'] ?? null);
+        self::assertStringContainsString('may already have been reviewed', $notices[0]['message'] ?? '');
+        self::assertSame(0, \BCC\Trust\Core\Security\TransactionManager::$rollbacks, 'nothing failed, so nothing rolls back');
+        foreach (\BCC\Trust\Core\Security\AuditLogger::actions() as $action) {
+            self::assertStringNotContainsString('_failed', $action, 'a stale tab is not a durable failure');
+        }
+    }
+
     // ── Blocker 8: approval does not publish (DECISION 17) ──────────────
 
     public function testApprovalIsNotDescribedAsPublication(): void
