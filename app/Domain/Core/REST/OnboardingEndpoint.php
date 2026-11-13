@@ -175,6 +175,22 @@ final class OnboardingEndpoint
 
         $handleService = Plugin::instance()->handleService();
 
+        $handle  = strtolower(trim((string) $request->get_param('handle')));
+        $current = $handleService->getHandle($userId);
+
+        // No-op rename short-circuits, cooldown or not: resubmitting your
+        // CURRENT handle changes nothing, arms nothing and says nothing about
+        // any other handle, so it is the documented 200 even inside the
+        // 7-day window (it used to answer 429, F-294).
+        if ($current !== '' && $current === $handle) {
+            $resp = ApiResponse::ok([
+                'handle'         => $handle,
+                'next_change_at' => null,
+            ]);
+            $resp->header('Cache-Control', 'no-store');
+            return $resp;
+        }
+
         // Cooldown check FIRST so a user mashing the rename button
         // can't probe handle availability via 422 responses while
         // they're locked out anyway.
@@ -192,26 +208,12 @@ final class OnboardingEndpoint
             return $resp;
         }
 
-        $handle = strtolower(trim((string) $request->get_param('handle')));
-
         $err = $handleService->validate($handle);
         if ($err !== null) {
             return ApiResponse::error($err, self::handleErrorMessage($err), 422);
         }
         if (!$handleService->isAvailable($handle, $userId)) {
             return ApiResponse::error('bcc_conflict', 'That handle is already taken.', 409);
-        }
-
-        // No-op rename short-circuits: don't arm the cooldown when the
-        // user submits their existing handle.
-        $current = $handleService->getHandle($userId);
-        if ($current === $handle) {
-            $resp = ApiResponse::ok([
-                'handle'         => $handle,
-                'next_change_at' => null,
-            ]);
-            $resp->header('Cache-Control', 'no-store');
-            return $resp;
         }
 
         // A handle CHANGE is rarer and costlier: its own per-account hourly
