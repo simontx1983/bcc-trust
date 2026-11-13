@@ -675,6 +675,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\Services\\SignalFetcher' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/SignalFetcher.php',
         'BCC\\Trust\\Onchain\\Services\\SignalRefreshService' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/SignalRefreshService.php',
         'BCC\\Trust\\Onchain\\Services\\SignalScorer' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/SignalScorer.php',
+        'BCC\\Trust\\Onchain\\Services\\SolanaCollectionAuthority' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/SolanaCollectionAuthority.php',
         'BCC\\Trust\\Onchain\\Services\\V1FetchFailureTracker' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/V1FetchFailureTracker.php',
         'BCC\\Trust\\Onchain\\Services\\Validation\\CosmosContractProbe' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/Validation/CosmosContractProbe.php',
         'BCC\\Trust\\Onchain\\Services\\Validation\\EvmContractProbe' => __DIR__ . '/../..' . '/app/Domain/Onchain/Services/Validation/EvmContractProbe.php',

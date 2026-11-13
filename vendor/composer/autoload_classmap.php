@@ -519,6 +519,7 @@ return array(
     'BCC\\Trust\\Onchain\\Services\\SignalFetcher' => $baseDir . '/app/Domain/Onchain/Services/SignalFetcher.php',
     'BCC\\Trust\\Onchain\\Services\\SignalRefreshService' => $baseDir . '/app/Domain/Onchain/Services/SignalRefreshService.php',
     'BCC\\Trust\\Onchain\\Services\\SignalScorer' => $baseDir . '/app/Domain/Onchain/Services/SignalScorer.php',
+    'BCC\\Trust\\Onchain\\Services\\SolanaCollectionAuthority' => $baseDir . '/app/Domain/Onchain/Services/SolanaCollectionAuthority.php',
     'BCC\\Trust\\Onchain\\Services\\V1FetchFailureTracker' => $baseDir . '/app/Domain/Onchain/Services/V1FetchFailureTracker.php',
     'BCC\\Trust\\Onchain\\Services\\Validation\\CosmosContractProbe' => $baseDir . '/app/Domain/Onchain/Services/Validation/CosmosContractProbe.php',
     'BCC\\Trust\\Onchain\\Services\\Validation\\EvmContractProbe' => $baseDir . '/app/Domain/Onchain/Services/Validation/EvmContractProbe.php',
