@@ -2,46 +2,6 @@
 
 declare(strict_types=1);
 
-namespace {
-    if (!defined('ABSPATH')) {
-        define('ABSPATH', sys_get_temp_dir() . '/');
-    }
-    if (!class_exists('WP_List_Table')) {
-        class WP_List_Table
-        {
-            /** @param array<string, mixed> $args */
-            public function __construct(array $args = [])
-            {
-            }
-        }
-    }
-    foreach ([
-        'esc_attr', 'esc_html', 'esc_url', 'esc_js', 'esc_html__', '__',
-    ] as $fn) {
-        if (!function_exists($fn)) {
-            eval('function ' . $fn . '(string $t, string $d = ""): string { return htmlspecialchars($t, ENT_QUOTES); }');
-        }
-    }
-    if (!function_exists('admin_url')) {
-        function admin_url(string $path = ''): string
-        {
-            return 'https://example.test/wp-admin/' . $path;
-        }
-    }
-    if (!function_exists('wp_create_nonce')) {
-        function wp_create_nonce(string $action = '-1'): string
-        {
-            return 'nonce-' . md5($action);
-        }
-    }
-    if (!function_exists('wp_nonce_field')) {
-        function wp_nonce_field(string $action = '-1', string $name = '_wpnonce', bool $referer = true, bool $echo = true): string
-        {
-            return '<input type="hidden" name="' . $name . '" value="nonce-' . md5($action) . '">';
-        }
-    }
-}
-
 namespace BCC\Trust\Tests\Unit {
 
     use BCC\Trust\Disputes\Admin\ReportListTable;
@@ -66,6 +26,12 @@ namespace BCC\Trust\Tests\Unit {
     #[PreserveGlobalState(false)]
     final class ReportRowFormsOutsideOuterFormTest extends TestCase
     {
+        protected function setUp(): void
+        {
+            // Child process only (see the stub file's header).
+            require_once dirname(__DIR__) . '/Stubs/report-row-forms-stubs.php';
+        }
+
         private static function openRow(int $id): AdminReportRowDTO
         {
             // The row DTO validates through bcc-core's DTOAssert.
@@ -140,6 +106,50 @@ namespace BCC\Trust\Tests\Unit {
             ob_start();
             $table->renderRowForms();
             self::assertSame('', (string) ob_get_clean(), 'forms print once');
+        }
+
+        /**
+         * F-312 (M2): each row form posts the list's status filter and page
+         * back, so the handler's redirect lands on the same view rather than
+         * "All", page 1.
+         */
+        public function testEveryRowFormCarriesTheListFilterAndPage(): void
+        {
+            $_GET['report_status'] = 'open';
+            $_GET['paged']         = '3';
+            $table = new ReportListTable();
+            $table->column_default(self::openRow(41), 'actions');
+            ob_start();
+            $table->renderRowForms();
+            $forms = (string) ob_get_clean();
+            unset($_GET['report_status'], $_GET['paged']);
+
+            self::assertSame(3, substr_count($forms, '<input type="hidden" name="report_status" value="open">'));
+            self::assertSame(3, substr_count($forms, '<input type="hidden" name="paged" value="3">'));
+        }
+
+        public function testTheHandlersRedirectBackToTheSameFilterAndPage(): void
+        {
+            $_POST['report_status'] = 'open';
+            $_POST['paged']         = '3';
+            $url = (new \ReflectionMethod(\BCC\Trust\Disputes\Admin\DisputeAdmin::class, 'reportsReturnUrl'))
+                ->invoke(null, ['error' => 'already_resolved']);
+            unset($_POST['report_status'], $_POST['paged']);
+
+            parse_str((string) parse_url((string) $url, PHP_URL_QUERY), $q);
+            self::assertSame(
+                ['page' => 'bcc-reports', 'report_status' => 'open', 'paged' => '3', 'error' => 'already_resolved'],
+                $q
+            );
+        }
+
+        /** The refusals the handlers redirect with are rendered, not dropped. */
+        public function testTheReportsPageRendersTheErrorTheHandlersSend(): void
+        {
+            $body = GateOrder::body(GateOrder::code('app/Domain/Disputes/Admin/DisputeAdmin.php'), 'render_reports_page');
+            self::assertStringContainsString("\$_GET['error']", $body);
+            self::assertStringContainsString("'already_resolved'", $body);
+            self::assertStringContainsString("'invalid_penalty'", $body);
         }
 
         public function testThePagePrintsTheRowFormsAfterTheOuterFormCloses(): void
