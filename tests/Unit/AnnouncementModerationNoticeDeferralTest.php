@@ -2,75 +2,6 @@
 
 declare(strict_types=1);
 
-namespace {
-    if (!defined('ABSPATH')) {
-        define('ABSPATH', sys_get_temp_dir() . '/');
-    }
-
-    $GLOBALS['__f307'] = ['posts' => [], 'meta' => [], 'cron' => [], 'logs' => []];
-
-    if (!class_exists('WP_Post')) {
-        final class WP_Post
-        {
-            public int $ID = 0;
-            public string $post_type = '';
-            public int $post_author = 0;
-        }
-    }
-    if (!function_exists('get_post')) {
-        function get_post($id = null)
-        {
-            return $GLOBALS['__f307']['posts'][(int) $id] ?? null;
-        }
-    }
-    if (!function_exists('get_post_meta')) {
-        function get_post_meta(int $id, string $key = '', bool $single = false)
-        {
-            return $GLOBALS['__f307']['meta'][$id][$key] ?? '';
-        }
-    }
-    if (!function_exists('update_post_meta')) {
-        function update_post_meta(int $id, string $key, $value): bool
-        {
-            $GLOBALS['__f307']['meta'][$id][$key] = (string) $value;
-            return true;
-        }
-    }
-    if (!function_exists('wp_next_scheduled')) {
-        /** @param list<mixed> $args */
-        function wp_next_scheduled(string $hook, array $args = [])
-        {
-            foreach ($GLOBALS['__f307']['cron'] as $e) {
-                if ($e['hook'] === $hook && $e['args'] === $args) {
-                    return $e['at'];
-                }
-            }
-            return false;
-        }
-    }
-    if (!function_exists('wp_schedule_single_event')) {
-        /** @param list<mixed> $args */
-        function wp_schedule_single_event(int $at, string $hook, array $args = []): bool
-        {
-            $GLOBALS['__f307']['cron'][] = ['at' => $at, 'hook' => $hook, 'args' => $args];
-            return true;
-        }
-    }
-}
-
-namespace BCC\Core\Log {
-    if (!class_exists(Logger::class, false)) {
-        final class Logger
-        {
-            /** @param array<string, mixed> $context */
-            public static function warning(string $message, array $context = []): void
-            {
-                $GLOBALS['__f307']['logs'][] = $message;
-            }
-        }
-    }
-}
-
 namespace BCC\Trust\Tests\Unit {
 
     use BCC\Trust\Core\Announcements\AnnouncementPostType;
@@ -100,6 +31,8 @@ namespace BCC\Trust\Tests\Unit {
 
         protected function setUp(): void
         {
+            // Child process only (see the stub file's header).
+            require_once dirname(__DIR__) . '/Stubs/announcement-moderation-notice-stubs.php';
             $GLOBALS['__f307'] = ['posts' => [], 'meta' => [], 'cron' => [], 'logs' => []];
             $post = new \WP_Post();
             $post->ID = self::ID;
@@ -195,14 +128,14 @@ namespace BCC\Trust\Tests\Unit {
             self::assertSame([[self::ID, true], [self::ID, false]], $this->sent);
         }
 
-        public function testAnUnreadableNoticeGetsNoBellAndIsLogged(): void
+        public function testAnUnreadableNoticeGetsNoBell(): void
         {
             unset($GLOBALS['__f307']['posts'][self::ID]);
             Svc::scheduleOutcomeNotice(self::ID, true);
 
             $this->runCron();
 
-            self::assertSame([], $this->sent);
+            self::assertSame([], $this->sent, 'an unreadable notice fails closed: no bell');
             self::assertNotEmpty($GLOBALS['__f307']['logs'], 'the skip is logged');
         }
     }
