@@ -62,9 +62,17 @@ final class WalletSignInVerifyBeforeConsumeTest extends TestCase
                 return $sql;
             }
 
-            /** @return null — no wallet link, no other owner */
+            /**
+             * null = no wallet link, no other owner. F-294 tests queue
+             * answers in $GLOBALS['__bcc_wl']['get_var_queue'] (oldest first).
+             *
+             * @return mixed
+             */
             public function get_var(string $sql)
             {
+                if (!empty($GLOBALS['__bcc_wl']['get_var_queue'])) {
+                    return array_shift($GLOBALS['__bcc_wl']['get_var_queue']);
+                }
                 return null;
             }
 
@@ -84,8 +92,14 @@ final class WalletSignInVerifyBeforeConsumeTest extends TestCase
 
     private static function signup(string $sig): int
     {
-        $req = new \WP_REST_Request(['wallet_address' => self::ADDR, 'signature' => $sig, 'handle' => 'newhandle']);
-        return (new WalletAuthController())->walletSignup($req)->get_status();
+        return self::signupResponse($sig)->get_status();
+    }
+
+    /** @param array<string, string> $extra */
+    private static function signupResponse(string $sig, array $extra = []): \WP_REST_Response
+    {
+        $req = new \WP_REST_Request(['wallet_address' => self::ADDR, 'signature' => $sig, 'handle' => 'newhandle'] + $extra);
+        return (new WalletAuthController())->walletSignup($req);
     }
 
     /** @return list<int> chain ids still live for ADDR */
@@ -167,5 +181,54 @@ final class WalletSignInVerifyBeforeConsumeTest extends TestCase
 
         self::assertSame(400, self::signup('good-sig'));
         self::assertSame([], $GLOBALS['__bcc_wl']['inserted'] ?? []);
+    }
+
+    // ── F-294: don't spend the signature on an answer known up front, and
+    //    say "already linked" only when it is ──────────────────────────────
+
+    public function testATakenEmailIs409BeforeTheSignatureIsSpent(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][3] = ['email' => 'taken@example.com', 'login' => 'u3', 'display' => 'Three'];
+
+        $resp = self::signupResponse('good-sig', ['email' => 'taken@example.com']);
+
+        self::assertSame(409, $resp->get_status());
+        self::assertSame('An account with that email already exists.', $resp->get_data()['error']['message'] ?? null);
+        self::assertSame([], $GLOBALS['__bcc_wl']['consumed'], 'the challenge is still live: no second signature needed');
+        self::assertSame([7, 8], self::live());
+        self::assertSame([], $GLOBALS['__bcc_wl']['inserted'] ?? []);
+    }
+
+    public function testATakenEmailIsStillCheckedOnlyAfterTheSignatureVerifies(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][3] = ['email' => 'taken@example.com', 'login' => 'u3', 'display' => 'Three'];
+
+        self::assertSame(401, self::signupResponse('junk', ['email' => 'taken@example.com'])->get_status(), 'no wallet proof, no address probe');
+    }
+
+    public function testALinkFailureThatIsNotAnExistingLinkIsARetryable503(): void
+    {
+        $GLOBALS['__bcc_wl']['insert_ok']   = true;
+        $GLOBALS['__bcc_wl']['link_result'] = 0;
+
+        $resp = self::signupResponse('good-sig');
+
+        self::assertSame(503, $resp->get_status());
+        self::assertSame('bcc_unavailable', $resp->get_data()['error']['code'] ?? null);
+        self::assertSame([500], $GLOBALS['__bcc_wl']['deleted'] ?? [], 'the half-made account is rolled back');
+    }
+
+    public function testALinkLostToSomeoneElseStillSaysAlreadyLinked(): void
+    {
+        $GLOBALS['__bcc_wl']['insert_ok']     = true;
+        $GLOBALS['__bcc_wl']['link_result']   = 0;
+        // 1st existsForOtherUser (pre-check): free; 2nd (after the failure): taken.
+        $GLOBALS['__bcc_wl']['get_var_queue'] = [null, '1'];
+
+        $resp = self::signupResponse('good-sig');
+
+        self::assertSame(409, $resp->get_status());
+        self::assertSame('bcc_wallet_already_linked', $resp->get_data()['error']['code'] ?? null);
+        self::assertSame([500], $GLOBALS['__bcc_wl']['deleted'] ?? []);
     }
 }
