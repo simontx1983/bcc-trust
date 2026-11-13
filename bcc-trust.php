@@ -1309,6 +1309,30 @@ add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CONTINUE_HOOK,
 // │      opt-out written (the intended behaviour — a banned user must    │
 // │      not be auto-re-added).                                          │
 // └─────────────────────────────────────────────────────────────────────┘
+// F-261 / F-29: a block removes the member-to-member follows between the
+// two members in BOTH directions, whichever door created it (BCC's
+// MyBlocksEndpoint, or PeepSo's own UI). PeepSoBlockWriter and PeepSo both
+// fire this on a NEW block. Idempotent: MyBlocksEndpoint also severs (to
+// clean up a block that predates F-29 on a repeat attempt), and the second
+// pass finds nothing left. A failure is logged, never thrown — the block is
+// already recorded.
+add_action('peepso_user_blocked', static function ($args): void {
+    $from = is_array($args) ? (int) ($args['from'] ?? 0) : 0;
+    $to   = is_array($args) ? (int) ($args['to'] ?? 0) : 0;
+    if ($from <= 0 || $to <= 0 || $from === $to) {
+        return;
+    }
+    try {
+        \BCC\Trust\Core\Plugin::instance()->watchingService()->severFollowsBetween($from, $to);
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::error('[bcc-trust] peepso_user_blocked: removing follows failed', [
+            'from'  => $from,
+            'to'    => $to,
+            'error' => $e->getMessage(),
+        ]);
+    }
+}, 10, 1);
+
 add_action('peepso_action_group_user_delete', function ($groupId, $userId) {
     $groupId = (int) $groupId;
     $userId  = (int) $userId;
@@ -2242,6 +2266,14 @@ if (defined('WP_CLI') && WP_CLI) {
     \WP_CLI::add_command(
         'bcc-trust hall-ownership',
         \BCC\Trust\Onchain\CLI\HallOwnershipRepairCommand::class
+    );
+    // F-261 — remove the follows that blocks made before F-29 left behind.
+    // THIS IS ITS ONLY ENTRY POINT. Dry run by default; --apply needs the
+    // exact --confirm token (bound to BCC_ENV and the planned pairs) and an
+    // explicit --user-id holding manage_options. Idempotent.
+    \WP_CLI::add_command(
+        'bcc-trust block-follows',
+        \BCC\Trust\Core\CLI\BlockFollowsBackfillCommand::class
     );
 }
 
