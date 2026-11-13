@@ -216,7 +216,27 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
         self::assertSame(1, $GLOBALS['__bcc_ms']['query']['bulk'] ?? null, 'only the member who WAS suspended counts');
         self::assertSame(1, $GLOBALS['__bcc_ms']['query']['bulk_skipped'] ?? null, 'the other is reported as skipped');
         self::assertSame(1, count(array_keys($GLOBALS['__bcc_ms']['audit'], 'admin_unsuspend', true)), 'one per-member audit row');
-        self::assertCount(1, $GLOBALS['__bcc_ms']['notified'] ?? [], 'no fan-out for the member who was not suspended');
+        // The after-commit refresh still runs for BOTH (#670 review): it is
+        // the repair path for a lost notify, and the count must never gate it.
+        self::assertCount(2, $GLOBALS['__bcc_ms']['notified'] ?? []);
+    }
+
+    /**
+     * #670 review: a single Unsuspend of a member whose cached state already
+     * reads "not suspended" still flushes and fans out — the second-click
+     * repair for a lost after-commit notify.
+     */
+    public function testASingleUnsuspendAlwaysRefreshesEvenWhenNothingWasOpen(): void
+    {
+        $GLOBALS['__bcc_ms']['rows'][4501] = true;
+        $GLOBALS['__bcc_ms']['close_returns'] = [4501 => 0];
+
+        ob_start();
+        $result = $this->service()->unsuspendUser(4501);
+        ob_end_clean();
+
+        self::assertTrue($result['success']);
+        self::assertCount(1, $GLOBALS['__bcc_ms']['notified'] ?? [], 'the refresh is never skipped');
     }
 
     public function testBulkSuspendAuditsEachMemberAndPurgesTheMemberCache(): void

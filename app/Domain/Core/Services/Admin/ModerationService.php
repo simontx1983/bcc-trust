@@ -167,12 +167,16 @@ final class ModerationService
     /**
      * Unsuspend atomically, then the after-commit cache flush (F-114).
      *
-     * @throws \Throwable when the transaction fails (nothing was written)
-     */
-    /**
+     * The flush/fan-out runs UNCONDITIONALLY: the single Unsuspend uses this
+     * too, and a second click there is how a lost after-commit notify (the
+     * Permissions cache refresh + re-score fan-out) gets repaired. The
+     * returned bool only feeds the bulk count, audit and skip list (F-315
+     * L3), so a stale cached "not suspended" can at worst miscount, never
+     * skip the refresh (#670 review).
+     *
      * @return bool whether the member WAS suspended (flag set or an open
-     *              suspension row). F-315 (L3): bulk Unsuspend counted, audited
-     *              and fanned out for members who never were.
+     *              suspension row)
+     * @throws \Throwable when the transaction fails (nothing was written)
      */
     private function unsuspendAtomically(int $userId, int $adminId): bool
     {
@@ -188,9 +192,7 @@ final class ModerationService
             return ($flag || $closed > 0) ? 1 : 0;
         });
 
-        if ($wasSuspended) {
-            $this->afterCommit('notify', $userId, fn () => $this->userInfoRepository->notifySuspensionChanged($userId));
-        }
+        $this->afterCommit('notify', $userId, fn () => $this->userInfoRepository->notifySuspensionChanged($userId));
         return $wasSuspended;
     }
 
