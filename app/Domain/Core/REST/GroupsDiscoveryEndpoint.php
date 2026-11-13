@@ -252,11 +252,16 @@ final class GroupsDiscoveryEndpoint
         foreach ($pagedRows as $row) {
             $pagedGroupIds[] = (int) $row['group_id'];
         }
-        $membershipByGroup = ($viewerId > 0 && $pagedGroupIds !== [])
-            ? PeepSoGroupRepository::findUserMemberships($viewerId, $pagedGroupIds)
+        // F-244: the viewer's RAW status per group (pending and banned too),
+        // so each card carries the same join verdict as the group page. A
+        // failed read is null → every card says `unavailable`, never a
+        // guessed Join.
+        $statusByGroup = ($viewerId > 0 && $pagedGroupIds !== [])
+            ? PeepSoGroupRepository::findUserMembershipStatuses($viewerId, $pagedGroupIds)
             : [];
 
         $cardView = Plugin::instance()->cardViewService();
+        $groups   = Plugin::instance()->groupsService();
 
         $items = [];
         foreach ($pagedRows as $row) {
@@ -264,6 +269,14 @@ final class GroupsDiscoveryEndpoint
             /** @var GroupContext $ctx */
             $ctx     = $row['context'];
             $display = $row['display'];
+            $rawStatus = $statusByGroup === null ? false : ($statusByGroup[$groupId] ?? null);
+            $joinFields = $groups->listJoinFields(
+                $ctx,
+                $viewerId,
+                $rawStatus,
+                (int) ($row['trust_min'] ?? 0),
+                is_string($row['validator_stats']['min_stake_display'] ?? null) ? $row['validator_stats']['min_stake_display'] : null
+            );
             // §4.4 community Card — pure composition from the row data
             // already in hand (zero queries per item). Additive: the
             // legacy flat fields stay untouched for the migration window.
@@ -281,9 +294,12 @@ final class GroupsDiscoveryEndpoint
                     'collection_stats' => $row['collection_stats'],
                     'chain_tag'        => $row['chain_tag'],
                     'trust_min'        => $row['trust_min'],
-                    'viewer_is_member' => isset($membershipByGroup[$groupId]),
+                    'viewer_is_member' => $joinFields['viewer_membership_status'] === 'member',
                     'posts_last_7d'    => (int) ($row['activity']['posts_last_7d'] ?? 0),
                     'active_members_7d' => (int) ($row['activity']['active_members_7d'] ?? 0),
+                    'can_join'                 => $joinFields['can_join'],
+                    'can_request_join'         => $joinFields['can_request_join'],
+                    'viewer_membership_status' => $joinFields['viewer_membership_status'],
                 ],
                 $viewerId
             );

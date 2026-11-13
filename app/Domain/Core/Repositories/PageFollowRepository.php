@@ -43,6 +43,7 @@ if (!defined('ABSPATH')) {
  */
 final class PageFollowRepository
 {
+    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
     /** Explicit column list — must match schema-page-follows.php. */
     private const COLUMNS = 'id, user_id, page_id, card_kind, tier_at_watch, created_at';
 
@@ -182,8 +183,13 @@ final class PageFollowRepository
      * `DELETE /me/watching/:id?source=page` takes). One bounded IN() per
      * chunk; (user_id, page_id) is unique, so at most one row per page.
      *
+     * Fail-closed like WatchingRepository::findActiveFollowIdsForFollowees:
+     * a failed read (detected through last_error, runRead) is logged and
+     * THROWS, so a card shows "could not tell" (null), never "not watching".
+     *
      * @param list<int> $pageIds
      * @return array<int, int> page id => page-follow id
+     * @throws \BCC\Trust\Onchain\Repositories\RepositoryReadFailure when a read did not run
      */
     public function findIdsForUserPages(int $userId, array $pageIds): array
     {
@@ -203,15 +209,15 @@ final class PageFollowRepository
         $out = [];
         foreach (array_chunk(array_keys($ids), 200) as $chunk) {
             $placeholders = implode(',', array_fill(0, count($chunk), '%d'));
-            /** @var list<object{id: int|numeric-string, page_id: int|numeric-string}>|null $rows */
-            $rows = $wpdb->get_results($wpdb->prepare(
+            /** @var list<object{id: int|numeric-string, page_id: int|numeric-string}> $rows */
+            $rows = self::runRead($wpdb->prepare(
                 "SELECT id, page_id FROM {$this->table}
                   WHERE user_id = %d AND page_id IN ({$placeholders})
                   LIMIT %d",
                 $userId,
                 ...array_merge($chunk, [count($chunk)])
-            ));
-            foreach ($rows ?: [] as $row) {
+            ), __FUNCTION__, true);
+            foreach ($rows as $row) {
                 $out[(int) $row->page_id] = (int) $row->id;
             }
         }

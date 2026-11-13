@@ -797,6 +797,135 @@ final class AccountWalletConfirmTest extends TestCase
         self::assertSame([], $GLOBALS['__bcc_wc']['deleted']);
     }
 
+    // ── F-332: an email given at wallet sign-up; recovery availability ──
+
+    private static function verifyCode(string $email, string $code): int
+    {
+        return (new \BCC\Trust\Core\REST\Auth\EmailVerificationController())->verifyEmail(
+            new \WP_REST_Request(['email' => $email, 'code' => $code])
+        )->get_status();
+    }
+
+    public function testAnEmailGivenAtWalletSignUpCountsOnlyOnceItsCodeIsVerified(): void
+    {
+        // Wallet sign-up with an email: user_email set, flag '0', code mailed.
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = 'typed@example.com';
+        $GLOBALS['__bcc_ph']['meta'][self::USER]['_bcc_email_verified'] = '0';
+        \BCC\Trust\Core\REST\Auth\AuthSupport::storeOtpForUser(self::USER, '123456');
+        self::assertFalse(AccountRecoveryService::hasRecoveryEmail(self::USER), 'pending: not a way back in yet');
+
+        self::assertNotSame(200, self::verifyCode('typed@example.com', '000000'));
+        self::assertFalse(AccountRecoveryService::hasRecoveryEmail(self::USER), 'a wrong code changes nothing');
+
+        self::assertSame(200, self::verifyCode('typed@example.com', '123456'));
+        self::assertTrue(AccountRecoveryService::hasRecoveryEmail(self::USER));
+    }
+
+    public function testAnExpiredCodeLeavesThePendingEmailUncounted(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = 'typed@example.com';
+        $GLOBALS['__bcc_ph']['meta'][self::USER]['_bcc_email_verified'] = '0';
+        // No stored code: expired (or never sent).
+
+        self::assertNotSame(200, self::verifyCode('typed@example.com', '123456'));
+        self::assertFalse(AccountRecoveryService::hasRecoveryEmail(self::USER));
+    }
+
+    public function testALegacyEmailWithNoFlagStillCounts(): void
+    {
+        unset($GLOBALS['__bcc_ph']['meta'][self::USER]['_bcc_email_verified']);
+        self::assertTrue(AccountRecoveryService::hasRecoveryEmail(self::USER));
+
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+        self::assertFalse(AccountRecoveryService::hasRecoveryEmail(self::USER), 'the placeholder never counts');
+    }
+
+    public function testAPendingTypoCanBeReplacedThroughTheRecoveryRoute(): void
+    {
+        // Signed up with a wallet and a mistyped email that was never verified.
+        self::newWalletAccount(600);
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = 'typo@exmaple.com';
+        $GLOBALS['__bcc_ph']['meta'][self::USER]['_bcc_email_verified'] = '0';
+
+        [$status, $data] = self::addRecoveryEmail();
+
+        self::assertSame(200, $status);
+        self::assertTrue($data['ok']);
+    }
+
+    public function testAvailabilityIsNowForTheSignupWallet(): void
+    {
+        self::newWalletAccount(600);
+
+        self::assertSame(
+            ['at' => time(), 'reason' => 'signup_wallet'],
+            AccountCredentialCheck::recoveryEmailAvailability(self::USER)
+        );
+    }
+
+    public function testAvailabilityWaitsFor48HoursOnANewWallet(): void
+    {
+        // A placeholder account whose only wallet (not a signup wallet)
+        // was verified an hour ago, before this sign-in.
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+        self::verifiedAgo(1, 3600);
+
+        self::assertSame(
+            ['at' => time() - 3600 + 48 * 3600, 'reason' => 'wallet_age'],
+            AccountCredentialCheck::recoveryEmailAvailability(self::USER)
+        );
+    }
+
+    public function testAvailabilityIsNowForAnOldWallet(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+
+        self::assertSame(
+            ['at' => time(), 'reason' => 'wallet_age'],
+            AccountCredentialCheck::recoveryEmailAvailability(self::USER)
+        );
+    }
+
+    public function testAvailabilityTakesTheEarliestQualifyingWallet(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+        self::verifiedAgo(1, 10 * 3600);
+        $GLOBALS['__bcc_wc']['links'][] = ['id' => 7, 'user_id' => self::USER, 'chain_id' => 1, 'address' => '0x00000000000000000000000000000000000000ff', 'verified_at' => time() - 20 * 3600];
+
+        self::assertSame(time() - 20 * 3600 + 48 * 3600, AccountCredentialCheck::recoveryEmailAvailability(self::USER)['at']);
+    }
+
+    public function testAvailabilityIsNullForAWalletVerifiedAfterThisSignIn(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+        self::verifiedAgo(1, 3600);
+        self::signIn(['auth_time' => time() - 2 * 3600]);
+
+        self::assertSame(['at' => null, 'reason' => null], AccountCredentialCheck::recoveryEmailAvailability(self::USER));
+    }
+
+    public function testAvailabilityIsNullOnceTheAccountHasARecoveryEmail(): void
+    {
+        self::assertTrue(AccountRecoveryService::hasRecoveryEmail(self::USER));
+        self::assertSame(['at' => null, 'reason' => null], AccountCredentialCheck::recoveryEmailAvailability(self::USER));
+    }
+
+    public function testTheWalletsPostureRendersAvailabilityAsIsoOrNull(): void
+    {
+        $render = new \ReflectionMethod(\BCC\Trust\Onchain\Controllers\WalletController::class, 'recoveryAvailability');
+        $render->setAccessible(true);
+
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+        self::verifiedAgo(1, 3600);
+        self::assertSame(
+            ['available_at' => gmdate('Y-m-d\TH:i:s\Z', time() - 3600 + 48 * 3600), 'available_reason' => 'wallet_age'],
+            $render->invoke(null, self::USER)
+        );
+
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = 'real@example.com';
+        self::assertSame(['available_at' => null, 'available_reason' => null], $render->invoke(null, self::USER));
+    }
+
     public function testRecoveryEmailStillAttachesAFirstEmailToAPlaceholderAccount(): void
     {
         $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;

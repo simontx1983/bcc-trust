@@ -694,7 +694,8 @@ final class Plugin
     public function notificationViewService(): Services\NotificationViewService
     {
         return $this->notificationViewService ??= new Services\NotificationViewService(
-            $this->notificationRepository()
+            $this->notificationRepository(),
+            $this->hiddenActivityRepository()
         );
     }
 
@@ -1135,7 +1136,18 @@ final class Plugin
             $this->contentReportRepository(),
             $this->hiddenActivityRepository(),
             $this->postShortcodeRepository(),
-            $this->gifRepository()
+            $this->gifRepository(),
+            $this->announcementModerationService()
+        );
+    }
+
+    private ?Services\AnnouncementModerationService $announcementModerationService = null;
+    /** F-307 — administrator takedown of announcements. */
+    public function announcementModerationService(): Services\AnnouncementModerationService
+    {
+        return $this->announcementModerationService ??= new Services\AnnouncementModerationService(
+            $this->hiddenActivityRepository(),
+            $this->peepSoActivityWriter()
         );
     }
 
@@ -2684,6 +2696,20 @@ final class Plugin
         // methods self-isolate with try/catch. A reversal routes to the
         // dedicated restoration notice; other reconsiderations to the
         // appeal-outcome notice — one bell per event, never both.
+        // F-307 — tell the author when an administrator takes their
+        // announcement down, and when it is restored. Bell only, and DEFERRED
+        // past the 30 s undo window (review): the cron handler re-reads the
+        // state, so an undone misclick tells the author nothing.
+        add_action('bcc_announcement_moderation_hidden', function (int $announcementId): void {
+            Services\AnnouncementModerationService::scheduleOutcomeNotice($announcementId, true);
+        }, 30, 1);
+        add_action('bcc_announcement_moderation_restored', function (int $announcementId): void {
+            Services\AnnouncementModerationService::scheduleOutcomeNotice($announcementId, false);
+        }, 30, 1);
+        add_action(Services\AnnouncementModerationService::NOTICE_HOOK, function ($announcementId, $hidden): void {
+            $this->announcementModerationService()->deliverOutcomeNotice((int) $announcementId, (bool) $hidden);
+        }, 10, 2);
+
         add_action('bcc_rank_recovery_started', function (int $userId, string $deadline): void {
             $this->notificationDispatcher()->onRankRecoveryStarted($userId, $deadline);
         }, 30, 2);

@@ -634,11 +634,9 @@ final class UserViewService
             return $this->trustScoreCache[$userId];
         }
 
-        $score = $this->reputationRepo->getScore($userId);
-        if ($score < 0.0)   { $score = 0.0; }
-        if ($score > 100.0) { $score = 100.0; }
-
-        return $this->trustScoreCache[$userId] = (int) round($score);
+        // The shared display rule (clamp 0–100, round) — the feed/comment
+        // author block reads the same helper, so the two never disagree.
+        return $this->trustScoreCache[$userId] = $this->reputationRepo->getDisplayScore($userId);
     }
 
     /**
