@@ -501,6 +501,12 @@ namespace BCC\Trust\Onchain\Services {
     if (!class_exists(HeliusSubscriptionManager::class, false)) {
         final class HeliusSubscriptionManager
         {
+            // F-314: the remote states the Helius panel and action form read.
+            public const REMOTE_OK              = 'ok';
+            public const REMOTE_MISSING         = 'missing';
+            public const REMOTE_UNREACHABLE     = 'unreachable';
+            public const REMOTE_NOT_PROVISIONED = 'not_provisioned';
+
             public static int $provisionCalls = 0;
             public static int $resyncCalls = 0;
 
