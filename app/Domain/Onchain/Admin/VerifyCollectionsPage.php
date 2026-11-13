@@ -188,7 +188,6 @@ final class VerifyCollectionsPage
      */
     public const MAX_BULK_IDS = 50;
 
-    /** Operator-scoped, short-lived carrier for PRG result notices. */
     /**
      * F-313 (M11): the description-review closure's "nothing was pending"
      * result. A non-false value, so TransactionManager commits the no-op
@@ -196,6 +195,7 @@ final class VerifyCollectionsPage
      */
     private const DESC_NOT_PENDING = 'not_pending';
 
+    /** Operator-scoped, short-lived carrier for PRG result notices. */
     private const NOTICE_TRANSIENT_PREFIX = 'bcc_vc_notices_';
     private const NOTICE_TTL              = 60;
 
