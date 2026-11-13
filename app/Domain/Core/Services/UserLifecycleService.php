@@ -67,6 +67,12 @@ class UserLifecycleService
         add_action('wp_login', [$this, 'onLogin'], 10, 2);
         add_action('peepso_page_created', [$this, 'onPageCreated']);
         add_action('before_delete_post', [$this, 'onPageDelete'], 10, 1);
+        // F-324: purge a post's reach counters on PERMANENT deletion.
+        //
+        // ⚠ A SEPARATE handler, not a branch inside onPageDelete: that one
+        // returns early unless the post is a `peepso-page`, and member posts
+        // are not. Piggybacking there would have silently never fired.
+        add_action('before_delete_post', [$this, 'onActivityPostDelete'], 10, 1);
 
         // PeepSo avatar changes don't trigger WP's profile_update hook.
         // Listen for PeepSo's avatar event to re-evaluate the complete_profile quest.
@@ -195,6 +201,30 @@ class UserLifecycleService
         // on the next per-target recompute.
 
         // Hard-delete analytics data
+        //
+        // F-324 post reach: the table is POST-keyed, so unlike every other
+        // purge here this cannot be one user-keyed DELETE — the member's
+        // act_ids are resolved first (authorship lives on
+        // `wp_posts.post_author`, not on the activities table). Batched so a
+        // prolific member cannot turn account deletion into one long lock,
+        // and bounded so a repository that keeps answering "more" can never
+        // spin here.
+        $reachBatches = 0;
+        while ($reachBatches < 50) {
+            $purged = \BCC\Trust\Core\Repositories\PostReachRepository::deleteForAuthor($userId);
+            if ($purged === null) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] post-reach purge failed on user delete', [
+                    'user_id' => $userId,
+                    'batches' => $reachBatches,
+                ]);
+                break;
+            }
+            if ($purged === 0) {
+                break;
+            }
+            $reachBatches++;
+        }
+
         $plugin->userInfoRepository()->deleteByUserId($userId);
         // Architecture A: the member's trust now lives on their self-page
         // score row, not the legacy reputation snapshot — delete that instead.
@@ -330,6 +360,43 @@ class UserLifecycleService
 
         // Invalidate caches.
         $plugin->scoreRepository()->invalidateCache($postId);
+    }
+
+    /**
+     * F-324 — drop a post's reach counters when the post is PERMANENTLY
+     * deleted.
+     *
+     * ⚠⚠ PERMANENT ONLY, deliberately. `PostsService::deletePost()` calls
+     * `wp_trash_post()`, which is recoverable — so trashing a post keeps its
+     * analytics and restoring it brings them back intact. Cascading on
+     * trash would make a reversible action irreversibly destroy the
+     * counters, which is the one thing a restore cannot undo.
+     *
+     * ⚠ No post-type filter. The id is handed to
+     * `PostReachRepository::deleteForWpPost()`, which resolves it through
+     * the indexed `act_external_id` and deletes nothing when there is no
+     * activity behind it. Filtering here would mean hard-coding PeepSo's
+     * CPT list (status, photo, gif, …) and silently missing any type added
+     * later — a cheap indexed lookup on a rare event is the better trade.
+     *
+     * Dedupe rows are intentionally NOT purged here: they are at most 48
+     * hours from expiry anyway, and deleting by post would add an extra
+     * scan on a table whose only index is on `seen_at`.
+     */
+    public function onActivityPostDelete(int $postId): void
+    {
+        if ($postId <= 0) {
+            return;
+        }
+
+        $deleted = \BCC\Trust\Core\Repositories\PostReachRepository::deleteForWpPost($postId);
+
+        if ($deleted === null) {
+            // Fail loud in the log, never block the deletion itself.
+            \BCC\Core\Log\Logger::error('[bcc-trust] post-reach purge failed on permanent delete', [
+                'wp_post_id' => $postId,
+            ]);
+        }
     }
 
     public function onLogin(string $userLogin, \WP_User $user): void

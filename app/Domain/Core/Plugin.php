@@ -1440,6 +1440,10 @@ final class Plugin
         // Rank Phase 8: once-only member appeal on a misconduct finding
         // (own finding only; §15.5)
         \BCC\Trust\Core\REST\MeFindingAppealEndpoint::register();
+        // F-324 post analytics: the reach beacon (anonymous allowed, always
+        // 204) and the owner-only read (three separate sections).
+        \BCC\Trust\Core\REST\PostViewBeaconEndpoint::register();
+        \BCC\Trust\Core\REST\MePostAnalyticsEndpoint::register();
         // Operator dashboard: the viewer's verified validator pages (§4)
         \BCC\Trust\Core\REST\MeValidatorPagesEndpoint::register();
         // Shared operator profile editor and per-validator overrides.

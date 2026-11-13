@@ -64,6 +64,19 @@ final class ViewerFingerprint
     public const HASH_BYTES = 16;
 
     /**
+     * Purposes. Each gets a DISJOINT code space for the same reader and day,
+     * so one purpose's dedupe claim can never consume another's.
+     *
+     * ⚠ PURPOSE_VIEW is special-cased to emit the already-shipped message
+     * `viewer:<day>|<subject>` with no purpose segment — see forDay(). Do not
+     * "tidy" that into a uniform format: it would change every viewer's code
+     * and contradict the construction documented in
+     * schema-post-view-dedupe.php and docs/database-schema.md.
+     */
+    public const PURPOSE_VIEW          = 'view';
+    public const PURPOSE_PROFILE_VISIT = 'profile_visit';
+
+    /**
      * Build the viewer code for a given UTC day.
      *
      * @param string $day       UTC day, 'Y-m-d' (callers use gmdate, the
@@ -74,9 +87,14 @@ final class ViewerFingerprint
      * @param string $userAgent Raw UA string; ignored when $viewerId > 0.
      * @return string|null 16 raw bytes, or null when no key is available.
      */
-    public static function forDay(string $day, int $viewerId, string $ip = '', string $userAgent = ''): ?string
-    {
-        if ($day === '') {
+    public static function forDay(
+        string $day,
+        int $viewerId,
+        string $ip = '',
+        string $userAgent = '',
+        string $purpose = self::PURPOSE_VIEW
+    ): ?string {
+        if ($day === '' || $purpose === '') {
             return null;
         }
 
@@ -97,7 +115,16 @@ final class ViewerFingerprint
         // mean different things. Free to add now because the feature ships
         // dark and no dedupe row exists yet — changing it later would
         // silently reset every viewer's code mid-day and double-count them.
-        $hex = DeviceFingerprinter::keyedHash('viewer:' . $day . '|' . $subject, 'viewerFingerprint');
+        // ⚠ The 'view' message is EXACTLY `viewer:<day>|<subject>` — no
+        // purpose segment — because that construction is already shipped and
+        // documented in schema-post-view-dedupe.php and the umbrella schema
+        // doc. Any other purpose gets its own segment, which keeps those
+        // records true while still giving each purpose a disjoint code space.
+        $message = $purpose === self::PURPOSE_VIEW
+            ? 'viewer:' . $day . '|' . $subject
+            : 'viewer:' . $purpose . ':' . $day . '|' . $subject;
+
+        $hex = DeviceFingerprinter::keyedHash($message, 'viewerFingerprint');
 
         if ($hex === null) {
             return null;
