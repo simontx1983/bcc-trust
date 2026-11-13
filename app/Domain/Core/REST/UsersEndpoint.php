@@ -501,6 +501,12 @@ final class UsersEndpoint
         $cursor      = is_string($cursorParam) && $cursorParam !== '' ? $cursorParam : null;
 
         $viewerId = get_current_user_id();
+
+        // ⚠ F-341's Blogs-section gate lives in BlogService::getUserBlog(),
+        // NOT here. It is a property of "who may read this member's blog",
+        // so it belongs with the read rather than with one route — a gate
+        // here would be bypassed the moment a second caller appeared, which
+        // is exactly the F-283 failure.
         $payload  = Plugin::instance()->blogService()->getUserBlog($userId, $viewerId, $cursor, $limit);
 
         $response = ApiResponse::ok($payload);

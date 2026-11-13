@@ -51,6 +51,9 @@ final class BlogTabGroupVisibilityTest extends TestCase
         Logger::reset();
         HiddenActivityRepository::$hidden = [];
         unset($GLOBALS['bcc_test_session_user']);
+        // F-341 — every section SHOWN by default, which is what the rest of
+        // this file assumes.
+        $GLOBALS['__bcc_blog_user_meta'] = [];
     }
 
     private function session(int $userId): void
@@ -69,6 +72,73 @@ final class BlogTabGroupVisibilityTest extends TestCase
         self::assertNotSame([], PeepSoActivityRepository::$calls, 'the repository was never called');
 
         return PeepSoActivityRepository::$calls[count(PeepSoActivityRepository::$calls) - 1];
+    }
+
+    // ── 0. F-341 — the Blogs section switch ─────────────────────────
+
+    /**
+     * ⭐⭐ THE GATE, asserted on what was READ rather than on what came
+     * back. A hidden Blogs section must not merely filter the posts out of
+     * the response — the posts must never be QUERIED, because a filter
+     * applied afterwards is one refactor away from leaking and costs a
+     * read nobody is allowed to see the result of.
+     *
+     * The harness records every repository call, so "the query never ran"
+     * is directly observable. That is why this assertion is `$calls === []`
+     * and not just an empty `items`.
+     */
+    public function testAHiddenBlogsSectionIsNeverEvenQueriedForANonOwner(): void
+    {
+        $this->session(self::VISITOR);
+        $GLOBALS['__bcc_blog_user_meta'][self::OWNER]['bcc_show_blogs_on_profile'] = '0';
+
+        $page = $this->service()->getUserBlog(self::OWNER, self::VISITOR);
+
+        self::assertSame([], $page['items'], 'a documented EMPTY, never an error');
+        self::assertFalse($page['pagination']['has_more']);
+        self::assertNull($page['pagination']['next_cursor']);
+        self::assertSame(
+            [],
+            PeepSoActivityRepository::$calls,
+            'the posts must never be read when the section is hidden'
+        );
+    }
+
+    /**
+     * ⭐ CONTROL. The OWNER reading their own tab is unaffected — the
+     * switch governs who ELSE sees it. Without this, a gate that refused
+     * everybody would satisfy the test above.
+     */
+    public function testTheOwnerStillReadsTheirOwnBlogWhenTheSectionIsHidden(): void
+    {
+        $this->session(self::OWNER);
+        $GLOBALS['__bcc_blog_user_meta'][self::OWNER]['bcc_show_blogs_on_profile'] = '0';
+
+        $this->service()->getUserBlog(self::OWNER, self::OWNER);
+
+        self::assertNotSame(
+            [],
+            PeepSoActivityRepository::$calls,
+            'the owner must still reach the query'
+        );
+    }
+
+    /**
+     * ⭐ CONTROL, the other way. With the switch untouched — which is every
+     * existing account — a non-owner reads the tab exactly as before. This
+     * is what proves F-341 changed nothing by default.
+     */
+    public function testAnUntouchedSwitchLeavesTheTabReadableByANonOwner(): void
+    {
+        $this->session(self::VISITOR);
+
+        $this->service()->getUserBlog(self::OWNER, self::VISITOR);
+
+        self::assertNotSame(
+            [],
+            PeepSoActivityRepository::$calls,
+            'absent meta means SHOWN; nothing changes until the owner opts out'
+        );
     }
 
     // ── 1. Degradation must send null, never [] ──────────────────────

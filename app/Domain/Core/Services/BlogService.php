@@ -34,6 +34,7 @@ use BCC\Trust\Core\Repositories\PostShortcodeRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\GroupAttribution;
 use BCC\Trust\Core\Support\ProfileAccess;
+use BCC\Trust\Core\Support\ProfileSectionVisibility;
 use BCC\Trust\Core\Support\RestrictedGroups;
 use BCC\Trust\Core\ValueObjects\GroupContext;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
@@ -101,6 +102,30 @@ final class BlogService
         int $limit = self::DEFAULT_LIMIT
     ): array {
         if ($userId <= 0) {
+            return self::emptyPage();
+        }
+
+        // ⚠⚠ F-341 — THE BLOGS SECTION SWITCH. PR 1 narrowed the profile
+        // payload's blog COUNT; that alone is cosmetic, because a non-owner
+        // could still read every post through /users/{handle}/blog. This is
+        // the read itself, so gating here cannot be bypassed by a future
+        // second caller — which a gate in the route could (the F-283
+        // failure: one surface narrowed, the next one forgotten).
+        //
+        // A documented EMPTY via the SAME emptyPage() the other guards use,
+        // never a 403: a refusal would itself disclose that the member has
+        // posts they have chosen not to show, and an error would make the
+        // client render a failure where the honest answer is "nothing to
+        // show you". Using emptyPage() also guarantees the shape matches.
+        //
+        // The OWNER and admins are unaffected — ProfileSectionVisibility
+        // handles both, through the same §F-02 exemption as the rest of
+        // profile privacy.
+        if (ProfileSectionVisibility::hides(
+            ProfileSectionVisibility::SECTION_BLOGS,
+            $userId,
+            $viewerId
+        )) {
             return self::emptyPage();
         }
 

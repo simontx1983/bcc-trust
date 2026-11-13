@@ -194,6 +194,32 @@ namespace BCC\Core\Feed {
     }
 }
 
+namespace BCC\Trust\Core\Support {
+    // ⚠ F-341: BlogService::getUserBlog() now asks
+    // ProfileSectionVisibility whether the owner shows their Blogs section,
+    // and that class reads user_meta with an UNQUALIFIED call from THIS
+    // namespace. Without this shim the whole suite fatals with "Call to
+    // undefined function BCC\Trust\Core\Support\get_user_meta()" — a FATAL,
+    // not an assertion failure, so the first symptom is a dead test class.
+    //
+    // ⭐ ProfileAccess::viewerIsExemptFromVisibility() needs no stub here:
+    // it guards the admin check with class_exists(), so an absent
+    // Permissions class simply means "not an admin".
+    //
+    // Fixture: $GLOBALS['__bcc_blog_user_meta'][<uid>][<key>].
+    // Absent reads as '' — which for a `bcc_show_*` key means SHOWN, the
+    // permissive default every existing test in this file relies on.
+    if (!\function_exists('BCC\Trust\Core\Support\get_user_meta')) {
+        /** @return mixed */
+        function get_user_meta($userId, $key = '', $single = false)
+        {
+            unset($single);
+
+            return $GLOBALS['__bcc_blog_user_meta'][(int) $userId][$key] ?? '';
+        }
+    }
+}
+
 namespace BCC\Core\Log {
     if (!class_exists('BCC\Core\Log\Logger', false)) {
         final class Logger
