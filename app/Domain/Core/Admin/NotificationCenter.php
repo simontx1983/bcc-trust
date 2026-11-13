@@ -142,7 +142,63 @@ final class NotificationCenter
         if ($item = DisputeScheduler::permanentOrphansNotification()) {
             $items[] = $item;
         }
+        if ($item = self::checkPendingContentReports()) {
+            $items[] = $item;
+        }
         return $items;
+    }
+
+    /** Short cache for the pending-report count (it runs on every wp-admin page). */
+    private const PENDING_REPORTS_TRANSIENT = 'bcc_nc_pending_content_reports';
+    private const PENDING_REPORTS_TTL       = 60;
+
+    /**
+     * F-315 (L6): nothing in wp-admin said content reports were waiting.
+     * The moderation queue is on the frontend (/admin/moderation), reached
+     * only from the avatar menu, so a backlog could sit unseen. This adds an
+     * info item with the count and a link to the queue (when the frontend
+     * origin is configured).
+     *
+     * @param (callable(): int)|null $count test seam; defaults to the
+     *        content-report repository's pending count
+     * @return NotificationItem|null
+     */
+    public static function checkPendingContentReports(?callable $count = null): ?array
+    {
+        $cached = get_transient(self::PENDING_REPORTS_TRANSIENT);
+        if (is_numeric($cached)) {
+            $pending = (int) $cached;
+        } else {
+            try {
+                $pending = $count !== null
+                    ? (int) $count()
+                    : \BCC\Trust\Core\Plugin::instance()->contentReportRepository()
+                        ->countForAdmin(\BCC\Trust\Core\Services\ModerationQueueService::STATUS_PENDING);
+            } catch (\Throwable $e) {
+                return null; // a banner is not worth a failed admin page
+            }
+            set_transient(self::PENDING_REPORTS_TRANSIENT, $pending, self::PENDING_REPORTS_TTL);
+        }
+        if ($pending <= 0) {
+            return null;
+        }
+
+        $item = [
+            'id'      => 'moderation.pending_content_reports',
+            'source'  => 'BCC Moderation',
+            'level'   => 'info',
+            'message' => sprintf(
+                $pending === 1 ? '%d content report is waiting in the moderation queue.' : '%d content reports are waiting in the moderation queue.',
+                $pending
+            ),
+        ];
+        $origin = class_exists('\BCC\Core\Support\FrontendOriginConfig')
+            ? \BCC\Core\Support\FrontendOriginConfig::canonical()
+            : null;
+        if ($origin !== null) {
+            $item['link'] = $origin . '/admin/moderation';
+        }
+        return $item;
     }
 
     /**

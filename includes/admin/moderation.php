@@ -188,8 +188,11 @@ function bcc_trust_render_moderation(): void {
     $post_actions = [
         'suspend_user'       => static function () use ( $mod ) {
             $userId = absint( $_POST['user_id'] ?? 0 );
-            $reason = sanitize_text_field( $_POST['suspend_reason'] ?? 'manual_suspension' );
-            $notes  = sanitize_textarea_field( $_POST['suspend_notes'] ?? '' );
+            // F-315 (L1): WordPress slashes $_POST, so "don't" was stored as
+            // "don\'t" in the suspension history and the audit. Unslash first,
+            // as the ring path already does.
+            $reason = sanitize_text_field( wp_unslash( $_POST['suspend_reason'] ?? 'manual_suspension' ) );
+            $notes  = sanitize_textarea_field( wp_unslash( $_POST['suspend_notes'] ?? '' ) );
             $mod->suspendUser( $userId, $reason, $notes );
         },
         'unsuspend_user'     => static function () use ( $mod ) {
@@ -225,7 +228,7 @@ function bcc_trust_render_moderation(): void {
         'override_score'     => static function () use ( $mod ) {
             $userId   = absint( $_POST['user_id'] ?? 0 );
             $newScore = absint( $_POST['override_score_value'] ?? 0 );
-            $reason   = sanitize_textarea_field( $_POST['override_reason'] ?? '' );
+            $reason   = sanitize_textarea_field( wp_unslash( $_POST['override_reason'] ?? '' ) ); // F-315 (L1)
             $mod->overrideScore( $userId, $newScore, $reason );
         },
         'undo_score_override' => static function () use ( $mod ) {

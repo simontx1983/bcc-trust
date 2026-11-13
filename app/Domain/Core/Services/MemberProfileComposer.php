@@ -184,6 +184,13 @@ final class MemberProfileComposer
             ? $this->attestationService->getViewerAttestation($viewerId, 'user_profile', $userId)
             : null;
 
+        // ── F-340: the trust header's vouch line (Figma notes 23 + 24).
+        //   Signed in, someone else's profile: vouched_by_watched_count
+        //   ("Vouched for by N people you watch"; 0 hides it). Signed
+        //   out: top_vouchers ("Top vouched by", <= 3). null / [] when
+        //   not applicable or unknown. See ProfileVouchLineResolver.
+        $base += $this->vouchLine()->forProfile($userId, $viewerId);
+
         // ── §J.6 attestation permissions — extend the base
         //   permissions block (which UserViewService::resolvePermissions
         //   produced with can_follow / can_message / can_block /
@@ -958,5 +965,15 @@ final class MemberProfileComposer
             ['key' => 'disputes', 'label' => 'Disputes', 'count' => (int) ($counts['disputes_signed'] ?? 0),  'hidden' => $hideFor('disputes_hidden')],
             ['key' => 'network',  'label' => 'Network',  'count' => (int) ($counts['following'] ?? 0),        'hidden' => $hideFor('delegations_hidden')],
         ];
+    }
+
+    private ?ProfileVouchLineResolver $vouchLineResolver = null;
+
+    /** F-340: built lazily, so the composer's constructor (and its callers) are unchanged. */
+    private function vouchLine(): ProfileVouchLineResolver
+    {
+        return $this->vouchLineResolver ??= new ProfileVouchLineResolver(
+            \BCC\Trust\Core\Plugin::instance()->attestationRepository()
+        );
     }
 }

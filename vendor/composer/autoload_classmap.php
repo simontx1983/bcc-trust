@@ -279,6 +279,7 @@ return array(
     'BCC\\Trust\\Core\\Services\\PendingEmailService' => $baseDir . '/app/Domain/Core/Services/PendingEmailService.php',
     'BCC\\Trust\\Core\\Services\\PolarizationTransitionNotifier' => $baseDir . '/app/Domain/Core/Services/PolarizationTransitionNotifier.php',
     'BCC\\Trust\\Core\\Services\\PostsService' => $baseDir . '/app/Domain/Core/Services/PostsService.php',
+    'BCC\\Trust\\Core\\Services\\ProfileVouchLineResolver' => $baseDir . '/app/Domain/Core/Services/ProfileVouchLineResolver.php',
     'BCC\\Trust\\Core\\Services\\PushDispatcher' => $baseDir . '/app/Domain/Core/Services/PushDispatcher.php',
     'BCC\\Trust\\Core\\Services\\Quest\\QuestProgressService' => $baseDir . '/app/Domain/Core/Services/Quest/QuestProgressService.php',
     'BCC\\Trust\\Core\\Services\\Quest\\QuestRegistry' => $baseDir . '/app/Domain/Core/Services/Quest/QuestRegistry.php',
