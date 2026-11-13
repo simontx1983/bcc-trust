@@ -486,6 +486,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Support\\CelebrationStash' => __DIR__ . '/../..' . '/app/Domain/Core/Support/CelebrationStash.php',
         'BCC\\Trust\\Core\\Support\\CircuitBreaker' => __DIR__ . '/../..' . '/app/Domain/Core/Support/CircuitBreaker.php',
         'BCC\\Trust\\Core\\Support\\CorsHandler' => __DIR__ . '/../..' . '/app/Domain/Core/Support/CorsHandler.php',
+        'BCC\\Trust\\Core\\Support\\CountPrivacy' => __DIR__ . '/../..' . '/app/Domain/Core/Support/CountPrivacy.php',
         'BCC\\Trust\\Core\\Support\\DigestSettings' => __DIR__ . '/../..' . '/app/Domain/Core/Support/DigestSettings.php',
         'BCC\\Trust\\Core\\Support\\Encryption' => __DIR__ . '/../..' . '/app/Domain/Core/Support/Encryption.php',
         'BCC\\Trust\\Core\\Support\\Formatting' => __DIR__ . '/../..' . '/app/Domain/Core/Support/Formatting.php',

@@ -45,6 +45,7 @@ use BCC\Trust\Core\Repositories\PageReadModelRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
+use BCC\Trust\Core\Support\CountPrivacy;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\Permission as PermissionShape;
 use BCC\Trust\Core\Support\ReputationTierMap;
@@ -883,12 +884,23 @@ final class CardViewService
                 $tier,
                 self::resolveMemberAvatarUrl($userId)
             ),
-            'stats'               => $this->buildMemberStats(
-                $userId,
+            'stats'               => self::buildMemberStats(
                 $trustScore,
+                // ⚠⚠ ALL THREE COUNTS COME FROM THE SUMMARY, ALREADY
+                // NARROWED (F-283 review). An earlier attempt passed
+                // `$summary['privacy']` and `$summary['is_self']` and let
+                // the card decide — but getSummary() returns NEITHER key
+                // (both are locals), so the card always received [] and
+                // false and narrowed nothing. Source-text wiring tests
+                // could not see it.
+                //
+                // Reading the narrowed values instead makes the whole class
+                // of bug impossible here: the card holds no privacy logic,
+                // so it cannot forget to apply it. It also drops a second
+                // read of the same count.
                 (int) $summary['followers_count'],
                 (int) $summary['following_count'],
-                $prefetched
+                (int) ($summary['engagement']['reviews_written'] ?? 0)
             ),
             'permissions'         => $this->resolveMemberPermissions($userId, $viewerId, $prefetched),
             // STUB: social_proof composition deferred (§O4). Field is
@@ -1955,27 +1967,30 @@ final class CardViewService
      * @param int $watchingCount Passed in from getSummary's
      *                           `following_count` — the active side of
      *                           the same graph, also already resolved.
-     * @param array<string, mixed>|null $prefetched MemberSummaryPrefetcher
-     *                           batch; its `reviews_written_counts` map is
-     *                           consulted before falling back to a
-     *                           per-member countByVoter() query.
+     * @param int $reviewsWritten Passed in from getSummary's
+     *                           `engagement.reviews_written`, which is
+     *                           where §K2 count privacy is applied. This
+     *                           method deliberately takes NO prefetch
+     *                           bundle: it used to read the count from
+     *                           `reviews_written_counts` itself, and that
+     *                           second source is exactly how the tile came
+     *                           to publish a number the profile hid
+     *                           (F-283). One source, narrowed once.
      * @return list<Stat>
      */
-    private function buildMemberStats(
-        int $userId,
+    private static function buildMemberStats(
         int $trustScore,
         int $watchersCount,
         int $watchingCount,
-        ?array $prefetched = null
+        int $reviewsWritten
     ): array {
-        // Same read pattern as UserViewService::getSummary — when the
-        // batch map is present, a missing key means zero (countByVoters
-        // GROUP BY omits zero-count voters), not "not prefetched".
-        if ($prefetched !== null && isset($prefetched['reviews_written_counts'])) {
-            $reviewsWritten = (int) ($prefetched['reviews_written_counts'][$userId] ?? 0);
-        } else {
-            $reviewsWritten = (int) $this->voteRepo->countByVoter($userId);
-        }
+        // ⚠ A PURE MAPPER, deliberately. Every count arrives ALREADY
+        // NARROWED by `UserViewService::getSummary()` (§K2 count privacy,
+        // F-283), so this method holds no privacy logic and reads no
+        // counts of its own. It used to read `reviews_written` from the
+        // prefetch bundle directly, which is exactly how that tile came
+        // to publish a number the profile hid — a second source is a
+        // second chance to forget the rule. Do not reintroduce one.
 
         return [
             ['key' => 'trust',           'label' => 'Trust',    'value' => (string) $trustScore,     'raw' => $trustScore,     'format' => 'score'],
