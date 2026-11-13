@@ -10,8 +10,10 @@
  *
  * Both count only what the public attestation roster would show, and less:
  * see AttestationRepository::eligibleProfileVouchSql (vouch only, active,
- * attestor exists, not suspended, real name not hidden). The signed-in
- * count also skips attestors mutually blocked with the viewer.
+ * attestor exists, not suspended). The signed-in count also skips
+ * attestors mutually blocked with the viewer. A voucher who hid their real
+ * name counts, and appears in top_vouchers as @handle (PublicIdentity, the
+ * roster's rendering), exactly as the roster shows them.
  *
  * A failed read is UNKNOWN, never a wrong number: the count stays null and
  * the avatar list empty (the line hides), the failure is logged, and the

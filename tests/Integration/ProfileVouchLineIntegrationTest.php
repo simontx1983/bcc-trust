@@ -23,8 +23,9 @@ use PHPUnit\Framework\TestCase;
  *
  * Every row below is a voucher the line must (or must not) count. The
  * eligible set is a strict subset of what the public roster shows: vouch
- * only, not revoked, attestor exists, not suspended, real name not
- * hidden; signed in, also not mutually blocked with the viewer.
+ * only, not revoked, attestor exists, not suspended; signed in, also not
+ * mutually blocked with the viewer. A hidden real name is NOT hidden
+ * participation: that voucher counts, as on the roster.
  */
 #[Group('integration')]
 #[Group('mariadb')]
@@ -42,7 +43,7 @@ final class ProfileVouchLineIntegrationTest extends TestCase
     private const WATCHED_C   = 934013; // followed, vouches          → counts
     private const UNWATCHED   = 934014; // NOT followed, vouches      → only "top"
     private const SUSPENDED   = 934015; // followed, vouches, suspended → never
-    private const NAME_HIDDEN = 934016; // followed, vouches, real name hidden → never
+    private const NAME_HIDDEN = 934016; // followed, vouches, real name hidden → COUNTS (as the roster shows them)
     private const BLOCKED     = 934017; // followed, vouches, blocked by the viewer → not counted (signed in)
     private const BACKER      = 934018; // followed, stand_behind only → never ("Vouched")
     private const REVOKED     = 934019; // followed, vouch revoked    → never
@@ -77,7 +78,7 @@ final class ProfileVouchLineIntegrationTest extends TestCase
     {
         $line = $this->resolver()->forProfile(self::OWNER, self::VIEWER);
 
-        self::assertSame(3, $line['vouched_by_watched_count'], 'A, B and C — not the unwatched, suspended, hidden, blocked, backer or revoked rows');
+        self::assertSame(4, $line['vouched_by_watched_count'], 'A, B, C and the name-hidden voucher; not the unwatched, suspended, blocked, backer or revoked rows');
         self::assertSame([], $line['top_vouchers'], 'the avatar list is for signed-out viewers only');
     }
 
@@ -93,15 +94,16 @@ final class ProfileVouchLineIntegrationTest extends TestCase
 
     public function testSignedOutTopVouchersAreTheEligibleOnesByScore(): void
     {
-        // Eligible for a signed-out view: A, B, C, UNWATCHED and BLOCKED
-        // (a block is between two signed-in members). Scores: A 90,
-        // UNWATCHED 80, C 70, BLOCKED 60, B none (neutral 50).
+        // Eligible for a signed-out view: A, B, C, UNWATCHED, BLOCKED (a
+        // block is between two signed-in members) and NAME_HIDDEN. Scores:
+        // A 90, UNWATCHED 80, C 70, BLOCKED 60; B and NAME_HIDDEN have no
+        // row (neutral 50), so the newer vouch (NAME_HIDDEN) comes first.
         self::assertSame(
             [self::WATCHED_A, self::UNWATCHED, self::WATCHED_C],
             (new AttestationRepository())->topProfileVoucherIds(self::OWNER, 3)
         );
         self::assertSame(
-            [self::WATCHED_A, self::UNWATCHED, self::WATCHED_C, self::BLOCKED, self::WATCHED_B],
+            [self::WATCHED_A, self::UNWATCHED, self::WATCHED_C, self::BLOCKED, self::NAME_HIDDEN, self::WATCHED_B],
             (new AttestationRepository())->topProfileVoucherIds(self::OWNER, 10),
             'and nobody ineligible ever appears'
         );

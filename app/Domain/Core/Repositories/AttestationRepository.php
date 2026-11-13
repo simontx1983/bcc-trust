@@ -204,8 +204,13 @@ final class AttestationRepository
      *   - kind `vouch` only (a "back" / stand_behind is a separate signal);
      *   - not revoked;
      *   - the attestor exists (wp_users);
-     *   - the attestor is not suspended (user_info.is_suspended, F-182);
-     *   - the attestor has not hidden their real name (`real_name_hidden`).
+     *   - the attestor is not suspended (user_info.is_suspended, F-182).
+     *
+     * A member who hid their real name still COUNTS: the roster lists them
+     * (as @handle), and a hidden name is not hidden participation, so the
+     * line must agree with the roster ("3 people you watch" while the
+     * roster shows 4 would be the surprise). Their name is masked where
+     * it is rendered (PublicIdentity), not here.
      *
      * @return array{0: string, 1: list<int|string>} FROM…WHERE SQL ending
      *         in a WHERE clause (append `AND …`), and its bound params
@@ -219,16 +224,13 @@ final class AttestationRepository
         $sql = "FROM `{$att}` a
                INNER JOIN {$wpdb->users} u ON u.ID = a.attestor_user_id
                LEFT JOIN `{$userInfo}` ui ON ui.user_id = a.attestor_user_id
-               LEFT JOIN {$wpdb->usermeta} rn
-                      ON rn.user_id = a.attestor_user_id AND rn.meta_key = %s
               WHERE a.target_kind = 'user_profile'
                 AND a.target_id   = %d
                 AND a.kind        = 'vouch'
                 AND a.revoked_at IS NULL
-                AND COALESCE(ui.is_suspended, 0) = 0
-                AND (rn.meta_value IS NULL OR LOWER(rn.meta_value) NOT IN ('1', 'true', 'yes', 'on'))";
+                AND COALESCE(ui.is_suspended, 0) = 0";
 
-        return [$sql, [\BCC\Trust\Core\Support\PrivacySettings::metaKeyFor('real_name_hidden'), $ownerId]];
+        return [$sql, [$ownerId]];
     }
 
     /**
