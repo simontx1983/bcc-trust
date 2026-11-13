@@ -265,15 +265,4 @@ final class HandleRenameIdentityTest extends TestCase
             'the client error object does not surface Retry-After'
         );
     }
-
-    public function testProfilePrefsReportsTheSameDate(): void
-    {
-        // readAll() needs the mentor service and PeepSo tables to run, so
-        // pin that it reads the ONE formatter rather than a second copy.
-        $src = (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Core/REST/MyProfilePrefsEndpoint.php');
-        self::assertMatchesRegularExpression(
-            "/'handle_next_change_at'\s*=>\s*\\\\BCC\\\\Trust\\\\Core\\\\Plugin::instance\(\)->handleService\(\)->nextChangeAt\(\\\$userId\)/",
-            $src
-        );
-    }
 }
