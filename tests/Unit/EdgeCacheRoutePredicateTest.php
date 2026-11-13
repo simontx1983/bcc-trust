@@ -28,6 +28,10 @@ final class EdgeCacheRoutePredicateTest extends TestCase
         yield 'bcc namespace root'      => ['/bcc/v1'];
         yield 'trust route'             => ['/bcc-trust/v1/read-model/health'];
         yield 'trust namespace root'    => ['/bcc-trust/v1'];
+        // F-337: WordPress routes case-insensitively.
+        yield 'upper-case namespace'    => ['/BCC/v1/search/groups'];
+        yield 'mixed-case trust'        => ['/Bcc-Trust/V1/read-model/health'];
+        yield 'mixed-case root'         => ['/Bcc/v1'];
     }
 
     /** @return iterable<string, array{string}> */
@@ -37,6 +41,7 @@ final class EdgeCacheRoutePredicateTest extends TestCase
         yield 'peepso'                   => ['/peepso/v1/profile'];
         yield 'lookalike prefix'         => ['/bcc/v10/thing'];
         yield 'lookalike trust prefix'   => ['/bcc-trustx/v1/thing'];
+        yield 'mixed-case lookalike'     => ['/BCC/V10/thing'];
         yield 'rest index'               => ['/'];
         yield 'empty'                    => [''];
     }
