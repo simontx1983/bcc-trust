@@ -131,13 +131,20 @@ final class AccountWalletConfirmTest extends TestCase
         );
     }
 
-    private static function verifiedAgo(int $linkId, int $seconds): void
+    /**
+     * Stamp link $linkId as verified $seconds ago and return that instant,
+     * so an assertion derives from the SAME value the code reads (one clock
+     * read): a second time() later can land on the next second.
+     */
+    private static function verifiedAgo(int $linkId, int $seconds): int
     {
+        $verifiedAt = time() - $seconds;
         foreach ($GLOBALS['__bcc_wc']['links'] as $i => $l) {
             if ($l['id'] === $linkId) {
-                $GLOBALS['__bcc_wc']['links'][$i]['verified_at'] = time() - $seconds;
+                $GLOBALS['__bcc_wc']['links'][$i]['verified_at'] = $verifiedAt;
             }
         }
+        return $verifiedAt;
     }
 
     private function user(int $id, string $email): void
@@ -255,8 +262,8 @@ final class AccountWalletConfirmTest extends TestCase
 
     public function testAWalletVerifiedAnHourAgoCannotConfirmYet(): void
     {
-        self::verifiedAgo(1, 3600);
-        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_ACCOUNT_DELETE);
+        $verifiedAt = self::verifiedAgo(1, 3600);
+        $sig        = self::sign(WalletChallenge::PURPOSE_CONFIRM_ACCOUNT_DELETE);
 
         $res = (new MyAccountEndpoint())->deleteAccount(new \WP_REST_Request(['confirm' => 'DELETE'] + self::walletProof($sig)));
         $err = $res->get_data()['error'];
@@ -264,7 +271,10 @@ final class AccountWalletConfirmTest extends TestCase
         self::assertSame(403, $res->get_status());
         self::assertSame('bcc_forbidden', $err['code']);
         self::assertStringContainsString('verified too recently', $err['message']);
-        self::assertSame(gmdate('Y-m-d\TH:i:s\Z', time() - 3600 + 48 * 3600), $err['data']['usable_at']);
+        // usable_at = verified_at + 48 h. Derived from the stamped instant,
+        // not a fresh time(): that raced the code's own read across a
+        // second boundary on CI (#656: expected :23Z, got :22Z).
+        self::assertSame(gmdate('Y-m-d\TH:i:s\Z', $verifiedAt + 48 * 3600), $err['data']['usable_at']);
         self::assertSame([], $GLOBALS['__bcc_wc']['deleted']);
         self::assertTrue(self::challengeIsLive(), 'checked before the challenge is spent');
     }
@@ -387,8 +397,12 @@ final class AccountWalletConfirmTest extends TestCase
     {
         $jwt = \BCC\Trust\Core\Support\JwtToken::class;
 
-        $fresh = $jwt::decode($jwt::encodeNewSession(self::USER, 'h'))['payload'];
-        self::assertSame(time(), $fresh['auth_time']);
+        $before = time();
+        $fresh  = $jwt::decode($jwt::encodeNewSession(self::USER, 'h'))['payload'];
+        // Bracketed, not assertSame(time(), …): the encoder's own clock read
+        // can fall in the previous second.
+        self::assertGreaterThanOrEqual($before, $fresh['auth_time']);
+        self::assertLessThanOrEqual(time(), $fresh['auth_time']);
 
         $cont = $jwt::decode($jwt::encodeContinuation(self::USER, 'h', 1234))['payload'];
         self::assertSame(1234, $jwt::sessionStartedAt($cont));
@@ -406,14 +420,15 @@ final class AccountWalletConfirmTest extends TestCase
         // The re-mint after a credential change (here: a wallet-only member
         // setting a password with their wallet) continues the SAME session.
         self::verifiedAgo(1, 5 * 86400);
-        self::signIn(['auth_time' => time() - 4 * 86400]);
+        $authTime = time() - 4 * 86400;
+        self::signIn(['auth_time' => $authTime]);
         $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_PASSWORD_CHANGE);
 
         [$status, $data] = self::call([new MyAccountEndpoint(), 'patchPassword'], ['password' => 'a brand new passphrase'] + self::walletProof($sig));
 
         self::assertSame(200, $status);
         $payload = \BCC\Trust\Core\Support\JwtToken::decode($data['token'])['payload'];
-        self::assertSame(time() - 4 * 86400, $payload['auth_time']);
+        self::assertSame($authTime, $payload['auth_time'], 'the continuation keeps the sign-in start');
     }
 
     public function testAWalletLinkedMidSessionStillCannotConfirmAfterAReMint(): void
@@ -890,9 +905,10 @@ final class AccountWalletConfirmTest extends TestCase
     {
         $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
         self::verifiedAgo(1, 10 * 3600);
-        $GLOBALS['__bcc_wc']['links'][] = ['id' => 7, 'user_id' => self::USER, 'chain_id' => 1, 'address' => '0x00000000000000000000000000000000000000ff', 'verified_at' => time() - 20 * 3600];
+        $earliest = time() - 20 * 3600;
+        $GLOBALS['__bcc_wc']['links'][] = ['id' => 7, 'user_id' => self::USER, 'chain_id' => 1, 'address' => '0x00000000000000000000000000000000000000ff', 'verified_at' => $earliest];
 
-        self::assertSame(time() - 20 * 3600 + 48 * 3600, AccountCredentialCheck::recoveryEmailAvailability(self::USER)['at']);
+        self::assertSame($earliest + 48 * 3600, AccountCredentialCheck::recoveryEmailAvailability(self::USER)['at']);
     }
 
     public function testAvailabilityIsNullForAWalletVerifiedAfterThisSignIn(): void
@@ -916,9 +932,9 @@ final class AccountWalletConfirmTest extends TestCase
         $render->setAccessible(true);
 
         $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
-        self::verifiedAgo(1, 3600);
+        $verifiedAt = self::verifiedAgo(1, 3600);
         self::assertSame(
-            ['available_at' => gmdate('Y-m-d\TH:i:s\Z', time() - 3600 + 48 * 3600), 'available_reason' => 'wallet_age'],
+            ['available_at' => gmdate('Y-m-d\TH:i:s\Z', $verifiedAt + 48 * 3600), 'available_reason' => 'wallet_age'],
             $render->invoke(null, self::USER)
         );
 
