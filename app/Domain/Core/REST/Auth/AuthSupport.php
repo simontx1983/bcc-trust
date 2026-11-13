@@ -191,14 +191,20 @@ final class AuthSupport
      * ONE small bucket per network (IPv4 /24, IPv6 /48), so a shared office,
      * campus or carrier NAT exhausted it between unrelated members. Each now
      * has an office-scale per-network budget, and the mail-sending routes
-     * add a tight per-ADDRESS budget so a single inbox still can't be
-     * bombed. The per-address key is a hash of the normalized email, the
-     * same whether or not an account exists (no enumeration oracle).
+     * add per-ADDRESS budgets (allowMailToAddress): a tight one per
+     * (address, network), and a looser one per address across all networks
+     * that the account's recently signed-in networks skip — so nobody
+     * elsewhere can use up the owner's own reset or verification mail, and
+     * a single inbox still can't be bombed. Keys hash the normalized email;
+     * for an address with no account the path is the same as for an
+     * untrusted network (no enumeration oracle).
      */
     /** /auth/forgot-password, per network per hour. */
     public const FORGOT_PASSWORD_RATE_LIMIT = 20;
-    /** /auth/forgot-password, per email address per hour (typo, mail didn't arrive, once more). */
+    /** /auth/forgot-password, per (email address, network) per hour (typo, mail didn't arrive, once more). */
     public const FORGOT_PASSWORD_EMAIL_RATE_LIMIT = 3;
+    /** /auth/forgot-password, per email address per hour across networks; the account's trusted networks skip it. */
+    public const FORGOT_PASSWORD_EMAIL_GLOBAL_RATE_LIMIT = 10;
     /**
      * /auth/reset-password, per network per hour. WP reset keys are ~20
      * random chars and single-use, so this is abuse insurance, not a
@@ -212,13 +218,55 @@ final class AuthSupport
     public const VERIFY_EMAIL_RATE_LIMIT = 30;
     /** /auth/resend-verification, per network per hour. */
     public const RESEND_VERIFICATION_RATE_LIMIT = 20;
-    /** /auth/resend-verification, per email address per hour. */
+    /** /auth/resend-verification, per (email address, network) per hour. */
     public const RESEND_VERIFICATION_EMAIL_RATE_LIMIT = 3;
+    /** /auth/resend-verification, per email address per hour across networks; the account's trusted networks skip it. */
+    public const RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT = 10;
 
     /** F-290: the per-address throttle key — normalized, hashed, existence-blind. */
     public static function emailThrottleKey(string $action, string $email): string
     {
         return 'bcc_throttle_' . $action . '_email_' . hash('sha256', strtolower(trim($email)));
+    }
+
+    /**
+     * F-290: may a mail-sending auth route (forgot-password, resend
+     * verification) send to $email for this caller? Call after the email is
+     * validated and BEFORE the route acts on the account.
+     *
+     *   1. $perNetwork per (address, caller's network) per hour — the tight
+     *      cap; a stranger elsewhere spends only their own share.
+     *   2. $global per address per hour across all networks — the anti-bomb
+     *      cap. Networks the account recently completed a sign-in from
+     *      (F-281's trusted networks) skip it, so a stranger who exhausts it
+     *      can't block the owner's own reset or verification mail at home.
+     *      An address with no account has no trusted networks: it takes the
+     *      exact path an untrusted network does, so a 429 says nothing about
+     *      whether an account exists.
+     */
+    public static function allowMailToAddress(string $action, string $email, int $perNetwork, int $global): bool
+    {
+        $network = self::loginNetwork();
+        if (!\BCC\Core\Security\Throttle::allow(
+            $action . '_email_net',
+            $perNetwork,
+            3600,
+            self::emailThrottleKey($action, $email) . '_net_' . hash('sha256', $network)
+        )) {
+            return false;
+        }
+
+        $user = get_user_by('email', $email);
+        if ($user instanceof \WP_User && self::isTrustedLoginNetwork((int) $user->ID, $network)) {
+            return true;
+        }
+
+        return \BCC\Core\Security\Throttle::allow(
+            $action . '_email',
+            $global,
+            3600,
+            self::emailThrottleKey($action, $email)
+        );
     }
     /** Anon-IP-keyed (per-minute) throttle for /auth/2fa/verify. */
     public const TWO_FA_VERIFY_RATE_LIMIT = 10;

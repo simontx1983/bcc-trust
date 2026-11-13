@@ -226,11 +226,11 @@ final class EmailVerificationController
 
         // F-290: the per-network bucket above is office scale; this caps mail
         // to any one inbox, before the lookup and whether or not it exists.
-        if (!\BCC\Core\Security\Throttle::allow(
-            'resend_verification_email',
+        if (!AuthSupport::allowMailToAddress(
+            'resend_verification',
+            $email,
             AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT,
-            3600,
-            AuthSupport::emailThrottleKey('resend_verification', $email)
+            AuthSupport::RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT
         )) {
             return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
         }

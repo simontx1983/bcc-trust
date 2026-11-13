@@ -630,13 +630,14 @@ final class PasswordAuthController
             return ApiResponse::error('bcc_invalid_request', 'A valid email is required.', 422);
         }
 
-        // ... and per ADDRESS, still before the lookup: caps mail to any one
-        // inbox from anywhere, the same whether or not an account exists.
-        if (!\BCC\Core\Security\Throttle::allow(
-            'forgot_password_email',
+        // ... and per ADDRESS (AuthSupport::allowMailToAddress): tight per
+        // network, looser across networks unless this is a network the
+        // account signs in from — existence-blind either way.
+        if (!AuthSupport::allowMailToAddress(
+            'forgot_password',
+            $email,
             AuthSupport::FORGOT_PASSWORD_EMAIL_RATE_LIMIT,
-            3600,
-            AuthSupport::emailThrottleKey('forgot_password', $email)
+            AuthSupport::FORGOT_PASSWORD_EMAIL_GLOBAL_RATE_LIMIT
         )) {
             return ApiResponse::error('bcc_rate_limited', 'Too many password-reset requests. Try again later.', 429);
         }

@@ -101,6 +101,64 @@ final class AuthLimitsPerNetworkTest extends TestCase
         );
     }
 
+    private static function from(string $ip): void
+    {
+        $GLOBALS['__bcc_ph']['client_ip'] = $ip;
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('mailRoutes')]
+    public function testAStrangerElsewhereSpendsOnlyTheirOwnNetworksShare(string $route, int $perNetwork, int $perAddress): void
+    {
+        self::from('203.0.113.9');
+        for ($i = 0; $i < $perAddress; $i++) {
+            self::hit($route, 'victim@example.com');
+        }
+        self::assertSame(429, self::hit($route, 'victim@example.com'), 'the stranger is capped');
+
+        self::from('198.51.100.20');
+        self::assertSame(200, self::hit($route, 'victim@example.com'), 'the owner on another network still gets mail');
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('mailRoutes')]
+    public function testTheGlobalCapStillStopsMailBombingAcrossNetworks(string $route, int $perNetwork, int $perAddress): void
+    {
+        $global = $route === 'forgot'
+            ? AuthSupport::FORGOT_PASSWORD_EMAIL_GLOBAL_RATE_LIMIT
+            : AuthSupport::RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT;
+        self::assertSame(10, $global);
+        for ($i = 0; $i < $global; $i++) {
+            self::from('192.0.' . $i . '.1'); // a fresh network each time
+            self::assertSame(200, self::hit($route, 'target@example.com'));
+        }
+        self::from('100.64.0.1');
+        self::assertSame(429, self::hit($route, 'target@example.com'), 'the address is capped across networks');
+    }
+
+    public function testTheOwnersTrustedNetworkSkipsTheGlobalCap(): void
+    {
+        // An account whose owner completed a sign-in from home.
+        $GLOBALS['__bcc_ph']['users'][7] = ['email' => 'owner@example.com', 'login' => 'u7', 'display' => 'Owner'];
+        self::from('198.51.100.20');
+        AuthSupport::recordTrustedLoginNetwork(7);
+
+        // A stranger exhausts the global cap from many networks.
+        for ($i = 0; $i < AuthSupport::FORGOT_PASSWORD_EMAIL_GLOBAL_RATE_LIMIT; $i++) {
+            self::from('192.0.' . $i . '.1');
+            AuthSupport::allowMailToAddress('forgot_password', 'owner@example.com', AuthSupport::FORGOT_PASSWORD_EMAIL_RATE_LIMIT, AuthSupport::FORGOT_PASSWORD_EMAIL_GLOBAL_RATE_LIMIT);
+        }
+
+        self::from('100.64.0.1');
+        self::assertFalse(
+            AuthSupport::allowMailToAddress('forgot_password', 'owner@example.com', AuthSupport::FORGOT_PASSWORD_EMAIL_RATE_LIMIT, AuthSupport::FORGOT_PASSWORD_EMAIL_GLOBAL_RATE_LIMIT),
+            'an untrusted network is capped'
+        );
+        self::from('198.51.100.77'); // the owner's home /24
+        self::assertTrue(
+            AuthSupport::allowMailToAddress('forgot_password', 'owner@example.com', AuthSupport::FORGOT_PASSWORD_EMAIL_RATE_LIMIT, AuthSupport::FORGOT_PASSWORD_EMAIL_GLOBAL_RATE_LIMIT),
+            'the owner at home still gets their reset mail'
+        );
+    }
+
     public function testTheOtherApprovedNumbers(): void
     {
         self::assertSame(20, AuthSupport::LOGIN_RATE_LIMIT, 'login per network, per minute');
