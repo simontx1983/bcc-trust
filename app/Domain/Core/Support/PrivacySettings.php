@@ -196,6 +196,16 @@ final class PrivacySettings
         return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
     }
 
+    /**
+     * The wp_usermeta key behind flag($key), for a repository that has to
+     * apply the flag inside SQL (F-340: `real_name_hidden` attestors are
+     * left out of the profile vouch line). The same key flag() reads.
+     */
+    public static function metaKeyFor(string $key): string
+    {
+        return self::metaKey($key);
+    }
+
     /** The wp_usermeta key a public flag is stored under. */
     private static function metaKey(string $key): string
     {
