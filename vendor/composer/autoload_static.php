@@ -497,6 +497,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Support\\GroupAttribution' => __DIR__ . '/../..' . '/app/Domain/Core/Support/GroupAttribution.php',
         'BCC\\Trust\\Core\\Support\\GroupInteractionGate' => __DIR__ . '/../..' . '/app/Domain/Core/Support/GroupInteractionGate.php',
         'BCC\\Trust\\Core\\Support\\GroupLeaveGuard' => __DIR__ . '/../..' . '/app/Domain/Core/Support/GroupLeaveGuard.php',
+        'BCC\\Trust\\Core\\Support\\GroupRole' => __DIR__ . '/../..' . '/app/Domain/Core/Support/GroupRole.php',
         'BCC\\Trust\\Core\\Support\\InternalPath' => __DIR__ . '/../..' . '/app/Domain/Core/Support/InternalPath.php',
         'BCC\\Trust\\Core\\Support\\JwtToken' => __DIR__ . '/../..' . '/app/Domain/Core/Support/JwtToken.php',
         'BCC\\Trust\\Core\\Support\\KeysetCursor' => __DIR__ . '/../..' . '/app/Domain/Core/Support/KeysetCursor.php',

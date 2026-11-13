@@ -131,7 +131,7 @@ final class UserViewService
         $tier         = $this->reputationRepo->getTier($userId);
         $handle       = self::resolveHandle($user);
         $followCounts = PeepSoFollowerRepository::getCounts($userId);
-        $halls        = $this->resolveHalls($userId, $viewerId);
+        $halls        = $this->resolveHalls($userId, $viewerId, true);
         $primaryHall  = $this->resolvePrimaryHall($userId, $halls);
 
         // Member state (Rank redesign Phase 5) — prefer the prefetched
@@ -895,12 +895,21 @@ final class UserViewService
      * for a non-owner viewer it is DROPPED rather than shown. Previously
      * such a group was listed unconditionally.
      *
-     * The OWNER's own view is deliberately byte-identical to before -
-     * no filter, and no resolver call at all.
+     * The OWNER's own view is deliberately unfiltered. Without $withRoles
+     * it makes no resolver call at all; with them, one batched call
+     * supplies each row's `type`.
      *
-     * @return list<array{id: int, slug: string, name: string, is_primary: bool}>
+     * $withRoles (the full profile only): each row also carries the
+     * member's `role` / `role_label` in that group (GroupRole, the roster's
+     * vocabulary) — but ONLY where this viewer could already see that
+     * group's roster (§4.7.7): the member themself, an open group or a
+     * Hall, or a group the viewer is an active member of. Elsewhere both
+     * are null, so a profile never reveals who moderates a closed group. A
+     * failed status read is null too, never a guessed role.
+     *
+     * @return list<array{id: int, slug: string, name: string, is_primary: bool, role?: string|null, role_label?: string|null, type?: string|null}>
      */
-    private function resolveHalls(int $userId, int $viewerId): array
+    private function resolveHalls(int $userId, int $viewerId, bool $withRoles = false): array
     {
         if ($userId <= 0) {
             return [];
@@ -919,9 +928,12 @@ final class UserViewService
 
         // F-270 / F-323 - what may THIS viewer see of them? Skipped
         // entirely for the owner, who always sees their own groups.
-        if ($viewerId <= 0 || $viewerId !== $userId) {
-            $visible = ProfileGroupVisibility::filter(
-                Plugin::instance()->groupContextResolver()->forManyGroups($myGroupIds),
+        $isSelf   = $viewerId > 0 && $viewerId === $userId;
+        $contexts = [];
+        if (!$isSelf) {
+            $contexts = Plugin::instance()->groupContextResolver()->forManyGroups($myGroupIds);
+            $visible  = ProfileGroupVisibility::filter(
+                $contexts,
                 $userId,
                 $viewerId
             );
@@ -939,20 +951,68 @@ final class UserViewService
         $primaryGroupId = self::loadPrimaryGroupId($userId);
         $groupInfo      = PeepSoGroupRepository::findManyByIds($myGroupIds);
 
+        // Roles: the member's status per group, and (for anyone but the
+        // member) the viewer's, each in ONE batched read. A failed read is
+        // null → no role shown for it.
+        $memberStatuses = $withRoles
+            ? PeepSoGroupRepository::findUserMembershipStatuses($userId, $myGroupIds)
+            : null;
+        $viewerStatuses = ($withRoles && !$isSelf && $viewerId > 0)
+            ? PeepSoGroupRepository::findUserMembershipStatuses($viewerId, $myGroupIds)
+            : null;
+        // The row's group kind (hall | user | system | nft | validator), so
+        // a client can tell a Hall from any other group. The owner's own
+        // view resolved no contexts above; one batched call here.
+        if ($withRoles && $contexts === []) {
+            $contexts = Plugin::instance()->groupContextResolver()->forManyGroups($myGroupIds);
+        }
+
         $items = [];
         foreach ($myGroupIds as $groupId) {
             $info = $groupInfo[$groupId] ?? null;
             if ($info === null) {
                 continue;
             }
-            $items[] = [
+            $item = [
                 'id'         => $groupId,
                 'slug'       => $info->post_name,
                 'name'       => $info->post_title,
                 'is_primary' => $primaryGroupId === $groupId,
             ];
+            if ($withRoles) {
+                $role = null;
+                $raw  = $memberStatuses[$groupId] ?? null;
+                if ($raw !== null && self::rosterVisible($isSelf, $contexts[$groupId] ?? null, $viewerStatuses[$groupId] ?? null)) {
+                    $role = \BCC\Trust\Core\Support\GroupRole::normalize($raw);
+                }
+                $item['role']       = $role;
+                $item['role_label'] = $role !== null ? \BCC\Trust\Core\Support\GroupRole::label($role) : null;
+                $item['type']       = isset($contexts[$groupId]) ? $contexts[$groupId]->type->value : null;
+            }
+            $items[] = $item;
         }
         return $items;
+    }
+
+    /**
+     * Could this viewer already see the group's roster? The member
+     * themself always; anyone else by the group page's OWN rule
+     * (GroupsService::resolveMembersVisible — open → everyone, closed /
+     * secret → active members only, no exception for Halls), so the badge
+     * and the member list can never disagree. An unresolved context fails
+     * closed (not visible).
+     */
+    private static function rosterVisible(bool $isSelf, ?\BCC\Trust\Core\ValueObjects\GroupContext $ctx, ?string $viewerStatus): bool
+    {
+        if ($isSelf) {
+            return true;
+        }
+        if ($ctx === null) {
+            return false;
+        }
+        $viewerIsMember = $viewerStatus !== null
+            && in_array($viewerStatus, CommentService::READ_ALLOWED_STATUSES, true);
+        return GroupsService::resolveMembersVisible($ctx, $viewerIsMember);
     }
 
     /**

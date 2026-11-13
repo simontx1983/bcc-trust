@@ -156,10 +156,10 @@ final class GroupMembersService
                 continue;
             }
 
-            $role      = self::normalizeRole((string) $row->role);
+            $role      = \BCC\Trust\Core\Support\GroupRole::normalize((string) $row->role);
             $items[]   = array_merge($summary, [
                 'role'       => $role,
-                'role_label' => self::roleLabel($role),
+                'role_label' => \BCC\Trust\Core\Support\GroupRole::label($role),
                 'joined_at'  => self::joinedAtIso($row),
             ]);
         }
@@ -175,46 +175,6 @@ final class GroupMembersService
                 'has_more' => $hasMore,
             ],
         ];
-    }
-
-    /**
-     * Strip PeepSo's `member_` prefix to the canonical wire shape.
-     * `member_owner` → `owner`, `member_moderator`/`member_manager`
-     * → `moderator`, anything else → `member`.
-     *
-     * `member_manager` is folded into `moderator` because the FE
-     * doesn't need to distinguish the two PeepSo flavors; both are
-     * "above-baseline-but-not-owner" roles. If a future surface needs
-     * the manager/moderator split it can re-derive from the raw
-     * status, but the public contract stays narrow.
-     */
-    private static function normalizeRole(string $rawStatus): string
-    {
-        return match ($rawStatus) {
-            'member_owner'                       => 'owner',
-            'member_moderator', 'member_manager' => 'moderator',
-            default                              => 'member',
-        };
-    }
-
-    /**
-     * Server-rendered label per §A2 / §L5. Frontend prints verbatim —
-     * if a deployment localizes via `bcc_group_role_label`, that copy
-     * lands here too. Single source of truth for "what does a role
-     * READ as on the page."
-     */
-    private static function roleLabel(string $role): string
-    {
-        $defaults = [
-            'owner'     => 'OWNER',
-            'moderator' => 'MODERATOR',
-            'member'    => 'MEMBER',
-        ];
-
-        /** @var array<string, string> $map */
-        $map = apply_filters('bcc_group_role_labels', $defaults);
-
-        return $map[$role] ?? $defaults[$role] ?? 'MEMBER';
     }
 
     /**
