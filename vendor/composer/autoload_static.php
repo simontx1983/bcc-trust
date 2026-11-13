@@ -587,6 +587,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Onchain\\CLI\\HallOwnershipRepairCommand' => __DIR__ . '/../..' . '/app/Domain/Onchain/CLI/HallOwnershipRepairCommand.php',
         'BCC\\Trust\\Onchain\\CLI\\SolanaGateIdentityRepairCommand' => __DIR__ . '/../..' . '/app/Domain/Onchain/CLI/SolanaGateIdentityRepairCommand.php',
         'BCC\\Trust\\Onchain\\CLI\\ValidatorMsgQueueCommand' => __DIR__ . '/../..' . '/app/Domain/Onchain/CLI/ValidatorMsgQueueCommand.php',
+        'BCC\\Trust\\Onchain\\Contracts\\CountsErc1155Holdings' => __DIR__ . '/../..' . '/app/Domain/Onchain/Contracts/CountsErc1155Holdings.php',
         'BCC\\Trust\\Onchain\\Contracts\\CountsHoldingsWithCompleteness' => __DIR__ . '/../..' . '/app/Domain/Onchain/Contracts/CountsHoldingsWithCompleteness.php',
         'BCC\\Trust\\Onchain\\Contracts\\FetcherInterface' => __DIR__ . '/../..' . '/app/Domain/Onchain/Contracts/FetcherInterface.php',
         'BCC\\Trust\\Onchain\\Contracts\\LogoResolver' => __DIR__ . '/../..' . '/app/Domain/Onchain/Contracts/LogoResolver.php',
