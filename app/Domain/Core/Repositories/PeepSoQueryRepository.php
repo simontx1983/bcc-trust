@@ -150,7 +150,10 @@ final class PeepSoQueryRepository
      *
      * Each row also carries what the backfill needs to decide and to be
      * rolled back exactly: `current_role` (the claimer's existing
-     * peepso_page_members status on the page, null = no row) and
+     * peepso_page_members status on the page, null = no row; F-360: ranked
+     * by claimerStatusOrder(), so with several rows a `banned` one wins and
+     * the backfill's ban skip can never be hidden behind an older non-banned
+     * row — the same read as the live path's claimerPageStatus()) and
      * `other_owner` (a DIFFERENT user already holding `member_owner` on the
      * page, 0 = none).
      *
@@ -168,7 +171,8 @@ final class PeepSoQueryRepository
             "SELECT c.entity_id AS page_id, c.user_id,
                     (SELECT cur.pm_user_status FROM {$members} cur
                       WHERE cur.pm_page_id = c.entity_id AND cur.pm_user_id = c.user_id
-                      ORDER BY cur.pm_id ASC LIMIT 1) AS claimer_status,
+                      ORDER BY " . self::claimerStatusOrder('cur') . "
+                      LIMIT 1) AS claimer_status,
                     (SELECT oth.pm_user_id FROM {$members} oth
                       WHERE oth.pm_page_id = c.entity_id AND oth.pm_user_status = 'member_owner'
                         AND oth.pm_user_id <> c.user_id
@@ -299,6 +303,65 @@ final class PeepSoQueryRepository
         }
 
         return $owner === null ? 0 : (int) $owner;
+    }
+
+    /**
+     * F-360 live read: the claimer's OWN status on the page, ranked by
+     * claimerStatusOrder() — the same read the backfill makes. The live
+     * claim path (ensurePageOwnerMembership) and the revoke release
+     * (releaseClaimedPage) decide on this, never on PeepSoPageUser's flags:
+     * PeepSo's model reads ONE arbitrary row of the pair (`LIMIT 1`, no
+     * ORDER BY), and peepso_page_members has no unique (page, user) key.
+     *
+     * `status` is null when the pair has no row. NULL overall = the read did
+     * not run; the caller then writes nothing.
+     *
+     * @return array{status: ?string}|null
+     */
+    public static function claimerPageStatus(int $pageId, int $userId): ?array
+    {
+        if ($pageId <= 0 || $userId <= 0) {
+            return ['status' => null];
+        }
+
+        global $wpdb;
+        $members = $wpdb->prefix . 'peepso_page_members';
+
+        self::clearLastError();
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT cur.pm_user_status FROM {$members} cur
+              WHERE cur.pm_page_id = %d AND cur.pm_user_id = %d
+              ORDER BY " . self::claimerStatusOrder('cur') . "
+              LIMIT 1",
+            $pageId,
+            $userId
+        ));
+        if ($ok === false || self::lastError() !== '') {
+            return null;
+        }
+
+        $row = is_array($wpdb->last_result) ? ($wpdb->last_result[0] ?? null) : null;
+
+        return [
+            'status' => is_object($row) && isset($row->pm_user_status) && is_string($row->pm_user_status)
+                ? $row->pm_user_status
+                : null,
+        ];
+    }
+
+    /**
+     * F-360: the ONE order for "the claimer's status on a page" when the pair
+     * has several peepso_page_members rows: a `banned` row first (a ban is
+     * never hidden), then a `member_owner` row (an owner is never missed),
+     * then the oldest. So `banned` means a ban exists, `member_owner` means
+     * an owner row exists and no ban, and anything else means neither.
+     * $alias is always a literal from this class.
+     */
+    private static function claimerStatusOrder(string $alias): string
+    {
+        return "({$alias}.pm_user_status = 'banned') DESC, "
+            . "({$alias}.pm_user_status = 'member_owner') DESC, "
+            . "{$alias}.pm_id ASC";
     }
 
     // Separate helpers (bcc-core's shape) so static analysis does not narrow

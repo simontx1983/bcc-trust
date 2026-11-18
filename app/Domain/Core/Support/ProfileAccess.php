@@ -141,8 +141,9 @@ final class ProfileAccess
      *
      * It filters more than the profile level, all of it privacy-positive
      * and all of it matching what PeepSo does elsewhere: banned and
-     * unvalidated accounts (`usr_role`), blocks in either direction when
-     * `user_blocking_enable` is on, and `hide_from_search`.
+     * unvalidated accounts (`usr_role`), blocks in either direction
+     * (`user_blocking_enable`, pinned ON by PrivacySettings, F-295), and
+     * `hide_from_search`.
      *
      * ── The two exemptions PeepSo's SQL does NOT make ───────────────
      *
@@ -161,10 +162,15 @@ final class ProfileAccess
      * Order is preserved and duplicates collapse, so a caller can use
      * the result to filter its own page while keeping its sort.
      *
+     * `$applySearchOptOut = false` drops ONLY the hide_from_search leg
+     * ({@see PrivacySettings::ARG_IGNORE_SEARCH_OPTOUT}) for lists that are
+     * not a search or the directory — group rosters, which follow profile
+     * privacy (user decision). Every other leg still applies.
+     *
      * @param list<int> $userIds
      * @return list<int>
      */
-    public static function filterVisible(array $userIds): array
+    public static function filterVisible(array $userIds, bool $applySearchOptOut = true): array
     {
         if ($userIds === []) {
             return [];
@@ -203,12 +209,16 @@ final class ProfileAccess
             return isset($unique[$viewerId]) ? [$viewerId] : [];
         }
 
-        $ids    = array_keys($unique);
+        $ids  = array_keys($unique);
+        $args = [
+            'include' => $ids,
+            'number'  => count($ids),
+        ];
+        if (!$applySearchOptOut) {
+            $args[PrivacySettings::ARG_IGNORE_SEARCH_OPTOUT] = true;
+        }
         $search = new \PeepSoUserSearch(
-            [
-                'include' => $ids,
-                'number'  => count($ids),
-            ],
+            $args,
             $viewerId > 0 ? $viewerId : null,
             ''
         );

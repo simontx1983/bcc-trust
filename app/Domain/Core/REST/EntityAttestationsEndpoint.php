@@ -8,6 +8,14 @@
  * validator_card, project_card, creator_card) with the locked §J.4
  * shape: items[] + summary + pagination.
  *
+ * §F-02: a `user_profile` roster is a read about THAT member, so it sits
+ * behind the profile-wide gate like every per-user route: a profile the
+ * viewer may not open answers ProfileAccess::forbidden() (403,
+ * `reason: profile_private`). F-356 gates each ATTESTOR row in the
+ * service; this gates the TARGET. Card targets are pages, not people, and
+ * are not gated here. An anonymous verdict is the same for every
+ * anonymous viewer, so the public cache below stays correct.
+ *
  * Auth-OPTIONAL: anonymous viewers may read entity rosters. The view-
  * model carries no per-viewer state per §J.4 (third-party rows surface
  * the same fields for everyone). Caching follows the GroupMembersEndpoint
@@ -39,6 +47,7 @@ namespace BCC\Trust\Core\REST;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\ProfileAccess;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -134,6 +143,15 @@ final class EntityAttestationsEndpoint
                 'Invalid target_id.',
                 400
             ));
+        }
+
+        // §F-02: a member's received vouches are a read about that member.
+        // For user_profile the target_id IS the user id.
+        if ($targetKind === 'user_profile') {
+            if (!ProfileAccess::canViewProfile($targetId)) {
+                // Never shared-cached: the success below is public for anon.
+                return self::noStore(ProfileAccess::forbidden());
+            }
         }
 
         $kindParam = $request->get_param('kind');

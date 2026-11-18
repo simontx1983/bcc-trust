@@ -18,6 +18,7 @@
  *   $GLOBALS['__bcc_wp_wallet_rows'] = list<object>   rows getForUser returns
  *   $GLOBALS['__bcc_wp_wallet_reads']= int            getForUser call count
  *   $GLOBALS['__bcc_wp_user_by_addr']= array<string,int> address => user id
+ *   $GLOBALS['__bcc_wp_user_lookups']= int            findUserIdByAddress call count
  */
 
 declare(strict_types=1);
@@ -89,6 +90,7 @@ namespace BCC\Trust\Onchain\Repositories {
 
             public static function findUserIdByAddress(int $chainId, string $address): int
             {
+                $GLOBALS['__bcc_wp_user_lookups'] = (int) ($GLOBALS['__bcc_wp_user_lookups'] ?? 0) + 1;
                 /** @var array<string, int> $map */
                 $map = $GLOBALS['__bcc_wp_user_by_addr'] ?? [];
                 return $map[strtolower($address)] ?? 0;

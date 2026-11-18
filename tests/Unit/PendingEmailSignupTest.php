@@ -42,6 +42,8 @@ final class PendingEmailSignupTest extends TestCase
         parent::setUp();
         require_once __DIR__ . '/../Stubs/handle-rename-identity-stubs.php';
         require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
+        require_once __DIR__ . '/../Stubs/breached-password-stubs.php';
+        $GLOBALS['__bcc_hibp'] = ['calls' => [], 'metrics' => [], 'logs' => []];
         $GLOBALS['__bcc_ph'] = [
             'users'        => [],
             'meta'         => [],
@@ -83,9 +85,9 @@ final class PendingEmailSignupTest extends TestCase
     }
 
     /** @return array{status: int, message: string} */
-    private static function signup(string $handle, string $email): array
+    private static function signup(string $handle, string $email, string $password = 'correct horse battery'): array
     {
-        $req  = new \WP_REST_Request(['handle' => $handle, 'email' => $email, 'password' => 'correct horse battery']);
+        $req  = new \WP_REST_Request(['handle' => $handle, 'email' => $email, 'password' => $password]);
         $resp = (new PasswordAuthController())->signup($req);
         $data = $resp->get_data();
         return [
@@ -103,6 +105,15 @@ final class PendingEmailSignupTest extends TestCase
             'password' => 'a brand new password',
         ]);
         return (new PasswordAuthController())->resetPassword($req)->get_status();
+    }
+
+    /** The breach list answers that $password IS listed. */
+    private static function breached(string $password): void
+    {
+        $GLOBALS['__bcc_hibp']['response'] = [
+            'response' => ['code' => 200],
+            'body'     => substr(strtoupper(sha1($password)), 5) . ":12\r\n",
+        ];
     }
 
     private static function verified(int $userId): string
@@ -209,5 +220,120 @@ final class PendingEmailSignupTest extends TestCase
         self::assertSame(200, self::reset(self::STALE));
 
         self::assertNotContains('bcc_email_verified', $GLOBALS['__bcc_ph']['actions']);
+    }
+
+    // ── breached passwords ───────────────────────────────────────────────
+
+    public function testABreachedPasswordIsRefusedAtSignupAndNoAccountIsMade(): void
+    {
+        self::breached('correct horse battery');
+
+        $out = self::signup('alice', 'alice@example.test');
+
+        self::assertSame(422, $out['status']);
+        self::assertSame('This password has appeared in a data breach; please choose a different one.', $out['message']);
+        self::assertSame([], $GLOBALS['__bcc_ph']['users'], 'no account');
+        self::assertCount(1, $GLOBALS['__bcc_hibp']['calls']);
+    }
+
+    public function testATakenHandleCostsNoBreachLookup(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][7] = ['email' => 'bob@example.test', 'login' => AuthSupport::deriveLogin('bob'), 'display' => 'bob'];
+        $GLOBALS['__bcc_ph']['meta'][7]  = [HandleService::META_HANDLE => 'bob', AuthSupport::META_EMAIL_VERIFIED => '1'];
+
+        self::assertSame(409, self::signup('bob', 'other@example.test')['status']);
+        self::assertSame([], $GLOBALS['__bcc_hibp']['calls']);
+    }
+
+    public function testSignupStillWorksWhenTheBreachListIsDown(): void
+    {
+        $GLOBALS['__bcc_hibp']['response'] = new \WP_Error('http_request_failed', 'timed out');
+
+        self::assertSame(201, self::signup('alice', 'alice@example.test')['status']);
+        self::assertSame(['password_breach_check/unavailable'], $GLOBALS['__bcc_hibp']['metrics']);
+    }
+
+    public function testABreachedPasswordIsRefusedAtResetAndTheLinkStillWorks(): void
+    {
+        self::pending(self::STALE, 'alice', 'alice@example.test', self::DAY);
+        $GLOBALS['__bcc_ph']['passwords'][self::STALE] = 'the old password';
+        self::breached('a brand new password');
+
+        self::assertSame(422, self::reset(self::STALE));
+        self::assertSame('the old password', $GLOBALS['__bcc_ph']['passwords'][self::STALE], 'unchanged');
+        self::assertSame('k-' . self::STALE, $GLOBALS['__bcc_ph']['reset_keys'][self::STALE] ?? null, 'the key is not spent');
+
+        unset($GLOBALS['__bcc_hibp']['response']);
+        self::assertSame(200, self::reset(self::STALE));
+        self::assertSame('a brand new password', $GLOBALS['__bcc_ph']['passwords'][self::STALE]);
+    }
+
+    public function testAnInvalidResetKeyCostsNoBreachLookup(): void
+    {
+        self::pending(self::STALE, 'alice', 'alice@example.test', self::DAY);
+        $req = new \WP_REST_Request(['key' => 'wrong', 'login' => AuthSupport::deriveLogin('alice'), 'password' => 'a brand new password']);
+
+        self::assertSame(400, (new PasswordAuthController())->resetPassword($req)->get_status());
+        self::assertSame([], $GLOBALS['__bcc_hibp']['calls']);
+    }
+
+    // ── F-294: an identical sign-up retry is the same sign-up ────────────
+
+    public function testAnIdenticalRetryGetsTheSame201AndNoSecondAccountOrMail(): void
+    {
+        self::assertSame(201, self::signup('dana', 'dana@example.test')['status']);
+        $users = count($GLOBALS['__bcc_ph']['users']);
+        $mails = count($GLOBALS['__bcc_ph']['mail']);
+
+        self::assertSame(201, self::signup('dana', 'dana@example.test')['status'], 'the double submit');
+
+        self::assertCount($users, $GLOBALS['__bcc_ph']['users'], 'no second account');
+        self::assertCount($mails, $GLOBALS['__bcc_ph']['mail'], 'no second mail');
+    }
+
+    public function testADifferentPasswordIsADifferentSignup(): void
+    {
+        self::signup('dana', 'dana@example.test');
+
+        self::assertSame(409, self::signup('dana', 'dana@example.test', 'another password entirely')['status']);
+    }
+
+    public function testADifferentHandleIsADifferentSignup(): void
+    {
+        self::signup('dana', 'dana@example.test');
+
+        $retry = self::signup('dana2', 'dana@example.test');
+        self::assertSame(409, $retry['status']);
+        self::assertStringStartsWith('An account with that email already exists.', $retry['message']);
+    }
+
+    public function testARetryAfterTenMinutesIsNoLongerTheSameSignup(): void
+    {
+        self::signup('dana', 'dana@example.test');
+        $id = (int) array_key_last($GLOBALS['__bcc_ph']['users']);
+        $GLOBALS['__bcc_ph']['users'][$id]['registered'] = time() - 11 * 60;
+
+        self::assertSame(409, self::signup('dana', 'dana@example.test')['status']);
+    }
+
+    public function testAConfirmedAccountIsNeverTreatedAsARetry(): void
+    {
+        self::signup('dana', 'dana@example.test');
+        $id = (int) array_key_last($GLOBALS['__bcc_ph']['users']);
+        $GLOBALS['__bcc_ph']['meta'][$id][AuthSupport::META_EMAIL_VERIFIED] = '1';
+
+        self::assertSame(409, self::signup('dana', 'dana@example.test')['status']);
+    }
+
+    // ── F-294: the reset email says the newest link wins ─────────────────
+
+    public function testTheResetEmailSaysOnlyTheMostRecentLinkWorks(): void
+    {
+        self::pending(self::STALE, 'alice', 'alice@example.test', 2 * self::DAY);
+
+        \BCC\Trust\Core\Services\AuthMailer::sendPasswordResetEmail(self::STALE, 'alice@example.test', 'https://app.example.test/reset-password?key=k');
+
+        self::assertCount(1, $GLOBALS['__bcc_ph']['mail']);
+        self::assertStringContainsString('Only the most recent link works', (string) $GLOBALS['__bcc_ph']['mail'][0]['html']);
     }
 }

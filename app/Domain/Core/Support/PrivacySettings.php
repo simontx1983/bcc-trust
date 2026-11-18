@@ -182,6 +182,14 @@ final class PrivacySettings
             // and round-trips through FILTER_VALIDATE_BOOLEAN cleanly).
             update_user_meta($userId, self::metaKey($key), $value ? '1' : '0');
         }
+
+        // F-294: let caches that embed a member's name or listing react to a
+        // privacy change (the anon hot feed, on real_name_hidden). Only the
+        // keys this call actually wrote are passed.
+        $written = array_values(array_intersect(array_keys($partial), self::ALL_KEYS));
+        if ($written !== []) {
+            do_action('bcc_privacy_settings_changed', $userId, $written);
+        }
     }
 
     /**
@@ -214,6 +222,13 @@ final class PrivacySettings
      * Stays inside bcc-trust per §A4 — privacy decisions live in one
      * place, even when they affect a sibling plugin's surface.
      */
+    /**
+     * `PeepSoUserSearch` arg: leave the search opt-out (hide_from_search)
+     * out of this listing. Not a search and not the directory — see
+     * {@see filterPeepSoSearchArgs()}.
+     */
+    public const ARG_IGNORE_SEARCH_OPTOUT = '_bcc_ignore_search_optout';
+
     public static function registerSearchFilter(): void
     {
         add_filter('peepso_user_search_args', [self::class, 'filterPeepSoSearchArgs'], 20, 1);
@@ -234,6 +249,32 @@ final class PrivacySettings
         // `acc` alias, so it does not actually depend on that ordering —
         // but a predictable order is worth having anyway.
         add_action('pre_user_query', [self::class, 'filterPeepSoUserQuery'], 20, 1);
+
+        // F-295: ONE block system. BCC enforces blocks always (it reads
+        // peepso_blocks directly through PeepSoBlockRepository), but
+        // PeepSo's own SQL honours them only while its admin option
+        // `user_blocking_enable` is on: the user search behind our member
+        // search and the mention gate, plus PeepSo activity, photos and
+        // messages. Pin the option ON so both agree whatever the toggle
+        // says. Same posture as the hide-from-listing args filter above.
+        add_filter('peepso_filter_get_option_user_blocking_enable', [self::class, 'pinBlockingEnabled'], 20, 1);
+    }
+
+    /**
+     * F-295: PeepSo's `user_blocking_enable` always reads as ON.
+     *
+     * PeepSoConfigSettings::get_option() applies
+     * `peepso_filter_get_option_{name}` on every read, and both
+     * PeepSo::get_option() and PeepSo::get_option_new() go through it. So
+     * PeepSo's admin toggle also READS as on even when it is saved off,
+     * which is intended: blocks are not optional on BCC.
+     *
+     * @param mixed $stored the saved value (ignored)
+     */
+    public static function pinBlockingEnabled($stored): int
+    {
+        unset($stored);
+        return 1;
     }
 
     /**
@@ -324,11 +365,21 @@ final class PrivacySettings
      * would skip them entirely. Combined with relation=AND so an
      * existing meta_query (e.g. PeepSo's VIP filter) is preserved.
      *
+     * ⚠ A caller that is NOT a search or the directory passes
+     * {@see self::ARG_IGNORE_SEARCH_OPTOUT}: hide_from_search scopes to
+     * member search and the directory only (user decision 2026-11-12,
+     * F-257 copy). Group rosters follow profile privacy instead, so they
+     * keep every other leg of PeepSo's listing rule and skip just this one.
+     *
      * @param array<string, mixed> $args
      * @return array<string, mixed>
      */
     public static function filterPeepSoSearchArgs(array $args): array
     {
+        if (!empty($args[self::ARG_IGNORE_SEARCH_OPTOUT])) {
+            unset($args[self::ARG_IGNORE_SEARCH_OPTOUT]);
+            return $args;
+        }
 
         // ── hide_from_search, honoured unconditionally ────────────────
         //

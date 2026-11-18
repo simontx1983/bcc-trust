@@ -65,7 +65,12 @@ final class MyAccountEndpoint
     private const ROUTE_NAMESPACE = 'bcc/v1';
 
     /** Minimum new-password length. WordPress core has no hard floor; this is ours. */
-    private const PASSWORD_MIN_LENGTH = 10;
+    /**
+     * F-294 (user decision): ONE minimum everywhere, the same as sign-up and
+     * reset. Settings used to demand 10 while sign-up accepted 8. Existing
+     * passwords are unaffected; this only checks a NEW one.
+     */
+    private const PASSWORD_MIN_LENGTH = \BCC\Trust\Core\REST\Auth\AuthSupport::SIGNUP_MIN_PASSWORD_LENGTH;
 
     /** Confirmation token the client must echo back on DELETE. */
     private const DELETE_CONFIRMATION_TOKEN = 'DELETE';
@@ -323,6 +328,13 @@ final class MyAccountEndpoint
                 sprintf('Password must be at least %d characters.', self::PASSWORD_MIN_LENGTH),
                 422
             );
+        }
+        // A password known to have leaked is refused (fails open when the
+        // breach list is unreachable). Before the credential check for the
+        // same reason as the length: a refused password must not burn a
+        // signed wallet challenge.
+        if (\BCC\Trust\Core\Services\BreachedPasswordCheck::isBreached($newPassword)) {
+            return \BCC\Trust\Core\Services\BreachedPasswordCheck::rejection();
         }
 
         // A wallet-only member SETS their first password here, confirming

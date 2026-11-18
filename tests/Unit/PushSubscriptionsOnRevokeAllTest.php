@@ -42,6 +42,7 @@ final class PushSubscriptionsOnRevokeAllTest extends TestCase
         parent::setUp();
         require_once __DIR__ . '/../Stubs/pending-email-stubs.php';
         require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
+        require_once __DIR__ . '/../Stubs/breached-password-stubs.php';
         $GLOBALS['__bcc_ph'] = [
             'users'        => [self::USER => ['email' => 'u81@example.com', 'login' => 'u81', 'display' => 'U81']],
             'meta'         => [self::USER => ['bcc_handle' => 'handle81']],

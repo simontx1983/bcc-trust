@@ -860,6 +860,51 @@ final class AnnouncementRepositoryIntegrationTest extends TestCase
         self::assertNotNull($this->repo->findPublic(self::OTHER_PAGE_ID, $id), 'and it IS findable on its own page');
     }
 
+    /**
+     * F-307 B2 — the owner reads carry the takedown marker as
+     * `moderation_hidden_at`, via a scalar subquery: a DUPLICATED marker must
+     * neither multiply the row nor break the page's `limit + 1` over-fetch,
+     * and the newest write wins. Every other read still runs (the column is
+     * simply NULL there).
+     */
+    public function testTheOwnerReadsCarryTheTakedownMarkerWithoutMultiplyingRows(): void
+    {
+        global $wpdb;
+
+        $down = $this->seed('taken down', '2026-01-02 00:00:00');
+        $up   = $this->seed('still up', '2026-01-01 00:00:00');
+        $blank = $this->seed('blank marker', '2026-01-03 00:00:00');
+        foreach ([[$down, '2026-11-12 08:00:00'], [$down, '2026-11-12 09:00:00'], [$blank, '']] as [$id, $v]) {
+            self::assertNotFalse($wpdb->insert(self::META, [
+                'post_id'    => $id,
+                'meta_key'   => Vis::META_MODERATION_HIDDEN_AT,
+                'meta_value' => $v,
+            ]), $wpdb->last_error);
+        }
+
+        $row = $this->repo->findForOwner(self::PAGE_ID, self::operator(), $down);
+        self::assertNotNull($row);
+        self::assertSame('2026-11-12 09:00:00', $row->moderation_hidden_at, 'the newest marker wins');
+
+        $row = $this->repo->findForOwner(self::PAGE_ID, self::operator(), $up);
+        self::assertNotNull($row);
+        self::assertNull($row->moderation_hidden_at);
+
+        $row = $this->repo->findForOwner(self::PAGE_ID, self::operator(), $blank);
+        self::assertNotNull($row);
+        self::assertNull($row->moderation_hidden_at, 'an empty marker reads as NULL');
+
+        $page = $this->repo->listForOwner(self::PAGE_ID, self::operator(), [Caps::STATUS_PUBLISHED], 2, null);
+        self::assertSame(['blank marker', 'taken down'], $this->titles($page), 'one row each, no duplicates');
+        self::assertTrue($page['has_more'], 'the limit + 1 over-fetch is not inflated by the duplicate marker');
+
+        // The public reads still run and still refuse the taken-down row.
+        self::assertNull($this->repo->findPublic(self::PAGE_ID, $down));
+        $public = $this->repo->findPublic(self::PAGE_ID, $up);
+        self::assertNotNull($public);
+        self::assertNull($public->moderation_hidden_at);
+    }
+
     public function testFindForOwnerReturnsTheOperatorsOwnUnpublishedRow(): void
     {
         $draft = $this->seed('my draft', '2026-01-01 00:00:00', 'draft');

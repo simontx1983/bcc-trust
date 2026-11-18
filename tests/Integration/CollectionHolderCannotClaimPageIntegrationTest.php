@@ -58,6 +58,8 @@ final class CollectionHolderCannotClaimPageIntegrationTest extends TestCase
         $GLOBALS['__bcc_current_user'] = self::USER_ID;
         $GLOBALS['__bcc_bqs_roles']    = [];
         $GLOBALS['__bcc_bqs_calls']    = [];
+        $GLOBALS['__bcc_bqs_owner']       = [];
+        $GLOBALS['__bcc_bqs_owner_calls'] = [];
         Logger::reset();
 
         global $wpdb;
@@ -171,6 +173,44 @@ final class CollectionHolderCannotClaimPageIntegrationTest extends TestCase
      * The per-attempt fan-out is capped at 3 wallets on the collection's
      * chain, so one request cannot hold a worker for minutes.
      */
+    /**
+     * F-14 PR C: creator comes ONLY from owner() on the collection's own
+     * chain. A renounced owner (zero address: 'unknown') or one that moved to
+     * another address is no claim, even where the legacy mainnet-only lookup
+     * still says "creator".
+     */
+    public function testARenouncedOrMovedOwnerIsNotACreatorClaim(): void
+    {
+        $collectionId = $this->boundCollection();
+        $this->insertWallet(self::USER_ID, self::CREATOR_WALLET);
+        $GLOBALS['__bcc_bqs_roles'][self::CREATOR_WALLET] = 'creator'; // the legacy lookup's answer
+
+        foreach (['unknown', 'not_owner'] as $verdict) {
+            $GLOBALS['__bcc_bqs_owner'][self::CREATOR_WALLET] = $verdict;
+
+            $response = $this->claim($collectionId);
+
+            self::assertSame(403, $response->get_status(), $verdict);
+            self::assertSame([], $this->verifiedClaims(self::USER_ID), $verdict);
+        }
+        self::assertNotSame([], $GLOBALS['__bcc_bqs_owner_calls'], 'the owner() verdict was asked');
+        self::assertSame(
+            $this->chainSlug(),
+            $GLOBALS['__bcc_bqs_owner_calls'][0][0] ?? null,
+            "asked on the collection's own chain"
+        );
+    }
+
+    private function chainSlug(): string
+    {
+        global $wpdb;
+
+        return (string) $wpdb->get_var($wpdb->prepare(
+            "SELECT slug FROM `{$wpdb->prefix}bcc_chains` WHERE id = %d",
+            $this->evmChain
+        ));
+    }
+
     public function testCollectionMatchingChecksAtMostThreeWallets(): void
     {
         $collectionId = $this->boundCollection();
@@ -223,6 +263,32 @@ final class CollectionHolderCannotClaimPageIntegrationTest extends TestCase
 
             self::assertSame(403, $response->get_status(), $reason);
             self::assertSame('bcc_forbidden', $error['code'], $reason);
+            self::assertSame($message, $error['message'], $reason);
+            self::assertSame($reason, $error['data']['reason'] ?? null, $reason);
+        }
+    }
+
+    /**
+     * F-339: the two Solana unknowns map to their own codes and reasons —
+     * an outage is retryable (503), a creator the chain cannot prove is
+     * final (403) — never the wallet-mismatch default.
+     */
+    public function testTheTwoSolanaUnknownsMapToTheirOwnResponses(): void
+    {
+        $map = new \ReflectionMethod(PagesEndpoint::class, 'mapClaimFailure');
+        $map->setAccessible(true);
+
+        $cases = [
+            'verification_unavailable' => [503, 'bcc_unavailable', "We couldn't verify this collection's creator on-chain right now. Try again in a few minutes."],
+            'creator_unverifiable'     => [403, 'bcc_forbidden', "We can't confirm this collection's creator on-chain."],
+        ];
+        foreach ($cases as $reason => [$status, $code, $message]) {
+            /** @var \WP_REST_Response $response */
+            $response = $map->invoke(null, ['success' => false, 'error' => $reason, 'message' => 'x']);
+            $error    = $this->errorOf($response);
+
+            self::assertSame($status, $response->get_status(), $reason);
+            self::assertSame($code, $error['code'], $reason);
             self::assertSame($message, $error['message'], $reason);
             self::assertSame($reason, $error['data']['reason'] ?? null, $reason);
         }

@@ -41,6 +41,9 @@ final class BlockFollowBackfill
     /** A plan scanning more block rows than this refuses (needs a rethink, not a longer run). */
     public const MAX_BLOCK_ROWS = 50000;
 
+    /** Pages, including any made only of dropped rows: the walk is bounded even then. */
+    public const MAX_PAGES = (self::MAX_BLOCK_ROWS / self::PAGE_SIZE) + 1;
+
     /**
      * @param \Closure(int, int): int $sever severs follows between two members both ways; returns how many were removed
      */
@@ -60,17 +63,25 @@ final class BlockFollowBackfill
         $scanned = 0;
         $afterId = 0;
 
+        $pages = 0;
+
         while (true) {
-            $page = PeepSoBlockRepository::listBlockPairsAfter($afterId, self::PAGE_SIZE);
+            // The cursor is the page's highest RAW blk_id, so a page made
+            // only of rows the repository drops (a zero user id) still moves
+            // the walk on; only an empty read ends it.
+            $page = PeepSoBlockRepository::listBlockPairsPage($afterId, self::PAGE_SIZE);
             if ($page === null) {
                 return ['ok' => false, 'error' => 'A block page could not be read; no plan was produced.', 'scanned' => $scanned];
             }
-            if ($page === []) {
+            if ($page['done']) {
                 break;
             }
+            if (++$pages > self::MAX_PAGES) {
+                return ['ok' => false, 'error' => 'More than ' . self::MAX_PAGES . ' block pages; refusing to plan.', 'scanned' => $scanned];
+            }
+            $afterId = $page['next'];
 
-            foreach ($page as $row) {
-                $afterId = $row['id'];
+            foreach ($page['pairs'] as $row) {
                 $scanned++;
                 if ($scanned > self::MAX_BLOCK_ROWS) {
                     return ['ok' => false, 'error' => 'More than ' . self::MAX_BLOCK_ROWS . ' block rows; refusing to plan.', 'scanned' => $scanned];

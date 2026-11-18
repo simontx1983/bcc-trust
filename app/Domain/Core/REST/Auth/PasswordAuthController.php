@@ -23,6 +23,7 @@ use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\IpResolver;
+use BCC\Trust\Core\Security\TurnstileVerifier;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Services\AuthMailer;
 use BCC\Trust\Core\Services\HandleService;
@@ -192,6 +193,17 @@ final class PasswordAuthController
         // abandoned attempt does not block it forever.
         self::reclaimAbandonedSignups($handle, $email);
 
+        // F-294: a double submit (or a retry after a lost response) used to
+        // answer "handle taken" for the account the FIRST submit had just
+        // created. An identical retry (same email, handle and password)
+        // against that still-pending account, within a few minutes, gets the
+        // same 201 again. No second account, no second mail.
+        if (self::isIdenticalRecentSignup($handle, $email, $password)) {
+            $retry = ApiResponse::ok(['ok' => true, 'email' => $email], 201);
+            $retry->header('Cache-Control', 'no-store');
+            return $retry;
+        }
+
         // Fast-path collision check — UX shortcut so 99% of duplicates
         // get a clean 409 without spinning up wp_insert_user. The
         // remaining race window (a winning concurrent signup that
@@ -199,6 +211,13 @@ final class PasswordAuthController
         // is closed below by the wp_users.user_login UNIQUE constraint.
         if (!$handleService->isAvailable($handle)) {
             return ApiResponse::error('bcc_conflict', self::TAKEN_HANDLE, 409);
+        }
+
+        // A password known to have leaked is refused (fails open when the
+        // breach list is unreachable). After the cheap checks, so a request
+        // that fails them costs no outside call.
+        if (\BCC\Trust\Core\Services\BreachedPasswordCheck::isBreached($password)) {
+            return \BCC\Trust\Core\Services\BreachedPasswordCheck::rejection();
         }
 
         // wp_insert_user requires a unique user_login. We mint an internal
@@ -290,6 +309,40 @@ final class PasswordAuthController
      * email before another sign-up may take them (user-approved: 7 days).
      */
     public const ABANDONED_SIGNUP_SECONDS = 7 * 86400;
+
+    /**
+     * F-294: how long an identical sign-up retry counts as the same sign-up
+     * (user-approved: 10 minutes).
+     */
+    public const IDENTICAL_RETRY_SECONDS = 600;
+
+    /**
+     * True when the account holding $email is a still-pending email sign-up
+     * (isPendingEmailSignup), created for exactly this $handle, less than
+     * IDENTICAL_RETRY_SECONDS ago, with this $password. Every part has to
+     * match: a different handle or password is a different sign-up, and the
+     * 409 stands.
+     */
+    private static function isIdenticalRecentSignup(string $handle, string $email, string $password): bool
+    {
+        $userId = email_exists($email);
+        if (!is_int($userId) || $userId <= 0) {
+            return false;
+        }
+        $user = get_userdata($userId);
+        if (!($user instanceof \WP_User)
+            || strcasecmp((string) $user->user_login, AuthSupport::deriveLogin($handle)) !== 0
+        ) {
+            return false;
+        }
+        // user_registered is WordPress core's UTC column.
+        $registered = strtotime((string) $user->user_registered . ' UTC');
+        if ($registered === false || $registered < time() - self::IDENTICAL_RETRY_SECONDS) {
+            return false;
+        }
+        return self::isPendingEmailSignup($userId)
+            && wp_check_password($password, (string) $user->user_pass, $userId);
+    }
 
     /** F-285 copy (user-approved) for a sign-up's handle / email 409. */
     private const TAKEN_HANDLE = 'That handle is taken. If it\'s yours from an unfinished sign-up, check your email for the confirmation link; unconfirmed sign-ups free up after 7 days.';
@@ -383,9 +436,19 @@ final class PasswordAuthController
         // depends on this firing BEFORE wp_check_password's CPU-bound
         // bcrypt compare; otherwise an attacker can pin a CPU at the
         // password-check rate.
-        if (!\BCC\Core\Security\Throttle::allow('login', AuthSupport::LOGIN_RATE_LIMIT, 60)) {
+        // F-290: a refused call is not recorded (countDenied = false), and a
+        // call a later bucket refuses gives back what the earlier ones
+        // charged (releaseLoginCharges), so retrying while blocked never
+        // extends the block. A correct password STAYS counted: what follows
+        // it (the 2FA challenge and its emailed code) has no limit of its
+        // own, so releasing it would give anyone with valid credentials
+        // unlimited sign-ins (a 2FA mail bomb, and 2FA guesses across
+        // networks).
+        if (!\BCC\Core\Security\Throttle::allow('login', AuthSupport::LOGIN_RATE_LIMIT, 60, null, false)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
+        /** @var list<array{string, int, string|null}> $charged action, window, key */
+        $charged = [['login', 60, null]];
 
         $identifier = trim((string) $request->get_param('identifier'));
         $password   = (string) $request->get_param('password');
@@ -428,29 +491,75 @@ final class PasswordAuthController
             ? strtolower(sanitize_email($identifier))
             : ltrim(strtolower($identifier), '@'));
         $network = AuthSupport::loginNetwork();
+        $netKey  = 'bcc_throttle_login_account_net_' . hash('sha256', $typedKey . '|' . $network);
         if (!\BCC\Core\Security\Throttle::allow(
             'login_account_net',
             AuthSupport::LOGIN_ACCOUNT_RATE_LIMIT,
             AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
-            'bcc_throttle_login_account_net_' . hash('sha256', $typedKey . '|' . $network)
+            $netKey,
+            false
         )) {
+            self::releaseLoginCharges($charged);
             return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
+        $charged[] = ['login_account_net', AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW, $netKey];
+
         $trustedNetwork = $user !== false && AuthSupport::isTrustedLoginNetwork((int) $user->ID, $network);
-        if (!$trustedNetwork && !\BCC\Core\Security\Throttle::allow(
-            'login_account',
-            AuthSupport::LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT,
-            AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
-            'bcc_throttle_login_account_' . hash('sha256', $typedKey)
-        )) {
-            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
+        if (!$trustedNetwork) {
+            $ceilingKey = 'bcc_throttle_login_account_' . hash('sha256', $typedKey);
+            if (!\BCC\Core\Security\Throttle::allow(
+                'login_account',
+                AuthSupport::LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT,
+                AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
+                $ceilingKey,
+                false
+            )) {
+                self::releaseLoginCharges($charged);
+                return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
+            }
+            $charged[] = ['login_account', AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW, $ceilingKey];
+        }
+
+        // Captcha step-up, BEFORE the bcrypt compare (LoginStepUp): only
+        // after repeated failures for this identifier, or a site-wide failure
+        // spike, and never from a network the account recently signed in
+        // from. Off while Turnstile isn't configured. A Turnstile outage
+        // fails OPEN to the buckets above (logged and counted), so it can
+        // never lock everyone out.
+        if (LoginStepUp::required($typedKey, $trustedNetwork)) {
+            $verdict = TurnstileVerifier::verify(
+                (string) $request->get_param('captcha_token'),
+                IpResolver::getClientIp()
+            );
+            if ($verdict === TurnstileVerifier::FAIL) {
+                // A refusal, so it gives back what it charged (F-290).
+                self::releaseLoginCharges($charged);
+                return ApiResponse::error(
+                    'bcc_captcha_required',
+                    'Please complete the verification to continue.',
+                    429,
+                    LoginStepUp::challengeData()
+                );
+            }
         }
 
         // Generic error for "not found" and "wrong password" alike —
         // never leak which one failed (account-enumeration resistance).
         // wp_check_password is the canonical path; it handles legacy
         // hash formats + rehash-on-login transparently.
-        if ($user === false || !wp_check_password($password, $user->user_pass, $user->ID)) {
+        // F-294: an unknown account used to skip the bcrypt compare, so it
+        // answered measurably faster than a wrong password. It now pays one
+        // password hash too: the same order of work, discarded. Both
+        // branches record the step-up failure (#715): recording it only for
+        // a real account would show the captcha only for real accounts, an
+        // enumeration oracle.
+        if ($user === false) {
+            wp_hash_password($password);
+            LoginStepUp::recordFailure($typedKey, $trustedNetwork);
+            return ApiResponse::error('bcc_invalid_credentials', 'Invalid credentials.', 401);
+        }
+        if (!wp_check_password($password, $user->user_pass, $user->ID)) {
+            LoginStepUp::recordFailure($typedKey, $trustedNetwork);
             return ApiResponse::error('bcc_invalid_credentials', 'Invalid credentials.', 401);
         }
 
@@ -621,7 +730,10 @@ final class PasswordAuthController
         // Throttle first — per network, before any DB lookup or mail
         // dispatch (F-290: office scale, so a shared NAT doesn't lock
         // members out of each other's resets).
-        if (!\BCC\Core\Security\Throttle::allow('forgot_password', AuthSupport::FORGOT_PASSWORD_RATE_LIMIT, 3600)) {
+        // F-290: the per-network bucket doesn't record refused calls; the
+        // per-address mail caps below keep counting every request (they are
+        // the mail-bomb guard).
+        if (!\BCC\Core\Security\Throttle::allow('forgot_password', AuthSupport::FORGOT_PASSWORD_RATE_LIMIT, 3600, null, false)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many password-reset requests. Try again later.', 429);
         }
 
@@ -639,6 +751,7 @@ final class PasswordAuthController
             AuthSupport::FORGOT_PASSWORD_EMAIL_RATE_LIMIT,
             AuthSupport::FORGOT_PASSWORD_EMAIL_GLOBAL_RATE_LIMIT
         )) {
+            AuthSupport::releaseThrottle('forgot_password', 3600);
             return ApiResponse::error('bcc_rate_limited', 'Too many password-reset requests. Try again later.', 429);
         }
 
@@ -646,6 +759,23 @@ final class PasswordAuthController
 
         // Always-ok response below. We branch ONLY for the side effects
         // (key generation + email + audit) — never for the response.
+        //
+        // F-294: key generation hashes the key, which an unknown address
+        // used to skip, so it answered measurably faster. It pays the SAME
+        // hash now, mirroring get_password_reset_key(): WordPress 6.8+
+        // hashes the key with wp_fast_hash() (BLAKE2b, microseconds), so a
+        // password hash here (bcrypt, tens of ms) would make an unknown
+        // address the SLOWER one. Before 6.8 core hashed it with phpass,
+        // the cost of wp_hash_password(). The key write and mail delivery
+        // can still differ; the contract says so.
+        if (!($user instanceof \WP_User)) {
+            $decoyKey = wp_generate_password(20, false);
+            if (function_exists('wp_fast_hash')) {
+                wp_fast_hash($decoyKey);
+            } else {
+                wp_hash_password($decoyKey);
+            }
+        }
         if ($user instanceof \WP_User) {
             $userId = (int) $user->ID;
 
@@ -697,7 +827,7 @@ final class PasswordAuthController
      */
     public function resetPassword(WP_REST_Request $request): WP_REST_Response
     {
-        if (!\BCC\Core\Security\Throttle::allow('reset_password_attempt', AuthSupport::RESET_PASSWORD_RATE_LIMIT, 3600)) {
+        if (!\BCC\Core\Security\Throttle::allow('reset_password_attempt', AuthSupport::RESET_PASSWORD_RATE_LIMIT, 3600, null, false)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many attempts. Try again later.', 429);
         }
 
@@ -722,6 +852,14 @@ final class PasswordAuthController
             // Same generic code for "expired" and "wrong key" — never
             // leak which one. The frontend surfaces "expired or invalid".
             return ApiResponse::error('bcc_invalid_reset_token', 'This reset link is expired or invalid.', 400);
+        }
+
+        // A password known to have leaked is refused (fails open when the
+        // breach list is unreachable). Only once the key is valid, so this
+        // is no anonymous breach lookup; the key is not consumed, so the
+        // same link can try another password.
+        if (\BCC\Trust\Core\Services\BreachedPasswordCheck::isBreached($password)) {
+            return \BCC\Trust\Core\Services\BreachedPasswordCheck::rejection();
         }
 
         $userId = (int) $user->ID;
@@ -768,5 +906,18 @@ final class PasswordAuthController
         $response->header('Cache-Control', 'no-store');
 
         return $response;
+    }
+
+    /**
+     * F-290: give back every login bucket this call charged, when a later
+     * bucket refuses it.
+     *
+     * @param list<array{string, int, string|null}> $charged action, window, key
+     */
+    private static function releaseLoginCharges(array $charged): void
+    {
+        foreach ($charged as [$action, $window, $key]) {
+            AuthSupport::releaseThrottle($action, $window, $key);
+        }
     }
 }

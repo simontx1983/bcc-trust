@@ -60,6 +60,7 @@ final class WalletPrivacyEgressTest extends TestCase
         $GLOBALS['__bcc_wp_wallet_reads']    = 0;
         $GLOBALS['__bcc_wp_wallet_rows']     = [];
         $GLOBALS['__bcc_wp_user_by_addr']    = [];
+        $GLOBALS['__bcc_wp_user_lookups']    = 0;
         $GLOBALS['__bcc_wp_verified_counts'] = [];
     }
 
@@ -226,44 +227,39 @@ final class WalletPrivacyEgressTest extends TestCase
 
     /**
      * Allowlist assertion: the owner block carries `is_linked` and NOTHING
-     * else. Written as an exact key-set comparison so any re-added field
-     * fails here rather than shipping.
+     * else, and `is_linked` is null. Holder wallets are public on-chain, so
+     * a member/non-member answer was a wallet→member signal (it was true
+     * for a linked holder, false for an unlinked one). Exact key-set and
+     * value comparison, so a re-added field or answer fails here.
      */
-    public function testNftOwnerBlockExposesOnlyIsLinked(): void
+    public function testNftOwnerBlockIsLinkedIsAlwaysNull(): void
     {
-        $GLOBALS['__bcc_wp_user_by_addr'] = [strtolower(self::ADDRESS) => self::OWNER_ID];
+        $owner = self::invoke(NftPieceViewModelBuilder::class, 'buildDominantOwner');
 
-        $owner = self::invoke(
-            NftPieceViewModelBuilder::class,
-            'buildDominantOwner',
-            1,
-            self::ADDRESS
-        );
-
-        self::assertIsArray($owner);
-        self::assertSame(['is_linked'], array_keys($owner));
-        self::assertTrue($owner['is_linked']);
-
-        $serialised = strtolower(json_encode($owner, JSON_THROW_ON_ERROR));
-        self::assertStringNotContainsString(strtolower(self::ADDRESS), $serialised);
-        self::assertStringNotContainsString(strtolower(substr(self::ADDRESS, 0, 6)), $serialised);
+        self::assertSame(['is_linked' => null], $owner);
     }
 
-    /** An unlinked holder must not be distinguishable beyond the boolean. */
-    public function testNftOwnerBlockForUnlinkedWalletIsAlsoBare(): void
+    /** The holder's wallet is never resolved to a member: no lookup at all. */
+    public function testNftOwnerBlockNeverLooksUpTheHoldersMember(): void
     {
-        $GLOBALS['__bcc_wp_user_by_addr'] = [];
+        $source = (string) file_get_contents((string) (new \ReflectionClass(NftPieceViewModelBuilder::class))->getFileName());
 
-        $owner = self::invoke(
-            NftPieceViewModelBuilder::class,
-            'buildDominantOwner',
-            1,
-            self::ADDRESS
-        );
+        self::assertStringNotContainsString('findUserIdByAddress', $source, 'no wallet→member lookup on the anonymous piece route');
+        self::assertSame(0, $GLOBALS['__bcc_wp_user_lookups']);
+    }
 
-        self::assertIsArray($owner);
-        self::assertSame(['is_linked'], array_keys($owner));
-        self::assertFalse($owner['is_linked']);
+    /**
+     * The piece route is SHARED-cacheable only because its response is
+     * identical for every viewer. is_linked is null for everyone, so that
+     * stays true and the headers stay shared (no `private`).
+     */
+    public function testNftPieceResponseStaysSharedCacheable(): void
+    {
+        $source = (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Onchain/REST/NftPieceEndpoint.php');
+
+        self::assertStringContainsString("private const CACHE_INDEXED = 'max-age=300, stale-while-revalidate=1800';", $source);
+        self::assertStringContainsString("private const CACHE_COSMOS  = 'max-age=60, stale-while-revalidate=600';", $source);
+        self::assertStringNotContainsString('get_current_user_id', $source, 'the response must not vary by viewer');
     }
 
     // ──────────────────────────────────────────────────────────────────

@@ -29,6 +29,24 @@ use PHPUnit\Framework\TestCase;
 #[PreserveGlobalState(false)]
 final class FilterVisibleTest extends TestCase
 {
+    public function testByDefaultTheSearchOptOutApplies(): void
+    {
+        $GLOBALS['__bcc_fv_viewer'] = 7;
+        \BCC\Trust\Core\Support\ProfileAccess::filterVisible([11]);
+
+        self::assertArrayNotHasKey('_bcc_ignore_search_optout', $GLOBALS['__bcc_fv']['constructed'][0]['args']);
+    }
+
+    public function testARosterCanLeaveOutOnlyTheSearchOptOut(): void
+    {
+        $GLOBALS['__bcc_fv_viewer'] = 7;
+        \BCC\Trust\Core\Support\ProfileAccess::filterVisible([11], false);
+
+        $args = $GLOBALS['__bcc_fv']['constructed'][0]['args'];
+        self::assertTrue($args['_bcc_ignore_search_optout']);
+        self::assertSame([11], $args['include'], 'every other leg still runs through the same search');
+    }
+
     protected function setUp(): void
     {
         parent::setUp();

@@ -1083,6 +1083,18 @@ final class Plugin
         );
     }
 
+    /** F-345 — review replies (one response per review, by the reviewed party). */
+    private ?Services\ReviewReplyService $reviewReplyService = null;
+    public function reviewReplyService(): Services\ReviewReplyService
+    {
+        return $this->reviewReplyService ??= new Services\ReviewReplyService(
+            $this->voteRepository(),
+            new Repositories\ReviewReplyRepository(),
+            $this->activityStreamWriter(),
+            $this->pageOwnerResolver()
+        );
+    }
+
     /** §V1.5 — per-user disputes tab, paginated + privacy-honouring. */
     private ?Services\UserDisputesService $userDisputesService = null;
     public function userDisputesService(): Services\UserDisputesService
@@ -1461,6 +1473,10 @@ final class Plugin
         // Rank Phase 8: once-only member appeal on a misconduct finding
         // (own finding only; §15.5)
         \BCC\Trust\Core\REST\MeFindingAppealEndpoint::register();
+        // F-324 post analytics: the reach beacon (anonymous allowed, always
+        // 204) and the owner-only read (three separate sections).
+        \BCC\Trust\Core\REST\PostViewBeaconEndpoint::register();
+        \BCC\Trust\Core\REST\MePostAnalyticsEndpoint::register();
         // Operator dashboard: the viewer's verified validator pages (§4)
         \BCC\Trust\Core\REST\MeValidatorPagesEndpoint::register();
         // Shared operator profile editor and per-validator overrides.
@@ -1782,6 +1798,7 @@ final class Plugin
         // table read + hydrates authors/flaggers/watchers via the shared
         // MemberSummaryPrefetcher.
         \BCC\Trust\Core\REST\CardReviewsEndpoint::register();
+        \BCC\Trust\Core\REST\ReviewRepliesEndpoint::register();
         \BCC\Trust\Core\REST\CardWatchersEndpoint::register();
 
         // V2 Trust Attestation Layer — PR-2 self-mirror surface:
@@ -2435,6 +2452,23 @@ final class Plugin
         // F-277: drop a just-deleted post from the cached anon hot-feed
         // first page now, not at the next warm tick / TTL. Best-effort: the
         // delete has already committed, so a failure here is logged only.
+        // F-294 (item 13): identity and privacy changes drop the cached anon
+        // hot-feed pages at once (see FeedRankingService::forgetHotFeed):
+        // a deleted account, a changed handle, a real name just hidden or
+        // shown. Scores and votes never reach this. Best-effort, like F-277.
+        $forgetHotFeed = function (string $why, int $userId): void {
+            try {
+                $this->feedRankingService()->forgetHotFeed();
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] hot-feed drop failed', [
+                    'why'     => $why,
+                    'user_id' => $userId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        };
+        \BCC\Trust\Core\Services\Feed\FeedRankingService::registerIdentityHooks($forgetHotFeed);
+
         add_action('bcc_post_deleted', function ($viewerId, $actId): void {
             try {
                 $this->feedRankingService()->forgetDeletedPost((int) $actId);
@@ -2687,6 +2721,11 @@ final class Plugin
         add_action('bcc_review_published', function (int $authorId, int $pageId, int $voteId, string $explanation): void {
             $this->notificationDispatcher()->onReviewPublished($authorId, $pageId, $voteId, $explanation);
         }, 30, 4);
+
+        // F-345 — the reviewer's bell when the reviewed party replies.
+        add_action('bcc_review_reply_published', function (int $replierId, int $reviewerId, int $pageId, int $voteId, int $actId): void {
+            $this->notificationDispatcher()->onReviewReplyPublished($replierId, $reviewerId, $pageId, $voteId, $actId);
+        }, 30, 5);
 
         add_action('bcc_card_watched', function (int $viewerId, int $followId, string $targetKind, int $targetId): void {
             $this->notificationDispatcher()->onCardWatched($viewerId, $followId, $targetKind, $targetId);

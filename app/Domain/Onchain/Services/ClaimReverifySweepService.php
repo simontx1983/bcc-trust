@@ -10,7 +10,8 @@ declare(strict_types=1);
  *   KEEP     — ownership still holds;
  *   REVOKE   — ownership is DEFINITELY gone (a closed list of reasons);
  *   UNKNOWN  — anything it cannot decide for certain: a provider hiccup, a
- *              creator claim (no budgeted check yet — F-14 PR C), any throw.
+ *              creator claim on a non-EVM chain or whose owner() cannot be
+ *              read or was renounced (F-14 PR C), any throw.
  *              UNKNOWN NEVER REVOKES; it is counted and retried next week.
  *
  * MODE (`bcc_claim_reverify_mode`, product decision 2026-11-11):
@@ -40,7 +41,10 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Onchain\Services;
 
+use BCC\Trust\Core\Services\wallet\BlockchainQueryService;
+use BCC\Trust\Onchain\Fetchers\SolanaFetcher;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\Support\ProviderRequestBudget;
 use BCC\Trust\Onchain\ValueObjects\EligibilityVerdict;
@@ -166,7 +170,7 @@ class ClaimReverifySweepService
                 return $this->decideHolder($row, $budget);
             }
             if ($row->entity_type === 'collection' && $row->claim_role === 'creator') {
-                return [self::UNKNOWN, 'creator_check_pending'];
+                return $this->decideCreator($row, $budget);
             }
             return [self::UNKNOWN, 'unsupported_role'];
         } catch (\Throwable $e) {
@@ -232,6 +236,69 @@ class ClaimReverifySweepService
             return [self::REVOKE, 'no_longer_holder'];
         }
         return [self::UNKNOWN, $verdict->reason !== '' ? $verdict->reason : 'unknown'];
+    }
+
+    /**
+     * F-14 PR C: is the claim wallet still the collection contract's owner()?
+     *
+     * The wallet link is read fail-closed, as for validators; a link that is
+     * gone is a revoke. The owner() read costs one unit of the tick's budget
+     * (STOP when it cannot be paid). Only a DIFFERENT non-zero owner revokes;
+     * an unreadable, reverting or renounced (zero) owner is UNKNOWN.
+     *
+     * @param ReverifyRow $row
+     * @return array{0: string, 1: string}
+     */
+    private function decideCreator(object $row, ProviderRequestBudget $budget): array
+    {
+        if ($row->entity_row_id === null || (string) ($row->contract_address ?? '') === '' || (string) ($row->chain_slug ?? '') === '') {
+            return [self::UNKNOWN, 'collection_unresolved'];
+        }
+
+        $chainType = (string) ($row->chain_type ?? '');
+        if ($chainType !== 'evm' && $chainType !== 'solana') {
+            return [self::UNKNOWN, 'creator_check_unsupported_chain'];
+        }
+
+        $link = null;
+        // FAIL-CLOSED: a failed wallet read throws and becomes UNKNOWN.
+        foreach ($this->verifiedWallets((int) $row->user_id) as $wallet) {
+            if ((int) $wallet->chain_id === (int) $row->chain_id
+                && self::sameAddress((string) $wallet->wallet_address, (string) $row->wallet_address, $chainType)) {
+                $link = $wallet;
+                break;
+            }
+        }
+        if ($link === null) {
+            return [self::REVOKE, 'wallet_link_gone'];
+        }
+
+        if (!$budget->canSpend(1)) {
+            return [self::STOP, EligibilityVerdict::REASON_BUDGET_EXHAUSTED];
+        }
+        $budget->spend(1);
+
+        // F-339: Solana creatorship is the collection mint's current full
+        // update authority. Same three outcomes and the same rule as EVM
+        // (F-14 decision A): a renounced or unreadable authority is
+        // unknown, which never revokes.
+        if ($chainType === 'solana') {
+            $isAuthority = $this->solanaAuthority((string) $row->chain_slug, (string) $row->wallet_address, (string) $row->contract_address);
+
+            return match ($isAuthority) {
+                true    => [self::KEEP, ''],
+                false   => [self::REVOKE, 'no_longer_owner'],
+                default => [self::UNKNOWN, 'owner_unknown'],
+            };
+        }
+
+        $verdict = $this->ownerVerdict((string) $row->chain_slug, (string) $row->wallet_address, (string) $row->contract_address);
+
+        return match ($verdict) {
+            BlockchainQueryService::OWNER_VERDICT_OWNER     => [self::KEEP, ''],
+            BlockchainQueryService::OWNER_VERDICT_NOT_OWNER => [self::REVOKE, 'no_longer_owner'],
+            default                                         => [self::UNKNOWN, 'owner_unknown'],
+        };
     }
 
     /**
@@ -355,6 +422,31 @@ class ClaimReverifySweepService
     protected function holdingVerdict(int $userId, string $chainSlug, string $contract, ProviderRequestBudget $budget): EligibilityVerdict
     {
         return HoldingsService::eligibilityVerdict($userId, $chainSlug, $contract, 1, $budget);
+    }
+
+    /** One owner() read on the collection's own chain. */
+    protected function ownerVerdict(string $chainSlug, string $wallet, string $contract): string
+    {
+        $chain = ChainRepository::getBySlug($chainSlug);
+        if ($chain === null) {
+            return BlockchainQueryService::OWNER_VERDICT_UNKNOWN;
+        }
+
+        return BlockchainQueryService::evmContractOwnerVerdict($chain, $wallet, $contract);
+    }
+
+    /**
+     * One DAS getAsset on the collection mint (F-339): true / false / null
+     * (unknown, either kind).
+     */
+    protected function solanaAuthority(string $chainSlug, string $wallet, string $collectionMint): ?bool
+    {
+        $chain = ChainRepository::getBySlug($chainSlug);
+        if ($chain === null) {
+            return null;
+        }
+
+        return (new SolanaCollectionAuthority(new SolanaFetcher($chain)))->isAuthority($wallet, $collectionMint);
     }
 
     protected function revoke(int $claimId, string $reason): bool

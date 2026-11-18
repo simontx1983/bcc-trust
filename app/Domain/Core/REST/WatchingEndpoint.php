@@ -41,6 +41,7 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\ProfileAccess;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -276,6 +277,16 @@ final class WatchingEndpoint
 
         $targetKind = (string) $request->get_param('target_kind');
         $targetId   = (int) $request->get_param('target_id');
+
+        // §F-02: watching a MEMBER answers with their handle and tier, so it
+        // is a read about that member. A profile the viewer may not open is
+        // refused (403, `reason: profile_private`) before anything is
+        // written. Page kinds watch a page, not a person, and are not gated.
+        if ($targetKind === 'member') {
+            if (!ProfileAccess::canViewProfile($targetId)) {
+                return ProfileAccess::forbidden();
+            }
+        }
 
         $result = Plugin::instance()->watchingService()->watch($userId, $targetKind, $targetId);
 

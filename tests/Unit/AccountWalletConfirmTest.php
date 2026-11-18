@@ -70,6 +70,8 @@ final class AccountWalletConfirmTest extends TestCase
         require_once __DIR__ . '/../Stubs/pending-email-stubs.php';
         require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
         require_once __DIR__ . '/../Stubs/wallet-confirm-stubs.php';
+        require_once __DIR__ . '/../Stubs/breached-password-stubs.php';
+        $GLOBALS['__bcc_hibp'] = ['calls' => [], 'metrics' => [], 'logs' => []];
 
         $GLOBALS['__bcc_ph'] = [
             'users'        => [],
@@ -367,6 +369,7 @@ final class AccountWalletConfirmTest extends TestCase
             'refresh'              => ['app/Domain/Core/REST/Auth/SessionController.php', 'encodeContinuation', 1],
             'email + password'     => ['app/Domain/Core/REST/MyAccountEndpoint.php', 'encodeContinuation', 2],
             'wallet unlink'        => ['app/Domain/Onchain/Controllers/WalletController.php', 'encodeContinuation', 1],
+            'recovery-email confirm' => ['app/Domain/Core/REST/RecoveryEmailEndpoint.php', 'encodeContinuation', 1],
         ];
     }
 
@@ -537,6 +540,22 @@ final class AccountWalletConfirmTest extends TestCase
 
         self::assertSame(422, $status);
         self::assertTrue(self::challengeIsLive());
+        self::assertSame('random-never-shown', $GLOBALS['__bcc_ph']['passwords'][self::USER]);
+    }
+
+    public function testABreachedPasswordIsAnsweredBeforeTheChallengeIsSpent(): void
+    {
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_PASSWORD_CHANGE);
+        $GLOBALS['__bcc_hibp']['response'] = [
+            'response' => ['code' => 200],
+            'body'     => substr(strtoupper(sha1('a brand new passphrase')), 5) . ":3\r\n",
+        ];
+
+        [$status, $err] = self::call([new MyAccountEndpoint(), 'patchPassword'], ['password' => 'a brand new passphrase'] + self::walletProof($sig));
+
+        self::assertSame(422, $status);
+        self::assertSame('bcc_password_breached', $err['code'] ?? null);
+        self::assertTrue(self::challengeIsLive(), 'the signed challenge survives for another try');
         self::assertSame('random-never-shown', $GLOBALS['__bcc_ph']['passwords'][self::USER]);
     }
 
@@ -966,6 +985,62 @@ final class AccountWalletConfirmTest extends TestCase
         self::assertSame('real@example.com', $GLOBALS['__bcc_ph']['users'][self::USER]['email']);
     }
 
+    public function testConfirmingARecoveryEmailSignsOutOtherSessionsAndContinuesThisOne(): void
+    {
+        // Parity with the email-change confirm and the verify-email
+        // sign-in: the account gained the email it can be recovered through.
+        $jwt = \BCC\Trust\Core\Support\JwtToken::class;
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+        $otherDevice = $jwt::encodeNewSession(self::USER, 'handle' . self::USER);
+        $start = time() - 3 * 3600;
+        self::signIn(['auth_time' => $start]);
+        $otp = PendingEmailService::stage(self::USER, 'first@example.com', PendingEmailService::PURPOSE_RECOVERY);
+
+        [$status, $data] = self::call([new RecoveryEmailEndpoint(), 'verifyRecoveryEmail'], ['code' => $otp]);
+
+        self::assertSame(200, $status);
+        self::assertSame('first@example.com', $data['email']);
+        self::assertSame('Bearer', $data['token_type']);
+        self::assertSame($jwt::TTL_SECONDS, $data['expires_in']);
+
+        $fresh = $jwt::decode($data['token']);
+        self::assertTrue($fresh['ok'], 'the fresh token works');
+        self::assertSame($start, $fresh['payload']['auth_time'], 'it continues this session: the sign-in time is kept');
+
+        self::assertSame($jwt::ERR_REVOKED, $jwt::decode($otherDevice)['error'] ?? null, 'every earlier session is signed out');
+        self::assertSame($jwt::ERR_REVOKED, $jwt::decode(substr($_SERVER['HTTP_AUTHORIZATION'], 7))['error'] ?? null, 'including the token it replaced');
+    }
+
+    public function testAWrongRecoveryCodeSignsNobodyOut(): void
+    {
+        $jwt = \BCC\Trust\Core\Support\JwtToken::class;
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+        $otherDevice = $jwt::encodeNewSession(self::USER, 'handle' . self::USER);
+        $otp = PendingEmailService::stage(self::USER, 'first@example.com', PendingEmailService::PURPOSE_RECOVERY);
+
+        [$status, $err] = self::call([new RecoveryEmailEndpoint(), 'verifyRecoveryEmail'], ['code' => $otp === '000000' ? '111111' : '000000']);
+
+        self::assertSame(422, $status);
+        // F-294: the same code as /auth/verify-email and the email-change
+        // confirm ("stay on the code form"), not bcc_invalid_request.
+        self::assertSame('bcc_invalid_otp', $err['code'] ?? null);
+        self::assertSame('Incorrect code. Check the latest email and try again.', $err['message'] ?? null);
+        self::assertTrue($jwt::decode($otherDevice)['ok'], 'no credential changed, so no session ends');
+
+        [$status] = self::call([new RecoveryEmailEndpoint(), 'verifyRecoveryEmail'], ['code' => $otp]);
+        self::assertSame(200, $status, 'the pending entry survives a wrong code: the right one still works');
+    }
+
+    public function testARecoveryConfirmWithNothingPendingSaysStartAgain(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+
+        [$status, $err] = self::call([new RecoveryEmailEndpoint(), 'verifyRecoveryEmail'], ['code' => '123456']);
+
+        self::assertSame(400, $status);
+        self::assertSame('bcc_invalid_request', $err['code'] ?? null, 'expired or never requested: start again, not "retry the code"');
+    }
+
     // ── has_password ────────────────────────────────────────────────────
 
     public function testHasPasswordReadsTheFlagThenThePlaceholderThenUnknown(): void
@@ -986,5 +1061,25 @@ final class AccountWalletConfirmTest extends TestCase
 
         AccountRecoveryService::markHasPassword(self::USER);
         self::assertTrue(AccountRecoveryService::hasPassword(self::USER));
+    }
+
+    /** F-294 (user decision): settings accept the same 8-character minimum as sign-up and reset. */
+    public function testAnEightCharacterPasswordIsAcceptedLikeAtSignup(): void
+    {
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_PASSWORD_CHANGE);
+
+        [$status] = self::call([new MyAccountEndpoint(), 'patchPassword'], ['password' => 'eightchr'] + self::walletProof($sig));
+
+        self::assertSame(200, $status, 'settings used to demand 10');
+        self::assertSame('eightchr', $GLOBALS['__bcc_ph']['passwords'][self::USER]);
+    }
+
+    public function testSevenCharactersAreStillTooShort(): void
+    {
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_PASSWORD_CHANGE);
+
+        [$status] = self::call([new MyAccountEndpoint(), 'patchPassword'], ['password' => 'sevench'] + self::walletProof($sig));
+
+        self::assertSame(422, $status);
     }
 }

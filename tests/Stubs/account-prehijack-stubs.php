@@ -41,22 +41,39 @@ namespace BCC\Core\Security {
     if (!class_exists(Throttle::class, false)) {
         final class Throttle
         {
-            public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null): bool
+            public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null, bool $countDenied = true): bool
             {
                 // Records every bucket (the explicit $key when given, else the
                 // action); denies when a test sets throttle_deny. With
                 // throttle_counting set it COUNTS per bucket like the real
-                // limiter (increment, then allow while count <= limit).
+                // limiter (increment, then allow while count <= limit), and
+                // like it (F-290) gives a denied call's slot back when the
+                // caller passes countDenied = false.
                 $bucket = $key ?? $action;
                 $GLOBALS['__bcc_ph']['throttle_keys'][] = $bucket;
+                $GLOBALS['__bcc_ph']['throttle_count_denied'][$bucket] = $countDenied;
                 if (!empty($GLOBALS['__bcc_ph']['throttle_deny'])) {
                     return false;
                 }
                 if (!empty($GLOBALS['__bcc_ph']['throttle_counting'])) {
                     $GLOBALS['__bcc_ph']['throttle_hits'][$bucket] = ($GLOBALS['__bcc_ph']['throttle_hits'][$bucket] ?? 0) + 1;
-                    return $GLOBALS['__bcc_ph']['throttle_hits'][$bucket] <= $limit;
+                    $allowed = $GLOBALS['__bcc_ph']['throttle_hits'][$bucket] <= $limit;
+                    if (!$allowed && !$countDenied) {
+                        $GLOBALS['__bcc_ph']['throttle_hits'][$bucket]--;
+                    }
+                    return $allowed;
                 }
                 return true;
+            }
+
+            /** F-290: give back one slot of the bucket allow() used; never below zero. */
+            public static function release(string $action, int $window = 60, ?string $key = null): void
+            {
+                $bucket = $key ?? $action;
+                $GLOBALS['__bcc_ph']['throttle_releases'][] = $bucket;
+                if (($GLOBALS['__bcc_ph']['throttle_hits'][$bucket] ?? 0) > 0) {
+                    $GLOBALS['__bcc_ph']['throttle_hits'][$bucket]--;
+                }
             }
 
             /** F-281: the caller's address; tests set client_ip. */
@@ -289,6 +306,24 @@ namespace {
         function wp_check_password(string $password, string $hash, int $userId = 0): bool
         {
             return ($GLOBALS['__bcc_ph']['passwords'][$userId] ?? null) === $password;
+        }
+    }
+    // F-294 item 8: forgot-password for an unknown address pays the reset
+    // key's own cost (wp_generate_password + wp_fast_hash). The same doubles
+    // as handle-rename-identity-stubs, so whichever file loads first, a
+    // test sees the same records.
+    if (empty($GLOBALS['__bcc_no_fast_hash']) && !function_exists('wp_fast_hash')) {
+        function wp_fast_hash(string $message): string
+        {
+            $GLOBALS['__bcc_ph']['fast_hashes'] = ($GLOBALS['__bcc_ph']['fast_hashes'] ?? 0) + 1;
+            return 'fast:' . $message;
+        }
+    }
+    if (!function_exists('wp_generate_password')) {
+        function wp_generate_password(int $length = 12, bool $special = true, bool $extra = false): string
+        {
+            $GLOBALS['__bcc_ph']['generated'][] = $length . ($special ? '+special' : '') . ($extra ? '+extra' : '');
+            return str_repeat('k', $length);
         }
     }
     if (!function_exists('get_userdata')) {

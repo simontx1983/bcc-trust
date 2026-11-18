@@ -13,7 +13,8 @@
  *            auth } } plus an optional `user_agent` string. Side effect:
  *            flips push_master = true on first successful registration.
  *   - DELETE /me/push-subscriptions/{id}              → revoke a single
- *            device. Auth: subscription must belong to current user.
+ *            device. Deletes only the caller's own row; a missing id
+ *            and someone else's id get the same 200.
  *
  * Auth: required. Self-only — no admin override surface in V1.
  *
@@ -254,20 +255,16 @@ final class MyPushSubscriptionEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Subscription id is required.', 422);
         }
 
-        $repo = new PushSubscriptionRepository();
-        $row  = $repo->find($id);
-        if ($row === null) {
-            // Idempotent — already gone. Treat as success.
-            $resp = ApiResponse::ok(['ok' => true]);
-            $resp->header('Cache-Control', 'no-store');
-            return $resp;
+        // One answer whether the id was the caller's, is missing, or is
+        // someone else's. This used to answer 200 for a missing id but 403
+        // for another member's, which told any member whether a given
+        // subscription id exists. The delete is scoped to the caller, so
+        // another member's row is never touched. Only a failed write
+        // answers differently, and that does not depend on whose row it is.
+        $deleted = (new PushSubscriptionRepository())->deleteForUser($id, $userId);
+        if ($deleted === null) {
+            return ApiResponse::error('bcc_unavailable', 'Could not remove this device right now. Please try again.', 503);
         }
-
-        if ((int) $row->user_id !== $userId) {
-            return ApiResponse::error('bcc_forbidden', 'Not your subscription.', 403);
-        }
-
-        $repo->delete($id);
 
         $resp = ApiResponse::ok(['ok' => true]);
         $resp->header('Cache-Control', 'no-store');

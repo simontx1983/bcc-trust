@@ -230,6 +230,51 @@ final class NotificationDispatcher
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // bcc_review_reply_published — the reviewed party replied (F-345)
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Bell the reviewer when the reviewed party replies to their review.
+     * In-app only (NotificationType::BELL_ONLY), behind the
+     * `bell_bcc_review_reply` preference (default on). external_id is the
+     * reviewed page, so the row links to it like a review bell does.
+     */
+    public function onReviewReplyPublished(int $replierId, int $reviewerId, int $pageId, int $voteId, int $actId): void
+    {
+        unset($voteId, $actId); // the bell is the meta event; the reply renders on the review
+        if ($replierId <= 0 || $reviewerId <= 0 || $replierId === $reviewerId) {
+            return;
+        }
+        try {
+            $actorHandle = self::resolveHandle($replierId);
+            if (MemberSelfPageService::isSelfPage($pageId)) {
+                $message = sprintf('@%s replied to your review.', $actorHandle);
+            } else {
+                $pageName = self::resolvePageName($pageId);
+                $message  = $pageName !== ''
+                    ? sprintf('@%s replied to your review of %s.', $actorHandle, $pageName)
+                    : sprintf('@%s replied to your review.', $actorHandle);
+            }
+
+            $this->dispatch(
+                $replierId,
+                $reviewerId,
+                $message,
+                NotificationType::REVIEW_REPLY,
+                $pageId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] review reply dispatch failed', [
+                'replier_id'  => $replierId,
+                'reviewer_id' => $reviewerId,
+                'page_id'     => $pageId,
+                'error'       => $e->getMessage(),
+            ]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // bcc_card_watched — someone watched (followed) you
     // ──────────────────────────────────────────────────────────────────
 
@@ -1775,6 +1820,13 @@ final class NotificationDispatcher
         "We can no longer find the validator behind your %s claim, so the verified badge was removed. If it's still running, claim it again to restore the badge.";
 
     /**
+     * F-14 PR C copy (no_longer_owner) — the collection contract's owner()
+     * now names a different wallet. Approved 2026-11-13.
+     */
+    public const CLAIM_CREATOR_BADGE_REMOVED_MESSAGE =
+        "A different wallet now owns the %s contract, so the creator badge was removed. Claim again from the wallet that owns it.";
+
+    /**
      * The bell text for a revoked claim. An empty entity name drops the
      * name from the sentence ("your claim") rather than producing
      * "your this claim" (#594 review).
@@ -1785,6 +1837,11 @@ final class NotificationDispatcher
 
         if ($reason === 'no_longer_holder') {
             return sprintf(self::CLAIM_HOLDER_BADGE_REMOVED_MESSAGE, $name !== '' ? $name : 'this collection');
+        }
+        if ($reason === 'no_longer_owner') {
+            return $name !== ''
+                ? sprintf(self::CLAIM_CREATOR_BADGE_REMOVED_MESSAGE, $name)
+                : str_replace('the %s contract', "this collection's contract", self::CLAIM_CREATOR_BADGE_REMOVED_MESSAGE);
         }
 
         $template = $reason === 'validator_row_gone'

@@ -100,6 +100,15 @@ final class ProfileGateWiringTest extends TestCase
         // it stayed ungated. The gate lives in the service, where the owner
         // is resolved; the path is relative to REST_DIR.
         '../Services/CardWatchersService.php' => ['listWatchers'],
+        // ⚠ Three more that resolve no handle (a raw user id in the path or
+        // body), so the accounting scan below cannot see them either. Each
+        // gates only its MEMBER kind; their page kinds are not people.
+        //   - received vouches and reviews: `/entities/user_profile/{id}/…`
+        //   - POST /me/watching/watch, kind=member: a write whose answer
+        //     carries the member's handle and tier.
+        'EntityAttestationsEndpoint.php' => ['list'],
+        'CardReviewsEndpoint.php'        => ['list'],
+        'WatchingEndpoint.php'           => ['watch'],
     ];
 
     /**
@@ -124,15 +133,7 @@ final class ProfileGateWiringTest extends TestCase
             // report its enclosing method, which is the honest answer
             // for a guard placed inside one.
             if (is_array($token) && $token[0] === T_FUNCTION) {
-                for ($j = $i + 1; $j < count($tokens); $j++) {
-                    if (is_array($tokens[$j]) && $tokens[$j][0] === T_STRING) {
-                        $method = $tokens[$j][1];
-                        break;
-                    }
-                    if (!is_array($tokens[$j]) && $tokens[$j] === '(') {
-                        break; // anonymous function
-                    }
-                }
+                $method = self::declaredName($tokens, $i) ?? $method; // a closure keeps its enclosing method
                 continue;
             }
 
@@ -169,6 +170,55 @@ final class ProfileGateWiringTest extends TestCase
         unset($depth);
 
         return array_values(array_unique($found));
+    }
+
+    /**
+     * The name the `function` token at $i declares, or null for a closure.
+     *
+     * ⚠ Not only T_STRING. A method may be named with a reserved word, and
+     * PHP tokenizes `function list(` as T_LIST. Reading T_STRING alone
+     * skipped that name and credited the method's body to the next
+     * identifier (its parameter's type), so a gate inside a `list()` route
+     * was invisible to this test.
+     *
+     * @param array<int, array{0: int, 1: string, 2: int}|string> $tokens
+     */
+    private static function declaredName(array $tokens, int $i): ?string
+    {
+        for ($j = $i + 1, $n = count($tokens); $j < $n; $j++) {
+            $t = $tokens[$j];
+            if (is_array($t) && in_array($t[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
+                continue;
+            }
+            // Returns by reference. PHP 8.1+ tokenizes this `&` as an array
+            // token (T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG), older as '&'.
+            if ($t === '&' || (is_array($t) && $t[1] === '&')) {
+                continue;
+            }
+            if (is_array($t) && preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $t[1]) === 1) {
+                return $t[1];
+            }
+
+            return null; // `(`: a closure
+        }
+
+        return null;
+    }
+
+    public function testAMethodNamedWithAReservedWordIsAttributedToItsOwnName(): void
+    {
+        $tokens = token_get_all(
+            '<?php class A { public function list(\WP_REST_Request $r) {} '
+            . 'public function &byRef() {} public function plain() { $f = function () {}; } }'
+        );
+        $names = [];
+        foreach ($tokens as $i => $t) {
+            if (is_array($t) && $t[0] === T_FUNCTION) {
+                $names[] = self::declaredName($tokens, $i);
+            }
+        }
+
+        self::assertSame(['list', 'byRef', 'plain', null], $names);
     }
 
     public function testEveryGatedRouteCallsTheProfileGate(): void
@@ -210,7 +260,10 @@ final class ProfileGateWiringTest extends TestCase
                 // A service-layer gate refuses with null; its endpoint owns
                 // the 403 and is pinned in the next test.
                 $service = self::SERVICE_LAYER_GATES["{$file}::{$method}"] ?? null;
-                $refusal = $service === null ? 'return ProfileAccess::forbidden\(\);' : 'return null;';
+                // An endpoint may wrap the refusal in its own no-store helper.
+                $refusal = $service === null
+                    ? 'return (?:ProfileAccess::forbidden\(\)|self::noStore\(ProfileAccess::forbidden\(\)\));'
+                    : 'return null;';
                 $work    = $service === null ? ['ApiResponse::ok(', '->respond('] : $service['work'];
 
                 self::assertMatchesRegularExpression(

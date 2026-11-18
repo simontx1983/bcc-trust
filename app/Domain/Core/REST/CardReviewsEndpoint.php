@@ -20,6 +20,11 @@
  * `reviews_hidden` privacy flag governs only the written list on
  * `/users/{handle}/reviews` (Phillip, 2026-07-22).
  *
+ * ⚠ "Public" there means `reviews_hidden` does not apply. The profile-wide
+ * gate (§F-02) still does: a member profile the viewer may not open
+ * answers ProfileAccess::forbidden() (403, `reason: profile_private`), as
+ * on every per-user route. Card targets are pages and are not gated here.
+ *
  * Cache: matches `EntityAttestationsEndpoint` (the sibling by-target
  * read) — anon gets `public, max-age=30`; authed gets
  * `private, max-age=30` so future per-viewer fields can't leak through
@@ -43,6 +48,7 @@ use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\CardReviewsService;
 use BCC\Trust\Core\Services\MemberSelfPageService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\ProfileAccess;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -128,6 +134,15 @@ final class CardReviewsEndpoint
                 'Invalid target_id.',
                 400
             ));
+        }
+
+        // §F-02: a member's received reviews are a read about that member.
+        // Asked about the RAW user id, before the self-page translation.
+        if ($targetKind === 'user_profile') {
+            if (!ProfileAccess::canViewProfile($targetId)) {
+                // Never shared-cached: the success below is public for anon.
+                return self::noStore(ProfileAccess::forbidden());
+            }
         }
 
         // Member reviews live on the deterministic self-page id, never

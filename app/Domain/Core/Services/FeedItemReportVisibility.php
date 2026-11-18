@@ -14,8 +14,11 @@
  *     (FeedItemNormalizer::publicFeedModuleIds(), the rule the feed and
  *     permalink paths use), and the backing post must be published and not
  *     moderation-hidden;
- *   - ⚠ FOLLOW-UP: per-post `act_access` is not consulted yet. Update this
- *     in lockstep when F-02's per-post act_access lands.
+ *   - the post's own §F-02 AUDIENCE is consulted, for a post that is NOT
+ *     group-tagged ({@see audienceAllows()}). A group-tagged post is
+ *     deliberately exempt: inside a group, posts follow the GROUP's rules
+ *     (ratified product decision, 2026-11-12) and the group gate below is
+ *     what decides them;
  *   - a post that is not group-tagged, or is group-tagged with visibility
  *     `public_all`, is visible in the GLOBAL feed (mirrors bcc-core
  *     ActivityFeedService::isVisibleGlobally(), which is private — keep in
@@ -44,8 +47,11 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Feed\GroupSyndicationGate;
+use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
+use BCC\Trust\Core\Support\FeedItemGate;
+use BCC\Trust\Core\Support\ProfileAccess;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -67,9 +73,16 @@ class FeedItemReportVisibility
     public const GLOBAL_VISIBILITY = 'public_all';
 
 
+    /**
+     * @param \BCC\Trust\Core\Repositories\VoteRepository|null $votes For the F-345
+     *        review-reply arm only (is the reply's review still showable?).
+     *        Optional and last so every existing two-argument construction
+     *        keeps working; null resolves the plugin's repository lazily.
+     */
     public function __construct(
         private readonly GroupsService $groups,
-        private readonly HiddenActivityRepository $hidden
+        private readonly HiddenActivityRepository $hidden,
+        private ?\BCC\Trust\Core\Repositories\VoteRepository $votes = null
     ) {
     }
 
@@ -120,6 +133,17 @@ class FeedItemReportVisibility
         if ($actId <= 0 || $postId <= 0) {
             return false;
         }
+        // F-345: a review reply is reportable although no feed shows it
+        // (module 206 is deliberately off the feed allowlist below). It is
+        // visible exactly where it renders: nested under its review on a
+        // Reviews tab. So: the reply itself is live (published, not hidden)
+        // AND its parent review is still active and not hidden. Reviews are
+        // never group-tagged, so the group rule does not apply.
+        if ((int) ($activity->act_module_id ?? 0)
+            === \BCC\Trust\Core\Repositories\PeepSoActivityWriter::getNumericId(\BCC\Trust\Core\Repositories\ReviewReplyRepository::MODULE_NAME)
+        ) {
+            return $this->isLive($activity) && $this->replyParentIsVisible($postId);
+        }
         // Only modules a feed or permalink can show at all: the SAME
         // allowlist bcc-core's feed and permalink paths enforce (§11 reuse).
         // An ALLOWLIST, not a denylist: it excludes private messages (6),
@@ -127,18 +151,37 @@ class FeedItemReportVisibility
         // backgrounds (111) and raw peepso-blog posts (6661), and fails
         // closed on any module added later. Blog posts reach the feed as
         // module 204 (blog_excerpt), which is on the list.
-        if (!in_array(
-            (int) ($activity->act_module_id ?? 0),
-            \BCC\Core\Feed\FeedItemNormalizer::publicFeedModuleIds(),
-            true
-        )) {
+        if (!FeedItemGate::isFeedModule($activity->act_module_id ?? null)) {
             return false;
         }
         if (!$this->isLive($activity)) {
             return false; // trashed/unpublished or moderation-hidden: no feed shows it
         }
 
-        return $this->groupRuleAllows($viewerId, $postId);
+        if (!$this->groupRuleAllows($viewerId, $postId)) {
+            return false;
+        }
+
+        return self::audienceAllows($viewerId, $actId, $postId);
+    }
+
+    /**
+     * F-345: is the review a reply (backing post $postId) answers still
+     * showable — active and not moderation-hidden? Fails CLOSED: a failed
+     * read is "not visible", so a reply is never reportable on a guess.
+     */
+    private function replyParentIsVisible(int $postId): bool
+    {
+        $voteId = (int) get_post_meta($postId, '_bcc_activity_sidecar_id', true);
+        if ($voteId <= 0) {
+            return false;
+        }
+        $this->votes ??= \BCC\Trust\Core\Plugin::instance()->voteRepository();
+        try {
+            return $this->votes->findReviewForReply($voteId) !== null;
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            return false;
+        }
     }
 
     /**
@@ -233,6 +276,66 @@ class FeedItemReportVisibility
             return true; // member — sees every post in the group
         }
         return in_array($visibility, self::TEASER_VISIBILITIES, true);
+    }
+
+    /**
+     * §F-02 — may this viewer see this post's own AUDIENCE?
+     *
+     * ⚠ ONE RULE, NOT A SECOND LADDER. The decision is bcc-core's
+     * `PeepSoActivityRepository::f02PostVisibilityClause()`, reached by
+     * re-reading the row with `enforcePostVisibility: true`. The ladder —
+     * the post's `act_access` versus the author's `usr_profile_acc`, taken
+     * at the STRICTER of the two, over RANGES rather than exact matches so
+     * a stray PeepSo level lands on the nearest stricter rung — therefore
+     * lives in ONE place for the feed, the permalink and these routes.
+     * Restating it in PHP here is what §11 forbids, and it is the kind of
+     * copy that drifts silently the next time PeepSo adds a level.
+     *
+     * ⚠ A GROUP-TAGGED POST IS EXEMPT, deliberately. Inside a group, posts
+     * follow the GROUP's own rules — members see them (ratified product
+     * decision, 2026-11-12) — and {@see groupRuleAllows()} decides them.
+     * Applying F-02 here as well would hide a `members_only` group post's
+     * thread from a fellow member whenever its author keeps a private
+     * profile, which is the opposite of what was ratified.
+     *
+     * ⚠ The admin exemption is {@see ProfileAccess::postVisibilityArgs()},
+     * the SAME definition the profile and feed halves use, so the three
+     * cannot drift into the listed-but-unopenable state F-02 exists to
+     * remove. Safe here because every caller is a per-viewer request path.
+     * ⛔ A globally cached, viewer-independent payload (the hot feed, warmed
+     * by cron into one shared blob) must NEVER reach this method: taking
+     * the exemption there would store an ungated payload and serve it to
+     * everybody.
+     *
+     * @param int $actId The act whose `act_access` the rule reads. For a
+     *        COMMENT that is its PARENT post's act, never the comment's
+     *        own — a comment carries no audience of its own.
+     */
+    public static function audienceAllows(int $viewerId, int $actId, int $postId): bool
+    {
+        if ($actId <= 0 || $postId <= 0) {
+            return false;
+        }
+
+        // Group-tagged: the group's rule governs. `(int) > 0` matches the
+        // test CommentService::gateForParent uses, so a stored '0' is
+        // treated as NOT group-tagged by both and gets the stricter path.
+        if ((int) get_post_meta($postId, 'peepso_group_id', true) > 0) {
+            return true;
+        }
+
+        [$friendIds, $enforce] = ProfileAccess::postVisibilityArgs($viewerId);
+        if (!$enforce) {
+            return true; // admin, by the one shared definition
+        }
+
+        return PeepSoActivityRepository::getById(
+            $actId,
+            null,
+            $friendIds,
+            true,
+            $viewerId
+        ) !== null;
     }
 
     /**

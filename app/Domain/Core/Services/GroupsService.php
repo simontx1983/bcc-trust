@@ -194,7 +194,7 @@ final class GroupsService
         // initials cover used on /communities.
         $imageUrl        = null;
         $collectionStats = null;
-        $isNftHolder     = false;
+        $isNftHolder     = null; // F-359: unknown unless a surface really checks
         if ($ctx->type === GroupType::Nft) {
             [$imageUrl, $collectionStats, $isNftHolder] =
                 $this->resolveNftEnrichment($ctx, $viewerId, $isMember);
@@ -245,12 +245,16 @@ final class GroupsService
         $feedVisible    = $permissions['can_read_feed']['allowed'];
         $membersVisible = self::resolveMembersVisible($ctx, $isMember);
 
-        // Owners/managers see how many requests wait on them; everyone
-        // else gets null (no disclosure of the queue size).
+        // Owners/managers of a closed or secret plain group decide its
+        // membership (requests, invites): the panel gate. Everyone else,
+        // and every other kind, gets false.
+        $canManageMembership = self::canManageMembership($ctx, $viewerId, $groupId);
+
+        // Those same admins see how many requests wait on them; everyone
+        // else gets null (no disclosure of the queue size). Requests exist
+        // only on closed groups — a secret group is invite-only.
         $pendingRequestCount = null;
-        if ($ctx->privacy === PeepSoPrivacy::Closed
-            && $ctx->type !== GroupType::Nft && $ctx->type !== GroupType::Hall && $ctx->type !== GroupType::Validator
-            && GroupJoinRequestService::isGroupAdmin($viewerId, $groupId)) {
+        if ($canManageMembership && $ctx->privacy === PeepSoPrivacy::Closed) {
             $pendingRequestCount = PeepSoGroupRepository::countPendingMembers($groupId, PeepSoGroupRepository::PENDING_REQUEST);
         }
 
@@ -341,6 +345,7 @@ final class GroupsService
             'can_manage_public_all_policy' => $canManagePublicAll,
             'public_all_members_enabled'   => $publicAllMembersEnabled,
             'pending_request_count'        => $pendingRequestCount,
+            'can_manage_membership'        => $canManageMembership,
             // Same key vocabulary as the create-response on POST /me/groups
             // (MyGroupsEndpoint::postCreate) — `trust_min` is the canonical
             // signal that the group is reputation-gated (privacy === "open"
@@ -671,13 +676,14 @@ final class GroupsService
      * — frontend can keep one renderer for `collection_stats` across
      * both surfaces.
      *
-     * `$isNftHolder` is computed only when the viewer is authed AND
-     * not yet a member (a member doesn't need a re-check; their
-     * permissions block already says they can_leave). For anon viewers
-     * the holder check is impossible — we leave it false and the
-     * permissions block surfaces "Sign in" upstream of the unlock hint.
+     * `is_nft_holder` is NULL — "not checked on this render" — so the
+     * page answers `verify_on_join` like every list surface (F-359): the
+     * holder join door (/me/holder-groups) does the live wallet check. It
+     * is FALSE only when the group has no gate config, i.e. nothing a
+     * holder could satisfy. Anonymous viewers and members are answered
+     * upstream of it (auth_required / already_member).
      *
-     * @return array{0: string|null, 1: array<string, mixed>|null, 2: bool}
+     * @return array{0: string|null, 1: array<string, mixed>|null, 2: bool|null}
      *         [image_url, collection_stats, is_nft_holder]
      */
     private function resolveNftEnrichment(GroupContext $ctx, int $viewerId, bool $isMember): array
@@ -739,15 +745,13 @@ final class GroupsService
             ),
         ];
 
-        // Holder-eligibility check is currently a one-call probe that
-        // the permissions builder can synthesize without re-querying;
-        // we keep this slot for V2 phase 2 when a fast holder cache lands.
-        // For V1 detail-page semantics the FE's join button does the
-        // canonical eligibility round-trip via /me/holder-groups, so
-        // false-here just means "show the unlock_hint." Members get
-        // can_leave=true from the membership state; eligibility never
-        // fires for them.
-        $isNftHolder = false;
+        // Holder eligibility is NOT checked on this render (no fast holder
+        // cache yet); the join door (/me/holder-groups) does the canonical
+        // wallet round-trip. So the answer is "unknown" (null) and the page
+        // offers Join with `verify_on_join`, the same verdict as the lists
+        // (F-359). It used to be `false`, which told every eligible holder
+        // they were not eligible. Members never reach eligibility.
+        $isNftHolder = null;
         unset($viewerId, $isMember);
 
         return [$imageUrl, $stats, $isNftHolder];
@@ -779,6 +783,26 @@ final class GroupsService
     }
 
     /**
+     * F-272 (b): may the viewer run this group's membership panels
+     * (pending requests, invitations)? True only for an owner, manager or
+     * site admin ({@see GroupJoinRequestService::isGroupAdmin}) of a
+     * closed or SECRET plain group — a secret group's only way in is an
+     * invitation, so its admins need the invite panel as much as a closed
+     * group's need the request queue. Holder, Hall and delegator groups
+     * have their own on-chain doors and no membership panel.
+     */
+    private static function canManageMembership(GroupContext $ctx, int $viewerId, int $groupId): bool
+    {
+        if ($ctx->type === GroupType::Nft || $ctx->type === GroupType::Hall || $ctx->type === GroupType::Validator) {
+            return false;
+        }
+        if ($ctx->privacy !== PeepSoPrivacy::Closed && $ctx->privacy !== PeepSoPrivacy::Secret) {
+            return false;
+        }
+        return GroupJoinRequestService::isGroupAdmin($viewerId, $groupId);
+    }
+
+    /**
      * Build the {can_join, can_leave, can_read_feed} block.
      *
      * Mirrors `UserGroupsEndpoint::canJoin` for the join branch (single
@@ -795,7 +819,7 @@ final class GroupsService
         GroupContext $ctx,
         int $viewerId,
         bool $isMember,
-        bool $isNftHolder,
+        ?bool $isNftHolder,
         bool $isOwner = false,
         int $trustGateMin = 0,
         ?string $validatorMinStakeDisplay = null,
@@ -879,16 +903,18 @@ final class GroupsService
         // Delegator communities are stored `closed`, so without this
         // branch they'd surface the "request to join" copy — wrong: there
         // is no approval queue, the gate is on-chain delegation. Live
-        // eligibility is not computed here (an LCD call per detail render);
-        // the FE's join button does the canonical round-trip via
-        // /me/validator-groups, mirroring the holder-group posture above.
+        // delegation is not computed here (an LCD call per render), so —
+        // exactly like a holder group — Join is offered and the join door
+        // (/me/validator-groups) verifies it (F-359). It used to answer
+        // `not_eligible` to everyone, delegators included. The hint still
+        // states the requirement the join will check.
         if ($ctx->type === GroupType::Validator) {
             return [
-                'allowed'     => false,
+                'allowed'     => true,
                 'unlock_hint' => $validatorMinStakeDisplay !== null
                     ? sprintf('Delegate at least %s to this validator to join its community.', $validatorMinStakeDisplay)
                     : 'Delegate to this validator to join its community.',
-                'reason_code' => 'not_eligible',
+                'reason_code' => 'verify_on_join',
             ];
         }
 
@@ -954,7 +980,9 @@ final class GroupsService
      * FALSE = the batched read failed). A failed read answers `unavailable`
      * rather than guessing a Join. Holder groups are not wallet-checked
      * here unless the caller already knows ($nftHolder; null →
-     * `verify_on_join`); the page and the join door always are.
+     * `verify_on_join`), and delegator groups are always `verify_on_join`;
+     * the group page answers the same, and only the join door does the
+     * live check (F-359).
      *
      * @return array{
      *   can_join: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},

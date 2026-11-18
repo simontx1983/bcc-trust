@@ -10,7 +10,8 @@
  *   secret  + member     → full roster
  *   closed  + non-member → forbidden       (endpoint maps to 403)
  *   closed  + member     → full roster
- *   open    + anyone     → full roster
+ *   open    + anyone     → roster minus members THIS viewer may not see
+ *                          (ProfileAccess::filterVisible; count unchanged)
  *
  * The privacy gate runs BEFORE the SQL fetch so timing-based existence
  * leaks aren't possible. Non-existence and "exists but you can't see"
@@ -44,6 +45,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\MemberSummaryPrefetcher;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\ValueObjects\PeepSoPrivacy;
 
 if (!defined('ABSPATH')) {
@@ -124,6 +126,13 @@ final class GroupMembersService
         $rows  = PeepSoGroupRepository::listGroupMembers($groupId, $offset, $limit);
         $total = PeepSoGroupRepository::countGroupMembers($groupId);
 
+        // has_more follows the RAW page: the filter below can shorten a
+        // page, and clients advance by offset + limit, never items.length.
+        $hasMore = ($offset + count($rows)) < $total;
+
+        // ── 3b. An open roster omits members this viewer may not see. ─
+        $rows = self::rowsTheViewerMaySee($ctx->privacy, $rows, $viewerId, $groupId);
+
         // ── 4. Bulk-prime UserSummary prefetch maps. ─────────────────
         // Mirrors `UsersEndpoint::members` exactly so the wire shape
         // for `getSummary` stays identical across the directory and
@@ -164,8 +173,6 @@ final class GroupMembersService
             ]);
         }
 
-        $hasMore = ($offset + count($rows)) < $total;
-
         return [
             'items'      => $items,
             'pagination' => [
@@ -175,6 +182,56 @@ final class GroupMembersService
                 'has_more' => $hasMore,
             ],
         ];
+    }
+
+    /**
+     * An OPEN group's roster is readable by anyone, signed out included, so
+     * it must not list a member the viewer may not see (user decision): a
+     * private profile, a suspended account, a block in either direction —
+     * the ONE list rule, {@see ProfileAccess::filterVisible()} (one query
+     * for the page; the viewer always sees themselves, admins see
+     * everyone). Display only: `total` and the member count are unchanged.
+     *
+     * NOT hide_from_search: that setting scopes to member search and the
+     * directory (user decision 2026-11-12); rosters follow profile privacy.
+     *
+     * This group's OWNER and MANAGERS (and site admins) see the whole
+     * roster — they already decide its membership, and they need every
+     * member for managing it and for the transfer-ownership picker.
+     *
+     * Closed and secret rosters are shown only to the group's own members
+     * and are not filtered here.
+     *
+     * ⚠ filterVisible() judges the CURRENT user, so this is correct only
+     * for the REST caller, whose viewer is the current user.
+     *
+     * @template TRow of object{user_id: numeric-string}
+     * @param list<TRow> $rows
+     * @return list<TRow>
+     */
+    private static function rowsTheViewerMaySee(PeepSoPrivacy $privacy, array $rows, int $viewerId, int $groupId): array
+    {
+        if ($privacy !== PeepSoPrivacy::Open || $rows === []) {
+            return $rows;
+        }
+        if (GroupJoinRequestService::isGroupAdmin($viewerId, $groupId)) {
+            return $rows;
+        }
+
+        $ids = [];
+        foreach ($rows as $row) {
+            $uid = (int) $row->user_id;
+            if ($uid > 0) {
+                $ids[] = $uid;
+            }
+        }
+
+        $visible = array_flip(ProfileAccess::filterVisible($ids, false));
+
+        return array_values(array_filter(
+            $rows,
+            static fn (object $row): bool => isset($visible[(int) $row->user_id])
+        ));
     }
 
     /**

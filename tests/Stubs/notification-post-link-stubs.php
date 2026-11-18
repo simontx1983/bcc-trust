@@ -28,7 +28,33 @@ namespace BCC\Core\Log {
     }
 }
 
+namespace BCC\Core\Observability {
+    if (!class_exists(DegradationMetrics::class, false)) {
+        /** Records events; a failed moderation read records one. */
+        final class DegradationMetrics
+        {
+            /** @var list<string> "subsystem:event" */
+            public static array $recorded = [];
+
+            public static function record(string $subsystem, string $event): void
+            {
+                self::$recorded[] = $subsystem . ':' . $event;
+            }
+        }
+    }
+}
+
 namespace {
+    if (!function_exists('get_option')) {
+        /**
+         * @param mixed $default
+         * @return mixed
+         */
+        function get_option(string $name, $default = false)
+        {
+            return array_key_exists($name, $GLOBALS['__nv_options'] ?? []) ? $GLOBALS['__nv_options'][$name] : $default;
+        }
+    }
     if (!function_exists('wp_cache_get')) {
         /** @return mixed */
         function wp_cache_get(string $key, string $group = '', bool $force = false, ?bool &$found = null)
@@ -80,6 +106,25 @@ namespace {
                 return (string) preg_replace_callback('/%d/', static function () use (&$i, $args): string {
                     return (string) (int) ($args[$i++] ?? 0);
                 }, preg_replace('/\s+/', ' ', $query));
+            }
+
+            /**
+             * get_col(): with a query it runs it (discarding query()'s
+             * return, as wpdb does); with null it reads last_result.
+             *
+             * @return list<mixed>
+             */
+            public function get_col(?string $sql = null): array
+            {
+                if ($sql !== null) {
+                    $this->query($sql);
+                }
+                $out = [];
+                foreach ((array) $this->last_result as $row) {
+                    $values = array_values((array) $row);
+                    $out[]  = $values[0] ?? null;
+                }
+                return $out;
             }
 
             /** @return int|false */

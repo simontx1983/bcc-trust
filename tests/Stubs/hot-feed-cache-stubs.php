@@ -33,10 +33,14 @@ namespace {
             /** Every set() call, in order, as "group\0key". */
             public static array $writes = [];
 
+            /** Every delete() call (F-294), as "group\0key". */
+            public static array $deletes = [];
+
             public static function reset(): void
             {
-                self::$store  = [];
-                self::$writes = [];
+                self::$store   = [];
+                self::$writes  = [];
+                self::$deletes = [];
             }
 
             public static function id(string $key, string $group): string
@@ -76,6 +80,17 @@ namespace {
         }
     }
 
+    if (!function_exists('wp_cache_delete')) {
+        /** F-294: forgetHotFeed() drops pages. Recorded in $deletes. */
+        function wp_cache_delete($key, string $group = ''): bool
+        {
+            $id = \BccHotFeedCacheStore::id((string) $key, $group);
+            \BccHotFeedCacheStore::$deletes[] = $id;
+            $had = array_key_exists($id, \BccHotFeedCacheStore::$store);
+            unset(\BccHotFeedCacheStore::$store[$id]);
+            return $had;
+        }
+    }
     if (!function_exists('wp_cache_add')) {
         /**
          * Set-if-absent; CacheGeneration seeds a missing generation with it.
