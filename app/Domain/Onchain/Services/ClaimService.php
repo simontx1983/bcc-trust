@@ -22,6 +22,7 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
+use BCC\Trust\Onchain\Fetchers\SolanaFetcher;
 use BCC\Trust\Onchain\Support\Bech32;
 
 if (!defined('ABSPATH')) {
@@ -61,6 +62,18 @@ class ClaimService {
      * claim() accepts (F-303): a holder result is refused, never recorded.
      */
     private const EXCLUSIVE_ROLES = ['operator', 'creator'];
+
+    /**
+     * F-339: a collection match whose creator the chain could not settle.
+     * Neither is an exclusive role, so a caller that forgot to handle them
+     * would still refuse the claim; claim() answers each with its own error.
+     *   creator_unverifiable      the chain cannot prove anyone is the creator
+     *                             (renounced authority, delegated scope only,
+     *                             not-found mint) - final
+     *   verification_unavailable  no usable answer this time - retryable
+     */
+    public const ROLE_CREATOR_UNVERIFIABLE     = 'creator_unverifiable';
+    public const ROLE_VERIFICATION_UNAVAILABLE = 'verification_unavailable';
 
     /**
      * F-14: why a claim was revoked. A closed list — it is written to the
@@ -186,6 +199,24 @@ class ClaimService {
                 'claim_id'   => $claimId,
                 'role'       => $match['role'],
                 'is_primary' => true,
+            ];
+        }
+
+        // F-339: the chain could not settle who the collection's creator is.
+        // Never a claim; the two unknowns read differently (user decision):
+        // an outage is retryable, an unprovable creator is final.
+        if ($match['role'] === self::ROLE_VERIFICATION_UNAVAILABLE) {
+            return [
+                'success' => false,
+                'error'   => self::ROLE_VERIFICATION_UNAVAILABLE,
+                'message' => "We couldn't verify this collection's creator on-chain right now. Try again in a few minutes.",
+            ];
+        }
+        if ($match['role'] === self::ROLE_CREATOR_UNVERIFIABLE) {
+            return [
+                'success' => false,
+                'error'   => self::ROLE_CREATOR_UNVERIFIABLE,
+                'message' => "We can't confirm this collection's creator on-chain.",
             ];
         }
 
@@ -446,15 +477,16 @@ class ClaimService {
         // first wallet with ANY role, so a holder wallet listed before the
         // user's creator wallet answered "holder" — which claim() now
         // refuses — and the creator could never claim their own collection.
-        $holder = null;
+        $holder    = null;
+        $authority = null; // Solana: one authority reader (one getAsset) for every wallet
+        $unknown   = null; // Solana: why the creator could not be settled, if it couldn't
         foreach ($wallets as $wallet) {
             $addr      = $wallet->wallet_address;
             $chainType = $entity->chain_type ?? 'evm';
 
             $role = match ($chainType) {
                 'evm'    => self::evmCollectionRole($addr, $contractAddr, $entity),
-                // F-339 slots its Solana collection-authority check in here.
-                'solana' => $queryClass::getSolanaRole($addr, $contractAddr),
+                'solana' => self::solanaCollectionRole($addr, $contractAddr, $entity, $authority, $unknown),
                 default  => 'none',
             };
 
@@ -475,7 +507,60 @@ class ClaimService {
             }
         }
 
+        // F-339: no wallet proved creatorship and the chain could not say
+        // who the creator is. That, not "you only hold it" or "no match",
+        // is the answer (a creator whose check failed should hear "retry").
+        if ($unknown !== null) {
+            return [
+                'wallet_address' => '',
+                'chain_id'       => (int) $entity->chain_id,
+                'role'           => $unknown,
+            ];
+        }
+
         return $holder;
+    }
+
+    /**
+     * F-339: a Solana wallet's role in a collection.
+     *
+     * Creator ONLY when the wallet is the collection mint's CURRENT full
+     * update authority ({@see SolanaCollectionAuthority}, one DAS getAsset
+     * shared by every wallet in the claim). An unknown verdict is never a
+     * match: it is recorded in $unknown (first one wins; every wallet sees
+     * the same asset, so they agree) and the holder lookup is skipped,
+     * because claim() refuses with the unknown regardless. Otherwise
+     * holder/none comes from the existing holder lookup, and claim()
+     * refuses holders (F-303).
+     *
+     * @param EntityForClaim $entity
+     */
+    private static function solanaCollectionRole(string $wallet, string $mint, object $entity, ?SolanaCollectionAuthority &$authority, ?string &$unknown): string {
+        if ($authority === null) {
+            $chain = ChainRepository::getBySlug((string) $entity->chain_slug);
+            if ($chain === null) {
+                $unknown ??= self::ROLE_VERIFICATION_UNAVAILABLE;
+                return BlockchainQueryService::ROLE_NONE;
+            }
+            $authority = new SolanaCollectionAuthority(new SolanaFetcher($chain));
+        }
+
+        $verdict = $authority->verdict($wallet, $mint);
+        if ($verdict === SolanaCollectionAuthority::VERDICT_AUTHORITY) {
+            return BlockchainQueryService::ROLE_CREATOR;
+        }
+        if ($verdict === SolanaCollectionAuthority::VERDICT_UNAVAILABLE) {
+            $unknown ??= self::ROLE_VERIFICATION_UNAVAILABLE;
+            return BlockchainQueryService::ROLE_NONE;
+        }
+        if ($verdict === SolanaCollectionAuthority::VERDICT_UNVERIFIABLE) {
+            $unknown ??= self::ROLE_CREATOR_UNVERIFIABLE;
+            return BlockchainQueryService::ROLE_NONE;
+        }
+
+        return BlockchainQueryService::getSolanaRole($wallet, $mint) === BlockchainQueryService::ROLE_HOLDER
+            ? BlockchainQueryService::ROLE_HOLDER
+            : BlockchainQueryService::ROLE_NONE;
     }
 
     /**

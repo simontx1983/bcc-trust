@@ -64,6 +64,16 @@ final class SolanaCollectionAuthority
         '1nc1nerator11111111111111111111111111111111',
     ];
 
+    /**
+     * One getAsset per mint for this instance's life: a claim asks about
+     * every linked wallet against the SAME collection, and the authority
+     * list answers them all. Failures are memoised too, so one claim's
+     * wallets can never get different unknowns.
+     *
+     * @var array<string, array{ok: bool, result: ?array<string, mixed>, kind: string}>
+     */
+    private array $assets = [];
+
     public function __construct(private readonly SolanaFetcher $fetcher)
     {
     }
@@ -92,7 +102,7 @@ final class SolanaCollectionAuthority
             return self::VERDICT_UNVERIFIABLE;
         }
 
-        $r = $this->fetcher->assetResult($collectionMint);
+        $r = $this->assets[$collectionMint] ??= $this->fetcher->assetResult($collectionMint);
 
         if (!$r['ok']) {
             // A documented not-found is an answer: there is no asset whose

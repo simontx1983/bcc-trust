@@ -112,6 +112,18 @@ final class ClaimFailureMappingTest extends TestCase
         self::assertNotFalse($suspended, 'the service suspension refusal has no branch');
         self::assertLessThan($default, $suspended, 'the suspension branch is unreachable');
         self::assertStringContainsString("['reason' => 'not_operator']", $body, 'the default names its cause');
+
+        // F-339: a Solana creator the chain could not settle is never
+        // "your wallet does not match" — an outage is 503, an unprovable
+        // creator 403, each with its own reason, both before the default.
+        $unavailable = strpos($body, "=== 'verification_unavailable'");
+        $unverifiable = strpos($body, "=== 'creator_unverifiable'");
+        self::assertNotFalse($unavailable, 'the verification-unavailable outcome has no branch');
+        self::assertNotFalse($unverifiable, 'the creator-unverifiable outcome has no branch');
+        self::assertLessThan($default, $unavailable);
+        self::assertLessThan($default, $unverifiable);
+        self::assertStringContainsString("['reason' => 'verification_unavailable']", $body);
+        self::assertStringContainsString("['reason' => 'creator_unverifiable']", $body);
     }
 
     /**

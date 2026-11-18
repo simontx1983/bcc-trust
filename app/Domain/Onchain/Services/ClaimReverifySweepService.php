@@ -42,6 +42,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Onchain\Services;
 
 use BCC\Trust\Core\Services\wallet\BlockchainQueryService;
+use BCC\Trust\Onchain\Fetchers\SolanaFetcher;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
@@ -255,8 +256,7 @@ class ClaimReverifySweepService
         }
 
         $chainType = (string) ($row->chain_type ?? '');
-        if ($chainType !== 'evm') {
-            // F-339: the Solana collection-authority check slots in here.
+        if ($chainType !== 'evm' && $chainType !== 'solana') {
             return [self::UNKNOWN, 'creator_check_unsupported_chain'];
         }
 
@@ -277,6 +277,20 @@ class ClaimReverifySweepService
             return [self::STOP, EligibilityVerdict::REASON_BUDGET_EXHAUSTED];
         }
         $budget->spend(1);
+
+        // F-339: Solana creatorship is the collection mint's current full
+        // update authority. Same three outcomes and the same rule as EVM
+        // (F-14 decision A): a renounced or unreadable authority is
+        // unknown, which never revokes.
+        if ($chainType === 'solana') {
+            $isAuthority = $this->solanaAuthority((string) $row->chain_slug, (string) $row->wallet_address, (string) $row->contract_address);
+
+            return match ($isAuthority) {
+                true    => [self::KEEP, ''],
+                false   => [self::REVOKE, 'no_longer_owner'],
+                default => [self::UNKNOWN, 'owner_unknown'],
+            };
+        }
 
         $verdict = $this->ownerVerdict((string) $row->chain_slug, (string) $row->wallet_address, (string) $row->contract_address);
 
@@ -419,6 +433,20 @@ class ClaimReverifySweepService
         }
 
         return BlockchainQueryService::evmContractOwnerVerdict($chain, $wallet, $contract);
+    }
+
+    /**
+     * One DAS getAsset on the collection mint (F-339): true / false / null
+     * (unknown, either kind).
+     */
+    protected function solanaAuthority(string $chainSlug, string $wallet, string $collectionMint): ?bool
+    {
+        $chain = ChainRepository::getBySlug($chainSlug);
+        if ($chain === null) {
+            return null;
+        }
+
+        return (new SolanaCollectionAuthority(new SolanaFetcher($chain)))->isAuthority($wallet, $collectionMint);
     }
 
     protected function revoke(int $claimId, string $reason): bool
