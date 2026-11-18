@@ -374,6 +374,14 @@ namespace {
             return true;
         }
     }
+    if (!function_exists('delete_user_meta')) {
+        /** @param mixed $value */
+        function delete_user_meta(int $userId, string $key, $value = ''): bool
+        {
+            unset($GLOBALS['__bcc_ph']['meta'][$userId][$key]);
+            return true;
+        }
+    }
 
     if (!function_exists('wp_cache_delete')) {
         /** @param int|string $key */

@@ -224,6 +224,8 @@ require_once BCC_TRUST_PATH . 'includes/database/rotate-login-handles.php';
 require_once BCC_TRUST_PATH . 'includes/database/retire-renamed-original-handles.php';
 // F-257: fold the discovery opt-out into hide_from_search (registered in migration-runner.php).
 require_once BCC_TRUST_PATH . 'includes/database/fold-discovery-optout.php';
+// F-294: release unverified wallet sign-up emails (registered in migration-runner.php).
+require_once BCC_TRUST_PATH . 'includes/database/release-wallet-signup-unverified-emails.php';
 require_once BCC_TRUST_PATH . 'includes/database/flush-object-cache-display-names.php';
 // One-shot repair of NFT-gate pointers orphaned by retire-stargaze-chain.php
 // (deleted chain + collections, surviving PeepSo group posts). Repoints only
