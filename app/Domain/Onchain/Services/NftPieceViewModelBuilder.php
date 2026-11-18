@@ -12,7 +12,6 @@ use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\NftCollectionPiecesRepository;
 use BCC\Trust\Onchain\Repositories\NftHoldingsRepository;
-use BCC\Trust\Onchain\Repositories\WalletRepository;
 use BCC\Trust\Onchain\Support\MarketplaceLinkBuilder;
 use BCC\Trust\Onchain\Support\NftCollectionIdentifier;
 use BCC\Trust\Onchain\ValueObjects\CollectionMetadataRules;
@@ -54,7 +53,7 @@ if (!defined('ABSPATH')) {
  *     image_url_thumb: string|null,
  *     attributes: list<array{trait_type: string, value: string|int|float|bool, rarity_pct?: float}>,
  *     owner: array{
- *         is_linked: bool
+ *         is_linked: null
  *     }|null,
  *     owners_count: int,
  *     owners: list<array{}>,
@@ -687,7 +686,7 @@ final class NftPieceViewModelBuilder
      *
      * See docs/wallet-privacy-policy.md.
      *
-     * @return array{0: array{is_linked: bool}|null, 1: list<array{}>, 2: int}
+     * @return array{0: array{is_linked: null}|null, 1: list<array{}>, 2: int}
      */
     private static function resolveOwners(
         int $chainId,
@@ -705,8 +704,8 @@ final class NftPieceViewModelBuilder
             return [null, [], 0];
         }
 
-        $first = array_shift($rows);
-        $dominant = self::buildDominantOwner($chainId, (string) $first->wallet_address);
+        array_shift($rows); // the dominant holder
+        $dominant = self::buildDominantOwner();
 
         // ERC-1155 used to fan the remaining holders out into `owners[]`
         // as {wallet_address, address_short, balance}. All three are
@@ -738,13 +737,10 @@ final class NftPieceViewModelBuilder
      * 1 (when the call returns) or 0 (on transport failure / unknown
      * token).
      *
-     * Wallet → user resolution uses the same WalletRepository path as
-     * ETH/SOL — Cosmos bech32 addresses go through the existing
-     * `findUserIdByAddress` lookup. That lookup now feeds ONLY the
-     * `is_linked` boolean; no identity is emitted. Not-yet-linked
-     * Cosmos wallets surface as `owner.is_linked = false`.
+     * The holder's wallet is used only to know that a holder exists; it is
+     * never resolved to a member (`owner.is_linked` is always null).
      *
-     * @return array{0: array{is_linked: bool}|null, 1: list<array{}>, 2: int}
+     * @return array{0: array{is_linked: null}|null, 1: list<array{}>, 2: int}
      */
     private static function resolveCosmosOwner(
         ?CosmosFetcher $fetcher,
@@ -760,7 +756,7 @@ final class NftPieceViewModelBuilder
         if ($owner === null) {
             return [null, [], 0];
         }
-        $dominant = self::buildDominantOwner($chainId, $owner['wallet_address']);
+        $dominant = self::buildDominantOwner();
         return [$dominant, [], 1];
     }
 
@@ -781,23 +777,28 @@ final class NftPieceViewModelBuilder
      *     broadcast what it holds; holdings require the explicit opt-in
      *     NFT showcase.
      *
-     * What survives is `is_linked` — "some BCC member holds this" — which
-     * names nobody and cannot be resolved back to a member. The lookup
-     * stays server-side purely to compute that boolean.
+     * `is_linked` is now ALWAYS null (deprecated; the key stays so the
+     * shape does not change). It used to say whether the holding wallet
+     * belongs to a BCC member, and holder wallets are public on-chain, so
+     * it told anyone "this wallet is a member's": a wallet→member signal.
+     * The holder's wallet is therefore never looked up against wallet
+     * links here at all.
      *
-     * Note this was also an ENUMERATION primitive: walking token IDs of
-     * any indexed collection yielded a wallet→member table.
+     * It is null for EVERY viewer, the holder included, so the response
+     * stays viewer-invariant and safe for the shared Cache-Control in
+     * NftPieceEndpoint. A holder sees their pieces in their own gallery.
+     *
+     * Note the old fields were also an ENUMERATION primitive: walking token
+     * IDs of any indexed collection yielded a wallet→member table.
      *
      * See docs/wallet-privacy-policy.md.
      *
-     * @return array{is_linked: bool}
+     * @return array{is_linked: null}
      */
-    private static function buildDominantOwner(int $chainId, string $walletAddress): array
+    private static function buildDominantOwner(): array
     {
-        $userId = WalletRepository::findUserIdByAddress($chainId, $walletAddress);
-
         return [
-            'is_linked' => $userId > 0,
+            'is_linked' => null,
         ];
     }
 
