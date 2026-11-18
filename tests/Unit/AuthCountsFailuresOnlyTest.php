@@ -1,0 +1,146 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BCC\Trust\Core\Tests\Unit;
+
+use BCC\Trust\Core\REST\Auth\AuthSupport;
+use BCC\Trust\Core\REST\Auth\EmailVerificationController;
+use BCC\Trust\Core\REST\Auth\PasswordAuthController;
+use BCC\Trust\Core\Services\HandleService;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
+use PHPUnit\Framework\TestCase;
+
+/**
+ * F-290 follow-up (user complaints 2 and 3): on the anonymous auth routes a
+ * refused call is no longer recorded, and a correct password doesn't use
+ * up the sign-in budget. Every other caller keeps pessimistic counting.
+ *
+ * Pinned, running the REAL login / forgot-password / resend / verify /
+ * reset handlers over the counting Throttle double (which honours
+ * countDenied and release() as bcc-core #124 does):
+ *   - retrying while blocked never extends the block;
+ *   - a correct password gives back every login slot it charged;
+ *   - a call a LATER login bucket refuses gives back what it charged;
+ *   - forgot / resend: the per-network bucket doesn't record refusals and
+ *     gives its slot back when an address cap refuses; the per-address mail
+ *     caps still count every request (the mail-bomb guard);
+ *   - verify-email and reset-password opt in; signup does not.
+ */
+#[RunTestsInSeparateProcesses]
+#[PreserveGlobalState(false)]
+final class AuthCountsFailuresOnlyTest extends TestCase
+{
+    private const ALICE = 10;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        require_once __DIR__ . '/../Stubs/handle-rename-identity-stubs.php';
+        require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
+        $GLOBALS['__bcc_ph'] = [
+            'users'             => [self::ALICE => ['email' => 'alice@example.test', 'login' => 'u_alice', 'display' => 'Alice']],
+            // Unverified, so a correct password stops at 403 — past the throttle.
+            'meta'              => [self::ALICE => [HandleService::META_HANDLE => 'alice', AuthSupport::META_EMAIL_VERIFIED => '0']],
+            'passwords'         => [self::ALICE => 'right'],
+            'transients'        => [],
+            'mail'              => [],
+            'actions'           => [],
+            'current_user'      => 0,
+            'throttle_counting' => true,
+            'client_ip'         => '198.51.100.20',
+        ];
+    }
+
+    private static function login(string $identifier, string $password): int
+    {
+        return (new PasswordAuthController())->login(
+            new \WP_REST_Request(['identifier' => $identifier, 'password' => $password])
+        )->get_status();
+    }
+
+    private static function netKey(string $typed): string
+    {
+        return 'bcc_throttle_login_account_net_' . hash('sha256', 'id:' . hash('sha256', $typed) . '|' . AuthSupport::loginNetwork());
+    }
+
+    private static function hits(string $bucket): int
+    {
+        return (int) ($GLOBALS['__bcc_ph']['throttle_hits'][$bucket] ?? 0);
+    }
+
+    public function testRetryingWhileBlockedNeverExtendsTheBlock(): void
+    {
+        $limit = AuthSupport::LOGIN_ACCOUNT_RATE_LIMIT;
+        for ($i = 0; $i < $limit; $i++) {
+            // The per-IP `login` bucket (20/min) isn't what this case exercises.
+            unset($GLOBALS['__bcc_ph']['throttle_hits']['login']);
+            self::assertSame(401, self::login('alice', 'wrong' . $i));
+        }
+        for ($i = 0; $i < 15; $i++) {
+            unset($GLOBALS['__bcc_ph']['throttle_hits']['login']);
+            self::assertSame(429, self::login('alice', 'still-wrong'));
+        }
+
+        self::assertSame($limit, self::hits(self::netKey('alice')), 'the 15 refused retries were not recorded');
+    }
+
+    public function testACorrectPasswordGivesBackEverySlotItCharged(): void
+    {
+        for ($i = 0; $i < 3; $i++) {
+            self::login('alice', 'wrong' . $i);
+        }
+        $before = [self::hits('login'), self::hits(self::netKey('alice'))];
+
+        self::assertSame(403, self::login('alice', 'right'), 'past the throttle, stopped by the unverified email');
+
+        self::assertSame($before, [self::hits('login'), self::hits(self::netKey('alice'))], 'signing in used up nothing');
+        self::assertSame(3, self::hits(self::netKey('alice')), 'the three failures still count');
+    }
+
+    public function testACallALaterBucketRefusesGivesBackWhatItCharged(): void
+    {
+        // The per-identifier ceiling is already spent.
+        $ceiling = 'bcc_throttle_login_account_' . hash('sha256', 'id:' . hash('sha256', 'alice'));
+        $GLOBALS['__bcc_ph']['throttle_hits'][$ceiling] = AuthSupport::LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT;
+
+        self::assertSame(429, self::login('alice', 'wrong'));
+
+        self::assertSame(0, self::hits('login'), 'the per-IP slot was given back');
+        self::assertSame(0, self::hits(self::netKey('alice')), 'and the per-network one');
+        self::assertSame(AuthSupport::LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT, self::hits($ceiling), 'the refusing bucket recorded nothing');
+    }
+
+    public function testTheAuthRoutesOptInAndSignupDoesNot(): void
+    {
+        self::login('alice', 'wrong');
+        (new PasswordAuthController())->forgotPassword(new \WP_REST_Request(['email' => 'nobody@example.com']));
+        (new EmailVerificationController())->resendVerification(new \WP_REST_Request(['email' => 'nobody@example.com']));
+        (new EmailVerificationController())->verifyEmail(new \WP_REST_Request(['email' => 'nobody@example.com', 'code' => '123456']));
+        (new PasswordAuthController())->resetPassword(new \WP_REST_Request(['key' => 'k', 'login' => 'u', 'password' => 'a long new password']));
+        (new PasswordAuthController())->signup(new \WP_REST_Request(['email' => 'x@example.com', 'password' => 'a long password', 'handle' => 'xx']));
+
+        $flags = $GLOBALS['__bcc_ph']['throttle_count_denied'];
+        foreach (['login', self::netKey('alice'), 'forgot_password', 'resend_verification', 'verify_email', 'reset_password_attempt'] as $bucket) {
+            self::assertFalse($flags[$bucket], $bucket . ' does not record refused calls');
+        }
+        self::assertTrue($flags['signup'], 'everything else stays pessimistic');
+    }
+
+    public function testAnAddressCapRefusalGivesBackTheNetworkSlotButStillCountsTheAddress(): void
+    {
+        $perAddress = AuthSupport::FORGOT_PASSWORD_EMAIL_RATE_LIMIT;
+        for ($i = 0; $i < $perAddress; $i++) {
+            (new PasswordAuthController())->forgotPassword(new \WP_REST_Request(['email' => 'target@example.com']));
+        }
+        self::assertSame($perAddress, self::hits('forgot_password'));
+
+        $status = (new PasswordAuthController())->forgotPassword(new \WP_REST_Request(['email' => 'target@example.com']))->get_status();
+
+        self::assertSame(429, $status);
+        self::assertSame($perAddress, self::hits('forgot_password'), 'the refused request gave its network slot back');
+        $addressKey = AuthSupport::emailThrottleKey('forgot_password', 'target@example.com') . '_net_' . hash('sha256', AuthSupport::loginNetwork());
+        self::assertSame($perAddress + 1, self::hits($addressKey), 'the address cap counts every request (mail-bomb guard)');
+    }
+}

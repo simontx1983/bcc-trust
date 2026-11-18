@@ -117,6 +117,20 @@ final class AuthSupport
     public const TRUSTED_LOGIN_NETWORKS_MAX  = 10;
     public const TRUSTED_LOGIN_NETWORKS_TTL  = 30 * 86400;
 
+    /**
+     * F-290: Throttle::release() — give back a slot an auth route charged
+     * (a correct password, or a request a LATER bucket refused). Feature-
+     * detected: an older bcc-core without release() just leaves the slot
+     * counted, the safe direction.
+     */
+    public static function releaseThrottle(string $action, int $window, ?string $key = null): void
+    {
+        $release = [\BCC\Core\Security\Throttle::class, 'release'];
+        if (is_callable($release)) {
+            call_user_func($release, $action, $window, $key);
+        }
+    }
+
     /** The caller's network for login throttling: IPv4 /24, IPv6 /48. */
     public static function loginNetwork(): string
     {

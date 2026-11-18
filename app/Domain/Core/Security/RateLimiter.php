@@ -157,8 +157,8 @@ class RateLimiter {
      * @param int    $window  Window size in seconds.
      * @return bool
      */
-    public static function allowByKey(string $key, int $limit, int $window): bool {
-        return self::slidingWindowCheck($key, $limit, $window);
+    public static function allowByKey(string $key, int $limit, int $window, bool $countDenied = true): bool {
+        return self::slidingWindowCheck($key, $limit, $window, $countDenied);
     }
 
     /**
@@ -170,13 +170,13 @@ class RateLimiter {
      *
      * @return bool True if allowed, false if over limit.
      */
-    private static function slidingWindowCheck(string $key, int $limit, int $window): bool {
+    private static function slidingWindowCheck(string $key, int $limit, int $window, bool $countDenied = true): bool {
         $now    = self::now();
         $window = max(1, $window);
         $bucket = (int) floor($now / $window);
 
-        $curKey  = '_transient_bcc_rl_' . md5($key . '_b' . $bucket);
-        $prevKey = '_transient_bcc_rl_' . md5($key . '_b' . ($bucket - 1));
+        $curKey  = self::bucketOptionKey($key, $bucket);
+        $prevKey = self::bucketOptionKey($key, $bucket - 1);
         $bucketExpires = ($bucket + 2) * $window;
         $freshVal      = "1|{$bucketExpires}";
 
@@ -241,12 +241,45 @@ class RateLimiter {
         // latent rather than live. The scaled form denies it.
         $effectiveX100 = ($curCount * 100) + ($prevCount * $weightPct);
 
-        // Denied requests still consume a slot. Decrement-on-deny was
-        // removed because a flooder spamming past the limit would otherwise
-        // see every Nth request succeed (the previous denial freed capacity
-        // back into the same window). Pessimistic accounting is the whole
-        // point of the increment-first pattern.
-        return $effectiveX100 <= $limit * 100;
+        // Denied requests still consume a slot — by DEFAULT. Decrement-on-
+        // deny was removed because a flooder spamming past the limit would
+        // otherwise see every Nth request succeed (the previous denial freed
+        // capacity back into the same window). Pessimistic accounting is the
+        // whole point of the increment-first pattern, and every caller keeps
+        // it unless it opts out.
+        //
+        // F-290 opt-out ($countDenied = false, auth routes only): a member
+        // retrying while blocked must not extend the block. The increment
+        // above stays (it is what makes the check atomic); a deny then gives
+        // its slot back. A persistent flooder gets exactly $limit per window
+        // on those routes — the accepted trade-off, with tighter
+        // per-identifier / per-code caps behind each of them.
+        $allowed = $effectiveX100 <= $limit * 100;
+        if (!$allowed && !$countDenied) {
+            RateLimitRepository::decrementBucket($curKey);
+        }
+        return $allowed;
+    }
+
+    /** The wp_options row a key's counter lives in for one window bucket. */
+    private static function bucketOptionKey(string $key, int $bucket): string
+    {
+        return '_transient_bcc_rl_' . md5($key . '_b' . $bucket);
+    }
+
+    /**
+     * F-290: give back one slot of the CURRENT window bucket for $key — the
+     * slot an allowed call used, for a route that only counts failures
+     * (bcc-core Throttle::release(), e.g. a correct password). Never below
+     * zero (decrementBucket clamps). A call allowed in the previous bucket a
+     * moment before a bucket boundary is not found here and stays counted —
+     * the safe direction.
+     */
+    public static function releaseByKey(string $key, int $window): void
+    {
+        self::initRepositories();
+        $window = max(1, $window);
+        RateLimitRepository::decrementBucket(self::bucketOptionKey($key, (int) floor(self::now() / $window)));
     }
 
     /**
