@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Core\Services\ModerationQueueService;
+use BCC\Trust\Tests\Support\CoreSibling;
 use PHPUnit\Framework\Attributes\CoversMethod;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -38,11 +39,15 @@ final class ModerationQueueShapeTargetTest extends TestCase
     {
         parent::setUp();
         // Load the REAL bcc-core normalizer (not a stub) so the
-        // module→kind lockstep is what's actually pinned. CI checks out
-        // bcc-core adjacent to this plugin — same path convention as
-        // tests/Integration/bootstrap.php's DB.php require.
+        // module→kind lockstep is what's actually pinned.
+        //
+        // F-94: via CoreSibling, which FAILS in CI when the checkout is
+        // missing (a skip would be invisible in a green run) and SKIPS in a
+        // bare local worktree. A raw require_once did neither: it raised
+        // Error "Failed opening required" on every test in the file, which
+        // reads as a crash rather than as a missing checkout.
         if (!\class_exists('BCC\\Core\\Feed\\FeedItemNormalizer', false)) {
-            require_once dirname(__DIR__, 2) . '/../bcc-core/src/Feed/FeedItemNormalizer.php';
+            require_once CoreSibling::require('src/Feed/FeedItemNormalizer.php');
         }
         if (!\function_exists('get_post')) {
             // Preview source — null keeps preview '' so these tests pin
