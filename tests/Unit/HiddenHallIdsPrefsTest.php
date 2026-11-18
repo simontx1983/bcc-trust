@@ -159,6 +159,28 @@ final class HiddenHallIdsPrefsTest extends TestCase
         );
     }
 
+    public function testResendingTheSameListIsNotAFailure(): void
+    {
+        // ⚠ `update_user_meta()` returns FALSE for an unchanged value as well
+        // as for a failure — the hazard this endpoint's `checkedWrite()`
+        // docblock exists to warn about. The signal is `$wpdb->last_error`,
+        // never the return.
+        //
+        // The suite already pins that for a SCALAR switch (`hide_online`).
+        // This pins it for an ARRAY, where the stub's unchanged-check is an
+        // element-wise `===` rather than a string comparison. Without it,
+        // "simplifying" checkedWrite() to read the return value would make a
+        // member who re-sends their own unchanged hide list — which the
+        // v1.108 contract explicitly invites, every write being idempotent —
+        // get a 500.
+        self::seedStored([12, 7]);
+
+        $response = self::patch(['hidden_hall_ids' => [12, 7]]);
+
+        self::assertSame(200, $response->get_status());
+        self::assertSame([12, 7], self::stored(), 'and the list is unharmed');
+    }
+
     public function testTheFieldAloneIsEnoughForARequest(): void
     {
         // Without `$hiddenHalls === null` in the "nothing provided" guard,
