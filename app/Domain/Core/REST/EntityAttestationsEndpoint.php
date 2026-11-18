@@ -36,6 +36,10 @@
  * Pagination: page + per_page envelope per §J.4. PER_PAGE_MAX=50,
  * PAGE_MAX=20 match CardsListEndpoint's invariants.
  *
+ * SECRET pages: for the three card kinds, a viewer PageAccess refuses gets
+ * the roster of a target nobody has vouched for, the same answer a page
+ * that does not exist gets.
+ *
  * @package BCC\Trust\Core\REST
  * @since V2 Trust Attestation Layer Slice D (2026-05-13)
  */
@@ -47,6 +51,7 @@ namespace BCC\Trust\Core\REST;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Core\Support\ProfileAccess;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -192,24 +197,31 @@ final class EntityAttestationsEndpoint
             $perPage = self::PER_PAGE_MAX;
         }
 
-        $data = Plugin::instance()->attestationService()->getForTarget(
-            $targetKind,
-            $targetId,
-            [
-                'kind'            => $kind,
-                'sort'            => $sort,
-                'include_revoked' => $includeRevoked,
-                'page'            => $page,
-                'per_page'        => $perPage,
-            ]
-        );
+        $viewerId = get_current_user_id();
+
+        // ⚠ SECRET PAGES (the three card kinds; target_id is the page id). A
+        // viewer PageAccess refuses gets the roster of a target nobody has
+        // vouched for, which is also what a page that does not exist gets,
+        // so the answer never shows that the page is there.
+        $data = $targetKind !== 'user_profile' && !PageAccess::viewerMaySeeId($targetId, $viewerId)
+            ? self::rosterOfAnUnattestedTarget($page, $perPage)
+            : Plugin::instance()->attestationService()->getForTarget(
+                $targetKind,
+                $targetId,
+                [
+                    'kind'            => $kind,
+                    'sort'            => $sort,
+                    'include_revoked' => $includeRevoked,
+                    'page'            => $page,
+                    'per_page'        => $perPage,
+                ]
+            );
 
         $response = ApiResponse::ok($data);
 
         // §J.4 cache: private, max-age=30 — generation-counter invalidated
         // by POST/DELETE against the same target. Anon viewers get the
         // public variant since the row shape carries no per-viewer state.
-        $viewerId = get_current_user_id();
         if ($viewerId > 0) {
             $response->header('Cache-Control', 'private, max-age=30');
             $response->header('Vary', 'Authorization, Cookie');
@@ -218,6 +230,27 @@ final class EntityAttestationsEndpoint
         }
 
         return $response;
+    }
+
+    /**
+     * What AttestationService::getForTarget() answers for a target with no
+     * attestations, for the same (already clamped) page and per_page. A unit
+     * test compares the two, so this cannot drift from the real answer.
+     *
+     * @return array{items: array{}, summary: array{vouch_count: int, stand_behind_count: int}, pagination: array{page: int, per_page: int, total_pages: int, has_more: bool}}
+     */
+    private static function rosterOfAnUnattestedTarget(int $page, int $perPage): array
+    {
+        return [
+            'items'      => [],
+            'summary'    => ['vouch_count' => 0, 'stand_behind_count' => 0],
+            'pagination' => [
+                'page'        => $page,
+                'per_page'    => $perPage,
+                'total_pages' => 0,
+                'has_more'    => false,
+            ],
+        ];
     }
 
     /**

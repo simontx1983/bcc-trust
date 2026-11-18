@@ -22,8 +22,10 @@ use PHPUnit\Framework\TestCase;
  * hydratePages() (which DOES filter privacy), so trending returns fewer than
  * LIMIT results and burns enrichment budget on rows that never render.
  *
- * The clause mirrors SearchRepository::hydratePages() exactly: a `pm_priv`
- * LEFT JOIN on the PeepSo meta plus a `NULL OR CAST(...) <> 2` exclusion.
+ * The clause is bcc-core's shared PeepSoPagePrivacy::notSecretSql(), the one
+ * rule every page surface uses. It replaced a `pm_priv` LEFT JOIN with a
+ * `NULL OR CAST(...) <> 2` exclusion, which let a page carrying two privacy
+ * rows through when one said 0 (SecretPageVisibilityIntegrationTest).
  *
  * A real $wpdb is replaced with a recorder so the prepared template can be
  * asserted without a database. TableRegistry resolves table names via
@@ -34,6 +36,10 @@ final class TrendingPagesPrivacySqlTest extends TestCase
 {
     protected function setUp(): void
     {
+        // The REAL bcc-core rule, so this pins the fragment actually in force.
+        require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/ProbesReads.php');
+        require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/PeepSoPagePrivacy.php');
+
         global $wpdb;
         $wpdb = new class {
             public string $prefix   = 'wp_';
@@ -75,11 +81,11 @@ final class TrendingPagesPrivacySqlTest extends TestCase
         (new ReadModelHealthRepository())->getTrendingPages(12);
         $sql = self::lastSql();
 
-        // The privacy LEFT JOIN must be present, keyed on the PeepSo meta.
-        self::assertStringContainsString('peepso_page_privacy', $sql);
-        // And the SECRET (2) exclusion — NULL (no meta = open) OR value <> 2.
-        self::assertStringContainsString('pm_priv.meta_value IS NULL', $sql);
-        self::assertStringContainsString('CAST(pm_priv.meta_value AS UNSIGNED) <> 2', $sql);
+        // The shared SECRET-page rule, on the posts alias, exactly once.
+        $rule = (string) preg_replace('/\s+/', ' ', \BCC\Core\Repositories\PeepSoPagePrivacy::notSecretSql('p.ID'));
+        self::assertSame(1, substr_count($sql, 'WHERE ' . $rule), 'the shared rule is the WHERE clause');
+        // And the old LEFT JOIN form is gone, not kept beside it.
+        self::assertStringNotContainsString('pm_priv', $sql);
         // Sanity: still scoped to published peepso pages.
         self::assertStringContainsString("post_type = 'peepso-page'", $sql);
         self::assertStringContainsString("post_status = 'publish'", $sql);
