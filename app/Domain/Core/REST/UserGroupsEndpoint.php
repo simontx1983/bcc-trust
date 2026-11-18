@@ -172,6 +172,9 @@ final class UserGroupsEndpoint
     {
         $response = ApiResponse::ok(['items' => $items]);
         $response->header('Cache-Control', 'private, max-age=30');
+        // The list is filtered for the viewer, so the browser cache must
+        // key on the credential too (same as UserFollowsEndpoint).
+        $response->header('Vary', 'Authorization, Cookie');
         return $response;
     }
 

@@ -115,8 +115,10 @@ final class UserAlbumsEndpoint
     {
         $response = ApiResponse::ok(['items' => $items]);
         // Same caching posture as UserGroupsEndpoint — short private TTL
-        // because the row set is viewer-aware (friend-state visibility).
+        // and a Vary on the credential, because the row set is viewer-aware
+        // (per-album visibility).
         $response->header('Cache-Control', 'private, max-age=30');
+        $response->header('Vary', 'Authorization, Cookie');
         return $response;
     }
 

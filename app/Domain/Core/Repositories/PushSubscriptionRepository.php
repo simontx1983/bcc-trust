@@ -186,27 +186,6 @@ final class PushSubscriptionRepository
     }
 
     /**
-     * Find a single subscription by id. Used by the DELETE endpoint
-     * for the auth check before deletion.
-     *
-     * @phpstan-return PushSubscriptionRow|null
-     */
-    public function find(int $id): ?object
-    {
-        if ($id <= 0) {
-            return null;
-        }
-
-        global $wpdb;
-
-        /** @var PushSubscriptionRow|null */
-        return $wpdb->get_row($wpdb->prepare(
-            'SELECT ' . self::COLUMNS . " FROM {$this->table} WHERE id = %d LIMIT 1",
-            $id
-        ));
-    }
-
-    /**
      * Find an existing subscription for (user_id, endpoint_hash).
      * Used by upsert() to decide INSERT vs UPDATE.
      *
@@ -260,11 +239,12 @@ final class PushSubscriptionRepository
     }
 
     /**
-     * Delete one subscription. Returns true when a row was actually
-     * removed (auth + existence check pre-passed).
+     * Delete one subscription by id, whoever owns it. Returns true when a
+     * row was actually removed.
      *
-     * Caller is responsible for verifying the subscription belongs to
-     * the current user before invoking — repository does no auth.
+     * No ownership check: this is the dispatcher's tombstone path (the
+     * push service said the endpoint is gone). A member removing their own
+     * device goes through deleteForUser().
      */
     public function delete(int $id): bool
     {
@@ -275,6 +255,38 @@ final class PushSubscriptionRepository
         global $wpdb;
         $deleted = $wpdb->delete($this->table, ['id' => $id], ['%d']);
         return is_int($deleted) && $deleted > 0;
+    }
+
+    /**
+     * Delete one subscription only if it belongs to $userId. The
+     * ownership check is part of the DELETE itself, so nothing reads the
+     * row first and someone else's row is never touched.
+     *
+     * Returns the number of rows removed. 0 means the id is missing OR
+     * belongs to another user, and the two are deliberately not told
+     * apart: telling them apart would tell a caller whether someone
+     * else's subscription id exists. null on a DB error, which is logged.
+     */
+    public function deleteForUser(int $id, int $userId): ?int
+    {
+        if ($id <= 0 || $userId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $deleted = $wpdb->delete(
+            $this->table,
+            ['id' => $id, 'user_id' => $userId],
+            ['%d', '%d']
+        );
+        if (!is_int($deleted)) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] push subscription not deleted', [
+                'user_id' => $userId,
+                'error'   => (string) ($wpdb->last_error ?? ''),
+            ]);
+            return null;
+        }
+        return $deleted;
     }
 
     /**

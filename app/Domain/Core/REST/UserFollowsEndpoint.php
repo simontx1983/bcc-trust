@@ -146,6 +146,11 @@ final class UserFollowsEndpoint
 
         $response = ApiResponse::ok($result);
         $response->header('Cache-Control', 'private, max-age=30');
+        // The list depends on who is asking (privacy gates, viewer-relative
+        // card fields), so the browser cache must key on the credential:
+        // without it, a member who signs in after another on the same
+        // browser can be served the previous member's copy for 30 s.
+        $response->header('Vary', 'Authorization, Cookie');
         return $response;
     }
 
