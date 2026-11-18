@@ -135,10 +135,11 @@ class FeedItemReportVisibility
         }
         // F-345: a review reply is reportable although no feed shows it
         // (module 206 is deliberately off the feed allowlist below). It is
-        // visible exactly where it renders: nested under its review on a
-        // Reviews tab. So: the reply itself is live (published, not hidden)
-        // AND its parent review is still active and not hidden. Reviews are
-        // never group-tagged, so the group rule does not apply.
+        // reportable while the reply itself is live (published, not hidden)
+        // AND its parent review is still active and not hidden. That
+        // includes a reply that no longer renders after a hand-over (its
+        // author no longer answers for the page; only they still see it).
+        // Reviews are never group-tagged, so the group rule does not apply.
         if ((int) ($activity->act_module_id ?? 0)
             === \BCC\Trust\Core\Repositories\PeepSoActivityWriter::getNumericId(\BCC\Trust\Core\Repositories\ReviewReplyRepository::MODULE_NAME)
         ) {
