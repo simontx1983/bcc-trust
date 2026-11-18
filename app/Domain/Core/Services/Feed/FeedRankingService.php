@@ -265,6 +265,57 @@ final class FeedRankingService
     }
 
     /**
+     * F-294 (item 13): drop every cached anon hot-feed first page, so the
+     * next read (or the minutely warm tick) rebuilds it.
+     *
+     * For IDENTITY and PRIVACY changes, not freshness: an account deletion,
+     * a handle change, or "Hide my real name" switched on/off. The audit-
+     * confirmed choice above (a trending feed tolerates up to HOT_CACHE_TTL
+     * of stale SCORES and order, so votes never bust this cache) says
+     * nothing about a deleted account, an old handle or a real name the
+     * member just hid lingering for five minutes in a shared, publicly
+     * cacheable payload. Those events are rare, so the cost is one rebuild
+     * each; votes and scores still never call this.
+     *
+     * A member can appear in a cached page beyond the author block (names
+     * inside item content), so the whole page goes rather than items being
+     * patched. Per-viewer block filtering is untouched: it runs after this
+     * cache and never writes to it.
+     *
+     * ⚠ As with forgetDeletedPost(): the HTTP cache (`max-age=60`) is out of
+     * reach here.
+     */
+    public function forgetHotFeed(): void
+    {
+        for ($limit = 1; $limit <= self::HOT_CACHE_MAX_LIMIT; $limit++) {
+            wp_cache_delete(self::hotFeedCacheKey($limit), self::HOT_CACHE_GROUP);
+        }
+    }
+
+    /**
+     * The three events that call forgetHotFeed() (through $forget, which the
+     * caller wraps in its own error handling): an account deleted, a handle
+     * changed, and a privacy write that touched `real_name_hidden`. Here,
+     * not inline in Plugin, so a test can register them and fire them.
+     *
+     * @param callable(string $why, int $userId): void $forget
+     */
+    public static function registerIdentityHooks(callable $forget): void
+    {
+        add_action('deleted_user', static function ($userId) use ($forget): void {
+            $forget('account_deleted', (int) $userId);
+        }, 30, 1);
+        add_action('bcc_handle_changed', static function ($userId) use ($forget): void {
+            $forget('handle_changed', (int) $userId);
+        }, 30, 1);
+        add_action('bcc_privacy_settings_changed', static function ($userId, $keys) use ($forget): void {
+            if (is_array($keys) && in_array('real_name_hidden', $keys, true)) {
+                $forget('real_name_hidden', (int) $userId);
+            }
+        }, 30, 2);
+    }
+
+    /**
      * The pre-cache hot-feed build — exactly the former getHotFeed body.
      *
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
