@@ -54,6 +54,20 @@ if (!defined('ABSPATH')) {
 final class PostViewRecorder
 {
     /**
+     * Per-reader view dedupe window. A second view of the same post by the
+     * same reader inside this window is not counted at all.
+     *
+     * ⚠ This closes a gap between the approved design and the first
+     * implementation: the design specified a 30-minute window and the first
+     * cut counted every beacon, so views were inflatable by re-firing it
+     * (bounded only by the endpoint throttle).
+     */
+    private const VIEW_WINDOW_SECONDS = 1800;
+
+    /** Object-cache group for the window claims. */
+    private const VIEW_WINDOW_GROUP = 'bcc_trust:post_view_window';
+
+    /**
      * Record one view of a post.
      *
      * @param int    $actId    The post's act_id (NOT a wp_posts.ID).
@@ -62,7 +76,7 @@ final class PostViewRecorder
      * @return string A short outcome for logging and tests:
      *                'counted_unique' | 'counted_repeat' | 'ignored_author'
      *                | 'ignored_unknown_post' | 'ignored_bad_source'
-     *                | 'ignored_write_failed'
+     *                | 'ignored_repeat_window' | 'ignored_write_failed'
      *                ⚠ The endpoint does NOT return this to the client — a
      *                caller must not be able to probe whether a post exists
      *                or who wrote it by reading beacon outcomes.
@@ -100,6 +114,13 @@ final class PostViewRecorder
                 $viewerId > 0 ? '' : self::userAgent(),
                 ViewerFingerprint::PURPOSE_VIEW
             );
+
+            // 30-minute window: a refresh does not make a second view.
+            // Checked BEFORE the daily claim so a repeat inside the window
+            // costs no DB work at all.
+            if (!self::claimViewWindow($actId, $hash)) {
+                return 'ignored_repeat_window';
+            }
 
             $isUnique = false;
             if ($hash !== null) {
@@ -200,6 +221,68 @@ final class PostViewRecorder
 
             return 'ignored_write_failed';
         }
+    }
+
+    /**
+     * Claim this reader's view of this post for the current 30-minute
+     * window. True = count the view; false = a repeat inside the window.
+     *
+     * ── WHY THE OBJECT CACHE AND NOT A DEDUPE ROW ────────────────────
+     * A row per (post, reader, 30-minute bucket) would be up to 96× the
+     * daily-claim rows (48h ÷ 30min) and would blow `DEDUPE_MAX_ROWS`,
+     * which is deliberately set below `RetentionHealthSnapshot`'s alarm
+     * watermark — the fix would have broken the overgrown alarm. A cache
+     * key with a matching TTL costs no table growth.
+     *
+     * ── ⚠⚠ FAILING OPEN NEEDS A READ-BACK, NOT JUST A FALSE ──────────
+     * `wp_cache_add()` returns false for TWO different things: "already
+     * claimed" (the dedupe working) and "the store refused the write"
+     * (backend down, memory pressure, connection reset). Treating every
+     * false as a duplicate would DROP views whenever the cache refuses —
+     * fail-closed, and the opposite of what this metric wants.
+     *
+     * My first cut did exactly that, on the reasoning that a degraded
+     * backend fails to PERSIST rather than refusing, so the next request
+     * would see a fresh key. That covers an absent cache but not a
+     * refusing one, and the integration harness models the refusing case
+     * precisely because production fallbacks for it are otherwise
+     * unreachable from a test.
+     *
+     * So: on a false, read the key back. Present ⇒ a genuine duplicate,
+     * skip. Absent ⇒ the write never landed, so count the view. This is
+     * the same liveness read-back `Throttle` uses, for the same reason —
+     * I was wrong to think this path could do without it.
+     *
+     * ⚠ Note the opposite posture to Throttle on the ambiguous case: there,
+     * a degraded cache must fail CLOSED because the doubt could multiply an
+     * attacker's effective rate limit. Here the doubt costs at most a
+     * slightly generous view count, and an uncounted view is
+     * indistinguishable from "nobody read it" — so doubt counts the view.
+     *
+     * ⚠ A null `$hash` (no HMAC key, or a signed-out reader with no IP and
+     * no user-agent at all) means there is nothing to dedupe on. Count it,
+     * same reasoning.
+     */
+    private static function claimViewWindow(int $actId, ?string $hash): bool
+    {
+        if ($hash === null) {
+            return true;
+        }
+
+        // 8 bytes of the (already salted, already one-way) code, hex-encoded
+        // so the key is printable and bounded. Not an identity, and it
+        // outlives the request by at most the window.
+        $bucket = intdiv(time(), self::VIEW_WINDOW_SECONDS);
+        $key    = $actId . ':' . bin2hex(substr($hash, 0, 8)) . ':' . $bucket;
+
+        if (wp_cache_add($key, 1, self::VIEW_WINDOW_GROUP, self::VIEW_WINDOW_SECONDS) === true) {
+            return true;
+        }
+
+        // Disambiguate the false: duplicate, or a refused write?
+        $present = wp_cache_get($key, self::VIEW_WINDOW_GROUP);
+
+        return !($present !== false && $present !== null);
     }
 
     private static function userAgent(): string

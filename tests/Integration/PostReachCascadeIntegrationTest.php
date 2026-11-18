@@ -37,6 +37,18 @@ final class PostReachCascadeIntegrationTest extends TestCase
 
     public static function setUpBeforeClass(): void
     {
+        // The integration harness does NOT define BCC_ENCRYPTION_KEY, and
+        // without it ViewerFingerprint fails closed (returns null) — which
+        // silently disables the whole dedupe layer: no window claim, no
+        // unique claim, every view counted. That is correct production
+        // behaviour for a keyless install (activation is gated on the key),
+        // but it means a test without the key exercises only the degraded
+        // path. Defined here rather than at file level so it cannot leak
+        // into suites that never run this class.
+        if (!defined('BCC_ENCRYPTION_KEY')) {
+            define('BCC_ENCRYPTION_KEY', 'integration-key-for-post-reach-tests');
+        }
+
         $base = dirname(__DIR__, 2) . '/includes/database/';
         require_once $base . 'schema-post-reach-daily.php';
         require_once $base . 'schema-post-view-dedupe.php';
@@ -198,6 +210,123 @@ final class PostReachCascadeIntegrationTest extends TestCase
         self::assertSame(1, $reach['profile_visits']);
         self::assertSame(['feed', 'tag'], array_keys($reach['by_source']));
         self::assertSame(2, $reach['by_source']['feed']['views']);
+    }
+
+    /**
+     * ⭐ The 30-minute view window. A refresh must not make a second view.
+     *
+     * This is the gap the review caught: the design specified a window and
+     * the first implementation counted every beacon, so views were
+     * inflatable by re-firing it.
+     */
+    public function testASecondViewInsideTheWindowIsNotCounted(): void
+    {
+        $reader = self::AUTHOR + 31;
+
+        self::assertSame(
+            'counted_unique',
+            \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader),
+            'first view counts'
+        );
+        self::assertSame(
+            'ignored_repeat_window',
+            \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader),
+            'a refresh inside the window is not a second view'
+        );
+
+        $reach = PostReachRepository::reachForPost(self::ACT_ID);
+        self::assertNotNull($reach);
+        self::assertSame(1, $reach['views'], 'views must not be inflatable by re-firing the beacon');
+        self::assertSame(1, $reach['daily_unique_viewers']);
+    }
+
+    /** The window is per post: another post in the same window still counts. */
+    public function testTheWindowIsPerPostNotPerReader(): void
+    {
+        $other  = self::ACT_ID + 1;
+        $reader = self::AUTHOR + 32;
+        $this->seedFeedActivity($other, self::WP_POST + 1, '1', self::AUTHOR + 8);
+
+        \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader);
+        self::assertSame(
+            'counted_unique',
+            \BCC\Trust\Core\Services\PostViewRecorder::record($other, 'feed', $reader),
+            'a different post is a different window key'
+        );
+    }
+
+    /** A different reader in the same window counts — the code is per reader. */
+    public function testADifferentReaderInTheSameWindowCounts(): void
+    {
+        \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', self::AUTHOR + 33);
+        \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', self::AUTHOR + 34);
+
+        $reach = PostReachRepository::reachForPost(self::ACT_ID);
+        self::assertNotNull($reach);
+        self::assertSame(2, $reach['views']);
+        self::assertSame(2, $reach['daily_unique_viewers']);
+    }
+
+    /**
+     * ⚠⚠ FAIL OPEN on a refused cache write.
+     *
+     * `wp_cache_add()` returns false both for "already claimed" and for "the
+     * store refused the write". My first implementation treated every false
+     * as a duplicate, which would DROP views whenever the cache refuses —
+     * fail-closed, the opposite of what this metric wants. The read-back
+     * distinguishes them, and this test is what pins it: with writes
+     * refused, every view must still be counted.
+     */
+    public function testARefusedCacheWriteStillCountsTheView(): void
+    {
+        $reader = self::AUTHOR + 35;
+        $GLOBALS['__bcc_test_object_cache_write_fails'] = true;
+
+        try {
+            self::assertSame(
+                'counted_unique',
+                \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader),
+                'a refused cache write must not be read as "already claimed"'
+            );
+            self::assertSame(
+                'counted_repeat',
+                \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader),
+                'and the next one still counts — over-counting beats losing views'
+            );
+
+            $reach = PostReachRepository::reachForPost(self::ACT_ID);
+            self::assertNotNull($reach);
+            self::assertSame(2, $reach['views'], 'both views landed');
+        } finally {
+            unset($GLOBALS['__bcc_test_object_cache_write_fails']);
+        }
+    }
+
+    /** The author's own view is never reach, window or no window. */
+    public function testTheAuthorsOwnViewIsNotCounted(): void
+    {
+        self::assertSame(
+            'ignored_author',
+            \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', self::AUTHOR),
+            'reading your own post is not reach'
+        );
+
+        $reach = PostReachRepository::reachForPost(self::ACT_ID);
+        self::assertNotNull($reach);
+        self::assertSame(0, $reach['views']);
+    }
+
+    /** ⛔ The source whitelist, through the recorder rather than the repository. */
+    public function testTheRecorderRejectsAColdStartSource(): void
+    {
+        self::assertSame(
+            'ignored_bad_source',
+            \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'cold-start', self::AUTHOR + 36)
+        );
+
+        $reach = PostReachRepository::reachForPost(self::ACT_ID);
+        self::assertNotNull($reach);
+        self::assertSame(0, $reach['views']);
     }
 
     /**
