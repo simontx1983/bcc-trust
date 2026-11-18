@@ -25,7 +25,9 @@ use PHPUnit\Framework\TestCase;
  * about the system rather than about taste:
  *   - 2,920 `peepso-page` rows, ZERO with a score row, all rendering with
  *     `trust_score: 50` / `reputation_tier: neutral`;
- *   - 8 score rows in the whole database, ZERO with `page_owner_id = 0`.
+ *   - 8 score rows in the whole database, ZERO with `page_owner_id = 0`
+ *     (since owner-0, 2026-11-17, a RELEASED page's rows sit at 0; an
+ *     ownerless row is still never created).
  *
  * Nothing needs a seeded row, because `PageReadModelRepository::syncPage()`
  * distinguishes "no score row" (project the neutral default) from "the read
@@ -204,8 +206,10 @@ final class ValidatorPlaceholderScoreTest extends TestCase
             $src,
             'the refusal is the intended behaviour and must remain'
         );
+        // Owner-0 (2026-11-17): a RELEASED page's EXISTING row is returned
+        // first; an ownerless row is still never CREATED.
         self::assertMatchesRegularExpression(
-            '/if\s*\(\s*!\s*\$ownerId\s*\)\s*\{\s*throw new Exception\(/',
+            '/if\s*\(\s*!\s*\$ownerId\s*\)\s*\{\s*\$existing\s*=\s*\$this->getByPageId\(\$pageId\);\s*if\s*\(\s*\$existing\s*\)\s*\{\s*return \$existing;\s*\}\s*throw new Exception\(/',
             self::code($src),
             'the throw must still guard a falsy owner id'
         );

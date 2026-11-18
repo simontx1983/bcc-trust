@@ -1663,7 +1663,9 @@ final class AttestationRepository
             . " LEFT JOIN `{$scoresTable}` s ON a.target_kind != 'user_profile' AND s.page_id = a.target_id"
             . " WHERE a.kind = 'vouch'"
             . ' AND a.revoked_at IS NULL'
-            . " AND (a.target_kind = 'user_profile' OR s.page_owner_id IS NOT NULL)"
+            // `> 0`, not IS NOT NULL: a released page (owner-0) has nobody to
+            // draw an edge to.
+            . " AND (a.target_kind = 'user_profile' OR s.page_owner_id > 0)"
             . ' LIMIT %d';
 
         /** @phpstan-ignore-next-line argument.type */

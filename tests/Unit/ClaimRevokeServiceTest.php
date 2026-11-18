@@ -55,6 +55,7 @@ final class ClaimRevokeServiceTest extends TestCase
             'audit'                => ['audit'],
             'bonus'                => ['bonus'],
             'page release'         => ['page_release'],
+            'page bonus clear'     => ['page_bonus_clear'],
             'read model'           => ['read_model'],
             'verification_changed' => ['bcc_trust_verification_changed'],
             'claim_revoked event'  => ['bcc_onchain_claim_revoked'],
@@ -75,6 +76,7 @@ final class ClaimRevokeServiceTest extends TestCase
             'audit'                          => \ClaimRevokeWorld::$audits !== [],
             'bonus'                          => \ClaimRevokeWorld::$recomputes !== [],
             'page_release'                   => \ClaimRevokeWorld::$released !== [],
+            'page_bonus_clear'               => \ClaimRevokeWorld::$authorReads !== [] && ($failing === 'page_release' || \ClaimRevokeWorld::$cleared !== []),
             'read_model'                     => \ClaimRevokeWorld::$dirty !== [],
             'bcc_trust_verification_changed' => in_array('bcc_trust_verification_changed', array_column(\ClaimRevokeWorld::$actions, 0), true),
             'bcc_onchain_claim_revoked'      => in_array('bcc_onchain_claim_revoked', array_column(\ClaimRevokeWorld::$actions, 0), true),
@@ -106,6 +108,33 @@ final class ClaimRevokeServiceTest extends TestCase
         self::assertSame([77], $meta['mirror_page_ids']);
         // F-334: exactly the pages the user LOST are released, for that user.
         self::assertSame([[77, 5]], \ClaimRevokeWorld::$released);
+    }
+
+    /**
+     * Owner-0: the lost page is released (its score rows leave the user) and
+     * its bonus cleared BEFORE the user's bonus is recomputed, so the
+     * recompute resolves to a page they still own.
+     */
+    public function testTheLostPageIsReleasedAndClearedBeforeTheBonusIsRecomputed(): void
+    {
+        self::revoked();
+        \ClaimRevokeWorld::$ownerPage = 1_000_000_005; // their self-page, once the lost page is gone
+
+        ClaimService::revokeClaim(41, 'wallet_link_gone');
+
+        self::assertSame(['page_release:77', 'page_bonus_clear:77', 'bonus:1000000005'], \ClaimRevokeWorld::$order);
+    }
+
+    /** A release that was skipped, failed or found the page reassigned leaves its author, and its bonus. */
+    public function testAPageThatStillHasAnAuthorKeepsItsBonus(): void
+    {
+        self::revoked();
+        \ClaimRevokeWorld::$authorAfterRelease = 999;
+
+        ClaimService::revokeClaim(41, 'wallet_link_gone');
+
+        self::assertSame([77], \ClaimRevokeWorld::$authorReads, 'the step checked');
+        self::assertSame([], \ClaimRevokeWorld::$cleared);
     }
 
     public function testAClaimantWithNoOwnPageSkipsOnlyTheRecompute(): void

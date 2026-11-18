@@ -145,20 +145,103 @@ final class BonusService
         }
 
         try {
-            // F-101: a failed signal read must not be written as a
-            // claims-only bonus; retry later, as on lock contention.
-            try {
-                $signalRows = SignalRepository::get_for_page($pageId);
-            } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
-                BonusRetryService::queue($pageId, 0.0);
-                return;
+            if (!self::carriesOnchainBonus($pageId, $userId)) {
+                // A self-page whose owner runs an entity page: the bonus
+                // lives there, so this page's share is 0 (no signal read).
+                self::applyBonus($pageId, 0.0);
+            } else {
+                // F-101: a failed signal read must not be written as a
+                // claims-only bonus; retry later, as on lock contention.
+                try {
+                    $signalRows = SignalRepository::get_for_page($pageId);
+                } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+                    BonusRetryService::queue($pageId, 0.0);
+                    return;
+                }
+                $signalBonus = array_sum(array_column($signalRows, 'score_contribution'));
+
+                $claimBonus = ClaimRepository::computePageClaimBonus($userId);
+
+                $totalBonus = min($signalBonus + $claimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
+                self::applyBonus($pageId, $totalBonus);
             }
-            $signalBonus = array_sum(array_column($signalRows, 'score_contribution'));
+        } finally {
+            self::releaseBonusLock($pageId);
+        }
 
-            $claimBonus = ClaimRepository::computePageClaimBonus($userId);
+        // Written to an entity page: the owner's self-page must not carry
+        // the same bonus a second time.
+        if (!\BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($pageId)) {
+            self::settleSelfPageBonus($userId);
+        }
+    }
 
-            $totalBonus = min($signalBonus + $claimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
-            self::applyBonus($pageId, $totalBonus);
+    /**
+     * May $pageId carry its owner's on-chain bonus? User decision
+     * 2026-11-18 (option a): the bonus is the PERSON's (contract §J.12) and
+     * counts once. It lives on the owner's bonus page
+     * (ScoreRepository::getPageIdForOwner: oldest owned entity page, else
+     * the self-page), so a member self-page carries it only while its owner
+     * has no entity page. Entity pages always may (the claim-time write
+     * targets the claimed page before it is owned).
+     *
+     * Both bonus computations apply it — this recompute and
+     * BonusRetryService::processAll — so a retry can never write the bonus
+     * back onto a self-page it was cleared from.
+     */
+    public static function carriesOnchainBonus(int $pageId, int $ownerId): bool
+    {
+        if (!\BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($pageId)) {
+            return true;
+        }
+        if ($ownerId <= 0) {
+            return true;
+        }
+        $bonusPage = \BCC\Trust\Core\Plugin::instance()->scoreRepository()->getPageIdForOwner($ownerId);
+
+        return $bonusPage <= 0 || \BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($bonusPage);
+    }
+
+    /**
+     * After a bonus write to one of $userId's entity pages: recompute their
+     * self-page under its own lock, which carriesOnchainBonus() turns into
+     * 0 while they own an entity page. Skipped when the self-page has no
+     * row or no bonus to clear (no row is ever created here).
+     */
+    public static function settleSelfPageBonus(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+        $selfPageId = \BCC\Trust\Core\Services\MemberSelfPageService::selfPageId($userId);
+        $row        = \BCC\Trust\Core\Plugin::instance()->scoreRepository()->getByPageId($selfPageId);
+        if ($row === null || $row->getOnchainBonus() <= 0.0) {
+            return;
+        }
+
+        self::recomputeAndApply($selfPageId, $userId);
+    }
+
+    /**
+     * F-334 owner-0: a released page nobody owns carries no on-chain bonus.
+     * An EXPLICIT 0, never a recompute through an owner lookup: two
+     * process-static caches (PageOwnerResolver::$ownerCache and bcc-core's
+     * PeepSo::$cache behind SignalRepository::get_for_page) can still name
+     * the revoked owner for the rest of this request, and a recompute would
+     * write their signals back. A busy lock queues a retry, which recomputes
+     * from the page's owner in a later request: 0, so it also lands on 0.
+     */
+    public static function clearForUnownedPage(int $pageId): void
+    {
+        if ($pageId <= 0) {
+            return;
+        }
+        if (!self::acquireBonusLock($pageId)) {
+            BonusRetryService::queue($pageId, 0.0);
+            return;
+        }
+        try {
+            self::applyBonus($pageId, 0.0);
         } finally {
             self::releaseBonusLock($pageId);
         }
