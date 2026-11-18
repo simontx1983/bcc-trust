@@ -529,6 +529,15 @@ namespace BCC\Trust\Onchain\Services {
             /** @var list<bool> the $allowShrink each resync was called with */
             public static array $resyncArgs = [];
 
+            /** @var array{outcome: string, webhook_id: string, previous_webhook_id?: string} */
+            public static array $reregisterResult = ['outcome' => 'updated', 'webhook_id' => 'wh_123'];
+
+            /** @return array{outcome: string, webhook_id: string, previous_webhook_id?: string} */
+            public static function reregisterSharedWebhook(string $callbackUrl): array
+            {
+                return self::$reregisterResult;
+            }
+
             /** @return array{applied: bool, remote_count: int, local_count: int, refused?: string}|null */
             public static function resyncFromWalletLinks(bool $allowShrink = false): ?array
             {
@@ -549,6 +558,7 @@ namespace BCC\Trust\Onchain\Services {
                 self::$provisionThrows = null;
                 self::$resyncResult = ['applied' => true, 'remote_count' => 5, 'local_count' => 5];
                 self::$resyncThrows = null;
+                self::$reregisterResult = ['outcome' => 'updated', 'webhook_id' => 'wh_123'];
             }
         }
     }
