@@ -464,6 +464,15 @@ final class AnnouncementCapabilityResolverTest extends TestCase
         $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_DRAFT, 'moderation_hidden' => false, 'is_archived' => true, 'comments_enabled' => true];
         $caps = Caps::forRow(self::operator(), $row, self::goodMember(), true);
         self::assertSame(Caps::REASON_ARCHIVED, $caps['can_pin']['reason_code']);
+        // ⚠ F-307 B2 (#700 review): pin() now runs ownerAction() first, which
+        // answers REASON_ARCHIVED on its own, so pin alone no longer exposes
+        // the archived-before-published order in publishedOwnerAction().
+        // can_archive is that ladder's other caller and still depends on it.
+        self::assertSame(
+            Caps::REASON_ARCHIVED,
+            $caps['can_archive']['reason_code'],
+            'can_archive must name the permanent reason, not not-published'
+        );
     }
 
     /** MUST-NOT-HAPPEN #6. Nothing of ours writes these; a plugin or import can. */
