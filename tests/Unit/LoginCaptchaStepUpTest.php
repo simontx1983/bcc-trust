@@ -22,7 +22,8 @@ use PHPUnit\Framework\TestCase;
  *   - a normal sign-in never sees it;
  *   - the 11th wrong password for one identifier in 15 min turns it on for
  *     that identifier (the 10th does not); a site-wide failure spike turns
- *     it on for everyone, and is counted once per activation;
+ *     it on for everyone, and every failure over that threshold is counted
+ *     (so a spike crosses the alerter's threshold);
  *   - while on: no token → 429 bcc_captcha_required (with the site key),
  *     checked before the password, and Turnstile is never called;
  *     a valid token passes; an invalid one is refused and charges nothing;
@@ -245,7 +246,7 @@ final class LoginCaptchaStepUpTest extends TestCase
         self::assertSame([], $GLOBALS['__bcc_cap']['posts']);
     }
 
-    public function testASiteWideSpikeTurnsItOnForEveryoneOnce(): void
+    public function testASiteWideSpikeTurnsItOnForEveryoneAndCountsEachFailure(): void
     {
         $GLOBALS['__bcc_ph']['throttle_hits']['bcc_login_fail_site'] = LoginStepUp::SITE_FAILURES;
 
@@ -257,7 +258,11 @@ final class LoginCaptchaStepUpTest extends TestCase
 
         self::reply(true);
         self::assertSame(401, self::login('dave', 'wrong', 'tok')[0], 'another failure while it is on');
-        self::assertSame(['auth_throttle:login_failure_spike'], self::metrics(), 'counted once per activation, not per failure');
+        self::assertSame(
+            ['auth_throttle:login_failure_spike', 'auth_throttle:login_failure_spike'],
+            self::metrics(),
+            'every failure over the threshold counts, so a real wave reaches the alert threshold'
+        );
     }
 
     public function testAnUnknownIdentifierIsTreatedExactlyLikeAnAccount(): void

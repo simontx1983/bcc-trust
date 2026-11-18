@@ -18,7 +18,9 @@ use BCC\Trust\Core\Security\TurnstileVerifier;
  *     in IDENTIFIER_WINDOW from networks the account has NOT recently signed
  *     in from; or
  *   - more than SITE_FAILURES failed sign-ins site-wide in SITE_WINDOW (a
- *     spike), which turns it on for everyone.
+ *     spike), which turns it on for everyone. Each failure over that
+ *     threshold is counted as DegradationMetrics auth_throttle:
+ *     login_failure_spike, so a spike raises a DegradationAlerter alert.
  * Either stays on for HOLD seconds after the latest failure over its
  * threshold. A network the account recently completed a sign-in from (the
  * F-281 trusted networks) never sees the captcha. An identifier with no
@@ -59,10 +61,11 @@ final class LoginStepUp
         }
 
         if (!\BCC\Core\Security\Throttle::allow('login_fail_site', self::SITE_FAILURES, self::SITE_WINDOW, 'bcc_login_fail_site')) {
-            if (get_transient(self::FLAG_SITE) === false
-                && class_exists(\BCC\Core\Observability\DegradationMetrics::class)
-            ) {
-                // Once per activation, so the metric counts spikes, not failures.
+            // Every failed sign-in over the threshold is counted, so a real
+            // wave crosses bcc-core DegradationAlerter's threshold (5 an hour
+            // per subsystem) and alerts — once, on the transition. Steady
+            // state is zero.
+            if (class_exists(\BCC\Core\Observability\DegradationMetrics::class)) {
                 \BCC\Core\Observability\DegradationMetrics::record('auth_throttle', 'login_failure_spike');
             }
             set_transient(self::FLAG_SITE, 1, self::HOLD);
