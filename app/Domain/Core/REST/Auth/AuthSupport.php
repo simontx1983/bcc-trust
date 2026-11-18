@@ -125,9 +125,9 @@ final class AuthSupport
      */
     public static function releaseThrottle(string $action, int $window, ?string $key = null): void
     {
-        $release = [\BCC\Core\Security\Throttle::class, 'release'];
-        if (is_callable($release)) {
-            call_user_func($release, $action, $window, $key);
+        // @phpstan-ignore function.alreadyNarrowedType (an older bcc-core may be deployed alongside)
+        if (method_exists(\BCC\Core\Security\Throttle::class, 'release')) {
+            \BCC\Core\Security\Throttle::release($action, $window, $key);
         }
     }
 

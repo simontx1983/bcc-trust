@@ -170,7 +170,7 @@ class RateLimiter {
      *
      * @return bool True if allowed, false if over limit.
      */
-    private static function slidingWindowCheck(string $key, int $limit, int $window, bool $countDenied = true): bool {
+    private static function slidingWindowCheck(string $key, int $limit, int $window, bool $countDenied): bool {
         $now    = self::now();
         $window = max(1, $window);
         $bucket = (int) floor($now / $window);
@@ -356,8 +356,11 @@ class RateLimiter {
             // is exactly max(10, 4 × base), the same as an unboosted one.
             // CRIT-2's flood bound per /24 is therefore unchanged by boosts.
             $ipLimit   = max(10, min($adjustedLimit, $limit) * 4, $limit + $adjustedLimit + 1);
-            $allowedByUser = self::slidingWindowCheck($userKey, $adjustedLimit, $window);
-            $allowedByIp   = $allowedByUser && self::slidingWindowCheck($ipKey, $ipLimit, $window);
+            // Pessimistic (countDenied = true): votes, endorsements and the
+            // other action limits keep counting denied calls (F-290 opt-out is
+            // for the anonymous auth routes only).
+            $allowedByUser = self::slidingWindowCheck($userKey, $adjustedLimit, $window, true);
+            $allowedByIp   = $allowedByUser && self::slidingWindowCheck($ipKey, $ipLimit, $window, true);
             $allowed = $allowedByUser && $allowedByIp;
             $slidingKey = $allowedByUser ? $ipKey : $userKey;
         } else {
@@ -365,7 +368,7 @@ class RateLimiter {
             // key cardinality and prevent DB growth from rotating IPs.
             $subnet = self::normalizeIpToSubnet($ip);
             $slidingKey = "{$action}_anon_{$subnet}";
-            $allowed = self::slidingWindowCheck($slidingKey, $adjustedLimit, $window);
+            $allowed = self::slidingWindowCheck($slidingKey, $adjustedLimit, $window, true);
         }
 
         // Log excessive abuse when denied.
