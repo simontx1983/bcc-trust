@@ -40,6 +40,7 @@ use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
 use BCC\Trust\Core\Support\PageCardPrefetcher;
 use BCC\Trust\Core\Support\PageTypeMap;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\ReputationTierMap;
 
 if (!defined('ABSPATH')) {
@@ -461,6 +462,12 @@ final class WatchingService
 
         $grouped = self::groupHydrationTargets($items);
 
+        // §F-02: a member's card is a read about that member. One this
+        // viewer may not open gets `card: null`, like an unhydratable
+        // target; its card is never built. The row itself stays: it is the
+        // viewer's own follow and carries the follow_id they unwatch with.
+        $grouped['member_ids'] = self::viewableMembers($grouped['member_ids']);
+
         if ($grouped['member_ids'] === [] && $grouped['page_ids'] === []) {
             // Nothing hydratable on this page — still emit `card: null`
             // on every row so the shape is uniform.
@@ -510,6 +517,30 @@ final class WatchingService
         }
 
         return self::attachBuiltCards($items, $grouped, $memberCards, $pageCards);
+    }
+
+    /**
+     * Of $memberIds, the members the current viewer may open (§F-02), in
+     * order. One profile-gate verdict each (ProfileAccess::canViewProfile:
+     * the profile ladder + F-182 suspension, owner and admin exemptions),
+     * at most HYDRATED_MAX_PAGE_SIZE of them.
+     *
+     * `hide_from_search` is NOT applied: it hides a member from search and
+     * the directory, and the viewer's own watchlist is neither (the same
+     * rule as the attestation roster).
+     *
+     * ⚠ Current viewer only, like the gate: getWatching is only called for
+     * the signed-in viewer's own list.
+     *
+     * @param list<int> $memberIds
+     * @return list<int>
+     */
+    private static function viewableMembers(array $memberIds): array
+    {
+        return array_values(array_filter(
+            $memberIds,
+            static fn (int $id): bool => ProfileAccess::canViewProfile($id)
+        ));
     }
 
     /**
