@@ -90,6 +90,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
             'author_user_id'   => self::OWN_AUTHOR,
             'status'           => Caps::STATUS_PUBLISHED,
             'is_archived'      => false,
+            'moderation_hidden' => false,
             'comments_enabled' => $commentsEnabled,
         ];
     }
@@ -324,7 +325,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
     /** MUST-NOT-HAPPEN #5 — moderation is the one capability that survives archival. */
     public function testArchivalClosesEditPinAndCommentButLeavesModerationOpen(): void
     {
-        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'is_archived' => true, 'comments_enabled' => true];
+        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'moderation_hidden' => false, 'is_archived' => true, 'comments_enabled' => true];
         $caps = Caps::forRow(self::operator(), $row, self::goodMember(), true);
 
         foreach (['can_edit', 'can_pin', 'can_archive', 'can_comment'] as $key) {
@@ -353,7 +354,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
      */
     public function testAnArchiveDenialOffersNoUnlockHint(): void
     {
-        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'is_archived' => true, 'comments_enabled' => true];
+        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'moderation_hidden' => false, 'is_archived' => true, 'comments_enabled' => true];
         $caps = Caps::forRow(self::operator(), $row, self::goodMember(), true);
         self::assertNull($caps['can_edit']['unlock_hint']);
         self::assertNull($caps['can_pin']['unlock_hint']);
@@ -380,7 +381,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
     #[DataProvider('unpublishedStates')]
     public function testAnUnpublishedRowCanBeEditedButNeitherPinnedNorArchived(string $status): void
     {
-        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => $status, 'is_archived' => false, 'comments_enabled' => true];
+        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => $status, 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true];
         $caps = Caps::forRow(self::operator(), $row, self::goodMember(), true);
 
         self::assertFalse(Permission::isAllowed($caps, 'can_pin'), $status);
@@ -425,13 +426,13 @@ final class AnnouncementCapabilityResolverTest extends TestCase
      */
     public function testAnArchivedRowNamesArchivalRatherThanPublication(): void
     {
-        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'is_archived' => true, 'comments_enabled' => true];
+        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'moderation_hidden' => false, 'is_archived' => true, 'comments_enabled' => true];
         $caps = Caps::forRow(self::operator(), $row, self::goodMember(), true);
 
         self::assertFalse(Permission::isAllowed($caps, 'can_archive'));
         self::assertSame(Caps::REASON_ARCHIVED, $caps['can_archive']['reason_code']);
 
-        $draft = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_DRAFT, 'is_archived' => true, 'comments_enabled' => true];
+        $draft = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_DRAFT, 'moderation_hidden' => false, 'is_archived' => true, 'comments_enabled' => true];
         $dCaps = Caps::forRow(self::operator(), $draft, self::goodMember(), true);
 
         self::assertSame(
@@ -460,7 +461,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
      */
     public function testArchivedBeatsNotPublishedWhenBothWouldApply(): void
     {
-        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_DRAFT, 'is_archived' => true, 'comments_enabled' => true];
+        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_DRAFT, 'moderation_hidden' => false, 'is_archived' => true, 'comments_enabled' => true];
         $caps = Caps::forRow(self::operator(), $row, self::goodMember(), true);
         self::assertSame(Caps::REASON_ARCHIVED, $caps['can_pin']['reason_code']);
     }
@@ -469,7 +470,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
     #[DataProvider('malformedArchivedFlags')]
     public function testAMalformedArchivedFlagReadsAsArchived($value, string $why): void
     {
-        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'is_archived' => $value, 'comments_enabled' => true];
+        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'moderation_hidden' => false, 'is_archived' => $value, 'comments_enabled' => true];
         $caps = Caps::forRow(self::operator(), $row, self::goodMember(), true);
         self::assertSame(Caps::REASON_ARCHIVED, $caps['can_edit']['reason_code'], $why);
     }
@@ -488,7 +489,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
     #[DataProvider('unknownStatuses')]
     public function testAnUnrecognisedStatusIsNotPublished($status, string $why): void
     {
-        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => $status, 'is_archived' => false, 'comments_enabled' => true];
+        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => $status, 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true];
         $caps = Caps::forRow(self::operator(), $row, self::goodMember(), true);
         self::assertSame(Caps::REASON_NOT_PUBLISHED, $caps['can_pin']['reason_code'], $why);
     }
@@ -525,7 +526,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
 
         $gone = Caps::forRow(
             self::operator(),
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'is_archived' => true, 'comments_enabled' => true],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'moderation_hidden' => false, 'is_archived' => true, 'comments_enabled' => true],
             self::goodMember(),
             true
         );
@@ -550,7 +551,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
     #[DataProvider('unpublishedStates')]
     public function testAnUnpublishedRowIsPublishable(string $status): void
     {
-        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => $status, 'is_archived' => false, 'comments_enabled' => true];
+        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => $status, 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true];
         $caps = Caps::forRow(self::operator(), $row, self::goodMember(), true);
 
         self::assertTrue(Permission::isAllowed($caps, 'can_publish'), $status);
@@ -567,7 +568,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
      */
     public function testABlockedRowIsPublishableBecausePublishingIsItsRecoveryPath(): void
     {
-        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_BLOCKED, 'is_archived' => false, 'comments_enabled' => true];
+        $row  = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_BLOCKED, 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true];
         $caps = Caps::forRow(self::operator(), $row, self::goodMember(), true);
 
         self::assertTrue(Permission::isAllowed($caps, 'can_publish'));
@@ -588,6 +589,85 @@ final class AnnouncementCapabilityResolverTest extends TestCase
         self::assertSame('announcement_already_published', Caps::REASON_ALREADY_PUBLISHED);
         self::assertNotSame(Caps::REASON_NOT_PUBLISHED, Caps::REASON_ALREADY_PUBLISHED);
         self::assertNotSame(Caps::REASON_ARCHIVED, Caps::REASON_ALREADY_PUBLISHED);
+    }
+
+    // ── F-307 B2: an administrator takedown ──────────────────────────────
+
+    /**
+     * A taken-down notice closes edit and pin with the moderation reason and
+     * NO unlock hint (the operator cannot undo a moderator's takedown), while
+     * archive stays exactly as it was: the owner may still archive.
+     */
+    public function testATakedownDeniesEditAndPinButLeavesArchiveAsBefore(): void
+    {
+        $up   = Caps::forRow(self::operator(), self::publishedRow(), self::goodMember(), true);
+        $down = Caps::forRow(
+            self::operator(),
+            ['moderation_hidden' => true] + self::publishedRow(),
+            self::goodMember(),
+            true
+        );
+
+        foreach (['can_edit', 'can_pin'] as $key) {
+            self::assertTrue(Permission::isAllowed($up, $key), $key . ' is open on a live row');
+            self::assertFalse(Permission::isAllowed($down, $key), $key);
+            self::assertSame(Caps::REASON_MODERATION_HIDDEN, $down[$key]['reason_code'], $key);
+            self::assertNull($down[$key]['unlock_hint'], $key . ': no hint, the operator cannot undo it');
+        }
+
+        self::assertTrue(Permission::isAllowed($down, 'can_archive'), 'the owner may still archive');
+        self::assertSame($up['can_archive'], $down['can_archive']);
+        // Nothing but edit and pin moves.
+        foreach (['can_publish', 'can_manage_comments', 'can_comment', 'can_report'] as $key) {
+            self::assertSame($up[$key], $down[$key], $key);
+        }
+    }
+
+    /** Absent reads as taken down — the restrictive reading, like `is_archived`. */
+    public function testAnAbsentOrMalformedTakedownFlagFailsClosed(): void
+    {
+        $row = self::publishedRow();
+        unset($row['moderation_hidden']);
+        foreach ([null, 'false', '0', 0, ''] as $value) {
+            $r = $value === null ? $row : ['moderation_hidden' => $value] + $row;
+            $caps = Caps::forRow(self::operator(), $r, self::goodMember(), true);
+            self::assertSame(Caps::REASON_MODERATION_HIDDEN, $caps['can_edit']['reason_code'], var_export($value, true));
+            self::assertSame(Caps::REASON_MODERATION_HIDDEN, $caps['can_pin']['reason_code'], var_export($value, true));
+        }
+    }
+
+    /**
+     * Rung order: feature, ownership and archival outrank the takedown
+     * (archival is permanent); the takedown outranks "not published" on pin
+     * (it is the condition the operator cannot fix).
+     */
+    public function testTheTakedownRungSitsAfterArchivalAndBeforePublication(): void
+    {
+        $archivedDown = ['moderation_hidden' => true, 'is_archived' => true] + self::publishedRow();
+        $caps = Caps::forRow(self::operator(), $archivedDown, self::goodMember(), true);
+        self::assertSame(Caps::REASON_ARCHIVED, $caps['can_edit']['reason_code']);
+        self::assertSame(Caps::REASON_ARCHIVED, $caps['can_pin']['reason_code']);
+
+        $draftDown = ['moderation_hidden' => true, 'status' => Caps::STATUS_DRAFT] + self::publishedRow();
+        $caps = Caps::forRow(self::operator(), $draftDown, self::goodMember(), true);
+        self::assertSame(Caps::REASON_MODERATION_HIDDEN, $caps['can_pin']['reason_code']);
+        self::assertSame(Caps::REASON_NOT_PUBLISHED, $caps['can_archive']['reason_code'], 'archive ladder unchanged');
+
+        $caps = Caps::forRow(self::denied(), ['moderation_hidden' => true] + self::publishedRow(), self::goodMember(), true);
+        self::assertSame(Caps::REASON_NOT_CLAIMER, $caps['can_edit']['reason_code']);
+        self::assertSame(Caps::REASON_NOT_CLAIMER, $caps['can_pin']['reason_code']);
+
+        $caps = Caps::forRow(self::operator(), ['moderation_hidden' => true] + self::publishedRow(), self::goodMember(), false);
+        self::assertSame(Caps::REASON_FEATURE_DISABLED, $caps['can_edit']['reason_code']);
+        self::assertSame(Caps::REASON_FEATURE_DISABLED, $caps['can_pin']['reason_code']);
+    }
+
+    public function testTheModerationHiddenReasonIsADistinctDeclaredCode(): void
+    {
+        self::assertSame('announcement_moderation_hidden', Caps::REASON_MODERATION_HIDDEN);
+        self::assertNotSame(Caps::REASON_ARCHIVED, Caps::REASON_MODERATION_HIDDEN);
+        self::assertNotContains(Caps::REASON_MODERATION_HIDDEN, Caps::CAN_COMMENT_REASONS);
+        self::assertNotContains(Caps::REASON_MODERATION_HIDDEN, Caps::CAN_REPORT_REASONS);
     }
 
     public function testANonOperatorGetsTheGenericReasonOnEveryOwnerRowCapability(): void
@@ -653,37 +733,37 @@ final class AnnouncementCapabilityResolverTest extends TestCase
         $anon = ['authenticated' => false, 'suspended' => true, 'fraud_locked' => true, 'good_standing' => false];
 
         yield 'feature off beats everything' => [
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'is_archived' => true, 'comments_enabled' => false],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'moderation_hidden' => false, 'is_archived' => true, 'comments_enabled' => false],
             $anon, false, Caps::REASON_FEATURE_DISABLED,
         ];
         yield 'unavailable beats archived' => [
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_DRAFT, 'is_archived' => true, 'comments_enabled' => false],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_DRAFT, 'moderation_hidden' => false, 'is_archived' => true, 'comments_enabled' => false],
             $anon, true, Caps::REASON_UNAVAILABLE,
         ];
         yield 'archived beats comments-off' => [
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'is_archived' => true, 'comments_enabled' => false],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'moderation_hidden' => false, 'is_archived' => true, 'comments_enabled' => false],
             $anon, true, Caps::REASON_ARCHIVED,
         ];
         yield 'comments-off beats auth' => [
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'is_archived' => false, 'comments_enabled' => false],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => false],
             $anon, true, Caps::REASON_COMMENTS_DISABLED,
         ];
         yield 'auth beats suspension' => [
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'is_archived' => false, 'comments_enabled' => true],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true],
             $anon, true, Caps::REASON_AUTH_REQUIRED,
         ];
         yield 'suspension beats fraud' => [
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'is_archived' => false, 'comments_enabled' => true],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true],
             ['authenticated' => true, 'suspended' => true, 'fraud_locked' => true, 'good_standing' => false],
             true, Caps::REASON_SUSPENDED,
         ];
         yield 'fraud beats standing' => [
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'is_archived' => false, 'comments_enabled' => true],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true],
             ['authenticated' => true, 'suspended' => false, 'fraud_locked' => true, 'good_standing' => false],
             true, Caps::REASON_FRAUD_LOCKED,
         ];
         yield 'standing is reported as suspended' => [
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'is_archived' => false, 'comments_enabled' => true],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => 'published', 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true],
             ['authenticated' => true, 'suspended' => false, 'fraud_locked' => false, 'good_standing' => false],
             true, Caps::REASON_SUSPENDED,
         ];
@@ -733,7 +813,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
     {
         $caps = Caps::forRow(
             self::operator(),
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'is_archived' => false],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'moderation_hidden' => false, 'is_archived' => false],
             self::goodMember(),
             true
         );
@@ -812,7 +892,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
         $before = Caps::forCommentsResponse(self::operator(), self::publishedRow(), self::goodMember(), true);
         $after  = Caps::forCommentsResponse(
             self::operator(),
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'is_archived' => true, 'comments_enabled' => true],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'moderation_hidden' => false, 'is_archived' => true, 'comments_enabled' => true],
             self::goodMember(),
             true
         );
@@ -850,7 +930,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
 
     public function testAPredecessorsDraftIsNotPublishableByTheNewOperator(): void
     {
-        $row  = ['author_user_id' => 42, 'status' => Caps::STATUS_DRAFT, 'is_archived' => false, 'comments_enabled' => true];
+        $row  = ['author_user_id' => 42, 'status' => Caps::STATUS_DRAFT, 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true];
         $caps = Caps::forRow(self::operator(7), $row, self::goodMember(), true);
 
         self::assertFalse(Permission::isAllowed($caps, 'can_publish'));
@@ -1034,7 +1114,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
             'authenticated' => false, 'suspended' => true,
             'fraud_locked'  => true,  'already_reported' => true,
         ];
-        $pub = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'is_archived' => false, 'comments_enabled' => true];
+        $pub = ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true];
 
         // The same published row, authored by user 42 — for the self-report
         // rung, which is a VIEWER-ROW relationship and so needs both halves.
@@ -1042,7 +1122,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
 
         yield 'feature off beats everything' => [$pub, $worst, false, Caps::REASON_FEATURE_DISABLED];
         yield 'unavailable beats auth' => [
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_DRAFT, 'is_archived' => false, 'comments_enabled' => true],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_DRAFT, 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => true],
             $worst, true, Caps::REASON_UNAVAILABLE,
         ];
         yield 'auth beats suspension' => [$pub, $worst, true, Caps::REASON_AUTH_REQUIRED];
@@ -1117,12 +1197,17 @@ final class AnnouncementCapabilityResolverTest extends TestCase
         foreach ([Caps::STATUS_PUBLISHED, Caps::STATUS_DRAFT, Caps::STATUS_SCHEDULED, Caps::STATUS_BLOCKED] as $status) {
             foreach ([true, false] as $archived) {
                 foreach ([true, false] as $comments) {
-                    $rows[] = [
-                        'status'           => $status,
-                        'is_archived'      => $archived,
-                        'comments_enabled' => $comments,
-                        'author_user_id'   => 42,
-                    ];
+                    // F-307 B2: the takedown flag is swept too, so its denial
+                    // obeys the same render rule.
+                    foreach ([true, false] as $takenDown) {
+                        $rows[] = [
+                            'status'            => $status,
+                            'is_archived'       => $archived,
+                            'moderation_hidden' => $takenDown,
+                            'comments_enabled'  => $comments,
+                            'author_user_id'    => 42,
+                        ];
+                    }
                 }
             }
         }
@@ -1309,6 +1394,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
         $row = [
             'status'           => Caps::STATUS_PUBLISHED,
             'is_archived'      => true,
+            'moderation_hidden' => false,
             'comments_enabled' => true,
             'author_user_id'   => 42,
         ];
@@ -1441,7 +1527,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
         // 1. Archived: comments close, reporting does not.
         $archived = Caps::forRow(
             self::denied(),
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'is_archived' => true, 'comments_enabled' => true],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'moderation_hidden' => false, 'is_archived' => true, 'comments_enabled' => true],
             self::goodMember(),
             true
         );
@@ -1463,7 +1549,7 @@ final class AnnouncementCapabilityResolverTest extends TestCase
         // And NOT a third way: comments_enabled is a comment switch only.
         $commentsOff = Caps::forRow(
             self::denied(),
-            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'is_archived' => false, 'comments_enabled' => false],
+            ['author_user_id' => self::OWN_AUTHOR, 'status' => Caps::STATUS_PUBLISHED, 'moderation_hidden' => false, 'is_archived' => false, 'comments_enabled' => false],
             self::goodMember(),
             true
         );
