@@ -16,22 +16,28 @@ if (!defined('ABSPATH')) {
  * {@see SolanaFetcher::assetResult()}, and an `authorities[]` entry whose
  * `address` is the wallet and whose `scopes` include `full`.
  *
- * Three answers, the same rule as the EVM owner() check (F-14,
+ * {@see verdict()} answers one of four; {@see isAuthority()} folds the two
+ * unknowns into null, the same rule as the EVM owner() check (F-14,
  * BlockchainQueryService::evmContractOwnerVerdict):
  *
- *   true   the wallet holds full authority over the collection mint today
- *   false  a DIFFERENT, real address holds full authority today — the only
- *          decided "no"
- *   null   UNKNOWN — everything else: no Helius key, transport, non-2xx,
- *          rate limit, an undocumented error, a not-found mint, a response
- *          we cannot read, an unreadable entry, and a RENOUNCED authority
- *          (no full authority listed, or one handed to the system program
- *          or the incinerator)
+ *   authority      true   the wallet holds full authority today
+ *   not_authority  false  a DIFFERENT, real address holds full authority
+ *                         today — the only decided "no"
+ *   unverifiable   null   the chain cannot prove anyone is the creator, and
+ *                         asking again will not change that: a RENOUNCED
+ *                         authority (no full authority listed, or one handed
+ *                         to the System Program or the incinerator), a
+ *                         delegated (non-full) scope alone, a not-found
+ *                         mint, or no mint to ask about
+ *   unavailable    null   we could not get a usable answer this time: no
+ *                         Helius key, transport, non-2xx, rate limit, an
+ *                         undocumented error, or a response we cannot read
  *
  * ⚠ Product rule (user, F-14 decision A): unknown never grants and never
  * revokes. Renouncing does not make someone "not the creator", exactly as
- * an EVM owner() of the zero address reads unknown. The claim path turns
- * null into "couldn't verify"; the re-verify sweep keeps the claim.
+ * an EVM owner() of the zero address reads unknown. At claim time the two
+ * unknowns read differently (user, F-339): `unavailable` is a retryable
+ * "couldn't verify", `unverifiable` a final "can't confirm the creator".
  *
  * ⚠ Base58 addresses are case-sensitive: compared exactly, never folded.
  *
@@ -42,6 +48,11 @@ if (!defined('ABSPATH')) {
 final class SolanaCollectionAuthority
 {
     public const SCOPE_FULL = 'full';
+
+    public const VERDICT_AUTHORITY     = 'authority';
+    public const VERDICT_NOT_AUTHORITY = 'not_authority';
+    public const VERDICT_UNVERIFIABLE  = 'unverifiable';
+    public const VERDICT_UNAVAILABLE   = 'unavailable';
 
     /**
      * Addresses an authority is handed to in order to renounce it: the
@@ -57,39 +68,52 @@ final class SolanaCollectionAuthority
     {
     }
 
+    /** true / false / null (unknown, either kind) — for the re-verify sweep. */
     public function isAuthority(string $wallet, string $collectionMint): ?bool
+    {
+        return match ($this->verdict($wallet, $collectionMint)) {
+            self::VERDICT_AUTHORITY     => true,
+            self::VERDICT_NOT_AUTHORITY => false,
+            default                     => null,
+        };
+    }
+
+    /**
+     * @return self::VERDICT_*
+     */
+    public function verdict(string $wallet, string $collectionMint): string
     {
         $wallet         = trim($wallet);
         $collectionMint = trim($collectionMint);
         if ($wallet === '') {
-            return false;
+            return self::VERDICT_NOT_AUTHORITY;
         }
         if ($collectionMint === '') {
-            return null;
+            return self::VERDICT_UNVERIFIABLE;
         }
 
         $r = $this->fetcher->assetResult($collectionMint);
 
-        // Every failure is unknown — a not-found mint included: a collection
-        // we can no longer read proves nobody's authority, and must never
-        // revoke a creator (F-14 decision A).
         if (!$r['ok']) {
-            return null;
+            // A documented not-found is an answer: there is no asset whose
+            // authority could prove a creator, and asking again won't make
+            // one. Every other failure is this attempt's, so retryable.
+            return ($r['kind'] ?? '') === 'not_found' ? self::VERDICT_UNVERIFIABLE : self::VERDICT_UNAVAILABLE;
         }
 
         $asset = $r['result'];
         if (!is_array($asset)) {
-            return null;
+            return self::VERDICT_UNAVAILABLE;
         }
 
         // An answer about a different asset is no answer about this one.
         if (isset($asset['id']) && $asset['id'] !== $collectionMint) {
-            return null;
+            return self::VERDICT_UNAVAILABLE;
         }
 
         $authorities = $asset['authorities'] ?? null;
         if (!is_array($authorities)) {
-            return null;
+            return self::VERDICT_UNAVAILABLE;
         }
 
         $unreadable  = false;
@@ -103,7 +127,7 @@ final class SolanaCollectionAuthority
                 continue;
             }
             if ($entry['address'] === $wallet) {
-                return true;
+                return self::VERDICT_AUTHORITY;
             }
             if (in_array($entry['address'], self::RENOUNCED_ADDRESSES, true)) {
                 continue;
@@ -111,11 +135,11 @@ final class SolanaCollectionAuthority
             $otherHolder = true;
         }
 
-        // A malformed entry could have been this wallet's: unknown, not no.
+        // A malformed entry could have been this wallet's: not a no.
         if ($unreadable) {
-            return null;
+            return self::VERDICT_UNAVAILABLE;
         }
 
-        return $otherHolder ? false : null;
+        return $otherHolder ? self::VERDICT_NOT_AUTHORITY : self::VERDICT_UNVERIFIABLE;
     }
 }

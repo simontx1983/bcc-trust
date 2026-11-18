@@ -192,6 +192,60 @@ final class SolanaCollectionAuthorityTest extends TestCase
         self::assertNull($this->check(self::WALLET, '  '));
         self::assertSame([], $this->fetcher->assetCalls);
     }
+    // ── verdict(): WHICH unknown (claim-time copy differs, F-339) ─────
+
+    /** @return array<string, array{string, mixed, string}> kind, asset (or null), expected verdict */
+    public static function verdicts(): array
+    {
+        $full = static fn (string $a): array => ['address' => $a, 'scopes' => ['full']];
+        $mint = 'J1S9H3QjnRtBbbuD4HjPV6RpRhwuk4zKbxsnCHuTgh9w';
+        $me   = '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU';
+        $them = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM';
+
+        return [
+            'the wallet holds full'      => ['none', ['id' => $mint, 'authorities' => [$full($me)]], 'authority'],
+            'someone else holds full'    => ['none', ['id' => $mint, 'authorities' => [$full($them)]], 'not_authority'],
+            'renounced: none listed'     => ['none', ['id' => $mint, 'authorities' => []], 'unverifiable'],
+            'renounced: system program'  => ['none', ['id' => $mint, 'authorities' => [$full('11111111111111111111111111111111')]], 'unverifiable'],
+            'renounced: incinerator'     => ['none', ['id' => $mint, 'authorities' => [$full('1nc1nerator11111111111111111111111111111111')]], 'unverifiable'],
+            'delegated scope only'       => ['none', ['id' => $mint, 'authorities' => [['address' => $me, 'scopes' => ['metadata']]]], 'unverifiable'],
+            'mint not found'             => ['not_found', null, 'unverifiable'],
+            'no helius key'              => ['credentials_missing', null, 'unavailable'],
+            'transport'                  => ['transport', null, 'unavailable'],
+            'rate limited'               => ['rate_limited', null, 'unavailable'],
+            'non-2xx'                    => ['http_error', null, 'unavailable'],
+            'unknown kind'               => ['something_new', null, 'unavailable'],
+            'ok, no asset'               => ['none', null, 'unavailable'],
+            'no authorities key'         => ['none', ['id' => $mint], 'unavailable'],
+            'another asset answered'     => ['none', ['id' => $them, 'authorities' => [$full($me)]], 'unavailable'],
+            'an unreadable entry'        => ['none', ['id' => $mint, 'authorities' => [$full($them), ['address' => $me]]], 'unavailable'],
+        ];
+    }
+
+    /** @param array<string, mixed>|null $asset */
+    #[DataProvider('verdicts')]
+    public function testTheVerdictSaysWhichUnknown(string $kind, ?array $asset, string $expected): void
+    {
+        $this->fetcher->assetKind = $kind;
+        $this->fetcher->asset     = $asset;
+
+        $authority = new SolanaCollectionAuthority($this->fetcher);
+        self::assertSame($expected, $authority->verdict(self::WALLET, self::MINT));
+        self::assertSame(
+            match ($expected) { 'authority' => true, 'not_authority' => false, default => null },
+            $authority->isAuthority(self::WALLET, self::MINT),
+            'isAuthority folds both unknowns into null'
+        );
+    }
+
+    public function testNoMintToAskAboutIsUnverifiableAndNoWalletIsANo(): void
+    {
+        $authority = new SolanaCollectionAuthority($this->fetcher);
+
+        self::assertSame('unverifiable', $authority->verdict(self::WALLET, ' '));
+        self::assertSame('not_authority', $authority->verdict('', self::MINT));
+        self::assertSame([], $this->fetcher->assetCalls);
+    }
 }
 
 /** Fetcher double: no transport, a scripted getAsset answer. */
