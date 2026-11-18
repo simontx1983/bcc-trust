@@ -27,6 +27,9 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-import-type ChainRow from \BCC\Trust\Onchain\Repositories\ChainRepository
+ */
 class BlockchainQueryService {
 
     // Default public RPC endpoints (overridable via wp-config constants)
@@ -50,6 +53,18 @@ class BlockchainQueryService {
     public const ROLE_CREATOR = 'creator';
     public const ROLE_TEAM    = 'team';
     public const ROLE_NONE    = 'none';
+
+    // F-14 PR C: evmContractOwnerVerdict() outcomes.
+    public const OWNER_VERDICT_OWNER     = 'owner';
+    public const OWNER_VERDICT_NOT_OWNER = 'not_owner';
+    public const OWNER_VERDICT_UNKNOWN   = 'unknown';
+
+    /**
+     * TESTS ONLY: replaces how the owner() call is made for a chain.
+     *
+     * @var (\Closure(object): ((\Closure(string, string): array{ok: bool, result: ?string, kind: string})|null))|null
+     */
+    public static ?\Closure $ethCallerFor = null;
 
     /**
      * Fetch all NFT collections owned by a wallet in a single Alchemy API call.
@@ -270,6 +285,81 @@ class BlockchainQueryService {
         }
 
         return self::ROLE_NONE;
+    }
+
+    /**
+     * F-14 PR C: is `$wallet` the owner() of EVM `$contract` on `$chain`?
+     *
+     * Three outcomes, unlike the two-outcome role lookups above:
+     *   - OWNER_VERDICT_OWNER: owner() answered with this wallet;
+     *   - OWNER_VERDICT_NOT_OWNER: owner() answered with a DIFFERENT
+     *     non-zero address (ownership was transferred);
+     *   - OWNER_VERDICT_UNKNOWN: everything else. That covers a non-EVM chain
+     *     or address, a missing credential, a transport, RPC or revert
+     *     failure (a contract without Ownable), a result that is not one ABI
+     *     address word, and the ZERO address. The zero address means
+     *     ownership was renounced: it does not make the creator "not the
+     *     creator", so it never revokes, and it never grants a new claim
+     *     either (product decision, 2026-11-13).
+     *
+     * Chain-aware: the call goes to `$chain`'s own JSON-RPC endpoint through
+     * EvmFetcher::ethCallResult(), which already tells a failed call apart
+     * from an answer. One `eth_call`.
+     *
+     * @param ChainRow $chain
+     */
+    public static function evmContractOwnerVerdict(object $chain, string $wallet, string $contract): string {
+        $w = strtolower(trim($wallet));
+        $c = strtolower(trim($contract));
+        if ((string) ($chain->chain_type ?? '') !== 'evm'
+            || preg_match('/^0x[a-f0-9]{40}$/', $w) !== 1
+            || preg_match('/^0x[a-f0-9]{40}$/', $c) !== 1
+        ) {
+            return self::OWNER_VERDICT_UNKNOWN;
+        }
+
+        try {
+            $call = self::$ethCallerFor !== null ? (self::$ethCallerFor)($chain) : self::ethCallerFor($chain);
+            if ($call === null) {
+                return self::OWNER_VERDICT_UNKNOWN;
+            }
+            // owner() — selector 0x8da5cb5b
+            $r = $call($c, '0x8da5cb5b');
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] owner() read threw; treated as unknown', [
+                'chain_id'    => (int) ($chain->id ?? 0),
+                'error_class' => get_class($e),
+            ]);
+            return self::OWNER_VERDICT_UNKNOWN;
+        }
+
+        if (!$r['ok'] || !is_string($r['result'])
+            || preg_match('/^0x(0{24})([0-9a-f]{40})$/', strtolower($r['result']), $m) !== 1
+        ) {
+            return self::OWNER_VERDICT_UNKNOWN;
+        }
+
+        $owner = '0x' . $m[2];
+        if ($owner === '0x' . str_repeat('0', 40)) {
+            return self::OWNER_VERDICT_UNKNOWN; // renounced
+        }
+
+        return hash_equals($owner, $w) ? self::OWNER_VERDICT_OWNER : self::OWNER_VERDICT_NOT_OWNER;
+    }
+
+    /**
+     * The chain's eth_call, or null when the chain has no EVM driver.
+     *
+     * @param ChainRow $chain
+     * @return (\Closure(string, string): array{ok: bool, result: ?string, kind: string})|null
+     */
+    private static function ethCallerFor(object $chain): ?\Closure {
+        $fetcher = \BCC\Trust\Onchain\Factories\FetcherFactory::make_for_chain($chain);
+        if (!$fetcher instanceof \BCC\Trust\Onchain\Fetchers\EvmFetcher) {
+            return null;
+        }
+
+        return static fn (string $to, string $data): array => $fetcher->ethCallResult($to, $data);
     }
 
     /**

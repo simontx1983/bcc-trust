@@ -186,7 +186,25 @@ final class PageOwnerBackfillCandidatesIntegrationTest extends TestCase
         self::assertSame([['page_id' => $second, 'user_id' => self::USER_B, 'current_role' => null, 'other_owner' => 0]], $this->candidates($first));
     }
 
-    /** A read that did not run is NULL — never "nothing to repair". */
+    /**
+     * F-360: peepso_page_members has no unique (page, user) key, so a claimer
+     * can hold several rows on one page. A `banned` row must win over an older
+     * non-banned one, or the backfill's ban skip would be hidden and a banned
+     * claimer promoted to owner.
+     */
+    public function testABanIsSeenEvenBehindAnOlderNonBannedRow(): void
+    {
+        $page = $this->page(self::USER_A);
+        $this->claim(self::USER_A, $page);
+        $this->member(self::USER_A, $page, 'member'); // older, lower pm_id
+        $this->member(self::USER_A, $page, 'banned'); // newer
+
+        self::assertSame(
+            [['page_id' => $page, 'user_id' => self::USER_A, 'current_role' => 'banned', 'other_owner' => 0]],
+            $this->candidates()
+        );
+    }
+
     /** The live claim path's guard reads the same table (F-299 live guard). */
     public function testTheLivePathSeesADifferentOwnerButNotTheClaimerThemself(): void
     {
@@ -200,6 +218,7 @@ final class PageOwnerBackfillCandidatesIntegrationTest extends TestCase
         self::assertSame(0, PeepSoQueryRepository::otherPageOwnerId($empty, self::USER_A), 'no owner row: 0');
     }
 
+    /** A read that did not run is NULL — never "nothing to repair". */
     public function testAFailedReadIsNullNotEmpty(): void
     {
         global $wpdb;

@@ -20,6 +20,28 @@ namespace BCC\Core\Permissions {
     }
 }
 
+namespace BCC\Core\Repositories {
+    // F-296/F-331: the notification reads take the block lists from
+    // bcc-core's fail-closed readers. No blocks in these digest tests;
+    // NotificationBlockedActorTest covers the exclusion and the failure.
+    if (!class_exists(__NAMESPACE__ . '\PeepSoBlockRepository', false)) {
+        final class PeepSoBlockRepository
+        {
+            /** @return list<int>|null */
+            public static function getBlockedIdsOrUnknown(int $blockerId, int $limit = 500): ?array
+            {
+                return [];
+            }
+
+            /** @return list<int>|null */
+            public static function getBlockerIdsOrUnknown(int $blockedId, int $limit = 500): ?array
+            {
+                return [];
+            }
+        }
+    }
+}
+
 namespace BCC\Core\Log {
     if (!class_exists(Logger::class, false)) {
         final class Logger

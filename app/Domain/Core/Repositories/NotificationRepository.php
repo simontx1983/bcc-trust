@@ -45,12 +45,7 @@ if (!defined('ABSPATH')) {
  */
 final class NotificationRepository
 {
-    use \BCC\Trust\Onchain\Repositories\GuardsReadFailures;
-
-    /** PeepSo's block table (read-only here; bcc-core owns the writes). */
-    private const BLOCKS_TABLE_SUFFIX = 'peepso_blocks';
-
-    /** Per direction; same bound as bcc-core PeepSoBlockRepository::getBlockedIds(). */
+    /** Per direction; the bcc-core readers' own default bound. */
     private const BLOCK_READ_LIMIT = 500;
 
     /** Owned by PeepSo — see class docblock. */
@@ -74,12 +69,14 @@ final class NotificationRepository
      * short pages and pagination dead-ends). System rows (from user 0) are
      * never excluded.
      *
-     * FAIL-CLOSED. The same two bounded reads the feed makes, but through
-     * runRead(): bcc-core's getBlockedIds()/getBlockerIds() are get_col()
-     * reads that return [] on a failed query, which would read as "no
-     * blocks" and drop the filter. A failed read THROWS instead: the bell
-     * list and the badge count answer 503, and the digest skips that user
-     * this run (DigestService counts it as failed; nothing is mailed).
+     * FAIL-CLOSED, through bcc-core's getBlockedIdsOrUnknown() /
+     * getBlockerIdsOrUnknown() (F-331), which answer NULL when the read did
+     * not run. (The plain getBlockedIds()/getBlockerIds() return [] on a
+     * failed query, which would read as "no blocks" and drop the filter;
+     * #630 carried its own SELECTs until core had these.) A failed read
+     * THROWS: the bell list and the badge count answer 503, and the digest
+     * skips that user this run (DigestService counts it as failed; nothing
+     * is mailed).
      *
      * Beyond BLOCK_READ_LIMIT blocks in one direction the rest stay
      * unfiltered (same bound as the feed; >500 blocks is pathological).
@@ -89,23 +86,23 @@ final class NotificationRepository
      */
     private static function blockedActorClause(int $userId): array
     {
-        global $wpdb;
-        $blocks = $wpdb->prefix . self::BLOCKS_TABLE_SUFFIX;
-
-        $blocked = self::runRead($wpdb->prepare(
-            "SELECT blk_blocked_id AS uid FROM {$blocks} WHERE blk_user_id = %d LIMIT %d",
-            $userId,
-            self::BLOCK_READ_LIMIT
-        ), __FUNCTION__, true);
-        $blockers = self::runRead($wpdb->prepare(
-            "SELECT blk_user_id AS uid FROM {$blocks} WHERE blk_blocked_id = %d LIMIT %d",
-            $userId,
-            self::BLOCK_READ_LIMIT
-        ), __FUNCTION__, true);
+        $blocked  = \BCC\Core\Repositories\PeepSoBlockRepository::getBlockedIdsOrUnknown($userId, self::BLOCK_READ_LIMIT);
+        $blockers = \BCC\Core\Repositories\PeepSoBlockRepository::getBlockerIdsOrUnknown($userId, self::BLOCK_READ_LIMIT);
+        if ($blocked === null || $blockers === null) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] notification block read failed — refusing to read notifications unfiltered', [
+                'user_id'   => $userId,
+                'direction' => $blocked === null ? 'blocked' : 'blockers',
+            ]);
+            throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure(
+                self::class,
+                __FUNCTION__,
+                'PeepSoBlockRepository read did not run'
+            );
+        }
 
         $ids = [];
-        foreach (array_merge($blocked, $blockers) as $row) {
-            $id = isset($row->uid) ? (int) $row->uid : 0;
+        foreach (array_merge($blocked, $blockers) as $raw) {
+            $id = (int) $raw;
             if ($id > 0) {
                 $ids[$id] = $id;
             }

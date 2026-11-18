@@ -16,7 +16,9 @@
 
 namespace BCC\Trust\Onchain\Services;
 
+use BCC\Trust\Core\Services\wallet\BlockchainQueryService;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
+use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\ValidatorRepository;
 use BCC\Trust\Onchain\Repositories\CollectionRepository;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
@@ -450,7 +452,8 @@ class ClaimService {
             $chainType = $entity->chain_type ?? 'evm';
 
             $role = match ($chainType) {
-                'evm'    => $queryClass::getEthRole($addr, $contractAddr),
+                'evm'    => self::evmCollectionRole($addr, $contractAddr, $entity),
+                // F-339 slots its Solana collection-authority check in here.
                 'solana' => $queryClass::getSolanaRole($addr, $contractAddr),
                 default  => 'none',
             };
@@ -473,6 +476,32 @@ class ClaimService {
         }
 
         return $holder;
+    }
+
+    /**
+     * F-14 PR C: an EVM wallet's role in a collection.
+     *
+     * Creator ONLY when owner() on the collection's OWN chain names this
+     * wallet (BlockchainQueryService::evmContractOwnerVerdict). The old
+     * lookup always asked Ethereum mainnet and read any failure as "not
+     * the creator"; a renounced (zero) owner is unknown, so it is never a
+     * match. Holder still comes from the legacy lookup, and claim() refuses
+     * holders (F-303); a creator answer from that mainnet-only lookup is
+     * not trusted.
+     *
+     * @param EntityForClaim $entity
+     */
+    private static function evmCollectionRole(string $wallet, string $contract, object $entity): string {
+        $chain = ChainRepository::getBySlug((string) $entity->chain_slug);
+        if ($chain !== null
+            && BlockchainQueryService::evmContractOwnerVerdict($chain, $wallet, $contract) === BlockchainQueryService::OWNER_VERDICT_OWNER
+        ) {
+            return BlockchainQueryService::ROLE_CREATOR;
+        }
+
+        return BlockchainQueryService::getEthRole($wallet, $contract) === BlockchainQueryService::ROLE_HOLDER
+            ? BlockchainQueryService::ROLE_HOLDER
+            : BlockchainQueryService::ROLE_NONE;
     }
 
     /**
