@@ -200,6 +200,75 @@ final class PostReachCascadeIntegrationTest extends TestCase
         self::assertSame(2, $reach['by_source']['feed']['views']);
     }
 
+    /**
+     * ⭐ THE EXISTENCE-ORACLE PROPERTY.
+     *
+     * A non-owner must get an answer BYTE-IDENTICAL to a missing post. This
+     * asserts indistinguishability, not merely that each is a 404 — two
+     * different 404 bodies would still leak which case occurred.
+     *
+     * Why it matters: an earlier revision returned 403 for a foreign post,
+     * reasoning that post existence is public. It is not — secret-group,
+     * §F-02-private and moderation-hidden posts are exactly the cases where
+     * it is private, so the split would have told a viewer that a post they
+     * cannot see exists.
+     */
+    public function testANonOwnerGetsAnAnswerIdenticalToAMissingPost(): void
+    {
+        $service  = new \BCC\Trust\Core\Services\PostAnalyticsService();
+        $stranger = self::AUTHOR + 999;
+
+        $foreign = $service->forOwner(self::ACT_ID, $stranger);
+        $missing = $service->forOwner(self::ACT_ID + 424242, $stranger);
+        $badId   = $service->forOwner(0, $stranger);
+
+        self::assertSame(
+            $missing,
+            $foreign,
+            'someone else\'s post must be indistinguishable from a post that does not exist'
+        );
+        self::assertSame($missing, $badId, 'and so must a malformed id');
+        self::assertSame('bcc_not_found', $foreign['error'] ?? null);
+    }
+
+    /**
+     * Anti-vacuity for the case above: the owner really does get a payload,
+     * so the uniform 404 is not simply "refuse everyone".
+     */
+    public function testTheOwnerStillGetsTheThreeSections(): void
+    {
+        $this->seedReach(self::ACT_ID);
+
+        $result = (new \BCC\Trust\Core\Services\PostAnalyticsService())
+            ->forOwner(self::ACT_ID, self::AUTHOR);
+
+        self::assertArrayNotHasKey('error', $result, 'the author is allowed');
+        self::assertSame(['act_id', 'reach', 'engagement', 'trust'], array_keys($result));
+        self::assertTrue($result['reach']['available']);
+        self::assertSame(2, $result['reach']['views'], 'seedReach writes one feed + one tag view');
+
+        // Trust is permanently unavailable per post — a decision, not a gap.
+        self::assertFalse($result['trust']['available']);
+        self::assertSame('trust_is_profile_scoped', $result['trust']['reason']);
+    }
+
+    /**
+     * `engagement_rate` is null, never 0, when there are no measured
+     * viewers. Rendering 0% would read as "nobody engaged" when the truth is
+     * "nothing to divide by".
+     */
+    public function testEngagementRateIsNullWithNoMeasuredViewers(): void
+    {
+        $result = (new \BCC\Trust\Core\Services\PostAnalyticsService())
+            ->forOwner(self::ACT_ID, self::AUTHOR);
+
+        self::assertSame(0, $result['reach']['daily_unique_viewers']);
+        self::assertNull(
+            $result['engagement']['engagement_rate'],
+            'an undefined rate must be null, not 0'
+        );
+    }
+
     /** A post with no rows is a real zero, distinguishable from a failure. */
     public function testAPostWithNoReachReadsAsZeroNotNull(): void
     {

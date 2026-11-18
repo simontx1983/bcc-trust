@@ -73,21 +73,36 @@ final class PostAnalyticsService
         if ($viewerId <= 0) {
             return ['error' => 'bcc_unauthorized', 'message' => 'Sign in required.'];
         }
+
+        // ⚠⚠ EXISTENCE ORACLE (F-47 posture). Every non-success outcome below
+        // is the SAME 404: a bad id, an id with no post, and someone else's
+        // post are byte-identical to a caller.
+        //
+        // An earlier revision returned 403 for a foreign post, on the
+        // reasoning that a post's existence is already public. That
+        // reasoning was WRONG for this codebase: secret-group posts,
+        // §F-02-private posts and moderation-hidden posts are precisely the
+        // cases where existence is NOT public, so a 403/404 split would tell
+        // a viewer that a post they cannot see exists. `PostsService::deletePost`
+        // carries the same warning for the same reason.
+        //
+        // Making the two indistinguishable is better than wording the
+        // distinction carefully: there is nothing for the caller to DO with
+        // "it exists but isn't yours" on an analytics read, so the
+        // distinction has no value to trade against the leak. It also means
+        // this endpoint needs no visibility check of its own to be safe —
+        // the property holds by construction.
         if ($actId <= 0) {
-            return ['error' => 'bcc_invalid_request', 'message' => 'Invalid post id.'];
+            return self::notFound();
         }
 
         $activity = PeepSoActivityRepository::getById($actId);
         if ($activity === null) {
-            return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
+            return self::notFound();
         }
 
-        // Owner-only. 403 rather than the 404 MeFindingAppealEndpoint uses:
-        // a post's existence is already public, so distinguishing "not
-        // yours" from "not here" leaks nothing here, and it matches the
-        // sibling owner-only read on GET /posts/{id}.
         if ((int) $activity->act_user_id !== $viewerId) {
-            return ['error' => 'bcc_forbidden', 'message' => 'You can only see analytics for your own posts.'];
+            return self::notFound();
         }
 
         // Resolved ONCE, from the activity row — see the ID DISCIPLINE note.
@@ -107,6 +122,21 @@ final class PostAnalyticsService
                 'reason'    => 'trust_is_profile_scoped',
             ],
         ];
+    }
+
+    /**
+     * The single not-found answer.
+     *
+     * ⚠ One method, so the three call sites CANNOT drift apart into
+     * distinguishable responses. If a future change needs to tell them
+     * apart, that is a deliberate decision to make here — not something to
+     * arrive at by editing one branch's message.
+     *
+     * @return array{error: string, message: string}
+     */
+    private static function notFound(): array
+    {
+        return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
     }
 
     /**

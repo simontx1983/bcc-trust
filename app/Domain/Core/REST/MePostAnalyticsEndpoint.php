@@ -7,11 +7,11 @@
  * section's outage cannot make another look like zeros.
  *
  * ⚠ OWNER-ONLY, enforced in the service against the post's author, not by
- * hiding a control. A non-owner gets **403 `bcc_forbidden`**, deliberately
- * NOT the 404 that `MeFindingAppealEndpoint` returns: that endpoint 404s to
- * avoid revealing whether a finding exists, whereas a post's existence is
- * already public, so 403 leaks nothing here and matches the sibling
- * owner-only read on `GET /posts/{id}`.
+ * hiding a control. A non-owner gets the **same 404** as a missing post —
+ * matching `MeFindingAppealEndpoint`'s no-leak posture. An earlier revision
+ * returned 403 on the reasoning that post existence is public; that is false
+ * for secret-group, §F-02-private and moderation-hidden posts, so the split
+ * would have revealed that a post the viewer cannot see exists.
  *
  * ⚠ `trust` always returns `available: false`. Attestations target profiles
  * and cards, never an activity post, and per-post vouching was deliberately
@@ -44,12 +44,20 @@ final class MePostAnalyticsEndpoint
     private const RATE_LIMIT  = 60;
     private const RATE_WINDOW = 300;
 
-    /** @var array<string, int> error code → HTTP status */
+    /**
+     * Error code → HTTP status.
+     *
+     * ⚠ There is deliberately NO `bcc_forbidden` here. A non-owner gets the
+     * same 404 as a missing post, so the route cannot be used to discover
+     * that a post exists which the viewer is not allowed to see (secret
+     * group, §F-02 private, moderation-hidden). Adding a 403 back would
+     * reintroduce that oracle.
+     *
+     * @var array<string, int>
+     */
     private const ERROR_STATUS = [
-        'bcc_unauthorized'    => 401,
-        'bcc_invalid_request' => 400,
-        'bcc_not_found'       => 404,
-        'bcc_forbidden'       => 403,
+        'bcc_unauthorized' => 401,
+        'bcc_not_found'    => 404,
     ];
 
     public static function register(): void
