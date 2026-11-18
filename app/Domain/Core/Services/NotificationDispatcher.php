@@ -1820,6 +1820,13 @@ final class NotificationDispatcher
         "We can no longer find the validator behind your %s claim, so the verified badge was removed. If it's still running, claim it again to restore the badge.";
 
     /**
+     * F-14 PR C copy (no_longer_owner) — the collection contract's owner()
+     * now names a different wallet. Approved 2026-11-13.
+     */
+    public const CLAIM_CREATOR_BADGE_REMOVED_MESSAGE =
+        "A different wallet now owns the %s contract, so the creator badge was removed. Claim again from the wallet that owns it.";
+
+    /**
      * The bell text for a revoked claim. An empty entity name drops the
      * name from the sentence ("your claim") rather than producing
      * "your this claim" (#594 review).
@@ -1830,6 +1837,11 @@ final class NotificationDispatcher
 
         if ($reason === 'no_longer_holder') {
             return sprintf(self::CLAIM_HOLDER_BADGE_REMOVED_MESSAGE, $name !== '' ? $name : 'this collection');
+        }
+        if ($reason === 'no_longer_owner') {
+            return $name !== ''
+                ? sprintf(self::CLAIM_CREATOR_BADGE_REMOVED_MESSAGE, $name)
+                : str_replace('the %s contract', "this collection's contract", self::CLAIM_CREATOR_BADGE_REMOVED_MESSAGE);
         }
 
         $template = $reason === 'validator_row_gone'

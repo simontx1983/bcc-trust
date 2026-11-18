@@ -200,6 +200,26 @@ namespace BCC\Trust\Core\Support {
             return \bcc_f02blog_fixture()['session'];
         }
     }
+
+    // ⚠ F-341: BlogService::getUserBlog() now asks ProfileSectionVisibility
+    // whether the owner shows their Blogs section, and that reads user_meta
+    // with an UNQUALIFIED call from THIS namespace. Without the shim this
+    // suite fatals with "Call to undefined function
+    // BCC\Trust\Core\Support\get_user_meta()" — a FATAL, so the whole class
+    // dies at the call rather than failing an assertion.
+    //
+    // Returns '' unconditionally: absent meta means the section is SHOWN,
+    // which is what every assertion in this file assumes. This suite is
+    // about the §F-02 per-post gate, not about section switches.
+    if (!\function_exists('BCC\Trust\Core\Support\get_user_meta')) {
+        /** @return mixed */
+        function get_user_meta($userId, $key = '', $single = false)
+        {
+            unset($userId, $key, $single);
+
+            return '';
+        }
+    }
 }
 
 namespace BCC\Trust\Core\Services {

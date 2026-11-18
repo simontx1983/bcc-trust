@@ -501,6 +501,12 @@ final class UsersEndpoint
         $cursor      = is_string($cursorParam) && $cursorParam !== '' ? $cursorParam : null;
 
         $viewerId = get_current_user_id();
+
+        // ⚠ F-341's Blogs-section gate lives in BlogService::getUserBlog(),
+        // NOT here. It is a property of "who may read this member's blog",
+        // so it belongs with the read rather than with one route — a gate
+        // here would be bypassed the moment a second caller appeared, which
+        // is exactly the F-283 failure.
         $payload  = Plugin::instance()->blogService()->getUserBlog($userId, $viewerId, $cursor, $limit);
 
         $response = ApiResponse::ok($payload);
@@ -792,8 +798,9 @@ final class UsersEndpoint
         //
         // It also honours three things this endpoint never implemented:
         // banned and unvalidated accounts are excluded (`usr_role`), blocks
-        // are respected in both directions when `user_blocking_enable` is
-        // on, and `hide_from_search` finally works — the contract has
+        // are respected in both directions (PeepSo gates that on
+        // `user_blocking_enable`, which PrivacySettings pins ON, F-295), and
+        // `hide_from_search` finally works — the contract has
         // promised since v1.64 that it "excludes the user from directory +
         // member search", and nothing enforced it. ⚠ So member COUNTS can
         // legitimately drop with this change; that is the setting starting

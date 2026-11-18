@@ -265,6 +265,248 @@ final class PostReachRepository
     }
 
     /**
+     * Lifetime reach for one post, with the per-source breakdown.
+     *
+     * ⚠ FAILS CLOSED: returns null on a DB error, never a zero-filled
+     * array. A post nobody has read and a post whose query broke must not
+     * look the same to the caller — the API turns null into
+     * `available: false`, not into zeros.
+     *
+     * ── WHAT `unique_viewers` MEANS HERE, PRECISELY ──────────────────
+     * The dedupe claim is per (post, DAY) — NOT per source — so on a given
+     * day the first source to show the post to a viewer scores the +1 and
+     * every other source scores 0 for them. Summing across sources is
+     * therefore correct and does not double-count.
+     *
+     * Summing across DAYS does over-count: a reader returning on two days
+     * is two daily uniques, by design (the dedupe hash is salted per day,
+     * so there is deliberately nothing stable to deduplicate against
+     * across days). So this total is "sum of daily unique viewers" — a
+     * conservative UPPER bound on distinct people, which makes any
+     * engagement rate derived from it a conservative LOWER bound. The API
+     * labels it `daily_unique_viewers` for that reason; do not relabel it
+     * as lifetime uniques.
+     *
+     * @param int $postId A peepso `act_id` — NOT a wp_posts.ID. The two sit
+     *                    side by side in PostsService::deletePost.
+     * @return array{
+     *     views: int,
+     *     daily_unique_viewers: int,
+     *     profile_visits: int,
+     *     by_source: array<string, array{views: int, daily_unique_viewers: int, profile_visits: int}>
+     * }|null
+     */
+    public static function reachForPost(int $postId): ?array
+    {
+        if ($postId <= 0) {
+            return null;
+        }
+        if (!self::installed()) {
+            // Not installed is "cannot answer", not "zero views".
+            return null;
+        }
+
+        global $wpdb;
+        $table = self::reachTable();
+
+        self::clearLastError();
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT source,
+                    SUM(views) AS v,
+                    SUM(unique_viewers) AS u,
+                    SUM(profile_visits) AS pv
+               FROM {$table}
+              WHERE post_id = %d
+              GROUP BY source",
+            $postId
+        ));
+
+        if ($ok === false || self::readFailed()) {
+            return null;
+        }
+
+        /** @var list<object{source?: string, v?: int|numeric-string, u?: int|numeric-string, pv?: int|numeric-string}>|mixed $rows */
+        $rows = $wpdb->last_result;
+        if (!is_array($rows)) {
+            $rows = [];
+        }
+
+        $totals  = ['views' => 0, 'daily_unique_viewers' => 0, 'profile_visits' => 0];
+        $bySource = [];
+
+        foreach ($rows as $row) {
+            $source = (string) ($row->source ?? '');
+            // Defensive: a row whose source is not whitelisted cannot be
+            // produced by this class's writer, but a hand-edited row
+            // should not appear in an operator-facing breakdown.
+            if (!in_array($source, self::SOURCES, true)) {
+                continue;
+            }
+
+            $entry = [
+                'views'                => (int) ($row->v ?? 0),
+                'daily_unique_viewers' => (int) ($row->u ?? 0),
+                'profile_visits'       => (int) ($row->pv ?? 0),
+            ];
+
+            $bySource[$source]             = $entry;
+            $totals['views']              += $entry['views'];
+            $totals['daily_unique_viewers'] += $entry['daily_unique_viewers'];
+            $totals['profile_visits']     += $entry['profile_visits'];
+        }
+
+        return $totals + ['by_source' => $bySource];
+    }
+
+    /**
+     * Purge reach rows for a post identified by its **wp_posts.ID**.
+     *
+     * ⭐ This method exists so no caller has to do the id translation, and
+     * so a mix-up is a NAMING error rather than a silent zero. `deleteForPost()`
+     * takes an act_id; this one takes a wp_post id and resolves it here. The
+     * two ids sit side by side in `PostsService::deletePost` as `$actId` and
+     * `$postId`, and passing the wrong one to a single `deleteForPost($id)`
+     * would quietly delete nothing at all.
+     *
+     * Used by the `before_delete_post` cascade, which only ever has the
+     * wp_post id. Resolution is index-backed (`act_external_index`).
+     *
+     * @return int|null Rows deleted, 0 when the post had no reach rows (or
+     *                  no activity), null on a read/write failure.
+     */
+    public static function deleteForWpPost(int $wpPostId): ?int
+    {
+        if ($wpPostId <= 0 || !self::installed()) {
+            return null;
+        }
+
+        global $wpdb;
+        $activities = $wpdb->prefix . 'peepso_activities';
+
+        if (!TableRegistry::exists($activities)) {
+            return null;
+        }
+
+        self::clearLastError();
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT act_id FROM {$activities} WHERE act_external_id = %d",
+            $wpPostId
+        ));
+
+        if ($ok === false || self::readFailed()) {
+            return null;
+        }
+
+        /** @var list<object{act_id?: int|numeric-string}>|mixed $rows */
+        $rows = $wpdb->last_result;
+        if (!is_array($rows) || $rows === []) {
+            // No activity for this post — nothing to purge, and that is a
+            // real zero rather than a failure.
+            return 0;
+        }
+
+        $deleted = 0;
+        foreach ($rows as $row) {
+            $actId = (int) ($row->act_id ?? 0);
+            if ($actId <= 0) {
+                continue;
+            }
+            $n = self::deleteForPost($actId);
+            if ($n === null) {
+                return null;
+            }
+            $deleted += $n;
+        }
+
+        return $deleted;
+    }
+
+    /**
+     * Purge reach rows for every post a member authored, in ONE bounded
+     * batch. Call until it returns 0.
+     *
+     * ⚠ The reach table is POST-keyed, so this cannot be a single
+     * user-keyed DELETE like the other purges in `UserLifecycleService`. It
+     * resolves the member's act_ids first — and authorship lives on
+     * `wp_posts.post_author`, NOT on the activities table, which carries
+     * only `act_owner_id` (a different thing: the owner of the wall or
+     * group the post sits on).
+     *
+     * ⚠ Batched because a prolific member could own a lot of rows and
+     * account deletion must not take one long lock. Multi-table DELETE does
+     * not accept LIMIT in MySQL, so this is a bounded SELECT followed by a
+     * keyed DELETE rather than a single join-delete.
+     *
+     * @param int $limit Max act_ids resolved per call.
+     * @return int|null Rows deleted this batch, 0 when nothing is left,
+     *                  null on failure.
+     */
+    public static function deleteForAuthor(int $userId, int $limit = 200): ?int
+    {
+        if ($userId <= 0 || !self::installed()) {
+            return null;
+        }
+
+        $limit = max(1, min(1000, $limit));
+
+        global $wpdb;
+        $activities = $wpdb->prefix . 'peepso_activities';
+        $reach      = self::reachTable();
+
+        if (!TableRegistry::exists($activities)) {
+            return null;
+        }
+
+        self::clearLastError();
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT DISTINCT a.act_id
+               FROM {$activities} a
+               INNER JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
+               INNER JOIN {$reach} r ON r.post_id = a.act_id
+              WHERE p.post_author = %d
+              LIMIT %d",
+            $userId,
+            $limit
+        ));
+
+        if ($ok === false || self::readFailed()) {
+            return null;
+        }
+
+        /** @var list<object{act_id?: int|numeric-string}>|mixed $rows */
+        $rows = $wpdb->last_result;
+        if (!is_array($rows) || $rows === []) {
+            return 0;
+        }
+
+        $ids = [];
+        foreach ($rows as $row) {
+            $actId = (int) ($row->act_id ?? 0);
+            if ($actId > 0) {
+                $ids[] = $actId;
+            }
+        }
+        if ($ids === []) {
+            return 0;
+        }
+
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+
+        self::clearLastError();
+        $deleted = $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$reach} WHERE post_id IN ({$placeholders})",
+            ...$ids
+        ));
+
+        if ($deleted === false || self::readFailed()) {
+            self::logWriteFailure('delete_for_author');
+            return null;
+        }
+
+        return (int) $deleted;
+    }
+
+    /**
      * Sweep the dedupe table: age TTL first, then an overflow trim.
      *
      * Modelled on `HeliusSeenSignaturesRepository::sweep()`, which solves the

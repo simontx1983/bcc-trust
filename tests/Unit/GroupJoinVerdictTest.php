@@ -107,7 +107,8 @@ final class GroupJoinVerdictTest extends TestCase
             'closed, requested'   => [PeepSoPrivacy::Closed, GroupType::User, 'pending_admin', 'requires_approval', 'requested', 'already_requested'],
             'closed, invited'     => [PeepSoPrivacy::Closed, GroupType::User, 'pending_user', 'requires_approval', 'invited', 'invited'],
             'secret, invited'     => [PeepSoPrivacy::Secret, GroupType::User, 'pending_user', 'invite_only', 'invited', 'not_applicable'],
-            'delegator community' => [PeepSoPrivacy::Closed, GroupType::Validator, null, 'not_eligible', 'none', 'not_applicable'],
+            // F-359: delegation is verified by the join door, like a holder group.
+            'delegator community' => [PeepSoPrivacy::Closed, GroupType::Validator, null, 'verify_on_join', 'none', 'not_applicable'],
         ];
     }
 
@@ -117,7 +118,8 @@ final class GroupJoinVerdictTest extends TestCase
         $f = $this->fields(self::ctx($privacy, $type), $status);
 
         self::assertSame($joinReason, $f['can_join']['reason_code']);
-        self::assertSame($joinReason === null, $f['can_join']['allowed']);
+        // Join is offered when nothing stands in the way, or the join door verifies.
+        self::assertSame($joinReason === null || $joinReason === 'verify_on_join', $f['can_join']['allowed']);
         self::assertSame($membership, $f['viewer_membership_status']);
         self::assertSame($requestReason, $f['can_request_join']['reason_code']);
     }
@@ -155,14 +157,17 @@ final class GroupJoinVerdictTest extends TestCase
             'trust gated, short'  => [PeepSoPrivacy::Open, GroupType::User, null, 50, null],
             'holder, holds'       => [PeepSoPrivacy::Closed, GroupType::Nft, null, 0, true],
             'holder, does not'    => [PeepSoPrivacy::Closed, GroupType::Nft, null, 0, false],
+            // F-359: what the group page really sends — not checked on render.
+            'holder, not checked' => [PeepSoPrivacy::Closed, GroupType::Nft, null, 0, null],
             'delegator'           => [PeepSoPrivacy::Closed, GroupType::Validator, null, 0, null],
         ];
     }
 
     /**
-     * The page computes can_join through buildPermissions() with a real
-     * holder check; give the list path the same holder verdict and the two
-     * must be identical.
+     * The page computes can_join through buildPermissions(); give the list
+     * path the same holder verdict (true, false, or null = not checked,
+     * which is what the page sends since F-359) and the two must be
+     * identical.
      */
     #[DataProvider('agreement')]
     public function testTheListVerdictEqualsThePagesForTheSameInputs(PeepSoPrivacy $privacy, GroupType $type, ?string $status, int $trustMin, ?bool $holder): void
@@ -173,9 +178,9 @@ final class GroupJoinVerdictTest extends TestCase
         $page = new ReflectionMethod(GroupsService::class, 'buildPermissions');
         $page->setAccessible(true);
         /** @var array{can_join: array<string, mixed>} $perms */
-        $perms = $page->invoke($this->groups, $ctx, self::VIEWER, $isMember, (bool) $holder, false, $trustMin, null, $status === 'banned');
+        $perms = $page->invoke($this->groups, $ctx, self::VIEWER, $isMember, $holder, false, $trustMin, null, $status === 'banned');
 
-        $list = $this->fields($ctx, $status, $trustMin, $type === GroupType::Nft ? (bool) $holder : null);
+        $list = $this->fields($ctx, $status, $trustMin, $type === GroupType::Nft ? $holder : null);
 
         self::assertSame($perms['can_join'], $list['can_join']);
     }

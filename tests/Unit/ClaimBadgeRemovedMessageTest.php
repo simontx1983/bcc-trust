@@ -33,6 +33,10 @@ final class ClaimBadgeRemovedMessageTest extends TestCase
                 "We couldn't confirm your linked wallets still hold Bad Kids, so the holder badge was removed. Claim again once a linked wallet holds it."],
             'holder, unnamed' => ['', 'no_longer_holder',
                 "We couldn't confirm your linked wallets still hold this collection, so the holder badge was removed. Claim again once a linked wallet holds it."],
+            'creator, named' => ['Bad Kids', 'no_longer_owner',
+                "A different wallet now owns the Bad Kids contract, so the creator badge was removed. Claim again from the wallet that owns it."],
+            'creator, unnamed' => [' ', 'no_longer_owner',
+                "A different wallet now owns this collection's contract, so the creator badge was removed. Claim again from the wallet that owns it."],
         ];
     }
 
@@ -44,7 +48,7 @@ final class ClaimBadgeRemovedMessageTest extends TestCase
 
     public function testNoMessageEverReadsYourThisClaimOrCarriesANudge(): void
     {
-        foreach (['wallet_link_gone', 'validator_row_gone', 'no_longer_holder'] as $reason) {
+        foreach (['wallet_link_gone', 'validator_row_gone', 'no_longer_holder', 'no_longer_owner'] as $reason) {
             $text = NotificationDispatcher::claimBadgeRemovedMessage('', $reason);
             self::assertStringNotContainsString('your this', $text);
             self::assertStringNotContainsString('%s', $text);
