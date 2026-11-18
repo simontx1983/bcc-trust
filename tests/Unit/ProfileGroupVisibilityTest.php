@@ -461,7 +461,10 @@ final class ProfileGroupVisibilityTest extends TestCase
     public function testJunkEntriesAreIgnoredAndNumericStringsStillHide(): void
     {
         $GLOBALS['__bcc_pgv']['memberships'] = [self::G_SECRET => true];
-        self::hideForOwner([0, -5, 'abc', null, (string) self::G_HALL, self::G_HALL]);
+        // ⚠ The int form is deliberately ABSENT: the numeric STRING must be
+        // the only thing that can hide this Hall, or dropping string
+        // support would still pass (it did — a surviving mutation caught it).
+        self::hideForOwner([0, -5, 'abc', null, (string) self::G_HALL]);
 
         $ids = self::ids(ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::VIEWER));
 
