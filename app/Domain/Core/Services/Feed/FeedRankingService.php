@@ -271,7 +271,10 @@ final class FeedRankingService
      * next read (or the minutely warm tick) rebuilds it.
      *
      * For IDENTITY and PRIVACY changes, not freshness: an account deletion,
-     * a handle change, or "Hide my real name" switched on/off. The audit-
+     * a handle change, "Hide my real name" switched on/off, a profile
+     * visibility change (F-02: a profile just made private must not keep
+     * its posts on a shared anon page), or a suspension change (F-182: a
+     * suspended member's profile is hidden). The audit-
      * confirmed choice above (a trending feed tolerates up to HOT_CACHE_TTL
      * of stale SCORES and order, so votes never bust this cache) says
      * nothing about a deleted account, an old handle or a real name the
@@ -295,10 +298,13 @@ final class FeedRankingService
     }
 
     /**
-     * The three events that call forgetHotFeed() (through $forget, which the
+     * The events that call forgetHotFeed() (through $forget, which the
      * caller wraps in its own error handling): an account deleted, a handle
-     * changed, and a privacy write that touched `real_name_hidden`. Here,
-     * not inline in Plugin, so a test can register them and fire them.
+     * changed, a privacy write that touched `real_name_hidden`, a profile
+     * visibility that changed (MyProfilePrefsEndpoint), and a suspension or
+     * unsuspension (UserInfoRepository::notifySuspensionChanged, after the
+     * commit). Here, not inline in Plugin, so a test can register them and
+     * fire them.
      *
      * @param callable(string $why, int $userId): void $forget
      */
@@ -315,6 +321,12 @@ final class FeedRankingService
                 $forget('real_name_hidden', (int) $userId);
             }
         }, 30, 2);
+        add_action('bcc_profile_visibility_changed', static function ($userId) use ($forget): void {
+            $forget('profile_visibility_changed', (int) $userId);
+        }, 30, 1);
+        add_action('bcc_user_suspension_changed', static function ($userId) use ($forget): void {
+            $forget('suspension_changed', (int) $userId);
+        }, 30, 1);
     }
 
     /**
