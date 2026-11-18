@@ -536,6 +536,7 @@ final class AttestationService
                 404
             );
         }
+        self::assertTargetAttestable($attestorUserId, $targetKind, $targetId);
         if ($targetOwnerId === $attestorUserId) {
             // Structural — §N7 self-target rule. The FE already hides
             // the button (allowed=false, unlock_hint=null), so reaching
@@ -1043,6 +1044,9 @@ final class AttestationService
      * WatchingService). Returns one of validator_card / project_card /
      * creator_card, or null when the page isn't an entity card kind
      * (member self-pages and unrecognized types fall through to null).
+     * A page with NO stored type is a legacy project page
+     * (PageTypeMap::effectivePageType), exactly as its card renders it, so
+     * the cast-path target check accepts the project_card its card offers.
      *
      * Entity endorse/vouch only ever targets entity cards — the REST
      * /endorse handler uses this to reject non-entity page ids.
@@ -1053,7 +1057,7 @@ final class AttestationService
             return null;
         }
         $pageType = (string) get_post_meta($pageId, '_bcc_page_type', true);
-        $cardKind = PageTypeMap::kindForPageType($pageType);
+        $cardKind = PageTypeMap::kindForStoredPageType($pageType);
         if ($cardKind === null) {
             return null;
         }
@@ -1907,6 +1911,59 @@ final class AttestationService
     // ──────────────────────────────────────────────────────────────────
     // Resolution + sanitization (private)
     // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * May this attestor attest this target at all? Runs after existence
+     * (resolveTargetOwnerUserId) and before the self-target check. Every
+     * refusal is the SAME 404 a missing target gets, so the answer reveals
+     * nothing: not which post ids exist, not who is private or blocking.
+     *
+     *   - *_card       → a peepso-page whose page type maps to exactly this
+     *                    target_kind (targetKindForPage, the rule the legacy
+     *                    /endorse handler already applies). A feed post, a
+     *                    group post or another kind of page is not a card;
+     *                    vouching for one used to bell its author and feed
+     *                    rank evidence.
+     *   - user_profile → a member the attestor may view
+     *                    (ProfileAccess::canViewProfile: the profile ladder
+     *                    plus suspension; it judges the CURRENT viewer, who
+     *                    is the attestor on every cast path) with no block in
+     *                    either direction. An unreadable block table answers
+     *                    a retryable 503, never an admit.
+     *
+     * @throws AttestationException
+     */
+    private static function assertTargetAttestable(int $attestorUserId, string $targetKind, int $targetId): void
+    {
+        $notFound = new AttestationException(
+            AttestationException::CODE_NOT_FOUND,
+            'Target not found.',
+            404
+        );
+
+        if ($targetKind !== 'user_profile') {
+            if (get_post_type($targetId) !== 'peepso-page' || self::targetKindForPage($targetId) !== $targetKind) {
+                throw $notFound;
+            }
+            return;
+        }
+
+        if (!\BCC\Trust\Core\Support\ProfileAccess::canViewProfile($targetId)) {
+            throw $notFound;
+        }
+
+        $blocked = \BCC\Core\Repositories\PeepSoBlockRepository::isMutuallyBlockedOrUnknown($attestorUserId, $targetId);
+        if ($blocked === null) {
+            throw new AttestationException(
+                AttestationException::CODE_UNAVAILABLE,
+                'We could not complete this right now. Please try again.',
+                503
+            );
+        }
+        if ($blocked) {
+            throw $notFound;
+        }
+    }
 
     /**
      * Resolve target owner for self-target detection.
