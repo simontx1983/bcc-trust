@@ -63,6 +63,29 @@ final class GroupInteractionGate
             return self::notFound();
         }
 
+        // §F-02 — the post's own AUDIENCE, not only its group. Without
+        // this, anyone holding a feed id could react to, stoke or
+        // helpful-mark a followers-only or only-me post, and ring its
+        // author's bell from content they were never shown.
+        //
+        // A COMMENT act is gated on its PARENT's act row: the rule reads
+        // `act_access`, which a comment does not meaningfully carry. The
+        // getCommentMeta() read repeats the one resolveLiveTarget() just
+        // did — one indexed lookup on a write path that already makes
+        // several, paid to keep that method's signature (and its
+        // NotificationDispatcher caller) untouched.
+        $comment       = Plugin::instance()->commentRepository()->getCommentMeta($actId);
+        $audienceActId = $comment === null ? $actId : (int) ($comment->parent_act_id ?? 0);
+        if ($audienceActId <= 0
+            || !\BCC\Trust\Core\Services\FeedItemReportVisibility::audienceAllows(
+                $userId,
+                $audienceActId,
+                $postId
+            )
+        ) {
+            return self::notFound();
+        }
+
         return self::checkPost($userId, $postId);
     }
 
@@ -82,11 +105,27 @@ final class GroupInteractionGate
     public static function checkComment(int $userId, int $commentActId): ?WP_REST_Response
     {
         $notFound = self::notFound(self::NOT_FOUND_COMMENT);
-        if ($commentActId <= 0 || Plugin::instance()->commentRepository()->getCommentMeta($commentActId) === null) {
+        $meta     = $commentActId > 0
+            ? Plugin::instance()->commentRepository()->getCommentMeta($commentActId)
+            : null;
+        if ($meta === null) {
             return $notFound;
         }
         $parentPostId = self::resolveLiveTarget($commentActId);
         if ($parentPostId === null) {
+            return $notFound;
+        }
+
+        // §F-02 — the PARENT post's audience. A comment carries none of its
+        // own, and the meta is already in hand here, so this costs nothing.
+        $parentActId = (int) ($meta->parent_act_id ?? 0);
+        if ($parentActId <= 0
+            || !\BCC\Trust\Core\Services\FeedItemReportVisibility::audienceAllows(
+                $userId,
+                $parentActId,
+                $parentPostId
+            )
+        ) {
             return $notFound;
         }
 
