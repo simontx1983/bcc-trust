@@ -81,10 +81,26 @@ final class AnnouncementModerationService
     /** Is the notice currently taken down? */
     public function isHidden(int $announcementId): bool
     {
+        return self::isTakenDown($announcementId);
+    }
+
+    /**
+     * The ONE PHP reader of the takedown marker — static so a caller with no
+     * instance (F-307 B2: AnnouncementWriteService's edit/pin refusals) reuses
+     * it rather than writing a second predicate. Same rule as the SQL one in
+     * {@see AnnouncementVisibility::publicPredicateSql()}: any non-empty
+     * marker is a takedown.
+     *
+     * @phpstan-impure
+     */
+    public static function isTakenDown(int $announcementId): bool
+    {
         if ($announcementId <= 0) {
             return false;
         }
-        return trim((string) get_post_meta($announcementId, AnnouncementVisibility::META_MODERATION_HIDDEN_AT, true)) !== '';
+        $v = get_post_meta($announcementId, AnnouncementVisibility::META_MODERATION_HIDDEN_AT, true);
+
+        return is_scalar($v) && trim((string) $v) !== '';
     }
 
     /** The notice's projected feed activity, or 0 when it has none. */
@@ -201,7 +217,17 @@ final class AnnouncementModerationService
         if (wp_next_scheduled(self::NOTICE_HOOK, $args) !== false) {
             return;
         }
-        wp_schedule_single_event(time() + self::NOTICE_DELAY_SECONDS, self::NOTICE_HOOK, $args);
+        $scheduled = wp_schedule_single_event(time() + self::NOTICE_DELAY_SECONDS, self::NOTICE_HOOK, $args);
+        if ($scheduled !== true) {
+            // F-307 review (Low): a dropped schedule means the author is never
+            // told about a real takedown/restore. Not fatal to the moderation
+            // action itself, but it must be visible.
+            Logger::warning('[AnnouncementModerationService] moderation bell could not be scheduled', [
+                'announcement_id' => $announcementId,
+                'action'          => $hidden ? 'hidden' : 'restored',
+                'error'           => $scheduled instanceof \WP_Error ? $scheduled->get_error_message() : 'false',
+            ]);
+        }
     }
 
     /**
@@ -242,11 +268,26 @@ final class AnnouncementModerationService
             return false;
         }
 
-        update_post_meta($announcementId, self::META_LAST_NOTICE, $hidden ? 'hidden' : 'restored');
         $send ??= static function (int $id, bool $h): void {
             \BCC\Trust\Core\Plugin::instance()->notificationDispatcher()->onAnnouncementModerated($id, $h);
         };
-        $send($announcementId, $hidden);
+
+        // F-307 review (Low): SEND FIRST, record after. Recording first marked
+        // a bell whose dispatch threw as sent, so no later delivery would ever
+        // retry it. Now a throw leaves META_LAST_NOTICE untouched and a later
+        // state check can still send it.
+        try {
+            $send($announcementId, $hidden);
+        } catch (\Throwable $e) {
+            Logger::warning('[AnnouncementModerationService] deferred moderation bell dispatch failed', [
+                'announcement_id' => $announcementId,
+                'hidden'          => $hidden,
+                'error'           => $e->getMessage(),
+            ]);
+            return false;
+        }
+
+        update_post_meta($announcementId, self::META_LAST_NOTICE, $hidden ? 'hidden' : 'restored');
         return true;
     }
 

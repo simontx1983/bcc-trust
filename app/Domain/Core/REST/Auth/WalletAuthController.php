@@ -487,30 +487,45 @@ final class WalletAuthController
             );
         }
 
-        // Throttle per WALLET (+ a route-wide ceiling), still BEFORE the
-        // CPU-bound signature verification (F-123). Not per IP: this route is
-        // called server-side by the frontend, so every request shares one IP
-        // and a per-IP bucket let anyone lock out all wallet logins. Keyed on
-        // the address alone (F-25): the chain is only known once a signature
-        // verifies. Placed AFTER the live-challenge check: only an address with
-        // a server-issued challenge counts against its bucket, so a bare junk
-        // request costs the attacker nothing against it. This RAISES the cost
-        // of draining a victim's bucket, it does not prevent it: the anonymous
-        // /auth/wallet-nonce issues a challenge for any address (per-IP
-        // throttled), so an attacker rotating IPs can still spend that
-        // wallet's 5/min. Lower-casing makes case-distinct base58/SS58
-        // addresses share a bucket: fail-closed (stricter), never looser.
+        // Throttle per WALLET (+ a route-wide ceiling), BEFORE the CPU-bound
+        // signature verification (F-123). Not per IP: this route is called
+        // server-side by the frontend, so every request shares one IP. Keyed
+        // on the address alone (F-25): the chain is only known once a
+        // signature verifies. Placed AFTER the live-challenge check, so a bare
+        // junk request touches no bucket. Lower-casing makes case-distinct
+        // base58/SS58 addresses share a bucket: fail-closed, never looser.
+        //
+        // Both buckets count VERIFIED sign-ins only. A refused call is not
+        // recorded (countDenied = false), and a signature that verifies
+        // against none of the address's challenges gives both slots back
+        // below. Before, anyone could spend one wallet's 5/min — or the whole
+        // route's 300/min, locking every wallet out — with junk signatures.
+        // The bound on junk is now the per-challenge cap below.
+        $identity = strtolower($walletAddress);
         if (!AuthSupport::allowIdentityAttempt(
             'wallet_login',
-            strtolower($walletAddress),
+            $identity,
             AuthSupport::WALLET_LOGIN_RATE_LIMIT,
-            AuthSupport::WALLET_LOGIN_GLOBAL_LIMIT
+            AuthSupport::WALLET_LOGIN_GLOBAL_LIMIT,
+            false
         )) {
             return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
 
+        $candidates = self::candidatesUnderAttemptCap($candidates, $walletAddress);
+        if ($candidates === []) {
+            AuthSupport::releaseIdentityAttempt('wallet_login', $identity);
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'Challenge not found or expired. Please request a new nonce.',
+                400
+            );
+        }
+
         $match = self::verifiedCandidate($candidates, $walletAddress, $signature, $extra);
         if ($match === null) {
+            AuthSupport::releaseIdentityAttempt('wallet_login', $identity);
+            self::recordFailedSignature($candidates, $walletAddress);
             Logger::warning('[bcc-trust] wallet-login signature invalid', [
                 'address'    => $walletAddress,
                 'candidates' => count($candidates),
@@ -701,6 +716,19 @@ final class WalletAuthController
         // Point of no return for the nonce: consume the challenge the
         // signature verified against (above). Null = replayed, or a concurrent
         // request with the same signature won.
+        // F-294: an address that is already taken fails at wp_insert_user
+        // below — AFTER this challenge is spent — so the user had to sign
+        // again just to be told. Checked here instead: after the signature
+        // verified (no wallet proof, no address probe), before the consume.
+        // The race (taken between here and the insert) still 409s below.
+        if (email_exists($email) !== false) {
+            return ApiResponse::error(
+                'bcc_conflict',
+                $emailRaw !== '' ? 'An account with that email already exists.' : 'Account creation failed; contact support.',
+                409
+            );
+        }
+
         if (WalletIdentityService::consumeAnonymousChallenge($walletAddress, (int) $chain->id) === null) {
             return ApiResponse::error(
                 'bcc_invalid_request',
@@ -788,18 +816,36 @@ final class WalletAuthController
         );
 
         if (!$walletLinkId) {
-            require_once ABSPATH . 'wp-admin/includes/user.php';
+            if (!function_exists('wp_delete_user')) {
+                require_once ABSPATH . 'wp-admin/includes/user.php';
+            }
             wp_delete_user($userIdInt);
 
-            Logger::warning('[bcc-trust] wallet-signup link race lost; rolled back user', [
-                'chain'   => (string) $chain->slug,
-                'address' => $walletAddress,
+            // F-294: say "already linked" only when it IS (someone else's
+            // link won the race). Any other link failure used to say so too,
+            // and the wallet sign-in it pointed to then answered
+            // bcc_wallet_not_linked. The account above is gone, so any
+            // matching row belongs to someone else. A failed read reads as
+            // "not linked": the retryable answer.
+            $linkedElsewhere = WalletRepository::existsForOtherUser(0, (int) $chain->id, $walletAddress);
+
+            Logger::warning('[bcc-trust] wallet-signup link failed; rolled back user', [
+                'chain'            => (string) $chain->slug,
+                'address'          => $walletAddress,
+                'linked_elsewhere' => $linkedElsewhere,
             ]);
 
+            if ($linkedElsewhere) {
+                return ApiResponse::error(
+                    'bcc_wallet_already_linked',
+                    'This wallet is already linked to an account. Sign in with your wallet instead.',
+                    409
+                );
+            }
             return ApiResponse::error(
-                'bcc_wallet_already_linked',
-                'This wallet is already linked to an account. Sign in with your wallet instead.',
-                409
+                'bcc_unavailable',
+                "We couldn't link your wallet. Please try again.",
+                503
             );
         }
 
@@ -879,5 +925,82 @@ final class WalletAuthController
             }
         }
         return null;
+    }
+
+    /**
+     * Wallet-login per-challenge cap, part 1: count every signature check
+     * BEFORE verifying (the 2FA "L2" rule), so concurrent requests cannot
+     * race past the cap. Correct attempts count too, so up to MAX-1 bad
+     * signatures followed by the right one still sign in. A challenge already
+     * over the cap is deleted without verifying.
+     *
+     * @param list<array<string, mixed>> $candidates
+     * @return list<array<string, mixed>> the candidates still under the cap
+     */
+    private static function candidatesUnderAttemptCap(array $candidates, string $walletAddress): array
+    {
+        $kept = [];
+        foreach ($candidates as $candidate) {
+            if (\BCC\Core\Security\Throttle::allow(
+                'wallet_login_attempt',
+                AuthSupport::WALLET_LOGIN_CHALLENGE_MAX_FAILURES,
+                AuthSupport::WALLET_LOGIN_CHALLENGE_WINDOW,
+                'wallet_login_attempt:' . self::challengeIdentity($candidate, $walletAddress)
+            )) {
+                $kept[] = $candidate;
+                continue;
+            }
+            self::dropChallenge($candidate, $walletAddress);
+        }
+        return $kept;
+    }
+
+    /**
+     * Part 2: after a signature verified against none of the candidates,
+     * count one failure per candidate; the MAX-th deletes that challenge, so
+     * the owner's next /auth/wallet-nonce gets a fresh one at once. (F-25 pins
+     * a live challenge, so a cap that only refused would hold the owner out
+     * for its full 300 s.) Keyed on the challenge itself, so a fresh
+     * challenge starts a fresh count.
+     *
+     * @param list<array<string, mixed>> $candidates
+     */
+    private static function recordFailedSignature(array $candidates, string $walletAddress): void
+    {
+        foreach ($candidates as $candidate) {
+            if (!\BCC\Core\Security\Throttle::allow(
+                'wallet_login_fail',
+                AuthSupport::WALLET_LOGIN_CHALLENGE_MAX_FAILURES - 1,
+                AuthSupport::WALLET_LOGIN_CHALLENGE_WINDOW,
+                'wallet_login_fail:' . self::challengeIdentity($candidate, $walletAddress)
+            )) {
+                self::dropChallenge($candidate, $walletAddress);
+            }
+        }
+    }
+
+    /**
+     * One live challenge: the address, its chain, and the challenge's own
+     * nonce and message (a new challenge for the same address and chain gets
+     * a new nonce, so it never inherits an old count).
+     *
+     * @param array<string, mixed> $candidate
+     */
+    private static function challengeIdentity(array $candidate, string $walletAddress): string
+    {
+        return substr(hash('sha256', implode("\n", [
+            strtolower($walletAddress),
+            (string) (int) ($candidate['chain_id'] ?? 0),
+            (string) ($candidate['nonce'] ?? ''),
+            (string) ($candidate['message'] ?? ''),
+        ])), 0, 32);
+    }
+
+    /** @param array<string, mixed> $candidate */
+    private static function dropChallenge(array $candidate, string $walletAddress): void
+    {
+        $chainId = (int) ($candidate['chain_id'] ?? 0);
+        WalletIdentityService::consumeAnonymousChallenge($walletAddress, $chainId);
+        Logger::audit('wallet_login_challenge_attempts_exhausted', ['chain_id' => $chainId]);
     }
 }

@@ -69,6 +69,14 @@ final class PeepSoActivityWriter
         // ActivityStreamWriter::handleAnnouncementPublished() insert at all:
         // insert() refuses any module name absent from this map.
         'announcement' => 205,
+        // F-345 — a review reply: ONE activity per reply, so the existing
+        // feed_item report, act-level hide and moderation queue apply to it.
+        // ⚠ Deliberately ABSENT from bcc-core's FeedItemNormalizer::
+        // MODULE_TO_KIND: that map is the feed allowlist, so leaving 206 out
+        // keeps a reply out of every stream (it only ever renders nested
+        // under its review). Reports reach it through the explicit reply arm
+        // in FeedItemReportVisibility instead.
+        'review_reply' => 206,
     ];
 
     /**

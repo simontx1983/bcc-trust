@@ -85,9 +85,9 @@ final class PendingEmailSignupTest extends TestCase
     }
 
     /** @return array{status: int, message: string} */
-    private static function signup(string $handle, string $email): array
+    private static function signup(string $handle, string $email, string $password = 'correct horse battery'): array
     {
-        $req  = new \WP_REST_Request(['handle' => $handle, 'email' => $email, 'password' => 'correct horse battery']);
+        $req  = new \WP_REST_Request(['handle' => $handle, 'email' => $email, 'password' => $password]);
         $resp = (new PasswordAuthController())->signup($req);
         $data = $resp->get_data();
         return [
@@ -275,5 +275,65 @@ final class PendingEmailSignupTest extends TestCase
 
         self::assertSame(400, (new PasswordAuthController())->resetPassword($req)->get_status());
         self::assertSame([], $GLOBALS['__bcc_hibp']['calls']);
+    }
+
+    // ── F-294: an identical sign-up retry is the same sign-up ────────────
+
+    public function testAnIdenticalRetryGetsTheSame201AndNoSecondAccountOrMail(): void
+    {
+        self::assertSame(201, self::signup('dana', 'dana@example.test')['status']);
+        $users = count($GLOBALS['__bcc_ph']['users']);
+        $mails = count($GLOBALS['__bcc_ph']['mail']);
+
+        self::assertSame(201, self::signup('dana', 'dana@example.test')['status'], 'the double submit');
+
+        self::assertCount($users, $GLOBALS['__bcc_ph']['users'], 'no second account');
+        self::assertCount($mails, $GLOBALS['__bcc_ph']['mail'], 'no second mail');
+    }
+
+    public function testADifferentPasswordIsADifferentSignup(): void
+    {
+        self::signup('dana', 'dana@example.test');
+
+        self::assertSame(409, self::signup('dana', 'dana@example.test', 'another password entirely')['status']);
+    }
+
+    public function testADifferentHandleIsADifferentSignup(): void
+    {
+        self::signup('dana', 'dana@example.test');
+
+        $retry = self::signup('dana2', 'dana@example.test');
+        self::assertSame(409, $retry['status']);
+        self::assertStringStartsWith('An account with that email already exists.', $retry['message']);
+    }
+
+    public function testARetryAfterTenMinutesIsNoLongerTheSameSignup(): void
+    {
+        self::signup('dana', 'dana@example.test');
+        $id = (int) array_key_last($GLOBALS['__bcc_ph']['users']);
+        $GLOBALS['__bcc_ph']['users'][$id]['registered'] = time() - 11 * 60;
+
+        self::assertSame(409, self::signup('dana', 'dana@example.test')['status']);
+    }
+
+    public function testAConfirmedAccountIsNeverTreatedAsARetry(): void
+    {
+        self::signup('dana', 'dana@example.test');
+        $id = (int) array_key_last($GLOBALS['__bcc_ph']['users']);
+        $GLOBALS['__bcc_ph']['meta'][$id][AuthSupport::META_EMAIL_VERIFIED] = '1';
+
+        self::assertSame(409, self::signup('dana', 'dana@example.test')['status']);
+    }
+
+    // ── F-294: the reset email says the newest link wins ─────────────────
+
+    public function testTheResetEmailSaysOnlyTheMostRecentLinkWorks(): void
+    {
+        self::pending(self::STALE, 'alice', 'alice@example.test', 2 * self::DAY);
+
+        \BCC\Trust\Core\Services\AuthMailer::sendPasswordResetEmail(self::STALE, 'alice@example.test', 'https://app.example.test/reset-password?key=k');
+
+        self::assertCount(1, $GLOBALS['__bcc_ph']['mail']);
+        self::assertStringContainsString('Only the most recent link works', (string) $GLOBALS['__bcc_ph']['mail'][0]['html']);
     }
 }

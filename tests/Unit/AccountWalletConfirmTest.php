@@ -1045,4 +1045,24 @@ final class AccountWalletConfirmTest extends TestCase
         AccountRecoveryService::markHasPassword(self::USER);
         self::assertTrue(AccountRecoveryService::hasPassword(self::USER));
     }
+
+    /** F-294 (user decision): settings accept the same 8-character minimum as sign-up and reset. */
+    public function testAnEightCharacterPasswordIsAcceptedLikeAtSignup(): void
+    {
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_PASSWORD_CHANGE);
+
+        [$status] = self::call([new MyAccountEndpoint(), 'patchPassword'], ['password' => 'eightchr'] + self::walletProof($sig));
+
+        self::assertSame(200, $status, 'settings used to demand 10');
+        self::assertSame('eightchr', $GLOBALS['__bcc_ph']['passwords'][self::USER]);
+    }
+
+    public function testSevenCharactersAreStillTooShort(): void
+    {
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_PASSWORD_CHANGE);
+
+        [$status] = self::call([new MyAccountEndpoint(), 'patchPassword'], ['password' => 'sevench'] + self::walletProof($sig));
+
+        self::assertSame(422, $status);
+    }
 }

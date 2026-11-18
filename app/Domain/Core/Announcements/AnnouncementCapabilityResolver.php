@@ -148,6 +148,14 @@ final class AnnouncementCapabilityResolver
      * with no copy. The frontend handoff names it explicitly for that reason.
      */
     public const REASON_ALREADY_PUBLISHED = 'announcement_already_published';
+
+    /**
+     * F-307 B2 — an administrator took the notice down. Denies `can_edit` and
+     * `can_pin` with NO unlock hint: the operator cannot undo a moderator's
+     * takedown, so a hint would promise a path that does not exist.
+     * `can_archive` is deliberately untouched (the owner may still archive).
+     */
+    public const REASON_MODERATION_HIDDEN = 'announcement_moderation_hidden';
     public const REASON_UNAVAILABLE       = 'announcement_unavailable';
     public const REASON_COMMENTS_DISABLED = 'comments_disabled';
     public const REASON_AUTH_REQUIRED     = 'auth_required';
@@ -314,6 +322,8 @@ final class AnnouncementCapabilityResolver
      *   - `comments_enabled`  bool
      *   - `author_user_id`    int   (the self-report rung, and — F-147 — the
      *                                 author-only rung of edit / pin / publish)
+     *   - `moderation_hidden` bool  (F-307 B2: an administrator took it down;
+     *                                 closes edit and pin, not archive)
      *
      * `$viewer` is the viewer's standing, computed by the caller from the
      * existing services — this class performs no standing check:
@@ -352,6 +362,9 @@ final class AnnouncementCapabilityResolver
         $isOperator = self::isOperator($decision);
         $archived   = self::flag($row, 'is_archived', true);   // absent ⇒ archived
         $published  = self::status($row) === self::STATUS_PUBLISHED;
+        // F-307 B2: absent ⇒ taken down, the restrictive reading like every
+        // other row flag. It only ever narrows edit and pin.
+        $takenDown  = self::flag($row, 'moderation_hidden', true);
 
         // ⚠⚠ F-147: EDIT, PIN AND PUBLISH ARE AUTHOR-ONLY; ARCHIVE IS NOT.
         // After a claim hand-over the current operator sees the previous
@@ -367,8 +380,8 @@ final class AnnouncementCapabilityResolver
         $isAuthor = $isOperator && self::authoredByOperator($decision, $row);
 
         return [
-            'can_edit'            => self::ownerAction($isAuthor, $archived, $featureEnabled),
-            'can_pin'             => self::pin($isAuthor, $archived, $published, $featureEnabled),
+            'can_edit'            => self::edit($isAuthor, $archived, $takenDown, $featureEnabled),
+            'can_pin'             => self::pin($isAuthor, $archived, $published, $takenDown, $featureEnabled),
             // ⚠⚠ NARROWED WITH THE ROUTE, and it has to be. The archive route
             // refuses any non-published row (§4.32.6), so leaving this as a
             // plain owner action would hand a client a permitted capability for
@@ -546,14 +559,48 @@ final class AnnouncementCapabilityResolver
         bool $isOperator,
         bool $archived,
         bool $published,
+        bool $takenDown,
         bool $featureEnabled
     ): array {
-        // Delegates: `can_pin` and `can_archive` are provably the same ladder
-        // now that archive refuses unpublished rows, and §11 forbids a parallel
-        // implementation of logic that already exists. Kept as a named method
-        // because the capability it answers is named, and because its callers
-        // and tests address it by name.
+        // F-307 B2: the takedown rung sits right after archival — after the
+        // feature / ownership / archival rungs (reused from ownerAction(), not
+        // re-typed) and BEFORE publication. Like archival it is a condition
+        // the operator cannot fix, so it outranks the one they can.
+        $base = self::ownerAction($isOperator, $archived, $featureEnabled);
+        if ($base['allowed'] !== true) {
+            return $base;
+        }
+        if ($takenDown) {
+            return Permission::deny(self::REASON_MODERATION_HIDDEN);
+        }
+
+        // Delegates: `can_pin` and `can_archive` are the same ladder past the
+        // takedown rung (archive is NOT closed by a takedown), and §11 forbids
+        // a parallel implementation of logic that already exists. Kept as a
+        // named method because the capability it answers is named, and
+        // because its callers and tests address it by name.
         return self::publishedOwnerAction($isOperator, $archived, $published, $featureEnabled);
+    }
+
+    /**
+     * `can_edit` — {@see self::ownerAction()} plus the F-307 B2 takedown rung,
+     * placed after archival (both are conditions the operator cannot undo;
+     * archival is checked first because it is permanent). No unlock hint.
+     *
+     * @return Entry
+     */
+    private static function edit(
+        bool $isOperator,
+        bool $archived,
+        bool $takenDown,
+        bool $featureEnabled
+    ): array {
+        $base = self::ownerAction($isOperator, $archived, $featureEnabled);
+        if ($base['allowed'] !== true || !$takenDown) {
+            return $base;
+        }
+
+        return Permission::deny(self::REASON_MODERATION_HIDDEN);
     }
 
     /**
