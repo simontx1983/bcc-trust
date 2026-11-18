@@ -866,11 +866,17 @@ final class NftIndexerStatusView
         }
 
         $outcome = $result['outcome'];
-        $changed = in_array($outcome, ['updated', 'recreated'], true);
-        AdminActionSupport::audit(
-            $changed ? 'admin_helius_webhook_reregistered' : 'admin_helius_webhook_reregister_' . $outcome,
-            'helius_webhook'
-        );
+        $action  = match ($outcome) {
+            // A recreate leaves the old webhook's id behind; its own action
+            // and both ids make any webhook still on Helius traceable.
+            'recreated' => 'admin_helius_webhook_recreated',
+            'updated'   => 'admin_helius_webhook_reregistered',
+            default     => 'admin_helius_webhook_reregister_' . $outcome,
+        };
+        $meta = isset($result['previous_webhook_id'])
+            ? ['previous_webhook_id' => $result['previous_webhook_id'], 'webhook_id' => $result['webhook_id']]
+            : [];
+        AdminActionSupport::audit($action, 'helius_webhook', null, $meta);
         self::redirect('helius_reregister_' . $outcome, 0);
     }
 

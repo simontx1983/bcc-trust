@@ -18,8 +18,9 @@ use PHPUnit\Framework\TestCase;
  * bounded per account. Pinned against the REAL EmailVerificationController +
  * AuthSupport (counting Throttle stub):
  *   - wrong codes 1..4 leave the code usable — the right one still signs in;
- *   - the 5th wrong code burns it: the right code then fails too, and the
- *     answer is the same generic one (no new enumeration signal);
+ *   - the 5th wrong code burns it: the right code then fails too. Since
+ *     F-294 the burning attempt and every attempt after it answer
+ *     bcc_otp_exhausted ("request a new code") until a resend;
  *   - the counter is per (user, current code): a resend starts fresh, and
  *     another account's failures never count;
  *   - the bucket key is explicit (user + code identity, never the code);
@@ -106,21 +107,92 @@ final class VerifyEmailAttemptCapTest extends TestCase
         self::assertSame('0', $GLOBALS['__bcc_ph']['meta'][self::USER][AuthSupport::META_EMAIL_VERIFIED]);
     }
 
-    public function testABurnAnswersExactlyLikeAnyWrongCode(): void
+    /**
+     * F-294 (user-approved): the burning attempt says "request a new code"
+     * (bcc_otp_exhausted), and so does every attempt after it, the RIGHT
+     * code included, until a resend. Wrong codes before the cap stay
+     * generic.
+     *
+     * This test asserted the OPPOSITE before F-294 ("the burning attempt
+     * looks like the others", F-48: no new enumeration signal). It flipped
+     * because the behaviour did: the signal is only reachable after the cap
+     * on an account with a pending code, and sign-up already says whether
+     * an email has an account.
+     */
+    public function testABurnSaysRequestANewCode(): void
     {
-        $bodies = [];
+        $answers = [];
         for ($i = 1; $i <= AuthSupport::VERIFY_EMAIL_MAX_FAILURES; $i++) {
-            $res      = (new EmailVerificationController())->verifyEmail(
+            $res       = (new EmailVerificationController())->verifyEmail(
                 new \WP_REST_Request(['email' => self::EMAIL, 'code' => '000000'])
             );
-            $bodies[] = [$res->get_status(), $res->get_data()];
+            $answers[] = (string) ($res->get_data()['error']['code'] ?? '');
         }
-        $unknown = (new EmailVerificationController())->verifyEmail(
+
+        self::assertSame(
+            array_merge(array_fill(0, AuthSupport::VERIFY_EMAIL_MAX_FAILURES - 1, 'bcc_invalid_otp'), ['bcc_otp_exhausted']),
+            $answers
+        );
+
+        $right = (new EmailVerificationController())->verifyEmail(
+            new \WP_REST_Request(['email' => self::EMAIL, 'code' => self::CODE])
+        );
+        self::assertSame(400, $right->get_status());
+        self::assertSame('bcc_otp_exhausted', $right->get_data()['error']['code'] ?? null, 'the right code is not "invalid"');
+        self::assertSame('Too many attempts. Request a new code.', $right->get_data()['error']['message'] ?? null);
+    }
+
+    public function testAResendEndsTheExhaustedState(): void
+    {
+        for ($i = 1; $i <= AuthSupport::VERIFY_EMAIL_MAX_FAILURES; $i++) {
+            self::verify('000000');
+        }
+
+        (new EmailVerificationController())->resendVerification(new \WP_REST_Request(['email' => self::EMAIL]));
+        $wrong = (new EmailVerificationController())->verifyEmail(
+            new \WP_REST_Request(['email' => self::EMAIL, 'code' => '000000'])
+        );
+
+        self::assertSame('bcc_invalid_otp', $wrong->get_data()['error']['code'] ?? null, 'a fresh code, a fresh count');
+        self::assertNotNull(AuthSupport::emailOtpIdentity(self::USER), 'the resend issued a new code');
+    }
+
+    public function testAnUnknownAddressStaysGeneric(): void
+    {
+        $res = (new EmailVerificationController())->verifyEmail(
             new \WP_REST_Request(['email' => 'nobody@example.com', 'code' => '000000'])
         );
 
-        self::assertCount(1, array_unique(array_map('serialize', $bodies)), 'the burning attempt looks like the others');
-        self::assertSame($bodies[0], [$unknown->get_status(), $unknown->get_data()], 'and like an unknown address');
+        self::assertSame('bcc_invalid_otp', $res->get_data()['error']['code'] ?? null);
+    }
+
+    public function testResendAcceptsAHandleAndMailsTheAddressOnFile(): void
+    {
+        AuthSupport::burnEmailOtp(self::USER);
+        $GLOBALS['__bcc_ph']['mail'] = [];
+
+        $res = (new EmailVerificationController())->resendVerification(new \WP_REST_Request(['identifier' => '@Handle61']));
+
+        self::assertSame(200, $res->get_status());
+        self::assertSame(['ok' => true], $res->get_data()['data'] ?? null, 'the same silent ok');
+        self::assertNotNull(AuthSupport::emailOtpIdentity(self::USER), 'a new code was issued');
+        self::assertSame([self::EMAIL], array_column($GLOBALS['__bcc_ph']['mail'], 'to'));
+    }
+
+    public function testResendByAnUnknownHandleIsTheSameSilentOk(): void
+    {
+        $res = (new EmailVerificationController())->resendVerification(new \WP_REST_Request(['identifier' => 'nobody-here']));
+
+        self::assertSame(200, $res->get_status());
+        self::assertSame(['ok' => true], $res->get_data()['data'] ?? null);
+        self::assertSame([], $GLOBALS['__bcc_ph']['mail']);
+    }
+
+    public function testResendWithNeitherEmailNorIdentifierIs422(): void
+    {
+        $res = (new EmailVerificationController())->resendVerification(new \WP_REST_Request([]));
+
+        self::assertSame(422, $res->get_status());
     }
 
     public function testAResendStartsAFreshCount(): void

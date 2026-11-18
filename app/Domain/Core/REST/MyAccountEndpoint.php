@@ -329,6 +329,13 @@ final class MyAccountEndpoint
                 422
             );
         }
+        // A password known to have leaked is refused (fails open when the
+        // breach list is unreachable). Before the credential check for the
+        // same reason as the length: a refused password must not burn a
+        // signed wallet challenge.
+        if (\BCC\Trust\Core\Services\BreachedPasswordCheck::isBreached($newPassword)) {
+            return \BCC\Trust\Core\Services\BreachedPasswordCheck::rejection();
+        }
 
         // A wallet-only member SETS their first password here, confirming
         // with a wallet signature (they have no current one).

@@ -112,7 +112,10 @@ final class UserAlbumPhotosEndpoint
         }
 
         $response = ApiResponse::ok(['items' => $items]);
+        // Album access is decided per viewer, so the browser cache must key
+        // on the credential too (same as UserAlbumsEndpoint).
         $response->header('Cache-Control', 'private, max-age=30');
+        $response->header('Vary', 'Authorization, Cookie');
         return $response;
     }
 

@@ -128,9 +128,13 @@ final class MeValidatorPagesEndpoint
             ];
         }
 
-        return ApiResponse::ok([
+        $response = ApiResponse::ok([
             'items' => $items,
             'total' => count($items),
         ]);
+        // The caller's own claims: never stored by any cache, like the
+        // other /me reads (MeProgressionEndpoint, MeAttestationsEndpoint).
+        $response->header('Cache-Control', 'private, no-store');
+        return $response;
     }
 }

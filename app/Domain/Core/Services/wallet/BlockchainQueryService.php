@@ -266,18 +266,17 @@ class BlockchainQueryService {
     }
 
     /**
-     * Determine the highest role a wallet holds in a Solana NFT project.
+     * Whether a wallet holds a Solana NFT project: holder or none.
+     *
+     * Never "creator". Solana creatorship is the collection mint's current
+     * update authority, read by \BCC\Trust\Onchain\Services\SolanaCollectionAuthority
+     * (F-339); the always-false creator stub that used to sit here is gone.
      *
      * @param string $walletAddress   Base58 Solana wallet address
      * @param string $mintAddress     Base58 Candy Machine / collection mint address
      * @return string
      */
     public static function getSolanaRole(string $walletAddress, string $mintAddress): string {
-
-        // Creator: check if wallet is the verified creator of the collection
-        if (self::isSolanaCollectionCreator($walletAddress, $mintAddress)) {
-            return self::ROLE_CREATOR;
-        }
 
         // Holder: wallet owns at least one token from the collection
         if (self::isSolanaNftHolder($walletAddress, $mintAddress)) {
@@ -676,19 +675,6 @@ class BlockchainQueryService {
             return (string) BCC_SOL_RPC_URL;
         }
         return self::DEFAULT_SOL_RPC;
-    }
-
-    /**
-     * Check if wallet is a verified creator of the collection.
-     * We query the mint account metadata to read the creators array.
-     */
-    private static function isSolanaCollectionCreator(string $wallet, string $mint): bool {
-        $rpc = self::resolveSolanaRpc();
-
-        // Derive Metaplex metadata PDA — complex; skip for now and rely on holder check
-        // Full creator verification would require deriving the metadata PDA from the mint
-        // and reading on-chain data. For MVP, return false and let admins assign creator manually.
-        return false;
     }
 
     /**

@@ -791,6 +791,27 @@ final class PagesEndpoint
             );
         }
 
+        // F-339: a Solana collection whose creator the chain could not
+        // settle. Never "your wallet does not match": an outage is retryable
+        // (503), a creator the chain cannot prove is final (403). User
+        // decision; reasons are stable.
+        if (($result['error'] ?? '') === 'verification_unavailable') {
+            return ApiResponse::error(
+                'bcc_unavailable',
+                "We couldn't verify this collection's creator on-chain right now. Try again in a few minutes.",
+                503,
+                ['reason' => 'verification_unavailable']
+            );
+        }
+        if (($result['error'] ?? '') === 'creator_unverifiable') {
+            return ApiResponse::error(
+                'bcc_forbidden',
+                "We can't confirm this collection's creator on-chain.",
+                403,
+                ['reason' => 'creator_unverifiable']
+            );
+        }
+
         // Not a wallet mismatch either: the entity itself is gone.
         if (($result['error'] ?? '') === 'entity_not_found') {
             return ApiResponse::error(

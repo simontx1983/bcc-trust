@@ -222,6 +222,13 @@ final class PrivacySettings
      * Stays inside bcc-trust per §A4 — privacy decisions live in one
      * place, even when they affect a sibling plugin's surface.
      */
+    /**
+     * `PeepSoUserSearch` arg: leave the search opt-out (hide_from_search)
+     * out of this listing. Not a search and not the directory — see
+     * {@see filterPeepSoSearchArgs()}.
+     */
+    public const ARG_IGNORE_SEARCH_OPTOUT = '_bcc_ignore_search_optout';
+
     public static function registerSearchFilter(): void
     {
         add_filter('peepso_user_search_args', [self::class, 'filterPeepSoSearchArgs'], 20, 1);
@@ -358,11 +365,21 @@ final class PrivacySettings
      * would skip them entirely. Combined with relation=AND so an
      * existing meta_query (e.g. PeepSo's VIP filter) is preserved.
      *
+     * ⚠ A caller that is NOT a search or the directory passes
+     * {@see self::ARG_IGNORE_SEARCH_OPTOUT}: hide_from_search scopes to
+     * member search and the directory only (user decision 2026-11-12,
+     * F-257 copy). Group rosters follow profile privacy instead, so they
+     * keep every other leg of PeepSo's listing rule and skip just this one.
+     *
      * @param array<string, mixed> $args
      * @return array<string, mixed>
      */
     public static function filterPeepSoSearchArgs(array $args): array
     {
+        if (!empty($args[self::ARG_IGNORE_SEARCH_OPTOUT])) {
+            unset($args[self::ARG_IGNORE_SEARCH_OPTOUT]);
+            return $args;
+        }
 
         // ── hide_from_search, honoured unconditionally ────────────────
         //

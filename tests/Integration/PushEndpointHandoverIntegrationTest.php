@@ -104,6 +104,30 @@ final class PushEndpointHandoverIntegrationTest extends TestCase
     }
 
     /**
+     * `DELETE /me/push-subscriptions/{id}` deletes through deleteForUser():
+     * the ownership check is in the DELETE's own WHERE, so another member's
+     * row survives, and "someone else's" reads exactly like "missing" (0),
+     * which is what lets the route give both the same answer.
+     */
+    public function testDeleteForUserOnlyEverRemovesTheCallersOwnRow(): void
+    {
+        $alicesId = $this->repo->upsert(self::ALICE, self::SHARED_BROWSER, 'pA', 'aA', null);
+        $bobsId   = $this->repo->upsert(self::BOB, 'https://fcm.googleapis.com/fcm/send/bob-only-0003', 'pB', 'aB', null);
+        self::assertGreaterThan(0, $alicesId);
+        self::assertGreaterThan(0, $bobsId);
+
+        self::assertSame(0, $this->repo->deleteForUser($bobsId, self::ALICE), "Bob's row, asked for by Alice");
+        self::assertCount(1, $this->endpointsOf(self::BOB), "Bob's row is untouched");
+
+        global $wpdb;
+        $missing = 1 + (int) $wpdb->get_var('SELECT COALESCE(MAX(id), 0) FROM ' . $wpdb->prefix . 'bcc_push_subscriptions');
+        self::assertSame(0, $this->repo->deleteForUser($missing, self::ALICE), 'a missing id: the same 0');
+
+        self::assertSame(1, $this->repo->deleteForUser($alicesId, self::ALICE), 'her own row');
+        self::assertSame([], $this->endpointsOf(self::ALICE));
+    }
+
+    /**
      * Registrations of the same endpoint are serialised: unlocked, two
      * accounts registering at the same instant each deleted the other's
      * not-yet-written row and both inserted, leaving two owners. While

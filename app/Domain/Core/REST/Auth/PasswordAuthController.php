@@ -213,6 +213,13 @@ final class PasswordAuthController
             return ApiResponse::error('bcc_conflict', self::TAKEN_HANDLE, 409);
         }
 
+        // A password known to have leaked is refused (fails open when the
+        // breach list is unreachable). After the cheap checks, so a request
+        // that fails them costs no outside call.
+        if (\BCC\Trust\Core\Services\BreachedPasswordCheck::isBreached($password)) {
+            return \BCC\Trust\Core\Services\BreachedPasswordCheck::rejection();
+        }
+
         // wp_insert_user requires a unique user_login. We mint an internal
         // login from the handle (`u_<handle>`) so wp_user_login stays
         // disjoint from bcc_handle (per §B3 — handle is the public
@@ -540,7 +547,18 @@ final class PasswordAuthController
         // never leak which one failed (account-enumeration resistance).
         // wp_check_password is the canonical path; it handles legacy
         // hash formats + rehash-on-login transparently.
-        if ($user === false || !wp_check_password($password, $user->user_pass, $user->ID)) {
+        // F-294: an unknown account used to skip the bcrypt compare, so it
+        // answered measurably faster than a wrong password. It now pays one
+        // password hash too: the same order of work, discarded. Both
+        // branches record the step-up failure (#715): recording it only for
+        // a real account would show the captcha only for real accounts, an
+        // enumeration oracle.
+        if ($user === false) {
+            wp_hash_password($password);
+            LoginStepUp::recordFailure($typedKey, $trustedNetwork);
+            return ApiResponse::error('bcc_invalid_credentials', 'Invalid credentials.', 401);
+        }
+        if (!wp_check_password($password, $user->user_pass, $user->ID)) {
             LoginStepUp::recordFailure($typedKey, $trustedNetwork);
             return ApiResponse::error('bcc_invalid_credentials', 'Invalid credentials.', 401);
         }
@@ -741,6 +759,23 @@ final class PasswordAuthController
 
         // Always-ok response below. We branch ONLY for the side effects
         // (key generation + email + audit) — never for the response.
+        //
+        // F-294: key generation hashes the key, which an unknown address
+        // used to skip, so it answered measurably faster. It pays the SAME
+        // hash now, mirroring get_password_reset_key(): WordPress 6.8+
+        // hashes the key with wp_fast_hash() (BLAKE2b, microseconds), so a
+        // password hash here (bcrypt, tens of ms) would make an unknown
+        // address the SLOWER one. Before 6.8 core hashed it with phpass,
+        // the cost of wp_hash_password(). The key write and mail delivery
+        // can still differ; the contract says so.
+        if (!($user instanceof \WP_User)) {
+            $decoyKey = wp_generate_password(20, false);
+            if (function_exists('wp_fast_hash')) {
+                wp_fast_hash($decoyKey);
+            } else {
+                wp_hash_password($decoyKey);
+            }
+        }
         if ($user instanceof \WP_User) {
             $userId = (int) $user->ID;
 
@@ -817,6 +852,14 @@ final class PasswordAuthController
             // Same generic code for "expired" and "wrong key" — never
             // leak which one. The frontend surfaces "expired or invalid".
             return ApiResponse::error('bcc_invalid_reset_token', 'This reset link is expired or invalid.', 400);
+        }
+
+        // A password known to have leaked is refused (fails open when the
+        // breach list is unreachable). Only once the key is valid, so this
+        // is no anonymous breach lookup; the key is not consumed, so the
+        // same link can try another password.
+        if (\BCC\Trust\Core\Services\BreachedPasswordCheck::isBreached($password)) {
+            return \BCC\Trust\Core\Services\BreachedPasswordCheck::rejection();
         }
 
         $userId = (int) $user->ID;

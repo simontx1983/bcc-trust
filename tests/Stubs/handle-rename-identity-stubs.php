@@ -219,6 +219,31 @@ namespace {
             public function get_error_message(): string { return $this->message; }
         }
     }
+    // F-294 timing parity: count the password hashes a request pays.
+    if (!function_exists('wp_hash_password')) {
+        function wp_hash_password(string $password): string
+        {
+            $GLOBALS['__bcc_ph']['hashes'] = ($GLOBALS['__bcc_ph']['hashes'] ?? 0) + 1;
+            return 'hash:' . $password;
+        }
+    }
+    // F-294: get_password_reset_key()'s own hash on WordPress 6.8+. A test
+    // can play an older core by setting $GLOBALS['__bcc_no_fast_hash']
+    // before this file loads.
+    if (empty($GLOBALS['__bcc_no_fast_hash']) && !function_exists('wp_fast_hash')) {
+        function wp_fast_hash(string $message): string
+        {
+            $GLOBALS['__bcc_ph']['fast_hashes'] = ($GLOBALS['__bcc_ph']['fast_hashes'] ?? 0) + 1;
+            return 'fast:' . $message;
+        }
+    }
+    if (!function_exists('wp_generate_password')) {
+        function wp_generate_password(int $length = 12, bool $special = true, bool $extra = false): string
+        {
+            $GLOBALS['__bcc_ph']['generated'][] = $length . ($special ? '+special' : '') . ($extra ? '+extra' : '');
+            return str_repeat('k', $length);
+        }
+    }
     if (!function_exists('wp_insert_user')) {
         /**
          * @param array<string, mixed> $data

@@ -512,8 +512,11 @@ final class HeliusSubscriptionManager
      *
      *   - not configured / no stored id → nothing (`not_configured` /
      *     `not_provisioned`; use Provision);
-     *   - remote 404 → the stored id names nothing: forget it, provision a
-     *     fresh webhook, refill its address list (`recreated`);
+     *   - remote 404 → decided AGAIN under the address-list lock
+     *     (reregisterAfterMissing()): only a second 404 for the id stored at
+     *     that moment forgets it, provisions a fresh webhook and refills its
+     *     address list (`recreated`, logged and carrying
+     *     `previous_webhook_id`); `busy` when the lock is held;
      *   - remote 200, URL already right → nothing (`already_current`);
      *   - remote 200, URL differs → a FULL-body PUT under the address-list
      *     lock (`updated`; `busy` when the lock is held);
@@ -521,7 +524,7 @@ final class HeliusSubscriptionManager
      *     a transport error or an auth failure must never orphan a live
      *     webhook.
      *
-     * @return array{outcome: string, webhook_id: string}
+     * @return array{outcome: string, webhook_id: string, previous_webhook_id?: string}
      */
     public static function reregisterSharedWebhook(string $callbackUrl): array
     {
@@ -536,17 +539,75 @@ final class HeliusSubscriptionManager
         $result = self::fetchWebhookResult($webhookId);
 
         if ($result['code'] === 404) {
-            delete_option(self::OPTION_WEBHOOK_ID);
-            $newId = self::provisionSharedWebhook($callbackUrl);
-            if ($newId === null) {
-                return ['outcome' => 'recreate_failed', 'webhook_id' => ''];
-            }
-            // The fresh webhook watches nothing yet. Growing from empty is
-            // never a "shrink", so no override is needed.
-            self::resyncFromWalletLinks(false);
-            return ['outcome' => 'recreated', 'webhook_id' => $newId];
+            // ⚠ One 404 is not enough to recreate. Two re-registers at once
+            // (a double click, two admins) would each see it, and the second
+            // would forget the id the first had just stored: a second
+            // billable webhook, with the first still delivering and no id left
+            // to delete it by. Decide again under the address-list lock.
+            return self::withListLock(static fn (): array => self::reregisterAfterMissing($callbackUrl))
+                ?? ['outcome' => 'busy', 'webhook_id' => $webhookId];
         }
 
+        return self::pointWebhookAt($webhookId, $result, $callbackUrl);
+    }
+
+    /**
+     * reregisterSharedWebhook() after a first 404. Runs ONLY under the list
+     * lock, so two of these never interleave.
+     *
+     * The stored id is read again here rather than passed in: a request that
+     * held the lock first may already have replaced it, and that replacement
+     * must be checked, not forgotten. It is then fetched again, and only a
+     * second 404 recreates. Anything else is answered exactly as a first
+     * read would be (a one-off 404 that no longer holds, or the id another
+     * request just stored).
+     *
+     * @return array{outcome: string, webhook_id: string, previous_webhook_id?: string}
+     */
+    private static function reregisterAfterMissing(string $callbackUrl): array
+    {
+        $webhookId = (string) get_option(self::OPTION_WEBHOOK_ID, '');
+        if ($webhookId === '') {
+            return ['outcome' => 'not_provisioned', 'webhook_id' => ''];
+        }
+
+        $result = self::fetchWebhookResult($webhookId);
+        if ($result['code'] !== 404) {
+            return self::pointWebhookAt($webhookId, $result, $callbackUrl);
+        }
+
+        delete_option(self::OPTION_WEBHOOK_ID);
+        $newId = self::provisionSharedWebhook($callbackUrl);
+        if ($newId === null) {
+            \BCC\Core\Log\Logger::error('[HeliusSubscriptionManager] shared webhook missing on Helius; creating a new one failed', [
+                'previous_webhook_id' => $webhookId,
+            ]);
+            return ['outcome' => 'recreate_failed', 'webhook_id' => '', 'previous_webhook_id' => $webhookId];
+        }
+
+        // Both ids are logged so a webhook left behind on Helius can always
+        // be traced back to the id this site used to hold.
+        \BCC\Core\Log\Logger::warning('[HeliusSubscriptionManager] shared webhook missing on Helius; recreated', [
+            'previous_webhook_id' => $webhookId,
+            'webhook_id'          => $newId,
+        ]);
+
+        // The fresh webhook watches nothing yet. Growing from empty is
+        // never a "shrink", so no override is needed. (The list lock is
+        // re-entered here; GET_LOCK is re-entrant per session.)
+        self::resyncFromWalletLinks(false);
+        return ['outcome' => 'recreated', 'webhook_id' => $newId, 'previous_webhook_id' => $webhookId];
+    }
+
+    /**
+     * The answer to a webhook that is NOT missing: unreachable, already
+     * pointing at $callbackUrl, or fixed with a full-body PUT.
+     *
+     * @param array{code: ?int, body: ?array<string, mixed>} $result
+     * @return array{outcome: string, webhook_id: string}
+     */
+    private static function pointWebhookAt(string $webhookId, array $result, string $callbackUrl): array
+    {
         if ($result['code'] !== 200 || $result['body'] === null) {
             return ['outcome' => 'unreachable', 'webhook_id' => $webhookId];
         }
@@ -556,6 +617,7 @@ final class HeliusSubscriptionManager
 
         // Under the address-list lock: the full body carries the address
         // list, so an add/remove racing this PUT must not be overwritten.
+        // Re-entered when the caller already holds it.
         $ok = self::withListLock(static fn (): bool => self::putWebhookUrl($webhookId, $callbackUrl));
         if ($ok === null) {
             return ['outcome' => 'busy', 'webhook_id' => $webhookId];

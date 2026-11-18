@@ -70,6 +70,8 @@ final class AccountWalletConfirmTest extends TestCase
         require_once __DIR__ . '/../Stubs/pending-email-stubs.php';
         require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
         require_once __DIR__ . '/../Stubs/wallet-confirm-stubs.php';
+        require_once __DIR__ . '/../Stubs/breached-password-stubs.php';
+        $GLOBALS['__bcc_hibp'] = ['calls' => [], 'metrics' => [], 'logs' => []];
 
         $GLOBALS['__bcc_ph'] = [
             'users'        => [],
@@ -541,6 +543,22 @@ final class AccountWalletConfirmTest extends TestCase
         self::assertSame('random-never-shown', $GLOBALS['__bcc_ph']['passwords'][self::USER]);
     }
 
+    public function testABreachedPasswordIsAnsweredBeforeTheChallengeIsSpent(): void
+    {
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_PASSWORD_CHANGE);
+        $GLOBALS['__bcc_hibp']['response'] = [
+            'response' => ['code' => 200],
+            'body'     => substr(strtoupper(sha1('a brand new passphrase')), 5) . ":3\r\n",
+        ];
+
+        [$status, $err] = self::call([new MyAccountEndpoint(), 'patchPassword'], ['password' => 'a brand new passphrase'] + self::walletProof($sig));
+
+        self::assertSame(422, $status);
+        self::assertSame('bcc_password_breached', $err['code'] ?? null);
+        self::assertTrue(self::challengeIsLive(), 'the signed challenge survives for another try');
+        self::assertSame('random-never-shown', $GLOBALS['__bcc_ph']['passwords'][self::USER]);
+    }
+
     public function testAnEmailChangeChallengeCannotChangeThePassword(): void
     {
         $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_EMAIL_CHANGE);
@@ -1000,10 +1018,27 @@ final class AccountWalletConfirmTest extends TestCase
         $otherDevice = $jwt::encodeNewSession(self::USER, 'handle' . self::USER);
         $otp = PendingEmailService::stage(self::USER, 'first@example.com', PendingEmailService::PURPOSE_RECOVERY);
 
-        [$status] = self::call([new RecoveryEmailEndpoint(), 'verifyRecoveryEmail'], ['code' => $otp === '000000' ? '111111' : '000000']);
+        [$status, $err] = self::call([new RecoveryEmailEndpoint(), 'verifyRecoveryEmail'], ['code' => $otp === '000000' ? '111111' : '000000']);
 
         self::assertSame(422, $status);
+        // F-294: the same code as /auth/verify-email and the email-change
+        // confirm ("stay on the code form"), not bcc_invalid_request.
+        self::assertSame('bcc_invalid_otp', $err['code'] ?? null);
+        self::assertSame('Incorrect code. Check the latest email and try again.', $err['message'] ?? null);
         self::assertTrue($jwt::decode($otherDevice)['ok'], 'no credential changed, so no session ends');
+
+        [$status] = self::call([new RecoveryEmailEndpoint(), 'verifyRecoveryEmail'], ['code' => $otp]);
+        self::assertSame(200, $status, 'the pending entry survives a wrong code: the right one still works');
+    }
+
+    public function testARecoveryConfirmWithNothingPendingSaysStartAgain(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+
+        [$status, $err] = self::call([new RecoveryEmailEndpoint(), 'verifyRecoveryEmail'], ['code' => '123456']);
+
+        self::assertSame(400, $status);
+        self::assertSame('bcc_invalid_request', $err['code'] ?? null, 'expired or never requested: start again, not "retry the code"');
     }
 
     // ── has_password ────────────────────────────────────────────────────

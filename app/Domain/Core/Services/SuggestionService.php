@@ -22,7 +22,10 @@
  *                          (DelegationRepository::getSharedValidatorBackers)
  *   2. Exclusions (security-sensitive — applied to the candidate set):
  *        self, already-following, caution/risky, active-suspended,
- *        mutual blocks (either direction), watching-graph opt-out.
+ *        mutual blocks (either direction), watching-graph opt-out, and
+ *        (§F-02) anyone this viewer may not see by the directory's rule
+ *        (ProfileAccess::filterVisible), on the ranked pool, the
+ *        cold-start top-up and the reason's sample avatars alike.
  *   3. Scoring (affinity weights only — see WEIGHT constants).
  *   4. Reason derivation: the single highest-CONTRIBUTING signal.
  *   5. Cold-start top-up: if fewer than `$limit` survive, top up with
@@ -52,6 +55,7 @@ use BCC\Trust\Core\Repositories\SuspensionRepository;
 use BCC\Trust\Core\Repositories\WatchingRepository;
 use BCC\Trust\Core\Support\MemberSummaryPrefetcher;
 use BCC\Trust\Core\Support\PrivacySettings;
+use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\DelegationRepository;
 
@@ -279,18 +283,8 @@ final class SuggestionService
             }
         }
 
-        // ── 3. Order by score desc (tiebreak: id asc for stability) ────
-        $scored = [];
-        foreach ($pool as $cid => $entry) {
-            $scored[] = ['id' => $cid, 'score' => $entry['score'], 'signals' => $entry['signals']];
-        }
-        usort($scored, static function (array $a, array $b): int {
-            if ($a['score'] === $b['score']) {
-                return $a['id'] <=> $b['id'];
-            }
-            return $b['score'] <=> $a['score'];
-        });
-        $scored = array_slice($scored, 0, $limit);
+        // ── 3. Order by score desc, keep the first $limit the viewer may see ─
+        $scored = self::rankVisible($pool, $limit);
 
         // ── 4. Resolve reason = single highest-contributing signal. ────
         /** @var array<int, array{code: string, label: string}|null> $reasonByUser */
@@ -331,22 +325,7 @@ final class SuggestionService
                 $sampleUserIds[$sampleId] = true;
             }
         }
-        $sampleAvatarsByUser = [];
-        if ($sampleUserIds !== []) {
-            $ids = array_keys($sampleUserIds);
-            cache_users($ids);
-            $avatarUrlById = PeepSoMediaCache::avatarUrlBulk($ids);
-            foreach ($ids as $id) {
-                $user = get_userdata($id);
-                if ($user === false) {
-                    continue;
-                }
-                $sampleAvatarsByUser[$id] = [
-                    'handle'     => \BCC\Trust\Core\Support\PublicIdentity::handle($id, get_user_meta($id, 'bcc_handle', true)),
-                    'avatar_url' => $avatarUrlById[$id] ?? '',
-                ];
-            }
-        }
+        $sampleAvatarsByUser = self::sampleAvatars(array_keys($sampleUserIds));
 
         $items = [];
         foreach ($chosenIds as $cid) {
@@ -385,6 +364,106 @@ final class SuggestionService
         }
 
         return $items;
+    }
+
+    /**
+     * The pool ranked best-first (score desc, id asc for stability), cut to
+     * the first $limit candidates the current viewer may see.
+     *
+     * §F-02: suggestions are DISCOVERY, so they apply the directory's rule
+     * (ProfileAccess::filterVisible: the profile ladder, banned and
+     * unvalidated accounts, blocks either way, and hide_from_search), not a
+     * roster's. Before, a member with a private profile, or one hidden from
+     * search, was suggested by handle, name and avatar. Filtered after
+     * ranking and before the cut, so a hidden candidate never takes a slot.
+     *
+     * @param array<int, array{score: float, signals: array<string, array{contribution: float, label: string, sample_ids?: list<int>}>}> $pool
+     * @return list<array{id: int, score: float, signals: array<string, array{contribution: float, label: string, sample_ids?: list<int>}>}>
+     */
+    private static function rankVisible(array $pool, int $limit): array
+    {
+        $scored = [];
+        foreach ($pool as $cid => $entry) {
+            $scored[] = ['id' => $cid, 'score' => $entry['score'], 'signals' => $entry['signals']];
+        }
+        usort($scored, static function (array $a, array $b): int {
+            if ($a['score'] === $b['score']) {
+                return $a['id'] <=> $b['id'];
+            }
+            return $b['score'] <=> $a['score'];
+        });
+
+        $byId = [];
+        foreach ($scored as $row) {
+            $byId[$row['id']] = $row;
+        }
+        $out = [];
+        foreach (self::firstVisible(array_keys($byId), $limit) as $id) {
+            $out[] = $byId[$id];
+        }
+        return $out;
+    }
+
+    /**
+     * The first $want of $orderedIds the current viewer may see (§F-02,
+     * ProfileAccess::filterVisible), in their order.
+     *
+     * Asked in chunks of FILTER_VISIBLE_MAX: the scored pool can be larger
+     * than one filterVisible call judges (it REFUSES an oversized set, so
+     * one call over the whole pool would answer nothing). The walk stops
+     * once $want are found, so it is usually one query.
+     *
+     * @param list<int> $orderedIds
+     * @return list<int>
+     */
+    private static function firstVisible(array $orderedIds, int $want): array
+    {
+        $out = [];
+        if ($want <= 0) {
+            return $out;
+        }
+        foreach (array_chunk($orderedIds, ProfileAccess::FILTER_VISIBLE_MAX) as $chunk) {
+            foreach (ProfileAccess::filterVisible($chunk) as $id) {
+                $out[] = $id;
+                if (count($out) >= $want) {
+                    return $out;
+                }
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Handle + avatar for the mutual_follows reason's sample members, for
+     * the ones the current viewer may see (§F-02, the same rule as the
+     * candidates: ProfileAccess::filterVisible). Small: at most three per
+     * row, so one visibility query, one avatar-cache lookup and one
+     * cache_users() warm for the whole response, not N.
+     *
+     * @param list<int> $sampleUserIds
+     * @return array<int, array{handle: string, avatar_url: string}>
+     */
+    private static function sampleAvatars(array $sampleUserIds): array
+    {
+        $ids = ProfileAccess::filterVisible($sampleUserIds);
+        if ($ids === []) {
+            return [];
+        }
+
+        cache_users($ids);
+        $avatarUrlById = PeepSoMediaCache::avatarUrlBulk($ids);
+        $out = [];
+        foreach ($ids as $id) {
+            $user = get_userdata($id);
+            if ($user === false) {
+                continue;
+            }
+            $out[$id] = [
+                'handle'     => \BCC\Trust\Core\Support\PublicIdentity::handle($id, get_user_meta($id, 'bcc_handle', true)),
+                'avatar_url' => $avatarUrlById[$id] ?? '',
+            ];
+        }
+        return $out;
     }
 
     /**
@@ -537,8 +616,10 @@ final class SuggestionService
      * accumulating gravity on the same accounts. We deliberately do NOT
      * invent a second recency query.
      *
-     * Applies the SAME exclusion set as the scored path and dedupes
-     * against already-chosen ids.
+     * Applies the SAME exclusion set and visibility rule (§F-02,
+     * firstVisible) as the scored path and dedupes against already-chosen
+     * ids. Visibility is judged before the cut, so a hidden member never
+     * takes a slot.
      *
      * @param array<int, true> $exclude
      * @param array<int, true> $alreadyChosen
@@ -565,7 +646,7 @@ final class SuggestionService
         // the main pool filter above).
         update_meta_cache('user', $candidates);
 
-        $out = [];
+        $eligible = [];
         foreach ($candidates as $cid) {
             if ($cid <= 0 || isset($exclude[$cid]) || isset($alreadyChosen[$cid])) {
                 continue;
@@ -573,13 +654,10 @@ final class SuggestionService
             if ($this->isPrivacyOptedOut($cid)) {
                 continue;
             }
-            $out[]               = $cid;
+            $eligible[]          = $cid;
             $alreadyChosen[$cid] = true;
-            if (count($out) >= $need) {
-                break;
-            }
         }
-        return $out;
+        return self::firstVisible($eligible, $need);
     }
 
     /**
