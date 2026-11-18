@@ -341,7 +341,22 @@ final class RepostEndpoint
 
         // An announcement takes no engagement at all (contract §4.32.15),
         // and a repost is engagement that also REPUBLISHES it.
-        return NoReactionsGate::check($actId);
+        //
+        // ⚠ Written as call / guard / return rather than returning the gate's
+        // answer directly. The one-liner is tidier and behaves identically,
+        // but NoReactionsGateTest's per-file inventory counts that three-part
+        // token shape and requires the three counts to match, so the tidy
+        // form would leave this route OUT of the only guard that catches a
+        // future refactor dropping the call. (The tokens are deliberately
+        // not quoted anywhere in this file's comments — that inventory
+        // counts raw substrings, so a comment naming them inflates the count
+        // and breaks the very guard being satisfied.)
+        $noReactions = NoReactionsGate::check($actId);
+        if ($noReactions !== null) {
+            return $noReactions;
+        }
+
+        return null;
     }
 
     /**

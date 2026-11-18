@@ -245,6 +245,13 @@ final class NoReactionsGateTest extends TestCase
             'StokeEndpoint.php'       => 2,   // addStoke + removeStoke
             'ReactionsEndpoint.php'   => 2,   // setReaction + removeReaction
             'HelpfulMarkEndpoint.php' => 1,   // one shared handle() for all four routes
+            // F-346: one shared gate helper, reached TWICE per repost (the
+            // submitted id, then the resolved root) — a repost is engagement
+            // that also REPUBLISHES, so an announcement must refuse it
+            // exactly as it refuses a reaction. The helper's call site is
+            // what this per-file count can see; that both ids reach it is
+            // asserted behaviourally in RepostEndpointTest.
+            'RepostEndpoint.php'      => 1,
         ];
 
         foreach ($expected as $file => $want) {
