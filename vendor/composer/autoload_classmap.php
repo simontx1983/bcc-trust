@@ -379,6 +379,7 @@ return array(
     'BCC\\Trust\\Core\\Support\\RestrictedGroups' => $baseDir . '/app/Domain/Core/Support/RestrictedGroups.php',
     'BCC\\Trust\\Core\\Support\\RingIdentity' => $baseDir . '/app/Domain/Core/Support/RingIdentity.php',
     'BCC\\Trust\\Core\\Support\\SiteClock' => $baseDir . '/app/Domain/Core/Support/SiteClock.php',
+    'BCC\\Trust\\Core\\Support\\StrictBoolParam' => $baseDir . '/app/Domain/Core/Support/StrictBoolParam.php',
     'BCC\\Trust\\Core\\Support\\UserSlugResolver' => $baseDir . '/app/Domain/Core/Support/UserSlugResolver.php',
     'BCC\\Trust\\Core\\Support\\ViewerFingerprint' => $baseDir . '/app/Domain/Core/Support/ViewerFingerprint.php',
     'BCC\\Trust\\Core\\Support\\WalletAddressValidator' => $baseDir . '/app/Domain/Core/Support/WalletAddressValidator.php',

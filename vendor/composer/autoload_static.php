@@ -535,6 +535,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Support\\RestrictedGroups' => __DIR__ . '/../..' . '/app/Domain/Core/Support/RestrictedGroups.php',
         'BCC\\Trust\\Core\\Support\\RingIdentity' => __DIR__ . '/../..' . '/app/Domain/Core/Support/RingIdentity.php',
         'BCC\\Trust\\Core\\Support\\SiteClock' => __DIR__ . '/../..' . '/app/Domain/Core/Support/SiteClock.php',
+        'BCC\\Trust\\Core\\Support\\StrictBoolParam' => __DIR__ . '/../..' . '/app/Domain/Core/Support/StrictBoolParam.php',
         'BCC\\Trust\\Core\\Support\\UserSlugResolver' => __DIR__ . '/../..' . '/app/Domain/Core/Support/UserSlugResolver.php',
         'BCC\\Trust\\Core\\Support\\ViewerFingerprint' => __DIR__ . '/../..' . '/app/Domain/Core/Support/ViewerFingerprint.php',
         'BCC\\Trust\\Core\\Support\\WalletAddressValidator' => __DIR__ . '/../..' . '/app/Domain/Core/Support/WalletAddressValidator.php',
