@@ -245,12 +245,16 @@ final class GroupsService
         $feedVisible    = $permissions['can_read_feed']['allowed'];
         $membersVisible = self::resolveMembersVisible($ctx, $isMember);
 
-        // Owners/managers see how many requests wait on them; everyone
-        // else gets null (no disclosure of the queue size).
+        // Owners/managers of a closed or secret plain group decide its
+        // membership (requests, invites): the panel gate. Everyone else,
+        // and every other kind, gets false.
+        $canManageMembership = self::canManageMembership($ctx, $viewerId, $groupId);
+
+        // Those same admins see how many requests wait on them; everyone
+        // else gets null (no disclosure of the queue size). Requests exist
+        // only on closed groups — a secret group is invite-only.
         $pendingRequestCount = null;
-        if ($ctx->privacy === PeepSoPrivacy::Closed
-            && $ctx->type !== GroupType::Nft && $ctx->type !== GroupType::Hall && $ctx->type !== GroupType::Validator
-            && GroupJoinRequestService::isGroupAdmin($viewerId, $groupId)) {
+        if ($canManageMembership && $ctx->privacy === PeepSoPrivacy::Closed) {
             $pendingRequestCount = PeepSoGroupRepository::countPendingMembers($groupId, PeepSoGroupRepository::PENDING_REQUEST);
         }
 
@@ -341,6 +345,7 @@ final class GroupsService
             'can_manage_public_all_policy' => $canManagePublicAll,
             'public_all_members_enabled'   => $publicAllMembersEnabled,
             'pending_request_count'        => $pendingRequestCount,
+            'can_manage_membership'        => $canManageMembership,
             // Same key vocabulary as the create-response on POST /me/groups
             // (MyGroupsEndpoint::postCreate) — `trust_min` is the canonical
             // signal that the group is reputation-gated (privacy === "open"
@@ -775,6 +780,26 @@ final class GroupsService
         $row  = $rows[$config->validatorId] ?? null;
 
         return \BCC\Trust\Onchain\REST\ValidatorGroupsEndpoint::composeValidatorStats($row, $config->minStake);
+    }
+
+    /**
+     * F-272 (b): may the viewer run this group's membership panels
+     * (pending requests, invitations)? True only for an owner, manager or
+     * site admin ({@see GroupJoinRequestService::isGroupAdmin}) of a
+     * closed or SECRET plain group — a secret group's only way in is an
+     * invitation, so its admins need the invite panel as much as a closed
+     * group's need the request queue. Holder, Hall and delegator groups
+     * have their own on-chain doors and no membership panel.
+     */
+    private static function canManageMembership(GroupContext $ctx, int $viewerId, int $groupId): bool
+    {
+        if ($ctx->type === GroupType::Nft || $ctx->type === GroupType::Hall || $ctx->type === GroupType::Validator) {
+            return false;
+        }
+        if ($ctx->privacy !== PeepSoPrivacy::Closed && $ctx->privacy !== PeepSoPrivacy::Secret) {
+            return false;
+        }
+        return GroupJoinRequestService::isGroupAdmin($viewerId, $groupId);
     }
 
     /**
