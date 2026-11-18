@@ -198,6 +198,7 @@ return array(
     'BCC\\Trust\\Core\\Security\\TransactionManager' => $baseDir . '/app/Domain/Core/Security/TransactionManager.php',
     'BCC\\Trust\\Core\\Security\\TrustGraph' => $baseDir . '/app/Domain/Core/Security/TrustGraph.php',
     'BCC\\Trust\\Core\\Security\\TurnstileVerifier' => $baseDir . '/app/Domain/Core/Security/TurnstileVerifier.php',
+    'BCC\\Trust\\Core\\Security\\WordPressSignInGate' => $baseDir . '/app/Domain/Core/Security/WordPressSignInGate.php',
     'BCC\\Trust\\Core\\Services\\AccountRecoveryService' => $baseDir . '/app/Domain/Core/Services/AccountRecoveryService.php',
     'BCC\\Trust\\Core\\Services\\AccountSecurityMailer' => $baseDir . '/app/Domain/Core/Services/AccountSecurityMailer.php',
     'BCC\\Trust\\Core\\Services\\Admin\\ModerationService' => $baseDir . '/app/Domain/Core/Services/Admin/ModerationService.php',

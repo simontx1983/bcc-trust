@@ -1636,7 +1636,9 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 | BearerAuth → reads `Authorization: Bearer <jwt>`, verifies via
 |              JwtToken (HS256 + wp_salt('auth')), and authenticates
 |              the request as the JWT's user_id claim. WP cookie auth
-|              wins when both are present (same-origin admin tooling).
+|              wins when both are present (same-origin admin tooling;
+|              on a bcc route only an admin may be signed in that way,
+|              see WordPressSignInGate).
 |
 | CorsHandler → the SINGLE CORS authority for every WordPress REST
 |               route, gated by BCC_FRONTEND_ORIGIN (parsed by
@@ -1653,6 +1655,13 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 \BCC\Trust\Core\Support\BearerAuth::register();
 \BCC\Trust\Core\Support\CorsHandler::register();
 \BCC\Trust\Infrastructure\EdgeCache::init();
+
+// Security review 2026-11-18 (H2): members sign in at the app only.
+// wp-login.php / XML-RPC refuse member accounts, wp-admin sends members
+// away, and a member on a bcc route must be authenticated by the bearer
+// token (never a WordPress cookie or application password); see
+// WordPressSignInGate.
+\BCC\Trust\Core\Security\WordPressSignInGate::register();
 
 // F-305: suspended members are signed in READ-ONLY. One gate refuses every
 // BCC write from a known-suspended member, except an explicit allow-list
