@@ -17,6 +17,7 @@
 namespace BCC\Trust\Core\REST\Auth;
 
 use BCC\Trust\Core\Services\AccountRecoveryService;
+use BCC\Trust\Core\Services\HandleService;
 use BCC\Trust\Core\Support\ApiResponse;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -82,9 +83,18 @@ final class EmailVerificationController
                 'permission_callback' => '__return_true',
                 'args' => [
                     'email' => [
-                        'required'          => true,
+                        'required'          => false,
                         'type'              => 'string',
+                        'default'           => '',
                         'sanitize_callback' => 'sanitize_email',
+                    ],
+                    // F-294: an email OR a handle, so an unverified sign-in
+                    // by handle can offer "resend" (it knows no email).
+                    'identifier' => [
+                        'required'          => false,
+                        'type'              => 'string',
+                        'default'           => '',
+                        'sanitize_callback' => 'sanitize_text_field',
                     ],
                 ],
             ]
@@ -159,6 +169,13 @@ final class EmailVerificationController
             return ApiResponse::error('bcc_already_verified', 'This email is already verified.', 409);
         }
 
+        // F-294: the code was burned by too many wrong attempts and no new
+        // one has been sent. Say so, instead of "invalid or expired", so the
+        // user knows to request a new code rather than retype this one.
+        if (AuthSupport::emailOtpIdentity($userId) === null && get_transient(self::OTP_EXHAUSTED_PREFIX . $userId) !== false) {
+            return self::otpExhausted();
+        }
+
         // Count EVERY attempt BEFORE comparing (L2) — see TwoFactorController:
         // caps comparisons per (user, current code) at VERIFY_EMAIL_MAX_FAILURES
         // even under concurrent guesses; an attempt beyond it burns the code
@@ -170,9 +187,7 @@ final class EmailVerificationController
             AuthSupport::OTP_TTL,
             'verify_email_attempt:' . $userId . ':' . $otpId
         )) {
-            AuthSupport::burnEmailOtp($userId);
-            \BCC\Core\Log\Logger::audit('verify_email_attempts_exhausted', ['user_id' => $userId]);
-            return ApiResponse::error('bcc_invalid_otp', 'Invalid or expired code.', 400);
+            return self::exhaustOtp($userId);
         }
 
         if (!AuthSupport::consumeOtpForUser($userId, $code)) {
@@ -191,13 +206,37 @@ final class EmailVerificationController
                 AuthSupport::OTP_TTL,
                 'verify_email_fail:' . $userId . ':' . $otpId
             )) {
-                AuthSupport::burnEmailOtp($userId);
-                \BCC\Core\Log\Logger::audit('verify_email_attempts_exhausted', ['user_id' => $userId]);
+                return self::exhaustOtp($userId);
             }
             return ApiResponse::error('bcc_invalid_otp', 'Invalid or expired code.', 400);
         }
 
         return AuthSupport::finalizeVerification($userId);
+    }
+
+    /**
+     * F-294: a code burned by the attempt cap (F-48) used to answer the
+     * generic "Invalid or expired code.", so a user who then typed the right
+     * code was told it was wrong, with no hint to ask for a new one. The
+     * burning attempt, and every attempt after it until a resend, now
+     * answers bcc_otp_exhausted (user-approved). It is only reachable after
+     * the cap on an account with a pending code; sign-up already says
+     * whether an email has an account, so this adds nothing an attacker
+     * lacks.
+     */
+    private const OTP_EXHAUSTED_PREFIX = 'bcc_otp_exhausted_';
+
+    private static function exhaustOtp(int $userId): WP_REST_Response
+    {
+        AuthSupport::burnEmailOtp($userId);
+        set_transient(self::OTP_EXHAUSTED_PREFIX . $userId, '1', AuthSupport::OTP_TTL);
+        \BCC\Core\Log\Logger::audit('verify_email_attempts_exhausted', ['user_id' => $userId]);
+        return self::otpExhausted();
+    }
+
+    private static function otpExhausted(): WP_REST_Response
+    {
+        return ApiResponse::error('bcc_otp_exhausted', 'Too many attempts. Request a new code.', 400);
     }
 
     /**
@@ -223,24 +262,66 @@ final class EmailVerificationController
             return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
         }
 
-        $email = sanitize_email((string) $request->get_param('email'));
-        if ($email === '' || !is_email($email)) {
-            return ApiResponse::error('bcc_invalid_request', 'A valid email is required.', 422);
-        }
+        // F-294: `email`, or `identifier` (an email OR a handle). A handle
+        // resolves through the account's CURRENT handle, and the mail goes
+        // to the address on file; the response never says which, or whether.
+        $email      = sanitize_email((string) $request->get_param('email'));
+        $identifier = trim((string) $request->get_param('identifier'));
+        $user       = false;
 
-        // F-290: the per-network bucket above is office scale; this caps mail
-        // to any one inbox, before the lookup and whether or not it exists.
-        if (!AuthSupport::allowMailToAddress(
-            'resend_verification',
-            $email,
-            AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT,
-            AuthSupport::RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT
-        )) {
-            AuthSupport::releaseThrottle('resend_verification', 3600);
-            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
+        if ($email === '' && $identifier !== '' && is_email($identifier)) {
+            $email = sanitize_email($identifier);
         }
-
-        $user = get_user_by('email', $email);
+        if ($email !== '') {
+            if (!is_email($email)) {
+                return ApiResponse::error('bcc_invalid_request', 'A valid email is required.', 422);
+            }
+            // F-290: the per-network bucket above is office scale; this caps mail
+            // to any one inbox, before the lookup and whether or not it exists.
+            if (!AuthSupport::allowMailToAddress(
+                'resend_verification',
+                $email,
+                AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT,
+                AuthSupport::RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT
+            )) {
+                AuthSupport::releaseThrottle('resend_verification', 3600);
+                return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
+            }
+            $user = get_user_by('email', $email);
+        } elseif ($identifier !== '') {
+            $handle = ltrim(strtolower($identifier), '@');
+            // F-290 for the handle form: the same caps, keyed on the handle and
+            // checked BEFORE the lookup, so a 429 says nothing about whether
+            // the handle exists.
+            if (!AuthSupport::allowMailToAddress(
+                'resend_verification',
+                'handle:' . $handle,
+                AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT,
+                AuthSupport::RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT
+            )) {
+                AuthSupport::releaseThrottle('resend_verification', 3600);
+                return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
+            }
+            $ownerId = HandleService::currentOwner($handle);
+            $user    = $ownerId !== null ? get_userdata($ownerId) : false;
+            $email   = $user instanceof \WP_User ? (string) $user->user_email : '';
+            // The resolved inbox's own cap still binds, so alternating the
+            // email and handle forms cannot double the mail to one address.
+            // Over it, nothing is sent and the answer is the same ok (a 429
+            // here would say the handle exists). The network slot is NOT
+            // given back here: a give-back only for handles that exist would
+            // let the network bucket's count say which ones do.
+            if ($user instanceof \WP_User && !AuthSupport::allowMailToAddress(
+                'resend_verification',
+                $email,
+                AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT,
+                AuthSupport::RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT
+            )) {
+                $user = false;
+            }
+        } else {
+            return ApiResponse::error('bcc_invalid_request', 'Supply an email or a handle.', 422);
+        }
 
         if ($user instanceof \WP_User) {
             $userId        = (int) $user->ID;
@@ -259,6 +340,8 @@ final class EmailVerificationController
             ) {
                 // Overwrites the existing OTP (if any) so the previous code
                 // immediately stops working — only the new email is valid.
+                // A new code ends an "attempts exhausted" state (F-294).
+                delete_transient(self::OTP_EXHAUSTED_PREFIX . $userId);
                 AuthSupport::beginEmailVerification($userId, $email);
             }
         }

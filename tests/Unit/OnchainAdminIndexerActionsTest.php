@@ -490,6 +490,40 @@ final class OnchainAdminIndexerActionsTest extends TestCase
         );
     }
 
+    public function testHeliusRecreateIsAuditedWithBothWebhookIds(): void
+    {
+        \BccAdminTestState::$validNonceAction = 'bcc_helius_reregister';
+        \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::$reregisterResult =
+            ['outcome' => 'recreated', 'webhook_id' => 'wh_new', 'previous_webhook_id' => 'wh_old'];
+
+        try {
+            NftIndexerStatusView::handleHeliusReregister();
+        } catch (\BccAdminRedirect $r) {
+            $this->assertSame('helius_reregister_recreated', $r->args['bcc_nft_result']);
+        }
+
+        $rows = \BCC\Trust\Core\Security\AuditLogger::$rows;
+        $this->assertCount(1, $rows);
+        $this->assertSame('admin_helius_webhook_recreated', $rows[0]['action']);
+        $this->assertSame(['previous_webhook_id' => 'wh_old', 'webhook_id' => 'wh_new'], $rows[0]['meta']);
+    }
+
+    public function testHeliusUrlUpdateKeepsItsAuditActionAndCarriesNoIds(): void
+    {
+        \BccAdminTestState::$validNonceAction = 'bcc_helius_reregister';
+
+        try {
+            NftIndexerStatusView::handleHeliusReregister();
+        } catch (\BccAdminRedirect $r) {
+            $this->assertSame('helius_reregister_updated', $r->args['bcc_nft_result']);
+        }
+
+        $rows = \BCC\Trust\Core\Security\AuditLogger::$rows;
+        $this->assertCount(1, $rows);
+        $this->assertSame('admin_helius_webhook_reregistered', $rows[0]['action']);
+        $this->assertSame([], $rows[0]['meta']);
+    }
+
     public function testHeliusResyncDistinguishesAppliedFromNoOp(): void
     {
         \BccAdminTestState::$validNonceAction = 'bcc_helius_resync';

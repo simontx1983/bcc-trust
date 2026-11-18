@@ -24,7 +24,8 @@ use PHPUnit\Framework\TestCase;
  * party (a hidden reply still holds the slot and is frozen); ≤ 1000 chars;
  * the author edits (edited_at, only while they still answer for the page)
  * and deletes; when the page changes hands the old reply stops showing and
- * the slot is free; reads fail closed.
+ * the slot is free, and only its author still sees it, as
+ * `viewer_stale_reply`, to delete it (2026-11-18); reads fail closed.
  */
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
@@ -273,6 +274,67 @@ final class ReviewReplyServiceTest extends TestCase
         self::assertSame('bcc_forbidden', self::code(self::service()->update(self::OPERATOR, self::VOTE, 'edited after losing the page')));
         self::assertSame('old', \ReplyWorld::$replies[self::VOTE][0]['body']);
         self::assertSame(['deleted' => true], self::service()->delete(self::OPERATOR, self::VOTE));
+    }
+
+    public function testTheOldAuthorStillSeesTheirStaleReplyAndNobodyElseDoes(): void
+    {
+        $this->onValidatorPage(self::OPERATOR);
+        self::service()->create(self::OPERATOR, self::VOTE, 'from the old operator');
+        \ReplyWorld::$validatorOperators[self::VALIDATOR_PAGE] = self::NEW_OPERATOR;
+
+        $asOld = self::service()->forReviews(self::OPERATOR, self::rows(self::VOTE))[self::VOTE];
+        self::assertNull($asOld['reply'], 'it is not the page\'s response');
+        self::assertSame('from the old operator', $asOld['viewer_stale_reply']['body'] ?? null, 'but its author still sees it');
+        $perms = $asOld['viewer_stale_reply']['permissions'];
+        self::assertFalse($perms['can_edit']['allowed']);
+        self::assertSame('page_changed_hands', $perms['can_edit']['reason_code']);
+        self::assertTrue($perms['can_delete']['allowed']);
+        self::assertSame('own_reply', $perms['can_report']['reason_code']);
+
+        foreach ([0, self::REVIEWER, self::STRANGER, self::NEW_OPERATOR] as $viewer) {
+            self::assertNull(self::service()->forReviews($viewer, self::rows(self::VOTE))[self::VOTE]['viewer_stale_reply'], "viewer {$viewer} never sees someone else's stale reply");
+        }
+
+        self::service()->create(self::NEW_OPERATOR, self::VOTE, 'from the new operator');
+        $asOld = self::service()->forReviews(self::OPERATOR, self::rows(self::VOTE))[self::VOTE];
+        self::assertSame('from the new operator', $asOld['reply']['body'] ?? null, 'the page\'s response');
+        self::assertSame('from the old operator', $asOld['viewer_stale_reply']['body'] ?? null, 'beside their own stale one');
+
+        self::service()->delete(self::OPERATOR, self::VOTE);
+        self::assertNull(self::service()->forReviews(self::OPERATOR, self::rows(self::VOTE))[self::VOTE]['viewer_stale_reply'], 'gone once deleted');
+    }
+
+    public function testAReplyThatStillAnswersOrIsModerationHiddenIsNeverAStaleReply(): void
+    {
+        self::service()->create(self::MEMBER, self::VOTE, 'current');
+        $asMember = self::service()->forReviews(self::MEMBER, self::rows(self::VOTE))[self::VOTE];
+        self::assertSame('current', $asMember['reply']['body'] ?? null);
+        self::assertNull($asMember['viewer_stale_reply'], 'the current party\'s reply shows once, as the reply');
+
+        \ReplyWorld::$reviews[71]                              = ['voter' => self::REVIEWER, 'page' => self::VALIDATOR_PAGE];
+        \ReplyWorld::$validatorOperators[self::VALIDATOR_PAGE] = self::OPERATOR;
+        self::service()->create(self::OPERATOR, 71, 'hidden, then handed over');
+        \ReplyWorld::hide(71, self::OPERATOR);
+        \ReplyWorld::$validatorOperators[self::VALIDATOR_PAGE] = self::NEW_OPERATOR;
+
+        self::assertNull(
+            self::service()->forReviews(self::OPERATOR, self::rows(71))[71]['viewer_stale_reply'],
+            'a moderation-hidden reply stays frozen and unshown, even to its author'
+        );
+    }
+
+    public function testListPathsPrefetchTheStaleReplysAuthorToo(): void
+    {
+        $this->onValidatorPage(self::OPERATOR);
+        self::service()->create(self::OPERATOR, self::VOTE, 'old');
+        \ReplyWorld::$validatorOperators[self::VALIDATOR_PAGE] = self::NEW_OPERATOR;
+        self::service()->create(self::NEW_OPERATOR, self::VOTE, 'new');
+
+        $ids = ReviewReplyService::replyAuthorIds(self::service()->forReviews(self::OPERATOR, self::rows(self::VOTE)));
+        sort($ids);
+
+        self::assertSame([self::OPERATOR, self::NEW_OPERATOR], $ids);
+        self::assertSame([self::NEW_OPERATOR], ReviewReplyService::replyAuthorIds(self::service()->forReviews(0, self::rows(self::VOTE))));
     }
 
     // ── the Reviews-tab bundle ──────────────────────────────────────────

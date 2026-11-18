@@ -116,10 +116,8 @@ final class CardReviewsService
                 $rows
             )
         );
-        foreach ($replies as $bundle) {
-            if ($bundle['reply'] !== null) {
-                $authorIds[] = $bundle['reply']['author_id'];
-            }
+        foreach (ReviewReplyService::replyAuthorIds($replies) as $replyAuthorId) {
+            $authorIds[] = $replyAuthorId;
         }
 
         $authorIds  = array_values(array_unique($authorIds));
@@ -162,11 +160,12 @@ final class CardReviewsService
     }
 
     /**
-     * F-345: add `reply` (null when none, or hidden) and
+     * F-345: add `reply` (null when none, or hidden), `viewer_stale_reply`
+     * (the viewer's own reply after a hand-over, else null) and
      * `permissions.can_reply` to a shaped review row.
      *
      * @param array<string, mixed> $item
-     * @param array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}|null $bundle
+     * @param array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, viewer_stale_reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}|null $bundle
      * @param array<string, mixed>|null $prefetched
      * @return array<string, mixed>
      */
@@ -176,7 +175,10 @@ final class CardReviewsService
             ? Plugin::instance()->reviewReplyService()->withAuthor($bundle['reply'], $viewerId, $prefetched)
             : null;
 
-        $item['reply']       = $reply;
+        $item['reply']              = $reply;
+        $item['viewer_stale_reply'] = $bundle !== null && $bundle['viewer_stale_reply'] !== null
+            ? Plugin::instance()->reviewReplyService()->withAuthor($bundle['viewer_stale_reply'], $viewerId, $prefetched)
+            : null;
         $item['permissions'] = [
             'can_reply' => $bundle['can_reply']
                 ?? ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'not_applicable'],
