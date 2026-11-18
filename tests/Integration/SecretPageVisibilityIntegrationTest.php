@@ -19,7 +19,9 @@ use PHPUnit\Framework\TestCase;
  * Discovery (`/cards`, which `/onboarding/suggestions` also reads through
  * PageDiscoveryService) and trending hide secret pages from everyone, through
  * bcc-core's shared PeepSoPagePrivacy::notSecretSql(). The single card asks
- * PeepSoPagePrivacy::isVisibleTo(), which lets members and invitees in.
+ * PeepSoPagePrivacy::isVisibleTo(), which lets members and invitees in. Lists
+ * shown to one viewer (the watchlist, feed page labels) find their secret
+ * pages in one read, PageDiscoveryRepository::findSecretOrUnknownIds().
  *
  * ⚠⚠ THE TWO-ROW PAGES ARE THE POINT. Nothing stops a page from carrying two
  * privacy rows. The old LEFT JOIN form let a page with rows 0 and 2 through
@@ -135,6 +137,43 @@ final class SecretPageVisibilityIntegrationTest extends TestCase
         foreach (self::LISTED as $page) {
             self::assertFalse(PeepSoPagePrivacy::isSecretOrUnknown($page), "page {$page} is not secret");
         }
+    }
+
+    public function testTheBatchedReadNamesExactlyTheSecretPages(): void
+    {
+        $missing = 993199;
+        $ids     = [self::TWO_ROWS_OPEN, self::SECRET, $missing, self::OPEN, self::TWO_ROWS_SECRET,
+                    self::CLOSED, self::NO_META, self::SECRET];
+
+        self::assertSame(
+            [self::SECRET, self::TWO_ROWS_SECRET],
+            PageDiscoveryRepository::findSecretOrUnknownIds($ids),
+            'any privacy row reading 2 is secret, in input order, once each; an id with no post is not'
+        );
+        self::assertSame('', (string) $GLOBALS['wpdb']->last_error);
+
+        foreach ($ids as $page) {
+            if ($page === $missing) {
+                continue;
+            }
+            self::assertSame(
+                PeepSoPagePrivacy::isSecretOrUnknown($page),
+                in_array($page, [self::SECRET, self::TWO_ROWS_SECRET], true),
+                "page {$page}: the batched read agrees with the one-page probe"
+            );
+        }
+    }
+
+    public function testAFailedBatchedReadNamesEveryPage(): void
+    {
+        $GLOBALS['wpdb']->failQueriesMatching = '/NOT \(NOT EXISTS/';
+
+        self::assertSame(
+            [self::OPEN, self::SECRET],
+            PageDiscoveryRepository::findSecretOrUnknownIds([self::OPEN, self::SECRET]),
+            'unknown counts as secret'
+        );
+        self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures, 'the read really failed');
     }
 
     public function testASecretPageIsVisibleToItsMembersAndInviteesOnly(): void

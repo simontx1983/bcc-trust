@@ -19,7 +19,8 @@
  *   - watched_at         → null when no bcc_watch_meta row exists yet
  *
  * Previously stubbed, now wired (kept for changelog clarity):
- *   - card_kind         → resolved via WatchingRepository::findPageInfoByUserIds
+ *   - card_kind         → resolved via WatchingRepository::findPageCandidatesByUserIds,
+ *                         as the viewer may see it (pageInfoVisibleTo)
  *
  * Pagination: offset envelope per §1.5 (watchlist is a directory, not
  * a time-ordered feed).
@@ -38,6 +39,7 @@ use BCC\Trust\Core\Repositories\WatchMetaRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
+use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Core\Support\PageCardPrefetcher;
 use BCC\Trust\Core\Support\PageTypeMap;
 use BCC\Trust\Core\Support\ProfileAccess;
@@ -169,7 +171,8 @@ final class WatchingService
         //  more than page_size rows (which also bounds card hydration).
         //
         //  Queries: two COUNTs + at most one ranged read per source +
-        //  findPageInfoByUserIds + bulk get_post for the page-follow rows.
+        //  findPageCandidatesByUserIds + one batched page-privacy read +
+        //  bulk get_post for the page-follow rows.
         // ────────────────────────────────────────────────────────────
         $pageFollowTotal = $this->pageFollowRepo->countByUserId($userId);
         $peepsoTotal     = $this->watchingRepo->countItemsForUser($userId);
@@ -205,7 +208,7 @@ final class WatchingService
             $followeeUserIds[] = (int) $row->card_user_id;
         }
         $followeeUserIds = array_values(array_unique($followeeUserIds));
-        $pageInfo = $this->watchingRepo->findPageInfoByUserIds($followeeUserIds);
+        $pageInfo = $this->pageInfoVisibleTo($followeeUserIds, $userId);
 
         $peepsoItems = [];
         foreach ($rows as $row) {
@@ -468,6 +471,13 @@ final class WatchingService
         // viewer's own follow and carries the follow_id they unwatch with.
         $grouped['member_ids'] = self::viewableMembers($grouped['member_ids']);
 
+        // The same for a SECRET page this viewer may not see (PageAccess):
+        // `card: null`, and its card is never built. The row stays for the
+        // same reason. (A peepso row never points at such a page:
+        // pageInfoVisibleTo already resolved it as the viewer sees it. This
+        // catches the page-follow rows, which name their page directly.)
+        $grouped = self::withoutHiddenPages($grouped, $viewerId);
+
         if ($grouped['member_ids'] === [] && $grouped['page_ids'] === []) {
             // Nothing hydratable on this page — still emit `card: null`
             // on every row so the shape is uniform.
@@ -517,6 +527,88 @@ final class WatchingService
         }
 
         return self::attachBuiltCards($items, $grouped, $memberCards, $pageCards);
+    }
+
+    /**
+     * $grouped without the page targets this viewer may not see
+     * (PageAccess::visibleAmong: one batched read for the whole page). A
+     * dropped target's row gets `card: null` from attachBuiltCards, and the
+     * card is never built.
+     *
+     * @param array{
+     *   member_targets: array<int, int>,
+     *   page_targets: array<int, array{kind: string, page_id: int}>,
+     *   member_ids: list<int>,
+     *   page_ids: list<int>
+     * } $grouped
+     * @return array{
+     *   member_targets: array<int, int>,
+     *   page_targets: array<int, array{kind: string, page_id: int}>,
+     *   member_ids: list<int>,
+     *   page_ids: list<int>
+     * }
+     */
+    private static function withoutHiddenPages(array $grouped, int $viewerId): array
+    {
+        if ($grouped['page_ids'] === []) {
+            return $grouped;
+        }
+
+        $visible = PageAccess::visibleAmong($grouped['page_ids'], $viewerId);
+        $isVisible = array_flip($visible);
+
+        $grouped['page_ids']     = $visible;
+        $grouped['page_targets'] = array_filter(
+            $grouped['page_targets'],
+            static fn (array $target): bool => isset($isVisible[$target['page_id']])
+        );
+
+        return $grouped;
+    }
+
+    /**
+     * Each followed user's page AS THIS VIEWER MAY SEE IT: the first of the
+     * user's candidate pages (best first, WatchingRepository::
+     * findPageCandidatesByUserIds) that PageAccess lets the viewer see.
+     *
+     * A user whose only page is a SECRET one the viewer is not in is absent
+     * from the map, so their row is built as a member row, exactly like a
+     * user with no page. No page_id, slug, kind or link gives the secret page
+     * away, and a card hydrates as the member's own (profile-gated) card. A
+     * user with another page the viewer may see resolves to that one.
+     *
+     * One batched privacy read for the whole page of rows; only secret pages
+     * pay a member check.
+     *
+     * @param list<int> $userIds
+     * @return array<int, object{user_id: int|numeric-string, page_id: int|numeric-string, page_slug: string, page_type: string}>
+     */
+    private function pageInfoVisibleTo(array $userIds, int $viewerId): array
+    {
+        $candidates = $this->watchingRepo->findPageCandidatesByUserIds($userIds);
+        if ($candidates === []) {
+            return [];
+        }
+
+        $pageIds = [];
+        foreach ($candidates as $rows) {
+            foreach ($rows as $row) {
+                $pageIds[] = (int) $row->page_id;
+            }
+        }
+        $isVisible = array_flip(PageAccess::visibleAmong($pageIds, $viewerId));
+
+        $map = [];
+        foreach ($candidates as $userId => $rows) {
+            foreach ($rows as $row) {
+                if (isset($isVisible[(int) $row->page_id])) {
+                    $map[$userId] = $row;
+                    break;
+                }
+            }
+        }
+
+        return $map;
     }
 
     /**
@@ -986,7 +1078,7 @@ final class WatchingService
         // item carries the right card_kind / is_resolved /
         // identifier per the locked contract — same shape as items
         // from GET /me/watching.
-        $pageInfo = $this->watchingRepo->findPageInfoByUserIds([(int) $row->card_user_id]);
+        $pageInfo = $this->pageInfoVisibleTo([(int) $row->card_user_id], $viewerId);
         $userPage = $pageInfo[(int) $row->card_user_id] ?? null;
 
         return [

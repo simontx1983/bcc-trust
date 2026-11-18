@@ -321,24 +321,29 @@ final class WatchingRepository
      * surface validator / project / creator card_kinds with real
      * post_name slugs in URLs.
      *
-     * Returns one row per user, keyed by user_id. Users with no
-     * peepso-page are absent from the map (caller falls back to
-     * 'member' kind).
+     * Returns EVERY candidate page per user, best first, keyed by user_id.
+     * Users with no peepso-page are absent from the map (caller falls back
+     * to 'member' kind).
      *
-     * Multi-page-per-user resolution (LOCKED — deterministic):
-     *   1. Highest-priority _bcc_page_type wins — validator > builder > nft > unknown.
+     * ⚠ The caller picks, not this method: the first candidate the VIEWER
+     * may see wins (WatchingService::pageInfoVisibleTo, PageAccess). A
+     * SECRET page the viewer is not in is skipped, so the next candidate,
+     * or none, takes its place, exactly as if that page did not exist.
+     *
+     * Multi-page-per-user order (LOCKED — deterministic):
+     *   1. Highest-priority _bcc_page_type first — validator > builder > nft > unknown.
      *      (MIN(ID) alone would flip when a new page imports/migrates;
      *      anchoring to the contract page_type keeps the mapping stable
      *      across backups and reorderings.)
-     *   2. Within the same priority, lowest post_id wins (earliest-published).
+     *   2. Within the same priority, lowest post_id first (earliest-published).
      *
      * Bounded by LIMIT 200 — at the watch cap of 50 follows × an
      * unrealistic 4 pages each, the 200 row budget still holds.
      *
      * @param list<int> $userIds
-     * @return array<int, object{user_id: int|numeric-string, page_id: int|numeric-string, page_slug: string, page_type: string}>
+     * @return array<int, list<object{user_id: int|numeric-string, page_id: int|numeric-string, page_slug: string, page_type: string}>>
      */
-    public function findPageInfoByUserIds(array $userIds): array
+    public function findPageCandidatesByUserIds(array $userIds): array
     {
         if ($userIds === []) {
             return [];
@@ -384,12 +389,9 @@ final class WatchingRepository
 
         $map = [];
         foreach ($rows ?: [] as $row) {
-            $userId = (int) $row->user_id;
-            // First row per user_id wins (rows are ORDER BYed by
-            // priority + ID, so the first is the canonical pick).
-            if (!isset($map[$userId])) {
-                $map[$userId] = $row;
-            }
+            // Rows are ORDER BYed by user, then priority + ID, so each
+            // user's list comes out best first.
+            $map[(int) $row->user_id][] = $row;
         }
         return $map;
     }
