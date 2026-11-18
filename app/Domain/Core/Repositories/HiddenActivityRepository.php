@@ -148,6 +148,62 @@ final class HiddenActivityRepository
     }
 
     /**
+     * Which of THESE act ids are moderation-hidden? One read scoped to the
+     * caller's ids (an `IN` on the primary key), for a reader that judges a
+     * page of posts and has no use for the whole list.
+     *
+     * F-353: the notification bell called getAllHiddenIds() on every list
+     * read. On a cold object cache (no persistent cache) that is the full
+     * keyset read, up to READ_CEILING rows, to judge at most one bell page.
+     *
+     * ⚠ F-98 — FAILS CLOSED in the same sense as getAllHiddenIds(): a read
+     * that did not run, or ran with last_error set, is NULL, never [], so a
+     * caller cannot mistake a failure for "nothing is hidden". Detected with
+     * runRead() (it also catches wpdb's silent `! $this->ready` path). Not
+     * cached: it is a few primary-key lookups, and a failure is never
+     * remembered.
+     *
+     * @param list<int> $actIds bounded by the caller (one bell page, <= 50)
+     * @return list<int>|null the hidden subset, or null when the read failed
+     */
+    public function hiddenAmong(array $actIds): ?array
+    {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', $actIds),
+            static fn(int $id): bool => $id > 0
+        )));
+        if ($ids === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $table = TableRegistry::hiddenActivities();
+        $ph    = implode(',', array_fill(0, count($ids), '%d'));
+
+        $sql = $wpdb->prepare(
+            "SELECT act_id FROM {$table} WHERE act_id IN ({$ph}) LIMIT %d",
+            ...array_merge($ids, [count($ids)])
+        );
+        if (!self::runRead($sql)) {
+            self::recordReadFailure('exists_read_failed', [
+                'act_ids'  => count($ids),
+                'db_error' => (string) $wpdb->last_error,
+            ]);
+            return null;
+        }
+
+        $hidden = [];
+        foreach ((array) $wpdb->get_col(null) as $raw) {
+            $id = (int) $raw;
+            if ($id > 0) {
+                $hidden[] = $id;
+            }
+        }
+
+        return $hidden;
+    }
+
+    /**
      * Full list of hidden act_ids — what the feed pipeline merges into
      * its exclusion set. Cache-backed because every feed page fans into
      * this (5 min TTL, generation-busted on every add/remove).

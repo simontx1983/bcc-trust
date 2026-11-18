@@ -115,21 +115,30 @@ final class MyMessagesPrefsEndpoint
             return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please slow down.', 429);
         }
 
-        $touched = false;
-
-        $chatEnabled = $request->get_param('chat_enabled');
-        if ($chatEnabled !== null) {
-            $value = filter_var($chatEnabled, FILTER_VALIDATE_BOOLEAN);
-            update_user_meta($userId, 'peepso_chat_enabled', $value ? '1' : '0');
-            $touched = true;
+        // F-294: validate BOTH switches before writing either. A value that
+        // is not a boolean is a 422; a bare FILTER_VALIDATE_BOOLEAN used to
+        // read it as false and switch the setting off with a 200.
+        $writes = [];
+        foreach (['chat_enabled' => 'peepso_chat_enabled', 'chat_friends_only' => 'peepso_chat_friends_only'] as $param => $metaKey) {
+            $raw = $request->get_param($param);
+            if ($raw === null) {
+                continue;
+            }
+            $bool = \BCC\Trust\Core\Support\StrictBoolParam::parse($raw);
+            if ($bool === null) {
+                return ApiResponse::error(
+                    'bcc_invalid_request',
+                    sprintf('`%s` must be true or false.', $param),
+                    422
+                );
+            }
+            $writes[$metaKey] = $bool ? '1' : '0';
         }
 
-        $chatFriendsOnly = $request->get_param('chat_friends_only');
-        if ($chatFriendsOnly !== null) {
-            $value = filter_var($chatFriendsOnly, FILTER_VALIDATE_BOOLEAN);
-            update_user_meta($userId, 'peepso_chat_friends_only', $value ? '1' : '0');
-            $touched = true;
+        foreach ($writes as $metaKey => $value) {
+            update_user_meta($userId, $metaKey, $value);
         }
+        $touched = $writes !== [];
 
         if (!$touched) {
             return ApiResponse::error(

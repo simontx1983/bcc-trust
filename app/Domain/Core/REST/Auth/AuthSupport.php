@@ -117,6 +117,20 @@ final class AuthSupport
     public const TRUSTED_LOGIN_NETWORKS_MAX  = 10;
     public const TRUSTED_LOGIN_NETWORKS_TTL  = 30 * 86400;
 
+    /**
+     * F-290: Throttle::release() — give back a slot an auth route charged
+     * for a request a LATER bucket refused. Feature-
+     * detected: an older bcc-core without release() just leaves the slot
+     * counted, the safe direction.
+     */
+    public static function releaseThrottle(string $action, int $window, ?string $key = null): void
+    {
+        // @phpstan-ignore function.alreadyNarrowedType (an older bcc-core may be deployed alongside)
+        if (method_exists(\BCC\Core\Security\Throttle::class, 'release')) {
+            \BCC\Core\Security\Throttle::release($action, $window, $key);
+        }
+    }
+
     /** The caller's network for login throttling: IPv4 /24, IPv6 /48. */
     public static function loginNetwork(): string
     {
@@ -322,6 +336,25 @@ final class AuthSupport
     public const OAUTH_LOGIN_GLOBAL_LIMIT  = 300;
 
     /**
+     * Wallet-login: at most this many signature checks per live sign-in
+     * challenge. The MAX-th bad signature deletes the challenge, so the next
+     * /auth/wallet-nonce issues a fresh one. Bad signatures no longer spend
+     * the per-wallet bucket or the route ceiling (they would let anyone lock
+     * a wallet, or every wallet, out), so this cap is what bounds the
+     * CPU-bound verifies: 5 per issued challenge, and challenges come from
+     * the browser-direct, per-network-limited /auth/wallet-nonce.
+     */
+    public const WALLET_LOGIN_CHALLENGE_MAX_FAILURES = 5;
+
+    /**
+     * Window for those per-challenge counts. A challenge lives 300 s; with a
+     * 3600 s window at most 300/3600 of a count can fade while it is live
+     * (5 × 1/12 ≈ 0.42 of an attempt, never a whole one) — the
+     * TWO_FA_ATTEMPT_WINDOW reasoning.
+     */
+    public const WALLET_LOGIN_CHALLENGE_WINDOW = 3600;
+
+    /**
      * Throttle a sign-in attempt per IDENTITY plus a route-wide ceiling, both
      * with EXPLICIT bucket keys (Throttle otherwise keys an anonymous caller
      * by action + client IP — the shared-BFF-IP problem this replaces).
@@ -330,9 +363,14 @@ final class AuthSupport
      * address or provider id. Returns false (→ 429) when either bucket is
      * exhausted.
      */
-    public static function allowIdentityAttempt(string $action, string $identity, int $perIdentity, int $global): bool
-    {
-        if (!\BCC\Core\Security\Throttle::allow($action . '_global', $global, 60, $action . '_global')) {
+    public static function allowIdentityAttempt(
+        string $action,
+        string $identity,
+        int $perIdentity,
+        int $global,
+        bool $countDenied = true
+    ): bool {
+        if (!\BCC\Core\Security\Throttle::allow($action . '_global', $global, 60, $action . '_global', $countDenied)) {
             // The route-wide ceiling tripping means EVERY identity is now
             // refused — a flood, or the ceiling set too low for real traffic.
             // Count it so it is visible, never silent.
@@ -341,12 +379,31 @@ final class AuthSupport
             }
             return false;
         }
-        return \BCC\Core\Security\Throttle::allow(
-            $action,
-            $perIdentity,
-            60,
-            $action . ':' . substr(hash('sha256', $identity), 0, 32)
-        );
+        if (\BCC\Core\Security\Throttle::allow($action, $perIdentity, 60, self::identityBucketKey($action, $identity), $countDenied)) {
+            return true;
+        }
+        if (!$countDenied) {
+            // F-290: a refused call gives back the ceiling slot it charged.
+            self::releaseThrottle($action . '_global', 60, $action . '_global');
+        }
+        return false;
+    }
+
+    /**
+     * Give back both slots allowIdentityAttempt() charged — for an attempt
+     * that turned out not to be the identity's (wallet-login: a signature
+     * that verified against none of the address's challenges).
+     */
+    public static function releaseIdentityAttempt(string $action, string $identity): void
+    {
+        self::releaseThrottle($action, 60, self::identityBucketKey($action, $identity));
+        self::releaseThrottle($action . '_global', 60, $action . '_global');
+    }
+
+    /** $identity is hashed, so the bucket key never carries the raw address or provider id. */
+    private static function identityBucketKey(string $action, string $identity): string
+    {
+        return $action . ':' . substr(hash('sha256', $identity), 0, 32);
     }
     /** Anon-IP-keyed (per-minute) throttle for /auth/oauth-complete. */
     public const OAUTH_COMPLETE_RATE_LIMIT = 5;

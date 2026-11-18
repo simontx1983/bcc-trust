@@ -37,6 +37,7 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Support\GroupInteractionGate;
 use BCC\Trust\Core\Support\NoReactionsGate;
 use WP_REST_Request;
@@ -149,6 +150,17 @@ final class HelpfulMarkEndpoint
         $actId = (int) $request->get_param('id');
         if ($actId <= 0) {
             return ApiResponse::error('bcc_invalid_request', 'Invalid id.', 400);
+        }
+
+        // F-345: a POST target must be a FEED ITEM (FeedItemGate). A review
+        // reply (module 206) takes no helpful marks; same 404 as an unknown
+        // id. A comment target is a comment's own act, judged by
+        // gateComment() below, so it is not asked here.
+        if (!$isComment) {
+            $notFeedItem = FeedItemGate::check($actId);
+            if ($notFeedItem !== null) {
+                return $notFeedItem;
+            }
         }
 
         $gateError = $isComment

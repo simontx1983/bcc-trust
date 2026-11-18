@@ -119,16 +119,9 @@ final class NotificationViewService
             return [];
         }
 
-        $hidden = [];
-        if ($this->hiddenRepo !== null) {
-            try {
-                $hidden = array_flip($this->hiddenRepo->getAllHiddenIds());
-            } catch (\Throwable $e) {
-                // Moderation state unreadable: judge on existence alone.
-                $hidden = [];
-            }
-        }
-
+        // Only a post that still exists can be moderation-hidden, so only
+        // the live ids are checked.
+        $hidden  = $this->hiddenAmong(array_values(array_intersect($actIds, $live)));
         $liveSet = array_flip($live);
         $gone    = [];
         foreach ($actIds as $actId) {
@@ -138,6 +131,35 @@ final class NotificationViewService
         }
 
         return $gone;
+    }
+
+    /**
+     * F-353: which of these (live) act ids are moderation-hidden, read for
+     * just this page's ids instead of the whole hidden list.
+     *
+     * Failure behaviour is unchanged. If the scoped read fails, the answer
+     * comes from getAllHiddenIds() as it always did: its cached list, else
+     * the last-known-good list (F-98), so a failure never reads as "nothing
+     * hidden" while a known list exists. Only when that is unavailable too
+     * does existence alone decide (unknown is not gone; see goneActIds).
+     *
+     * @param list<int> $actIds
+     * @return array<int, int> a set keyed by hidden act id
+     */
+    private function hiddenAmong(array $actIds): array
+    {
+        if ($this->hiddenRepo === null || $actIds === []) {
+            return [];
+        }
+
+        try {
+            $hidden = $this->hiddenRepo->hiddenAmong($actIds) ?? $this->hiddenRepo->getAllHiddenIds();
+        } catch (\Throwable $e) {
+            // Moderation state unreadable: judge on existence alone.
+            return [];
+        }
+
+        return array_flip($hidden);
     }
 
     /**
@@ -330,6 +352,11 @@ final class NotificationViewService
             // every one of them dead-ended on the Floor.
             NotificationType::REACTION    => $actId > 0 ? '/post/' . $actId : '/',
             NotificationType::REVIEW      => self::resolvePageLink($externalId),
+            // F-345: a member self-page has no wp_post; the replier IS that
+            // member, so the bell opens their profile.
+            NotificationType::REVIEW_REPLY => \BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($externalId) && $actorHandle !== ''
+                ? '/u/' . $actorHandle
+                : self::resolvePageLink($externalId),
             NotificationType::CARD_WATCHED => $actorHandle !== '' ? '/u/' . $actorHandle : '/',
             // Rank standing changes + §15 findings all deep-link to the
             // member's own progression surface (/me/progression — the

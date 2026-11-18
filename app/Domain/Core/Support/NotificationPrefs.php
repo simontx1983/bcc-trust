@@ -77,6 +77,7 @@ final class NotificationPrefs
         NotificationType::GROUP_INVITED,
         NotificationType::ANNOUNCEMENT_HIDDEN,
         NotificationType::ANNOUNCEMENT_RESTORED,
+        NotificationType::REVIEW_REPLY,
     ];
 
     /**
@@ -145,6 +146,7 @@ final class NotificationPrefs
         'bell_bcc_group_invited'                             => true,
         'bell_bcc_announcement_hidden'                       => true,
         'bell_bcc_announcement_restored'                     => true,
+        'bell_bcc_review_reply'                              => true,
         'push_master'                                        => false,
         'push_event_review'                                  => true,
         'push_event_dispute_outcome'                         => true,

@@ -36,7 +36,9 @@ final class NotificationPostLinkTest extends TestCase
         $GLOBALS['__nv_cache']  = [];
         $GLOBALS['__nv_script'] = [];
         $GLOBALS['__nv_sql']    = [];
+        $GLOBALS['__nv_options'] = [];
         $GLOBALS['wpdb']        = new \NotificationPostLinkFakeWpdb();
+        \BCC\Core\Observability\DegradationMetrics::$recorded = [];
     }
 
     private static function resolve(string $type, int $actId): string
@@ -67,7 +69,10 @@ final class NotificationPostLinkTest extends TestCase
         return $out;
     }
 
-    /** Seed the hidden-id list the way a warm object cache serves it. */
+    /**
+     * Seed the FULL hidden-id list the way a warm object cache serves it.
+     * Since F-353 the bell reads it only when its scoped read fails.
+     */
     private static function hiddenRepo(array $hiddenIds): HiddenActivityRepository
     {
         $gen = \BCC\Trust\Core\Support\CacheGeneration::SEED_FLOOR + 7; // below the floor is re-seeded
@@ -108,6 +113,7 @@ final class NotificationPostLinkTest extends TestCase
     public function testALivePostIsAvailable(): void
     {
         $GLOBALS['__nv_script'][] = [(object) ['act_id' => '10'], (object) ['act_id' => '11']];
+        $GLOBALS['__nv_script'][] = []; // none of them hidden
 
         self::assertSame([], self::gone(self::hiddenRepo([]), [10, 11]));
         self::assertStringContainsString("p.post_status = 'publish'", $GLOBALS['__nv_sql'][0]);
@@ -117,6 +123,7 @@ final class NotificationPostLinkTest extends TestCase
     public function testADeletedOrUnpublishedPostIsGone(): void
     {
         $GLOBALS['__nv_script'][] = [(object) ['act_id' => '10']]; // 11 no longer backs a published post
+        $GLOBALS['__nv_script'][] = [];
 
         self::assertSame([11 => true], self::gone(self::hiddenRepo([]), [10, 11]));
     }
@@ -124,8 +131,89 @@ final class NotificationPostLinkTest extends TestCase
     public function testAModerationHiddenPostIsGone(): void
     {
         $GLOBALS['__nv_script'][] = [(object) ['act_id' => '10'], (object) ['act_id' => '11']];
+        $GLOBALS['__nv_script'][] = [(object) ['act_id' => '10']];
+
+        self::assertSame([10 => true], self::gone(self::hiddenRepo([]), [10, 11]));
+    }
+
+    // ── F-353: the moderation check reads this page's ids, not the list ──
+
+    /**
+     * The full list (here seeded to say 11) is NOT what decides: one read
+     * scoped to the page's ids does. Two queries in all, and neither is the
+     * full-list keyset read.
+     */
+    public function testTheModerationCheckReadsOnlyThisPagesIds(): void
+    {
+        $GLOBALS['__nv_script'][] = [(object) ['act_id' => '10'], (object) ['act_id' => '11']];
+        $GLOBALS['__nv_script'][] = [(object) ['act_id' => '10']];
+
+        self::assertSame([10 => true], self::gone(self::hiddenRepo([11]), [10, 11]));
+        self::assertCount(2, $GLOBALS['__nv_sql']);
+        self::assertStringContainsString('wp_bcc_hidden_activities WHERE act_id IN (10,11) LIMIT 2', $GLOBALS['__nv_sql'][1]);
+        foreach ($GLOBALS['__nv_sql'] as $sql) {
+            self::assertStringNotContainsString('ORDER BY act_id DESC', $sql, 'never the full hidden-list read');
+        }
+    }
+
+    public function testOnlyPostsThatStillExistAreCheckedForModeration(): void
+    {
+        $GLOBALS['__nv_script'][] = [(object) ['act_id' => '10']];
+        $GLOBALS['__nv_script'][] = [];
+
+        self::gone(self::hiddenRepo([]), [10, 11]);
+        self::assertStringContainsString('act_id IN (10) LIMIT 1', $GLOBALS['__nv_sql'][1]);
+    }
+
+    public function testNothingLiveMeansNoModerationRead(): void
+    {
+        $GLOBALS['__nv_script'][] = [];
+
+        self::assertSame([10 => true, 11 => true], self::gone(self::hiddenRepo([]), [10, 11]));
+        self::assertCount(1, $GLOBALS['__nv_sql']);
+    }
+
+    /**
+     * ⚠ Fail-closed (F-98): a failed scoped read never reads as "nothing
+     * hidden". It falls back to the known list, exactly as before F-353,
+     * and never trusts the stale rows the live read left in last_result.
+     */
+    public function testAFailedModerationReadFallsBackToTheKnownList(): void
+    {
+        $GLOBALS['__nv_script'][] = [(object) ['act_id' => '10'], (object) ['act_id' => '11']];
+        $GLOBALS['__nv_script'][] = false; // silent failure: last_result still holds the live rows
+
+        self::assertSame([11 => true], self::gone(self::hiddenRepo([11]), [10, 11]));
+        self::assertContains('moderation_hidden_ids:exists_read_failed', \BCC\Core\Observability\DegradationMetrics::$recorded);
+    }
+
+    public function testAModerationReadThatSetsLastErrorAlsoFallsBack(): void
+    {
+        $GLOBALS['__nv_script'][] = [(object) ['act_id' => '10'], (object) ['act_id' => '11']];
+        $GLOBALS['__nv_script'][] = ['error' => 'Deadlock found'];
 
         self::assertSame([10 => true], self::gone(self::hiddenRepo([10]), [10, 11]));
+    }
+
+    public function testWhenEveryReadFailsTheLastKnownGoodListStillCounts(): void
+    {
+        $GLOBALS['__nv_script'][] = [(object) ['act_id' => '10'], (object) ['act_id' => '11']];
+        $GLOBALS['__nv_script'][] = false; // scoped read
+        $GLOBALS['__nv_script'][] = false; // full-list read, cold cache
+        $GLOBALS['__nv_options'][HiddenActivityRepository::LAST_GOOD_OPTION] = [
+            'ids' => [11], 'read_at' => microtime(true) - 60, 'hash' => 'h',
+        ];
+
+        self::assertSame([11 => true], self::gone(new HiddenActivityRepository(), [10, 11]));
+    }
+
+    public function testWithNoKnownListAtAllExistenceAloneDecides(): void
+    {
+        $GLOBALS['__nv_script'][] = [(object) ['act_id' => '10']];
+        $GLOBALS['__nv_script'][] = false; // scoped read
+        $GLOBALS['__nv_script'][] = false; // full-list read; no last-good list → throws
+
+        self::assertSame([11 => true], self::gone(new HiddenActivityRepository(), [10, 11]));
     }
 
     /** ⚠ Unknown is not gone: a failed read must never strip a working link. */

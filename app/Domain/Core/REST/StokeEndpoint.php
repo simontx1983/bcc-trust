@@ -33,6 +33,7 @@ use BCC\Core\Feed\ReactionGrammarMap;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Support\GroupInteractionGate;
 use BCC\Trust\Core\Support\NoReactionsGate;
 use BCC\Trust\Core\Support\ReactionStateComposer;
@@ -101,6 +102,14 @@ final class StokeEndpoint
             return ApiResponse::error('bcc_invalid_request', 'Invalid post id.', 400);
         }
 
+        // F-345: only a FEED ITEM takes engagement here. A review reply
+        // (module 206) and any other off-feed activity is not a post on
+        // this route; same 404 as an unknown id (FeedItemGate).
+        $notFeedItem = FeedItemGate::check($actId);
+        if ($notFeedItem !== null) {
+            return $notFeedItem;
+        }
+
         $gateError = GroupInteractionGate::check($userId, $actId);
         if ($gateError !== null) {
             return $gateError;
@@ -141,6 +150,14 @@ final class StokeEndpoint
         $actId = (int) $request->get_param('id');
         if ($actId <= 0) {
             return ApiResponse::error('bcc_invalid_request', 'Invalid post id.', 400);
+        }
+
+        // F-345: only a FEED ITEM takes engagement here. A review reply
+        // (module 206) and any other off-feed activity is not a post on
+        // this route; same 404 as an unknown id (FeedItemGate).
+        $notFeedItem = FeedItemGate::check($actId);
+        if ($notFeedItem !== null) {
+            return $notFeedItem;
         }
 
         $gateError = GroupInteractionGate::check($userId, $actId);

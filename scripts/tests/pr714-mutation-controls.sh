@@ -230,7 +230,7 @@ control 7 "Cosmos top-30 cap marked complete" "$COSMOS" \
   -
 
 control 8 "ERC-1155 absent index row treated as zero" "$HOLDINGS" \
-  "s = s.replace('                return HoldingsCount::atLeast(0);', '                return HoldingsCount::exact(0);')" \
+  "s = s.replace('                    : HoldingsCount::atLeast(0);', '                    : HoldingsCount::exact(0);')" \
   "testAnAbsentIndexRowIsNotProofOfNonOwnership|testARelinkedWalletDoesNotInheritAConfidentZero" \
   -
 
