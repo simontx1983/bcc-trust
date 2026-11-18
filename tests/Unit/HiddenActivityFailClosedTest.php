@@ -220,6 +220,49 @@ final class HiddenActivityFailClosedTest extends TestCase
         self::assertContains('moderation_hidden_ids:exists_read_failed', DegradationMetrics::$recorded);
     }
 
+    // ── F-353: hiddenAmong, the scoped read ─────────────────────────────
+
+    public function testHiddenAmongAnswersOnlyTheAskedIds(): void
+    {
+        $out = (new HiddenActivityRepository())->hiddenAmong([101, 555, 103, 101, 0, -3]);
+
+        self::assertSame([101, 103], $out);
+        self::assertSame(1, $this->db()->queries, 'one read');
+    }
+
+    public function testHiddenAmongWithNothingToAskRunsNoQuery(): void
+    {
+        self::assertSame([], (new HiddenActivityRepository())->hiddenAmong([0, -1]));
+        self::assertSame(0, $this->db()->queries);
+    }
+
+    public function testHiddenAmongFailsClosedNeverEmpty(): void
+    {
+        $this->db()->failNext = 1;
+
+        self::assertNull((new HiddenActivityRepository())->hiddenAmong([101, 555]), 'a failure is unknown, never "none hidden"');
+        self::assertContains('moderation_hidden_ids:exists_read_failed', DegradationMetrics::$recorded);
+    }
+
+    public function testHiddenAmongNeverTrustsStaleRowsOnASilentFailure(): void
+    {
+        $repo = new HiddenActivityRepository();
+        self::assertSame([101], $repo->hiddenAmong([101])); // last_result = [['101']]
+
+        $this->db()->failSilentNext = 1;
+        self::assertNull($repo->hiddenAmong([555]), 'not the previous query\'s [101]');
+    }
+
+    public function testHiddenAmongLeavesTheFullListAndItsCacheAlone(): void
+    {
+        (new HiddenActivityRepository())->hiddenAmong([101]);
+
+        foreach (array_keys($GLOBALS['__hidden_cache']) as $k) {
+            self::assertStringNotContainsString('all_hidden_ids', (string) $k);
+        }
+        self::assertSame(0, $GLOBALS['__hidden_option_writes'], 'no last-good write');
+    }
+
     private function db(): HiddenIdsWpdb
     {
         global $wpdb;

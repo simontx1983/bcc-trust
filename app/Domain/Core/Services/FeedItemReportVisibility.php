@@ -14,8 +14,11 @@
  *     (FeedItemNormalizer::publicFeedModuleIds(), the rule the feed and
  *     permalink paths use), and the backing post must be published and not
  *     moderation-hidden;
- *   - ⚠ FOLLOW-UP: per-post `act_access` is not consulted yet. Update this
- *     in lockstep when F-02's per-post act_access lands.
+ *   - the post's own §F-02 AUDIENCE is consulted, for a post that is NOT
+ *     group-tagged ({@see audienceAllows()}). A group-tagged post is
+ *     deliberately exempt: inside a group, posts follow the GROUP's rules
+ *     (ratified product decision, 2026-11-12) and the group gate below is
+ *     what decides them;
  *   - a post that is not group-tagged, or is group-tagged with visibility
  *     `public_all`, is visible in the GLOBAL feed (mirrors bcc-core
  *     ActivityFeedService::isVisibleGlobally(), which is private — keep in
@@ -44,9 +47,11 @@ declare(strict_types=1);
 namespace BCC\Trust\Core\Services;
 
 use BCC\Core\Feed\GroupSyndicationGate;
+use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Support\FeedItemGate;
+use BCC\Trust\Core\Support\ProfileAccess;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -153,7 +158,11 @@ class FeedItemReportVisibility
             return false; // trashed/unpublished or moderation-hidden: no feed shows it
         }
 
-        return $this->groupRuleAllows($viewerId, $postId);
+        if (!$this->groupRuleAllows($viewerId, $postId)) {
+            return false;
+        }
+
+        return self::audienceAllows($viewerId, $actId, $postId);
     }
 
     /**
@@ -267,6 +276,66 @@ class FeedItemReportVisibility
             return true; // member — sees every post in the group
         }
         return in_array($visibility, self::TEASER_VISIBILITIES, true);
+    }
+
+    /**
+     * §F-02 — may this viewer see this post's own AUDIENCE?
+     *
+     * ⚠ ONE RULE, NOT A SECOND LADDER. The decision is bcc-core's
+     * `PeepSoActivityRepository::f02PostVisibilityClause()`, reached by
+     * re-reading the row with `enforcePostVisibility: true`. The ladder —
+     * the post's `act_access` versus the author's `usr_profile_acc`, taken
+     * at the STRICTER of the two, over RANGES rather than exact matches so
+     * a stray PeepSo level lands on the nearest stricter rung — therefore
+     * lives in ONE place for the feed, the permalink and these routes.
+     * Restating it in PHP here is what §11 forbids, and it is the kind of
+     * copy that drifts silently the next time PeepSo adds a level.
+     *
+     * ⚠ A GROUP-TAGGED POST IS EXEMPT, deliberately. Inside a group, posts
+     * follow the GROUP's own rules — members see them (ratified product
+     * decision, 2026-11-12) — and {@see groupRuleAllows()} decides them.
+     * Applying F-02 here as well would hide a `members_only` group post's
+     * thread from a fellow member whenever its author keeps a private
+     * profile, which is the opposite of what was ratified.
+     *
+     * ⚠ The admin exemption is {@see ProfileAccess::postVisibilityArgs()},
+     * the SAME definition the profile and feed halves use, so the three
+     * cannot drift into the listed-but-unopenable state F-02 exists to
+     * remove. Safe here because every caller is a per-viewer request path.
+     * ⛔ A globally cached, viewer-independent payload (the hot feed, warmed
+     * by cron into one shared blob) must NEVER reach this method: taking
+     * the exemption there would store an ungated payload and serve it to
+     * everybody.
+     *
+     * @param int $actId The act whose `act_access` the rule reads. For a
+     *        COMMENT that is its PARENT post's act, never the comment's
+     *        own — a comment carries no audience of its own.
+     */
+    public static function audienceAllows(int $viewerId, int $actId, int $postId): bool
+    {
+        if ($actId <= 0 || $postId <= 0) {
+            return false;
+        }
+
+        // Group-tagged: the group's rule governs. `(int) > 0` matches the
+        // test CommentService::gateForParent uses, so a stored '0' is
+        // treated as NOT group-tagged by both and gets the stricter path.
+        if ((int) get_post_meta($postId, 'peepso_group_id', true) > 0) {
+            return true;
+        }
+
+        [$friendIds, $enforce] = ProfileAccess::postVisibilityArgs($viewerId);
+        if (!$enforce) {
+            return true; // admin, by the one shared definition
+        }
+
+        return PeepSoActivityRepository::getById(
+            $actId,
+            null,
+            $friendIds,
+            true,
+            $viewerId
+        ) !== null;
     }
 
     /**

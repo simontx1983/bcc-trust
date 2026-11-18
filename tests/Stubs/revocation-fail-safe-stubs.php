@@ -101,6 +101,10 @@ namespace {
 
             /** When true the factory builds a fetcher WITHOUT the evidence interface. */
             public static bool $legacyFetcher = false;
+            /** F-278: the EVM driver can read current ERC-1155 holdings */
+            public static bool $erc1155Capable = false;
+            /** @var array<string, array{0: string, 1?: int}> "wallet|contract" => ['exact'|'atLeast'|'null'|'throw', n] */
+            public static array $erc1155Answers = [];
 
             /** Worst-case requests the fake declares per evidence read. */
             public static int $maxRequestsPerRead = 1;
@@ -176,6 +180,8 @@ namespace {
                 ];
                 self::$tokenStandards = self::$answers = self::$listAnswers = [];
                 self::$legacyFetcher = false;
+                self::$erc1155Capable = false;
+                self::$erc1155Answers = [];
                 self::$maxRequestsPerRead = 1;
                 self::$fetcherCalls = [];
                 self::$gateConfigs = self::$identities = self::$members = [];
@@ -957,6 +963,40 @@ namespace BCC\Trust\Onchain\Fetchers {
         }
     }
 
+    if (!class_exists(BccGateErc1155Fetcher::class, false)) {
+        /** F-278: an evidence driver that can also read current ERC-1155 holdings. */
+        final class BccGateErc1155Fetcher implements
+            \BCC\Trust\Onchain\Contracts\FetcherInterface,
+            \BCC\Trust\Onchain\Contracts\CountsHoldingsWithCompleteness,
+            \BCC\Trust\Onchain\Contracts\CountsErc1155Holdings
+        {
+            use BccGateFetcherBody;
+
+            public function count_holdings_evidence(string $wallet, string $contract): ?\BCC\Trust\Onchain\ValueObjects\HoldingsCount
+            {
+                return $this->evidenceAnswer($wallet, $contract);
+            }
+
+            public function max_requests_per_evidence_read(): int
+            {
+                return \BccRevokeWorld::$maxRequestsPerRead;
+            }
+
+            public function count_erc1155_holdings(string $wallet, string $contract): ?\BCC\Trust\Onchain\ValueObjects\HoldingsCount
+            {
+                \BccRevokeWorld::$fetcherCalls[] = 'count_erc1155_holdings:' . $wallet . '|' . $contract;
+                $answer = \BccRevokeWorld::$erc1155Answers[$wallet . '|' . $contract] ?? ['null'];
+
+                return match ($answer[0]) {
+                    'exact'   => \BCC\Trust\Onchain\ValueObjects\HoldingsCount::exact((int) ($answer[1] ?? 0)),
+                    'atLeast' => \BCC\Trust\Onchain\ValueObjects\HoldingsCount::atLeast((int) ($answer[1] ?? 0)),
+                    'throw'   => throw new \RuntimeException('scripted provider exception'),
+                    default   => null,
+                };
+            }
+        }
+    }
+
     if (!class_exists(BccGateLegacyFetcher::class, false)) {
         /** A driver that never vouched for completeness — integers only. */
         final class BccGateLegacyFetcher implements \BCC\Trust\Onchain\Contracts\FetcherInterface
@@ -977,8 +1017,12 @@ namespace BCC\Trust\Onchain\Factories {
 
             public static function make_for_chain(object $chain): object
             {
-                return \BccRevokeWorld::$legacyFetcher
-                    ? new \BCC\Trust\Onchain\Fetchers\BccGateLegacyFetcher($chain)
+                if (\BccRevokeWorld::$legacyFetcher) {
+                    return new \BCC\Trust\Onchain\Fetchers\BccGateLegacyFetcher($chain);
+                }
+
+                return \BccRevokeWorld::$erc1155Capable
+                    ? new \BCC\Trust\Onchain\Fetchers\BccGateErc1155Fetcher($chain)
                     : new \BCC\Trust\Onchain\Fetchers\BccGateEvidenceFetcher($chain);
             }
         }
