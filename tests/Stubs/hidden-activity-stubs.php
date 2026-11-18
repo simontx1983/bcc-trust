@@ -99,6 +99,12 @@ namespace BCC\Trust\Tests\Stubs {
             if (str_contains($sql, 'COUNT(*)')) {
                 return [[in_array((int) $this->args[0], $this->hidden, true) ? '1' : '0']];
             }
+            if (str_contains($sql, 'act_id IN (')) {
+                // hiddenAmong(): the ids, then the LIMIT.
+                $asked = array_map('intval', array_slice($this->args, 0, -1));
+                $rows  = array_values(array_filter($asked, fn (int $i): bool => in_array($i, $this->hidden, true)));
+                return array_map(static fn (int $i): array => [(string) $i], array_slice($rows, 0, (int) end($this->args)));
+            }
             [$cursor, $limit] = [(int) $this->args[0], (int) $this->args[1]];
             $ids = array_values(array_filter($this->hidden, static fn (int $i): bool => $i < $cursor));
             rsort($ids);

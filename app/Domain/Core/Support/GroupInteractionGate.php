@@ -63,6 +63,10 @@ final class GroupInteractionGate
             return self::notFound();
         }
 
+        if (!self::audienceAllows($userId, $actId, $postId)) {
+            return self::notFound();
+        }
+
         return self::checkPost($userId, $postId);
     }
 
@@ -82,11 +86,31 @@ final class GroupInteractionGate
     public static function checkComment(int $userId, int $commentActId): ?WP_REST_Response
     {
         $notFound = self::notFound(self::NOT_FOUND_COMMENT);
-        if ($commentActId <= 0 || Plugin::instance()->commentRepository()->getCommentMeta($commentActId) === null) {
+        $meta     = $commentActId > 0
+            ? Plugin::instance()->commentRepository()->getCommentMeta($commentActId)
+            : null;
+        if ($meta === null) {
             return $notFound;
         }
         $parentPostId = self::resolveLiveTarget($commentActId);
         if ($parentPostId === null) {
+            return $notFound;
+        }
+
+        // §F-02 — the PARENT post's audience. A comment carries none of its
+        // own, and the meta is already in hand here, so this needs no
+        // second read. ⚠ `parent_act_id` of 0 means the parent post has no
+        // activity row, which is a REAL value (the repository selects
+        // COALESCE(pa.act_id, 0)) — see audienceAllows() for why that
+        // SKIPS the gate rather than refusing.
+        $parentActId = (int) ($meta->parent_act_id ?? 0);
+        if ($parentActId > 0
+            && !\BCC\Trust\Core\Services\FeedItemReportVisibility::audienceAllows(
+                $userId,
+                $parentActId,
+                $parentPostId
+            )
+        ) {
             return $notFound;
         }
 
@@ -157,6 +181,79 @@ final class GroupInteractionGate
         }
 
         return $postId;
+    }
+
+    /**
+     * §F-02 — may this viewer see the POST behind this act at all?
+     *
+     * Without this, anyone holding a feed id could react to, stoke or
+     * helpful-mark a followers-only or only-me post, and ring its author's
+     * bell from content they were never shown. The rule itself is
+     * {@see FeedItemReportVisibility::audienceAllows()}, which reuses
+     * bcc-core's single SQL predicate — there is no second ladder here.
+     *
+     * ⚠ A COMMENT act is judged on its PARENT POST's act row, never its
+     * own: the predicate reads `act_access`, and a comment does not
+     * meaningfully carry one.
+     *
+     * ⚠⚠ AN UNRESOLVABLE PARENT ACT SKIPS THIS GATE, deliberately. It is a
+     * KNOWN, ACCEPTED narrowing rather than an oversight, so here is
+     * exactly what it costs.
+     *
+     * `CommentRepository::getCommentMeta()` selects
+     * `COALESCE(pa.act_id, 0)` over a LEFT JOIN matching on BOTH
+     * `act_external_id` AND `act_comment_module_id`, so 0 means "no
+     * activity row matched that PAIR" — which is two different situations:
+     *
+     *   - the parent post genuinely has no activity row. Then it is in no
+     *     feed and has no permalink, so the disclosure this gate closes
+     *     does not exist for it, and refusing would only break ordinary
+     *     interactions.
+     *   - the MODULE half of the join did not match, in which case the
+     *     parent activity DOES exist and may well be feed-visible. This
+     *     one is a real, if narrow, gap: on such a comment a viewer who
+     *     may not see the parent post can still stoke or helpful-mark it.
+     *
+     * The second case is why this is a trade and not a free pass. It is
+     * accepted because these are WRITE paths — no post content and no
+     * thread is disclosed, only interaction counts — because the
+     * membership gate still applies (a closed-group comment is still
+     * refused), and because failing closed would break interaction for the
+     * first case, which is the one the repository's own docblock calls
+     * "unresolvable".
+     *
+     * ⛔ Do NOT flip this to a refusal, or widen it, without first
+     * measuring how often that module half fails in production. If it is
+     * ~never, failing closed is strictly better and should be the
+     * decision; this note exists so whoever checks need not re-derive the
+     * question. `testAnUnresolvableParentActSkipsTheGate` pins the current
+     * behaviour either way, so a change there is a conscious one.
+     *
+     * ⚠ Costs one extra indexed read by act id on these write paths. That
+     * is the price of asking bcc-core's predicate instead of restating it;
+     * restating it is what §11 forbids and what drifts.
+     */
+    private static function audienceAllows(int $userId, int $actId, int $postId): bool
+    {
+        $comment = Plugin::instance()->commentRepository()->getCommentMeta($actId);
+        if ($comment !== null) {
+            $parentActId = (int) ($comment->parent_act_id ?? 0);
+            if ($parentActId <= 0) {
+                return true; // cannot ask; see the docblock
+            }
+
+            return \BCC\Trust\Core\Services\FeedItemReportVisibility::audienceAllows(
+                $userId,
+                $parentActId,
+                $postId
+            );
+        }
+
+        return \BCC\Trust\Core\Services\FeedItemReportVisibility::audienceAllows(
+            $userId,
+            $actId,
+            $postId
+        );
     }
 
     private const NOT_FOUND_POST = 'Post not found.';

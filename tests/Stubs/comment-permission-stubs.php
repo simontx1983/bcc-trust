@@ -66,6 +66,23 @@ namespace BCC\Core\Permissions {
             {
                 return true;
             }
+
+            /**
+             * ⚠ REQUIRED since the §F-02 audience gate reached these
+             * paths: ProfileAccess::viewerIsExemptFromVisibility() guards
+             * on class_exists() and then calls this. The class EXISTS here
+             * (that is the point of the stub), so a missing method is a
+             * FATAL — "Call to undefined method …::is_admin()" — rather
+             * than a failed assertion, which reads like a broken test
+             * instead of an incomplete stub.
+             *
+             * false = an ordinary viewer, which is what these suites are
+             * about; the admin exemption has its own coverage.
+             */
+            public static function is_admin(): bool
+            {
+                return false;
+            }
         }
     }
 }

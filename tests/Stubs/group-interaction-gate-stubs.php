@@ -36,8 +36,28 @@ namespace BCC\Core\Repositories {
 
     class PeepSoActivityRepository
     {
-        public static function getById(int $actId, ?array $allowedModuleIds = null): ?object
-        {
+        /**
+         * ⚠⚠ THE §F-02 PARAMETERS ARE LOAD-BEARING. PHP silently DISCARDS
+         * extra positional arguments to a user-defined method, so while
+         * this took only ($actId, $allowedModuleIds) the audience read —
+         * `getById($actId, null, $friends, true, $viewer)` — was accepted
+         * and its enforcement thrown away. The gate was INERT in this
+         * suite: it could never refuse, so every "a non-group post
+         * passes" test passed whether the gate worked or not.
+         *
+         * ⚠ The predicate is MODELLED here (a list of act ids the viewer
+         * may not see). bcc-core owns and tests the real one.
+         *
+         * @param list<int>|null $allowedModuleIds
+         * @param list<int>|null $viewerFriendIds
+         */
+        public static function getById(
+            int $actId,
+            ?array $allowedModuleIds = null,
+            ?array $viewerFriendIds = null,
+            bool $enforcePostVisibility = false,
+            int $viewerId = 0
+        ): ?object {
             $row = $GLOBALS['__bcc_gig']['acts'][$actId] ?? null;
             if ($row === null) {
                 return null;
@@ -47,6 +67,12 @@ namespace BCC\Core\Repositories {
             $module = (int) ($row['module'] ?? 1);
             if ($allowedModuleIds !== null && !in_array($module, $allowedModuleIds, true)) {
                 return null;
+            }
+            if ($enforcePostVisibility) {
+                $GLOBALS['__bcc_gig']['f02_reads'][] = ['act_id' => $actId, 'viewer' => $viewerId];
+                if (in_array($actId, $GLOBALS['__bcc_gig']['f02_hidden'] ?? [], true)) {
+                    return null;
+                }
             }
             $GLOBALS['__bcc_gig']['allowlists'][] = $allowedModuleIds;
             return (object) [

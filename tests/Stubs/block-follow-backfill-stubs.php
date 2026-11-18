@@ -6,7 +6,7 @@
  *
  * Fixture ($GLOBALS['__bcc_bfb']):
  *   blocks       list<array{id, blocker, blocked}> in blk_id order
- *   page_fails   bool  listBlockPairsAfter returns null
+ *   page_fails   bool  listBlockPairsPage returns null
  *   follows      list<"active:passive"> existing member follows
  *   follow_fails bool  findFollowIdForPair throws RepositoryReadFailure
  *   cursors      list<int> afterId values the backfill paged with
@@ -20,18 +20,30 @@ namespace BCC\Core\Repositories {
     if (!class_exists(PeepSoBlockRepository::class, false)) {
         final class PeepSoBlockRepository
         {
-            /** @return list<array{id: int, blocker: int, blocked: int}>|null */
-            public static function listBlockPairsAfter(int $afterId, int $limit = 500): ?array
+            /**
+             * Models the real page: `blocks` are RAW rows; a row with a zero
+             * blocker or blocked is dropped from `pairs` but still moves `next`.
+             *
+             * @return array{pairs: list<array{id: int, blocker: int, blocked: int}>, next: int, done: bool}|null
+             */
+            public static function listBlockPairsPage(int $afterId, int $limit = 500): ?array
             {
                 $GLOBALS['__bcc_bfb']['cursors'][] = $afterId;
                 if (!empty($GLOBALS['__bcc_bfb']['page_fails'])) {
                     return null;
                 }
-                $page = array_values(array_filter(
+                $raw = array_slice(array_values(array_filter(
                     $GLOBALS['__bcc_bfb']['blocks'] ?? [],
                     static fn (array $r): bool => $r['id'] > $afterId
-                ));
-                return array_slice($page, 0, $limit);
+                )), 0, $limit);
+                if ($raw === []) {
+                    return ['pairs' => [], 'next' => $afterId, 'done' => true];
+                }
+                return [
+                    'pairs' => array_values(array_filter($raw, static fn (array $r): bool => $r['blocker'] > 0 && $r['blocked'] > 0)),
+                    'next'  => max(array_column($raw, 'id')),
+                    'done'  => false,
+                ];
             }
         }
     }
