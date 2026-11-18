@@ -254,8 +254,20 @@ final class BlogService
             // Stacks with the group gate rather than replacing it: a post
             // must clear BOTH its group's visibility and its author's
             // profile level. The two answer different questions.
-            viewerFriendIds: $friendIds,
-            enforcePostVisibility: $enforceF02
+            $friendIds,   // viewerFriendIds
+            $enforceF02,  // enforcePostVisibility
+            // F-275: a read that did not run THROWS
+            // ActivityReadFailedException instead of answering [], which
+            // read as "this member has written nothing". UsersEndpoint::blog()
+            // turns it into 503 bcc_unavailable.
+            //
+            // ⚠ POSITIONAL ON PURPOSE, and so are the two above (they used
+            // to be named). A bcc-core that predates the flag ignores an
+            // extra positional argument and keeps the old answer; a named
+            // `throwOnReadFailure:` would be a fatal "unknown named
+            // parameter" on every blog read, and a named argument cannot
+            // be followed by a positional one.
+            true          // throwOnReadFailure
         );
 
         $hasMore = count($rows) > $limit;

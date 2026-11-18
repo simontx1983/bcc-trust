@@ -326,12 +326,37 @@ final class FeedColdStartService
             return self::FALLBACK_RECENT_ACTION;
         }
 
+        // F-275: a read that did not run THROWS ActivityReadFailedException
+        // rather than answering [], which would put the fallback line on a
+        // member as if they had posted nothing. FeedColdStartEndpoint turns
+        // it into 503 bcc_unavailable, as it does for the hot-posts block.
+        //
+        // ⚠ The flag is the 20th parameter and is passed POSITIONALLY, so
+        // every default before it is spelled out. A bcc-core that predates
+        // the flag ignores an extra positional argument; a named
+        // `throwOnReadFailure:` would be a fatal "unknown named parameter".
+        // Every value below is that parameter's own default.
         $rows = PeepSoActivityRepository::getActivities(
             [$userId],
-            null,    // any module
-            null,
-            null,
-            1        // single most-recent row
+            null,    // moduleIds: any module
+            null,    // cursorTime
+            null,    // cursorActId
+            1,       // limit: the single most-recent row
+            null,    // excludedAuthorIds
+            null,    // excludedActIds
+            null,    // onlyForGroupId
+            null,    // excludedGroupIds
+            null,    // groupVisibilityIn
+            null,    // hashtag
+            null,    // hallFeed
+            null,    // onlyForPageId
+            null,    // restrictedGroupIds
+            null,    // groupGateMode
+            null,    // viewerMemberGroupIds
+            0,       // viewerId
+            null,    // viewerFriendIds
+            false,   // enforcePostVisibility
+            true     // throwOnReadFailure
         );
         if ($rows === []) {
             return self::FALLBACK_RECENT_ACTION;
