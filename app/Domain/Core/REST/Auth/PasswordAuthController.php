@@ -23,6 +23,7 @@ use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Core\Security\IpResolver;
+use BCC\Trust\Core\Security\TurnstileVerifier;
 use BCC\Trust\Core\Services\AccountSecurityMailer;
 use BCC\Trust\Core\Services\AuthMailer;
 use BCC\Trust\Core\Services\HandleService;
@@ -509,6 +510,30 @@ final class PasswordAuthController
                 self::releaseLoginCharges($charged);
                 return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
             }
+            $charged[] = ['login_account', AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW, $ceilingKey];
+        }
+
+        // Captcha step-up, BEFORE the bcrypt compare (LoginStepUp): only
+        // after repeated failures for this identifier, or a site-wide failure
+        // spike, and never from a network the account recently signed in
+        // from. Off while Turnstile isn't configured. A Turnstile outage
+        // fails OPEN to the buckets above (logged and counted), so it can
+        // never lock everyone out.
+        if (LoginStepUp::required($typedKey, $trustedNetwork)) {
+            $verdict = TurnstileVerifier::verify(
+                (string) $request->get_param('captcha_token'),
+                IpResolver::getClientIp()
+            );
+            if ($verdict === TurnstileVerifier::FAIL) {
+                // A refusal, so it gives back what it charged (F-290).
+                self::releaseLoginCharges($charged);
+                return ApiResponse::error(
+                    'bcc_captcha_required',
+                    'Please complete the verification to continue.',
+                    429,
+                    LoginStepUp::challengeData()
+                );
+            }
         }
 
         // Generic error for "not found" and "wrong password" alike —
@@ -516,6 +541,7 @@ final class PasswordAuthController
         // wp_check_password is the canonical path; it handles legacy
         // hash formats + rehash-on-login transparently.
         if ($user === false || !wp_check_password($password, $user->user_pass, $user->ID)) {
+            LoginStepUp::recordFailure($typedKey, $trustedNetwork);
             return ApiResponse::error('bcc_invalid_credentials', 'Invalid credentials.', 401);
         }
 
