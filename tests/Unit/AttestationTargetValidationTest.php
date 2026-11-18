@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\Tests\Unit;
 
+use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Services\AttestationException;
 use BCC\Trust\Core\Services\AttestationService;
@@ -32,6 +33,10 @@ use PHPUnit\Framework\TestCase;
  *
  * Observable for "the target gate passed": the attestor here is below
  * Neutral, so the NEXT gate (tier) throws bcc_attestation_ineligible 403.
+ *
+ * A REAFFIRM renews a vouch (decay reset, owner belled), so it owes the
+ * same target rules, or a row cast before them could be renewed forever.
+ * Its "passed" observable is the per-attestor lock, stubbed busy (429).
  */
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
@@ -82,8 +87,43 @@ final class AttestationTargetValidationTest extends TestCase
             }
         };
         (new \ReflectionProperty(AttestationService::class, 'reputationRepo'))->setValue($svc, $rep);
+        // The real repository; its one read goes to the world's $wpdb.
+        $repo = (new \ReflectionClass(AttestationRepository::class))->newInstanceWithoutConstructor();
+        (new \ReflectionProperty(AttestationService::class, 'repo'))->setValue($svc, $repo);
 
         return $svc;
+    }
+
+    /** @return array{0: string, 1: int, 2: string} code, status, message */
+    private static function reaffirmOutcome(string $targetKind, int $targetId): array
+    {
+        \AttestTargetWorld::$attestation = (object) [
+            'id'               => 1,
+            'attestor_user_id' => self::ATTESTOR,
+            'target_kind'      => $targetKind,
+            'target_id'        => $targetId,
+            'kind'             => 'vouch',
+            'revoked_at'       => null,
+        ];
+        try {
+            self::service()->reaffirm(self::ATTESTOR, 1);
+        } catch (AttestationException $e) {
+            return [$e->errorCode, $e->status, $e->getMessage()];
+        }
+        self::fail('the busy lock should have thrown');
+    }
+
+    private static function reaffirmPassedTheTargetGate(string $targetKind, int $targetId): void
+    {
+        self::assertSame(AttestationException::CODE_RATE_LIMITED, self::reaffirmOutcome($targetKind, $targetId)[0]);
+    }
+
+    /** A refused reaffirm answers the cast's 404 and never reaches the renewal. */
+    private static function reaffirmRefused(string $targetKind, int $targetId): void
+    {
+        $before = \AttestTargetWorld::$lockAttempts;
+        self::assertSame(self::notFound(), self::reaffirmOutcome($targetKind, $targetId));
+        self::assertSame($before, \AttestTargetWorld::$lockAttempts, 'refused before the lock, so nothing is renewed');
     }
 
     /** @return array{0: string, 1: int, 2: string} code, status, message */
@@ -183,5 +223,47 @@ final class AttestationTargetValidationTest extends TestCase
     public function testTheNotFoundShapeIsTheExisting404(): void
     {
         self::assertSame([AttestationException::CODE_NOT_FOUND, 404, 'Target not found.'], self::notFound());
+    }
+
+    // ── reaffirm owes the same target rules ─────────────────────────────
+
+    public function testAReaffirmOfAValidTargetStillProceeds(): void
+    {
+        self::reaffirmPassedTheTargetGate('validator_card', self::VALIDATOR_PAGE);
+        self::reaffirmPassedTheTargetGate('project_card', self::LEGACY_PAGE);
+        self::reaffirmPassedTheTargetGate('user_profile', self::MEMBER);
+    }
+
+    public function testAVouchCastOnANonCardCannotBeReaffirmed(): void
+    {
+        self::reaffirmRefused('validator_card', self::FEED_POST);
+        self::reaffirmRefused('validator_card', self::POST_WITH_META);
+        self::reaffirmRefused('project_card', self::VALIDATOR_PAGE);
+    }
+
+    public function testAVouchOnAGoneOrUnpublishedTargetCannotBeReaffirmed(): void
+    {
+        self::reaffirmRefused('validator_card', self::DRAFT_PAGE);
+        self::reaffirmRefused('user_profile', 999999);
+    }
+
+    public function testAVouchOnAMemberNowHiddenOrBlockedCannotBeReaffirmed(): void
+    {
+        \AttestTargetWorld::$viewable[self::MEMBER] = false;
+        self::reaffirmRefused('user_profile', self::MEMBER);
+
+        \AttestTargetWorld::$viewable = [];
+        \AttestTargetWorld::$blocked[self::MEMBER] = true;
+        self::reaffirmRefused('user_profile', self::MEMBER);
+    }
+
+    public function testAReaffirmOnAnUnreadableBlockTableIsARetryable503(): void
+    {
+        \AttestTargetWorld::$blocked[self::MEMBER] = null;
+
+        [$code, $status] = self::reaffirmOutcome('user_profile', self::MEMBER);
+        self::assertSame(AttestationException::CODE_UNAVAILABLE, $code);
+        self::assertSame(503, $status);
+        self::assertSame(0, \AttestTargetWorld::$lockAttempts);
     }
 }

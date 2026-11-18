@@ -930,6 +930,22 @@ final class AttestationService
         $targetId   = (int) ($row->target_id ?? 0);
         $kind       = (string) ($row->kind ?? '');
 
+        // A reaffirm RENEWS the vouch (decay reset, owner belled), so it owes
+        // the cast's target rules: the target still exists and is still
+        // attestable by this attestor. Otherwise a row cast before those
+        // rules (on a feed post, on a member the attestor can no longer
+        // view, across a later block) could be renewed forever. The same
+        // 404 a cast answers, so a reaffirm reveals no more than a cast.
+        $targetOwnerId = self::resolveTargetOwnerUserId($targetKind, $targetId);
+        if ($targetOwnerId <= 0) {
+            throw new AttestationException(
+                AttestationException::CODE_NOT_FOUND,
+                'Target not found.',
+                404
+            );
+        }
+        self::assertTargetAttestable($attestorUserId, $targetKind, $targetId);
+
         $attestorLockKey = self::LOCK_PREFIX_ATTESTOR . $attestorUserId;
         if (!AdvisoryLock::acquire($attestorLockKey, self::LOCK_WAIT_SECS)) {
             throw new AttestationException(
@@ -973,7 +989,6 @@ final class AttestationService
             );
         }
 
-        $targetOwnerId = self::resolveTargetOwnerUserId($targetKind, $targetId);
         CacheManager::invalidateAttestationTargetCaches(
             $targetKind,
             $targetId,
@@ -1914,7 +1929,8 @@ final class AttestationService
 
     /**
      * May this attestor attest this target at all? Runs after existence
-     * (resolveTargetOwnerUserId) and before the self-target check. Every
+     * (resolveTargetOwnerUserId): on a cast before the self-target check,
+     * and on a reaffirm before anything is renewed. Every
      * refusal is the SAME 404 a missing target gets, so the answer reveals
      * nothing: not which post ids exist, not who is private or blocking.
      *

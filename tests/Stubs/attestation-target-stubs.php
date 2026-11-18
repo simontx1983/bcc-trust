@@ -20,13 +20,35 @@ namespace {
         public static array $viewable = [];
         /** @var array<int, bool|null> other user id => block state with the attestor (null = unreadable) */
         public static array $blocked = [];
+        /** @var object|null the attestation row findOneById() returns (reaffirm tests) */
+        public static ?object $attestation = null;
+        /** @var int how often the reaffirm reached its per-attestor lock */
+        public static int $lockAttempts = 0;
 
         public static function reset(): void
         {
-            self::$posts    = [];
-            self::$users    = [];
-            self::$viewable = [];
-            self::$blocked  = [];
+            self::$posts        = [];
+            self::$users        = [];
+            self::$viewable     = [];
+            self::$blocked      = [];
+            self::$attestation  = null;
+            self::$lockAttempts = 0;
+
+            // The one $wpdb read a reaffirm makes before its lock:
+            // AttestationRepository::findOneById().
+            $GLOBALS['wpdb'] = new class {
+                public string $prefix = 'wp_';
+
+                public function prepare(string $sql, mixed ...$args): string
+                {
+                    return $sql;
+                }
+
+                public function get_row(string $sql): ?object
+                {
+                    return AttestTargetWorld::$attestation;
+                }
+            };
         }
     }
 
@@ -100,6 +122,28 @@ namespace BCC\Core\Permissions {
         final class Permissions
         {
             public static function is_not_suspended(?int $userId, bool $allowAdminBypass = true): bool
+            {
+                return true;
+            }
+        }
+    }
+}
+
+namespace BCC\Core\DB {
+    if (!class_exists(__NAMESPACE__ . '\\AdvisoryLock', false)) {
+        /**
+         * Always busy: a reaffirm that reaches its lock has passed every
+         * target check, and stops there with 429 before renewing anything.
+         */
+        final class AdvisoryLock
+        {
+            public static function acquire(string $key, int $timeout = 0): bool
+            {
+                \AttestTargetWorld::$lockAttempts++;
+                return false;
+            }
+
+            public static function release(string $key): bool
             {
                 return true;
             }
