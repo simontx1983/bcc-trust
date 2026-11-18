@@ -205,8 +205,9 @@ final class GroupMembersService
      * ⚠ filterVisible() judges the CURRENT user, so this is correct only
      * for the REST caller, whose viewer is the current user.
      *
-     * @param list<object> $rows
-     * @return list<object>
+     * @template TRow of object{user_id: numeric-string}
+     * @param list<TRow> $rows
+     * @return list<TRow>
      */
     private static function rowsTheViewerMaySee(PeepSoPrivacy $privacy, array $rows, int $viewerId, int $groupId): array
     {
@@ -219,7 +220,7 @@ final class GroupMembersService
 
         $ids = [];
         foreach ($rows as $row) {
-            $uid = (int) ($row->user_id ?? 0);
+            $uid = (int) $row->user_id;
             if ($uid > 0) {
                 $ids[] = $uid;
             }
@@ -229,7 +230,7 @@ final class GroupMembersService
 
         return array_values(array_filter(
             $rows,
-            static fn (object $row): bool => isset($visible[(int) ($row->user_id ?? 0)])
+            static fn (object $row): bool => isset($visible[(int) $row->user_id])
         ));
     }
 
