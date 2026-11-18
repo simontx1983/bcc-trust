@@ -97,6 +97,7 @@ final class TwoFactorAttemptCapTest extends TestCase
 
         self::assertSame(200, $status);
         self::assertIsString($data['data']['token'] ?? null);
+        self::assertSame([], $GLOBALS['__bcc_ph']['auth_cookies'] ?? [], 'a bearer token only: no WordPress auth cookie (H3)');
     }
 
     public function testTheFifthWrongCodeBurnsTheOtpAndTheChallenge(): void
