@@ -41,22 +41,39 @@ namespace BCC\Core\Security {
     if (!class_exists(Throttle::class, false)) {
         final class Throttle
         {
-            public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null): bool
+            public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null, bool $countDenied = true): bool
             {
                 // Records every bucket (the explicit $key when given, else the
                 // action); denies when a test sets throttle_deny. With
                 // throttle_counting set it COUNTS per bucket like the real
-                // limiter (increment, then allow while count <= limit).
+                // limiter (increment, then allow while count <= limit), and
+                // like it (F-290) gives a denied call's slot back when the
+                // caller passes countDenied = false.
                 $bucket = $key ?? $action;
                 $GLOBALS['__bcc_ph']['throttle_keys'][] = $bucket;
+                $GLOBALS['__bcc_ph']['throttle_count_denied'][$bucket] = $countDenied;
                 if (!empty($GLOBALS['__bcc_ph']['throttle_deny'])) {
                     return false;
                 }
                 if (!empty($GLOBALS['__bcc_ph']['throttle_counting'])) {
                     $GLOBALS['__bcc_ph']['throttle_hits'][$bucket] = ($GLOBALS['__bcc_ph']['throttle_hits'][$bucket] ?? 0) + 1;
-                    return $GLOBALS['__bcc_ph']['throttle_hits'][$bucket] <= $limit;
+                    $allowed = $GLOBALS['__bcc_ph']['throttle_hits'][$bucket] <= $limit;
+                    if (!$allowed && !$countDenied) {
+                        $GLOBALS['__bcc_ph']['throttle_hits'][$bucket]--;
+                    }
+                    return $allowed;
                 }
                 return true;
+            }
+
+            /** F-290: give back one slot of the bucket allow() used; never below zero. */
+            public static function release(string $action, int $window = 60, ?string $key = null): void
+            {
+                $bucket = $key ?? $action;
+                $GLOBALS['__bcc_ph']['throttle_releases'][] = $bucket;
+                if (($GLOBALS['__bcc_ph']['throttle_hits'][$bucket] ?? 0) > 0) {
+                    $GLOBALS['__bcc_ph']['throttle_hits'][$bucket]--;
+                }
             }
 
             /** F-281: the caller's address; tests set client_ip. */

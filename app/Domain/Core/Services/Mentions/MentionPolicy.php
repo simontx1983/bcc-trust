@@ -15,8 +15,9 @@ declare(strict_types=1);
  *   - banned users (`acc.usr_role` ∈ register/verified/ban)
  *   - PRIVATE-profile users (`usr_profile_acc = 40`)
  *   - members-only users when viewer is anon (`usr_profile_acc = 20`)
- *   - bidirectional `peepso_user_blocked` (viewer→target AND target→viewer,
- *     gated on `user_blocking_enable`)
+ *   - bidirectional `peepso_user_blocked` (viewer→target AND target→viewer;
+ *     PeepSo gates it on `user_blocking_enable`, which PrivacySettings
+ *     pins ON, F-295, so it always applies)
  *   - hidden via `peepso_is_hide_profile_from_user_listing` user-meta
  *     (PeepSo gates its own clause on `allow_hide_user_from_user_listing`;
  *     PrivacySettings hooks `peepso_user_search_args` to apply it always —

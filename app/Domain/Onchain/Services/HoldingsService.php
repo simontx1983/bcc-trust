@@ -2,6 +2,7 @@
 
 namespace BCC\Trust\Onchain\Services;
 
+use BCC\Trust\Onchain\Contracts\CountsErc1155Holdings;
 use BCC\Trust\Onchain\Contracts\CountsHoldingsWithCompleteness;
 use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Factories\FetcherFactory;
@@ -1185,8 +1186,14 @@ final class HoldingsService
             $indexed = (int) ($byWallet[$walletLinkId] ?? 0);
             if ($indexed <= 0) {
                 // A pre-link holding, or a relink under a new wallet id, is
-                // simply not in the index.
-                return HoldingsCount::atLeast(0);
+                // simply not in the index — and a transfer-out of a token
+                // the index never saw arrive is clamped to a zero row. So
+                // the index's zero proves nothing. F-278: a driver that can
+                // read the wallet's current holdings of the contract is
+                // asked instead; any other driver keeps the old answer.
+                return $fetcher instanceof CountsErc1155Holdings
+                    ? self::erc1155ProviderCount($fetcher, $walletLinkId, $walletAddress, $contract, $chainId, $budget)
+                    : HoldingsCount::atLeast(0);
             }
 
             return self::transferIndexIsFresh($chainId)
@@ -1324,6 +1331,38 @@ final class HoldingsService
         }
 
         return $lostAt !== null && $lostAt >= $observedAt;
+    }
+
+    /**
+     * F-278: the provider's answer for an ERC-1155 contract the index shows
+     * at zero. One request, charged to `$budget` before asking. A throw or a
+     * null is `provider_unavailable` (UNKNOWN, which never revokes); only
+     * the provider's complete "owns none" is a zero.
+     */
+    private static function erc1155ProviderCount(
+        CountsErc1155Holdings $fetcher,
+        int $walletLinkId,
+        string $walletAddress,
+        string $contract,
+        int $chainId,
+        ProviderRequestBudget $budget
+    ): HoldingsCount|string {
+        if (!$budget->canSpend(1)) {
+            return EligibilityVerdict::REASON_BUDGET_EXHAUSTED;
+        }
+        $budget->spend(1);
+
+        try {
+            return $fetcher->count_erc1155_holdings($walletAddress, $contract)
+                ?? EligibilityVerdict::REASON_PROVIDER_UNAVAILABLE;
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::warning('[HoldingsService] ERC-1155 ownership read threw; treated as unavailable', [
+                'chain_id'       => $chainId,
+                'wallet_link_id' => $walletLinkId,
+                'error_class'    => get_class($e),
+            ]);
+            return EligibilityVerdict::REASON_PROVIDER_UNAVAILABLE;
+        }
     }
 
     /**

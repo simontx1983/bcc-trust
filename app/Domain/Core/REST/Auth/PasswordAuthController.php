@@ -383,9 +383,19 @@ final class PasswordAuthController
         // depends on this firing BEFORE wp_check_password's CPU-bound
         // bcrypt compare; otherwise an attacker can pin a CPU at the
         // password-check rate.
-        if (!\BCC\Core\Security\Throttle::allow('login', AuthSupport::LOGIN_RATE_LIMIT, 60)) {
+        // F-290: a refused call is not recorded (countDenied = false), and a
+        // call a later bucket refuses gives back what the earlier ones
+        // charged (releaseLoginCharges), so retrying while blocked never
+        // extends the block. A correct password STAYS counted: what follows
+        // it (the 2FA challenge and its emailed code) has no limit of its
+        // own, so releasing it would give anyone with valid credentials
+        // unlimited sign-ins (a 2FA mail bomb, and 2FA guesses across
+        // networks).
+        if (!\BCC\Core\Security\Throttle::allow('login', AuthSupport::LOGIN_RATE_LIMIT, 60, null, false)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
+        /** @var list<array{string, int, string|null}> $charged action, window, key */
+        $charged = [['login', 60, null]];
 
         $identifier = trim((string) $request->get_param('identifier'));
         $password   = (string) $request->get_param('password');
@@ -428,22 +438,32 @@ final class PasswordAuthController
             ? strtolower(sanitize_email($identifier))
             : ltrim(strtolower($identifier), '@'));
         $network = AuthSupport::loginNetwork();
+        $netKey  = 'bcc_throttle_login_account_net_' . hash('sha256', $typedKey . '|' . $network);
         if (!\BCC\Core\Security\Throttle::allow(
             'login_account_net',
             AuthSupport::LOGIN_ACCOUNT_RATE_LIMIT,
             AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
-            'bcc_throttle_login_account_net_' . hash('sha256', $typedKey . '|' . $network)
+            $netKey,
+            false
         )) {
+            self::releaseLoginCharges($charged);
             return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
+        $charged[] = ['login_account_net', AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW, $netKey];
+
         $trustedNetwork = $user !== false && AuthSupport::isTrustedLoginNetwork((int) $user->ID, $network);
-        if (!$trustedNetwork && !\BCC\Core\Security\Throttle::allow(
-            'login_account',
-            AuthSupport::LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT,
-            AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
-            'bcc_throttle_login_account_' . hash('sha256', $typedKey)
-        )) {
-            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
+        if (!$trustedNetwork) {
+            $ceilingKey = 'bcc_throttle_login_account_' . hash('sha256', $typedKey);
+            if (!\BCC\Core\Security\Throttle::allow(
+                'login_account',
+                AuthSupport::LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT,
+                AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
+                $ceilingKey,
+                false
+            )) {
+                self::releaseLoginCharges($charged);
+                return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
+            }
         }
 
         // Generic error for "not found" and "wrong password" alike —
@@ -621,7 +641,10 @@ final class PasswordAuthController
         // Throttle first — per network, before any DB lookup or mail
         // dispatch (F-290: office scale, so a shared NAT doesn't lock
         // members out of each other's resets).
-        if (!\BCC\Core\Security\Throttle::allow('forgot_password', AuthSupport::FORGOT_PASSWORD_RATE_LIMIT, 3600)) {
+        // F-290: the per-network bucket doesn't record refused calls; the
+        // per-address mail caps below keep counting every request (they are
+        // the mail-bomb guard).
+        if (!\BCC\Core\Security\Throttle::allow('forgot_password', AuthSupport::FORGOT_PASSWORD_RATE_LIMIT, 3600, null, false)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many password-reset requests. Try again later.', 429);
         }
 
@@ -639,6 +662,7 @@ final class PasswordAuthController
             AuthSupport::FORGOT_PASSWORD_EMAIL_RATE_LIMIT,
             AuthSupport::FORGOT_PASSWORD_EMAIL_GLOBAL_RATE_LIMIT
         )) {
+            AuthSupport::releaseThrottle('forgot_password', 3600);
             return ApiResponse::error('bcc_rate_limited', 'Too many password-reset requests. Try again later.', 429);
         }
 
@@ -697,7 +721,7 @@ final class PasswordAuthController
      */
     public function resetPassword(WP_REST_Request $request): WP_REST_Response
     {
-        if (!\BCC\Core\Security\Throttle::allow('reset_password_attempt', AuthSupport::RESET_PASSWORD_RATE_LIMIT, 3600)) {
+        if (!\BCC\Core\Security\Throttle::allow('reset_password_attempt', AuthSupport::RESET_PASSWORD_RATE_LIMIT, 3600, null, false)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many attempts. Try again later.', 429);
         }
 
@@ -768,5 +792,18 @@ final class PasswordAuthController
         $response->header('Cache-Control', 'no-store');
 
         return $response;
+    }
+
+    /**
+     * F-290: give back every login bucket this call charged, when a later
+     * bucket refuses it.
+     *
+     * @param list<array{string, int, string|null}> $charged action, window, key
+     */
+    private static function releaseLoginCharges(array $charged): void
+    {
+        foreach ($charged as [$action, $window, $key]) {
+            AuthSupport::releaseThrottle($action, $window, $key);
+        }
     }
 }

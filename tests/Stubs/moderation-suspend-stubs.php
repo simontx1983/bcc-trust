@@ -16,6 +16,7 @@
  *   tv        array<int,int>  user id → bcc_token_version
  *   rows      array<int,bool> user id → user_info row exists
  *   synced    list<int>       user ids passed to sync()
+ *   wp_sessions_destroyed list<int> user ids whose WP_Session_Tokens::destroy_all() ran
  */
 
 declare(strict_types=1);
@@ -231,6 +232,26 @@ namespace BCC\Trust\Core\Services\Admin {
 }
 
 namespace {
+    // WordPress cookie sessions: records which users had every session
+    // destroyed on suspension.
+    if (!class_exists('WP_Session_Tokens', false)) {
+        class WP_Session_Tokens
+        {
+            private function __construct(private int $userId)
+            {
+            }
+
+            public static function get_instance(int $userId): self
+            {
+                return new self($userId);
+            }
+
+            public function destroy_all(): void
+            {
+                $GLOBALS['__bcc_ms']['wp_sessions_destroyed'][] = $this->userId;
+            }
+        }
+    }
     if (!function_exists('get_current_user_id')) {
         function get_current_user_id(): int
         {
