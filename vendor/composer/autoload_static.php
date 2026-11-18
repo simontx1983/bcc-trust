@@ -345,6 +345,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Security\\AuditLogger' => __DIR__ . '/../..' . '/app/Domain/Core/Security/AuditLogger.php',
         'BCC\\Trust\\Core\\Security\\AuditMeta' => __DIR__ . '/../..' . '/app/Domain/Core/Security/AuditMeta.php',
         'BCC\\Trust\\Core\\Security\\BehavioralAnalyzer' => __DIR__ . '/../..' . '/app/Domain/Core/Security/BehavioralAnalyzer.php',
+        'BCC\\Trust\\Core\\Security\\CoreUsersRouteGuard' => __DIR__ . '/../..' . '/app/Domain/Core/Security/CoreUsersRouteGuard.php',
         'BCC\\Trust\\Core\\Security\\DeviceFingerprinter' => __DIR__ . '/../..' . '/app/Domain/Core/Security/DeviceFingerprinter.php',
         'BCC\\Trust\\Core\\Security\\FraudDetector' => __DIR__ . '/../..' . '/app/Domain/Core/Security/FraudDetector.php',
         'BCC\\Trust\\Core\\Security\\FraudWhitelist' => __DIR__ . '/../..' . '/app/Domain/Core/Security/FraudWhitelist.php',

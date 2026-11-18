@@ -1658,6 +1658,12 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 // SuspendedWriteGate.
 \BCC\Trust\Core\Security\SuspendedWriteGate::register();
 
+// Security review 2026-11-18: core's /wp/v2/users routes (and everything
+// under them) are admin-only. A member's bearer token could otherwise change
+// the account's password or email there, around every BCC step-up; see
+// CoreUsersRouteGuard.
+\BCC\Trust\Core\Security\CoreUsersRouteGuard::register();
+
 // Validator announcements, unit A1 (api-contract-v1.md §4.32): the private
 // `bcc_announcement` post type plus the four guards that stop WordPress's
 // own comment surfaces serving announcement comments.

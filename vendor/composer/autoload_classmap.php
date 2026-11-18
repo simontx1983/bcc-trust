@@ -189,6 +189,7 @@ return array(
     'BCC\\Trust\\Core\\Security\\AuditLogger' => $baseDir . '/app/Domain/Core/Security/AuditLogger.php',
     'BCC\\Trust\\Core\\Security\\AuditMeta' => $baseDir . '/app/Domain/Core/Security/AuditMeta.php',
     'BCC\\Trust\\Core\\Security\\BehavioralAnalyzer' => $baseDir . '/app/Domain/Core/Security/BehavioralAnalyzer.php',
+    'BCC\\Trust\\Core\\Security\\CoreUsersRouteGuard' => $baseDir . '/app/Domain/Core/Security/CoreUsersRouteGuard.php',
     'BCC\\Trust\\Core\\Security\\DeviceFingerprinter' => $baseDir . '/app/Domain/Core/Security/DeviceFingerprinter.php',
     'BCC\\Trust\\Core\\Security\\FraudDetector' => $baseDir . '/app/Domain/Core/Security/FraudDetector.php',
     'BCC\\Trust\\Core\\Security\\FraudWhitelist' => $baseDir . '/app/Domain/Core/Security/FraudWhitelist.php',
