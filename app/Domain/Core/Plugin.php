@@ -2435,6 +2435,23 @@ final class Plugin
         // F-277: drop a just-deleted post from the cached anon hot-feed
         // first page now, not at the next warm tick / TTL. Best-effort: the
         // delete has already committed, so a failure here is logged only.
+        // F-294 (item 13): identity and privacy changes drop the cached anon
+        // hot-feed pages at once (see FeedRankingService::forgetHotFeed):
+        // a deleted account, a changed handle, a real name just hidden or
+        // shown. Scores and votes never reach this. Best-effort, like F-277.
+        $forgetHotFeed = function (string $why, int $userId): void {
+            try {
+                $this->feedRankingService()->forgetHotFeed();
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] hot-feed drop failed', [
+                    'why'     => $why,
+                    'user_id' => $userId,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        };
+        \BCC\Trust\Core\Services\Feed\FeedRankingService::registerIdentityHooks($forgetHotFeed);
+
         add_action('bcc_post_deleted', function ($viewerId, $actId): void {
             try {
                 $this->feedRankingService()->forgetDeletedPost((int) $actId);

@@ -182,6 +182,14 @@ final class PrivacySettings
             // and round-trips through FILTER_VALIDATE_BOOLEAN cleanly).
             update_user_meta($userId, self::metaKey($key), $value ? '1' : '0');
         }
+
+        // F-294: let caches that embed a member's name or listing react to a
+        // privacy change (the anon hot feed, on real_name_hidden). Only the
+        // keys this call actually wrote are passed.
+        $written = array_values(array_intersect(array_keys($partial), self::ALL_KEYS));
+        if ($written !== []) {
+            do_action('bcc_privacy_settings_changed', $userId, $written);
+        }
     }
 
     /**
