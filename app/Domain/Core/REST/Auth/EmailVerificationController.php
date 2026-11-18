@@ -272,11 +272,45 @@ final class EmailVerificationController
             if (!is_email($email)) {
                 return ApiResponse::error('bcc_invalid_request', 'A valid email is required.', 422);
             }
+            // F-290: the per-network bucket above is office scale; this caps mail
+            // to any one inbox, before the lookup and whether or not it exists.
+            if (!AuthSupport::allowMailToAddress(
+                'resend_verification',
+                $email,
+                AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT,
+                AuthSupport::RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT
+            )) {
+                return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
+            }
             $user = get_user_by('email', $email);
         } elseif ($identifier !== '') {
-            $ownerId = HandleService::currentOwner(ltrim(strtolower($identifier), '@'));
+            $handle = ltrim(strtolower($identifier), '@');
+            // F-290 for the handle form: the same caps, keyed on the handle and
+            // checked BEFORE the lookup, so a 429 says nothing about whether
+            // the handle exists.
+            if (!AuthSupport::allowMailToAddress(
+                'resend_verification',
+                'handle:' . $handle,
+                AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT,
+                AuthSupport::RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT
+            )) {
+                return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
+            }
+            $ownerId = HandleService::currentOwner($handle);
             $user    = $ownerId !== null ? get_userdata($ownerId) : false;
             $email   = $user instanceof \WP_User ? (string) $user->user_email : '';
+            // The resolved inbox's own cap still binds, so alternating the
+            // email and handle forms cannot double the mail to one address.
+            // Over it, nothing is sent and the answer is the same ok (a 429
+            // here would say the handle exists).
+            if ($user instanceof \WP_User && !AuthSupport::allowMailToAddress(
+                'resend_verification',
+                $email,
+                AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT,
+                AuthSupport::RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT
+            )) {
+                $user = false;
+            }
         } else {
             return ApiResponse::error('bcc_invalid_request', 'Supply an email or a handle.', 422);
         }
