@@ -35,6 +35,26 @@
 declare(strict_types=1);
 
 namespace {
+    // F-334: what a failed wp_update_post(..., true) returns.
+    if (!class_exists('WP_Error', false)) {
+        class WP_Error
+        {
+            public function __construct(private string $code = '', private string $message = '')
+            {
+            }
+
+            public function get_error_code(): string
+            {
+                return $this->code;
+            }
+
+            public function get_error_message(): string
+            {
+                return $this->message;
+            }
+        }
+    }
+
     if (!function_exists('__bcc_drain_state')) {
         function __bcc_drain_state(): array { return $GLOBALS['__bcc_drain']; }
     }
@@ -397,6 +417,8 @@ namespace BCC\Trust\Core\Integration {
     }
 
     // F-299: onPageClaimed()'s ownership transfer on an author-0 page.
+    // Knob `fail_author_write` (bool): it fails the way the real one does
+    // with $wpError = true, returning a WP_Error and writing NOTHING.
     if (!function_exists('BCC\Trust\Core\Integration\wp_update_post')) {
         /**
          * @param array<string, mixed> $post
@@ -404,6 +426,9 @@ namespace BCC\Trust\Core\Integration {
          */
         function wp_update_post(array $post, bool $wpError = false)
         {
+            if (!empty($GLOBALS['__bcc_drain']['fail_author_write'])) {
+                return new \WP_Error('db_update_error', 'Could not update post in the database.');
+            }
             $id = (int) ($post['ID'] ?? 0);
             $GLOBALS['__bcc_drain']['post_author'][$id] = (int) ($post['post_author'] ?? 0);
 
@@ -414,7 +439,7 @@ namespace BCC\Trust\Core\Integration {
         /** @param mixed $thing */
         function is_wp_error($thing): bool
         {
-            return false;
+            return $thing instanceof \WP_Error;
         }
     }
 }

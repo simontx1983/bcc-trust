@@ -342,12 +342,20 @@ class PeepSoIntegration
      *   - nothing happens if ANY verified operator/creator claim still binds
      *     the page (a multi-chain page can be held through another
      *     validator) — read fail-closed: unknown never frees a page;
+     *   - their PeepSo `member_owner` row is demoted to `member` (F-299
+     *     wrote it); they stay a member/follower;
      *   - `post_author` goes back to 0, only if it is still this user (an
      *     admin reassignment since the claim is left alone), and their
      *     owned-page count drops;
-     *   - their PeepSo `member_owner` row is demoted to `member` (F-299
-     *     wrote it); they stay a member/follower;
      *   - one `page_owner_released` audit row records the old owner.
+     *
+     * ⚠ The DEMOTION RUNS FIRST, so a step that fails can never leave a
+     * page half-freed. A failed demotion stops before `post_author` is
+     * touched, and the page stays fully owned. A failed author reset after
+     * the demotion leaves `post_author` on the old owner, and onPageClaimed()
+     * refuses a page with a different author. Author-first, a failed
+     * demotion left an author-0 page: the next claimer became its author
+     * while the old `member_owner` row kept PeepSo ownership.
      *
      * The score rows stay keyed to the old owner until the next claim moves
      * them (onPageClaimed). Called from ClaimService::revokeClaim's isolated
@@ -368,44 +376,57 @@ class PeepSoIntegration
                 return false;
             }
 
-            $authorReset = false;
-            if ((int) get_post_field('post_author', $pageId) === $userId) {
-                $update = wp_update_post(['ID' => $pageId, 'post_author' => 0], true);
-                if (is_wp_error($update)) {
-                    \BCC\Core\Log\Logger::error('[bcc-trust] page release: post_author reset failed', [
-                        'page_id' => $pageId,
-                        'user_id' => $userId,
-                        'error'   => $update->get_error_message(),
-                    ]);
-                    return false;
-                }
-                $this->userInfoRepo->decrementPageCount($userId, $pageId);
-                $authorReset = true;
-            }
-
+            // 1. Demote first (see the ⚠ above). Nothing has changed yet,
+            //    so a failure here leaves the page fully owned.
             $ownerRow = 'none';
             if (class_exists('PeepSoPageUser')) {
                 $member = new \PeepSoPageUser($pageId, $userId);
                 if ($member->is_owner === true) {
-                    $ownerRow = $member->member_modify('member') === true ? 'demoted' : 'demote_failed';
+                    if ($member->member_modify('member') !== true) {
+                        \BCC\Core\Log\Logger::error('[bcc-trust] page release: member_owner demotion failed - page left owned', [
+                            'page_id' => $pageId,
+                            'user_id' => $userId,
+                        ]);
+                        return false;
+                    }
+                    $ownerRow = 'demoted';
                 }
             }
 
-            AuditLogger::log('page_owner_released', $pageId, [
+            // 2. Then the author.
+            $authorReset       = false;
+            $authorResetFailed = false;
+            if ((int) get_post_field('post_author', $pageId) === $userId) {
+                $update = wp_update_post(['ID' => $pageId, 'post_author' => 0], true);
+                if (is_wp_error($update)) {
+                    $authorResetFailed = true;
+                    \BCC\Core\Log\Logger::error('[bcc-trust] page release: post_author reset failed', [
+                        'page_id'   => $pageId,
+                        'user_id'   => $userId,
+                        'owner_row' => $ownerRow,
+                        'error'     => $update->get_error_message(),
+                    ]);
+                } else {
+                    $this->userInfoRepo->decrementPageCount($userId, $pageId);
+                    $authorReset = true;
+                }
+            }
+
+            if ($authorResetFailed && $ownerRow === 'none') {
+                return false; // nothing changed: no release to record
+            }
+
+            $meta = [
                 'old_owner'    => $userId,
                 'author_reset' => $authorReset,
                 'owner_row'    => $ownerRow,
-            ], 'page');
-
-            if ($ownerRow === 'demote_failed') {
-                \BCC\Core\Log\Logger::error('[bcc-trust] page release: member_owner demotion failed', [
-                    'page_id' => $pageId,
-                    'user_id' => $userId,
-                ]);
-                return false;
+            ];
+            if ($authorResetFailed) {
+                $meta['author_reset_failed'] = true; // the demotion DID happen
             }
+            AuditLogger::log('page_owner_released', $pageId, $meta, 'page');
 
-            return true;
+            return !$authorResetFailed;
         } catch (\Throwable $e) {
             \BCC\Core\Log\Logger::error('[bcc-trust] page release failed', [
                 'page_id' => $pageId,

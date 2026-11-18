@@ -139,6 +139,63 @@ final class PageClaimReleaseTest extends TestCase
         self::assertFalse(self::audits('page_owner_released')[0][2]['author_reset']);
     }
 
+    // ── failure order: the page is never half-freed ────────────────────
+
+    /**
+     * The demotion runs FIRST. When it fails, `post_author` was never
+     * touched, so the next claimer is refused (the page still has an author)
+     * instead of becoming its author while the old owner row keeps PeepSo
+     * ownership.
+     */
+    public function testAFailedDemotionLeavesThePageFullyOwned(): void
+    {
+        $GLOBALS['__bcc_drain']['fail_modify'] = true;
+        $integration = $this->integration();
+
+        self::assertFalse($integration->releaseClaimedPage(self::PAGE, self::OLD));
+
+        self::assertSame(self::OLD, $GLOBALS['__bcc_drain']['post_author'][self::PAGE], 'post_author is never reset after a failed demotion');
+        self::assertSame('member_owner', $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD]);
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_count_drops']);
+        self::assertSame([], self::audits('page_owner_released'), 'nothing changed, so there is no release to record');
+        self::assertCount(1, $GLOBALS['__bcc_drain']['errors'], 'logged, never thrown');
+
+        $GLOBALS['__bcc_drain']['fail_modify'] = false;
+        $integration->onPageClaimed(self::NEW, self::PAGE);
+
+        self::assertSame(self::OLD, $GLOBALS['__bcc_drain']['post_author'][self::PAGE], 'the next claimer does not become the author');
+        self::assertArrayNotHasKey(self::NEW, $GLOBALS['__bcc_drain']['page_members'][self::PAGE], 'and gets no owner row');
+    }
+
+    /**
+     * The other order: the demotion lands, then the author reset fails.
+     * `post_author` stays on the old owner, so the next claimer is still
+     * refused, and the demotion that did happen is audited.
+     */
+    public function testAFailedAuthorResetAfterTheDemotionStillNeverSplitsThePage(): void
+    {
+        $GLOBALS['__bcc_drain']['fail_author_write'] = true;
+        $integration = $this->integration();
+
+        self::assertFalse($integration->releaseClaimedPage(self::PAGE, self::OLD));
+
+        self::assertSame(self::OLD, $GLOBALS['__bcc_drain']['post_author'][self::PAGE]);
+        self::assertSame('member', $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD], 'the demotion ran first');
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_count_drops'], 'no count drop without the author reset');
+        $released = self::audits('page_owner_released');
+        self::assertCount(1, $released);
+        self::assertSame(
+            ['old_owner' => self::OLD, 'author_reset' => false, 'owner_row' => 'demoted', 'author_reset_failed' => true],
+            $released[0][2]
+        );
+        self::assertCount(1, $GLOBALS['__bcc_drain']['errors']);
+
+        $integration->onPageClaimed(self::NEW, self::PAGE);
+
+        self::assertSame(self::OLD, $GLOBALS['__bcc_drain']['post_author'][self::PAGE], 'the next claimer does not become the author');
+        self::assertArrayNotHasKey(self::NEW, $GLOBALS['__bcc_drain']['page_members'][self::PAGE], 'and gets no owner row');
+    }
+
     // ── the takeover ────────────────────────────────────────────────────
 
     public function testTheNextOperatorsClaimTakesThePageOverIncludingTheScoreRow(): void
