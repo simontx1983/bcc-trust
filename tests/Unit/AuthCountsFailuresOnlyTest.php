@@ -13,15 +13,15 @@ use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 /**
- * F-290 follow-up (user complaints 2 and 3): on the anonymous auth routes a
- * refused call is no longer recorded, and a correct password doesn't use
- * up the sign-in budget. Every other caller keeps pessimistic counting.
+ * F-290 follow-up: on the anonymous auth routes a refused call is no
+ * longer recorded. Every other caller keeps pessimistic counting.
  *
  * Pinned, running the REAL login / forgot-password / resend / verify /
  * reset handlers over the counting Throttle double (which honours
  * countDenied and release() as bcc-core #124 does):
  *   - retrying while blocked never extends the block;
- *   - a correct password gives back every login slot it charged;
+ *   - a correct password STAYS counted (the 2FA step after it has no
+ *     limit of its own, so a release would mean unlimited sign-ins);
  *   - a call a LATER login bucket refuses gives back what it charged;
  *   - forgot / resend: the per-network bucket doesn't record refusals and
  *     gives its slot back when an address cap refuses; the per-address mail
@@ -86,17 +86,19 @@ final class AuthCountsFailuresOnlyTest extends TestCase
         self::assertSame($limit, self::hits(self::netKey('alice')), 'the 15 refused retries were not recorded');
     }
 
-    public function testACorrectPasswordGivesBackEverySlotItCharged(): void
+    public function testACorrectPasswordStaysCounted(): void
     {
         for ($i = 0; $i < 3; $i++) {
             self::login('alice', 'wrong' . $i);
         }
-        $before = [self::hits('login'), self::hits(self::netKey('alice'))];
 
         self::assertSame(403, self::login('alice', 'right'), 'past the throttle, stopped by the unverified email');
 
-        self::assertSame($before, [self::hits('login'), self::hits(self::netKey('alice'))], 'signing in used up nothing');
-        self::assertSame(3, self::hits(self::netKey('alice')), 'the three failures still count');
+        self::assertSame(4, self::hits('login'), 'the per-IP bucket keeps the success');
+        self::assertSame(4, self::hits(self::netKey('alice')), 'so does the per-network one');
+        $ceiling = 'bcc_throttle_login_account_' . hash('sha256', 'id:' . hash('sha256', 'alice'));
+        self::assertSame(4, self::hits($ceiling), 'and the per-identifier ceiling');
+        self::assertSame([], $GLOBALS['__bcc_ph']['throttle_releases'] ?? [], 'nothing was given back');
     }
 
     public function testACallALaterBucketRefusesGivesBackWhatItCharged(): void

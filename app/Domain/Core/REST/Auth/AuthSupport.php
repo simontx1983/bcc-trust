@@ -119,7 +119,7 @@ final class AuthSupport
 
     /**
      * F-290: Throttle::release() — give back a slot an auth route charged
-     * (a correct password, or a request a LATER bucket refused). Feature-
+     * for a request a LATER bucket refused. Feature-
      * detected: an older bcc-core without release() just leaves the slot
      * counted, the safe direction.
      */

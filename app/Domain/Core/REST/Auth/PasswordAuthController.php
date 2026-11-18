@@ -383,11 +383,14 @@ final class PasswordAuthController
         // depends on this firing BEFORE wp_check_password's CPU-bound
         // bcrypt compare; otherwise an attacker can pin a CPU at the
         // password-check rate.
-        // F-290: the login buckets count FAILED attempts only. A refused call
-        // is not recorded (countDenied = false), a call a later bucket
-        // refuses gives back what it charged, and a correct password gives
-        // back everything (releaseLoginCharges) — so retrying while blocked
-        // never extends the block, and signing in never uses up the budget.
+        // F-290: a refused call is not recorded (countDenied = false), and a
+        // call a later bucket refuses gives back what the earlier ones
+        // charged (releaseLoginCharges), so retrying while blocked never
+        // extends the block. A correct password STAYS counted: what follows
+        // it (the 2FA challenge and its emailed code) has no limit of its
+        // own, so releasing it would give anyone with valid credentials
+        // unlimited sign-ins (a 2FA mail bomb, and 2FA guesses across
+        // networks).
         if (!\BCC\Core\Security\Throttle::allow('login', AuthSupport::LOGIN_RATE_LIMIT, 60, null, false)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
@@ -461,7 +464,6 @@ final class PasswordAuthController
                 self::releaseLoginCharges($charged);
                 return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
             }
-            $charged[] = ['login_account', AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW, $ceilingKey];
         }
 
         // Generic error for "not found" and "wrong password" alike —
@@ -471,11 +473,6 @@ final class PasswordAuthController
         if ($user === false || !wp_check_password($password, $user->user_pass, $user->ID)) {
             return ApiResponse::error('bcc_invalid_credentials', 'Invalid credentials.', 401);
         }
-
-        // A correct password is not a guess: it must not use up the budget
-        // (F-290). Whatever follows (unverified email, the second factor) has
-        // its own caps.
-        self::releaseLoginCharges($charged);
 
         $userId = (int) $user->ID;
         $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
@@ -798,7 +795,8 @@ final class PasswordAuthController
     }
 
     /**
-     * F-290: give back every login bucket this call charged.
+     * F-290: give back every login bucket this call charged, when a later
+     * bucket refuses it.
      *
      * @param list<array{string, int, string|null}> $charged action, window, key
      */

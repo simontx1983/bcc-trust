@@ -269,11 +269,13 @@ class RateLimiter {
 
     /**
      * F-290: give back one slot of the CURRENT window bucket for $key — the
-     * slot an allowed call used, for a route that only counts failures
-     * (bcc-core Throttle::release(), e.g. a correct password). Never below
-     * zero (decrementBucket clamps). A call allowed in the previous bucket a
-     * moment before a bucket boundary is not found here and stays counted —
-     * the safe direction.
+     * slot an allowed call used (bcc-core Throttle::release(), e.g. a login
+     * bucket a later one refused). Never below zero (decrementBucket clamps).
+     * ⚠ It always decrements the bucket that is current NOW. If a window
+     * boundary passed between the allow() and this release, the call's own
+     * slot stays counted in the old bucket, and the NEW bucket loses one —
+     * possibly a slot another call charged. At most one slot per release, and
+     * only across a boundary.
      */
     public static function releaseByKey(string $key, int $window): void
     {
