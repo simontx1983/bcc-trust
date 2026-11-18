@@ -16,26 +16,42 @@ if (!defined('ABSPATH')) {
  * {@see SolanaFetcher::assetResult()}, and an `authorities[]` entry whose
  * `address` is the wallet and whose `scopes` include `full`.
  *
- * Three answers, never two:
+ * Three answers, the same rule as the EVM owner() check (F-14,
+ * BlockchainQueryService::evmContractOwnerVerdict):
  *
  *   true   the wallet holds full authority over the collection mint today
- *   false  a DECIDED no — the asset was read and the wallet is not a full
- *          authority, or DAS documented the mint as not found
- *   null   INDETERMINATE — no Helius key, transport failure, non-2xx, rate
- *          limit, an undocumented error, or a response we cannot read
+ *   false  a DIFFERENT, real address holds full authority today — the only
+ *          decided "no"
+ *   null   UNKNOWN — everything else: no Helius key, transport, non-2xx,
+ *          rate limit, an undocumented error, a not-found mint, a response
+ *          we cannot read, an unreadable entry, and a RENOUNCED authority
+ *          (no full authority listed, or one handed to the system program
+ *          or the incinerator)
  *
- * ⚠ null is never a match and never a "no". An outage must not tell a real
- * creator that their wallet does not own their collection, and must never
- * grant a claim. The caller turns null into a retryable "couldn't verify".
+ * ⚠ Product rule (user, F-14 decision A): unknown never grants and never
+ * revokes. Renouncing does not make someone "not the creator", exactly as
+ * an EVM owner() of the zero address reads unknown. The claim path turns
+ * null into "couldn't verify"; the re-verify sweep keeps the claim.
  *
  * ⚠ Base58 addresses are case-sensitive: compared exactly, never folded.
  *
  * ⚠ The scope must be `full`. A narrower scope (e.g. metadata-only) is a
- * delegated authority, not the collection's owner.
+ * delegated authority: it neither proves the wallet is the owner nor
+ * proves that someone else is.
  */
 final class SolanaCollectionAuthority
 {
     public const SCOPE_FULL = 'full';
+
+    /**
+     * Addresses an authority is handed to in order to renounce it: the
+     * System Program (Solana's all-ones "zero" key) and the incinerator.
+     * Holding them is nobody holding it.
+     */
+    public const RENOUNCED_ADDRESSES = [
+        '11111111111111111111111111111111',
+        '1nc1nerator11111111111111111111111111111111',
+    ];
 
     public function __construct(private readonly SolanaFetcher $fetcher)
     {
@@ -54,10 +70,11 @@ final class SolanaCollectionAuthority
 
         $r = $this->fetcher->assetResult($collectionMint);
 
+        // Every failure is unknown — a not-found mint included: a collection
+        // we can no longer read proves nobody's authority, and must never
+        // revoke a creator (F-14 decision A).
         if (!$r['ok']) {
-            // Only the documented getAsset not-found decides a negative;
-            // every other kind is an outage or an unreadable answer.
-            return ($r['kind'] ?? '') === 'not_found' ? false : null;
+            return null;
         }
 
         $asset = $r['result'];
@@ -75,18 +92,30 @@ final class SolanaCollectionAuthority
             return null;
         }
 
-        $unreadable = false;
+        $unreadable  = false;
+        $otherHolder = false;
         foreach ($authorities as $entry) {
             if (!is_array($entry) || !is_string($entry['address'] ?? null) || !is_array($entry['scopes'] ?? null)) {
                 $unreadable = true;
                 continue;
             }
-            if ($entry['address'] === $wallet && in_array(self::SCOPE_FULL, $entry['scopes'], true)) {
+            if (!in_array(self::SCOPE_FULL, $entry['scopes'], true)) {
+                continue;
+            }
+            if ($entry['address'] === $wallet) {
                 return true;
             }
+            if (in_array($entry['address'], self::RENOUNCED_ADDRESSES, true)) {
+                continue;
+            }
+            $otherHolder = true;
         }
 
-        // A malformed entry could have been this wallet's: undecided, not no.
-        return $unreadable ? null : false;
+        // A malformed entry could have been this wallet's: unknown, not no.
+        if ($unreadable) {
+            return null;
+        }
+
+        return $otherHolder ? false : null;
     }
 }
