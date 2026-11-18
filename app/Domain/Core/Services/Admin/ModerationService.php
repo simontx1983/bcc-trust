@@ -138,6 +138,8 @@ final class ModerationService
         // that had landed.
         $this->afterCommit('notify', $userId, fn () => $this->userInfoRepository->notifySuspensionChanged($userId));
         $this->afterCommit('revoke_sessions', $userId, fn () => $this->revokeSessions($userId));
+        // Its own step, so a failure in one revoke cannot skip the other.
+        $this->afterCommit('destroy_wp_sessions', $userId, fn () => $this->destroyWordPressSessions($userId));
     }
 
     /**
@@ -1246,5 +1248,20 @@ final class ModerationService
     private function revokeSessions(int $userId): void
     {
         \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
+    }
+
+    /**
+     * End every WordPress cookie session the user holds (wp-admin, PeepSo's
+     * own UI), as revokeSessions() does for the Bearer tokens. Without it a
+     * suspended member's existing cookie session kept working until it
+     * expired. Called only after the suspension transaction committed.
+     *
+     * Nothing is needed on UNSUSPEND: the member signs in again (a
+     * suspended member may sign in read-only meanwhile, F-305), and that
+     * creates a fresh session.
+     */
+    private function destroyWordPressSessions(int $userId): void
+    {
+        \WP_Session_Tokens::get_instance($userId)->destroy_all();
     }
 }

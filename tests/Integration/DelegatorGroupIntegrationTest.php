@@ -1077,21 +1077,23 @@ final class DelegatorGroupIntegrationTest extends TestCase
         $method  = new \ReflectionMethod(GroupsService::class, 'resolveCanJoin');
         $context = new GroupContext(1, GroupType::Validator, PeepSoPrivacy::Closed, false, 'validator', 1, null);
 
+        // F-359: Join is offered and the join door verifies the delegation;
+        // the hint still names the requirement.
         self::assertSame(
             [
-                'allowed'     => false,
+                'allowed'     => true,
                 'unlock_hint' => 'Delegate at least 2.5 ATOM to this validator to join its community.',
-                'reason_code' => 'not_eligible',
+                'reason_code' => 'verify_on_join',
             ],
-            $method->invoke($service, $context, 701, false, false, 0, '2.5 ATOM')
+            $method->invoke($service, $context, 701, false, null, 0, '2.5 ATOM')
         );
         self::assertSame(
             [
-                'allowed'     => false,
+                'allowed'     => true,
                 'unlock_hint' => 'Delegate to this validator to join its community.',
-                'reason_code' => 'not_eligible',
+                'reason_code' => 'verify_on_join',
             ],
-            $method->invoke($service, $context, 701, false, false, 0, null)
+            $method->invoke($service, $context, 701, false, null, 0, null)
         );
     }
 
