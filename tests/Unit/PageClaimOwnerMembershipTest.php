@@ -71,11 +71,15 @@ final class PageClaimOwnerMembershipTest extends TestCase
         $prop = new ReflectionProperty(PeepSoIntegration::class, 'userInfoRepo');
         $prop->setAccessible(true);
         $prop->setValue($instance, new \BCC\Trust\Core\Repositories\UserInfoRepository());
+        $score = new ReflectionProperty(PeepSoIntegration::class, 'scoreRepo');
+        $score->setAccessible(true);
+        $score->setValue($instance, new \BCC\Trust\Core\Repositories\ScoreRepository());
 
         return $instance;
     }
 
-    private function ownerStatus(): string|false
+    /** @return string|list<string>|false a list when the pair holds several rows */
+    private function ownerStatus(): string|array|false
     {
         return $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::USER] ?? false;
     }
@@ -232,6 +236,51 @@ final class PageClaimOwnerMembershipTest extends TestCase
             ['[bcc-trust] page owner membership not written - owner check failed'],
             array_column($GLOBALS['__bcc_drain']['errors'] ?? [], 'message'),
             'refused by the owner-check guard itself, not by a later error'
+        );
+    }
+
+    // ── F-360: several rows for one pair (no unique (page, user) key) ───
+    //
+    // PeepSo's model reads ONE arbitrary row of the pair, and member_modify()
+    // rewrites EVERY row of it. Deciding on the model's flags promoted
+    // [member, banned], and rewriting the banned row lifted the ban.
+
+    public function testABanBehindAnOlderMemberRowIsNeverLifted(): void
+    {
+        $GLOBALS['__bcc_drain']['post_author'][self::PAGE]                = self::USER;
+        $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::USER] = ['member', 'banned'];
+
+        $this->integration()->onClaimFollowersDrain(self::USER, self::PAGE);
+
+        self::assertSame(['member', 'banned'], $this->ownerStatus(), 'the banned row is never rewritten');
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_writes'], 'no join, no promote');
+        self::assertSame('skip_banned', $GLOBALS['__bcc_drain']['audits'][0]['meta']['reason'] ?? null, 'flagged for manual review');
+    }
+
+    public function testABanAheadOfAMemberRowIsNeverLifted(): void
+    {
+        $GLOBALS['__bcc_drain']['post_author'][self::PAGE]                = self::USER;
+        $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::USER] = ['banned', 'member'];
+
+        $this->integration()->onClaimFollowersDrain(self::USER, self::PAGE);
+
+        self::assertSame(['banned', 'member'], $this->ownerStatus());
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_writes']);
+        self::assertSame('skip_banned', $GLOBALS['__bcc_drain']['audits'][0]['meta']['reason'] ?? null);
+    }
+
+    public function testAnUnreadableClaimerStatusWritesNothing(): void
+    {
+        $GLOBALS['__bcc_drain']['post_author'][self::PAGE] = self::USER;
+        $GLOBALS['__bcc_drain']['status_read_fails']       = true;
+
+        $this->integration()->onClaimFollowersDrain(self::USER, self::PAGE);
+
+        self::assertFalse($this->ownerStatus());
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_writes']);
+        self::assertSame(
+            ['[bcc-trust] page owner membership not written - claimer status read failed'],
+            array_column($GLOBALS['__bcc_drain']['errors'], 'message')
         );
     }
 

@@ -36,9 +36,12 @@ namespace {
         public static array $errors = [];
         /** @var array<string, true> step => throw */
         public static array $fail = [];
+        /** @var list<array{int, int}> F-334: [pageId, userId] per releaseClaimedPage() */
+        public static array $released = [];
 
         public static function reset(): void
         {
+            self::$released = [];
             self::$result = null;
             self::$throw = null;
             self::$revokeCalls = [];
@@ -139,6 +142,31 @@ namespace BCC\Core\Log {
             public static function warning(string $m, array $c = []): void {}
             /** @param array<string, mixed> $c */
             public static function info(string $m, array $c = []): void {}
+        }
+    }
+}
+
+// F-334: the page-release step reaches PeepSoIntegration through the Plugin.
+namespace BCC\Trust\Core {
+    if (!class_exists(__NAMESPACE__ . '\\Plugin', false)) {
+        final class Plugin
+        {
+            public static function instance(): self
+            {
+                return new self();
+            }
+
+            public function peepSoIntegration(): object
+            {
+                return new class {
+                    public function releaseClaimedPage(int $pageId, int $userId): bool
+                    {
+                        \ClaimRevokeWorld::maybeFail('page_release');
+                        \ClaimRevokeWorld::$released[] = [$pageId, $userId];
+                        return true;
+                    }
+                };
+            }
         }
     }
 }
