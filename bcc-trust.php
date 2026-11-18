@@ -1239,7 +1239,7 @@ add_action(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK, functio
         $stats = \BCC\Trust\Onchain\OnchainPlugin::instance()
             ->nftGroupRevokeService()
             ->sweep();
-        if ($stats['revoked'] > 0 || $stats['skipped_unknown'] > 0) {
+        if ($stats['revoked'] > 0 || $stats['skipped_unknown'] > 0 || $stats['awaiting_second_zero'] > 0) {
             \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group revoke sweep', $stats);
         }
     } catch (\Throwable $e) {
