@@ -201,6 +201,10 @@ final class FeedRankingService
             return $cached;
         }
 
+        // ⚠ F-275: the build THROWS on a feed read that did not run, so it
+        // never reaches this write. Keep the write after the build: caching
+        // a failed build would serve an empty hot feed to every reader for
+        // HOT_CACHE_TTL after the database recovered.
         $payload = $this->buildHotFeed(null, $limit);
         wp_cache_set($key, $payload, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
 
@@ -212,6 +216,10 @@ final class FeedRankingService
      * payload and stores it UNCONDITIONALLY (refresh-on-hit), so the
      * request path above stays a pure cache read between cron ticks.
      * Owned by CronService::warmHotFeed() on `bcc_trust_feed_hot_warm`.
+     *
+     * ⚠ F-275: a feed read that did not run throws out of the build, BEFORE
+     * the write, so a failed tick leaves the last good page in place rather
+     * than overwriting it with an empty one. CronService catches and logs.
      */
     public function warmHotFeed(int $limit = self::HOT_WARM_LIMIT): void
     {
