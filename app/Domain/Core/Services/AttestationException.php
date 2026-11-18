@@ -42,6 +42,7 @@ final class AttestationException extends RuntimeException
     public const CODE_FORBIDDEN             = 'bcc_forbidden';
     public const CODE_REVOKED               = 'bcc_attestation_revoked';
     public const CODE_INTERNAL              = 'bcc_internal_error';
+    public const CODE_UNAVAILABLE           = 'bcc_unavailable';
 
     /** @param array<string, mixed> $data */
     public function __construct(
