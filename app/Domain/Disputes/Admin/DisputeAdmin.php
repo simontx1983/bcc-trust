@@ -386,6 +386,21 @@ class DisputeAdmin
             );
         }
 
+        // F-312 (M2): the handlers have always redirected with `error`, and
+        // nothing rendered it — a refused action looked like nothing happened.
+        $errors = [
+            'already_resolved' => __('That report was already resolved, so nothing changed. Another moderator may have acted on it.', 'bcc-disputes'),
+            'invalid_penalty'  => __('The penalty must be between 1 and 20 points. Nothing changed.', 'bcc-disputes'),
+            'penalty_failed'   => __('The penalty could not be applied, so the report was left open and the score is unchanged. The details are in the bcc-trust log.', 'bcc-disputes'),
+        ];
+        $error = isset($_GET['error']) ? sanitize_key((string) $_GET['error']) : '';
+        if (isset($errors[$error])) {
+            printf(
+                '<div class="notice notice-error is-dismissible"><p>%s</p></div>',
+                esc_html($errors[$error])
+            );
+        }
+
         $table->views();
         echo '<form method="get">';
         echo '<input type="hidden" name="page" value="bcc-reports" />';
@@ -442,18 +457,32 @@ class DisputeAdmin
         $update_ok = UserReportRepository::updateReportStatus($report_id, $action);
 
         if (!$update_ok) {
-            wp_safe_redirect(add_query_arg(
-                ['page' => 'bcc-reports', 'error' => 'already_resolved'],
-                admin_url('admin.php')
-            ));
+            wp_safe_redirect(self::reportsReturnUrl(['error' => 'already_resolved']));
             exit;
         }
 
-        wp_safe_redirect(add_query_arg(
-            ['page' => 'bcc-reports', 'report_updated' => $action],
-            admin_url('admin.php')
-        ));
+        wp_safe_redirect(self::reportsReturnUrl(['report_updated' => $action]));
         exit;
+    }
+
+    /**
+     * F-312 (M2): back to the User Reports list the admin acted from — same
+     * status filter, same page — plus the outcome arg the page renders.
+     *
+     * @param array<string, string> $extra
+     */
+    private static function reportsReturnUrl(array $extra): string
+    {
+        $args   = ['page' => 'bcc-reports'];
+        $status = isset($_POST['report_status']) ? sanitize_key((string) $_POST['report_status']) : '';
+        if ($status !== '') {
+            $args['report_status'] = $status;
+        }
+        $paged = isset($_POST['paged']) ? absint($_POST['paged']) : 0;
+        if ($paged > 1) {
+            $args['paged'] = (string) $paged;
+        }
+        return add_query_arg(array_merge($args, $extra), admin_url('admin.php'));
     }
 
     private static function handle_report_penalize(): void
@@ -466,30 +495,54 @@ class DisputeAdmin
         $penalty_points = absint($_POST['penalty_points'] ?? 0);
         $penalty_reason = sanitize_textarea_field($_POST['penalty_reason'] ?? '');
 
-        if (!$report_id || $penalty_points < 1 || $penalty_points > 20) {
-            wp_die(__('Invalid penalty amount. Must be between 1 and 20.', 'bcc-disputes'));
+        if (!$report_id) {
+            return;
         }
 
         check_admin_referer('bcc_report_penalize_' . $report_id);
+
+        // F-312 (M2): a notice on the list, not a bare wp_die screen.
+        if ($penalty_points < 1 || $penalty_points > 20) {
+            wp_safe_redirect(self::reportsReturnUrl(['error' => 'invalid_penalty']));
+            exit;
+        }
 
         // Claim the report atomically FIRST — prevents double-penalize race.
         // updateReportStatus uses WHERE status = 'open', so only one request wins.
         $update_ok = UserReportRepository::updateReportStatus($report_id, 'penalized');
 
         if (!$update_ok) {
-            wp_die(__('Report not found or already resolved.', 'bcc-disputes'));
+            wp_safe_redirect(self::reportsReturnUrl(['error' => 'already_resolved']));
+            exit;
         }
 
         // Status claimed — now safe to apply penalty (only runs once).
         $report = UserReportRepository::getReportById($report_id);
         if (!$report) {
-            wp_die(__('Report data could not be loaded.', 'bcc-disputes'));
+            // F-310 (M1): give the claim back rather than leave a report
+            // marked penalized with no penalty behind it.
+            UserReportRepository::reopenReport($report_id, 'penalized');
+            wp_safe_redirect(self::reportsReturnUrl(['error' => 'penalty_failed']));
+            exit;
         }
         $reported_user_id = (int) $report->reported_id;
 
-        // Fire a hook so the trust-engine can apply the penalty through its
-        // own service layer, rather than reaching into its internal repository.
-        do_action('bcc.trust.admin_report_penalty', $reported_user_id, abs($penalty_points), $penalty_reason);
+        // The trust engine applies the penalty through its own service
+        // layer and ANSWERS whether it landed (F-310 M1: this was an action
+        // whose listener swallowed every failure, so the panel reported
+        // success on an unchanged score). No answer = not applied.
+        $applied = (bool) apply_filters(
+            'bcc.trust.admin_report_penalty_applied',
+            false,
+            $reported_user_id,
+            abs($penalty_points),
+            $penalty_reason
+        );
+        if (!$applied) {
+            UserReportRepository::reopenReport($report_id, 'penalized');
+            wp_safe_redirect(self::reportsReturnUrl(['error' => 'penalty_failed']));
+            exit;
+        }
 
         \BCC\Core\Log\Logger::audit('[Disputes] admin_report_penalty', [
             'report_id'  => $report_id,
@@ -499,10 +552,7 @@ class DisputeAdmin
             'admin_id'   => get_current_user_id(),
         ]);
 
-        wp_safe_redirect(add_query_arg(
-            ['page' => 'bcc-reports', 'report_updated' => 'penalized'],
-            admin_url('admin.php')
-        ));
+        wp_safe_redirect(self::reportsReturnUrl(['report_updated' => 'penalized']));
         exit;
     }
 }

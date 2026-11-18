@@ -121,6 +121,21 @@ final class WebhooksPage
             . self::formatLastDelivery($lastDeliveryTs)
             . '</td></tr>';
 
+        // F-314: where the subscription itself is checked and fixed. A stored
+        // id only — no Helius call on every view of this page; the Settings
+        // panel does the remote check and offers Re-register.
+        $webhookId = (string) get_option(\BCC\Trust\Onchain\Services\HeliusSubscriptionManager::OPTION_WEBHOOK_ID, '');
+        $settings  = add_query_arg(
+            ['page' => \BCC\Trust\Onchain\Admin\SettingsPage::PAGE_SLUG, 'tab' => 'nft'],
+            admin_url('admin.php')
+        );
+        echo '<tr><th>Subscription</th><td>'
+            . ($webhookId !== ''
+                ? 'Webhook <code>' . esc_html($webhookId) . '</code>'
+                : AdminUi::badge('not provisioned', AdminUi::WARN))
+            . ' · <a href="' . esc_url($settings) . '">Check status, resync or re-register in Settings ▸ NFT Indexer</a>'
+            . '</td></tr>';
+
         echo '</tbody></table>';
     }
 

@@ -194,7 +194,7 @@ final class GroupsService
         // initials cover used on /communities.
         $imageUrl        = null;
         $collectionStats = null;
-        $isNftHolder     = false;
+        $isNftHolder     = null; // F-359: unknown unless a surface really checks
         if ($ctx->type === GroupType::Nft) {
             [$imageUrl, $collectionStats, $isNftHolder] =
                 $this->resolveNftEnrichment($ctx, $viewerId, $isMember);
@@ -243,7 +243,7 @@ final class GroupsService
         $permissions['can_request_join'] = $this->resolveCanRequestJoin($ctx, $viewerId, $isMember, $rawStatus, $groupId);
 
         $feedVisible    = $permissions['can_read_feed']['allowed'];
-        $membersVisible = $this->resolveMembersVisible($ctx, $isMember);
+        $membersVisible = self::resolveMembersVisible($ctx, $isMember);
 
         // Owners/managers see how many requests wait on them; everyone
         // else gets null (no disclosure of the queue size).
@@ -671,13 +671,14 @@ final class GroupsService
      * — frontend can keep one renderer for `collection_stats` across
      * both surfaces.
      *
-     * `$isNftHolder` is computed only when the viewer is authed AND
-     * not yet a member (a member doesn't need a re-check; their
-     * permissions block already says they can_leave). For anon viewers
-     * the holder check is impossible — we leave it false and the
-     * permissions block surfaces "Sign in" upstream of the unlock hint.
+     * `is_nft_holder` is NULL — "not checked on this render" — so the
+     * page answers `verify_on_join` like every list surface (F-359): the
+     * holder join door (/me/holder-groups) does the live wallet check. It
+     * is FALSE only when the group has no gate config, i.e. nothing a
+     * holder could satisfy. Anonymous viewers and members are answered
+     * upstream of it (auth_required / already_member).
      *
-     * @return array{0: string|null, 1: array<string, mixed>|null, 2: bool}
+     * @return array{0: string|null, 1: array<string, mixed>|null, 2: bool|null}
      *         [image_url, collection_stats, is_nft_holder]
      */
     private function resolveNftEnrichment(GroupContext $ctx, int $viewerId, bool $isMember): array
@@ -739,15 +740,13 @@ final class GroupsService
             ),
         ];
 
-        // Holder-eligibility check is currently a one-call probe that
-        // the permissions builder can synthesize without re-querying;
-        // we keep this slot for V2 phase 2 when a fast holder cache lands.
-        // For V1 detail-page semantics the FE's join button does the
-        // canonical eligibility round-trip via /me/holder-groups, so
-        // false-here just means "show the unlock_hint." Members get
-        // can_leave=true from the membership state; eligibility never
-        // fires for them.
-        $isNftHolder = false;
+        // Holder eligibility is NOT checked on this render (no fast holder
+        // cache yet); the join door (/me/holder-groups) does the canonical
+        // wallet round-trip. So the answer is "unknown" (null) and the page
+        // offers Join with `verify_on_join`, the same verdict as the lists
+        // (F-359). It used to be `false`, which told every eligible holder
+        // they were not eligible. Members never reach eligibility.
+        $isNftHolder = null;
         unset($viewerId, $isMember);
 
         return [$imageUrl, $stats, $isNftHolder];
@@ -795,7 +794,7 @@ final class GroupsService
         GroupContext $ctx,
         int $viewerId,
         bool $isMember,
-        bool $isNftHolder,
+        ?bool $isNftHolder,
         bool $isOwner = false,
         int $trustGateMin = 0,
         ?string $validatorMinStakeDisplay = null,
@@ -879,16 +878,18 @@ final class GroupsService
         // Delegator communities are stored `closed`, so without this
         // branch they'd surface the "request to join" copy — wrong: there
         // is no approval queue, the gate is on-chain delegation. Live
-        // eligibility is not computed here (an LCD call per detail render);
-        // the FE's join button does the canonical round-trip via
-        // /me/validator-groups, mirroring the holder-group posture above.
+        // delegation is not computed here (an LCD call per render), so —
+        // exactly like a holder group — Join is offered and the join door
+        // (/me/validator-groups) verifies it (F-359). It used to answer
+        // `not_eligible` to everyone, delegators included. The hint still
+        // states the requirement the join will check.
         if ($ctx->type === GroupType::Validator) {
             return [
-                'allowed'     => false,
+                'allowed'     => true,
                 'unlock_hint' => $validatorMinStakeDisplay !== null
                     ? sprintf('Delegate at least %s to this validator to join its community.', $validatorMinStakeDisplay)
                     : 'Delegate to this validator to join its community.',
-                'reason_code' => 'not_eligible',
+                'reason_code' => 'verify_on_join',
             ];
         }
 
@@ -954,7 +955,9 @@ final class GroupsService
      * FALSE = the batched read failed). A failed read answers `unavailable`
      * rather than guessing a Join. Holder groups are not wallet-checked
      * here unless the caller already knows ($nftHolder; null →
-     * `verify_on_join`); the page and the join door always are.
+     * `verify_on_join`), and delegator groups are always `verify_on_join`;
+     * the group page answers the same, and only the join door does the
+     * live check (F-359).
      *
      * @return array{
      *   can_join: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},
@@ -1124,7 +1127,12 @@ final class GroupsService
         ];
     }
 
-    private function resolveMembersVisible(GroupContext $ctx, bool $isMember): bool
+    /**
+     * May a viewer see this group's member roster? THE rule — the group
+     * page's `members_visible` and the profile's role disclosure
+     * (UserViewService) both call it, so the two cannot drift.
+     */
+    public static function resolveMembersVisible(GroupContext $ctx, bool $isMember): bool
     {
         if ($ctx->privacy === PeepSoPrivacy::Open) {
             return true;

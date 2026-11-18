@@ -1,0 +1,479 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BCC\Trust\Tests\Integration;
+
+use BCC\Trust\Core\Repositories\PostReachRepository;
+use BCC\Trust\Core\Services\UserLifecycleService;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\Group;
+use PHPUnit\Framework\TestCase;
+
+/**
+ * F-324 — the reach cascade, and the id discipline around it.
+ *
+ * The decision under test: analytics are purged on PERMANENT deletion only.
+ * `PostsService::deletePost()` calls `wp_trash_post()`, which is
+ * recoverable, so trashing a post must KEEP its counters and restoring it
+ * must bring them back — cascading on trash would make a reversible action
+ * irreversibly destroy the numbers.
+ *
+ * ⚠ The sharpest case here is `testAWpPostIdPassedAsAnActIdDeletesNothing`.
+ * Four of this feature's five reads key on `act_id`; the cascade's only
+ * input is a `wp_posts.ID`. A mix-up does not error — it silently matches
+ * no rows — so it is pinned by a test rather than trusted to review.
+ */
+#[Group('integration')]
+#[CoversClass(PostReachRepository::class)]
+final class PostReachCascadeIntegrationTest extends TestCase
+{
+    use FeedActivityFixture;
+
+    private const ACT_ID   = 970101;
+    private const WP_POST  = 970900;
+    private const AUTHOR   = 970500;
+    private const DAY      = '2026-11-12';
+
+    public static function setUpBeforeClass(): void
+    {
+        // The integration harness does NOT define BCC_ENCRYPTION_KEY, and
+        // without it ViewerFingerprint fails closed (returns null) — which
+        // silently disables the whole dedupe layer: no window claim, no
+        // unique claim, every view counted. That is correct production
+        // behaviour for a keyless install (activation is gated on the key),
+        // but it means a test without the key exercises only the degraded
+        // path. Defined here rather than at file level so it cannot leak
+        // into suites that never run this class.
+        if (!defined('BCC_ENCRYPTION_KEY')) {
+            define('BCC_ENCRYPTION_KEY', 'integration-key-for-post-reach-tests');
+        }
+
+        $base = dirname(__DIR__, 2) . '/includes/database/';
+        require_once $base . 'schema-post-reach-daily.php';
+        require_once $base . 'schema-post-view-dedupe.php';
+        bcc_trust_create_post_reach_daily_table();
+        bcc_trust_create_post_view_dedupe_table();
+    }
+
+    protected function setUp(): void
+    {
+        global $wpdb;
+        $wpdb->query('TRUNCATE TABLE `' . $wpdb->prefix . 'bcc_trust_post_reach_daily`');
+        \BCC\Trust\Core\Database\TableRegistry::flushExistenceCache();
+
+        $this->seedFeedActivity(self::ACT_ID, self::WP_POST, '1', self::AUTHOR);
+
+        // ⚠ The harness reports NO persistent object cache by default, and
+        // the 30-minute view window is skipped without one (deliberately —
+        // wp_cache_* would be a per-request array, so it could never dedupe
+        // across requests, and a wp_options fallback is the write
+        // amplification bcc-core removed). So the window tests must declare
+        // one, or they would pass vacuously against a disabled window.
+        $GLOBALS['__bcc_test_ext_object_cache'] = true;
+    }
+
+    protected function tearDown(): void
+    {
+        unset(
+            $GLOBALS['__bcc_test_ext_object_cache'],
+            $GLOBALS['__bcc_test_object_cache_write_fails']
+        );
+        $this->removeFeedActivities();
+    }
+
+    private function rowCount(int $actId): int
+    {
+        global $wpdb;
+        $table = $wpdb->prefix . 'bcc_trust_post_reach_daily';
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table} WHERE post_id = %d",
+            $actId
+        ));
+    }
+
+    private function seedReach(int $actId): void
+    {
+        PostReachRepository::incrementView($actId, self::DAY, 'feed', true);
+        PostReachRepository::incrementView($actId, self::DAY, 'tag', false);
+    }
+
+    /**
+     * The real service, with its two constructor dependencies.
+     *
+     * ⚠ Neither dependency is used by `onActivityPostDelete()` — it only
+     * calls a static repository method — but the handler is deliberately
+     * exercised through the real object rather than bypassed, because what
+     * this test is for is that the HOOK's entry point passes the wp_post id
+     * through correctly. Both are cheap: ScoreRepository takes no arguments,
+     * and UserSyncService needs only a UserInfoRepository.
+     */
+    private function lifecycleService(): UserLifecycleService
+    {
+        return new UserLifecycleService(
+            new \BCC\Trust\Core\Services\UserSyncService(
+                new \BCC\Trust\Core\Repositories\UserInfoRepository()
+            ),
+            new \BCC\Trust\Core\Repositories\ScoreRepository()
+        );
+    }
+
+    public function testPermanentDeletionRemovesTheReachRows(): void
+    {
+        $this->seedReach(self::ACT_ID);
+        self::assertSame(2, $this->rowCount(self::ACT_ID), 'fixture seeded');
+
+        // What before_delete_post hands the handler is the wp_post id.
+        $this->lifecycleService()->onActivityPostDelete(self::WP_POST);
+
+        self::assertSame(0, $this->rowCount(self::ACT_ID), 'permanent deletion purges');
+    }
+
+    /**
+     * ⭐ The id-mix-up guard. `deleteForPost()` takes an act_id; handing it a
+     * wp_post id matches nothing and reports success, which is why the
+     * cascade calls `deleteForWpPost()` instead.
+     */
+    public function testAWpPostIdPassedAsAnActIdDeletesNothing(): void
+    {
+        $this->seedReach(self::ACT_ID);
+
+        $wrong = PostReachRepository::deleteForPost(self::WP_POST);
+
+        self::assertSame(0, $wrong, 'a wp_post id matches no reach row — no error, just nothing');
+        self::assertSame(
+            2,
+            $this->rowCount(self::ACT_ID),
+            'and the real rows survive, which is exactly how this bug would hide'
+        );
+
+        // The correctly-named entry point does the translation and works.
+        self::assertSame(2, PostReachRepository::deleteForWpPost(self::WP_POST));
+        self::assertSame(0, $this->rowCount(self::ACT_ID));
+    }
+
+    public function testTrashingAPostKeepsItsCountsAndRestoringLeavesThemIntact(): void
+    {
+        global $wpdb;
+        $this->seedReach(self::ACT_ID);
+
+        // Trash is a post_status change. Nothing in this feature watches
+        // status, which is the point: the counters must survive it.
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$wpdb->posts} SET post_status = 'trash' WHERE ID = %d",
+            self::WP_POST
+        ));
+        self::assertSame(2, $this->rowCount(self::ACT_ID), 'trash keeps the counts');
+
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$wpdb->posts} SET post_status = 'publish' WHERE ID = %d",
+            self::WP_POST
+        ));
+        self::assertSame(2, $this->rowCount(self::ACT_ID), 'restore leaves them intact');
+    }
+
+    public function testDeletingAnUnrelatedPostLeavesTheseRowsAlone(): void
+    {
+        $this->seedReach(self::ACT_ID);
+
+        // A wp_post id with no activity behind it: a real zero, not a failure.
+        self::assertSame(0, PostReachRepository::deleteForWpPost(self::WP_POST + 12345));
+        self::assertSame(2, $this->rowCount(self::ACT_ID));
+    }
+
+    public function testTheAuthorPurgeRemovesOnlyThatAuthorsRows(): void
+    {
+        $otherAct  = self::ACT_ID + 1;
+        $otherPost = self::WP_POST + 1;
+        $this->seedFeedActivity($otherAct, $otherPost, '1', self::AUTHOR + 7);
+
+        $this->seedReach(self::ACT_ID);
+        $this->seedReach($otherAct);
+
+        $purged = PostReachRepository::deleteForAuthor(self::AUTHOR);
+
+        self::assertSame(2, $purged, 'only the target author\'s rows');
+        self::assertSame(0, $this->rowCount(self::ACT_ID));
+        self::assertSame(2, $this->rowCount($otherAct), 'the other author is untouched');
+    }
+
+    public function testTheAuthorPurgeReportsZeroWhenThereIsNothingLeft(): void
+    {
+        self::assertSame(
+            0,
+            PostReachRepository::deleteForAuthor(self::AUTHOR),
+            'zero means done — the caller loops until it sees this'
+        );
+    }
+
+    public function testReachForPostTotalsAcrossSourcesAndKeepsTheBreakdown(): void
+    {
+        PostReachRepository::incrementView(self::ACT_ID, self::DAY, 'feed', true);
+        PostReachRepository::incrementView(self::ACT_ID, self::DAY, 'feed', false);
+        PostReachRepository::incrementView(self::ACT_ID, self::DAY, 'tag', true);
+        PostReachRepository::incrementProfileVisit(self::ACT_ID, self::DAY, 'feed');
+
+        $reach = PostReachRepository::reachForPost(self::ACT_ID);
+
+        self::assertNotNull($reach);
+        self::assertSame(3, $reach['views']);
+        self::assertSame(2, $reach['daily_unique_viewers'], 'summing across sources does not double-count');
+        self::assertSame(1, $reach['profile_visits']);
+        self::assertSame(['feed', 'tag'], array_keys($reach['by_source']));
+        self::assertSame(2, $reach['by_source']['feed']['views']);
+    }
+
+    /**
+     * ⭐ The 30-minute view window. A refresh must not make a second view.
+     *
+     * This is the gap the review caught: the design specified a window and
+     * the first implementation counted every beacon, so views were
+     * inflatable by re-firing it.
+     */
+    public function testASecondViewInsideTheWindowIsNotCounted(): void
+    {
+        $reader = self::AUTHOR + 31;
+
+        self::assertSame(
+            'counted_unique',
+            \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader),
+            'first view counts'
+        );
+        self::assertSame(
+            'ignored_repeat_window',
+            \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader),
+            'a refresh inside the window is not a second view'
+        );
+
+        $reach = PostReachRepository::reachForPost(self::ACT_ID);
+        self::assertNotNull($reach);
+        self::assertSame(1, $reach['views'], 'views must not be inflatable by re-firing the beacon');
+        self::assertSame(1, $reach['daily_unique_viewers']);
+    }
+
+    /**
+     * ⚠ Without a persistent object cache the window is SKIPPED, so every
+     * view counts. Asserted rather than left implicit, because it is the
+     * documented degradation (§4 states the requirement) and because the
+     * alternative — a wp_options fallback — is precisely what bcc-core's
+     * Throttle removed for write amplification.
+     *
+     * Note the beacon itself still works in this configuration:
+     * `Throttle::isReady()` is satisfied by bcc-trust's RateLimiter
+     * existing, not by the object cache. So views are recorded, just not
+     * de-duplicated.
+     */
+    public function testWithoutAPersistentObjectCacheEveryViewCounts(): void
+    {
+        unset($GLOBALS['__bcc_test_ext_object_cache']);
+        $reader = self::AUTHOR + 37;
+
+        self::assertSame(
+            'counted_unique',
+            \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader)
+        );
+        self::assertSame(
+            'counted_repeat',
+            \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader),
+            'no cache => no window => the second view is still counted'
+        );
+
+        $reach = PostReachRepository::reachForPost(self::ACT_ID);
+        self::assertNotNull($reach);
+        self::assertSame(2, $reach['views'], 'both counted — the documented degradation');
+        self::assertSame(
+            1,
+            $reach['daily_unique_viewers'],
+            'uniqueness is DB-backed, so it still holds without a cache'
+        );
+    }
+
+    /** The window is per post: another post in the same window still counts. */
+    public function testTheWindowIsPerPostNotPerReader(): void
+    {
+        $other  = self::ACT_ID + 1;
+        $reader = self::AUTHOR + 32;
+        $this->seedFeedActivity($other, self::WP_POST + 1, '1', self::AUTHOR + 8);
+
+        \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader);
+        self::assertSame(
+            'counted_unique',
+            \BCC\Trust\Core\Services\PostViewRecorder::record($other, 'feed', $reader),
+            'a different post is a different window key'
+        );
+    }
+
+    /** A different reader in the same window counts — the code is per reader. */
+    public function testADifferentReaderInTheSameWindowCounts(): void
+    {
+        \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', self::AUTHOR + 33);
+        \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', self::AUTHOR + 34);
+
+        $reach = PostReachRepository::reachForPost(self::ACT_ID);
+        self::assertNotNull($reach);
+        self::assertSame(2, $reach['views']);
+        self::assertSame(2, $reach['daily_unique_viewers']);
+    }
+
+    /**
+     * ⚠⚠ FAIL OPEN on a refused cache write.
+     *
+     * `wp_cache_add()` returns false both for "already claimed" and for "the
+     * store refused the write". My first implementation treated every false
+     * as a duplicate, which would DROP views whenever the cache refuses —
+     * fail-closed, the opposite of what this metric wants. The read-back
+     * distinguishes them, and this test is what pins it: with writes
+     * refused, every view must still be counted.
+     */
+    public function testARefusedCacheWriteStillCountsTheView(): void
+    {
+        $reader = self::AUTHOR + 35;
+        $GLOBALS['__bcc_test_object_cache_write_fails'] = true;
+
+        try {
+            self::assertSame(
+                'counted_unique',
+                \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader),
+                'a refused cache write must not be read as "already claimed"'
+            );
+            self::assertSame(
+                'counted_repeat',
+                \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader),
+                'and the next one still counts — over-counting beats losing views'
+            );
+
+            $reach = PostReachRepository::reachForPost(self::ACT_ID);
+            self::assertNotNull($reach);
+            self::assertSame(2, $reach['views'], 'both views landed');
+        } finally {
+            unset($GLOBALS['__bcc_test_object_cache_write_fails']);
+        }
+    }
+
+    /** The author's own view is never reach, window or no window. */
+    public function testTheAuthorsOwnViewIsNotCounted(): void
+    {
+        self::assertSame(
+            'ignored_author',
+            \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', self::AUTHOR),
+            'reading your own post is not reach'
+        );
+
+        $reach = PostReachRepository::reachForPost(self::ACT_ID);
+        self::assertNotNull($reach);
+        self::assertSame(0, $reach['views']);
+    }
+
+    /** ⛔ The source whitelist, through the recorder rather than the repository. */
+    public function testTheRecorderRejectsAColdStartSource(): void
+    {
+        self::assertSame(
+            'ignored_bad_source',
+            \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'cold-start', self::AUTHOR + 36)
+        );
+
+        $reach = PostReachRepository::reachForPost(self::ACT_ID);
+        self::assertNotNull($reach);
+        self::assertSame(0, $reach['views']);
+    }
+
+    /**
+     * ⭐ THE EXISTENCE-ORACLE PROPERTY.
+     *
+     * A non-owner must get an answer BYTE-IDENTICAL to a missing post. This
+     * asserts indistinguishability, not merely that each is a 404 — two
+     * different 404 bodies would still leak which case occurred.
+     *
+     * Why it matters: an earlier revision returned 403 for a foreign post,
+     * reasoning that post existence is public. It is not — secret-group,
+     * §F-02-private and moderation-hidden posts are exactly the cases where
+     * it is private, so the split would have told a viewer that a post they
+     * cannot see exists.
+     */
+    public function testANonOwnerGetsAnAnswerIdenticalToAMissingPost(): void
+    {
+        $service  = new \BCC\Trust\Core\Services\PostAnalyticsService();
+        $stranger = self::AUTHOR + 999;
+
+        $foreign = $service->forOwner(self::ACT_ID, $stranger);
+        $missing = $service->forOwner(self::ACT_ID + 424242, $stranger);
+        $badId   = $service->forOwner(0, $stranger);
+
+        self::assertSame(
+            $missing,
+            $foreign,
+            'someone else\'s post must be indistinguishable from a post that does not exist'
+        );
+        self::assertSame($missing, $badId, 'and so must a malformed id');
+        self::assertSame('bcc_not_found', $foreign['error'] ?? null);
+    }
+
+    /**
+     * Anti-vacuity for the case above: the owner really does get a payload,
+     * so the uniform 404 is not simply "refuse everyone".
+     */
+    public function testTheOwnerStillGetsTheThreeSections(): void
+    {
+        $this->seedReach(self::ACT_ID);
+
+        $result = (new \BCC\Trust\Core\Services\PostAnalyticsService())
+            ->forOwner(self::ACT_ID, self::AUTHOR);
+
+        self::assertArrayNotHasKey('error', $result, 'the author is allowed');
+        self::assertSame(['act_id', 'reach', 'engagement', 'trust'], array_keys($result));
+        self::assertTrue($result['reach']['available']);
+        self::assertSame(2, $result['reach']['views'], 'seedReach writes one feed + one tag view');
+
+        // Trust is permanently unavailable per post — a decision, not a gap.
+        self::assertFalse($result['trust']['available']);
+        self::assertSame('trust_is_profile_scoped', $result['trust']['reason']);
+    }
+
+    /**
+     * `engagement_rate` is null, never 0, when there are no measured
+     * viewers. Rendering 0% would read as "nobody engaged" when the truth is
+     * "nothing to divide by".
+     */
+    public function testEngagementRateIsNullWithNoMeasuredViewers(): void
+    {
+        $result = (new \BCC\Trust\Core\Services\PostAnalyticsService())
+            ->forOwner(self::ACT_ID, self::AUTHOR);
+
+        self::assertSame(0, $result['reach']['daily_unique_viewers']);
+        self::assertNull(
+            $result['engagement']['engagement_rate'],
+            'an undefined rate must be null, not 0'
+        );
+    }
+
+    /** A post with no rows is a real zero, distinguishable from a failure. */
+    public function testAPostWithNoReachReadsAsZeroNotNull(): void
+    {
+        $reach = PostReachRepository::reachForPost(self::ACT_ID);
+
+        self::assertNotNull($reach, 'no rows is not a failure');
+        self::assertSame(0, $reach['views']);
+        self::assertSame([], $reach['by_source']);
+    }
+
+    /** ⚠ A failed read must be null — never a zero-filled array. */
+    public function testAFailedReachReadIsNullNotZeros(): void
+    {
+        global $wpdb;
+        $table = $wpdb->prefix . 'bcc_trust_post_reach_daily';
+
+        $wpdb->query("DROP TABLE `{$table}`");
+        \BCC\Trust\Core\Database\TableRegistry::flushExistenceCache();
+
+        try {
+            self::assertNull(
+                PostReachRepository::reachForPost(self::ACT_ID),
+                'an unreadable table must not read as "no views"'
+            );
+        } finally {
+            bcc_trust_create_post_reach_daily_table();
+            \BCC\Trust\Core\Database\TableRegistry::flushExistenceCache();
+        }
+    }
+}

@@ -190,6 +190,10 @@ class PeepSoIntegration
                         'note'           => 'no automatic transfer by design; needs an explicit reassignment decision',
                     ]
                 );
+            } else {
+                // F-299: already this user's page — make sure the PeepSo
+                // owner row exists too (idempotent; heals pre-F-299 claims).
+                self::ensurePageOwnerMembership($pageId, $userId);
             }
 
             return;
@@ -210,6 +214,15 @@ class PeepSoIntegration
         }
 
         $this->userInfoRepo->incrementPageCount($userId, $pageId);
+
+        // F-299: record the claimer as the page's PeepSo OWNER too. Every
+        // directory and card owner signal (the /members VALIDATORS filter
+        // and chip counts, owned-page counts on member cards) reads the
+        // `peepso_page_members` `member_owner` row, and moving post_author
+        // alone never wrote one — so a verified operator never appeared as
+        // the owner of the page they had just claimed. Best-effort and
+        // logged: the claim itself is already recorded.
+        self::ensurePageOwnerMembership($pageId, $userId);
 
         // V1.6 follower migration — drain bcc_page_follows for this
         // page into real PeepSo user→user follows on the new operator.
@@ -296,7 +309,107 @@ class PeepSoIntegration
             return;
         }
 
+        // F-299: the resubmitted-claim path for a page this user already
+        // owns. It also heals a missing `member_owner` row — a claim made
+        // before F-299, or one whose owner write failed — idempotently.
+        self::ensurePageOwnerMembership($pageId, $userId);
+
         $this->migratePageFollowersToPeepSo($pageId, $userId);
+    }
+
+    /**
+     * F-299: make $userId the PeepSo `member_owner` of $pageId, through
+     * PeepSo's own model — the same `member_join()` + `member_modify(
+     * 'member_owner')` pair PeepSoPage::create() runs for a page's creator,
+     * which also recounts the page's members.
+     *
+     * Idempotent: an existing owner row is left alone; an existing row of
+     * another status is promoted without a join (a join on an existing row
+     * would rewrite it to plain `member` first). Silent on success; any
+     * failure is logged and answered `false`, never thrown — the claim is
+     * already committed when this runs, and the drain retry heals it.
+     *
+     * Exposed (public static) for the one-off backfill command, which must
+     * write exactly what a claim writes.
+     */
+    public static function ensurePageOwnerMembership(int $pageId, int $userId): bool
+    {
+        if ($pageId <= 0 || $userId <= 0) {
+            return false;
+        }
+
+        if (!class_exists('PeepSoPageUser')) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] page owner membership not written - PeepSo Pages is not loaded', [
+                'page_id' => $pageId,
+                'user_id' => $userId,
+            ]);
+            return false;
+        }
+
+        try {
+            $member = new \PeepSoPageUser($pageId, $userId);
+            if ($member->is_owner === true) {
+                return true;
+            }
+
+            // F-299 live guard — the SAME decision the backfill makes
+            // (PageOwnerDecision): a claim never lifts a ban and never adds
+            // a second owner. Either case is skipped, logged and recorded in
+            // the admin audit log for manual review. An unreadable owner
+            // check writes nothing (never risk a second owner).
+            $otherOwner = \BCC\Trust\Core\Repositories\PeepSoQueryRepository::otherPageOwnerId($pageId, $userId);
+            if ($otherOwner === null) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] page owner membership not written - owner check failed', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                ]);
+                return false;
+            }
+            $decision = \BCC\Trust\Core\Support\PageOwnerDecision::decide(
+                is_string($member->role) ? $member->role : null,
+                $otherOwner
+            );
+            if (\BCC\Trust\Core\Support\PageOwnerDecision::isSkip($decision)) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] page owner membership skipped for manual review', [
+                    'page_id'     => $pageId,
+                    'user_id'     => $userId,
+                    'reason'      => $decision,
+                    'other_owner' => $otherOwner,
+                ]);
+                AuditLogger::log('page_owner_membership_skipped', $pageId, [
+                    'user_id'     => $userId,
+                    'reason'      => $decision,
+                    'other_owner' => $otherOwner,
+                ], 'page', $userId);
+                return false;
+            }
+
+            if ($member->role === false && $member->member_join() !== true) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] page owner membership: member_join failed', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                ]);
+                return false;
+            }
+
+            if ($member->member_modify('member_owner') !== true || $member->is_owner !== true) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] page owner membership: promotion to member_owner failed', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                    'role'    => is_string($member->role) ? $member->role : '',
+                ]);
+                return false;
+            }
+
+            return true;
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] page owner membership: write threw', [
+                'page_id' => $pageId,
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return false;
+        }
     }
 
     /**

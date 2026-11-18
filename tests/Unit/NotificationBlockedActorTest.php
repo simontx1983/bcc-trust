@@ -57,6 +57,8 @@ final class NotificationBlockedActorTest extends TestCase
             /** @var list<array{0: string, 1: list<mixed>}> */
             public array $prepared = [];
             public int $mainRuns = 0;
+            /** @var list<array{0: string, 1: int, 2: int}> core block-reader calls (F-331) */
+            public array $blockCalls = [];
 
             /** @param mixed ...$args */
             public function prepare(string $sql, ...$args): string
@@ -122,11 +124,11 @@ final class NotificationBlockedActorTest extends TestCase
         };
     }
 
-    /** @return array{0: string, 1: list<mixed>} the notification statement (after the two block reads) */
+    /** @return array{0: string, 1: list<mixed>} the notification statement */
     private function mainStatement(): array
     {
-        self::assertCount(3, $this->wpdb->prepared, 'two block reads, then the notification read');
-        return $this->wpdb->prepared[2];
+        self::assertCount(1, $this->wpdb->prepared, 'the block lists come from bcc-core, not raw SQL here (F-331)');
+        return $this->wpdb->prepared[0];
     }
 
     #[DataProvider('reads')]
@@ -147,11 +149,8 @@ final class NotificationBlockedActorTest extends TestCase
         self::assertSame([41, 42, 43], array_slice($args, $offset + $typeCount, 3));
         self::assertSame(substr_count($sql, '%d') + substr_count($sql, '%s'), count($args), 'one argument per placeholder');
 
-        // Both directions are bounded reads.
-        self::assertStringContainsString('WHERE blk_user_id = %d LIMIT %d', $this->wpdb->prepared[0][0]);
-        self::assertStringContainsString('WHERE blk_blocked_id = %d LIMIT %d', $this->wpdb->prepared[1][0]);
-        self::assertSame([7, 500], $this->wpdb->prepared[0][1]);
-        self::assertSame([7, 500], $this->wpdb->prepared[1][1]);
+        // Both directions, through bcc-core's fail-closed readers, bounded.
+        self::assertSame([['blocked', 7, 500], ['blockers', 7, 500]], $this->wpdb->blockCalls);
     }
 
     #[DataProvider('reads')]

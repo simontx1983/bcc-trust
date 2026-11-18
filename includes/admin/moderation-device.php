@@ -47,7 +47,7 @@ function bcc_trust_render_fingerprint_moderation( $fingerprint ) {
             <a href="<?php echo esc_url( admin_url( 'admin.php?page=bcc-trust-moderation' ) ); ?>" class="button">&larr; Back</a>
 
             <?php if ( ! $is_whitelisted ): ?>
-                <form method="post" style="display:inline;" action="<?php echo esc_url( admin_url( 'admin.php?page=bcc-trust-moderation' ) ); ?>">
+                <form method="post" style="display:inline;" action="<?php echo esc_url( add_query_arg( [ 'page' => 'bcc-trust-moderation', 'fingerprint' => rawurlencode( $fingerprint ) ], admin_url( 'admin.php' ) ) ); /* F-312 (M8): stay on this investigation */ ?>">
                     <?php wp_nonce_field( 'bcc_trust_moderation' ); ?>
                     <input type="hidden" name="user_id" value="0">
                     <input type="hidden" name="whitelist_type" value="fingerprint">
@@ -56,7 +56,7 @@ function bcc_trust_render_fingerprint_moderation( $fingerprint ) {
                     <button name="add_whitelist" class="button">Whitelist this Device</button>
                 </form>
             <?php else: ?>
-                <form method="post" style="display:inline;" action="<?php echo esc_url( admin_url( 'admin.php?page=bcc-trust-moderation' ) ); ?>">
+                <form method="post" style="display:inline;" action="<?php echo esc_url( add_query_arg( [ 'page' => 'bcc-trust-moderation', 'fingerprint' => rawurlencode( $fingerprint ) ], admin_url( 'admin.php' ) ) ); /* F-312 (M8): stay on this investigation */ ?>">
                     <?php wp_nonce_field( 'bcc_trust_moderation' ); ?>
                     <input type="hidden" name="user_id" value="0">
                     <input type="hidden" name="whitelist_type" value="fingerprint">

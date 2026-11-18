@@ -502,7 +502,15 @@ final class ModerationQueueService
                 $this->reportRepo->listIdsForTargetByStatus($targetKind, $targetId, self::STATUS_RESOLVED),
                 static fn (int $id): bool => $id !== $reportId
             ));
-            $this->reportRepo->transitionStatus($unupheldIds, self::STATUS_RESOLVED, self::STATUS_DISMISSED, $resolverUserId);
+            // F-336: only what the guarded UPDATE really moved feeds the
+            // credit reversal, the audit row and the undo token (same rule as
+            // the hide, F-306 review).
+            $unupheldIds = $this->actuallyMoved(
+                $unupheldIds,
+                $this->reportRepo->transitionStatus($unupheldIds, self::STATUS_RESOLVED, self::STATUS_DISMISSED, $resolverUserId),
+                self::STATUS_DISMISSED,
+                $resolverUserId
+            );
 
             // F-73 — the verdict covers the whole target, so EVERY pending
             // report on it closes too. Before, only the clicked report
@@ -514,7 +522,12 @@ final class ModerationQueueService
                 $this->reportRepo->listIdsForTargetByStatus($targetKind, $targetId, self::STATUS_PENDING),
                 static fn (int $id): bool => $id !== $reportId
             ));
-            $this->reportRepo->transitionStatus($closedPendingIds, self::STATUS_PENDING, self::STATUS_DISMISSED, $resolverUserId);
+            $closedPendingIds = $this->actuallyMoved(
+                $closedPendingIds,
+                $this->reportRepo->transitionStatus($closedPendingIds, self::STATUS_PENDING, self::STATUS_DISMISSED, $resolverUserId),
+                self::STATUS_DISMISSED,
+                $resolverUserId
+            );
 
             // The cooldown starts BEFORE the hide is removed: a report that
             // lands in between must not find the post visible AND

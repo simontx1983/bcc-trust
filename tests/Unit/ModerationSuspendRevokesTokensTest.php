@@ -38,7 +38,7 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/moderation-suspend-stubs.php';
-        $GLOBALS['__bcc_ms'] = ['tv' => [], 'rows' => [], 'synced' => [], 'suspended' => [], 'audit' => [], 'errors' => [], 'fail_suspend' => false];
+        $GLOBALS['__bcc_ms'] = ['tv' => [], 'rows' => [], 'synced' => [], 'suspended' => [], 'audit' => [], 'errors' => [], 'fail_suspend' => false, 'wp_sessions_destroyed' => []];
     }
 
     private function service(): ModerationService
@@ -104,7 +104,8 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
             }
             public function closeActive(int $userId, int $unsuspendedBy): int
             {
-                return 1;
+                // F-315 (L3): per-user open-row count; 1 unless a test says otherwise.
+                return $GLOBALS['__bcc_ms']['close_returns'][$userId] ?? 1;
             }
         };
 
@@ -200,6 +201,68 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
         foreach ($tokens as $t) {
             self::assertRevoked($t);
         }
+    }
+
+    // ── F-315 (L2, L3) ───────────────────────────────────────────────
+
+    public function testBulkUnsuspendCountsOnlyMembersWhoWereSuspended(): void
+    {
+        $GLOBALS['__bcc_ms']['rows'] += [4401 => true, 4402 => true];
+        $GLOBALS['__bcc_ms']['already'] = [4401];          // flagged suspended
+        $GLOBALS['__bcc_ms']['close_returns'] = [4402 => 0]; // never suspended
+
+        self::runAdminHandler(fn () => $this->service()->handleBulkAction([4401, 4402], 'unsuspend'));
+
+        self::assertSame(1, $GLOBALS['__bcc_ms']['query']['bulk'] ?? null, 'only the member who WAS suspended counts');
+        self::assertSame(1, $GLOBALS['__bcc_ms']['query']['bulk_skipped'] ?? null, 'the other is reported as skipped');
+        self::assertSame(1, count(array_keys($GLOBALS['__bcc_ms']['audit'], 'admin_unsuspend', true)), 'one per-member audit row');
+        // The after-commit refresh still runs for BOTH (#670 review): it is
+        // the repair path for a lost notify, and the count must never gate it.
+        self::assertCount(2, $GLOBALS['__bcc_ms']['notified'] ?? []);
+    }
+
+    /**
+     * #670 review: a single Unsuspend of a member whose cached state already
+     * reads "not suspended" still flushes and fans out — the second-click
+     * repair for a lost after-commit notify.
+     */
+    public function testASingleUnsuspendAlwaysRefreshesEvenWhenNothingWasOpen(): void
+    {
+        $GLOBALS['__bcc_ms']['rows'][4501] = true;
+        $GLOBALS['__bcc_ms']['close_returns'] = [4501 => 0];
+
+        ob_start();
+        $result = $this->service()->unsuspendUser(4501);
+        ob_end_clean();
+
+        self::assertTrue($result['success']);
+        self::assertCount(1, $GLOBALS['__bcc_ms']['notified'] ?? [], 'the refresh is never skipped');
+    }
+
+    public function testBulkSuspendAuditsEachMemberAndPurgesTheMemberCache(): void
+    {
+        self::runAdminHandler(fn () => $this->service()->handleBulkAction([4301, 4302], 'suspend'));
+
+        self::assertSame(2, count(array_keys($GLOBALS['__bcc_ms']['audit'], 'admin_suspend', true)), 'a per-member row, as a single suspend writes');
+        self::assertSame(['members'], $GLOBALS['__bcc_ms']['purged'] ?? [], 'the anon /members cards are refreshed once');
+    }
+
+    public function testRingSuspendAuditsEachMemberAndPurgesTheMemberCache(): void
+    {
+        $GLOBALS['__bcc_ms']['rows'] += [4201 => true, 4202 => true];
+
+        self::runAdminHandler(fn () => $this->service()->handleRingAction([4201, 4202], 'suspend_all', 'ring note'));
+
+        self::assertSame(2, count(array_keys($GLOBALS['__bcc_ms']['audit'], 'admin_suspend', true)));
+        self::assertSame(['members'], $GLOBALS['__bcc_ms']['purged'] ?? []);
+    }
+
+    public function testSuspendNotesAndOverrideReasonsAreUnslashed(): void
+    {
+        $code = \BCC\Trust\Tests\Support\GateOrder::code('includes/admin/moderation.php');
+        self::assertStringContainsString("sanitize_textarea_field( wp_unslash( \$_POST['suspend_notes']", $code);
+        self::assertStringContainsString("sanitize_text_field( wp_unslash( \$_POST['suspend_reason']", $code);
+        self::assertStringContainsString("sanitize_textarea_field( wp_unslash( \$_POST['override_reason']", $code);
     }
 
     public function testAFailedSuspensionRevokesNothing(): void
@@ -340,5 +403,47 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
             'each user\'s fraud fields are written; the failure is skipped'
         );
         self::assertSame(['bulk' => 2, 'bulk_skipped' => 0], $GLOBALS['__bcc_ms']['query'], 'only real successes are counted');
+    }
+    // ── WordPress cookie sessions end too ───────────────────────────────
+
+    public function testASingleSuspendAlsoDestroysTheMembersWordPressSessions(): void
+    {
+        $GLOBALS['__bcc_ms']['rows'][self::UID] = true;
+
+        ob_start();
+        $this->service()->suspendUser(self::UID, 'manual_suspension');
+        ob_end_clean();
+
+        self::assertSame([self::UID], $GLOBALS['__bcc_ms']['wp_sessions_destroyed']);
+    }
+
+    public function testBulkSuspendDestroysEveryMembersWordPressSessions(): void
+    {
+        foreach ([4701, 4702] as $uid) {
+            $GLOBALS['__bcc_ms']['rows'][$uid] = true;
+        }
+
+        self::runAdminHandler(fn () => $this->service()->handleBulkAction([4701, 4702], 'suspend'));
+
+        self::assertSame([4701, 4702], $GLOBALS['__bcc_ms']['wp_sessions_destroyed']);
+    }
+
+    public function testUnsuspendDestroysNothing(): void
+    {
+        $GLOBALS['__bcc_ms']['rows'][4801] = true;
+
+        ob_start();
+        $this->service()->unsuspendUser(4801);
+        ob_end_clean();
+
+        self::assertSame([], $GLOBALS['__bcc_ms']['wp_sessions_destroyed']);
+    }
+
+    public function testAFailedTokenRevokeStillEndsTheWordPressSessions(): void
+    {
+        // The two revokes are separate after-commit steps (source pin: the
+        // revoke helpers are each wrapped on their own).
+        $src = (string) preg_replace('/\s+/', ' ', (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Core/Services/Admin/ModerationService.php'));
+        self::assertStringContainsString("\$this->afterCommit('revoke_sessions', \$userId, fn () => \$this->revokeSessions(\$userId)); // Its own step, so a failure in one revoke cannot skip the other. \$this->afterCommit('destroy_wp_sessions', \$userId, fn () => \$this->destroyWordPressSessions(\$userId));", $src);
     }
 }

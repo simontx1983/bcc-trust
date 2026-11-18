@@ -1309,6 +1309,30 @@ add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CONTINUE_HOOK,
 // │      opt-out written (the intended behaviour — a banned user must    │
 // │      not be auto-re-added).                                          │
 // └─────────────────────────────────────────────────────────────────────┘
+// F-261 / F-29: a block removes the member-to-member follows between the
+// two members in BOTH directions, whichever door created it (BCC's
+// MyBlocksEndpoint, or PeepSo's own UI). PeepSoBlockWriter and PeepSo both
+// fire this on a NEW block. Idempotent: MyBlocksEndpoint also severs (to
+// clean up a block that predates F-29 on a repeat attempt), and the second
+// pass finds nothing left. A failure is logged, never thrown — the block is
+// already recorded.
+add_action('peepso_user_blocked', static function ($args): void {
+    $from = is_array($args) ? (int) ($args['from'] ?? 0) : 0;
+    $to   = is_array($args) ? (int) ($args['to'] ?? 0) : 0;
+    if ($from <= 0 || $to <= 0 || $from === $to) {
+        return;
+    }
+    try {
+        \BCC\Trust\Core\Plugin::instance()->watchingService()->severFollowsBetween($from, $to);
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::error('[bcc-trust] peepso_user_blocked: removing follows failed', [
+            'from'  => $from,
+            'to'    => $to,
+            'error' => $e->getMessage(),
+        ]);
+    }
+}, 10, 1);
+
 add_action('peepso_action_group_user_delete', function ($groupId, $userId) {
     $groupId = (int) $groupId;
     $userId  = (int) $userId;
@@ -1554,8 +1578,14 @@ add_action('bcc.trust.recalculate_score', function (int $pageId): void {
     \BCC\Trust\Core\Plugin::instance()->voteService()->recalculateScoreOrRequeue($pageId);
 });
 
-// Admin report penalty — fired by the disputes admin panel.
-add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points, string $reason): void {
+// Admin report penalty — asked for by the disputes admin panel.
+//
+// F-310 (M1): a FILTER that answers whether the penalty landed. It was an
+// action that caught and logged every failure, so the panel reported
+// "Report marked as penalized" while the score was unchanged. With no
+// listener the filter's default (false) is returned, so Penalize fails
+// closed.
+add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, int $userId, int $points, string $reason): bool {
     try {
         // Architecture A: the penalty lands on the member's self-page.
         // applyPenalty accumulates penalty_adjustment (a negative delta) and
@@ -1564,9 +1594,28 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
         $pageId = \BCC\Trust\Core\Plugin::instance()
             ->memberSelfPageService()
             ->ensureSelfPage($userId);
-        \BCC\Trust\Core\Plugin::instance()
+        if ($pageId <= 0) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] admin_report_penalty_failed', [
+                'user_id' => $userId,
+                'points'  => $points,
+                'error'   => 'no self-page for the reported member',
+            ]);
+            return false;
+        }
+        $updated = \BCC\Trust\Core\Plugin::instance()
             ->scoreRepository()
             ->applyPenalty($pageId, (float) (-1 * abs($points)));
+        if ($updated <= 0) {
+            // No score row: nothing landed. Say so instead of "penalized".
+            \BCC\Core\Log\Logger::error('[bcc-trust] admin_report_penalty_failed', [
+                'user_id' => $userId,
+                'points'  => $points,
+                'page_id' => $pageId,
+                'error'   => 'no score row was updated',
+            ]);
+            return false;
+        }
+        return true;
     } catch (\Throwable $e) {
         \BCC\Core\Log\Logger::error('[bcc-trust] admin_report_penalty_failed', [
             'user_id' => $userId,
@@ -1574,8 +1623,9 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
             'reason'  => $reason,
             'error'   => $e->getMessage(),
         ]);
+        return false;
     }
-}, 10, 3);
+}, 10, 4);
 
 /*
 |--------------------------------------------------------------------------
@@ -2206,6 +2256,13 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust activity',
         \BCC\Trust\Core\CLI\BackfillActivityModuleIdsCommand::class
     );
+    // F-299 one-off: record each claimed page's claimer as its PeepSo
+    // `member_owner` (claims before F-299 never wrote it). Dry run unless
+    // --apply; idempotent.
+    \WP_CLI::add_command(
+        'bcc-trust pages',
+        \BCC\Trust\Core\CLI\BackfillPageOwnersCommand::class
+    );
     // Validator message queue: inspect + recover the pre-claim backlog
     // (status / drain / retry / suppress). `retry` proves via the row's
     // idempotency key that no message landed before re-sending.
@@ -2242,6 +2299,14 @@ if (defined('WP_CLI') && WP_CLI) {
     \WP_CLI::add_command(
         'bcc-trust hall-ownership',
         \BCC\Trust\Onchain\CLI\HallOwnershipRepairCommand::class
+    );
+    // F-261 — remove the follows that blocks made before F-29 left behind.
+    // THIS IS ITS ONLY ENTRY POINT. Dry run by default; --apply needs the
+    // exact --confirm token (bound to BCC_ENV and the planned pairs) and an
+    // explicit --user-id holding manage_options. Idempotent.
+    \WP_CLI::add_command(
+        'bcc-trust block-follows',
+        \BCC\Trust\Core\CLI\BlockFollowsBackfillCommand::class
     );
 }
 
