@@ -371,6 +371,20 @@ final class OAuthController
      * email taken) leave the provider_token intact so the user can correct and
      * retry without restarting the OAuth flow. The token is consumed only when
      * user creation succeeds.
+     *
+     * F-294: a retry is the same sign-up. A second submit with the same
+     * provider_token used to answer "That handle is already taken." (two
+     * submits racing, both reading the token before either consumed it) or
+     * "Session expired." (a retry after the first had succeeded and consumed
+     * it). Now:
+     *   - submits for one token are serialised by an advisory lock, so the
+     *     second waits for the first instead of racing it;
+     *   - a successful create remembers (token hash → account) for
+     *     OAUTH_RETRY_SECONDS, and a retry with that token signs in as that
+     *     account: a fresh session, the same 201 response shape. No second
+     *     account, no second mail.
+     * Only a hash of the token is stored; the token itself stays single-use
+     * for CREATING an account.
      */
     public function oauthComplete(WP_REST_Request $request): WP_REST_Response
     {
@@ -378,12 +392,76 @@ final class OAuthController
             return ApiResponse::error('bcc_rate_limited', 'Too many requests. Please wait.', 429);
         }
 
+        $providerToken = sanitize_text_field((string) $request->get_param('provider_token'));
+        if ($providerToken === '') {
+            return ApiResponse::error('bcc_invalid_request', 'provider_token is required.', 400);
+        }
+
+        $lockKey = self::OAUTH_COMPLETE_LOCK_PREFIX . self::tokenHash($providerToken);
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($lockKey, self::OAUTH_COMPLETE_LOCK_WAIT)) {
+            // The other submit still holds it; nothing was created by this one.
+            return ApiResponse::error('bcc_unavailable', 'Your sign-up is still being completed. Please try again.', 503);
+        }
+        try {
+            $done = get_transient(self::OAUTH_DONE_PREFIX . self::tokenHash($providerToken));
+            if (is_numeric($done) && (int) $done > 0) {
+                $userId = (int) $done;
+                $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
+                if ($handle !== '' && get_userdata($userId) !== false) {
+                    return self::signedInResponse($userId, $handle);
+                }
+            }
+
+            return $this->completeOauthSignup($request, $providerToken);
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lockKey);
+        }
+    }
+
+    /** F-294: how long a completed provider_token keeps answering a retry. */
+    public const OAUTH_RETRY_SECONDS = 600;
+
+    /** F-294: how long a second submit waits for the first (seconds). */
+    private const OAUTH_COMPLETE_LOCK_WAIT = 5;
+
+    private const OAUTH_COMPLETE_LOCK_PREFIX = 'bcc_oauth_complete_';
+    private const OAUTH_DONE_PREFIX          = 'bcc_oauth_done_';
+
+    private static function tokenHash(string $providerToken): string
+    {
+        return substr(hash('sha256', $providerToken), 0, 40);
+    }
+
+    /**
+     * The 201 every successful oauth-complete answers with, for $userId: a
+     * fresh session.
+     */
+    private static function signedInResponse(int $userId, string $handle): WP_REST_Response
+    {
+        $response = ApiResponse::ok([
+            'user_id'          => $userId,
+            'handle'           => $handle,
+            'token'            => JwtToken::encodeNewSession($userId, $handle),
+            'expires_in'       => AuthSupport::JWT_TTL_SECONDS,
+            'token_type'       => 'Bearer',
+            'in_good_standing' => AuthSupport::resolveInGoodStanding($userId),
+            // F-305: a suspended member signs in READ-ONLY; the client shows
+            // the suspension notice from this flag. Every write gate refuses.
+            'suspended'        => AuthSupport::resolveSuspended($userId),
+        ], 201);
+        $response->header('Cache-Control', 'no-store');
+
+        return $response;
+    }
+
+    /** The create path, under the per-token lock (see oauthComplete()). */
+    private function completeOauthSignup(WP_REST_Request $request, string $providerToken): WP_REST_Response
+    {
         // No server-to-server secret gate here (unlike /auth/oauth): this
         // endpoint is browser-called from /signup/complete-profile, and its
         // security rests on the provider_token — an unforgeable, single-use,
         // server-issued capability that ONLY the secret-gated /auth/oauth can
         // mint, carrying server-stored (not client-supplied) provider data.
-        $providerToken = sanitize_text_field((string) $request->get_param('provider_token'));
         $handle        = strtolower(trim((string) $request->get_param('handle')));
         $displayName   = AuthSupport::sanitizePublicDisplayName(sanitize_text_field((string) $request->get_param('display_name')));
 
@@ -497,9 +575,10 @@ final class OAuthController
         }
 
         // Consume the provider_token only after the user row is committed.
+        // F-294: a retry with this token signs in as this account (above).
+        set_transient(self::OAUTH_DONE_PREFIX . self::tokenHash($providerToken), (string) $userIdInt, self::OAUTH_RETRY_SECONDS);
         AuthSupport::consumeOauthProviderToken($providerToken);
 
-        $token = JwtToken::encodeNewSession($userIdInt, $handle);
 
         Logger::audit('user_signup', [
             'user_id'  => $userIdInt,
@@ -529,18 +608,6 @@ final class OAuthController
             AuthSupport::beginEmailVerification($userIdInt, $email);
         }
 
-        $response = ApiResponse::ok([
-            'user_id'          => $userIdInt,
-            'handle'           => $handle,
-            'token'            => $token,
-            'expires_in'       => AuthSupport::JWT_TTL_SECONDS,
-            'token_type'       => 'Bearer',
-            'in_good_standing' => AuthSupport::resolveInGoodStanding($userIdInt),
-            // F-305: a suspended member signs in READ-ONLY; the client shows
-            // the suspension notice from this flag. Every write gate refuses.
-            'suspended'        => AuthSupport::resolveSuspended($userIdInt),
-        ], 201);
-        $response->header('Cache-Control', 'no-store');
-        return $response;
+        return self::signedInResponse($userIdInt, $handle);
     }
 }
