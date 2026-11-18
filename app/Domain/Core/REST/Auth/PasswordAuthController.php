@@ -547,7 +547,18 @@ final class PasswordAuthController
         // never leak which one failed (account-enumeration resistance).
         // wp_check_password is the canonical path; it handles legacy
         // hash formats + rehash-on-login transparently.
-        if ($user === false || !wp_check_password($password, $user->user_pass, $user->ID)) {
+        // F-294: an unknown account used to skip the bcrypt compare, so it
+        // answered measurably faster than a wrong password. It now pays one
+        // password hash too: the same order of work, discarded. Both
+        // branches record the step-up failure (#715): recording it only for
+        // a real account would show the captcha only for real accounts, an
+        // enumeration oracle.
+        if ($user === false) {
+            wp_hash_password($password);
+            LoginStepUp::recordFailure($typedKey, $trustedNetwork);
+            return ApiResponse::error('bcc_invalid_credentials', 'Invalid credentials.', 401);
+        }
+        if (!wp_check_password($password, $user->user_pass, $user->ID)) {
             LoginStepUp::recordFailure($typedKey, $trustedNetwork);
             return ApiResponse::error('bcc_invalid_credentials', 'Invalid credentials.', 401);
         }
@@ -748,6 +759,23 @@ final class PasswordAuthController
 
         // Always-ok response below. We branch ONLY for the side effects
         // (key generation + email + audit) — never for the response.
+        //
+        // F-294: key generation hashes the key, which an unknown address
+        // used to skip, so it answered measurably faster. It pays the SAME
+        // hash now, mirroring get_password_reset_key(): WordPress 6.8+
+        // hashes the key with wp_fast_hash() (BLAKE2b, microseconds), so a
+        // password hash here (bcrypt, tens of ms) would make an unknown
+        // address the SLOWER one. Before 6.8 core hashed it with phpass,
+        // the cost of wp_hash_password(). The key write and mail delivery
+        // can still differ; the contract says so.
+        if (!($user instanceof \WP_User)) {
+            $decoyKey = wp_generate_password(20, false);
+            if (function_exists('wp_fast_hash')) {
+                wp_fast_hash($decoyKey);
+            } else {
+                wp_hash_password($decoyKey);
+            }
+        }
         if ($user instanceof \WP_User) {
             $userId = (int) $user->ID;
 

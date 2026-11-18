@@ -308,6 +308,24 @@ namespace {
             return ($GLOBALS['__bcc_ph']['passwords'][$userId] ?? null) === $password;
         }
     }
+    // F-294 item 8: forgot-password for an unknown address pays the reset
+    // key's own cost (wp_generate_password + wp_fast_hash). The same doubles
+    // as handle-rename-identity-stubs, so whichever file loads first, a
+    // test sees the same records.
+    if (empty($GLOBALS['__bcc_no_fast_hash']) && !function_exists('wp_fast_hash')) {
+        function wp_fast_hash(string $message): string
+        {
+            $GLOBALS['__bcc_ph']['fast_hashes'] = ($GLOBALS['__bcc_ph']['fast_hashes'] ?? 0) + 1;
+            return 'fast:' . $message;
+        }
+    }
+    if (!function_exists('wp_generate_password')) {
+        function wp_generate_password(int $length = 12, bool $special = true, bool $extra = false): string
+        {
+            $GLOBALS['__bcc_ph']['generated'][] = $length . ($special ? '+special' : '') . ($extra ? '+extra' : '');
+            return str_repeat('k', $length);
+        }
+    }
     if (!function_exists('get_userdata')) {
         /** @return \WP_User|false */
         function get_userdata($id)
