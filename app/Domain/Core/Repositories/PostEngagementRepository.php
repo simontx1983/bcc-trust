@@ -63,13 +63,35 @@ final class PostEngagementRepository
     }
 
     /**
-     * How many times this post has been reposted.
+     * How many MEMBERS have reposted this post.
      *
      * Counts only reposts whose own wp_posts row is still published, so a
      * deleted or trashed repost stops counting — the same `post_status`
      * filter `CommentRepository::countsByParentPostIds()` applies.
      *
-     * @param int $actId The reposted post's act_id (NOT a wp_posts.ID).
+     * ⚠⚠ `COUNT(DISTINCT a.act_owner_id)`, NOT `COUNT(*)`, and that is a
+     * robustness choice rather than a change of meaning. Reposting is
+     * once-per-member-per-post, so under correct behaviour the two are
+     * identical — but nothing in the DATABASE can enforce that rule, so
+     * DISTINCT is what keeps a duplicate that slipped past the app-level
+     * check from inflating a public number.
+     *
+     * Why no constraint is possible: PeepSo's activities table carries
+     * `act_owner_index(act_owner_id)` and `act_repost_index(act_repost_id)`
+     * as two separate NON-unique single-column indexes, and a
+     * `UNIQUE (act_owner_id, act_repost_id)` is incompatible with the schema
+     * anyway — `act_repost_id` defaults to 0 for every ordinary post, so
+     * uniqueness would cap each member at one ordinary post ever. The
+     * once-only rule is entirely ours to enforce, which is exactly why this
+     * read must not assume it held.
+     *
+     * ⚠ $actId MUST BE THE ROOT. PeepSo stores the chain root in
+     * `act_repost_id` (it calls `get_repost_root()` first), so passing a
+     * repost's OWN act_id returns 0 rather than the original's count — a
+     * confident zero, not an error. Callers resolve the root with
+     * `PeepSoActivityRepository::resolveRepostRoot()`.
+     *
+     * @param int $actId The ROOT post's act_id (NOT a wp_posts.ID).
      * @return int|null null when the count could not be read.
      */
     public static function repostCount(int $actId): ?int
@@ -86,7 +108,7 @@ final class PostEngagementRepository
         global $wpdb;
 
         return self::readCount($wpdb->prepare(
-            "SELECT COUNT(*) AS n
+            "SELECT COUNT(DISTINCT a.act_owner_id) AS n
                FROM {$activities} a
                INNER JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
               WHERE a.act_repost_id = %d
