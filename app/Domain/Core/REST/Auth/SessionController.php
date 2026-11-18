@@ -325,9 +325,15 @@ final class SessionController
      *   - Grace window is bounded (REFRESH_GRACE_SECONDS = 86400). After
      *     that the path 401s and the user re-authenticates fully.
      *
+     *   - F-282: the presented token is RETIRED once the new one is minted
+     *     (JwtToken::retireAfterRefresh): it keeps working for
+     *     REFRESH_OVERLAP_SECONDS so the session's other tabs and in-flight
+     *     requests can pick up the new token, then fails everywhere. Before,
+     *     it stayed usable until exp + the refresh grace, so a copy taken
+     *     before the refresh outlived it by days.
+     *
      * Not in scope:
      *   - Rotating refresh tokens (single-use, separate from access JWT).
-     *     V1 design accepts a stolen JWT being refreshable within grace;
      *     revokeAllForUser is the kill switch for compromised accounts.
      */
     public function refresh(WP_REST_Request $request): WP_REST_Response
@@ -398,6 +404,9 @@ final class SessionController
         // A refresh continues the same sign-in: keep when it began (F-253's
         // "wallet linked before this sign-in" rule must not reset here).
         $fresh = JwtToken::encodeContinuation($userId, $handle, JwtToken::sessionStartedAt($payload));
+
+        // F-282: the old token stops working once the overlap has passed.
+        JwtToken::retireAfterRefresh($payload);
 
         Logger::audit('token_refreshed', [
             'user_id' => $userId,

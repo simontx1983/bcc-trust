@@ -288,7 +288,8 @@ final class SuspensionGateParityTest extends TestCase
         $result = ClaimService::claim(7, 'validator', 1);
 
         self::assertFalse($result['success'] ?? null);
-        self::assertSame('bcc_forbidden', $result['error'] ?? null);
+        // An explicit sentinel the claim route maps to reason `suspended` (F-303).
+        self::assertSame('suspended', $result['error'] ?? null);
         self::assertSame('Your account is suspended.', $result['message'] ?? null);
         self::assertSame([false], $GLOBALS['__bcc_susp_fixture']['bypass_args']);
     }

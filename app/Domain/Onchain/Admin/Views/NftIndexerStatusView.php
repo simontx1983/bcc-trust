@@ -424,7 +424,7 @@ final class NftIndexerStatusView
         $apiKeyDefined = defined('BCC_HELIUS_API_KEY') && (string) constant('BCC_HELIUS_API_KEY') !== '';
         $secretDefined = defined('BCC_HELIUS_WEBHOOK_SECRET') && (string) constant('BCC_HELIUS_WEBHOOK_SECRET') !== '';
         $callbackUrl   = HeliusWebhookEndpoint::callbackUrl();
-        $status        = HeliusSubscriptionManager::status();
+        $status        = HeliusSubscriptionManager::status($callbackUrl);
         $dedupeRows    = HeliusSeenSignaturesRepository::rowCount();
         $dedupeAlarm   = HeliusSeenSignaturesRepository::ALARM_THRESHOLD;
         $sigfailCount  = (int) get_option('bcc_helius_signature_sigfail_total', 0);
@@ -450,6 +450,22 @@ final class NftIndexerStatusView
                     <td><?php echo $status['webhook_id'] !== '' ? '<code>' . esc_html($status['webhook_id']) . '</code>' : '<em>not provisioned</em>'; ?></td></tr>
                 <tr><th>Configured callback (remote)</th>
                     <td><?php echo $status['callback_url'] !== null ? '<code>' . esc_html($status['callback_url']) . '</code>' : '—'; ?></td></tr>
+                <?php
+                // F-314: say WHY the remote fields are empty, and flag a callback
+                // that points somewhere else (e.g. after a domain cutover).
+                $remoteWarning = match (true) {
+                    $status['remote_state'] === HeliusSubscriptionManager::REMOTE_MISSING
+                        => 'Helius has no webhook with this ID (it was deleted on Helius\'s side). Nothing is being delivered. Use Re-register below.',
+                    $status['remote_state'] === HeliusSubscriptionManager::REMOTE_UNREACHABLE
+                        => 'Helius could not be reached, or refused the request. Check BCC_HELIUS_API_KEY and Helius status; nothing has been changed.',
+                    $status['callback_matches'] === false
+                        => 'The remote webhook posts to a different URL than this site\'s callback above, so deliveries are not arriving here. Use Re-register below.',
+                    default => null,
+                };
+                if ($remoteWarning !== null): ?>
+                <tr><th>Remote webhook problem</th>
+                    <td><strong style="color:var(--bcc-danger);"><?php echo esc_html($remoteWarning); ?></strong></td></tr>
+                <?php endif; ?>
                 <tr><th>Remote address count</th>
                     <td><?php echo $status['remote_address_count'] !== null ? (int) $status['remote_address_count'] : '—'; ?></td></tr>
                 <tr><th>Local managed count (helius_managed = 1)</th>
@@ -490,7 +506,11 @@ final class NftIndexerStatusView
         </table>
 
         <?php
-        self::renderHeliusActionForm((string) $status['webhook_id']);
+        self::renderHeliusActionForm(
+            (string) $status['webhook_id'],
+            (string) $status['remote_state'],
+            $status['callback_matches']
+        );
     }
 
     /**
@@ -605,7 +625,7 @@ final class NftIndexerStatusView
      * Both mutate state on Helius, not just locally — the copy says so,
      * because the labels alone read like local operations.
      *
-     * @return array{provision: string, resync: string}
+     * @return array{provision: string, resync: string, reregister: string}
      */
     public static function heliusConfirmations(): array
     {
@@ -616,15 +636,23 @@ final class NftIndexerStatusView
             'resync' => "Repoint the remote Helius webhook's address list?\n\n"
                 . 'This PATCHes the live webhook on Helius so its address list matches this '
                 . 'site\'s wallet_links table. Solana ingestion follows the remote list.',
+            'reregister' => "Re-register the shared Helius webhook?\n\n"
+                . 'If Helius still has it, its callback URL is changed to this site\'s URL above. '
+                . 'If Helius no longer has it, a NEW billable webhook is created and refilled from '
+                . 'wallet_links. Both call the Helius API.',
         ];
     }
 
     /**
      * Provision (when no webhook exists) or Resync (when one does).
      */
-    public static function renderHeliusActionForm(string $webhookId): void
+    public static function renderHeliusActionForm(string $webhookId, string $remoteState = '', ?bool $callbackMatches = null): void
     {
         $confirms = self::heliusConfirmations();
+        // F-314: offered only when the stored webhook is gone or points at
+        // the wrong URL — never on "unreachable", where nothing is known.
+        $needsReregister = $webhookId !== ''
+            && ($remoteState === HeliusSubscriptionManager::REMOTE_MISSING || $callbackMatches === false);
         ?>
         <p style="margin-top:16px">
             <?php if ($webhookId === ''): ?>
@@ -651,6 +679,18 @@ final class NftIndexerStatusView
                 <small style="margin-left:8px">Rebuilds the remote address list from the canonical local table. Use after <code>helius_managed</code> drift.</small>
             <?php endif; ?>
         </p>
+        <?php if ($needsReregister): ?>
+        <p style="margin-top:8px">
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
+                  style="display:inline;margin:0;"
+                  onsubmit="return confirm(<?php echo esc_attr(AdminActionSupport::confirmLiteral($confirms['reregister'])); ?>);">
+                <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION_HELIUS_REREGISTER); ?>">
+                <?php wp_nonce_field(self::ACTION_HELIUS_REREGISTER); ?>
+                <button type="submit" class="button button-primary">Re-register shared webhook</button>
+            </form>
+            <small style="margin-left:8px">Points the webhook at this site's callback URL again, or recreates it if Helius no longer has it.</small>
+        </p>
+        <?php endif; ?>
         <?php
     }
 
@@ -662,6 +702,7 @@ final class NftIndexerStatusView
     public const ACTION_SET_STATE         = 'bcc_nft_indexer_set_state';
     public const ACTION_HELIUS_PROVISION  = 'bcc_helius_provision';
     public const ACTION_HELIUS_RESYNC     = 'bcc_helius_resync';
+    public const ACTION_HELIUS_REREGISTER = 'bcc_helius_reregister';
 
     public static function register_actions(): void
     {
@@ -669,6 +710,7 @@ final class NftIndexerStatusView
         add_action('admin_post_' . self::ACTION_SET_STATE,        [self::class, 'handleSetState']);
         add_action('admin_post_' . self::ACTION_HELIUS_PROVISION, [self::class, 'handleHeliusProvision']);
         add_action('admin_post_' . self::ACTION_HELIUS_RESYNC,    [self::class, 'handleHeliusResync']);
+        add_action('admin_post_' . self::ACTION_HELIUS_REREGISTER, [self::class, 'handleHeliusReregister']);
     }
 
     /**
@@ -771,6 +813,33 @@ final class NftIndexerStatusView
      * `ACTION_SET_STATE . '_' . $chainId . '_' . $newState` in this same
      * file, where the operator really is authorising one named row.
      */
+    /**
+     * F-314: point the stored webhook at this site's callback again, or
+     * recreate it when Helius no longer has it. Mutates EXTERNAL provider
+     * state; the same gates as Provision and Resync.
+     */
+    public static function handleHeliusReregister(): void
+    {
+        AdminActionSupport::requireCapability();
+        AdminActionSupport::requirePost();
+        AdminActionSupport::requireNonce(self::ACTION_HELIUS_REREGISTER);
+
+        try {
+            $result = HeliusSubscriptionManager::reregisterSharedWebhook(HeliusWebhookEndpoint::callbackUrl());
+        } catch (\Throwable $e) {
+            $ref = AdminActionSupport::failure($e, 'admin_helius_webhook_reregister_failed', 'helius_webhook');
+            self::redirect('helius_reregister_failed', 0, $ref);
+        }
+
+        $outcome = $result['outcome'];
+        $changed = in_array($outcome, ['updated', 'recreated'], true);
+        AdminActionSupport::audit(
+            $changed ? 'admin_helius_webhook_reregistered' : 'admin_helius_webhook_reregister_' . $outcome,
+            'helius_webhook'
+        );
+        self::redirect('helius_reregister_' . $outcome, 0);
+    }
+
     public static function handleHeliusProvision(): void
     {
         AdminActionSupport::requireCapability();
@@ -943,6 +1012,17 @@ final class NftIndexerStatusView
             'helius_provisioned'      => ['updated', 'Helius shared webhook provisioned.'],
             'helius_provision_failed' => ['error',   'Provisioning failed. Check BCC_HELIUS_API_KEY + BCC_HELIUS_WEBHOOK_SECRET in wp-config.php.'],
             'helius_resync_failed'    => ['error',   'Resync failed.'],
+            // F-314: re-register outcomes.
+            'helius_reregister_updated'         => ['updated', 'The Helius webhook now posts to this site\'s callback URL.'],
+            'helius_reregister_recreated'       => ['updated', 'Helius no longer had the webhook, so a new one was created and refilled from wallet_links.'],
+            'helius_reregister_already_current' => ['updated', 'Nothing to do: the Helius webhook already posts to this site\'s callback URL.'],
+            'helius_reregister_busy'            => ['error',   'The address list is being changed right now; nothing was sent. Try again in a moment.'],
+            'helius_reregister_unreachable'     => ['error',   'Helius could not be reached or refused the request, so nothing was changed. Check BCC_HELIUS_API_KEY and Helius status.'],
+            'helius_reregister_not_provisioned' => ['error',   'No webhook is stored yet. Use Provision instead.'],
+            'helius_reregister_not_configured'  => ['error',   'Re-register needs BCC_HELIUS_API_KEY and BCC_HELIUS_WEBHOOK_SECRET in wp-config.php.'],
+            'helius_reregister_update_failed'   => ['error',   'Helius refused the update, so the callback URL is unchanged.'],
+            'helius_reregister_recreate_failed' => ['error',   'Helius no longer had the webhook, and creating a new one failed. Use Provision once Helius is reachable.'],
+            'helius_reregister_failed'          => ['error',   AdminActionSupport::failureMessage($ref)],
         ];
 
         if ($result === 'helius_resynced' || $result === 'helius_resync_noop') {

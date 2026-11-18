@@ -57,10 +57,10 @@ final class OnchainAdminConfirmationRenderTest extends TestCase
         return (string) ob_get_clean();
     }
 
-    private function renderHelius(string $webhookId): string
+    private function renderHelius(string $webhookId, string $remoteState = '', ?bool $callbackMatches = null): string
     {
         ob_start();
-        NftIndexerStatusView::renderHeliusActionForm($webhookId);
+        NftIndexerStatusView::renderHeliusActionForm($webhookId, $remoteState, $callbackMatches);
         return (string) ob_get_clean();
     }
 
@@ -255,6 +255,29 @@ final class OnchainAdminConfirmationRenderTest extends TestCase
     {
         $this->assertSame(1, substr_count($this->renderHelius(''), 'onsubmit="return confirm('));
         $this->assertSame(1, substr_count($this->renderHelius('wh_123'), 'onsubmit="return confirm('));
+    }
+
+    /**
+     * F-314: Re-register is offered only when the stored webhook is gone
+     * (404) or points at another URL — never on "unreachable", where
+     * nothing is known — and it carries its own confirm and nonce.
+     */
+    public function testReregisterAppearsOnlyForAMissingOrMisdirectedWebhook(): void
+    {
+        $missing    = $this->renderHelius('wh_123', 'missing');
+        $misdirect  = $this->renderHelius('wh_123', 'ok', false);
+        $healthy    = $this->renderHelius('wh_123', 'ok', true);
+        $unknown    = $this->renderHelius('wh_123', 'unreachable');
+        $noWebhook  = $this->renderHelius('', 'not_provisioned');
+
+        foreach ([$missing, $misdirect] as $html) {
+            $this->assertStringContainsString('value="bcc_helius_reregister"', $html);
+            $this->assertSame(2, substr_count($html, 'onsubmit="return confirm('), 'Resync and Re-register each confirm');
+        }
+        foreach ([$healthy, $unknown, $noWebhook] as $html) {
+            $this->assertStringNotContainsString('bcc_helius_reregister', $html);
+        }
+        $this->assertStringContainsString('a NEW billable webhook', NftIndexerStatusView::heliusConfirmations()['reregister']);
     }
 
     public function testHeliusConfirmationsDiscloseThatTheyMutateRemoteState(): void

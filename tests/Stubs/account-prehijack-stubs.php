@@ -59,6 +59,12 @@ namespace BCC\Core\Security {
                 return true;
             }
 
+            /** F-281: the caller's address; tests set client_ip. */
+            public static function clientIp(): string
+            {
+                return (string) ($GLOBALS['__bcc_ph']['client_ip'] ?? '203.0.113.7');
+            }
+
             /** @return null */
             public static function lastDenial()
             {

@@ -129,7 +129,8 @@ class WalletController
         // Account-recovery posture for the settings UI: drives the
         // "set up a recovery method" banner and mirrors the unlink
         // self-lockout guard client-side. has_recovery_email = a real
-        // (non-placeholder) email is set; verified_wallet_count = wallets
+        // (non-placeholder) email is set and not pending its verification
+        // code (F-332); verified_wallet_count = wallets
         // usable for wallet login.
         $resp = ApiResponse::ok([
             'items'    => $items,
@@ -140,10 +141,27 @@ class WalletController
                 // the confirmation the account forms ask for: the current
                 // password, or a signature from a verified wallet.
                 'has_password'          => AccountRecoveryService::hasPassword($userId),
-            ],
+            ] + self::recoveryAvailability($userId),
         ]);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
+    }
+
+    /**
+     * F-332: when this session can attach a first recovery email —
+     * `available_at` (ISO-8601 UTC, or null) and `available_reason`
+     * ('signup_wallet' | 'wallet_age' | null). See
+     * AccountCredentialCheck::recoveryEmailAvailability().
+     *
+     * @return array{available_at: string|null, available_reason: string|null}
+     */
+    private static function recoveryAvailability(int $userId): array
+    {
+        $a = \BCC\Trust\Core\REST\AccountCredentialCheck::recoveryEmailAvailability($userId);
+        return [
+            'available_at'     => $a['at'] === null ? null : gmdate('Y-m-d\TH:i:s\Z', $a['at']),
+            'available_reason' => $a['reason'],
+        ];
     }
 
     /**

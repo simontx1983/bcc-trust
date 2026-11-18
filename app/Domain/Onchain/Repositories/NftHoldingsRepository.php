@@ -774,6 +774,47 @@ final class NftHoldingsRepository
     }
 
     /**
+     * When the index last recorded this wallet LOSING a holding of
+     * $contract: the newest balance-0 row's indexed_at as a unix time, or
+     * null when it never has (F-278). The revoke sweep uses it to distrust
+     * a cached "owns" observed before the loss.
+     *
+     * Bounded: the uk_wallet_token prefix (wallet_link_id, contract_address)
+     * and one aggregate row. The contract is folded for the same reason
+     * readVisibleByContract() folds it (case-insensitive collation).
+     *
+     * @throws RepositoryReadFailure on a failed read, which must never be
+     *         read as "never lost".
+     */
+    public static function latestLossAtOrThrow(int $walletLinkId, string $contract): ?int
+    {
+        if ($walletLinkId <= 0 || $contract === '') {
+            return null;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        $at = $wpdb->get_var($wpdb->prepare(
+            "SELECT MAX(indexed_at)
+               FROM {$table}
+              WHERE wallet_link_id = %d
+                AND contract_address = %s
+                AND balance = 0",
+            $walletLinkId,
+            strtolower($contract)
+        ));
+        self::guardReadOrThrow('latestLossAtOrThrow');
+
+        if (!is_string($at) || $at === '') {
+            return null;
+        }
+        $ts = strtotime($at . ' UTC');
+
+        return $ts === false ? null : $ts;
+    }
+
+    /**
      * Delete all holdings for every wallet linked to a user (full
      * account cleanup). nft_holdings has no user_id column of its own,
      * so ownership is resolved via a join to wallet_links — this MUST

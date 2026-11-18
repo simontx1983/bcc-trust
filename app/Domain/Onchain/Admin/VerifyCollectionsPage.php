@@ -188,6 +188,13 @@ final class VerifyCollectionsPage
      */
     public const MAX_BULK_IDS = 50;
 
+    /**
+     * F-313 (M11): the description-review closure's "nothing was pending"
+     * result. A non-false value, so TransactionManager commits the no-op
+     * instead of throwing.
+     */
+    private const DESC_NOT_PENDING = 'not_pending';
+
     /** Operator-scoped, short-lived carrier for PRG result notices. */
     private const NOTICE_TRANSIENT_PREFIX = 'bcc_vc_notices_';
     private const NOTICE_TTL              = 60;
@@ -610,7 +617,13 @@ final class VerifyCollectionsPage
                     // back — return without writing an audit row, because a
                     // record saying a decision happened would be
                     // indistinguishable later from one that did.
-                    return false;
+                    //
+                    // ⚠ F-313 (M11): NOT `false`. TransactionManager reads a
+                    // `false` return as "roll back" and THROWS, so the catch
+                    // below showed "The operation failed" and wrote a durable
+                    // *_failed audit row for an ordinary stale tab. Nothing
+                    // was written here, so committing is a no-op.
+                    return self::DESC_NOT_PENDING;
                 }
 
                 $auditId = AuditLogger::logChecked(
@@ -634,7 +647,7 @@ final class VerifyCollectionsPage
                 return true;
             });
 
-            if (!$applied) {
+            if ($applied === self::DESC_NOT_PENDING) {
                 $notices = [[
                     'type'    => 'warning',
                     'message' => 'No pending description was found for that collection, so nothing changed. '
@@ -1213,6 +1226,25 @@ final class VerifyCollectionsPage
         // Re-resolved on the way out as well as the way in, so a hand-edited
         // value cannot round-trip an unknown tab back into a URL.
         printf('<input type="hidden" name="vstate" value="%s">', esc_attr(self::resolveTab($tab)));
+        // F-313 (M10): and the search term. returnArgs() already reads `s`
+        // back, but nothing posted it, so every row action dropped the search
+        // while keeping `paged` — landing on page N of the UNSEARCHED list.
+        $search = self::currentSearch();
+        if ($search !== '') {
+            printf('<input type="hidden" name="s" value="%s">', esc_attr($search));
+        }
+    }
+
+    /**
+     * The list's search term, bounded at the boundary: a 200-char cap keeps
+     * the LIKE term and the URL sane. One parse for the page and every form
+     * that carries the list context back.
+     */
+    private static function currentSearch(): string
+    {
+        return isset($_GET['s'])
+            ? trim(mb_substr(sanitize_text_field((string) $_GET['s']), 0, 200))
+            : '';
     }
 
     /**
@@ -1465,6 +1497,15 @@ final class VerifyCollectionsPage
                 'message' => 'The collection could not be read just now, so nothing was attempted. '
                     . 'No community was created and no state was changed. Please try again.',
             ]);
+        }
+
+        // F-313 (M9): another provisioning run holds this collection's lock,
+        // so NOTHING was attempted. It used to fall through to the success
+        // branch, and the row read "Community created". Like `unavailable`,
+        // it is the absence of an outcome: an error with the server's own
+        // message, the button back, and no durable failure audit row.
+        if ($result['status'] === 'busy') {
+            wp_send_json_error(['message' => $result['message']]);
         }
 
         if ($result['status'] === 'failed'
@@ -2063,9 +2104,7 @@ final class VerifyCollectionsPage
         // ⚠ Bounded at the boundary. A 200-char cap keeps the LIKE term and
         // the URL sane; nothing downstream depends on the length, and a
         // longer term would narrow to nothing anyway.
-        $searchTerm = isset($_GET['s'])
-            ? trim(mb_substr(sanitize_text_field((string) $_GET['s']), 0, 200))
-            : '';
+        $searchTerm = self::currentSearch();
 
         $availableChains    = ChainRepository::getActive();
         $availableStandards = CollectionRepository::getDistinctTokenStandards();
@@ -2502,6 +2541,9 @@ final class VerifyCollectionsPage
                 <input type="hidden" name="chain" value="<?php echo esc_attr($selectedChain); ?>">
                 <input type="hidden" name="token_standard" value="<?php echo esc_attr($selectedTokenStandard); ?>">
                 <input type="hidden" name="vstate" value="<?php echo esc_attr($vstate); ?>">
+                <?php if ($searchTerm !== ''): // F-313 (M10): the bulk Save keeps the search too ?>
+                    <input type="hidden" name="s" value="<?php echo esc_attr($searchTerm); ?>">
+                <?php endif; ?>
 
                 <p class="submit" style="margin:0 0 12px 0;">
                     <button type="submit"
@@ -3162,7 +3204,11 @@ final class VerifyCollectionsPage
                     post(ACTION_PROVISION, id, 'provision')
                         .then(function (resp) {
                             if (resp && resp.success) {
-                                if (cell) { cell.innerHTML = '<span style="color:var(--bcc-success);font-size:12px;">Community created</span>'; }
+                                // F-313 (M9): say which success it was, and drop the row's
+                                // now-stale request control ("Withdraw request").
+                                var existed = resp.data && resp.data.status === 'exists';
+                                if (cell) { cell.innerHTML = '<span style="color:var(--bcc-success);font-size:12px;">' + (existed ? 'Community already existed' : 'Community created') + '</span>'; }
+                                if (row) { row.querySelectorAll('button[form="vc-intent-' + id + '"]').forEach(function (b) { b.remove(); }); }
                             } else {
                                 btn.disabled = false;
                                 btn.textContent = 'Create now';

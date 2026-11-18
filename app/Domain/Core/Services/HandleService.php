@@ -203,6 +203,18 @@ final class HandleService
         return $expiresAt > time() ? $expiresAt : null;
     }
 
+    /**
+     * When $userId may next change their handle, as ISO-8601 UTC
+     * ("2026-06-17T14:05:00Z"), or null when they can change it now. The
+     * one formatter for every surface that tells a client about the
+     * cooldown (F-333): GET /me/profile-prefs and the cooldown 429.
+     */
+    public function nextChangeAt(int $userId): ?string
+    {
+        $expiresAt = $this->cooldownExpiresAt($userId);
+        return $expiresAt === null ? null : gmdate('Y-m-d\TH:i:s\Z', $expiresAt);
+    }
+
     public function getHandle(int $userId): string
     {
         return (string) get_user_meta($userId, self::META_HANDLE, true);
