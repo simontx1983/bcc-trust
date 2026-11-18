@@ -285,6 +285,81 @@ class RateLimiter {
     }
 
     /**
+     * F-289: seconds until a call on $key would be allowed again, assuming no
+     * other call lands on it in the meantime. It is the exact Retry-After for
+     * a deny allowByKey() just returned (bcc-core Throttle asks for it).
+     *
+     * It reads the two buckets slidingWindowCheck() weighs and solves that
+     * check for the first second that passes: a retry at now + this is
+     * allowed, and one a second earlier is not. The answer runs from 0 up to
+     * two windows, because the bucket a call was refused in still counts,
+     * weighted, all through the next one. So the window length is
+     * not the wait; it can be too short as well as too long.
+     *
+     * A failed read answers $window, the value Retry-After always used to
+     * carry.
+     */
+    public static function retryAfterByKey(string $key, int $limit, int $window): int
+    {
+        self::initRepositories();
+        $window = max(1, $window);
+        $now    = self::now();
+        $bucket = (int) floor($now / $window);
+
+        $current  = RateLimitRepository::getBucketCount(self::bucketOptionKey($key, $bucket));
+        $previous = RateLimitRepository::getBucketCount(self::bucketOptionKey($key, $bucket - 1));
+        if ($current === null || $previous === null) {
+            return $window;
+        }
+
+        $elapsed = $now - ($bucket * $window);
+
+        // Later in this bucket: the retry makes the current count one higher.
+        $second = self::firstPassingSecond($current + 1, $previous, $limit, $window, $elapsed);
+        if ($second !== null) {
+            return $second - $elapsed;
+        }
+        // In the next bucket: the retry is its first call, and this bucket's
+        // count becomes the weighted previous one.
+        $second = self::firstPassingSecond(1, $current, $limit, $window, 0);
+        if ($second !== null) {
+            return ($window - $elapsed) + $second;
+        }
+        // The bucket after that no longer weighs this one at all.
+        return (2 * $window) - $elapsed;
+    }
+
+    /**
+     * The first second $e in [$from, $window) of a bucket at which
+     * slidingWindowCheck() passes with these counts ($current already
+     * includes the call being checked), or null if none does. The check is
+     *
+     *     $current * 100 + $previous * w(e) <= $limit * 100,
+     *     w(e) = 100 - floor(e * 100 / $window),
+     *
+     * and w only falls as e grows, so it is solved directly, not searched.
+     */
+    private static function firstPassingSecond(int $current, int $previous, int $limit, int $window, int $from): ?int
+    {
+        // What the previous bucket's weighted share may still use.
+        $room = ($limit - $current) * 100;
+        if ($room < 0) {
+            return null;
+        }
+        if ($previous === 0) {
+            return $from;
+        }
+        $maxWeight = intdiv($room, $previous);
+        if ($maxWeight >= 100) {
+            return $from;
+        }
+        // w(e) <= maxWeight  <=>  floor(e * 100 / window) >= 100 - maxWeight
+        //                    <=>  e >= ceil((100 - maxWeight) * window / 100)
+        $second = max($from, intdiv(((100 - $maxWeight) * $window) + 99, 100));
+        return $second < $window ? $second : null;
+    }
+
+    /**
      * Check if action allowed
      *
      * @param string $action
