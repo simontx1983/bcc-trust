@@ -75,6 +75,19 @@ final class CardsListEndpoint
     private const PAGE_MAX     = 20;
 
     /**
+     * A text search (`q`) is capped at Q_MAX_LENGTH characters and throttled
+     * to Q_RATE_LIMIT per Q_RATE_WINDOW seconds, per account or, anonymous,
+     * per /24 subnet (Throttle's own key). Same numbers as bcc-search's
+     * SearchController. Each distinct `q` is a leading-wildcard LIKE that
+     * the 30 s discovery cache cannot absorb, so it is the expensive call.
+     * Only searches are throttled: plain directory browsing stays cached,
+     * and anonymous visitors behind one carrier NAT share a subnet bucket.
+     */
+    public const Q_MAX_LENGTH  = 100;
+    public const Q_RATE_LIMIT  = 10;
+    public const Q_RATE_WINDOW = 5;
+
+    /**
      * Card-tier (frontend canonical, per §C1) → reputation tier
      * (PageDiscoveryService internal). Risky is intentionally absent —
      * Accepted values for the `tier` filter — the reputation tiers, directly.
@@ -142,6 +155,14 @@ final class CardsListEndpoint
                     'q' => [
                         'required'          => false,
                         'type'              => 'string',
+                        // A longer q is a 400 rest_invalid_param before the
+                        // handler runs. ⚠ WordPress only checks maxLength
+                        // when validate_callback names its schema validator:
+                        // it does not auto-validate hand-registered args
+                        // (same wiring as bcc-search's SearchController).
+                        // The handler checks the length again.
+                        'maxLength'         => self::Q_MAX_LENGTH,
+                        'validate_callback' => 'rest_validate_request_arg',
                         'sanitize_callback' => 'sanitize_text_field',
                     ],
                     'page' => [
@@ -189,6 +210,19 @@ final class CardsListEndpoint
         $tierParam = (string) $request->get_param('tier');
         $sortParam = (string) $request->get_param('sort');
         $query     = (string) $request->get_param('q');
+
+        // See Q_RATE_LIMIT. Before any query work, searches only.
+        if ($query !== '' && !\BCC\Core\Security\Throttle::allow('cards_list', self::Q_RATE_LIMIT, self::Q_RATE_WINDOW)) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many searches. Please wait a few seconds.', 429);
+        }
+        // Defence in depth behind the arg's maxLength.
+        if (mb_strlen($query) > self::Q_MAX_LENGTH) {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                sprintf('q must be at most %d characters.', self::Q_MAX_LENGTH),
+                400
+            );
+        }
 
         $page = (int) $request->get_param('page');
         if ($page <= 0) {
