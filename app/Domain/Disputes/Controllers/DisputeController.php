@@ -616,33 +616,36 @@ class DisputeController
         $reason_key       = $req->get_param('reason_key');
         $reason_detail    = (string) $req->get_param('reason_detail');
 
+        // Cheap refusals a member can fix, BEFORE the throttle (F-311 M5): a
+        // refused-then-corrected submit must not hit a 429. None of them
+        // looks up another account: already_reported reads only the
+        // reporter's OWN open reports.
         if ( $reported_id === $reporter_id ) {
             return $this->error('cannot_self_report', 'You cannot report yourself.', 400);
-        }
-
-        $reported_user = get_userdata( $reported_id );
-        if ( ! $reported_user ) {
-            return $this->error('user_not_found', 'User not found.', 404);
         }
 
         if ( $reason_key === 'other' && strlen( $reason_detail ) < BCC_DISPUTES_MIN_DETAIL_LENGTH ) {
             return $this->error('detail_required', 'Please provide at least ' . BCC_DISPUTES_MIN_DETAIL_LENGTH . ' characters describing your reason.', 400);
         }
 
-        if ( UserReportRepository::countRecentReportsByReporter($reporter_id) >= 5 ) {
-            return $this->error('report_limit_reached', 'You have reached the daily report limit. Please try again later.', 429);
-        }
-
         if ( UserReportRepository::hasActiveReport($reporter_id, $reported_id) ) {
             return $this->error('already_reported', 'You have already submitted an active report against this user.', 409);
         }
 
-        // F-311 (M5): the 60 s throttle is spent only by a submission that
-        // passed validation. It used to run first, so a refusal the member
-        // could fix (cannot_self_report, detail_required, already_reported)
-        // burned the window and the corrected resubmit got a 429.
         $throttled = $this->throttle('report_user', $reporter_id, 60);
         if ($throttled) return $throttled;
+
+        // ⚠ AFTER the throttle (#669 review): user_not_found says whether an
+        // account id exists. Ahead of the per-minute throttle it let anyone
+        // signed in probe user ids at full speed.
+        $reported_user = get_userdata( $reported_id );
+        if ( ! $reported_user ) {
+            return $this->error('user_not_found', 'User not found.', 404);
+        }
+
+        if ( UserReportRepository::countRecentReportsByReporter($reporter_id) >= 5 ) {
+            return $this->error('report_limit_reached', 'You have reached the daily report limit. Please try again later.', 429);
+        }
 
         // Protect targets from coordinated report campaigns.
         if ( UserReportRepository::countActiveReportsAgainst($reported_id) >= 10 ) {

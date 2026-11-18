@@ -64,6 +64,14 @@ namespace {
         /** @return mixed */
         function get_user_meta(int $userId, string $key = '', bool $single = false)
         {
+            if ($key === '') {
+                // WordPress: every key, each as a list of values.
+                $all = [];
+                foreach (array_keys($GLOBALS['__bcc_ph']['meta'][$userId] ?? []) as $k) {
+                    $all[$k] = bcc_hri_values($userId, (string) $k);
+                }
+                return $all;
+            }
             $values = bcc_hri_values($userId, $key);
             if ($single) {
                 return $values[0] ?? '';
@@ -158,6 +166,116 @@ namespace {
                 }
             }
             return false;
+        }
+    }
+}
+
+// ── F-285 / F-287: what the real signup() and resetPassword() need ─────
+
+namespace BCC\Trust\Core\Security {
+    if (!class_exists(AuditLogger::class, false)) {
+        final class AuditLogger
+        {
+            /** @param array<string, mixed> $context */
+            public static function log(string $action, int $actorId, array $context = [], string $targetType = '', int $targetId = 0): void
+            {
+                $GLOBALS['__bcc_ph']['audit'][] = ['action' => $action, 'actor' => $actorId, 'context' => $context, 'target' => $targetId];
+            }
+        }
+    }
+}
+
+namespace BCC\Trust\Core\Services {
+    if (!class_exists(AccountSecurityMailer::class, false)) {
+        final class AccountSecurityMailer
+        {
+            public static function passwordChanged(int $userId): void {}
+        }
+    }
+}
+
+namespace BCC\Trust\Onchain\Repositories {
+    if (!class_exists(WalletRepository::class, false)) {
+        final class WalletRepository
+        {
+            /** @return list<object> */
+            public static function getForUserOrThrow(int $userId, ?string $walletType = null, bool $verifiedOnly = false): array
+            {
+                if (!empty($GLOBALS['__bcc_ph']['wallet_read_fails'])) {
+                    throw new \RuntimeException('injected wallet read failure');
+                }
+                return $GLOBALS['__bcc_ph']['wallets'][$userId] ?? [];
+            }
+        }
+    }
+}
+
+namespace {
+    if (!class_exists('WP_Error', false)) {
+        class WP_Error
+        {
+            public function __construct(private string $code = '', private string $message = '') {}
+            public function get_error_code(): string { return $this->code; }
+            public function get_error_message(): string { return $this->message; }
+        }
+    }
+    if (!function_exists('wp_insert_user')) {
+        /**
+         * @param array<string, mixed> $data
+         * @return int|\WP_Error
+         */
+        function wp_insert_user(array $data)
+        {
+            foreach ($GLOBALS['__bcc_ph']['users'] as $u) {
+                if (strcasecmp((string) $u['login'], (string) $data['user_login']) === 0) {
+                    return new \WP_Error('existing_user_login', 'login taken');
+                }
+                if (strcasecmp((string) $u['email'], (string) $data['user_email']) === 0) {
+                    return new \WP_Error('existing_user_email', 'email taken');
+                }
+            }
+            $id = max(array_merge([100], array_keys($GLOBALS['__bcc_ph']['users']))) + 1;
+            $GLOBALS['__bcc_ph']['users'][$id] = [
+                'email'      => (string) $data['user_email'],
+                'login'      => (string) $data['user_login'],
+                'display'    => (string) ($data['display_name'] ?? ''),
+                'registered' => time(),
+            ];
+            $GLOBALS['__bcc_ph']['passwords'][$id] = (string) $data['user_pass'];
+            foreach ((array) ($data['meta_input'] ?? []) as $k => $v) {
+                $GLOBALS['__bcc_ph']['meta'][$id][$k] = (string) $v;
+            }
+            return $id;
+        }
+    }
+    if (!function_exists('wp_delete_user')) {
+        function wp_delete_user(int $id): bool
+        {
+            if (!isset($GLOBALS['__bcc_ph']['users'][$id])) {
+                return false;
+            }
+            unset($GLOBALS['__bcc_ph']['users'][$id], $GLOBALS['__bcc_ph']['meta'][$id], $GLOBALS['__bcc_ph']['passwords'][$id]);
+            $GLOBALS['__bcc_ph']['deleted'][] = $id;
+            return true;
+        }
+    }
+    if (!function_exists('check_password_reset_key')) {
+        /** @return \WP_User|\WP_Error */
+        function check_password_reset_key(string $key, string $login)
+        {
+            foreach ($GLOBALS['__bcc_ph']['users'] as $id => $u) {
+                if ($u['login'] === $login && ($GLOBALS['__bcc_ph']['reset_keys'][$id] ?? null) === $key) {
+                    return new \WP_User((int) $id, $u['email'], $u['login'], $u['display']);
+                }
+            }
+            return new \WP_Error('invalid_key', 'invalid');
+        }
+    }
+    if (!function_exists('reset_password')) {
+        function reset_password(\WP_User $user, string $password): void
+        {
+            $GLOBALS['__bcc_ph']['passwords'][$user->ID] = $password;
+            unset($GLOBALS['__bcc_ph']['reset_keys'][$user->ID]);
         }
     }
 }

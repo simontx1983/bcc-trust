@@ -75,6 +75,7 @@ final class OnchainAdminIndexerActionsTest extends TestCase
             'admin_post_bcc_nft_indexer_set_state',
             'admin_post_bcc_helius_provision',
             'admin_post_bcc_helius_resync',
+            'admin_post_bcc_helius_reregister',
         ], $GLOBALS['bcc_test_registered_actions']);
     }
 

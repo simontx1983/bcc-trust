@@ -113,7 +113,15 @@ final class PendingEmailService
         $user     = get_userdata($userId);
         $oldEmail = $user instanceof \WP_User ? (string) $user->user_email : '';
 
-        $result = wp_update_user(['ID' => $userId, 'user_email' => $pending['email']]);
+        // The old address gets BCC's own notice (the caller's job). WordPress
+        // core would send a second "Email Changed" mail from the same update
+        // (F-294), so its notice is switched off for THIS write only.
+        add_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
+        try {
+            $result = wp_update_user(['ID' => $userId, 'user_email' => $pending['email']]);
+        } finally {
+            remove_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
+        }
         if (is_wp_error($result)) {
             return ['ok' => false, 'error' => self::ERR_WRITE_FAILED];
         }

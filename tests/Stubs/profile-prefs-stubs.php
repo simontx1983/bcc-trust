@@ -121,6 +121,18 @@ namespace BCC\Trust\Core\REST {
     }
 }
 
+namespace BCC\Trust\Core\Services {
+    // F-333: HandleService::nextChangeAt() (profile-prefs `handle_next_change_at`)
+    // reads the cooldown meta from this namespace; same store as above.
+    if (!function_exists(__NAMESPACE__ . '\get_user_meta')) {
+        /** @return mixed */
+        function get_user_meta(int $userId, string $key = '', bool $single = false)
+        {
+            return $GLOBALS['__bcc_prefs_meta'][$userId][$key] ?? '';
+        }
+    }
+}
+
 namespace BCC\Trust\Core\Support {
     // ⚠ F-341: /me/profile-prefs now reads and writes the §K2 flags through
     // PrivacySettings, which lives in THIS namespace — so its unqualified
