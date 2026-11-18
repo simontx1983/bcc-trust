@@ -18,6 +18,34 @@ require_once __DIR__ . '/announcement-archive-stubs.php';
 
 $GLOBALS['__bcc_arch_post_writes'] = [];
 
+// Minimal pass-throughs so a mutated edit() (refusal removed) reaches the
+// post write and fails the "no post write" assertion, not an undefined
+// function.
+if (!function_exists('wp_kses_post')) {
+    function wp_kses_post($data)
+    {
+        return $data;
+    }
+}
+if (!function_exists('wp_slash')) {
+    function wp_slash($value)
+    {
+        return $value;
+    }
+}
+if (!function_exists('is_wp_error')) {
+    function is_wp_error($thing): bool
+    {
+        return $thing instanceof \WP_Error;
+    }
+}
+if (!function_exists('has_filter')) {
+    function has_filter($hook_name, $callback = false)
+    {
+        return false;
+    }
+}
+
 if (!function_exists('wp_update_post')) {
     /** @param array<string, mixed> $post */
     function wp_update_post($post = [], bool $wp_error = false, bool $fire_after_hooks = true)
