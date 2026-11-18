@@ -37,7 +37,7 @@ jobs:
           repository: simontx1983/bcc-core
           path: app/public/wp-content/plugins/bcc-core
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: '8.2'
           # gmp is required by simplito/elliptic-php (on-chain crypto).
@@ -280,7 +280,7 @@ jobs:
           repository: simontx1983/bcc-core
           path: app/public/wp-content/plugins/bcc-core
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: '8.2'
           extensions: gmp, mbstring, mysqli
@@ -330,7 +330,7 @@ jobs:
         with:
           repository: simontx1983/bcc-core
           path: app/public/wp-content/plugins/bcc-core
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: '8.2'
           extensions: gmp, mbstring, mysqli
@@ -385,7 +385,7 @@ jobs:
         with:
           repository: simontx1983/bcc-core
           path: app/public/wp-content/plugins/bcc-core
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: '8.2'
           extensions: gmp, intl, mbstring, mysqli
@@ -451,7 +451,7 @@ jobs:
           docker exec mariadb mariadb -uroot -proot -e \
             "SELECT VERSION(), @@GLOBAL.sql_mode, @@GLOBAL.transaction_isolation, @@GLOBAL.innodb_lock_wait_timeout"
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: '8.2'
           extensions: gmp, mbstring, mysqli
