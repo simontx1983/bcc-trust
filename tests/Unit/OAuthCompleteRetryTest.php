@@ -18,8 +18,12 @@ use PHPUnit\Framework\TestCase;
  *   - submits for one token are serialised by an advisory lock; a submit
  *     that cannot get it within the wait answers a retryable 503 and
  *     creates nothing;
- *   - after a successful create, a retry with that token signs in as that
- *     account (fresh session, the same 201 shape) for OAUTH_RETRY_SECONDS.
+ *   - after a successful create, ONE retry of the same request signs in
+ *     as that account (fresh session, the same 201 shape), audited.
+ * The token sits in a URL, so that replay is narrow (review, blocking):
+ * one use, OAUTH_RETRY_SECONDS (two minutes), the same handle, no "sign
+ * out everywhere" since, and a marker that cannot be deleted is not
+ * honoured. Each guard has its own test below.
  *
  * Against the REAL controller, over handle-rename-identity-stubs.php +
  * account-prehijack-stubs.php (whose AdvisoryLock stub records acquire /
@@ -88,17 +92,86 @@ final class OAuthCompleteRetryTest extends TestCase
         self::assertSame(array_keys($first['data']), array_keys($retry['data']), 'the same response shape');
         self::assertCount($users, $GLOBALS['__bcc_ph']['users'], 'no second account');
         self::assertCount($mails, $GLOBALS['__bcc_ph']['mail'], 'no second mail');
+        self::assertSame(
+            [['oauth_complete_retry_signin', ['user_id' => $first['data']['user_id']]]],
+            self::retryAudits(),
+            'the replay sign-in is audited, once'
+        );
     }
 
-    public function testARetryWithADifferentHandleIsStillTheSameAccount(): void
+    /** @return list<array{0: string, 1: array<string, mixed>}> */
+    private static function retryAudits(): array
     {
-        $first = self::complete('newcomer');
+        return array_values(array_filter(
+            $GLOBALS['__bcc_ph']['audit_log'] ?? [],
+            static fn (array $a): bool => $a[0] === 'oauth_complete_retry_signin'
+        ));
+    }
 
-        $retry = self::complete('someone-else');
+    /** @param array{status: int, data: array<string, mixed>, code: string} $res */
+    private static function assertSpent(array $res, string $why): void
+    {
+        self::assertSame(400, $res['status'], $why);
+        self::assertSame('bcc_invalid_oauth_token', $res['code'], $why);
+        self::assertArrayNotHasKey('token', $res['data'], 'no session');
+    }
 
-        self::assertSame(201, $retry['status']);
-        self::assertSame($first['data']['user_id'], $retry['data']['user_id']);
-        self::assertSame('newcomer', $retry['data']['handle'], 'the account the token already created');
+    public function testOnlyOneReplayIsHonoured(): void
+    {
+        self::complete();
+        self::assertSame(201, self::complete()['status'], 'the one replay');
+
+        self::assertSpent(self::complete(), 'a second replay');
+        self::assertCount(1, self::retryAudits());
+        self::assertCount(1, $GLOBALS['__bcc_ph']['users'], 'no second account');
+    }
+
+    public function testARetryWithADifferentHandleIsRefusedAndSpendsTheReplay(): void
+    {
+        self::complete('newcomer');
+
+        self::assertSpent(self::complete('someone-else'), 'another handle is not the same request');
+        self::assertSpent(self::complete('newcomer'), 'and it used up the one replay');
+        self::assertSame([], self::retryAudits());
+        self::assertCount(1, $GLOBALS['__bcc_ph']['users'], 'no second account');
+    }
+
+    public function testTheSameHandleTypedDifferentlyIsTheSameRequest(): void
+    {
+        self::complete('newcomer');
+
+        self::assertSame(201, self::complete('  NewComer ')['status'], 'normalised as the create normalises it');
+    }
+
+    public function testTheReplayWindowIsTwoMinutes(): void
+    {
+        self::complete();
+
+        self::assertSame(120, OAuthController::OAUTH_RETRY_SECONDS);
+        $ttls = array_filter(
+            $GLOBALS['__bcc_ph']['transient_ttls'] ?? [],
+            static fn ($key): bool => str_starts_with((string) $key, 'bcc_oauth_done_'),
+            ARRAY_FILTER_USE_KEY
+        );
+        self::assertSame([120], array_values($ttls), 'the marker lives two minutes');
+    }
+
+    public function testASignOutEverywhereKillsTheReplay(): void
+    {
+        $first = self::complete();
+        \BCC\Trust\Core\Support\JwtToken::revokeAllForUser((int) $first['data']['user_id']);
+
+        self::assertSpent(self::complete(), 'the token version moved since the sign-up');
+        self::assertSame([], self::retryAudits());
+    }
+
+    public function testAMarkerThatCannotBeDeletedIsNotHonoured(): void
+    {
+        self::complete();
+        $GLOBALS['__bcc_ph']['delete_transient_fails'] = true;
+
+        self::assertSpent(self::complete(), 'single use or not at all');
+        self::assertSame([], self::retryAudits());
     }
 
     public function testASubmitThatCannotTakeTheLockCreatesNothing(): void

@@ -379,12 +379,16 @@ final class OAuthController
      * it). Now:
      *   - submits for one token are serialised by an advisory lock, so the
      *     second waits for the first instead of racing it;
-     *   - a successful create remembers (token hash → account) for
-     *     OAUTH_RETRY_SECONDS, and a retry with that token signs in as that
-     *     account: a fresh session, the same 201 response shape. No second
-     *     account, no second mail.
-     * Only a hash of the token is stored; the token itself stays single-use
-     * for CREATING an account.
+     *   - a successful create remembers (token hash → account + its token
+     *     version) for OAUTH_RETRY_SECONDS, and ONE retry of the same
+     *     request signs in as that account: a fresh session, the same 201
+     *     response shape. No second account, no second mail.
+     * The token sits in the complete-profile URL, so the replay is kept as
+     * narrow as a lost response needs (review, blocking): one use (the
+     * marker is deleted, under the lock, before anything is answered), two
+     * minutes, the SAME handle, and no "sign out everywhere" since. Anything
+     * else answers the spent-token 400. Only a hash of the token is stored;
+     * the token itself stays single-use for CREATING an account.
      */
     public function oauthComplete(WP_REST_Request $request): WP_REST_Response
     {
@@ -403,13 +407,10 @@ final class OAuthController
             return ApiResponse::error('bcc_unavailable', 'Your sign-up is still being completed. Please try again.', 503);
         }
         try {
-            $done = get_transient(self::OAUTH_DONE_PREFIX . self::tokenHash($providerToken));
-            if (is_numeric($done) && (int) $done > 0) {
-                $userId = (int) $done;
-                $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
-                if ($handle !== '' && get_userdata($userId) !== false) {
-                    return self::signedInResponse($userId, $handle);
-                }
+            $doneKey = self::OAUTH_DONE_PREFIX . self::tokenHash($providerToken);
+            $done    = get_transient($doneKey);
+            if ($done !== false) {
+                return self::replayCompletedSignup($doneKey, $done, $request);
             }
 
             return $this->completeOauthSignup($request, $providerToken);
@@ -418,8 +419,49 @@ final class OAuthController
         }
     }
 
-    /** F-294: how long a completed provider_token keeps answering a retry. */
-    public const OAUTH_RETRY_SECONDS = 600;
+    /**
+     * F-294: the one retry a completed provider_token may answer (see
+     * oauthComplete()). Runs under the token's lock.
+     *
+     * @param mixed $done the completion marker: {user_id, tv}
+     */
+    private static function replayCompletedSignup(string $doneKey, $done, WP_REST_Request $request): WP_REST_Response
+    {
+        // Single use: the marker goes FIRST. Under this token's lock no
+        // other submit can read it in between, so whatever happens below,
+        // it never answers again. A delete that fails refuses the replay.
+        if (!delete_transient($doneKey) || !is_array($done)) {
+            return self::spentProviderToken();
+        }
+        $userId = (int) ($done['user_id'] ?? 0);
+        $tv     = $done['tv'] ?? null;
+        if ($userId <= 0 || !is_int($tv) || get_userdata($userId) === false) {
+            return self::spentProviderToken();
+        }
+
+        // The same request only: the handle it created. And not after a
+        // "sign out everywhere", which moves the account's token version.
+        $handle = (string) get_user_meta($userId, HandleService::META_HANDLE, true);
+        $asked  = strtolower(trim((string) $request->get_param('handle')));
+        if ($handle === '' || $asked !== $handle || JwtToken::currentTokenVersion($userId) !== $tv) {
+            return self::spentProviderToken();
+        }
+
+        Logger::audit('oauth_complete_retry_signin', ['user_id' => $userId]);
+
+        return self::signedInResponse($userId, $handle);
+    }
+
+    private static function spentProviderToken(): WP_REST_Response
+    {
+        return ApiResponse::error('bcc_invalid_oauth_token', 'Session expired. Please sign in again.', 400);
+    }
+
+    /**
+     * F-294: how long a completed provider_token can answer its one retry.
+     * Enough for a lost response, no more: the token is in a URL.
+     */
+    public const OAUTH_RETRY_SECONDS = 120;
 
     /** F-294: how long a second submit waits for the first (seconds). */
     private const OAUTH_COMPLETE_LOCK_WAIT = 5;
@@ -472,11 +514,7 @@ final class OAuthController
         // Peek without consuming — validation errors below leave the token intact.
         $data = AuthSupport::peekOauthProviderToken($providerToken);
         if ($data === null) {
-            return ApiResponse::error(
-                'bcc_invalid_oauth_token',
-                'Session expired. Please sign in again.',
-                400
-            );
+            return self::spentProviderToken();
         }
 
         $handleService = Plugin::instance()->handleService();
@@ -575,8 +613,13 @@ final class OAuthController
         }
 
         // Consume the provider_token only after the user row is committed.
-        // F-294: a retry with this token signs in as this account (above).
-        set_transient(self::OAUTH_DONE_PREFIX . self::tokenHash($providerToken), (string) $userIdInt, self::OAUTH_RETRY_SECONDS);
+        // F-294: one retry of this request signs in as this account, while
+        // its token version stands (replayCompletedSignup()).
+        set_transient(
+            self::OAUTH_DONE_PREFIX . self::tokenHash($providerToken),
+            ['user_id' => $userIdInt, 'tv' => JwtToken::currentTokenVersion($userIdInt)],
+            self::OAUTH_RETRY_SECONDS
+        );
         AuthSupport::consumeOauthProviderToken($providerToken);
 
 
