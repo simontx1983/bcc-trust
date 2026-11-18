@@ -33,7 +33,13 @@ use PHPUnit\Framework\TestCase;
  *   - a network the account recently signed in from never sees it, and its
  *     failures don't count toward the identifier;
  *   - an identifier with no account behaves exactly like one with
- *     (existence-blind).
+ *     (existence-blind);
+ *   - (security review of #715) a valid token counts only if OUR /auth/login
+ *     widget produced it: action `login`, and a hostname that is one of
+ *     BCC_FRONTEND_ORIGIN's exact hosts (any scheme or port, any case) or
+ *     its Vercel preview shape. Another site, another widget, no hostname
+ *     or action, a look-alike host, or a git-branch alias is refused — a
+ *     FAIL, never a fail-open.
  *
  * ## Isolation
  * Subprocess-only; setUp() loads tests/Stubs/handle-rename-identity-stubs.php,
@@ -46,9 +52,16 @@ final class LoginCaptchaStepUpTest extends TestCase
     private const ALICE = 10;
     private const IP    = '198.51.100.20';
 
+    /** Our frontend (exact, a dev origin with a port, and the preview shape). */
+    private const ORIGINS = 'https://app.bcc.test,http://localhost:3000,'
+        . 'regex:^https://bcc-frontend-[a-z0-9]{9}-acme-team\.vercel\.app$';
+
     protected function setUp(): void
     {
         parent::setUp();
+        // Before the stubs: account-prehijack-stubs.php defines its own
+        // frontend origin when none is set.
+        define('BCC_FRONTEND_ORIGIN', self::ORIGINS);
         require_once __DIR__ . '/../Stubs/handle-rename-identity-stubs.php';
         require_once __DIR__ . '/../Stubs/login-captcha-stubs.php';
         require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
@@ -90,12 +103,27 @@ final class LoginCaptchaStepUpTest extends TestCase
         }
     }
 
-    private static function reply(bool $success, array $codes = [], int $status = 200): void
+    /**
+     * A siteverify reply. By default it says the token was solved on our
+     * frontend's login widget; $solved replaces that (`[]` = Turnstile said
+     * neither where nor for what).
+     *
+     * @param list<string>         $codes
+     * @param array<string, mixed> $solved
+     */
+    private static function reply(bool $success, array $codes = [], int $status = 200, array $solved = ['hostname' => 'app.bcc.test', 'action' => 'login']): void
     {
         $GLOBALS['__bcc_cap']['reply'] = [
             'response' => ['code' => $status],
-            'body'     => (string) json_encode(['success' => $success, 'error-codes' => $codes]),
+            'body'     => (string) json_encode(['success' => $success, 'error-codes' => $codes] + $solved),
         ];
+    }
+
+    /** With the step-up on for alice, a VALID token solved at $hostname for $action: the login status. */
+    private static function solvedAt(string $hostname, string $action = 'login'): int
+    {
+        self::reply(true, [], 200, ['hostname' => $hostname, 'action' => $action]);
+        return self::login('alice', 'right', 'tok-' . $hostname . '-' . $action)[0];
     }
 
     private static function code(array $body): string
@@ -273,5 +301,61 @@ final class LoginCaptchaStepUpTest extends TestCase
 
         self::assertSame(429, $status, 'the step-up says nothing about whether the account exists');
         self::assertSame('bcc_captcha_required', self::code($body));
+    }
+
+    /** Security review of #715: a valid token from another site that renders our public site key. */
+    public function testATokenSolvedOnAnotherSiteIsRefused(): void
+    {
+        self::failTimes('alice', LoginStepUp::IDENTIFIER_FAILURES + 1);
+        // login() drops the per-network `login` bucket before each call.
+        $before = array_diff_key($GLOBALS['__bcc_ph']['throttle_hits'] ?? [], ['login' => true]);
+
+        foreach (['evil.example', 'app.bcc.test.evil.example', 'evilapp.bcc.test', 'bcc.test'] as $host) {
+            self::reply(true, [], 200, ['hostname' => $host, 'action' => 'login']);
+            [$status, $body] = self::login('alice', 'right', 'tok-elsewhere');
+            self::assertSame(429, $status, "$host is not our frontend");
+            self::assertSame('bcc_captcha_required', self::code($body), 'asked again, never let through');
+        }
+
+        self::assertSame([], self::metrics(), 'a FAIL, not a Turnstile outage: nothing fails open');
+        self::assertSame($before, array_diff_key($GLOBALS['__bcc_ph']['throttle_hits'] ?? [], ['login' => true]), 'and, like any refused token, charges nothing');
+    }
+
+    public function testATokenForAnotherWidgetIsRefused(): void
+    {
+        self::failTimes('alice', LoginStepUp::IDENTIFIER_FAILURES + 1);
+
+        self::assertSame(429, self::solvedAt('app.bcc.test', 'signup'));
+        self::assertSame(429, self::solvedAt('app.bcc.test', 'LOGIN'), 'the action is exact');
+        self::assertSame(429, self::solvedAt('app.bcc.test', ''));
+    }
+
+    public function testAReplyWithoutHostnameOrActionIsRefused(): void
+    {
+        self::failTimes('alice', LoginStepUp::IDENTIFIER_FAILURES + 1);
+
+        foreach ([[], ['action' => 'login'], ['hostname' => 'app.bcc.test'], ['hostname' => ['app.bcc.test'], 'action' => 'login']] as $solved) {
+            self::reply(true, [], 200, $solved);
+            self::assertSame(429, self::login('alice', 'right', 'tok-partial')[0], (string) json_encode($solved));
+        }
+        self::assertSame([], self::metrics());
+    }
+
+    public function testEveryOneOfOurOriginsPasses(): void
+    {
+        self::failTimes('alice', LoginStepUp::IDENTIFIER_FAILURES + 1);
+
+        self::assertSame(403, self::solvedAt('app.bcc.test'), 'the production origin');
+        self::assertSame(403, self::solvedAt('APP.BCC.TEST'), 'hostnames compare case-insensitively');
+        self::assertSame(403, self::solvedAt('localhost'), 'a dev origin with a port: the host is what counts');
+        self::assertSame(403, self::solvedAt('bcc-frontend-abc123xyz-acme-team.vercel.app'), 'a Vercel preview');
+    }
+
+    public function testAGitBranchAliasIsNotAPreview(): void
+    {
+        self::failTimes('alice', LoginStepUp::IDENTIFIER_FAILURES + 1);
+
+        self::assertSame(429, self::solvedAt('bcc-frontend-git-main-acme-team.vercel.app'));
+        self::assertSame(429, self::solvedAt('bcc-frontend-abc123xyz-other-team.vercel.app'), "another team's preview");
     }
 }

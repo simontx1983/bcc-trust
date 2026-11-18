@@ -495,12 +495,17 @@ final class WalletAuthController
         // junk request touches no bucket. Lower-casing makes case-distinct
         // base58/SS58 addresses share a bucket: fail-closed, never looser.
         //
-        // Both buckets count VERIFIED sign-ins only. A refused call is not
-        // recorded (countDenied = false), and a signature that verifies
-        // against none of the address's challenges gives both slots back
-        // below. Before, anyone could spend one wallet's 5/min — or the whole
-        // route's 300/min, locking every wallet out — with junk signatures.
-        // The bound on junk is now the per-challenge cap below.
+        // Both buckets count COMPLETED sign-ins only. A refused call is not
+        // recorded (countDenied = false), and every other exit that does not
+        // sign someone in gives both slots back below: a signature that
+        // verifies against none of the address's challenges, a challenge
+        // already consumed, and (security review of #708) a VALID signature
+        // from a wallet no account uses, or an account with no handle.
+        // Otherwise anyone could spend one wallet's 5/min, or the whole
+        // route's 300/min and lock every wallet out, with junk signatures or
+        // with real ones from throwaway wallets. The bound on junk is the
+        // per-challenge cap below; on throwaway wallets, the nonce route's
+        // own limits.
         $identity = strtolower($walletAddress);
         if (!AuthSupport::allowIdentityAttempt(
             'wallet_login',
@@ -535,7 +540,9 @@ final class WalletAuthController
         [, $chain] = $match;
 
         if (WalletIdentityService::consumeAnonymousChallenge($walletAddress, (int) $chain->id) === null) {
-            // Replayed, or a concurrent request with the same signature won.
+            // Replayed, or a concurrent request with the same signature won
+            // (and that one is the sign-in that counts).
+            AuthSupport::releaseIdentityAttempt('wallet_login', $identity);
             return ApiResponse::error(
                 'bcc_invalid_request',
                 'Challenge not found or expired. Please request a new nonce.',
@@ -560,6 +567,7 @@ final class WalletAuthController
             // /signup (or the wallet-signup flow) with the wallet
             // pre-attached. Per Decision B(a) we surface this as a
             // distinct, recoverable code rather than auto-promoting.
+            AuthSupport::releaseIdentityAttempt('wallet_login', $identity);
             return ApiResponse::error(
                 'bcc_wallet_not_linked',
                 'No account is linked to this wallet.',
@@ -573,6 +581,7 @@ final class WalletAuthController
             // was created outside the BCC signup flow. Per §B6 the JWT
             // contract requires a handle — fail loud so the frontend
             // can route through a handle-claim surface.
+            AuthSupport::releaseIdentityAttempt('wallet_login', $identity);
             return ApiResponse::error(
                 'bcc_invalid_state',
                 'Account is missing a handle — set one before logging in.',
