@@ -19,7 +19,9 @@
  * self-lockout guard only relaxes once a real inbox is proven.
  *
  *   POST /bcc/v1/me/account/recovery-email         — prove wallet, stage email, mail OTP
- *   POST /bcc/v1/me/account/recovery-email/verify  — confirm OTP, promote to user_email
+ *   POST /bcc/v1/me/account/recovery-email/verify  — confirm OTP, promote to user_email;
+ *                                                     signs out every OTHER session and
+ *                                                     returns a fresh token (store it)
  *
  * The wallet challenge is issued by the existing GET /auth/nonce (authed)
  * and consumed here, so no new nonce surface is added. The signed message
@@ -206,6 +208,17 @@ final class RecoveryEmailEndpoint
         $pendingEmail = $confirmed['email'];
         $oldEmail     = $confirmed['old_email'];
 
+        // The account just gained the email it can be recovered through — a
+        // credential change, like the email-change confirm and the
+        // verify-email sign-in, which both sign out every other session. Same
+        // here (parity): revoke FIRST, then mint, so the fresh token carries
+        // the bumped version. It CONTINUES this session (F-253): read when it
+        // began before the revoke invalidates the presented token.
+        $sessionStart = \BCC\Trust\Core\Support\JwtToken::presentedSessionStartedAt($userId);
+        \BCC\Trust\Core\Support\JwtToken::revokeAllForUser($userId);
+        $handle     = (string) get_user_meta($userId, \BCC\Trust\Core\Services\HandleService::META_HANDLE, true);
+        $freshToken = \BCC\Trust\Core\Support\JwtToken::encodeContinuation($userId, $handle, $sessionStart);
+
         AuditLogger::log('recovery_email_confirmed', $userId, [], 'user', $userId);
 
         // Out-of-band notification. Replacing the synthetic placeholder →
@@ -217,7 +230,13 @@ final class RecoveryEmailEndpoint
             AccountSecurityMailer::emailChanged($userId, $oldEmail, $pendingEmail);
         }
 
-        $resp = ApiResponse::ok(['ok' => true, 'email' => $pendingEmail]);
+        $resp = ApiResponse::ok([
+            'ok'         => true,
+            'email'      => $pendingEmail,
+            'token'      => $freshToken,
+            'expires_in' => \BCC\Trust\Core\Support\JwtToken::TTL_SECONDS,
+            'token_type' => 'Bearer',
+        ]);
         $resp->header('Cache-Control', 'no-store');
         return $resp;
     }
