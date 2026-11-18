@@ -213,6 +213,13 @@ final class PasswordAuthController
             return ApiResponse::error('bcc_conflict', self::TAKEN_HANDLE, 409);
         }
 
+        // A password known to have leaked is refused (fails open when the
+        // breach list is unreachable). After the cheap checks, so a request
+        // that fails them costs no outside call.
+        if (\BCC\Trust\Core\Services\BreachedPasswordCheck::isBreached($password)) {
+            return \BCC\Trust\Core\Services\BreachedPasswordCheck::rejection();
+        }
+
         // wp_insert_user requires a unique user_login. We mint an internal
         // login from the handle (`u_<handle>`) so wp_user_login stays
         // disjoint from bcc_handle (per §B3 — handle is the public
@@ -817,6 +824,14 @@ final class PasswordAuthController
             // Same generic code for "expired" and "wrong key" — never
             // leak which one. The frontend surfaces "expired or invalid".
             return ApiResponse::error('bcc_invalid_reset_token', 'This reset link is expired or invalid.', 400);
+        }
+
+        // A password known to have leaked is refused (fails open when the
+        // breach list is unreachable). Only once the key is valid, so this
+        // is no anonymous breach lookup; the key is not consumed, so the
+        // same link can try another password.
+        if (\BCC\Trust\Core\Services\BreachedPasswordCheck::isBreached($password)) {
+            return \BCC\Trust\Core\Services\BreachedPasswordCheck::rejection();
         }
 
         $userId = (int) $user->ID;

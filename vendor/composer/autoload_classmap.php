@@ -218,6 +218,7 @@ return array(
     'BCC\\Trust\\Core\\Services\\BlockFollowBackfill' => $baseDir . '/app/Domain/Core/Services/BlockFollowBackfill.php',
     'BCC\\Trust\\Core\\Services\\BlogCoverImageWriter' => $baseDir . '/app/Domain/Core/Services/BlogCoverImageWriter.php',
     'BCC\\Trust\\Core\\Services\\BlogService' => $baseDir . '/app/Domain/Core/Services/BlogService.php',
+    'BCC\\Trust\\Core\\Services\\BreachedPasswordCheck' => $baseDir . '/app/Domain/Core/Services/BreachedPasswordCheck.php',
     'BCC\\Trust\\Core\\Services\\Capability\\CapabilityCatalog' => $baseDir . '/app/Domain/Core/Services/Capability/CapabilityCatalog.php',
     'BCC\\Trust\\Core\\Services\\Capability\\CapabilityResolver' => $baseDir . '/app/Domain/Core/Services/Capability/CapabilityResolver.php',
     'BCC\\Trust\\Core\\Services\\Capability\\CapabilityShadow' => $baseDir . '/app/Domain/Core/Services/Capability/CapabilityShadow.php',
