@@ -6,6 +6,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+use BCC\Trust\Onchain\Contracts\CountsErc1155Holdings;
 use BCC\Trust\Onchain\Contracts\CountsHoldingsWithCompleteness;
 use BCC\Trust\Onchain\Contracts\FetcherInterface;
 use BCC\Trust\Onchain\Repositories\ChainCheckpointRepository;
@@ -70,13 +71,14 @@ use BCC\Trust\Onchain\ValueObjects\HoldingsCount;
  *     }|null
  * }
  */
-class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
+class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness, CountsErc1155Holdings
 {
     private const HTTP_TIMEOUT          = 12;
     private const ALCHEMY_MAX_COUNT     = 1000; // alchemy_getAssetTransfers per-page cap (spike 1)
     private const ALCHEMY_NFT_PAGE_SIZE = 100;  // getContractsForOwner pageSize (max per Alchemy docs)
     private const ALCHEMY_NFT_MAX_PAGES = 5;    // Hard cap. 5 × 100 = 500 contracts/wallet/fetch — covers whales without unbounded CU spend.
     private const ALCHEMY_NFT_CU_PER_CALL = 320;
+    private const ALCHEMY_NFT_OWNER_CU    = 480; // getNFTsForOwner, charged to the same daily gauge (F-278)
 
     /** @var ChainRow */
     private object $chain;
@@ -219,6 +221,74 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
     public function max_requests_per_evidence_read(): int
     {
         return 1;
+    }
+
+    /**
+     * F-278: the wallet's CURRENT holdings of one ERC-1155 contract, from
+     * Alchemy NFT API v3 `getNFTsForOwner` filtered to that contract. Unlike
+     * the transfer index, this does not depend on when the wallet was
+     * linked.
+     *
+     * `totalCount` is the number of DISTINCT token ids the wallet owns under
+     * the filter, not the summed balance. So 0 is exact (owns none) and a
+     * positive count is only a lower bound on the balance.
+     *
+     * Spam is NOT excluded: a gate contract Alchemy classifies as spam must
+     * still be counted, or its holders would read as owning none.
+     *
+     * null (UNKNOWN), never a zero, when: an address is not an EVM address,
+     * the chain has no Alchemy credential, the daily CU gauge cannot cover
+     * the call, the request failed, or the body is not the documented shape
+     * (`totalCount` a non-negative integer, `ownedNfts` a list that is empty
+     * exactly when the count is zero).
+     */
+    public function count_erc1155_holdings(string $wallet, string $contract): ?HoldingsCount
+    {
+        $owner = strtolower($wallet);
+        $to    = strtolower($contract);
+        if (!preg_match('/^0x[a-f0-9]{40}$/', $owner) || !preg_match('/^0x[a-f0-9]{40}$/', $to)) {
+            return null;
+        }
+
+        $nftBase = $this->alchemyNftBase();
+        if ($nftBase === null) {
+            return null;
+        }
+
+        $chainId     = (int) $this->chain->id;
+        $dailyBudget = defined('BCC_ETH_DAILY_RPC_BUDGET')
+            ? (int) constant('BCC_ETH_DAILY_RPC_BUDGET')
+            : NftEthIndexerWorker::DEFAULT_DAILY_BUDGET;
+        ChainCheckpointRepository::ensureExists($chainId);
+        if (ChainCheckpointRepository::cuRemainingForToday($chainId, $dailyBudget) < self::ALCHEMY_NFT_OWNER_CU) {
+            return null;
+        }
+
+        $page = $this->alchemyNftGet(
+            $nftBase . '/getNFTsForOwner',
+            [
+                'owner'                => $owner,
+                'contractAddresses[]'  => $to,
+                'withMetadata'         => 'false',
+                'pageSize'             => '1',
+            ],
+            'Alchemy NFT getNFTsForOwner'
+        );
+        ChainCheckpointRepository::addCuUsage($chainId, self::ALCHEMY_NFT_OWNER_CU);
+
+        if ($page === null) {
+            return null;
+        }
+        $total = $page['totalCount'] ?? null;
+        $owned = $page['ownedNfts'] ?? null;
+        if (!is_int($total) || $total < 0 || !is_array($owned) || !array_is_list($owned)) {
+            return null;
+        }
+        if (($total === 0) !== ($owned === [])) {
+            return null; // self-contradictory body: no answer
+        }
+
+        return $total === 0 ? HoldingsCount::exact(0) : HoldingsCount::atLeast($total);
     }
 
     /**
@@ -1403,7 +1473,7 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
      * @param array<string, scalar|null> $queryParams
      * @return array<string, mixed>|null
      */
-    private function alchemyNftGet(string $url, array $queryParams): ?array
+    private function alchemyNftGet(string $url, array $queryParams, string $label = 'Alchemy NFT getContractsForOwner'): ?array
     {
         $filtered = [];
         foreach ($queryParams as $k => $v) {
@@ -1425,7 +1495,7 @@ class EvmFetcher implements FetcherInterface, CountsHoldingsWithCompleteness
             'timeout'   => self::HTTP_TIMEOUT,
             'sslverify' => true,
         ], [
-            'label'    => 'Alchemy NFT getContractsForOwner',
+            'label'    => $label,
             'chain_id' => $chainId,
         ]);
 

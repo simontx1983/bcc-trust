@@ -436,6 +436,7 @@ return array(
     'BCC\\Trust\\Onchain\\CLI\\HallOwnershipRepairCommand' => $baseDir . '/app/Domain/Onchain/CLI/HallOwnershipRepairCommand.php',
     'BCC\\Trust\\Onchain\\CLI\\SolanaGateIdentityRepairCommand' => $baseDir . '/app/Domain/Onchain/CLI/SolanaGateIdentityRepairCommand.php',
     'BCC\\Trust\\Onchain\\CLI\\ValidatorMsgQueueCommand' => $baseDir . '/app/Domain/Onchain/CLI/ValidatorMsgQueueCommand.php',
+    'BCC\\Trust\\Onchain\\Contracts\\CountsErc1155Holdings' => $baseDir . '/app/Domain/Onchain/Contracts/CountsErc1155Holdings.php',
     'BCC\\Trust\\Onchain\\Contracts\\CountsHoldingsWithCompleteness' => $baseDir . '/app/Domain/Onchain/Contracts/CountsHoldingsWithCompleteness.php',
     'BCC\\Trust\\Onchain\\Contracts\\FetcherInterface' => $baseDir . '/app/Domain/Onchain/Contracts/FetcherInterface.php',
     'BCC\\Trust\\Onchain\\Contracts\\LogoResolver' => $baseDir . '/app/Domain/Onchain/Contracts/LogoResolver.php',
