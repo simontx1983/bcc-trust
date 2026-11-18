@@ -269,6 +269,31 @@ final class PostViewRecorder
             return true;
         }
 
+        // ⚠⚠ NO PERSISTENT OBJECT CACHE ⇒ NO WINDOW, DELIBERATELY.
+        //
+        // Without one, wp_cache_* is a per-request array, so every request
+        // starts empty and the claim below could never dedupe across
+        // requests — it would be a pointless round-trip per view. Returning
+        // early makes that degradation explicit instead of accidental.
+        //
+        // ⛔ There is deliberately NO wp_options / transient fallback. That
+        // is exactly what bcc-core's Throttle REMOVED: "a wp_options-backed
+        // sliding-window fallback; that fallback caused write amplification
+        // on the most-contended WP table under load and has been removed."
+        // A view beacon fires far more often than a rate-limit check, so the
+        // same fallback here would be worse, and it would put a write on the
+        // request path of a metric whose own contract entry calls it
+        // indicative.
+        //
+        // ⚠ Note this does NOT disable the beacon: Throttle::isReady() is
+        // satisfied by bcc-trust's RateLimiter existing, not by the object
+        // cache, so views are still recorded on a cache-less install — they
+        // just are not de-duplicated. That is the fail-open direction the
+        // rest of this path takes, and §4 states the requirement.
+        if (!wp_using_ext_object_cache()) {
+            return true;
+        }
+
         // 8 bytes of the (already salted, already one-way) code, hex-encoded
         // so the key is printable and bounded. Not an identity, and it
         // outlives the request by at most the window.

@@ -63,10 +63,22 @@ final class PostReachCascadeIntegrationTest extends TestCase
         \BCC\Trust\Core\Database\TableRegistry::flushExistenceCache();
 
         $this->seedFeedActivity(self::ACT_ID, self::WP_POST, '1', self::AUTHOR);
+
+        // ⚠ The harness reports NO persistent object cache by default, and
+        // the 30-minute view window is skipped without one (deliberately —
+        // wp_cache_* would be a per-request array, so it could never dedupe
+        // across requests, and a wp_options fallback is the write
+        // amplification bcc-core removed). So the window tests must declare
+        // one, or they would pass vacuously against a disabled window.
+        $GLOBALS['__bcc_test_ext_object_cache'] = true;
     }
 
     protected function tearDown(): void
     {
+        unset(
+            $GLOBALS['__bcc_test_ext_object_cache'],
+            $GLOBALS['__bcc_test_object_cache_write_fails']
+        );
         $this->removeFeedActivities();
     }
 
@@ -238,6 +250,43 @@ final class PostReachCascadeIntegrationTest extends TestCase
         self::assertNotNull($reach);
         self::assertSame(1, $reach['views'], 'views must not be inflatable by re-firing the beacon');
         self::assertSame(1, $reach['daily_unique_viewers']);
+    }
+
+    /**
+     * ⚠ Without a persistent object cache the window is SKIPPED, so every
+     * view counts. Asserted rather than left implicit, because it is the
+     * documented degradation (§4 states the requirement) and because the
+     * alternative — a wp_options fallback — is precisely what bcc-core's
+     * Throttle removed for write amplification.
+     *
+     * Note the beacon itself still works in this configuration:
+     * `Throttle::isReady()` is satisfied by bcc-trust's RateLimiter
+     * existing, not by the object cache. So views are recorded, just not
+     * de-duplicated.
+     */
+    public function testWithoutAPersistentObjectCacheEveryViewCounts(): void
+    {
+        unset($GLOBALS['__bcc_test_ext_object_cache']);
+        $reader = self::AUTHOR + 37;
+
+        self::assertSame(
+            'counted_unique',
+            \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader)
+        );
+        self::assertSame(
+            'counted_repeat',
+            \BCC\Trust\Core\Services\PostViewRecorder::record(self::ACT_ID, 'feed', $reader),
+            'no cache => no window => the second view is still counted'
+        );
+
+        $reach = PostReachRepository::reachForPost(self::ACT_ID);
+        self::assertNotNull($reach);
+        self::assertSame(2, $reach['views'], 'both counted — the documented degradation');
+        self::assertSame(
+            1,
+            $reach['daily_unique_viewers'],
+            'uniqueness is DB-backed, so it still holds without a cache'
+        );
     }
 
     /** The window is per post: another post in the same window still counts. */
