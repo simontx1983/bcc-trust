@@ -70,6 +70,8 @@ final class AccountWalletConfirmTest extends TestCase
         require_once __DIR__ . '/../Stubs/pending-email-stubs.php';
         require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
         require_once __DIR__ . '/../Stubs/wallet-confirm-stubs.php';
+        require_once __DIR__ . '/../Stubs/breached-password-stubs.php';
+        $GLOBALS['__bcc_hibp'] = ['calls' => [], 'metrics' => [], 'logs' => []];
 
         $GLOBALS['__bcc_ph'] = [
             'users'        => [],
@@ -538,6 +540,22 @@ final class AccountWalletConfirmTest extends TestCase
 
         self::assertSame(422, $status);
         self::assertTrue(self::challengeIsLive());
+        self::assertSame('random-never-shown', $GLOBALS['__bcc_ph']['passwords'][self::USER]);
+    }
+
+    public function testABreachedPasswordIsAnsweredBeforeTheChallengeIsSpent(): void
+    {
+        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_PASSWORD_CHANGE);
+        $GLOBALS['__bcc_hibp']['response'] = [
+            'response' => ['code' => 200],
+            'body'     => substr(strtoupper(sha1('a brand new passphrase')), 5) . ":3\r\n",
+        ];
+
+        [$status, $err] = self::call([new MyAccountEndpoint(), 'patchPassword'], ['password' => 'a brand new passphrase'] + self::walletProof($sig));
+
+        self::assertSame(422, $status);
+        self::assertSame('bcc_password_breached', $err['code'] ?? null);
+        self::assertTrue(self::challengeIsLive(), 'the signed challenge survives for another try');
         self::assertSame('random-never-shown', $GLOBALS['__bcc_ph']['passwords'][self::USER]);
     }
 

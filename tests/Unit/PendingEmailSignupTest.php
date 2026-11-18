@@ -42,6 +42,8 @@ final class PendingEmailSignupTest extends TestCase
         parent::setUp();
         require_once __DIR__ . '/../Stubs/handle-rename-identity-stubs.php';
         require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
+        require_once __DIR__ . '/../Stubs/breached-password-stubs.php';
+        $GLOBALS['__bcc_hibp'] = ['calls' => [], 'metrics' => [], 'logs' => []];
         $GLOBALS['__bcc_ph'] = [
             'users'        => [],
             'meta'         => [],
@@ -103,6 +105,15 @@ final class PendingEmailSignupTest extends TestCase
             'password' => 'a brand new password',
         ]);
         return (new PasswordAuthController())->resetPassword($req)->get_status();
+    }
+
+    /** The breach list answers that $password IS listed. */
+    private static function breached(string $password): void
+    {
+        $GLOBALS['__bcc_hibp']['response'] = [
+            'response' => ['code' => 200],
+            'body'     => substr(strtoupper(sha1($password)), 5) . ":12\r\n",
+        ];
     }
 
     private static function verified(int $userId): string
@@ -209,5 +220,60 @@ final class PendingEmailSignupTest extends TestCase
         self::assertSame(200, self::reset(self::STALE));
 
         self::assertNotContains('bcc_email_verified', $GLOBALS['__bcc_ph']['actions']);
+    }
+
+    // ── breached passwords ───────────────────────────────────────────────
+
+    public function testABreachedPasswordIsRefusedAtSignupAndNoAccountIsMade(): void
+    {
+        self::breached('correct horse battery');
+
+        $out = self::signup('alice', 'alice@example.test');
+
+        self::assertSame(422, $out['status']);
+        self::assertSame('This password has appeared in a data breach; please choose a different one.', $out['message']);
+        self::assertSame([], $GLOBALS['__bcc_ph']['users'], 'no account');
+        self::assertCount(1, $GLOBALS['__bcc_hibp']['calls']);
+    }
+
+    public function testATakenHandleCostsNoBreachLookup(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][7] = ['email' => 'bob@example.test', 'login' => AuthSupport::deriveLogin('bob'), 'display' => 'bob'];
+        $GLOBALS['__bcc_ph']['meta'][7]  = [HandleService::META_HANDLE => 'bob', AuthSupport::META_EMAIL_VERIFIED => '1'];
+
+        self::assertSame(409, self::signup('bob', 'other@example.test')['status']);
+        self::assertSame([], $GLOBALS['__bcc_hibp']['calls']);
+    }
+
+    public function testSignupStillWorksWhenTheBreachListIsDown(): void
+    {
+        $GLOBALS['__bcc_hibp']['response'] = new \WP_Error('http_request_failed', 'timed out');
+
+        self::assertSame(201, self::signup('alice', 'alice@example.test')['status']);
+        self::assertSame(['password_breach_check/unavailable'], $GLOBALS['__bcc_hibp']['metrics']);
+    }
+
+    public function testABreachedPasswordIsRefusedAtResetAndTheLinkStillWorks(): void
+    {
+        self::pending(self::STALE, 'alice', 'alice@example.test', self::DAY);
+        $GLOBALS['__bcc_ph']['passwords'][self::STALE] = 'the old password';
+        self::breached('a brand new password');
+
+        self::assertSame(422, self::reset(self::STALE));
+        self::assertSame('the old password', $GLOBALS['__bcc_ph']['passwords'][self::STALE], 'unchanged');
+        self::assertSame('k-' . self::STALE, $GLOBALS['__bcc_ph']['reset_keys'][self::STALE] ?? null, 'the key is not spent');
+
+        unset($GLOBALS['__bcc_hibp']['response']);
+        self::assertSame(200, self::reset(self::STALE));
+        self::assertSame('a brand new password', $GLOBALS['__bcc_ph']['passwords'][self::STALE]);
+    }
+
+    public function testAnInvalidResetKeyCostsNoBreachLookup(): void
+    {
+        self::pending(self::STALE, 'alice', 'alice@example.test', self::DAY);
+        $req = new \WP_REST_Request(['key' => 'wrong', 'login' => AuthSupport::deriveLogin('alice'), 'password' => 'a brand new password']);
+
+        self::assertSame(400, (new PasswordAuthController())->resetPassword($req)->get_status());
+        self::assertSame([], $GLOBALS['__bcc_hibp']['calls']);
     }
 }

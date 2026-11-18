@@ -370,6 +370,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Services\\BlockFollowBackfill' => __DIR__ . '/../..' . '/app/Domain/Core/Services/BlockFollowBackfill.php',
         'BCC\\Trust\\Core\\Services\\BlogCoverImageWriter' => __DIR__ . '/../..' . '/app/Domain/Core/Services/BlogCoverImageWriter.php',
         'BCC\\Trust\\Core\\Services\\BlogService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/BlogService.php',
+        'BCC\\Trust\\Core\\Services\\BreachedPasswordCheck' => __DIR__ . '/../..' . '/app/Domain/Core/Services/BreachedPasswordCheck.php',
         'BCC\\Trust\\Core\\Services\\Capability\\CapabilityCatalog' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Capability/CapabilityCatalog.php',
         'BCC\\Trust\\Core\\Services\\Capability\\CapabilityResolver' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Capability/CapabilityResolver.php',
         'BCC\\Trust\\Core\\Services\\Capability\\CapabilityShadow' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Capability/CapabilityShadow.php',
