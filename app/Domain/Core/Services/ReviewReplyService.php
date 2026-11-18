@@ -33,7 +33,9 @@ if (!defined('ABSPATH')) {
  *     answers for the page (answersFor). When the page changes hands (claim
  *     revoked, operator changed, page reassigned) the old author's reply
  *     stops showing and no longer holds the slot, so the current party can
- *     write their own. The old author may still delete theirs, not edit it.
+ *     write their own. The old author may still delete theirs, not edit it,
+ *     and still SEES it — as `viewer_stale_reply`, to them alone — so the
+ *     delete has a place in the UI (user decision 2026-11-18).
  *   - Shown nested under its review on the Reviews tabs, never as a feed
  *     item, and its feed_id takes no comments or reactions (FeedItemGate).
  *     A reply shows only while its review is visible AND the reply itself is
@@ -71,12 +73,18 @@ final class ReviewReplyService
      * The reply shown is the page's response: the one whose author answers
      * for the page now, and only while it is not hidden.
      *
+     * `viewer_stale_reply` is the VIEWER's own reply after a hand-over: they
+     * no longer answer for the page, so it is not the page's response and
+     * nobody else sees it, but its author does, so they can delete it. Null
+     * while it is moderation-hidden: that one is frozen (delete answers 404).
+     * It can sit beside `reply` when the new party has replied too.
+     *
      * A read failure degrades to "no reply shown, can't reply" for the page
      * (logged): a review list must still render, and a can_reply that
      * guessed "no reply yet" could offer a duplicate.
      *
      * @param list<array{id: int, page_id: int, voter_user_id: int}> $reviews
-     * @return array<int, array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}>
+     * @return array<int, array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, viewer_stale_reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}>
      */
     public function forReviews(int $viewerId, array $reviews): array
     {
@@ -106,15 +114,39 @@ final class ReviewReplyService
             $own     = self::byAuthor($all, $viewerId);
 
             $out[$r['id']] = [
-                'reply'     => $current !== null && !$current['hidden']
+                'reply'              => $current !== null && !$current['hidden']
                     ? $this->shapeReply($current, $viewerId)
                     : null,
-                'can_reply' => $readOk
+                'viewer_stale_reply' => $own !== null && !$own['hidden'] && !$this->answersFor($r['page_id'], $viewerId)
+                    ? $this->shapeReply($own, $viewerId, true)
+                    : null,
+                'can_reply'          => $readOk
                     ? $this->canReplyFor($viewerId, $r['page_id'], $r['voter_user_id'], $own !== null)
                     : self::deny('unavailable'),
             ];
         }
         return $out;
+    }
+
+    /**
+     * The author ids a list path must prefetch for forReviews() output: the
+     * shown reply's and the viewer's stale reply's. A summary built without
+     * its prefetch rows would show zero followers rather than re-reading.
+     *
+     * @param array<int, array{reply: array{author_id: int}|null, viewer_stale_reply: array{author_id: int}|null}> $bundles
+     * @return list<int>
+     */
+    public static function replyAuthorIds(array $bundles): array
+    {
+        $ids = [];
+        foreach ($bundles as $bundle) {
+            foreach ([$bundle['reply'], $bundle['viewer_stale_reply']] as $reply) {
+                if ($reply !== null) {
+                    $ids[$reply['author_id']] = true;
+                }
+            }
+        }
+        return array_keys($ids);
     }
 
     /**
@@ -410,15 +442,16 @@ final class ReviewReplyService
     }
 
     /**
-     * What THIS viewer may do with a reply that is shown as the page's
-     * response, so the client never derives it (§1.4.5): its author answers
-     * for the page by construction, so editing needs only authorship and
-     * good standing.
+     * What THIS viewer may do with a reply, so the client never derives it
+     * (§1.4.5). For the page's response its author answers for the page by
+     * construction, so editing needs only authorship and good standing. A
+     * $stale reply is the viewer's own after a hand-over: deletable, never
+     * editable (update() refuses it with 403).
      *
      * @param array{author_id: int} $row
      * @return array{can_edit: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}, can_delete: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}, can_report: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}
      */
-    private static function permissionsFor(array $row, int $viewerId): array
+    private static function permissionsFor(array $row, int $viewerId, bool $stale = false): array
     {
         $isAuthor = $viewerId > 0 && $row['author_id'] === $viewerId;
         $isRestricted = $viewerId > 0 && self::restricted($viewerId) !== null;
@@ -434,7 +467,7 @@ final class ReviewReplyService
         }
 
         return [
-            'can_edit'   => !$isAuthor ? self::deny('not_author') : ($isRestricted ? self::deny('sender_restricted') : self::allow()),
+            'can_edit'   => !$isAuthor ? self::deny('not_author') : ($stale ? self::deny('page_changed_hands') : ($isRestricted ? self::deny('sender_restricted') : self::allow())),
             'can_delete' => $isAuthor ? self::allow() : self::deny('not_author'),
             'can_report' => $report,
         ];
@@ -444,7 +477,7 @@ final class ReviewReplyService
      * @param array{vote_id: int, post_id: int, act_id: int, author_id: int, body: string, posted_at: string, edited_at: string|null, hidden: bool} $row
      * @return array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}
      */
-    private function shapeReply(array $row, int $viewerId): array
+    private function shapeReply(array $row, int $viewerId, bool $stale = false): array
     {
         return [
             'id'          => $row['post_id'],
@@ -456,7 +489,7 @@ final class ReviewReplyService
             // already parses (`feed_<act_id>`) → POST /me/reports feed_item.
             // It takes no comments or reactions (FeedItemGate).
             'feed_id'     => 'feed_' . $row['act_id'],
-            'permissions' => self::permissionsFor($row, $viewerId),
+            'permissions' => self::permissionsFor($row, $viewerId, $stale),
         ];
     }
 

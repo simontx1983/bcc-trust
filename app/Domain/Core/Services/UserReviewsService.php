@@ -137,15 +137,10 @@ final class UserReviewsService
                 $rows
             )
         );
-        $replyAuthorIds = [];
-        foreach ($replies as $bundle) {
-            if ($bundle['reply'] !== null) {
-                $replyAuthorIds[$bundle['reply']['author_id']] = true;
-            }
-        }
-        $prefetched = $replyAuthorIds === []
+        $replyAuthorIds = ReviewReplyService::replyAuthorIds($replies);
+        $prefetched     = $replyAuthorIds === []
             ? null
-            : \BCC\Trust\Core\Support\MemberSummaryPrefetcher::primeFor(array_keys($replyAuthorIds));
+            : \BCC\Trust\Core\Support\MemberSummaryPrefetcher::primeFor($replyAuthorIds);
 
         $items = [];
         $now   = time();
