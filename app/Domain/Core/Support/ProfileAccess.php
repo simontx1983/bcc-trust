@@ -141,8 +141,9 @@ final class ProfileAccess
      *
      * It filters more than the profile level, all of it privacy-positive
      * and all of it matching what PeepSo does elsewhere: banned and
-     * unvalidated accounts (`usr_role`), blocks in either direction when
-     * `user_blocking_enable` is on, and `hide_from_search`.
+     * unvalidated accounts (`usr_role`), blocks in either direction
+     * (`user_blocking_enable`, pinned ON by PrivacySettings, F-295), and
+     * `hide_from_search`.
      *
      * ── The two exemptions PeepSo's SQL does NOT make ───────────────
      *
