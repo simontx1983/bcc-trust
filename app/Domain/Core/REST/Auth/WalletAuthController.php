@@ -701,6 +701,19 @@ final class WalletAuthController
         // Point of no return for the nonce: consume the challenge the
         // signature verified against (above). Null = replayed, or a concurrent
         // request with the same signature won.
+        // F-294: an address that is already taken fails at wp_insert_user
+        // below — AFTER this challenge is spent — so the user had to sign
+        // again just to be told. Checked here instead: after the signature
+        // verified (no wallet proof, no address probe), before the consume.
+        // The race (taken between here and the insert) still 409s below.
+        if (email_exists($email) !== false) {
+            return ApiResponse::error(
+                'bcc_conflict',
+                $emailRaw !== '' ? 'An account with that email already exists.' : 'Account creation failed; contact support.',
+                409
+            );
+        }
+
         if (WalletIdentityService::consumeAnonymousChallenge($walletAddress, (int) $chain->id) === null) {
             return ApiResponse::error(
                 'bcc_invalid_request',
@@ -788,18 +801,36 @@ final class WalletAuthController
         );
 
         if (!$walletLinkId) {
-            require_once ABSPATH . 'wp-admin/includes/user.php';
+            if (!function_exists('wp_delete_user')) {
+                require_once ABSPATH . 'wp-admin/includes/user.php';
+            }
             wp_delete_user($userIdInt);
 
-            Logger::warning('[bcc-trust] wallet-signup link race lost; rolled back user', [
-                'chain'   => (string) $chain->slug,
-                'address' => $walletAddress,
+            // F-294: say "already linked" only when it IS (someone else's
+            // link won the race). Any other link failure used to say so too,
+            // and the wallet sign-in it pointed to then answered
+            // bcc_wallet_not_linked. The account above is gone, so any
+            // matching row belongs to someone else. A failed read reads as
+            // "not linked": the retryable answer.
+            $linkedElsewhere = WalletRepository::existsForOtherUser(0, (int) $chain->id, $walletAddress);
+
+            Logger::warning('[bcc-trust] wallet-signup link failed; rolled back user', [
+                'chain'            => (string) $chain->slug,
+                'address'          => $walletAddress,
+                'linked_elsewhere' => $linkedElsewhere,
             ]);
 
+            if ($linkedElsewhere) {
+                return ApiResponse::error(
+                    'bcc_wallet_already_linked',
+                    'This wallet is already linked to an account. Sign in with your wallet instead.',
+                    409
+                );
+            }
             return ApiResponse::error(
-                'bcc_wallet_already_linked',
-                'This wallet is already linked to an account. Sign in with your wallet instead.',
-                409
+                'bcc_unavailable',
+                "We couldn't link your wallet. Please try again.",
+                503
             );
         }
 
