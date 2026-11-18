@@ -515,6 +515,47 @@ final class AnnouncementViewServiceTest extends TestCase
     }
 
     /**
+     * F-307 B2 — the owner row says whether an administrator took the notice
+     * down, and when; a taken-down row closes edit and pin. The public row has
+     * no such field (a taken-down notice never reaches a public read).
+     */
+    public function testTheOwnerRowCarriesTheTakedownStateAndThePublicRowDoesNot(): void
+    {
+        $owner = static fn (object $row): array => View::ownerPage(
+            [$row], false, [], self::operator(), self::goodMember(), true, self::SLUG
+        )['items'][0];
+
+        $up = $owner(self::row());
+        self::assertSame(['hidden' => false, 'hidden_at' => null], $up['moderation']);
+        self::assertTrue($up['capabilities']['can_edit']['allowed']);
+
+        $down = $owner(self::row(['moderation_hidden_at' => '2026-11-12 08:30:00']));
+        self::assertSame(['hidden' => true, 'hidden_at' => '2026-11-12T08:30:00Z'], $down['moderation']);
+        self::assertSame(Caps::REASON_MODERATION_HIDDEN, $down['capabilities']['can_edit']['reason_code']);
+        self::assertSame(Caps::REASON_MODERATION_HIDDEN, $down['capabilities']['can_pin']['reason_code']);
+        self::assertTrue($down['capabilities']['can_archive']['allowed'], 'the owner may still archive');
+
+        // Presence decides `hidden`, exactly as the public predicate does; an
+        // unparseable marker is still a takedown, just without a timestamp.
+        $odd = $owner(self::row(['moderation_hidden_at' => 'yes']));
+        self::assertSame(['hidden' => true, 'hidden_at' => null], $odd['moderation']);
+        // An empty marker is NOT a takedown.
+        self::assertFalse($owner(self::row(['moderation_hidden_at' => '']))['moderation']['hidden']);
+
+        $detail = View::detail(
+            self::row(['moderation_hidden_at' => '2026-11-12 08:30:00']),
+            [], self::operator(), self::goodMember(), true, self::SLUG
+        );
+        self::assertTrue($detail['moderation']['hidden'], 'detail is the owner row plus body');
+
+        $public = View::publicPage(
+            [self::row(['moderation_hidden_at' => '2026-11-12 08:30:00'])],
+            false, [], Cursor::SURFACE_ANNOUNCEMENTS_ACTIVE, self::SLUG
+        )['items'][0];
+        self::assertArrayNotHasKey('moderation', $public);
+    }
+
+    /**
      * ⚠ Capabilities are passed through from the resolver VERBATIM. Asserted
      * by comparing against a direct resolver call, so the service cannot
      * filter, reorder or recompute them — and so it stays agnostic to
@@ -530,7 +571,7 @@ final class AnnouncementViewServiceTest extends TestCase
             self::operator(),
             // The fixture row's post_author (7) — the service passes it in,
             // and since F-147 it decides the author-only edit/pin/publish.
-            ['author_user_id' => '7', 'status' => Caps::STATUS_DRAFT, 'is_archived' => false, 'comments_enabled' => true],
+            ['author_user_id' => '7', 'status' => Caps::STATUS_DRAFT, 'is_archived' => false, 'comments_enabled' => true, 'moderation_hidden' => false],
             $viewer,
             true
         );
@@ -743,6 +784,7 @@ final class AnnouncementViewServiceTest extends TestCase
         self::assertSame([
             'archived_at'      => '_bcc_announcement_archived_at',
             'comments_enabled' => '_bcc_announcement_comments_enabled',
+            'moderation_hidden_at' => '_bcc_announcement_moderation_hidden_at',
         ], View::metaKeysRead());
     }
 

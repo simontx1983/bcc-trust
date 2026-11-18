@@ -6,6 +6,7 @@ use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Repositories\PostReachRepository;
 use BCC\Trust\Core\Security\IpResolver;
 use BCC\Trust\Core\Support\ViewerFingerprint;
+use BCC\Trust\Core\Support\FeedItemGate;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -89,7 +90,7 @@ final class PostViewRecorder
             }
 
             $activity = PeepSoActivityRepository::getById($actId);
-            if ($activity === null) {
+            if ($activity === null || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)) {
                 return 'ignored_unknown_post';
             }
 
@@ -167,7 +168,7 @@ final class PostViewRecorder
             }
 
             $activity = PeepSoActivityRepository::getById($actId);
-            if ($activity === null) {
+            if ($activity === null || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)) {
                 return 'ignored_unknown_post';
             }
 

@@ -234,9 +234,14 @@ namespace BCC\Core\Feed {
             ?array $excludedActIds = null,
             ?array $excludedGroupIds = null,
             ?array $viewerFriendIds = null,
-            bool $enforcePostVisibility = false
+            bool $enforcePostVisibility = false,
+            ?array $moduleIds = null
         ): array {
             $GLOBALS['__bcc_f02feed']['excluded']['getActivityForAuthor'] = $excludedAuthorIds;
+            // F-341: the module ALLOWLIST the wall asked for. Recorded
+            // separately from the F-02 record because it answers a
+            // different question — WHICH KINDS, not which viewer.
+            $GLOBALS['__bcc_f02feed']['module_ids']['getActivityForAuthor'] = $moduleIds;
             unset($authorId, $cursor, $limit, $excludedAuthorIds, $excludedActIds, $excludedGroupIds);
             \bcc_f02feed_record('getActivityForAuthor', $viewerId, $viewerFriendIds, $enforcePostVisibility);
 
@@ -434,6 +439,29 @@ namespace BCC\Trust\Core\Support {
         function get_current_user_id(): int
         {
             return 0;
+        }
+    }
+
+    // ⚠⚠ REQUIRED, not optional. F-341 made the author wall consult
+    // ProfileSectionVisibility, which reads user_meta with an UNQUALIFIED
+    // call from THIS namespace — as does PrivacySettings, for the §K2
+    // `bcc_privacy_*` keys. Without this shadow every wall test dies with
+    // "Call to undefined function BCC\Trust\Core\Support\get_user_meta()",
+    // a FATAL rather than a failed assertion, which is far easier to
+    // misread as a broken test than as a missing stub.
+    //
+    // ⚠ ProfileSectionVisibility and PrivacySettings are the REAL classes
+    // here. Only the storage is faked, so the suite still exercises the
+    // actual switch semantics — including "absent meta means SHOWN",
+    // which is why an unset key returns '' exactly as WordPress does.
+    if (!\function_exists('BCC\Trust\Core\Support\get_user_meta')) {
+        /** @return mixed */
+        function get_user_meta($userId, $key = '', $single = false)
+        {
+            unset($single);
+            $meta = $GLOBALS['__bcc_f02feed']['section_meta'] ?? [];
+
+            return $meta[(int) $userId][$key] ?? '';
         }
     }
 }

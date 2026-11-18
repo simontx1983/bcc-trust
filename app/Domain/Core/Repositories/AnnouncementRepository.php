@@ -917,7 +917,31 @@ final class AnnouncementRepository
                 mce.meta_value AS comments_enabled,
                 mp.meta_value AS publish_at,
                 ' . self::BLOCKED_EXPR . ' AS blocked_at,
+                ' . $this->moderationHiddenExpr() . ' AS moderation_hidden_at,
                 ' . $effectiveExpr . ' AS effective_at';
+    }
+
+    /**
+     * F-307 B2 — the administrator takedown timestamp, empty-string-safe, for
+     * the OWNER row (`moderation.hidden_at`).
+     *
+     * ⚠ A correlated SCALAR subquery, never a JOIN: the marker is not one of
+     * the single-valued-by-construction keys in {@see self::metaJoins()}, and
+     * a duplicated meta row on a JOIN would multiply the outer rows (and the
+     * page's `limit + 1` over-fetch with them). `ORDER BY meta_id DESC LIMIT 1`
+     * makes a duplicate pick the newest write rather than error.
+     *
+     * The key is {@see AnnouncementVisibility::META_MODERATION_HIDDEN_AT} — the
+     * ONE producer the public predicate also reads. On a public read the value
+     * is always NULL (the predicate refuses every marked row), so the column is
+     * harmless there and the column list stays one list.
+     */
+    private function moderationHiddenExpr(): string
+    {
+        return "(SELECT NULLIF(mh.meta_value, '') FROM {$this->metaTable} mh"
+            . ' WHERE mh.post_id = p.ID'
+            . " AND mh.meta_key = '" . AnnouncementVisibility::META_MODERATION_HIDDEN_AT . "'"
+            . ' ORDER BY mh.meta_id DESC LIMIT 1)';
     }
 
     /**
