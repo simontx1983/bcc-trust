@@ -268,6 +268,36 @@ final class FeedPostVisibilityWiringTest extends TestCase
         self::assertNull($GLOBALS['__bcc_f02feed']['excluded']['getFeed:tag'] ?? null);
     }
 
+    /**
+     * F-276: the tag feed's body is shared with the signed-in hot page
+     * (personalizedHotFeed), so what getTagFeed() hands it is pinned here:
+     * the NORMALISED hashtag, the caller's cursor and the caller's limit,
+     * on the global feed.
+     */
+    public function testTheTagFeedForwardsItsHashtagCursorAndLimit(): void
+    {
+        $this->service()->getTagFeed(self::VIEWER, '#Solana ', 'abc', 5);
+
+        $args = $GLOBALS['__bcc_f02feed']['getfeed_args'] ?? [];
+        self::assertIsArray($args);
+        self::assertCount(1, $args);
+        self::assertSame('Solana', $args[0]['hashtag'], 'trimmed, without the leading #');
+        self::assertSame('abc', $args[0]['cursor']);
+        self::assertSame(5, $args[0]['limit']);
+        self::assertSame(self::VIEWER, $args[0]['viewerId']);
+        self::assertNull($args[0]['onlyForGroupId'], 'the global feed, with its public_all gate');
+        self::assertSame([self::VIEWER], $GLOBALS['__bcc_f02feed']['hydrated_for'] ?? null, 'hydrated for the viewer');
+    }
+
+    /** An empty hashtag answers an empty page without reading anything. */
+    public function testAnEmptyHashtagReadsNothing(): void
+    {
+        $out = $this->service()->getTagFeed(self::VIEWER, '  ##  ');
+
+        self::assertSame([], $out['items']);
+        self::assertSame([], $this->calls(), 'no candidate read');
+    }
+
     // ── F-269: an author always sees their own posts ─────────────────
 
     /** @return array<string, array{0: string, 1: string}> surface => [invoke label, recorded label] */
