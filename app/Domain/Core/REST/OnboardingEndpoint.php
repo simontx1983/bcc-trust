@@ -175,21 +175,38 @@ final class OnboardingEndpoint
 
         $handleService = Plugin::instance()->handleService();
 
+        $handle  = strtolower(trim((string) $request->get_param('handle')));
+        $current = $handleService->getHandle($userId);
+
+        // No-op rename short-circuits, cooldown or not: resubmitting your
+        // CURRENT handle changes nothing, arms nothing and says nothing about
+        // any other handle, so it is the documented 200 even inside the
+        // 7-day window (it used to answer 429, F-294).
+        if ($current !== '' && $current === $handle) {
+            $resp = ApiResponse::ok([
+                'handle'         => $handle,
+                'next_change_at' => null,
+            ]);
+            $resp->header('Cache-Control', 'no-store');
+            return $resp;
+        }
+
         // Cooldown check FIRST so a user mashing the rename button
         // can't probe handle availability via 422 responses while
         // they're locked out anyway.
         $expiresAt = $handleService->cooldownExpiresAt($userId);
         if ($expiresAt !== null) {
+            // `next_change_at` (F-333): the client error object does not
+            // surface headers, so the date rides in the body too.
             $resp = ApiResponse::error(
                 'bcc_rate_limited',
                 'Handle can only be changed once every 7 days.',
-                429
+                429,
+                ['next_change_at' => $handleService->nextChangeAt($userId)]
             );
             $resp->header('Retry-After', (string) max(0, $expiresAt - time()));
             return $resp;
         }
-
-        $handle = strtolower(trim((string) $request->get_param('handle')));
 
         $err = $handleService->validate($handle);
         if ($err !== null) {
@@ -197,18 +214,6 @@ final class OnboardingEndpoint
         }
         if (!$handleService->isAvailable($handle, $userId)) {
             return ApiResponse::error('bcc_conflict', 'That handle is already taken.', 409);
-        }
-
-        // No-op rename short-circuits: don't arm the cooldown when the
-        // user submits their existing handle.
-        $current = $handleService->getHandle($userId);
-        if ($current === $handle) {
-            $resp = ApiResponse::ok([
-                'handle'         => $handle,
-                'next_change_at' => null,
-            ]);
-            $resp->header('Cache-Control', 'no-store');
-            return $resp;
         }
 
         // A handle CHANGE is rarer and costlier: its own per-account hourly

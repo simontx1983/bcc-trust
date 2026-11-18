@@ -168,7 +168,7 @@ final class PeepSoQueryRepository
             "SELECT c.entity_id AS page_id, c.user_id,
                     (SELECT cur.pm_user_status FROM {$members} cur
                       WHERE cur.pm_page_id = c.entity_id AND cur.pm_user_id = c.user_id
-                      ORDER BY cur.pm_id ASC LIMIT 1) AS current_role,
+                      ORDER BY cur.pm_id ASC LIMIT 1) AS claimer_status,
                     (SELECT oth.pm_user_id FROM {$members} oth
                       WHERE oth.pm_page_id = c.entity_id AND oth.pm_user_status = 'member_owner'
                         AND oth.pm_user_id <> c.user_id
@@ -204,13 +204,101 @@ final class PeepSoQueryRepository
                 $out[] = [
                     'page_id'      => (int) $row->page_id,
                     'user_id'      => (int) $row->user_id,
-                    'current_role' => isset($row->current_role) && is_string($row->current_role) ? $row->current_role : null,
+                    // SQL alias `claimer_status`, NOT `current_role`: that is a
+                    // reserved word in MariaDB (CURRENT_ROLE()), a syntax error
+                    // there while MySQL 8 accepts it. Production is MariaDB.
+                    'current_role' => isset($row->claimer_status) && is_string($row->claimer_status) ? $row->claimer_status : null,
                     'other_owner'  => isset($row->other_owner) ? (int) $row->other_owner : 0,
                 ];
             }
         }
 
         return $out;
+    }
+
+    /**
+     * F-245: which of these activity ids still back a LIVE post — the
+     * activity row exists and its post is published (not trashed, drafted
+     * or deleted). Bounded by the caller's list (one bell page, <= 50).
+     *
+     * This is the "is the post gone" half of a notification's
+     * `target_available`. Per-viewer visibility (blocks, gated groups) is
+     * deliberately NOT judged here: the permalink applies those and answers
+     * 404, which the client already handles.
+     *
+     * Fail-closed in the sense that matters: a read that did not run returns
+     * NULL ("unknown"), never [] — `query()` is called explicitly because
+     * wpdb has failure paths that return false without setting last_error
+     * and leave the previous query's rows in last_result.
+     *
+     * @param list<int> $actIds
+     * @return list<int>|null the live subset, or null when the read failed
+     */
+    public static function liveActivityIds(array $actIds): ?array
+    {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', $actIds),
+            static fn(int $id): bool => $id > 0
+        )));
+        if ($ids === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $acts = $wpdb->prefix . 'peepso_activities';
+        $ph   = implode(',', array_fill(0, count($ids), '%d'));
+
+        self::clearLastError();
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT a.act_id
+               FROM {$acts} a
+               JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
+              WHERE a.act_id IN ({$ph})
+                AND p.post_status = 'publish'",
+            ...$ids
+        ));
+        if ($ok === false || self::lastError() !== '') {
+            return null;
+        }
+
+        $out = [];
+        foreach (is_array($wpdb->last_result) ? $wpdb->last_result : [] as $row) {
+            if (is_object($row) && isset($row->act_id)) {
+                $out[] = (int) $row->act_id;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * F-299 live guard: a DIFFERENT user holding `member_owner` on the page
+     * (0 = none), so a verified claim never creates a second owner. NULL =
+     * the read did not run; the caller then writes nothing.
+     */
+    public static function otherPageOwnerId(int $pageId, int $userId): ?int
+    {
+        if ($pageId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $members = $wpdb->prefix . 'peepso_page_members';
+
+        self::clearLastError();
+        $owner = $wpdb->get_var($wpdb->prepare(
+            "SELECT pm_user_id FROM {$members}
+              WHERE pm_page_id = %d AND pm_user_status = 'member_owner' AND pm_user_id <> %d
+              ORDER BY pm_id ASC
+              LIMIT 1",
+            $pageId,
+            $userId
+        ));
+        if (self::lastError() !== '') {
+            return null;
+        }
+
+        return $owner === null ? 0 : (int) $owner;
     }
 
     // Separate helpers (bcc-core's shape) so static analysis does not narrow

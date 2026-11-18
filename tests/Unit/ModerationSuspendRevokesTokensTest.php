@@ -104,7 +104,8 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
             }
             public function closeActive(int $userId, int $unsuspendedBy): int
             {
-                return 1;
+                // F-315 (L3): per-user open-row count; 1 unless a test says otherwise.
+                return $GLOBALS['__bcc_ms']['close_returns'][$userId] ?? 1;
             }
         };
 
@@ -200,6 +201,68 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
         foreach ($tokens as $t) {
             self::assertRevoked($t);
         }
+    }
+
+    // ── F-315 (L2, L3) ───────────────────────────────────────────────
+
+    public function testBulkUnsuspendCountsOnlyMembersWhoWereSuspended(): void
+    {
+        $GLOBALS['__bcc_ms']['rows'] += [4401 => true, 4402 => true];
+        $GLOBALS['__bcc_ms']['already'] = [4401];          // flagged suspended
+        $GLOBALS['__bcc_ms']['close_returns'] = [4402 => 0]; // never suspended
+
+        self::runAdminHandler(fn () => $this->service()->handleBulkAction([4401, 4402], 'unsuspend'));
+
+        self::assertSame(1, $GLOBALS['__bcc_ms']['query']['bulk'] ?? null, 'only the member who WAS suspended counts');
+        self::assertSame(1, $GLOBALS['__bcc_ms']['query']['bulk_skipped'] ?? null, 'the other is reported as skipped');
+        self::assertSame(1, count(array_keys($GLOBALS['__bcc_ms']['audit'], 'admin_unsuspend', true)), 'one per-member audit row');
+        // The after-commit refresh still runs for BOTH (#670 review): it is
+        // the repair path for a lost notify, and the count must never gate it.
+        self::assertCount(2, $GLOBALS['__bcc_ms']['notified'] ?? []);
+    }
+
+    /**
+     * #670 review: a single Unsuspend of a member whose cached state already
+     * reads "not suspended" still flushes and fans out — the second-click
+     * repair for a lost after-commit notify.
+     */
+    public function testASingleUnsuspendAlwaysRefreshesEvenWhenNothingWasOpen(): void
+    {
+        $GLOBALS['__bcc_ms']['rows'][4501] = true;
+        $GLOBALS['__bcc_ms']['close_returns'] = [4501 => 0];
+
+        ob_start();
+        $result = $this->service()->unsuspendUser(4501);
+        ob_end_clean();
+
+        self::assertTrue($result['success']);
+        self::assertCount(1, $GLOBALS['__bcc_ms']['notified'] ?? [], 'the refresh is never skipped');
+    }
+
+    public function testBulkSuspendAuditsEachMemberAndPurgesTheMemberCache(): void
+    {
+        self::runAdminHandler(fn () => $this->service()->handleBulkAction([4301, 4302], 'suspend'));
+
+        self::assertSame(2, count(array_keys($GLOBALS['__bcc_ms']['audit'], 'admin_suspend', true)), 'a per-member row, as a single suspend writes');
+        self::assertSame(['members'], $GLOBALS['__bcc_ms']['purged'] ?? [], 'the anon /members cards are refreshed once');
+    }
+
+    public function testRingSuspendAuditsEachMemberAndPurgesTheMemberCache(): void
+    {
+        $GLOBALS['__bcc_ms']['rows'] += [4201 => true, 4202 => true];
+
+        self::runAdminHandler(fn () => $this->service()->handleRingAction([4201, 4202], 'suspend_all', 'ring note'));
+
+        self::assertSame(2, count(array_keys($GLOBALS['__bcc_ms']['audit'], 'admin_suspend', true)));
+        self::assertSame(['members'], $GLOBALS['__bcc_ms']['purged'] ?? []);
+    }
+
+    public function testSuspendNotesAndOverrideReasonsAreUnslashed(): void
+    {
+        $code = \BCC\Trust\Tests\Support\GateOrder::code('includes/admin/moderation.php');
+        self::assertStringContainsString("sanitize_textarea_field( wp_unslash( \$_POST['suspend_notes']", $code);
+        self::assertStringContainsString("sanitize_text_field( wp_unslash( \$_POST['suspend_reason']", $code);
+        self::assertStringContainsString("sanitize_textarea_field( wp_unslash( \$_POST['override_reason']", $code);
     }
 
     public function testAFailedSuspensionRevokesNothing(): void

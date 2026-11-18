@@ -1832,6 +1832,64 @@ final class NotificationDispatcher
         }
     }
 
+    /**
+     * F-307 — the author's announcement was taken down ($hidden = true) or
+     * restored by an administrator. Subscriber for
+     * `bcc_announcement_moderation_hidden` / `_restored`.
+     *
+     * Self-notification, bell only (BELL_ONLY), the same shape as the F-73
+     * auto-hide notice: the copy names no reporter and no administrator.
+     * Copy approved by the user 2026-11-12 (exact text below).
+     */
+    public function onAnnouncementModerated(int $announcementId, bool $hidden): void
+    {
+        if ($announcementId <= 0) {
+            return;
+        }
+        try {
+            $post = get_post($announcementId);
+            if (!$post instanceof \WP_Post) {
+                return;
+            }
+            $authorId = (int) $post->post_author;
+            if ($authorId <= 0) {
+                return;
+            }
+            $title = trim((string) $post->post_title);
+            $name  = $title !== '' ? mb_strimwidth($title, 0, 80, '…', 'UTF-8') : '';
+            $this->dispatch(
+                $authorId,
+                $authorId,
+                self::announcementModeratedMessage($name, $hidden),
+                $hidden ? NotificationType::ANNOUNCEMENT_HIDDEN : NotificationType::ANNOUNCEMENT_RESTORED,
+                $announcementId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] announcement moderation notice failed', [
+                'announcement_id' => $announcementId,
+                'hidden'          => $hidden,
+                'error'           => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /** F-307 author copy — exact text, user-approved 2026-11-12. %s = the notice's title. */
+    public const ANNOUNCEMENT_HIDDEN_MESSAGE =
+        'A moderator hid your announcement "%s" because it breaks a site rule. It is no longer visible to others.';
+
+    /** F-307 author copy — exact text, user-approved 2026-11-12. %s = the notice's title. */
+    public const ANNOUNCEMENT_RESTORED_MESSAGE =
+        'Your announcement "%s" was reviewed and restored.';
+
+    public static function announcementModeratedMessage(string $title, bool $hidden): string
+    {
+        $template = $hidden ? self::ANNOUNCEMENT_HIDDEN_MESSAGE : self::ANNOUNCEMENT_RESTORED_MESSAGE;
+        return $title !== ''
+            ? sprintf($template, $title)
+            : str_replace(' "%s"', '', $template);
+    }
+
     /** The approved F-73 author notice — exact text (product sign-off 2026-11-10). */
     public const CONTENT_AUTO_HIDDEN_MESSAGE =
         'One of your posts was hidden automatically after several members reported it. '

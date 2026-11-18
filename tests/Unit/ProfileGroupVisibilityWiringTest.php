@@ -79,9 +79,11 @@ final class ProfileGroupVisibilityWiringTest extends TestCase
     {
         $code = GateOrder::code(self::USER_VIEW);
 
+        // getUser() also passes `true` (role disclosure, viewer-scoped too);
+        // what matters here is that both calls pass the viewer.
         self::assertSame(
             2,
-            substr_count($code, 'resolveHalls($userId, $viewerId)'),
+            preg_match_all('/resolveHalls\(\$userId, \$viewerId(?:, true)?\)/', $code),
             'getUser() and getSummary() must both pass the viewer'
         );
     }

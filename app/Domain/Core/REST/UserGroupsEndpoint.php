@@ -138,6 +138,14 @@ final class UserGroupsEndpoint
             ? $this->loadPostingStatuses($viewerId, $visibleIds)
             : [];
 
+        // F-244: the VIEWER's own raw status in each listed group, in one
+        // batched read, so can_join / can_leave are the group page's verdict
+        // (GroupsService) rather than a tab-local copy. A failed read is
+        // null → every row says `unavailable`, never a guessed Join.
+        $viewerStatuses = $viewerId > 0
+            ? PeepSoGroupRepository::findUserMembershipStatuses($viewerId, $visibleIds)
+            : [];
+
         $items = [];
         foreach ($visibleContexts as $groupId => $ctx) {
             $display = $displays[$groupId] ?? null;
@@ -148,7 +156,9 @@ final class UserGroupsEndpoint
                 $holderEligibility[$groupId] ?? null,
                 $chainSlugByGroup[$groupId] ?? null,
                 $trustMinByGroup[$groupId] ?? null,
-                $postingStatusByGroup[$groupId] ?? null
+                $postingStatusByGroup[$groupId] ?? null,
+                $viewerId,
+                $viewerStatuses === null ? false : ($viewerStatuses[$groupId] ?? null)
             );
         }
 
@@ -297,9 +307,26 @@ final class UserGroupsEndpoint
         ?array $holderEligibility,
         ?string $chainTag,
         ?int $trustMin,
-        ?string $memberStatus = null
+        ?string $memberStatus = null,
+        int $viewerId = 0,
+        string|null|false $viewerStatus = null
     ): array {
         $route = $this->routeKeyForType($ctx->type);
+
+        // One verdict with the group page (F-244). Holder eligibility, when
+        // this tab computed it, is a real verdict; otherwise verify_on_join.
+        $groups = Plugin::instance()->groupsService();
+        $join   = $groups->listJoinFields(
+            $ctx,
+            $viewerId,
+            $viewerStatus,
+            $trustMin ?? 0,
+            null,
+            $holderEligibility !== null ? $holderEligibility['eligible'] : null
+        );
+        $leave = $viewerStatus === false
+            ? ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'unavailable']
+            : $groups->leavePermission($viewerId, $viewerStatus);
 
         return [
             'group_id'     => $ctx->groupId,
@@ -319,10 +346,12 @@ final class UserGroupsEndpoint
                 'join'  => ['url' => self::REST_BASE . '/' . $route . '/' . $ctx->groupId . '/join'],
                 'leave' => ['url' => self::REST_BASE . '/' . $route . '/' . $ctx->groupId . '/leave'],
             ],
+            'viewer_membership_status' => $join['viewer_membership_status'],
             'permissions'  => [
-                'can_join'      => $this->canJoin($ctx, $isSelf, $holderEligibility),
-                'can_leave'     => $this->canLeave($isSelf),
-                'can_post_blog' => $this->canPostBlog($isSelf, $memberStatus),
+                'can_join'         => $join['can_join'],
+                'can_request_join' => $join['can_request_join'],
+                'can_leave'        => $leave,
+                'can_post_blog'    => $this->canPostBlog($isSelf, $memberStatus),
             ],
         ];
     }
@@ -357,72 +386,6 @@ final class UserGroupsEndpoint
         /** @var string $filtered */
         $filtered = apply_filters('bcc_group_type_label', $label, $type->value);
         return (string) $filtered;
-    }
-
-    /**
-     * @param array{eligible: bool, min_balance: int, balance: int}|null $holderEligibility
-     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
-     */
-    private function canJoin(GroupContext $ctx, bool $isSelf, ?array $holderEligibility): array
-    {
-        if ($isSelf) {
-            // Viewing own profile — listed groups are already joined.
-            return [
-                'allowed'     => false,
-                'unlock_hint' => null,
-                'reason_code' => 'already_member',
-            ];
-        }
-
-        if ($ctx->type === GroupType::Nft) {
-            if ($holderEligibility !== null && $holderEligibility['eligible']) {
-                return [
-                    'allowed'     => true,
-                    'unlock_hint' => null,
-                    'reason_code' => null,
-                ];
-            }
-            return [
-                'allowed'     => false,
-                'unlock_hint' => 'Hold an NFT from this collection to join.',
-                'reason_code' => 'not_eligible',
-            ];
-        }
-
-        // Delegator communities are stored `closed`, so without this branch
-        // they'd fall through to the "request to join" copy below — wrong:
-        // there is no approval queue, the gate is on-chain delegation.
-        // Live eligibility is deliberately NOT computed here (it would cost
-        // an LCD call per profile render); the FE does the canonical
-        // round-trip via /me/validator-groups, same posture as the holder
-        // tab. Copy mirrors ValidatorGroupsEndpoint's server-pinned hint.
-        if ($ctx->type === GroupType::Validator) {
-            return [
-                'allowed'     => false,
-                'unlock_hint' => 'Delegate to this validator to join its community.',
-                'reason_code' => 'not_eligible',
-            ];
-        }
-
-        if ($ctx->privacy === PeepSoPrivacy::Secret) {
-            return [
-                'allowed'     => false,
-                'unlock_hint' => null,
-                'reason_code' => 'invite_only',
-            ];
-        }
-        if ($ctx->privacy === PeepSoPrivacy::Closed) {
-            return [
-                'allowed'     => false,
-                'unlock_hint' => 'Visit the group page to request to join.',
-                'reason_code' => 'requires_approval',
-            ];
-        }
-        return [
-            'allowed'     => true,
-            'unlock_hint' => null,
-            'reason_code' => null,
-        ];
     }
 
     /**
@@ -504,15 +467,4 @@ final class UserGroupsEndpoint
         return $out;
     }
 
-    /**
-     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
-     */
-    private function canLeave(bool $isSelf): array
-    {
-        return [
-            'allowed'     => $isSelf,
-            'unlock_hint' => null,
-            'reason_code' => $isSelf ? null : 'not_self',
-        ];
-    }
 }

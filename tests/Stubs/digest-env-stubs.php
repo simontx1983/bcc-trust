@@ -66,6 +66,23 @@ if (!class_exists('DigestFakeWpdb')) {
             return array_map('strval', array_slice($ids, 0, $limit));
         }
 
+        /** @var mixed */
+        public $last_result = [];
+
+        /**
+         * F-296: NotificationRepository's block reads (query() + last_result).
+         * No blocks in these digest tests.
+         *
+         * @return int
+         */
+        public function query(string $sql)
+        {
+            $this->queries[] = $sql;
+            $this->last_error  = '';
+            $this->last_result = [];
+            return 0;
+        }
+
         /** @return list<object> */
         public function get_results(string $sql): array
         {

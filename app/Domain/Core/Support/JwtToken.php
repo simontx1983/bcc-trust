@@ -93,6 +93,8 @@ final class JwtToken
     public const ERR_REVOKED       = 'jwt_revoked';
     /** This one token was signed out via POST /auth/logout (per-jti denylist). */
     public const ERR_LOGGED_OUT    = 'jwt_logged_out';
+    /** F-282: this token was exchanged by POST /auth/refresh and its overlap has passed. */
+    public const ERR_SUPERSEDED    = 'jwt_superseded';
 
     /**
      * F-253: mint the token for a REAL sign-in (password + 2FA, OAuth,
@@ -333,6 +335,11 @@ final class JwtToken
         if ($jti !== '' && self::isLoggedOut($userId, $jti)) {
             return ['ok' => false, 'error' => self::ERR_LOGGED_OUT];
         }
+        // F-282: a token exchanged by /auth/refresh dies once its overlap
+        // has passed (same per-request meta cache, no extra query).
+        if ($jti !== '' && self::isSuperseded($userId, $jti)) {
+            return ['ok' => false, 'error' => self::ERR_SUPERSEDED];
+        }
 
         return ['ok' => true, 'payload' => $payload];
     }
@@ -434,6 +441,104 @@ final class JwtToken
                 \BCC\Core\DB\AdvisoryLock::release($lockKey);
             }
         }
+    }
+
+    /** User-meta key holding tokens retired by a refresh (F-282). */
+    public const RETIRED_META_KEY = 'bcc_jwt_retired';
+
+    /**
+     * How long a refreshed token keeps working after the refresh (F-282).
+     * Long enough for every tab and in-flight request of the same session to
+     * pick up the new token (the frontend signs the member out when a
+     * refresh is refused), short enough that a copied token stops being a
+     * standing credential.
+     */
+    public const REFRESH_OVERLAP_SECONDS = 120;
+
+    /**
+     * F-282: retire a token that POST /auth/refresh has just exchanged for a
+     * new one. It keeps working for REFRESH_OVERLAP_SECONDS, then fails every
+     * check — authentication, refresh and GET /auth/session — with
+     * ERR_SUPERSEDED, until it could no longer have been used anyway (the
+     * same horizon as logOut()). Before this, a refresh left the old token
+     * live: a copy taken before the refresh, or the one a sign-out had not
+     * reached, stayed usable for up to 7 days plus another day of refresh.
+     *
+     * The FIRST retirement wins: refreshing the same token again during its
+     * overlap mints another token but never pushes the cutoff later, so a
+     * copied token can't be kept alive by refreshing it in a loop.
+     *
+     * Same per-user lock and pruning as logOut(); best-effort like it.
+     *
+     * @param array<string, mixed> $payload a payload returned by decodeForRefresh()
+     */
+    public static function retireAfterRefresh(array $payload): void
+    {
+        $jti    = (string) ($payload['jti'] ?? '');
+        $userId = (int) ($payload['user_id'] ?? 0);
+        if ($jti === '' || $userId <= 0) {
+            return;
+        }
+
+        $lockKey = self::DENYLIST_LOCK_PREFIX . $userId;
+        $locked  = \BCC\Core\DB\AdvisoryLock::acquire($lockKey, self::DENYLIST_LOCK_WAIT);
+        if (!$locked) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] jwt retire-list written without lock', ['user_id' => $userId]);
+        }
+
+        try {
+            wp_cache_delete($userId, 'user_meta');
+
+            $now  = time();
+            $list = self::retiredList($userId);
+            foreach ($list as $hash => $entry) {
+                if ($entry['until'] < $now) {
+                    unset($list[$hash]);
+                }
+            }
+            $hash = self::denylistHash($jti);
+            if (!isset($list[$hash])) {
+                $list[$hash] = [
+                    'from'  => $now + self::REFRESH_OVERLAP_SECONDS,
+                    'until' => $now + self::denylistTtl((int) ($payload['exp'] ?? 0)),
+                ];
+            }
+            if (count($list) > self::DENYLIST_MAX_ENTRIES) {
+                uasort($list, static fn (array $a, array $b): int => $a['until'] <=> $b['until']);
+                $list = array_slice($list, -self::DENYLIST_MAX_ENTRIES, null, true);
+            }
+            update_user_meta($userId, self::RETIRED_META_KEY, $list);
+        } finally {
+            if ($locked) {
+                \BCC\Core\DB\AdvisoryLock::release($lockKey);
+            }
+        }
+    }
+
+    private static function isSuperseded(int $userId, string $jti): bool
+    {
+        $entry = self::retiredList($userId)[self::denylistHash($jti)] ?? null;
+        if ($entry === null) {
+            return false;
+        }
+        $now = time();
+        return $entry['from'] <= $now && $now <= $entry['until'];
+    }
+
+    /** @return array<string, array{from: int, until: int}> */
+    private static function retiredList(int $userId): array
+    {
+        $raw = get_user_meta($userId, self::RETIRED_META_KEY, true);
+        if (!is_array($raw)) {
+            return [];
+        }
+        $out = [];
+        foreach ($raw as $hash => $entry) {
+            if (is_array($entry) && isset($entry['from'], $entry['until'])) {
+                $out[(string) $hash] = ['from' => (int) $entry['from'], 'until' => (int) $entry['until']];
+            }
+        }
+        return $out;
     }
 
     private const DENYLIST_LOCK_PREFIX = 'bcc_jwt_deny_';

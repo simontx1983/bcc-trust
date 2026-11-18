@@ -127,11 +127,11 @@ final class PushPayload
             $body = 'You were mentioned.';
         }
 
-        // count==1 with a known activity row → deep-link to the floor
-        // focused on it (mirrors NotificationViewService::resolveLink for
-        // REACTION). count>1 (mixed sources) → floor.
+        // count==1 with a known activity row → the post's permalink
+        // (mirrors NotificationViewService::resolveLink; F-245 — the old
+        // `/?focus=` link was read by nothing). count>1 (mixed sources) → floor.
         $url = ($count === 1 && $actId > 0)
-            ? sprintf('/?focus=%d', $actId)
+            ? sprintf('/post/%d', $actId)
             : '/';
 
         return [
@@ -224,11 +224,10 @@ final class PushPayload
         $payload = [
             'title' => $title,
             'body'  => $body,
-            // Mirror REACTION + MENTION deep-link convention: jump to
-            // the floor focused on the parent post. The FE has no
-            // comment-anchor consumer in V1 — the user scrolls to find
-            // the new comment in the thread.
-            'url'   => $actId > 0 ? sprintf('/?focus=%d', $actId) : '/',
+            // Mirror REACTION + MENTION: the parent post's permalink
+            // (F-245). The FE has no comment-anchor consumer in V1 — the
+            // user scrolls to find the new comment in the thread.
+            'url'   => $actId > 0 ? sprintf('/post/%d', $actId) : '/',
         ];
         if ($postId > 0) {
             // Per-post tag so two posts with concurrent comments don't

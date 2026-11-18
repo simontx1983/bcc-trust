@@ -119,7 +119,7 @@ final class PageOwnerBackfillCandidatesIntegrationTest extends TestCase
     private function candidates(int $after = 0, int $limit = 500): array
     {
         $rows = PeepSoQueryRepository::claimedPagesMissingOwnerRow($after, $limit);
-        self::assertNotNull($rows, 'the read must run');
+        self::assertNotNull($rows, 'the read must run: ' . (string) $GLOBALS['wpdb']->last_error);
 
         return array_values(array_filter($rows, fn (array $r): bool => in_array($r['page_id'], $this->pages, true)));
     }
@@ -187,6 +187,19 @@ final class PageOwnerBackfillCandidatesIntegrationTest extends TestCase
     }
 
     /** A read that did not run is NULL — never "nothing to repair". */
+    /** The live claim path's guard reads the same table (F-299 live guard). */
+    public function testTheLivePathSeesADifferentOwnerButNotTheClaimerThemself(): void
+    {
+        $page = $this->page(self::USER_A);
+        $this->member(self::USER_B, $page, 'member_owner');
+
+        self::assertSame(self::USER_B, PeepSoQueryRepository::otherPageOwnerId($page, self::USER_A), 'a different owner is found');
+        self::assertSame(0, PeepSoQueryRepository::otherPageOwnerId($page, self::USER_B), 'the owner themself is not "another" owner');
+
+        $empty = $this->page(self::USER_A);
+        self::assertSame(0, PeepSoQueryRepository::otherPageOwnerId($empty, self::USER_A), 'no owner row: 0');
+    }
+
     public function testAFailedReadIsNullNotEmpty(): void
     {
         global $wpdb;

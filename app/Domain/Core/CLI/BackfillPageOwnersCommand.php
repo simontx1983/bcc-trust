@@ -39,6 +39,7 @@ namespace BCC\Trust\Core\CLI;
 
 use BCC\Trust\Core\Integration\PeepSoIntegration;
 use BCC\Trust\Core\Repositories\PeepSoQueryRepository;
+use BCC\Trust\Core\Support\PageOwnerDecision;
 use WP_CLI;
 
 if (!defined('ABSPATH')) {
@@ -49,10 +50,11 @@ final class BackfillPageOwnersCommand
 {
     private const BATCH = 100;
 
-    public const ACTION_JOIN             = 'join';
-    public const ACTION_PROMOTE          = 'promote';
-    public const ACTION_SKIP_BANNED      = 'skip_banned';
-    public const ACTION_SKIP_OTHER_OWNER = 'skip_other_owner';
+    // The decision is PageOwnerDecision's, shared with the live claim path.
+    public const ACTION_JOIN             = PageOwnerDecision::JOIN;
+    public const ACTION_PROMOTE          = PageOwnerDecision::PROMOTE;
+    public const ACTION_SKIP_BANNED      = PageOwnerDecision::SKIP_BANNED;
+    public const ACTION_SKIP_OTHER_OWNER = PageOwnerDecision::SKIP_OTHER_OWNER;
 
     /**
      * Record each claimed page's claimer as its PeepSo owner (F-299).
@@ -175,27 +177,27 @@ final class BackfillPageOwnersCommand
      */
     public static function plan(array $row): array
     {
-        if ($row['other_owner'] > 0) {
-            return [
+        $action = PageOwnerDecision::decide($row['current_role'], $row['other_owner']);
+
+        return match ($action) {
+            PageOwnerDecision::SKIP_OTHER_OWNER => [
                 'action' => self::ACTION_SKIP_OTHER_OWNER,
                 'detail' => sprintf('page already has a different member_owner (user %d)', $row['other_owner']),
-            ];
-        }
-
-        if ($row['current_role'] === 'banned') {
-            return [
+            ],
+            PageOwnerDecision::SKIP_BANNED => [
                 'action' => self::ACTION_SKIP_BANNED,
                 'detail' => 'claimer is banned on this page',
-            ];
-        }
-
-        if ($row['current_role'] === null) {
-            return ['action' => self::ACTION_JOIN, 'detail' => 'joined (no prior row; rollback = delete the row)'];
-        }
-
-        return [
-            'action' => self::ACTION_PROMOTE,
-            'detail' => sprintf('promoted from %s (rollback = set it back to %s)', $row['current_role'], $row['current_role']),
-        ];
+            ],
+            PageOwnerDecision::JOIN => [
+                'action' => self::ACTION_JOIN,
+                'detail' => 'joined (no prior row; rollback = delete the row)',
+            ],
+            // ALREADY_OWNER cannot reach here (the candidate query excludes
+            // pairs that already have the owner row); treated like PROMOTE.
+            default => [
+                'action' => self::ACTION_PROMOTE,
+                'detail' => sprintf('promoted from %s (rollback = set it back to %s)', (string) $row['current_role'], (string) $row['current_role']),
+            ],
+        };
     }
 }

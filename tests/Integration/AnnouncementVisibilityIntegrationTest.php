@@ -397,6 +397,62 @@ final class AnnouncementVisibilityIntegrationTest extends TestCase
         self::assertSame([], $this->visible(Vis::archivedSql(self::META, 'p')));
     }
 
+    // ── 4b. F-307 predicate 4: an administrator takedown ────────────────
+
+    /**
+     * A taken-down notice fails the public predicate, so every read that
+     * composes it (list, detail, comments, feed projection) drops it. Its
+     * untouched neighbour stays public in the same query.
+     */
+    public function testATakenDownAnnouncementIsNotPublic(): void
+    {
+        $down = $this->seed('taken down');
+        $this->seed('still up');
+        $this->addMeta($down, Vis::META_MODERATION_HIDDEN_AT, '2026-11-12 00:00:00');
+
+        self::assertSame(['still up'], $this->visible());
+        self::assertSame(['still up'], $this->visible(Vis::notArchivedSql(self::META, 'p')));
+        self::assertSame([], $this->visible(Vis::archivedSql(self::META, 'p')));
+    }
+
+    /** A takedown also hides an ARCHIVED notice — archived is still public, a takedown is not. */
+    public function testATakenDownArchivedAnnouncementIsNotPublic(): void
+    {
+        $down = $this->seed('archived and taken down', archivedAt: '2026-01-01 00:00:00');
+        $this->addMeta($down, Vis::META_MODERATION_HIDDEN_AT, '2026-11-12 00:00:00');
+
+        self::assertSame([], $this->visible());
+    }
+
+    /** An emptied marker row is not a takedown (same rule as archival). */
+    public function testAnEmptyTakedownMarkerIsNotATakedown(): void
+    {
+        $id = $this->seed('cleared takedown');
+        $this->addMeta($id, Vis::META_MODERATION_HIDDEN_AT, '');
+
+        self::assertSame(['cleared takedown'], $this->visible());
+    }
+
+    /** A second, duplicated marker row neither multiplies nor un-hides the row. */
+    public function testADuplicatedTakedownMarkerStillHidesExactlyOnce(): void
+    {
+        $id = $this->seed('double marker');
+        $this->addMeta($id, Vis::META_MODERATION_HIDDEN_AT, '2026-11-12 00:00:00');
+        $this->addMeta($id, Vis::META_MODERATION_HIDDEN_AT, '');
+        $this->seed('neighbour');
+
+        self::assertSame(['neighbour'], $this->visible());
+    }
+
+    private function addMeta(int $postId, string $key, string $value): void
+    {
+        global $wpdb;
+        self::assertNotFalse(
+            $wpdb->insert(self::META, ['post_id' => $postId, 'meta_key' => $key, 'meta_value' => $value]),
+            "seeding meta {$key}: " . $wpdb->last_error
+        );
+    }
+
     // ── 5. The predicate composes, and refuses a bad alias ──────────────
 
     public function testThePredicateAndsOntoAnExistingWhereRatherThanReplacingIt(): void
