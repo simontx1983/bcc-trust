@@ -78,6 +78,11 @@ final class GroupInteractionGateTest extends TestCase
         self::loadRealFeedAllowlist();
 
         $GLOBALS['__bcc_gig'] = [
+            // §F-02: act ids whose audience excludes the viewer, and the
+            // enforced reads that actually happened. Empty by default, so
+            // every pre-existing test keeps its original meaning.
+            'f02_hidden' => [],
+            'f02_reads'  => [],
             'acts' => [
                 self::GROUP_POST_ACT     => ['external_id' => self::GROUP_POST_ID],
                 self::PLAIN_POST_ACT     => ['external_id' => self::PLAIN_POST_ID],
@@ -487,5 +492,63 @@ final class GroupInteractionGateTest extends TestCase
             GateOrder::assertOrder($body, ['$gateError = ', 'if ($gateError !== null) {', 'return $gateError;'], $label);
             GateOrder::assertNoWorkBefore($body, 'return $gateError;', $h['writes'], $label);
         }
+    }
+
+    // ── §F-02: the post's own audience, not only its group ──────────────
+
+    /**
+     * ⭐ The gap this closed. `checkPost()` answered "no membership gate"
+     * for any post outside a group, so anyone holding a feed id could
+     * react to, stoke or helpful-mark a followers-only or only-me post —
+     * and ring its author's bell from content they were never shown.
+     *
+     * 404, not 403: a refusal that said "forbidden" would confirm the post
+     * is there, which is the same existence-oracle rule as F-163 above.
+     */
+    public function testANonGroupPostTheViewerMayNotSeeIsNotFound(): void
+    {
+        $GLOBALS['__bcc_gig']['f02_hidden'] = [self::PLAIN_POST_ACT];
+
+        self::assertSame(
+            [404, 'bcc_not_found'],
+            self::statusAndCode((self::GATE)::check(self::USER, self::PLAIN_POST_ACT))
+        );
+    }
+
+    /**
+     * ⭐ CONTROL, and the one that proves the test above is not vacuous:
+     * the same act, visible, still passes. The audience read must also
+     * have HAPPENED and carried this viewer — a gate that refused for some
+     * other reason would satisfy the refusal test alone.
+     */
+    public function testAVisibleNonGroupPostStillPassesAndWasAudienceChecked(): void
+    {
+        self::assertNull((self::GATE)::check(self::USER, self::PLAIN_POST_ACT));
+
+        self::assertSame(
+            [['act_id' => self::PLAIN_POST_ACT, 'viewer' => self::USER]],
+            $GLOBALS['__bcc_gig']['f02_reads'],
+            'the audience was asked, for this viewer, about this act'
+        );
+    }
+
+    /**
+     * ⭐⭐ THE RATIFIED CARVE-OUT. Inside a group, posts follow the GROUP's
+     * rules — members see them — so §F-02 must not be consulted there at
+     * all. Asserted on the recorded reads rather than on the verdict: a
+     * group post can be allowed for unrelated reasons, and what must hold
+     * is that the audience question is never asked.
+     */
+    public function testAGroupPostIsNeverAudienceChecked(): void
+    {
+        $GLOBALS['__bcc_gig']['f02_hidden']  = [self::GROUP_POST_ACT];
+        $GLOBALS['__bcc_gig']['members'][self::USER . ':' . self::GROUP] = true;
+
+        // A MEMBER, acting in the room: allowed by the group rule, and the
+        // audience never asked. Both halves matter — asserting only the
+        // empty read list would also pass for a viewer who was refused
+        // before the audience step could run.
+        self::assertNull((self::GATE)::check(self::USER, self::GROUP_POST_ACT));
+        self::assertSame([], $GLOBALS['__bcc_gig']['f02_reads'], 'the group room must not consult §F-02');
     }
 }
