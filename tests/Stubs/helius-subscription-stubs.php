@@ -78,8 +78,21 @@ namespace {
         /** @var list<array<string, mixed>> F-314: every PUT body, decoded in full */
         public static array $putBodies = [];
 
+        /** @var list<string> F-314: the URL of every webhook GET, in order */
+        public static array $getUrls = [];
+
+        /**
+         * F-314: run once, at the next successful lock acquire — models a
+         * request that held the lock first and changed the world meanwhile.
+         *
+         * @var (callable(): void)|null
+         */
+        public static $onNextAcquire = null;
+
         public static function reset(): void
         {
+            self::$getUrls         = [];
+            self::$onNextAcquire   = null;
             self::$createResponses = [];
             self::$putBodies       = [];
             self::$rawRequests   = 0;
@@ -137,6 +150,11 @@ namespace BCC\Core\DB {
                 \HeliusWorld::$lockLog[] = 'acquire:' . $key . ':' . $timeout . ':' . ($ok ? 'ok' : 'busy');
                 if ($ok) {
                     \HeliusWorld::$lockHeld++;
+                    if (\HeliusWorld::$onNextAcquire !== null) {
+                        $hook = \HeliusWorld::$onNextAcquire;
+                        \HeliusWorld::$onNextAcquire = null;
+                        $hook();
+                    }
                 }
                 return $ok;
             }
@@ -157,22 +175,28 @@ namespace BCC\Core\Log {
             /** @var list<string> */
             public static array $lines = [];
 
+            /** @var list<array<string, mixed>> the context of each line, same order */
+            public static array $contexts = [];
+
             /** @param array<string, mixed> $c */
             public static function info(string $m, array $c = []): void
             {
                 self::$lines[] = 'info:' . $m;
+                self::$contexts[] = $c;
             }
 
             /** @param array<string, mixed> $c */
             public static function warning(string $m, array $c = []): void
             {
                 self::$lines[] = 'warning:' . $m;
+                self::$contexts[] = $c;
             }
 
             /** @param array<string, mixed> $c */
             public static function error(string $m, array $c = []): void
             {
                 self::$lines[] = 'error:' . $m;
+                self::$contexts[] = $c;
             }
         }
     }
@@ -190,6 +214,7 @@ namespace BCC\Trust\Onchain\Support {
             public static function get(string $url, array $args = [], array $options = [])
             {
                 \HeliusWorld::$getCalls++;
+                \HeliusWorld::$getUrls[] = $url;
                 if (\HeliusWorld::$throwInsideLock) {
                     throw new \RuntimeException('boom inside the critical section');
                 }
