@@ -299,6 +299,7 @@ final class EmailVerificationController
                 AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT,
                 AuthSupport::RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT
             )) {
+                AuthSupport::releaseThrottle('resend_verification', 3600);
                 return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
             }
             $ownerId = HandleService::currentOwner($handle);
@@ -307,7 +308,9 @@ final class EmailVerificationController
             // The resolved inbox's own cap still binds, so alternating the
             // email and handle forms cannot double the mail to one address.
             // Over it, nothing is sent and the answer is the same ok (a 429
-            // here would say the handle exists).
+            // here would say the handle exists). The network slot is NOT
+            // given back here: a give-back only for handles that exist would
+            // let the network bucket's count say which ones do.
             if ($user instanceof \WP_User && !AuthSupport::allowMailToAddress(
                 'resend_verification',
                 $email,

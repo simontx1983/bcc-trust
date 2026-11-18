@@ -145,4 +145,45 @@ final class AuthCountsFailuresOnlyTest extends TestCase
         $addressKey = AuthSupport::emailThrottleKey('forgot_password', 'target@example.com') . '_net_' . hash('sha256', AuthSupport::loginNetwork());
         self::assertSame($perAddress + 1, self::hits($addressKey), 'the address cap counts every request (mail-bomb guard)');
     }
+
+    /** @param array<string, string> $params */
+    private static function resend(array $params): int
+    {
+        return (new EmailVerificationController())->resendVerification(new \WP_REST_Request($params))->get_status();
+    }
+
+    public function testAHandleCapRefusalGivesBackTheNetworkSlotButStillCountsTheHandle(): void
+    {
+        $perHandle = AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT;
+        for ($i = 0; $i < $perHandle; $i++) {
+            self::assertSame(200, self::resend(['identifier' => 'nobody-here']));
+        }
+        self::assertSame($perHandle, self::hits('resend_verification'));
+
+        self::assertSame(429, self::resend(['identifier' => 'nobody-here']));
+
+        self::assertSame($perHandle, self::hits('resend_verification'), 'the refused request gave its network slot back');
+        $handleKey = AuthSupport::emailThrottleKey('resend_verification', 'handle:nobody-here') . '_net_' . hash('sha256', AuthSupport::loginNetwork());
+        self::assertSame($perHandle + 1, self::hits($handleKey), 'the handle cap counts every request');
+    }
+
+    public function testTheSilentInboxCapOnTheHandleFormKeepsTheNetworkSlot(): void
+    {
+        // Spend alice's inbox cap by email, then ask by handle: nothing is
+        // sent, the answer is the same ok, and the network slot stays
+        // charged. A give-back only here (the handle exists) would let the
+        // network count tell existing handles from unknown ones.
+        $perAddress = AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT;
+        for ($i = 0; $i < $perAddress; $i++) {
+            self::resend(['email' => 'alice@example.test']);
+        }
+        $mails   = count($GLOBALS['__bcc_ph']['mail']);
+        $network = self::hits('resend_verification');
+
+        self::assertSame(200, self::resend(['identifier' => 'alice']));
+
+        self::assertSame($mails, count($GLOBALS['__bcc_ph']['mail']), 'over the inbox cap, nothing is sent');
+        self::assertSame($network + 1, self::hits('resend_verification'), 'the network slot is not given back');
+        self::assertSame([], $GLOBALS['__bcc_ph']['throttle_releases'] ?? [], 'nothing was released');
+    }
 }
