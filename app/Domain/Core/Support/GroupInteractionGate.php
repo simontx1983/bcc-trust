@@ -196,17 +196,38 @@ final class GroupInteractionGate
      * own: the predicate reads `act_access`, and a comment does not
      * meaningfully carry one.
      *
-     * ⚠⚠ AN UNRESOLVABLE PARENT ACT SKIPS THIS GATE, deliberately, and
-     * this is the one place the rule is not applied. `CommentRepository`
-     * selects `COALESCE(pa.act_id, 0) AS parent_act_id`, so 0 is a REAL
-     * production value meaning "this comment's parent post has no activity
-     * row", not a bug or a missing fixture. Refusing there would break
-     * ordinary interactions on that data shape, and it would buy nothing:
-     * a post with no activity row appears in no feed and has no permalink,
-     * so the disclosure this gate closes does not exist for it. The
-     * membership gate still applies, so a closed-group comment is still
-     * refused. ⛔ Do NOT "tighten" this to a refusal without first
-     * checking what that COALESCE can return.
+     * ⚠⚠ AN UNRESOLVABLE PARENT ACT SKIPS THIS GATE, deliberately. It is a
+     * KNOWN, ACCEPTED narrowing rather than an oversight, so here is
+     * exactly what it costs.
+     *
+     * `CommentRepository::getCommentMeta()` selects
+     * `COALESCE(pa.act_id, 0)` over a LEFT JOIN matching on BOTH
+     * `act_external_id` AND `act_comment_module_id`, so 0 means "no
+     * activity row matched that PAIR" — which is two different situations:
+     *
+     *   - the parent post genuinely has no activity row. Then it is in no
+     *     feed and has no permalink, so the disclosure this gate closes
+     *     does not exist for it, and refusing would only break ordinary
+     *     interactions.
+     *   - the MODULE half of the join did not match, in which case the
+     *     parent activity DOES exist and may well be feed-visible. This
+     *     one is a real, if narrow, gap: on such a comment a viewer who
+     *     may not see the parent post can still stoke or helpful-mark it.
+     *
+     * The second case is why this is a trade and not a free pass. It is
+     * accepted because these are WRITE paths — no post content and no
+     * thread is disclosed, only interaction counts — because the
+     * membership gate still applies (a closed-group comment is still
+     * refused), and because failing closed would break interaction for the
+     * first case, which is the one the repository's own docblock calls
+     * "unresolvable".
+     *
+     * ⛔ Do NOT flip this to a refusal, or widen it, without first
+     * measuring how often that module half fails in production. If it is
+     * ~never, failing closed is strictly better and should be the
+     * decision; this note exists so whoever checks need not re-derive the
+     * question. `testAnUnresolvableParentActSkipsTheGate` pins the current
+     * behaviour either way, so a change there is a conscious one.
      *
      * ⚠ Costs one extra indexed read by act id on these write paths. That
      * is the price of asking bcc-core's predicate instead of restating it;
