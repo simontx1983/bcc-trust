@@ -174,6 +174,25 @@ namespace BCC\Core\Feed {
             ?array $viewerFriendIds = null,
             bool $enforcePostVisibility = false
         ): array {
+            // F-276: every argument, in call order, so a surface's
+            // limit / cursor / hashtag can be asserted and a refactor
+            // can be diffed call for call.
+            $GLOBALS['__bcc_f02feed']['getfeed_args'][] = [
+                'viewerId'              => $viewerId,
+                'scope'                 => $scope,
+                'cursor'                => $cursor,
+                'limit'                 => $limit,
+                'excludedAuthorIds'     => $excludedAuthorIds,
+                'excludedActIds'        => $excludedActIds,
+                'onlyForGroupId'        => $onlyForGroupId,
+                'excludedGroupIds'      => $excludedGroupIds,
+                'groupVisibilityIn'     => $groupVisibilityIn,
+                'hashtag'               => $hashtag,
+                'hallFeed'              => $hallFeed,
+                'viewerFriendIds'       => $viewerFriendIds,
+                'enforcePostVisibility' => $enforcePostVisibility,
+            ];
+
             unset(
                 $cursor, $limit, $excludedActIds,
                 $excludedGroupIds, $groupVisibilityIn, $hallFeed
@@ -382,7 +401,9 @@ namespace BCC\Trust\Core\Services\Feed {
          */
         public function hydrate(array $items, int $viewerId): array
         {
-            unset($viewerId);
+            // F-276: which viewer a page was hydrated for — the
+            // viewer_reaction / vouch / can_report chrome follows it.
+            $GLOBALS['__bcc_f02feed']['hydrated_for'][] = $viewerId;
 
             return $items;
         }
@@ -395,7 +416,8 @@ namespace BCC\Trust\Core\Services\Feed {
         /** @return mixed */
         function wp_cache_get(string $key, string $group = '')
         {
-            unset($key, $group);
+            // F-276: which shared-cache keys a surface read.
+            $GLOBALS['__bcc_f02feed']['cache_reads'][] = $group . '/' . $key;
 
             return false;
         }
@@ -424,7 +446,9 @@ namespace BCC\Trust\Core\Services\Feed {
         /** @param mixed $value */
         function wp_cache_set(string $key, $value, string $group = '', int $ttl = 0): bool
         {
-            unset($key, $value, $group, $ttl);
+            unset($value, $ttl);
+            // F-276: which shared-cache keys a surface wrote.
+            $GLOBALS['__bcc_f02feed']['cache_writes'][] = $group . '/' . $key;
 
             return true;
         }
