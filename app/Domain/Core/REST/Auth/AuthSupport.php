@@ -71,8 +71,13 @@ final class AuthSupport
     public const VERIFY_RATE_LIMIT = 5;
     /** Anon-IP-keyed throttle for signup. Throttle::allow buckets by IP for unauthed requests. */
     public const SIGNUP_RATE_LIMIT = 5;
-    /** Anon-IP-keyed throttle for login. Same budget as signup — login is the obvious brute-force target. */
-    public const LOGIN_RATE_LIMIT = 5;
+    /**
+     * Anon per-NETWORK (IPv4 /24, IPv6 /48) throttle for login, per minute.
+     * F-290: was 5, which a shared office / campus / carrier NAT exhausted
+     * between unrelated members. Guessing against one account is bounded
+     * by the per-identifier buckets (LOGIN_ACCOUNT_*), not by this.
+     */
+    public const LOGIN_RATE_LIMIT = 20;
     /**
      * Per-identifier and per-account login throttles (defense-in-depth vs
      * brute force against ONE account, which the per-IP `login` bucket
@@ -182,30 +187,87 @@ final class AuthSupport
      */
     public const REFRESH_RATE_LIMIT = 30;
     /**
-     * Anon-IP-keyed (hourly) throttle for /auth/forgot-password. Caps
-     * email-bomb spam against any single account from one source.
-     * 3/hour covers the legitimate retry pattern (typo, mail didn't
-     * arrive, try once more) without giving a harasser a useful weapon.
+     * F-290 (user-approved numbers): the anonymous auth throttles used to be
+     * ONE small bucket per network (IPv4 /24, IPv6 /48), so a shared office,
+     * campus or carrier NAT exhausted it between unrelated members. Each now
+     * has an office-scale per-network budget, and the mail-sending routes
+     * add per-ADDRESS budgets (allowMailToAddress): a tight one per
+     * (address, network), and a looser one per address across all networks
+     * that the account's recently signed-in networks skip — so nobody
+     * elsewhere can use up the owner's own reset or verification mail, and
+     * a single inbox still can't be bombed. Keys hash the normalized email;
+     * for an address with no account the path is the same as for an
+     * untrusted network (no enumeration oracle).
      */
-    public const FORGOT_PASSWORD_RATE_LIMIT = 3;
+    /** /auth/forgot-password, per network per hour. */
+    public const FORGOT_PASSWORD_RATE_LIMIT = 20;
+    /** /auth/forgot-password, per (email address, network) per hour (typo, mail didn't arrive, once more). */
+    public const FORGOT_PASSWORD_EMAIL_RATE_LIMIT = 3;
+    /** /auth/forgot-password, per email address per hour across networks; the account's trusted networks skip it. */
+    public const FORGOT_PASSWORD_EMAIL_GLOBAL_RATE_LIMIT = 10;
     /**
-     * Anon-IP-keyed (hourly) throttle for /auth/reset-password. Defense
-     * in depth against key brute force — WP reset keys are ~20 random
-     * chars so this is bug-or-misuse insurance, not an active budget.
+     * /auth/reset-password, per network per hour. WP reset keys are ~20
+     * random chars and single-use, so this is abuse insurance, not a
+     * brute-force budget.
      */
-    public const RESET_PASSWORD_RATE_LIMIT = 10;
+    public const RESET_PASSWORD_RATE_LIMIT = 30;
     /**
-     * Anon-IP-keyed (hourly) throttle for /auth/verify-email. Caps OTP
-     * brute-force attempts — 10/hour against a 6-digit code is negligible
-     * attack surface given the 15-minute OTP TTL.
+     * /auth/verify-email, per network per hour. Guessing is bounded by the
+     * per-code cap (VERIFY_EMAIL_MAX_FAILURES, then the code burns).
      */
-    public const VERIFY_EMAIL_RATE_LIMIT = 10;
+    public const VERIFY_EMAIL_RATE_LIMIT = 30;
+    /** /auth/resend-verification, per network per hour. */
+    public const RESEND_VERIFICATION_RATE_LIMIT = 20;
+    /** /auth/resend-verification, per (email address, network) per hour. */
+    public const RESEND_VERIFICATION_EMAIL_RATE_LIMIT = 3;
+    /** /auth/resend-verification, per email address per hour across networks; the account's trusted networks skip it. */
+    public const RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT = 10;
+
+    /** F-290: the per-address throttle key — normalized, hashed, existence-blind. */
+    public static function emailThrottleKey(string $action, string $email): string
+    {
+        return 'bcc_throttle_' . $action . '_email_' . hash('sha256', strtolower(trim($email)));
+    }
+
     /**
-     * Anon-IP-keyed (hourly) throttle for /auth/resend-verification.
-     * Caps email-bomb abuse from a single source: 3/hour covers the
-     * "I didn't get it" retry pattern without enabling harassment.
+     * F-290: may a mail-sending auth route (forgot-password, resend
+     * verification) send to $email for this caller? Call after the email is
+     * validated and BEFORE the route acts on the account.
+     *
+     *   1. $perNetwork per (address, caller's network) per hour — the tight
+     *      cap; a stranger elsewhere spends only their own share.
+     *   2. $global per address per hour across all networks — the anti-bomb
+     *      cap. Networks the account recently completed a sign-in from
+     *      (F-281's trusted networks) skip it, so a stranger who exhausts it
+     *      can't block the owner's own reset or verification mail at home.
+     *      An address with no account has no trusted networks: it takes the
+     *      exact path an untrusted network does, so a 429 says nothing about
+     *      whether an account exists.
      */
-    public const RESEND_VERIFICATION_RATE_LIMIT = 3;
+    public static function allowMailToAddress(string $action, string $email, int $perNetwork, int $global): bool
+    {
+        $network = self::loginNetwork();
+        if (!\BCC\Core\Security\Throttle::allow(
+            $action . '_email_net',
+            $perNetwork,
+            3600,
+            self::emailThrottleKey($action, $email) . '_net_' . hash('sha256', $network)
+        )) {
+            return false;
+        }
+
+        $user = get_user_by('email', $email);
+        if ($user instanceof \WP_User && self::isTrustedLoginNetwork((int) $user->ID, $network)) {
+            return true;
+        }
+
+        return \BCC\Core\Security\Throttle::allow(
+            $action . '_email',
+            $global,
+            3600,
+            self::emailThrottleKey($action, $email)
+        );
+    }
     /** Anon-IP-keyed (per-minute) throttle for /auth/2fa/verify. */
     public const TWO_FA_VERIFY_RATE_LIMIT = 10;
     /** Anon-IP-keyed (per-minute) throttle for /auth/2fa/resend. */
