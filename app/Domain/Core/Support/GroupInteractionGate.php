@@ -63,26 +63,7 @@ final class GroupInteractionGate
             return self::notFound();
         }
 
-        // §F-02 — the post's own AUDIENCE, not only its group. Without
-        // this, anyone holding a feed id could react to, stoke or
-        // helpful-mark a followers-only or only-me post, and ring its
-        // author's bell from content they were never shown.
-        //
-        // A COMMENT act is gated on its PARENT's act row: the rule reads
-        // `act_access`, which a comment does not meaningfully carry. The
-        // getCommentMeta() read repeats the one resolveLiveTarget() just
-        // did — one indexed lookup on a write path that already makes
-        // several, paid to keep that method's signature (and its
-        // NotificationDispatcher caller) untouched.
-        $comment       = Plugin::instance()->commentRepository()->getCommentMeta($actId);
-        $audienceActId = $comment === null ? $actId : (int) ($comment->parent_act_id ?? 0);
-        if ($audienceActId <= 0
-            || !\BCC\Trust\Core\Services\FeedItemReportVisibility::audienceAllows(
-                $userId,
-                $audienceActId,
-                $postId
-            )
-        ) {
+        if (!self::audienceAllows($userId, $actId, $postId)) {
             return self::notFound();
         }
 
@@ -117,10 +98,14 @@ final class GroupInteractionGate
         }
 
         // §F-02 — the PARENT post's audience. A comment carries none of its
-        // own, and the meta is already in hand here, so this costs nothing.
+        // own, and the meta is already in hand here, so this needs no
+        // second read. ⚠ `parent_act_id` of 0 means the parent post has no
+        // activity row, which is a REAL value (the repository selects
+        // COALESCE(pa.act_id, 0)) — see audienceAllows() for why that
+        // SKIPS the gate rather than refusing.
         $parentActId = (int) ($meta->parent_act_id ?? 0);
-        if ($parentActId <= 0
-            || !\BCC\Trust\Core\Services\FeedItemReportVisibility::audienceAllows(
+        if ($parentActId > 0
+            && !\BCC\Trust\Core\Services\FeedItemReportVisibility::audienceAllows(
                 $userId,
                 $parentActId,
                 $parentPostId
@@ -196,6 +181,58 @@ final class GroupInteractionGate
         }
 
         return $postId;
+    }
+
+    /**
+     * §F-02 — may this viewer see the POST behind this act at all?
+     *
+     * Without this, anyone holding a feed id could react to, stoke or
+     * helpful-mark a followers-only or only-me post, and ring its author's
+     * bell from content they were never shown. The rule itself is
+     * {@see FeedItemReportVisibility::audienceAllows()}, which reuses
+     * bcc-core's single SQL predicate — there is no second ladder here.
+     *
+     * ⚠ A COMMENT act is judged on its PARENT POST's act row, never its
+     * own: the predicate reads `act_access`, and a comment does not
+     * meaningfully carry one.
+     *
+     * ⚠⚠ AN UNRESOLVABLE PARENT ACT SKIPS THIS GATE, deliberately, and
+     * this is the one place the rule is not applied. `CommentRepository`
+     * selects `COALESCE(pa.act_id, 0) AS parent_act_id`, so 0 is a REAL
+     * production value meaning "this comment's parent post has no activity
+     * row", not a bug or a missing fixture. Refusing there would break
+     * ordinary interactions on that data shape, and it would buy nothing:
+     * a post with no activity row appears in no feed and has no permalink,
+     * so the disclosure this gate closes does not exist for it. The
+     * membership gate still applies, so a closed-group comment is still
+     * refused. ⛔ Do NOT "tighten" this to a refusal without first
+     * checking what that COALESCE can return.
+     *
+     * ⚠ Costs one extra indexed read by act id on these write paths. That
+     * is the price of asking bcc-core's predicate instead of restating it;
+     * restating it is what §11 forbids and what drifts.
+     */
+    private static function audienceAllows(int $userId, int $actId, int $postId): bool
+    {
+        $comment = Plugin::instance()->commentRepository()->getCommentMeta($actId);
+        if ($comment !== null) {
+            $parentActId = (int) ($comment->parent_act_id ?? 0);
+            if ($parentActId <= 0) {
+                return true; // cannot ask; see the docblock
+            }
+
+            return \BCC\Trust\Core\Services\FeedItemReportVisibility::audienceAllows(
+                $userId,
+                $parentActId,
+                $postId
+            );
+        }
+
+        return \BCC\Trust\Core\Services\FeedItemReportVisibility::audienceAllows(
+            $userId,
+            $actId,
+            $postId
+        );
     }
 
     private const NOT_FOUND_POST = 'Post not found.';

@@ -249,12 +249,25 @@ final class GroupInteractionGateTest extends TestCase
         self::assertSame([], $GLOBALS['__bcc_gig']['access_calls']);
     }
 
+    /**
+     * ⚠ There are now TWO act lookups on this path, and the distinction
+     * matters: the FIRST decides whether the act is something a feed route
+     * may touch at all (the canonical module allowlist, F-163), and the
+     * SECOND is the §F-02 audience re-read, which asks a different
+     * question and passes NO module filter on purpose — it answers "may
+     * this viewer see this post", and the allowlist question is already
+     * settled by the time it runs. Asserting only on the first keeps this
+     * test about the thing it is named for.
+     */
     public function testTheLookupUsesTheCanonicalFeedAllowlist(): void
     {
         (self::GATE)::check(self::USER, self::PLAIN_POST_ACT);
 
         $expected = \BCC\Core\Feed\FeedItemNormalizer::publicFeedModuleIds();
-        self::assertSame([$expected], $GLOBALS['__bcc_gig']['allowlists'], 'the PRODUCTION allowlist, passed to the lookup');
+        $calls    = $GLOBALS['__bcc_gig']['allowlists'];
+
+        self::assertNotSame([], $calls, 'the act lookup never happened');
+        self::assertSame($expected, $calls[0], 'the PRODUCTION allowlist, passed to the FIRST lookup');
         self::assertNotContains(6, $expected, 'control: DMs are not a feed module');
         self::assertContains(1, $expected, 'control: status posts are');
     }

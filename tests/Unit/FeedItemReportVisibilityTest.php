@@ -57,6 +57,12 @@ final class FeedItemReportVisibilityTest extends TestCase
             require_once dirname(__DIR__, 2) . '/../bcc-core/src/Feed/GroupSyndicationGate.php';
         }
         require_once __DIR__ . '/../Stubs/nonopen-groups-seed.php';
+        // §F-02: canSee() now also asks the post's own AUDIENCE, which
+        // re-reads the act with enforcement on. Without this double the
+        // suite dies with "Class PeepSoActivityRepository not found" — a
+        // FATAL, not a failed assertion.
+        require_once __DIR__ . '/../Stubs/activity-audience-stubs.php';
+        $GLOBALS['__bcc_aud'] = ['hidden' => [], 'calls' => []];
         // Default: NO group is non-open, the pre-F-23 shape bcc-core's own
         // tests pin. So the matrix below exercises the GROUP gate, and the
         // syndication question is seeded explicitly by the tests that are
@@ -163,11 +169,59 @@ final class FeedItemReportVisibilityTest extends TestCase
         self::assertSame($expected, $this->gate()->canSee(self::VIEWER, $this->activity()));
     }
 
-    public function testANonGroupPostIsVisibleToEveryone(): void
+    /**
+     * ⚠ NARROWED by §F-02's audience rule, and the old name over-claimed.
+     * A post outside any group is not refused BY THE GROUP RULE — that is
+     * what this asserts, and it is still true. What changed is that
+     * canSee() no longer stops there: the post's own audience is asked
+     * too, which is the next two tests.
+     */
+    public function testANonGroupPostIsNotRefusedByTheGroupRule(): void
     {
         $this->post([]);
         self::assertTrue($this->gate()->canSee(self::VIEWER, $this->activity()));
         self::assertTrue($this->gate()->canSee(0, $this->activity()), 'even a signed-out viewer sees the global feed');
+    }
+
+    /**
+     * ⭐ The §F-02 hole this closed. A post outside any group used to be
+     * visible to anyone who could name it, because the group rule answers
+     * TRUE for a non-group post and nothing else was asked. Its own
+     * audience is now consulted.
+     */
+    public function testANonGroupPostIsRefusedWhenItsAudienceExcludesTheViewer(): void
+    {
+        $this->post([]);
+        $GLOBALS['__bcc_aud']['hidden'] = [(int) $this->activity()->act_id];
+
+        self::assertFalse($this->gate()->canSee(self::VIEWER, $this->activity()));
+    }
+
+    /**
+     * ⭐⭐ THE CARVE-OUT, as a control. Inside a group, posts follow the
+     * GROUP's rules — members see them — so the audience question must not
+     * be asked at all there. Asserted on the RECORDED READS rather than on
+     * the answer: a group post could come out visible for unrelated
+     * reasons, and what must hold is that §F-02 was never consulted.
+     *
+     * Without this, applying the audience rule everywhere would look
+     * correct while hiding a members_only group post's thread from a
+     * fellow member whose author keeps a private profile.
+     */
+    public function testAGroupPostIsDecidedByTheGroupRuleAloneNotTheAudience(): void
+    {
+        $this->group(self::PRIVACY['open']);
+        $this->post(['peepso_group_id' => (string) self::GROUP, '_bcc_post_visibility' => 'public_group']);
+        $this->wpdb()->members[self::VIEWER . ':' . self::GROUP] = 'member';
+        $GLOBALS['__bcc_aud']['hidden'] = [(int) $this->activity()->act_id];
+
+        self::assertTrue($this->gate()->canSee(self::VIEWER, $this->activity()));
+
+        $enforced = array_filter(
+            \bcc_aud_fixture()['calls'],
+            static fn(array $c): bool => $c['enforce'] === true
+        );
+        self::assertSame([], array_values($enforced), 'the group room must not consult §F-02');
     }
 
     public function testAMissingVisibilityMarkerIsMembersOnly(): void
