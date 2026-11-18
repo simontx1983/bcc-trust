@@ -196,6 +196,64 @@ final class PageClaimReleaseTest extends TestCase
         self::assertArrayNotHasKey(self::NEW, $GLOBALS['__bcc_drain']['page_members'][self::PAGE], 'and gets no owner row');
     }
 
+    // ── F-360: several rows for the old owner (no unique (page, user) key)
+
+    /**
+     * Deciding on PeepSo's one-row `is_owner`: [member_owner, banned] read as
+     * owner, and the demotion (which rewrites EVERY row of the pair) lifted
+     * the ban.
+     */
+    public function testAnOwnerRowAheadOfABanIsLeftForManualReview(): void
+    {
+        $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD] = ['member_owner', 'banned'];
+
+        self::assertFalse($this->integration()->releaseClaimedPage(self::PAGE, self::OLD));
+
+        self::assertSame(['member_owner', 'banned'], $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD], 'the ban is never lifted');
+        self::assertSame(self::OLD, $GLOBALS['__bcc_drain']['post_author'][self::PAGE], 'and the page is not half-freed');
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_writes']);
+        self::assertSame([['page_owner_release_skipped', self::PAGE, ['old_owner' => self::OLD, 'reason' => 'banned']]], self::audits('page_owner_release_skipped'));
+        self::assertSame([], self::audits('page_owner_released'));
+    }
+
+    /** ... and [banned, member_owner] read as NOT owner: the author was reset while the owner row stayed. */
+    public function testABanAheadOfAnOwnerRowIsLeftForManualReview(): void
+    {
+        $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD] = ['banned', 'member_owner'];
+
+        self::assertFalse($this->integration()->releaseClaimedPage(self::PAGE, self::OLD));
+
+        self::assertSame(['banned', 'member_owner'], $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD]);
+        self::assertSame(self::OLD, $GLOBALS['__bcc_drain']['post_author'][self::PAGE], 'no author reset beside a leftover owner row');
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_count_drops']);
+        self::assertCount(1, self::audits('page_owner_release_skipped'));
+    }
+
+    /** No ban: an owner row behind an older `member` row is still found and demoted. */
+    public function testAnOwnerRowBehindAMemberRowIsStillDemoted(): void
+    {
+        $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD] = ['member', 'member_owner'];
+
+        self::assertTrue($this->integration()->releaseClaimedPage(self::PAGE, self::OLD));
+
+        self::assertSame(['member', 'member'], $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD], 'no owner row is left behind');
+        self::assertSame(0, $GLOBALS['__bcc_drain']['post_author'][self::PAGE]);
+        self::assertSame('demoted', self::audits('page_owner_released')[0][2]['owner_row']);
+    }
+
+    public function testAnUnreadableOwnerStatusNeverFreesThePage(): void
+    {
+        $GLOBALS['__bcc_drain']['status_read_fails'] = true;
+
+        self::assertFalse($this->integration()->releaseClaimedPage(self::PAGE, self::OLD));
+
+        self::assertSame(self::OLD, $GLOBALS['__bcc_drain']['post_author'][self::PAGE]);
+        self::assertSame('member_owner', $GLOBALS['__bcc_drain']['page_members'][self::PAGE][self::OLD]);
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_writes']);
+        self::assertSame([], $GLOBALS['__bcc_drain']['audits']);
+        self::assertCount(1, $GLOBALS['__bcc_drain']['errors'], 'logged, never thrown');
+    }
+
     // ── the takeover ────────────────────────────────────────────────────
 
     public function testTheNextOperatorsClaimTakesThePageOverIncludingTheScoreRow(): void

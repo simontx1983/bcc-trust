@@ -65,6 +65,21 @@ namespace {
     // no row (an existing row is re-set to `member`); member_modify() updates
     // an EXISTING row only (an UPDATE that matches nothing still "succeeds");
     // both re-read the flags. Knobs: `fail_join`, `fail_modify` (bool).
+    //
+    // F-360: a pair may hold SEVERAL rows (no unique (page, user) key): give
+    // `page_members[pageId][userId]` a list of statuses in pm_id order. Like
+    // the real model, init() then reads ONE row (`LIMIT 1`, no ORDER BY —
+    // modelled as the first), and member_modify() rewrites EVERY row of the
+    // pair (its UPDATE matches on page + user only).
+    if (!function_exists('__bcc_pm_rows')) {
+        /** @return list<string> the pair's statuses in pm_id order */
+        function __bcc_pm_rows(int $pageId, int $userId): array
+        {
+            $rows = $GLOBALS['__bcc_drain']['page_members'][$pageId][$userId] ?? [];
+
+            return is_array($rows) ? array_values($rows) : [$rows];
+        }
+    }
     if (!class_exists('PeepSoPageUser', false)) {
         class PeepSoPageUser
         {
@@ -80,7 +95,7 @@ namespace {
 
             private function init(): void
             {
-                $role            = $GLOBALS['__bcc_drain']['page_members'][$this->page_id][(int) $this->user_id] ?? false;
+                $role            = __bcc_pm_rows($this->page_id, (int) $this->user_id)[0] ?? false;
                 $this->role      = $role;
                 $this->is_member = is_string($role) && str_starts_with($role, 'member');
                 $this->is_owner  = $role === 'member_owner';
@@ -91,6 +106,9 @@ namespace {
                 $GLOBALS['__bcc_drain']['page_writes'][] = ['join', $this->page_id, (int) $this->user_id];
                 if (!empty($GLOBALS['__bcc_drain']['fail_join'])) {
                     return false;
+                }
+                if (__bcc_pm_rows($this->page_id, (int) $this->user_id) !== []) {
+                    return $this->member_modify('member'); // the real join on an existing row
                 }
                 $GLOBALS['__bcc_drain']['page_members'][$this->page_id][(int) $this->user_id] = 'member';
                 $this->init();
@@ -103,7 +121,10 @@ namespace {
                 if (!empty($GLOBALS['__bcc_drain']['fail_modify'])) {
                     return false;
                 }
-                if (isset($GLOBALS['__bcc_drain']['page_members'][$this->page_id][(int) $this->user_id])) {
+                $current = $GLOBALS['__bcc_drain']['page_members'][$this->page_id][(int) $this->user_id] ?? null;
+                if (is_array($current)) {
+                    $GLOBALS['__bcc_drain']['page_members'][$this->page_id][(int) $this->user_id] = array_fill(0, count($current), $role);
+                } elseif ($current !== null) {
                     $GLOBALS['__bcc_drain']['page_members'][$this->page_id][(int) $this->user_id] = $role;
                 }
                 $this->init();
@@ -335,6 +356,12 @@ namespace BCC\Core\Repositories {
 namespace BCC\Trust\Core\Repositories {
     // F-299 live guard's other-owner read, from the in-memory page members.
     // `owner_read_fails` makes it answer "unreadable" (null).
+    //
+    // F-360 claimerPageStatus(): the ranked read (a ban first, then an owner
+    // row, then the oldest). The real SQL ordering is proved against MySQL
+    // and MariaDB in PageOwnerBackfillCandidatesIntegrationTest; this fake
+    // lets the unit tests prove the CALLERS decide on it and not on
+    // PeepSoPageUser's one-row flags. `status_read_fails` = unreadable (null).
     if (!class_exists(PeepSoQueryRepository::class, false)) {
         final class PeepSoQueryRepository
         {
@@ -343,13 +370,29 @@ namespace BCC\Trust\Core\Repositories {
                 if (!empty($GLOBALS['__bcc_drain']['owner_read_fails'])) {
                     return null;
                 }
-                foreach ($GLOBALS['__bcc_drain']['page_members'][$pageId] ?? [] as $uid => $status) {
-                    if ((int) $uid !== $userId && $status === 'member_owner') {
+                foreach (array_keys($GLOBALS['__bcc_drain']['page_members'][$pageId] ?? []) as $uid) {
+                    if ((int) $uid !== $userId && in_array('member_owner', __bcc_pm_rows($pageId, (int) $uid), true)) {
                         return (int) $uid;
                     }
                 }
 
                 return 0;
+            }
+
+            /** @return array{status: ?string}|null */
+            public static function claimerPageStatus(int $pageId, int $userId): ?array
+            {
+                if (!empty($GLOBALS['__bcc_drain']['status_read_fails'])) {
+                    return null;
+                }
+                $rows = __bcc_pm_rows($pageId, $userId);
+                foreach (['banned', 'member_owner'] as $ranked) {
+                    if (in_array($ranked, $rows, true)) {
+                        return ['status' => $ranked];
+                    }
+                }
+
+                return ['status' => $rows[0] ?? null];
             }
         }
     }
