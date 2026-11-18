@@ -166,7 +166,7 @@ final class CardReviewsService
      * `permissions.can_reply` to a shaped review row.
      *
      * @param array<string, mixed> $item
-     * @param array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}|null $bundle
+     * @param array{reply: array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>}|null, can_reply: array{allowed: bool, unlock_hint: string|null, reason_code: string|null}}|null $bundle
      * @param array<string, mixed>|null $prefetched
      * @return array<string, mixed>
      */

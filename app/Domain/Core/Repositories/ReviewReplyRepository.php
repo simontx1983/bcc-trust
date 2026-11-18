@@ -23,16 +23,18 @@ if (!defined('ABSPATH')) {
  * act_id) and HiddenActivityRepository (act-level hide). Writes go through
  * ActivityStreamWriter; this class only reads.
  *
- * Every read returns the reply that OCCUPIES a review's one slot, hidden or
- * not, with a `hidden` flag. Callers decide: a review list renders only
- * `hidden === false` (a hidden reply reads as "no reply"), while can_reply and
- * the write paths treat a hidden reply as still occupying the slot, so a
- * moderator hiding a reply does not let a second one be posted, and its author
- * can still delete it.
+ * A review can carry MORE THAN ONE reply over time (the hand-over rule, user
+ * decision 2026-11-17): when the page changes hands, the old author's reply
+ * stops being the page's response and the current party may write their own.
+ * So reads return EVERY reply on a review, hidden included, each with a
+ * `hidden` flag, and ReviewReplyService decides which one is the page's
+ * response (the one whose author currently answers for the page). Each author
+ * holds at most one reply per review.
  *
- * FAIL-CLOSED: both read through GuardsReadFailures::runRead(…, true), so a
- * failed query throws RepositoryReadFailure instead of answering "no reply".
- * For the write path that matters most: "no reply" would allow a duplicate.
+ * FAIL-CLOSED: every read goes through GuardsReadFailures::runRead(…, true),
+ * so a failed query throws RepositoryReadFailure instead of answering "no
+ * reply". A read that hits its row bound throws too: a truncated result could
+ * miss the current reply, and "no reply" would offer a duplicate.
  */
 final class ReviewReplyRepository
 {
@@ -46,12 +48,16 @@ final class ReviewReplyRepository
     /** Bound for one batch: a review list page is at most 100 rows. */
     private const MAX_BATCH = 100;
 
+    /** Row bound per review: hand-overs are rare, so a few replies at most. */
+    private const MAX_REPLIES_PER_REVIEW = 4;
+
     /**
-     * The replies for a page of reviews, keyed by vote id, hidden included.
+     * Every reply on a page of reviews, grouped by vote id, oldest first,
+     * hidden included.
      *
      * @param list<int> $voteIds
-     * @return array<int, array{vote_id: int, post_id: int, act_id: int, author_id: int, body: string, posted_at: string, edited_at: string|null, hidden: bool}>
-     * @throws RepositoryReadFailure when the read did not run
+     * @return array<int, list<array{vote_id: int, post_id: int, act_id: int, author_id: int, body: string, posted_at: string, edited_at: string|null, hidden: bool}>>
+     * @throws RepositoryReadFailure when the read did not run or hit its bound
      */
     public function findByVoteIds(array $voteIds): array
     {
@@ -61,29 +67,28 @@ final class ReviewReplyRepository
         }
 
         $out = [];
-        foreach ($this->read($ids) as $row) {
-            // One slot per review; the oldest row wins if a race ever wrote two.
-            $out[$row['vote_id']] ??= $row;
+        foreach ($this->read($ids, null) as $row) {
+            $out[$row['vote_id']][] = $row;
         }
         return $out;
     }
 
     /**
-     * The reply occupying this review's slot, hidden or not, or null.
+     * This author's reply on this review, hidden or not, or null.
      *
      * Impure: it reads the database, so a later call may see a write.
      *
      * @phpstan-impure
      *
      * @return array{vote_id: int, post_id: int, act_id: int, author_id: int, body: string, posted_at: string, edited_at: string|null, hidden: bool}|null
-     * @throws RepositoryReadFailure when the read did not run
+     * @throws RepositoryReadFailure when the read did not run or hit its bound
      */
-    public function findForVote(int $voteId): ?array
+    public function findForVoteByAuthor(int $voteId, int $authorId): ?array
     {
-        if ($voteId <= 0) {
+        if ($voteId <= 0 || $authorId <= 0) {
             return null;
         }
-        $rows = $this->read([$voteId]);
+        $rows = $this->read([$voteId], $authorId);
         return $rows[0] ?? null;
     }
 
@@ -92,7 +97,7 @@ final class ReviewReplyRepository
      * @return list<array{vote_id: int, post_id: int, act_id: int, author_id: int, body: string, posted_at: string, edited_at: string|null, hidden: bool}>
      * @throws RepositoryReadFailure
      */
-    private function read(array $voteIds): array
+    private function read(array $voteIds, ?int $authorId): array
     {
         global $wpdb;
 
@@ -110,6 +115,11 @@ final class ReviewReplyRepository
 
         $placeholders = implode(',', array_fill(0, count($voteIds), '%s'));
         $args         = array_map('strval', $voteIds);
+        $authorClause = $authorId !== null ? 'AND p.post_author = %d' : '';
+        if ($authorId !== null) {
+            $args[] = (string) $authorId;
+        }
+        $limit = count($voteIds) * self::MAX_REPLIES_PER_REVIEW;
 
         // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         $sql = $wpdb->prepare(
@@ -138,17 +148,24 @@ final class ReviewReplyRepository
               WHERE p.post_type = 'peepso-post'
                 AND p.post_status = 'publish'
                 AND pm_sc.meta_value IN ({$placeholders})
+                {$authorClause}
               ORDER BY p.ID ASC
               LIMIT %d",
             self::MODULE_NAME,
             $moduleId,
             self::META_EDITED_AT,
-            ...array_merge($args, [self::MAX_BATCH * 2])
+            ...array_merge($args, [$limit + 1])
         );
         // phpcs:enable WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 
         /** @var list<object{vote_id: int|numeric-string, post_id: int|numeric-string, act_id: int|numeric-string, author_id: int|numeric-string, body: string, posted_at: string, edited_at: string|null, is_hidden: int|numeric-string}> $rows */
         $rows = self::runRead((string) $sql, __FUNCTION__, true);
+
+        // One row past the bound means the answer may be incomplete: refuse
+        // it rather than risk missing the reply that holds the slot.
+        if (count($rows) > $limit) {
+            throw new RepositoryReadFailure(self::class, __FUNCTION__, 'reply read exceeded its row bound');
+        }
 
         $out = [];
         foreach ($rows as $row) {

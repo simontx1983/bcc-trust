@@ -46,6 +46,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Feed\GroupSyndicationGate;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
+use BCC\Trust\Core\Support\FeedItemGate;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -145,11 +146,7 @@ class FeedItemReportVisibility
         // backgrounds (111) and raw peepso-blog posts (6661), and fails
         // closed on any module added later. Blog posts reach the feed as
         // module 204 (blog_excerpt), which is on the list.
-        if (!in_array(
-            (int) ($activity->act_module_id ?? 0),
-            \BCC\Core\Feed\FeedItemNormalizer::publicFeedModuleIds(),
-            true
-        )) {
+        if (!FeedItemGate::isFeedModule($activity->act_module_id ?? null)) {
             return false;
         }
         if (!$this->isLive($activity)) {

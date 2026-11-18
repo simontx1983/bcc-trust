@@ -103,7 +103,7 @@ final class ReviewRepliesEndpoint
         }
 
         if (isset($result['reply']) && is_array($result['reply'])) {
-            /** @var array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string} $reply */
+            /** @var array{id: int, body: string, author_id: int, posted_at: string, edited_at: string|null, feed_id: string, permissions: array<string, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>} $reply */
             $reply           = $result['reply'];
             $result['reply'] = Plugin::instance()->reviewReplyService()->withAuthor($reply, $viewerId, null);
         }

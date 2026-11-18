@@ -7,6 +7,7 @@ use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\PeepSoReactionRepository;
 use BCC\Trust\Core\Repositories\PostEngagementRepository;
 use BCC\Trust\Core\Repositories\PostReachRepository;
+use BCC\Trust\Core\Support\FeedItemGate;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -97,7 +98,7 @@ final class PostAnalyticsService
         }
 
         $activity = PeepSoActivityRepository::getById($actId);
-        if ($activity === null) {
+        if ($activity === null || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)) {
             return self::notFound();
         }
 

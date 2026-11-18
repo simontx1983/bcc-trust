@@ -17,7 +17,7 @@ namespace {
     {
         /** @var array<int, array{voter: int, page: int}> active, not-hidden reviews by vote id */
         public static array $reviews = [];
-        /** @var array<int, array{vote_id: int, post_id: int, act_id: int, author_id: int, body: string, posted_at: string, edited_at: string|null, hidden: bool}> */
+        /** @var array<int, list<array{vote_id: int, post_id: int, act_id: int, author_id: int, body: string, posted_at: string, edited_at: string|null, hidden: bool}>> replies per vote id, oldest first */
         public static array $replies = [];
         /** @var array<int, int> page id => PeepSo/post owner (0 = an unowned placeholder) */
         public static array $owners = [];
@@ -28,6 +28,9 @@ namespace {
         public static bool $readFails = false;
         public static bool $throttled = false;
         public static bool $writeFails = false;
+        public static bool $lockBusy = false;
+        /** @var list<string> */
+        public static array $locks = [];
         /** @var list<array{string, array<int, mixed>}> */
         public static array $actions = [];
         /** @var list<array<string, mixed>> */
@@ -39,14 +42,18 @@ namespace {
         /** @var array<int, string> */
         public static array $postContent = [];
 
+        private static int $nextPost = 5000;
+
         public static function reset(): void
         {
-            foreach (['reviews', 'replies', 'owners', 'validatorOperators', 'suspended', 'actions', 'published', 'deleted', 'postMeta', 'postContent'] as $p) {
+            foreach (['reviews', 'replies', 'owners', 'validatorOperators', 'suspended', 'locks', 'actions', 'published', 'deleted', 'postMeta', 'postContent'] as $p) {
                 self::${$p} = [];
             }
             self::$readFails  = false;
             self::$throttled  = false;
             self::$writeFails = false;
+            self::$lockBusy   = false;
+            self::$nextPost   = 5000;
         }
 
         public static function maybeFail(): void
@@ -54,6 +61,32 @@ namespace {
             if (self::$readFails) {
                 throw new \BCC\Trust\Onchain\Repositories\RepositoryReadFailure('Stub', 'read', 'injected');
             }
+        }
+
+        public static function nextPostId(): int
+        {
+            return ++self::$nextPost;
+        }
+
+        /** Apply $fn to every stored reply row (in place). */
+        public static function eachReply(callable $fn): void
+        {
+            foreach (self::$replies as $voteId => $rows) {
+                foreach ($rows as $i => $row) {
+                    self::$replies[$voteId][$i] = $fn($row);
+                }
+            }
+        }
+
+        /** Mark a stored reply hidden (by vote and author). */
+        public static function hide(int $voteId, int $authorId): void
+        {
+            self::eachReply(static function (array $r) use ($voteId, $authorId): array {
+                if ($r['vote_id'] === $voteId && $r['author_id'] === $authorId) {
+                    $r['hidden'] = true;
+                }
+                return $r;
+            });
         }
     }
 
@@ -80,13 +113,15 @@ namespace {
         /** @param array<string, mixed> $post */
         function wp_update_post(array $post, bool $wpError = false): int
         {
-            ReplyWorld::$postContent[(int) $post['ID']] = (string) $post['post_content'];
-            foreach (ReplyWorld::$replies as $voteId => $r) {
-                if ($r['post_id'] === (int) $post['ID']) {
-                    ReplyWorld::$replies[$voteId]['body'] = (string) $post['post_content'];
+            $id = (int) $post['ID'];
+            ReplyWorld::$postContent[$id] = (string) $post['post_content'];
+            ReplyWorld::eachReply(static function (array $r) use ($id, $post): array {
+                if ($r['post_id'] === $id) {
+                    $r['body'] = (string) $post['post_content'];
                 }
-            }
-            return (int) $post['ID'];
+                return $r;
+            });
+            return $id;
         }
     }
     if (!function_exists('update_post_meta')) {
@@ -94,10 +129,13 @@ namespace {
         function update_post_meta(int $postId, string $key, $value): bool
         {
             ReplyWorld::$postMeta[$postId][$key] = $value;
-            foreach (ReplyWorld::$replies as $voteId => $r) {
-                if ($r['post_id'] === $postId && $key === '_bcc_review_reply_edited_at') {
-                    ReplyWorld::$replies[$voteId]['edited_at'] = (string) $value;
-                }
+            if ($key === '_bcc_review_reply_edited_at') {
+                ReplyWorld::eachReply(static function (array $r) use ($postId, $value): array {
+                    if ($r['post_id'] === $postId) {
+                        $r['edited_at'] = (string) $value;
+                    }
+                    return $r;
+                });
             }
             return true;
         }
@@ -123,6 +161,28 @@ namespace BCC\Core\Security {
             public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null): bool
             {
                 return !\ReplyWorld::$throttled;
+            }
+        }
+    }
+}
+
+namespace BCC\Core\DB {
+    if (!class_exists(__NAMESPACE__ . '\\AdvisoryLock', false)) {
+        final class AdvisoryLock
+        {
+            public static function acquire(string $key, int $timeout = 0): bool
+            {
+                if (\ReplyWorld::$lockBusy) {
+                    return false;
+                }
+                \ReplyWorld::$locks[] = 'acquire:' . $key;
+                return true;
+            }
+
+            public static function release(string $key): bool
+            {
+                \ReplyWorld::$locks[] = 'release:' . $key;
+                return true;
             }
         }
     }
@@ -161,7 +221,7 @@ namespace BCC\Trust\Core\Repositories {
             public const MODULE_NAME    = 'review_reply';
             public const META_EDITED_AT = '_bcc_review_reply_edited_at';
 
-            /** @param list<int> $voteIds @return array<int, array<string, mixed>> */
+            /** @param list<int> $voteIds @return array<int, list<array<string, mixed>>> */
             public function findByVoteIds(array $voteIds): array
             {
                 \ReplyWorld::maybeFail();
@@ -169,10 +229,15 @@ namespace BCC\Trust\Core\Repositories {
             }
 
             /** @return array<string, mixed>|null */
-            public function findForVote(int $voteId): ?array
+            public function findForVoteByAuthor(int $voteId, int $authorId): ?array
             {
                 \ReplyWorld::maybeFail();
-                return \ReplyWorld::$replies[$voteId] ?? null;
+                foreach (\ReplyWorld::$replies[$voteId] ?? [] as $row) {
+                    if ($row['author_id'] === $authorId) {
+                        return $row;
+                    }
+                }
+                return null;
             }
         }
     }
@@ -188,10 +253,10 @@ namespace BCC\Trust\Core\Services\Feed {
                 if (\ReplyWorld::$writeFails) {
                     return null;
                 }
-                $postId = 5000 + $voteId;
-                $actId  = 9000 + $voteId;
+                $postId = \ReplyWorld::nextPostId();
+                $actId  = $postId + 4000;
                 \ReplyWorld::$published[] = ['replier' => $replierId, 'vote' => $voteId, 'body' => $body];
-                \ReplyWorld::$replies[$voteId] = [
+                \ReplyWorld::$replies[$voteId][] = [
                     'vote_id' => $voteId, 'post_id' => $postId, 'act_id' => $actId, 'author_id' => $replierId,
                     'body' => $body, 'posted_at' => '2026-11-12 10:00:00', 'edited_at' => null, 'hidden' => false,
                 ];
@@ -201,6 +266,12 @@ namespace BCC\Trust\Core\Services\Feed {
             public function deleteReviewReply(int $postId, int $actId): bool
             {
                 \ReplyWorld::$deleted[] = [$postId, $actId];
+                foreach (\ReplyWorld::$replies as $voteId => $rows) {
+                    \ReplyWorld::$replies[$voteId] = array_values(array_filter(
+                        $rows,
+                        static fn(array $r): bool => $r['post_id'] !== $postId
+                    ));
+                }
                 return true;
             }
         }

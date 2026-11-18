@@ -45,6 +45,7 @@ use PHPUnit\Framework\TestCase;
 final class ReviewReplyRepositoryIntegrationTest extends TestCase
 {
     private const OWNER     = 987100;
+    private const NEW_OWNER = 987101;
     private const VOTER     = 987001;
     private const ACT_BASE  = 2700000500;
     private const POST_BASE = 2700000600;
@@ -158,7 +159,7 @@ final class ReviewReplyRepositoryIntegrationTest extends TestCase
      *
      * @return array{int, int}
      */
-    private function post(string $module, int $voteId, string $body, string $status = 'publish', bool $withActivity = true): array
+    private function post(string $module, int $voteId, string $body, string $status = 'publish', bool $withActivity = true, int $author = self::OWNER): array
     {
         global $wpdb;
         $i    = count($this->posts);
@@ -173,7 +174,7 @@ final class ReviewReplyRepositoryIntegrationTest extends TestCase
             'ID'            => $post,
             'post_type'     => 'peepso-post',
             'post_status'   => $status,
-            'post_author'   => self::OWNER,
+            'post_author'   => $author,
             'post_content'  => $body,
             'post_date_gmt' => '2026-11-12 10:00:00',
         ]), $wpdb->last_error);
@@ -201,13 +202,40 @@ final class ReviewReplyRepositoryIntegrationTest extends TestCase
         $rows = $this->replies->findByVoteIds([$vote]);
 
         self::assertArrayHasKey($vote, $rows);
-        self::assertSame($post, $rows[$vote]['post_id']);
-        self::assertSame($act, $rows[$vote]['act_id'], 'the act_id POST /me/reports and the hide key on');
-        self::assertSame(self::OWNER, $rows[$vote]['author_id']);
-        self::assertSame('thanks for the review', $rows[$vote]['body']);
-        self::assertFalse($rows[$vote]['hidden']);
-        self::assertNull($rows[$vote]['edited_at']);
-        self::assertSame($rows[$vote], $this->replies->findForVote($vote));
+        self::assertCount(1, $rows[$vote]);
+        $row = $rows[$vote][0];
+        self::assertSame($post, $row['post_id']);
+        self::assertSame($act, $row['act_id'], 'the act_id POST /me/reports and the hide key on');
+        self::assertSame(self::OWNER, $row['author_id']);
+        self::assertSame('thanks for the review', $row['body']);
+        self::assertFalse($row['hidden']);
+        self::assertNull($row['edited_at']);
+        self::assertSame($row, $this->replies->findForVoteByAuthor($vote, self::OWNER));
+        self::assertNull($this->replies->findForVoteByAuthor($vote, self::NEW_OWNER), 'another author has no reply here');
+    }
+
+    public function testAfterAHandOverEachAuthorsReplyIsReadOldestFirst(): void
+    {
+        $vote         = $this->vote();
+        [$oldPost]    = $this->post('review_reply', $vote, 'from the old owner');
+        [$newPost]    = $this->post('review_reply', $vote, 'from the new owner', 'publish', true, self::NEW_OWNER);
+
+        $rows = $this->replies->findByVoteIds([$vote]);
+
+        self::assertSame([$oldPost, $newPost], array_column($rows[$vote], 'post_id'));
+        self::assertSame($oldPost, $this->replies->findForVoteByAuthor($vote, self::OWNER)['post_id'] ?? null);
+        self::assertSame($newPost, $this->replies->findForVoteByAuthor($vote, self::NEW_OWNER)['post_id'] ?? null);
+    }
+
+    public function testAReadThatHitsItsRowBoundThrowsRatherThanRiskMissingTheCurrentReply(): void
+    {
+        $vote = $this->vote();
+        for ($i = 0; $i < 5; $i++) {
+            $this->post('review_reply', $vote, 'reply ' . $i, 'publish', true, self::OWNER + 10 + $i);
+        }
+
+        $this->expectException(RepositoryReadFailure::class);
+        $this->replies->findByVoteIds([$vote]);
     }
 
     public function testAHiddenReplyIsFlaggedNotDroppedSoTheSlotStaysTaken(): void
@@ -216,9 +244,9 @@ final class ReviewReplyRepositoryIntegrationTest extends TestCase
         [, $act]   = $this->post('review_reply', $vote, 'reply');
         self::assertTrue($this->hidden->add($act, 0, 'admin_action'));
 
-        $row = $this->replies->findForVote($vote);
+        $row = $this->replies->findForVoteByAuthor($vote, self::OWNER);
 
-        self::assertNotNull($row, 'a hidden reply still occupies the review\'s one slot');
+        self::assertNotNull($row, 'a hidden reply still occupies its author\'s slot');
         self::assertTrue($row['hidden']);
     }
 
@@ -243,7 +271,7 @@ final class ReviewReplyRepositoryIntegrationTest extends TestCase
         [$post]       = $this->post('review_reply', $vote, 'edited reply');
         $wpdb->insert($wpdb->postmeta, ['post_id' => $post, 'meta_key' => ReviewReplyRepository::META_EDITED_AT, 'meta_value' => '2026-11-12 11:30:00']);
 
-        self::assertSame('2026-11-12 11:30:00', $this->replies->findForVote($vote)['edited_at'] ?? null);
+        self::assertSame('2026-11-12 11:30:00', $this->replies->findForVoteByAuthor($vote, self::OWNER)['edited_at'] ?? null);
     }
 
     public function testAFailedReplyReadThrowsRatherThanReadingAsNoReply(): void
@@ -253,7 +281,7 @@ final class ReviewReplyRepositoryIntegrationTest extends TestCase
 
         $GLOBALS['wpdb']->failQueriesMatching = '/AS is_hidden/';
         $this->expectException(RepositoryReadFailure::class);
-        $this->replies->findForVote($vote);
+        $this->replies->findForVoteByAuthor($vote, self::OWNER);
     }
 
     // ── VoteRepository::findReviewForReply ──────────────────────────────
