@@ -179,6 +179,19 @@ class ReputationRepository {
     /**
      * Get reputation score for a user
      */
+    /**
+     * The trust score as EVERY surface shows it: getScore() clamped to
+     * 0–100 and rounded to an int. One definition, so the profile hero
+     * (User/Card `trust_score`) and the feed/comment author block can never
+     * show two numbers for one member. Reads the request memo, so callers
+     * that primeByUserIds() a page first pay no per-user query.
+     */
+    public function getDisplayScore(int $userId): int {
+        $score = $this->getScore($userId);
+
+        return (int) round(max(0.0, min(100.0, $score)));
+    }
+
     public function getScore(int $userId): float {
         $record = $this->getByUserId($userId);
         return $record ? (float) $record->reputation_score : self::DEFAULT_REPUTATION_SCORE;

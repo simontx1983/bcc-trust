@@ -184,7 +184,12 @@ final class MessagesService
         $perPage = max(1, min($perPage, self::INBOX_PER_PAGE_MAX));
         $offset  = ($page - 1) * $perPage;
 
-        $rows = PeepSoMessageRepository::findConversationsForUser($viewerId, $perPage, $offset);
+        // F-300: a failed read is a retryable 503, never an empty inbox
+        // ("No conversations yet" over a DB error).
+        $rows = self::readInboxRows($viewerId, $perPage, $offset);
+        if ($rows === null) {
+            return self::dmReadUnavailable();
+        }
         $total = PeepSoMessageRepository::countConversationsForUser($viewerId);
 
         if ($rows === []) {
@@ -397,13 +402,18 @@ final class MessagesService
         $perPage = max(1, min($perPage, self::THREAD_PER_PAGE_MAX));
         $offset  = ($page - 1) * $perPage;
 
-        $rows = PeepSoMessageRepository::findMessagesInConversation(
+        $rows = self::readThreadRows(
             $rootMsgId,
             $viewerId,
             // Fetch one extra to compute has_more without a COUNT
             $perPage + 1,
             $offset
         );
+        // F-300: a failed read is a retryable 503 — and, critically, the
+        // conversation is NOT marked read below: the viewer never saw it.
+        if ($rows === null) {
+            return self::dmReadUnavailable();
+        }
 
         $hasMore = count($rows) > $perPage;
         if ($hasMore) {
@@ -467,6 +477,9 @@ final class MessagesService
                 'is_group'     => count($participants) > 2,
                 'participants' => self::resolveUserMinis($participants, $userViews),
                 'peer'         => $peerId !== null ? ($userViews[$peerId] ?? null) : null,
+                // F-246: the reply composer learns "can't reply" (and the
+                // right copy) up front instead of from a failed POST.
+                'can_reply'    => self::canReply($viewerId, $rootMsgId),
             ],
             'items'      => $items,
             'pagination' => [
@@ -751,7 +764,7 @@ final class MessagesService
             'Recipient not found.',
             // ⚠ WRITE path: refuse with a retryable 503 if the block
             // table cannot be read. See evaluatePolicy().
-            true
+            refuseOnUnknownBlock: true
         );
         if ($gate !== null) {
             return ['error' => $gate['error'], 'message' => $gate['message']];
@@ -801,20 +814,9 @@ final class MessagesService
         // NORMAL_DM (a first-claim backlog delivery never creates an
         // ongoing exemption; see MessagingPolicy).
         $participants = PeepSoMessageRepository::getParticipantUserIds($rootMsgId);
-        $peerId = self::resolvePeerId($participants, $viewerId, count($participants) > 2);
-        if ($peerId !== null) {
-            $gate = self::evaluatePolicy(
-                MessagingPolicy::NORMAL_DM,
-                $viewerId,
-                $peerId,
-                'Conversation not found.',
-                // ⚠ WRITE path: refuse with a retryable 503 if the block
-                // table cannot be read. See evaluatePolicy().
-                true
-            );
-            if ($gate !== null) {
-                return ['error' => $gate['error'], 'message' => $gate['message']];
-            }
+        $gate = self::existingConversationGate($viewerId, $rootMsgId, $participants);
+        if ($gate !== null) {
+            return ['error' => $gate['error'], 'message' => $gate['message']];
         }
 
         // #122: no email to any participant who has blocked this
@@ -1736,6 +1738,130 @@ final class MessagesService
 
             return $check;
         };
+    }
+
+    // ── F-246 / F-300 helpers ───────────────────────────────────────────
+
+    /**
+     * F-246: would `POST /me/conversations/{id}/messages` be accepted
+     * right now? The reply composer's up-front answer, in the card
+     * permission shape {allowed, unlock_hint, reason_code}.
+     *
+     * Runs EXACTLY the gates the reply path runs, in the same order:
+     * the sender's permanent rules (sendMessage's suspension + own
+     * chat_enabled checks, via the shared senderMessagingGate) and, for
+     * a 1-on-1, existingConversationGate() — the SAME method the reply
+     * POST calls, so the two cannot drift.
+     *
+     * The transient rate limit is excluded, as on can_message. Block and
+     * peer-chat-off share `messaging_unavailable` (§4.19 shield).
+     *
+     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
+     */
+    private static function canReply(int $viewerId, int $rootMsgId): array
+    {
+        $senderGate = self::senderMessagingGate($viewerId);
+        if ($senderGate !== null) {
+            return $senderGate;
+        }
+
+        $gate = self::existingConversationGate($viewerId, $rootMsgId);
+        if ($gate !== null) {
+            return self::eligibilityDeny($gate['unlock_hint'], $gate['reason_code']);
+        }
+
+        return ['allowed' => true, 'unlock_hint' => null, 'reason_code' => null];
+    }
+
+    /**
+     * THE peer-side gate for sending into an EXISTING conversation — the
+     * one implementation behind both the reply POST
+     * (sendToExistingConversation) and the read-side `can_reply`, so the
+     * two cannot drift: a gate added here applies to both.
+     *
+     * For a 1-on-1, re-checks the privacy gate against the peer (a peer may
+     * have flipped chat_enabled / chat_friends_only since the last
+     * message), with the same evaluator as the start path. Replies always
+     * run NORMAL_DM (a first-claim backlog delivery never creates an
+     * ongoing exemption; see MessagingPolicy). Group threads have no peer
+     * gate. Returns the evaluator's payload, or null when the send may
+     * proceed.
+     *
+     * ⚠ The peer is resolved from the UNFILTERED participant list. PeepSo's
+     * viewer-filtered list drops a blocked peer, which would make a blocked
+     * pair pass. `$participants` lets the POST path reuse the list it has
+     * already read; when null it is read here, unfiltered.
+     *
+     * ⚠ WRITE-path semantics on both sides: an unreadable block table
+     * refuses (retryable 503 on the POST, `unavailable` on the read).
+     *
+     * @param list<int>|null $participants
+     * @return array{error: string, message: string, gate: string, reason_code: string, unlock_hint: string|null}|null
+     */
+    private static function existingConversationGate(int $viewerId, int $rootMsgId, ?array $participants = null): ?array
+    {
+        $participants ??= PeepSoMessageRepository::getParticipantUserIds($rootMsgId);
+        $peerId = self::resolvePeerId($participants, $viewerId, count($participants) > 2);
+        if ($peerId === null) {
+            return null;
+        }
+        return self::evaluatePolicy(
+            MessagingPolicy::NORMAL_DM,
+            $viewerId,
+            $peerId,
+            'Conversation not found.',
+            // ⚠ WRITE path: refuse with a retryable 503 if the block
+            // table cannot be read. See evaluatePolicy(). (can_reply
+            // shares this, so it answers `unavailable` then.)
+            refuseOnUnknownBlock: true
+        );
+    }
+
+    /**
+     * F-300: the inbox page, or NULL when the read failed.
+     *
+     * Feature-detected: bcc-core #113 added the `...OrUnknown` read. On an
+     * older bcc-core the old `?: []` read is used, which is exactly the
+     * pre-F-300 behaviour, so this file deploys in either order.
+     *
+     * @return list<array<string, mixed>>|null
+     */
+    private static function readInboxRows(int $viewerId, int $limit, int $offset): ?array
+    {
+        // @phpstan-ignore function.alreadyNarrowedType (an older bcc-core may be deployed alongside)
+        if (method_exists(PeepSoMessageRepository::class, 'findConversationsForUserOrUnknown')) {
+            return PeepSoMessageRepository::findConversationsForUserOrUnknown($viewerId, $limit, $offset);
+        }
+        return PeepSoMessageRepository::findConversationsForUser($viewerId, $limit, $offset);
+    }
+
+    /**
+     * F-300: a page of a thread, or NULL when either read failed.
+     * Feature-detected exactly like readInboxRows().
+     *
+     * @return list<array<string, mixed>>|null
+     */
+    private static function readThreadRows(int $rootMsgId, int $viewerId, int $limit, int $offset): ?array
+    {
+        // @phpstan-ignore function.alreadyNarrowedType (an older bcc-core may be deployed alongside)
+        if (method_exists(PeepSoMessageRepository::class, 'findMessagesInConversationOrUnknown')) {
+            return PeepSoMessageRepository::findMessagesInConversationOrUnknown($rootMsgId, $viewerId, $limit, $offset);
+        }
+        return PeepSoMessageRepository::findMessagesInConversation($rootMsgId, $viewerId, $limit, $offset);
+    }
+
+    /**
+     * F-300: the wire error for a DM read that did not run. Retryable
+     * (503), so the client shows an error state, not "No messages yet".
+     *
+     * @return array{error: string, message: string}
+     */
+    private static function dmReadUnavailable(): array
+    {
+        return [
+            'error'   => 'bcc_unavailable',
+            'message' => 'Messages could not be loaded. Please try again.',
+        ];
     }
 
     private static function previewBody(string $body): string

@@ -1651,9 +1651,15 @@ final class CollectionRepository
      * Each UPDATE is gated by `is_verified <> target` so unchanged rows
      * are not touched (no recurring no-op writes).
      *
+     * F-313 (M15): a failed UPDATE THROWS. It used to be cast to 0, so the
+     * caller's transaction committed and the admin saw "✓" (or "0 actually
+     * changed") for a write that never happened. The only caller runs this
+     * inside TransactionManager::run(), which rolls back and reports failure.
+     *
      * @param list<int> $idsToVerify
      * @param list<int> $idsToUnverify
      * @return int Total rows actually changed
+     * @throws \RuntimeException when either UPDATE fails
      */
     public static function setVerifiedBulk(array $idsToVerify, array $idsToUnverify): int
     {
@@ -1670,18 +1676,26 @@ final class CollectionRepository
 
         if ($verify !== []) {
             $ph = implode(',', array_fill(0, count($verify), '%d'));
-            $changed += (int) $wpdb->query($wpdb->prepare(
+            $result = $wpdb->query($wpdb->prepare(
                 "UPDATE {$table} SET is_verified = 1 WHERE id IN ({$ph}) AND is_verified <> 1",
                 ...$verify
             ));
+            if ($result === false) {
+                throw new \RuntimeException('verify UPDATE failed: ' . (string) $wpdb->last_error);
+            }
+            $changed += (int) $result;
         }
 
         if ($unverify !== []) {
             $ph = implode(',', array_fill(0, count($unverify), '%d'));
-            $changed += (int) $wpdb->query($wpdb->prepare(
+            $result = $wpdb->query($wpdb->prepare(
                 "UPDATE {$table} SET is_verified = 0 WHERE id IN ({$ph}) AND is_verified <> 0",
                 ...$unverify
             ));
+            if ($result === false) {
+                throw new \RuntimeException('unverify UPDATE failed: ' . (string) $wpdb->last_error);
+            }
+            $changed += (int) $result;
         }
 
         return $changed;

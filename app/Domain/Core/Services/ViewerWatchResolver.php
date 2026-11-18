@@ -33,6 +33,7 @@ namespace BCC\Trust\Core\Services;
 
 use BCC\Trust\Core\Repositories\PageFollowRepository;
 use BCC\Trust\Core\Repositories\WatchingRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -40,9 +41,17 @@ if (!defined('ABSPATH')) {
 
 /**
  * @phpstan-type ViewerWatch array{follow_id: int, source: 'peepso'|'page'}
+ * @phpstan-type WatchState ViewerWatch|'unknown'
  */
 final class ViewerWatchResolver
 {
+    /**
+     * A map value meaning "the read that would answer this failed" (as
+     * opposed to an absent key: not watching). Surfaces as
+     * `viewer_is_watching: null`, so the client shows a neutral state
+     * instead of a wrong "Watch" button. The card page never fails for it.
+     */
+    public const UNKNOWN = 'unknown';
     public function __construct(
         private readonly WatchingRepository $watching,
         private readonly PageFollowRepository $pageFollows
@@ -73,7 +82,7 @@ final class ViewerWatchResolver
 
     /**
      * @param list<int> $userIds
-     * @return array<int, ViewerWatch> user id => handle; absent = not watching
+     * @return array<int, WatchState> user id => handle or UNKNOWN; absent = not watching
      */
     public function forMembers(int $viewerId, array $userIds): array
     {
@@ -81,8 +90,15 @@ final class ViewerWatchResolver
             return [];
         }
 
+        try {
+            $followIds = $this->watching->findActiveFollowIdsForFollowees($viewerId, $userIds);
+        } catch (RepositoryReadFailure $e) {
+            self::logUnknown('members', $viewerId, $e);
+            return self::allUnknown($userIds, $viewerId);
+        }
+
         $out = [];
-        foreach ($this->watching->findActiveFollowIdsForFollowees($viewerId, $userIds) as $userId => $followId) {
+        foreach ($followIds as $userId => $followId) {
             $out[$userId] = ['follow_id' => $followId, 'source' => 'peepso'];
         }
 
@@ -91,7 +107,7 @@ final class ViewerWatchResolver
 
     /**
      * @param list<int> $pageIds
-     * @return array<int, ViewerWatch> page id => handle; absent = not watching
+     * @return array<int, WatchState> page id => handle or UNKNOWN; absent = not watching
      */
     public function forPages(int $viewerId, array $pageIds): array
     {
@@ -114,37 +130,89 @@ final class ViewerWatchResolver
             }
         }
 
-        $byAuthor = $authorOf === []
-            ? []
-            : $this->watching->findActiveFollowIdsForFollowees($viewerId, array_values(array_unique($authorOf)));
-        $byPage = $placeholders === []
-            ? []
-            : $this->pageFollows->findIdsForUserPages($viewerId, $placeholders);
-
         $out = [];
-        foreach ($authorOf as $pageId => $authorId) {
-            if (isset($byAuthor[$authorId])) {
-                $out[$pageId] = ['follow_id' => $byAuthor[$authorId], 'source' => 'peepso'];
+
+        // Each source fails on its own: a failed follow read makes the
+        // owned pages UNKNOWN, a failed page-follow read the placeholders.
+        if ($authorOf !== []) {
+            try {
+                $byAuthor = $this->watching->findActiveFollowIdsForFollowees($viewerId, array_values(array_unique($authorOf)));
+                foreach ($authorOf as $pageId => $authorId) {
+                    if (isset($byAuthor[$authorId])) {
+                        $out[$pageId] = ['follow_id' => $byAuthor[$authorId], 'source' => 'peepso'];
+                    }
+                }
+            } catch (RepositoryReadFailure $e) {
+                self::logUnknown('owned pages', $viewerId, $e);
+                foreach (array_keys($authorOf) as $pageId) {
+                    $out[$pageId] = self::UNKNOWN;
+                }
             }
         }
-        foreach ($byPage as $pageId => $followId) {
-            $out[$pageId] = ['follow_id' => $followId, 'source' => 'page'];
+
+        if ($placeholders !== []) {
+            try {
+                foreach ($this->pageFollows->findIdsForUserPages($viewerId, $placeholders) as $pageId => $followId) {
+                    $out[$pageId] = ['follow_id' => $followId, 'source' => 'page'];
+                }
+            } catch (RepositoryReadFailure $e) {
+                self::logUnknown('placeholder pages', $viewerId, $e);
+                foreach ($placeholders as $pageId) {
+                    $out[$pageId] = self::UNKNOWN;
+                }
+            }
         }
 
         return $out;
     }
 
     /**
-     * The two card/profile fields, from one resolved handle (or null).
+     * The two card/profile fields for `$id`, from a forPages()/forMembers()
+     * map:
+     *   - absent        → not watching:  false, null
+     *   - a handle      → watching:      true,  handle
+     *   - UNKNOWN       → the read failed: null, null
      *
-     * @param ViewerWatch|null $watch
-     * @return array{viewer_is_watching: bool, viewer_watch: ViewerWatch|null}
+     * @param array<int, mixed> $map
+     * @return array{viewer_is_watching: bool|null, viewer_watch: ViewerWatch|null}
      */
-    public static function fields(?array $watch): array
+    public static function fieldsFor(array $map, int $id): array
     {
-        return [
-            'viewer_is_watching' => $watch !== null,
-            'viewer_watch'       => $watch,
-        ];
+        if (!array_key_exists($id, $map)) {
+            return ['viewer_is_watching' => false, 'viewer_watch' => null];
+        }
+        $state = $map[$id];
+        if (is_array($state) && isset($state['follow_id'], $state['source'])) {
+            /** @var ViewerWatch $state */
+            return ['viewer_is_watching' => true, 'viewer_watch' => $state];
+        }
+
+        return ['viewer_is_watching' => null, 'viewer_watch' => null];
+    }
+
+    /**
+     * @param list<int> $ids
+     * @return array<int, 'unknown'>
+     */
+    private static function allUnknown(array $ids, int $viewerId): array
+    {
+        $out = [];
+        foreach ($ids as $id) {
+            $id = (int) $id;
+            if ($id > 0 && $id !== $viewerId) {
+                $out[$id] = self::UNKNOWN;
+            }
+        }
+
+        return $out;
+    }
+
+    private static function logUnknown(string $what, int $viewerId, RepositoryReadFailure $e): void
+    {
+        \BCC\Core\Log\Logger::warning('[bcc-trust] viewer watch state unknown: read failed', [
+            'for'       => $what,
+            'viewer_id' => $viewerId,
+            'error'     => $e->getMessage(),
+        ]);
     }
 }

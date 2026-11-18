@@ -240,12 +240,12 @@ control 9 "EVM unsupported list cached as complete empty" "$HOLDINGS" \
   -
 
 control 10 "Revocation on UNKNOWN enabled" "$REVOKE" \
-  "s = s.replace('                    if (\$verdict->isUnknown()) {', '                    if (\$verdict->isUnknown() && \$this->revokeMember(\$userId, \$groupId, \$config, \$verdict)) {\n                        \$stats[\\'revoked\\']++;\n                        continue;\n                    }\n                    if (\$verdict->isUnknown()) {')" \
+  "s = s.replace('                if (\$verdict->isUnknown()) {', '                if (\$verdict->isUnknown() && \$this->revokeMember(\$userId, \$groupId, \$config, \$verdict)) {\n                    \$stats[\\'revoked\\']++;\n                    continue;\n                }\n                if (\$verdict->isUnknown()) {')" \
   "testTheSweepNeverRemovesAMemberOnAWalletReadFailure|testTheSweepNeverRemovesAMemberOfAnInactiveChainsGroup|testKeptMembersBetweenRemovalsAreNeitherSkippedNorRevisited" \
   "testAFailedWalletQueryRemovesNobodyAndTheNextHealthyTickDoes|testKeptMembersBetweenRemovalsAreNeitherSkippedNorRevisited"
 
 control 11 "Revocation guard removed (any decided verdict removes)" "$REVOKE" \
-  "s = s.replace('                    if (\$verdict->isIneligible()\n                        && \$this->revokeMember(', '                    if (true\n                        && \$this->revokeMember(')" \
+  "s = s.replace('                if (\$verdict->isIneligible()\n                    && \$this->revokeMember(', '                if (true\n                    && \$this->revokeMember(')" \
   "testTheSweepKeepsAProvenHolder|testKeptMembersBetweenRemovalsAreNeitherSkippedNorRevisited" \
   "testKeptMembersBetweenRemovalsAreNeitherSkippedNorRevisited"
 
@@ -255,7 +255,7 @@ control 12 "Complete-zero AND changed to OR" "$COUNT" \
   -
 
 control 13 "Pagination offset bug restored" "$REVOKE" \
-  "s = s.replace('                \$offset = \$position;', '                \$offset += count(\$members);')" \
+  "s = s.replace('            \$offset = \$position;', '            \$offset += count(\$members);')" \
   "testOneSweepProcessesEveryMemberExactlyOnceAcrossPages|testKeptMembersBetweenRemovalsAreNeitherSkippedNorRevisited" \
   "testEveryMemberIsEvaluatedAndRemovedExactlyOnceAcrossPagesAndTicks|testKeptMembersBetweenRemovalsAreNeitherSkippedNorRevisited"
 
@@ -306,7 +306,7 @@ control 21 "Cosmos evidence reads the page cache again" "$COSMOS" \
   -
 
 control 22 "A cached complete zero answers the gate again" "$HOLDINGS" \
-  "s = s.replace('            if (\$matches > 0 && self::cachedPositiveIsTrusted(\$cached)) {\n                return HoldingsCount::atLeast(\$matches);\n            }', '            if (\$matches > 0 && self::cachedPositiveIsTrusted(\$cached)) {\n                return HoldingsCount::atLeast(\$matches);\n            }\n            if (\$matches === 0 && empty(\$cached[\\'truncated\\']) && (\$cached[\\'complete\\'] ?? false) === true) {\n                return HoldingsCount::exact(0);\n            }')" \
+  "s = s.replace('                return HoldingsCount::atLeast(\$matches);\n            }', '                return HoldingsCount::atLeast(\$matches);\n            }\n            if (\$matches === 0 && empty(\$cached[\\'truncated\\']) && (\$cached[\\'complete\\'] ?? false) === true) {\n                return HoldingsCount::exact(0);\n            }')" \
   "testAnEmptyCachedListNeverStopsTheDirectBalanceOfCheck|testACompleteCachedListNoLongerAnswersAGateZeroFromCache" \
   -
 
@@ -343,7 +343,7 @@ control 28 "Stored holdings rows accepted as ownership evidence" "$HOLDINGS" \
   -
 
 control 29 "The sweep uses (and writes) join continuation" "$REVOKE" \
-  "s = s.replace('                \$config->minBalance,\n                \$budget\n            );', '                \$config->minBalance,\n                \$budget,\n                true\n            );')" \
+  "s = s.replace('                \$budget,\n                false,\n                true\n            );', '                \$budget,\n                true,\n                true\n            );')" \
   "testTheSweepNeverWritesJoinContinuation|testTheSweepIgnoresAStoredJoinContinuation" \
   -
 

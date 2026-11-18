@@ -163,6 +163,69 @@ final class RestoreClosesAllReportsIntegrationTest extends TestCase
         self::assertTrue($this->hidden->exists(self::ACT_ID), 'the auto-hide is back');
     }
 
+    /**
+     * F-336: a failed sibling UPDATE moved nothing, so the restore must not
+     * reverse any sibling's credit or let undo reopen what it never closed.
+     * The clicked report and the restore itself still go through.
+     */
+    public function testAFailedSiblingCloseReversesAndRecordsNoSibling(): void
+    {
+        [$r1, $r2, $r3] = $this->reportAndAutoHide([950001, 950002, 950003]);
+        $GLOBALS['__bcc_test_actions'] = [];
+        $GLOBALS['wpdb']->clearFaultInjection();
+        $GLOBALS['wpdb']->failQueriesMatching = '/WHERE status = 0 AND id IN/';
+
+        $restore = $this->service->resolve($r1, ModerationQueueService::ACTION_RESTORE, self::ADMIN);
+        $GLOBALS['wpdb']->clearFaultInjection();
+
+        self::assertTrue($restore['ok'] ?? false, json_encode($restore) ?: '');
+        self::assertSame(ModerationQueueService::STATUS_DISMISSED, $this->reportStatus($r1));
+        foreach ([$r2, $r3] as $id) {
+            self::assertSame(ModerationQueueService::STATUS_PENDING, $this->reportStatus($id), "report {$id}: the failed UPDATE moved nothing");
+        }
+
+        // Undo must not reopen (or touch) reports the restore never closed.
+        $undo = $this->service->undo((string) ($restore['undo']['token'] ?? ''), self::ADMIN);
+        self::assertTrue($undo['ok'] ?? false, 'undo succeeds: ' . json_encode($undo));
+        foreach ([$r2, $r3] as $id) {
+            self::assertSame(ModerationQueueService::STATUS_PENDING, $this->reportStatus($id));
+        }
+        self::assertSame([], $this->auditedClosedPending($r1), 'the audit names no report the restore did not close');
+    }
+
+    /**
+     * F-336 review: the UN-UPHELD half. Siblings that a hide upheld (status
+     * 1) are moved to dismissed by the restore, and their report_upheld
+     * credit is reversed through bcc_content_restored_by_admin. When that
+     * UPDATE fails, nothing moved: no credit may be reversed, and the audit
+     * must name no un-upheld report.
+     */
+    public function testAFailedUnupholdReversesNoCreditAndRecordsNothing(): void
+    {
+        [$r1, $r2] = $this->reportAndAutoHide([950001, 950002]);
+        $hide = $this->service->resolve($r1, ModerationQueueService::ACTION_HIDE, self::ADMIN);
+        self::assertTrue($hide['ok'] ?? false, json_encode($hide) ?: '');
+        $r3 = $this->reports->create(950003, 'feed_item', self::ACT_ID, 'spam', '');
+        self::assertGreaterThan(0, $r3);
+
+        $GLOBALS['__bcc_test_actions'] = [];
+        $GLOBALS['wpdb']->clearFaultInjection();
+        $GLOBALS['wpdb']->failQueriesMatching = '/WHERE status = 1 AND id IN/';
+        $restore = $this->service->resolve($r3, ModerationQueueService::ACTION_RESTORE, self::ADMIN);
+        $GLOBALS['wpdb']->clearFaultInjection();
+
+        self::assertTrue($restore['ok'] ?? false, json_encode($restore) ?: '');
+        foreach ([$r1, $r2] as $id) {
+            self::assertSame(ModerationQueueService::STATUS_RESOLVED, $this->reportStatus($id), "report {$id}: the failed UPDATE moved nothing");
+        }
+        $restored = array_values(array_filter(
+            $GLOBALS['__bcc_test_actions'],
+            static fn (array $a): bool => $a[0] === 'bcc_content_restored_by_admin'
+        ));
+        self::assertCount(1, $restored);
+        self::assertSame([], $restored[0][1][3], 'no credit is reversed for a report the restore did not un-uphold');
+    }
+
     public function testADismissStillClosesOnlyTheClickedReport(): void
     {
         $r1 = $this->reports->create(950001, 'feed_item', self::ACT_ID, 'spam', '');
@@ -198,6 +261,18 @@ final class RestoreClosesAllReportsIntegrationTest extends TestCase
     {
         update_post_meta(self::POST_ID, AutoHideService::META_REHIDE_COOLDOWN_UNTIL, (string) (time() - 1));
         self::assertFalse(AutoHideService::inRehideCooldown(self::ACT_ID));
+    }
+
+    /** @return list<int> the closed_pending_report_ids of the restore audit row for $reportId */
+    private function auditedClosedPending(int $reportId): array
+    {
+        global $wpdb;
+        $meta = $wpdb->get_var($wpdb->prepare(
+            'SELECT meta FROM `' . \BCC\Trust\Core\Database\TableRegistry::activity() . "` WHERE action = 'admin_restore_report' AND target_id = %d ORDER BY id DESC LIMIT 1",
+            $reportId
+        ));
+        $decoded = is_string($meta) ? json_decode($meta, true) : null;
+        return is_array($decoded) ? array_map('intval', (array) ($decoded['closed_pending_report_ids'] ?? [])) : [];
     }
 
     private function reportStatus(int $reportId): int

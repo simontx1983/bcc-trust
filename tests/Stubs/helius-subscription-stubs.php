@@ -72,8 +72,16 @@ namespace {
         /** @var list<array<string, mixed>> the args of every ApiRetry::post call */
         public static array $postArgs = [];
 
+        /** @var list<array{code: int, body: string}> F-314: create-webhook POST responses */
+        public static array $createResponses = [];
+
+        /** @var list<array<string, mixed>> F-314: every PUT body, decoded in full */
+        public static array $putBodies = [];
+
         public static function reset(): void
         {
+            self::$createResponses = [];
+            self::$putBodies       = [];
             self::$rawRequests   = 0;
             self::$postArgs      = [];
             $GLOBALS['wpdb']     = (object) ['prefix' => 'wpsa6_'];
@@ -209,9 +217,14 @@ namespace BCC\Trust\Onchain\Support {
             {
                 \HeliusWorld::$postArgs[] = $args;
                 if (($args['method'] ?? 'POST') !== 'PUT') {
+                    // F-314: the create-webhook POST, when a test queued an answer.
+                    if (\HeliusWorld::$createResponses !== []) {
+                        return array_shift(\HeliusWorld::$createResponses);
+                    }
                     return new \WP_Error('unexpected', 'only the address-list PUT is modelled');
                 }
                 $decoded = json_decode((string) ($args['body'] ?? ''), true);
+                \HeliusWorld::$putBodies[] = is_array($decoded) ? $decoded : [];
                 \HeliusWorld::$puts[] = is_array($decoded) ? array_values((array) ($decoded['accountAddresses'] ?? [])) : [];
                 $code = \HeliusWorld::$putCodes === [] ? 200 : array_shift(\HeliusWorld::$putCodes);
                 return ['code' => $code, 'body' => '{}'];
@@ -272,6 +285,22 @@ namespace BCC\Trust\Onchain\Services {
         function get_option(string $name, mixed $default = false): mixed
         {
             return array_key_exists($name, \HeliusWorld::$options) ? \HeliusWorld::$options[$name] : $default;
+        }
+    }
+
+    if (!function_exists(__NAMESPACE__ . '\\update_option')) {
+        function update_option(string $name, mixed $value, mixed $autoload = null): bool
+        {
+            \HeliusWorld::$options[$name] = $value;
+            return true;
+        }
+    }
+
+    if (!function_exists(__NAMESPACE__ . '\\delete_option')) {
+        function delete_option(string $name): bool
+        {
+            unset(\HeliusWorld::$options[$name]);
+            return true;
         }
     }
 

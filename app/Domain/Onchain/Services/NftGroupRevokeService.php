@@ -33,9 +33,11 @@
  * still writing it for genuine PeepSo-UI mod removals.
  *
  * Bounded + rotated: each tick processes at most SWEEP_BATCH_SIZE
- * (member, group) pairs and persists a rotation cursor across
- * groups+members so every member is eventually covered, not just the
- * first N. Never unbounded RPC in one tick.
+ * (member, group) pairs and visits at most SWEEP_GROUP_BUDGET groups, and
+ * persists a rotation cursor across groups+members so every member is
+ * eventually covered, not just the first N. The group walk is a keyset on
+ * group id (F-278), so there is no ceiling on how many holder groups are
+ * reached. Never unbounded RPC in one tick.
  *
  * @package BCC\Trust\Onchain\Services
  */
@@ -60,6 +62,9 @@ final class NftGroupRevokeService
 
     /** Default per-tick cap on (member) re-verifications. Filterable. */
     public const SWEEP_BATCH_SIZE = 200;
+
+    /** Most groups one tick visits, whatever their members cost (F-278). */
+    public const SWEEP_GROUP_BUDGET = 500;
 
     /** Option storing the rotation cursor across ticks. */
     private const CURSOR_OPTION = 'bcc_gated_group_revoke_cursor';
@@ -192,182 +197,84 @@ final class NftGroupRevokeService
             $batchCap = self::SWEEP_BATCH_SIZE;
         }
 
-        $groupIds = GatedGroupRepository::listAllGatedGroupIds();
-        $stats    = self::emptyStats(false);
-        if ($groupIds === []) {
-            return $stats;
-        }
+        $stats  = self::emptyStats(false);
+        $budget = null; // created at the first group that needs a provider read
 
-        $budget = $this->budgetFactory !== null
-            ? ($this->budgetFactory)()
-            : HoldingsService::verificationBudget(HoldingsService::SURFACE_REVOKE);
+        // F-278: a keyset walk on group id, like ValidatorGroupRevokeService,
+        // so every holder group is eventually reached however many exist (the
+        // old single read stopped at the first 500). The saved cursor means
+        // "resume at the first group with an id at or above this, at this
+        // member offset"; the offset only applies if that exact group still
+        // exists. The stored shape {group_id, offset} is unchanged.
+        $cursor  = $this->readCursor();
+        $startId = $cursor['group_id'];
 
-        // Resolve the rotation cursor → (groupIndex, memberOffset). The
-        // cursor is a flat "global member offset" we walk forward; when it
-        // runs off the end of the gated-group set we wrap to 0. Persisting
-        // group_id + offset (rather than a raw integer) keeps the cursor
-        // stable even if a group is added/removed between ticks.
-        $cursor       = $this->readCursor();
-        $startGroupId = $cursor['group_id'];
-        $startOffset  = $cursor['offset'];
+        $processed = 0;
+        $visited   = 0;
+        $afterId   = max(0, $startId - 1);
+        $wrapped   = false;
 
-        // Order groups deterministically (listAllGatedGroupIds already
-        // returns ORDER BY ID ASC). Find where the cursor points; if the
-        // cursored group no longer exists, fall back to the start.
-        $startIdx = array_search($startGroupId, $groupIds, true);
-        if ($startIdx === false) {
-            $startIdx    = 0;
-            $startOffset = 0;
-        }
+        while ($visited < self::SWEEP_GROUP_BUDGET) {
+            $groupIds = GatedGroupRepository::listGatedGroupIdsAfter($afterId, self::SWEEP_GROUP_BUDGET - $visited);
 
-        $processed   = 0;
-        $groupsCount = count($groupIds);
-        $nextCursor  = ['group_id' => $groupIds[0], 'offset' => 0];
-        $wrapped     = false;
-
-        // Walk groups starting from the cursor, wrapping once around the
-        // whole set so a tick can finish a near-end group then pick up the
-        // earlier ones — but never loops forever (the $wrapped guard +
-        // batch cap both terminate it).
-        for ($step = 0; $step < $groupsCount; $step++) {
-            $idx     = ($startIdx + $step) % $groupsCount;
-            $groupId = $groupIds[$idx];
-            // Only the very first group in this tick honours the saved
-            // intra-group offset; subsequent groups start at 0.
-            $offset  = ($step === 0) ? $startOffset : 0;
-
-            $config = GatedGroupRepository::getGateConfig($groupId);
-            if ($config === null) {
-                continue; // No longer a holder group — skip.
-            }
-
-            // PR 5b: resolve the gate's identity from its linked collection
-            // row BEFORE looking at a single member.
-            //
-            // This is the path where the old defect did real damage. An
-            // alias-backed Solana gate made `count_holdings` return a REAL
-            // `0`, which became INELIGIBLE, which this sweep treats as
-            // grounds to EVICT — so a genuine holder could be removed from a
-            // community because the question asked about them was invalid.
-            //
-            // An unresolved identity now skips the whole group: no provider
-            // call, no verdict, and above all no revocation.
-            $identity = GateIdentityResolver::resolve($config);
-            if (!$identity->isResolved()) {
+            if ($groupIds === []) {
+                if ($wrapped) {
+                    break; // No holder groups at all.
+                }
+                // Past the last group: go round to the first.
+                $wrapped = true;
+                $afterId = 0;
                 continue;
             }
-            $chainSlug = $identity->chainSlug();
-            $canonical = $identity->canonical();
 
-            $touchedThisGroup = false;
-
-            // Page through this group's active members.
-            while (true) {
-                if ($processed >= $batchCap) {
-                    // Out of budget mid-group — persist a cursor pointing at
-                    // THIS group + the offset we reached so the next tick
-                    // resumes here.
-                    $nextCursor = ['group_id' => $groupId, 'offset' => $offset];
-                    $this->writeCursor($nextCursor);
-                    if ($touchedThisGroup) {
-                        $stats['groups_touched']++;
-                    }
+            foreach ($groupIds as $groupId) {
+                if ($wrapped && $groupId >= $startId) {
+                    // Back where this tick started: the rotation is complete.
+                    $this->writeCursor(['group_id' => $groupId, 'offset' => 0]);
                     return $stats;
                 }
 
-                $remaining = $batchCap - $processed;
-                $pageSize  = (int) min(self::MEMBER_PAGE_SIZE, $remaining);
-                $members   = PeepSoGroupRepository::listGroupMembers($groupId, $offset, $pageSize);
-                if ($members === []) {
-                    break; // End of this group's member list.
+                $visited++;
+                $afterId = $groupId;
+
+                $config = GatedGroupRepository::getGateConfig($groupId);
+                if ($config === null) {
+                    continue; // No longer a holder group — skip.
                 }
 
-                // Where the member being looked at sits in the list AS IT IS
-                // NOW. It moves past a member who stays; it does not move
-                // past one who was removed, because the next row has taken
-                // that place.
-                $position = $offset;
-
-                foreach ($members as $member) {
-                    $userId = (int) $member->user_id;
-
-                    // Owners are never revoked. PeepSoGroupWriter::leave
-                    // also refuses them, but short-circuiting here avoids a
-                    // pointless eligibility RPC for the owner row.
-                    if ($userId <= 0 || $this->isOwnerRole((string) $member->role)) {
-                        $position++;
-                        continue;
-                    }
-
-                    $verdict = $this->verdictForMember($userId, $chainSlug, $canonical, $config, $budget);
-
-                    if ($verdict->isBudgetExhausted() && $stats['checked'] > 0) {
-                        // Out of provider budget before this member could be
-                        // decided. Nothing was done to them; the next tick
-                        // starts here.
-                        $stats['stopped_on_budget'] = true;
-                        $this->writeCursor(['group_id' => $groupId, 'offset' => $position]);
-                        if ($touchedThisGroup) {
-                            $stats['groups_touched']++;
-                        }
-                        return $stats;
-                    }
-
-                    $touchedThisGroup = true;
-                    $stats['checked']++;
-                    $processed++;
-
-                    if ($verdict->isUnknown()) {
-                        // Not proven either way: a failed read, an unavailable
-                        // chain, incomplete evidence, a provider outage — or a
-                        // single member too expensive for a whole tick. FAIL
-                        // OPEN — skip, retry next tick. Never revoke without
-                        // proof.
-                        $stats['skipped_unknown']++;
-                        $stats['skipped_reasons'][$verdict->reason] = ($stats['skipped_reasons'][$verdict->reason] ?? 0) + 1;
-                        $position++;
-                        continue;
-                    }
-
-                    if ($verdict->isIneligible()
-                        && $this->revokeMember($userId, $groupId, $config, $verdict)
-                    ) {
-                        $stats['revoked']++;
-                        continue; // removed: the next row now sits at $position
-                    }
-
-                    // ELIGIBLE, or a removal PeepSo refused → still listed.
-                    $position++;
+                // PR 5b: resolve the gate's identity from its linked collection
+                // row BEFORE looking at a single member.
+                //
+                // This is the path where the old defect did real damage. An
+                // alias-backed Solana gate made `count_holdings` return a REAL
+                // `0`, which became INELIGIBLE, which this sweep treats as
+                // grounds to EVICT — so a genuine holder could be removed from a
+                // community because the question asked about them was invalid.
+                //
+                // An unresolved identity now skips the whole group: no provider
+                // call, no verdict, and above all no revocation.
+                $identity = GateIdentityResolver::resolve($config);
+                if (!$identity->isResolved()) {
+                    continue;
                 }
 
-                $offset = $position;
-                if (count($members) < $pageSize) {
-                    break; // Short page = end of group.
+                // The saved offset belongs to the saved group. If that group
+                // is gone, this is the next one, and it starts from its top.
+                $offset = (!$wrapped && $groupId === $startId) ? $cursor['offset'] : 0;
+
+                $budget ??= $this->budgetFactory !== null
+                    ? ($this->budgetFactory)()
+                    : HoldingsService::verificationBudget(HoldingsService::SURFACE_REVOKE);
+
+                if (!$this->sweepGroup($groupId, $config, $identity->chainSlug(), $identity->canonical(), $offset, $batchCap, $processed, $budget, $stats)) {
+                    return $stats; // Out of budget; sweepGroup saved the cursor.
                 }
-            }
-
-            if ($touchedThisGroup) {
-                $stats['groups_touched']++;
-            }
-
-            // Finished this group within budget. Advance the cursor to the
-            // NEXT group at offset 0. If we've wrapped back to the start
-            // group, stop.
-            $nextIdx = ($idx + 1) % $groupsCount;
-            $nextCursor = ['group_id' => $groupIds[$nextIdx], 'offset' => 0];
-
-            if ($nextIdx === $startIdx) {
-                $wrapped = true;
-                break;
             }
         }
 
-        // Whole eligible set covered this tick (small install) or wrapped.
-        if ($wrapped) {
-            // Reset to the beginning so the next tick starts fresh.
-            $nextCursor = ['group_id' => $groupIds[0], 'offset' => 0];
-        }
-        $this->writeCursor($nextCursor);
+        // Spent the group budget, or found nothing to do: the next tick
+        // carries on past the last group visited.
+        $this->writeCursor(['group_id' => $afterId + 1, 'offset' => 0]);
 
         return $stats;
     }
@@ -422,6 +329,121 @@ final class NftGroupRevokeService
     }
 
     /**
+     * Page through one group's active members. False when the member or
+     * provider budget ran out inside it, having saved where to resume.
+     *
+     * ⚠ THE OFFSET ADVANCES PAST MEMBERS STILL PRESENT, NOT PAST THE PAGE.
+     * listGroupMembers() is OFFSET-paged, and a removal moves every later row
+     * up one. A member who stayed, the owner, an UNKNOWN, or a refused leave()
+     * is still listed, so they count; only a real removal doesn't.
+     *
+     * @param array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool, skipped_overlap: bool} $stats
+     */
+    private function sweepGroup(
+        int $groupId,
+        GatedGroupConfig $config,
+        string $chainSlug,
+        string $canonical,
+        int $offset,
+        int $batchCap,
+        int &$processed,
+        ProviderRequestBudget $budget,
+        array &$stats
+    ): bool {
+        $touchedThisGroup = false;
+
+        // Page through this group's active members.
+        while (true) {
+            if ($processed >= $batchCap) {
+                // Out of budget mid-group — persist a cursor pointing at
+                // THIS group + the offset we reached so the next tick
+                // resumes here.
+                $this->writeCursor(['group_id' => $groupId, 'offset' => $offset]);
+                if ($touchedThisGroup) {
+                    $stats['groups_touched']++;
+                }
+                return false;
+            }
+
+            $remaining = $batchCap - $processed;
+            $pageSize  = (int) min(self::MEMBER_PAGE_SIZE, $remaining);
+            $members   = PeepSoGroupRepository::listGroupMembers($groupId, $offset, $pageSize);
+            if ($members === []) {
+                break; // End of this group's member list.
+            }
+
+            // Where the member being looked at sits in the list AS IT IS
+            // NOW. It moves past a member who stays; it does not move
+            // past one who was removed, because the next row has taken
+            // that place.
+            $position = $offset;
+
+            foreach ($members as $member) {
+                $userId = (int) $member->user_id;
+
+                // Owners are never revoked. PeepSoGroupWriter::leave
+                // also refuses them, but short-circuiting here avoids a
+                // pointless eligibility RPC for the owner row.
+                if ($userId <= 0 || $this->isOwnerRole((string) $member->role)) {
+                    $position++;
+                    continue;
+                }
+
+                $verdict = $this->verdictForMember($userId, $chainSlug, $canonical, $config, $budget);
+
+                if ($verdict->isBudgetExhausted() && $stats['checked'] > 0) {
+                    // Out of provider budget before this member could be
+                    // decided. Nothing was done to them; the next tick
+                    // starts here.
+                    $stats['stopped_on_budget'] = true;
+                    $this->writeCursor(['group_id' => $groupId, 'offset' => $position]);
+                    if ($touchedThisGroup) {
+                        $stats['groups_touched']++;
+                    }
+                    return false;
+                }
+
+                $touchedThisGroup = true;
+                $stats['checked']++;
+                $processed++;
+
+                if ($verdict->isUnknown()) {
+                    // Not proven either way: a failed read, an unavailable
+                    // chain, incomplete evidence, a provider outage — or a
+                    // single member too expensive for a whole tick. FAIL
+                    // OPEN — skip, retry next tick. Never revoke without
+                    // proof.
+                    $stats['skipped_unknown']++;
+                    $stats['skipped_reasons'][$verdict->reason] = ($stats['skipped_reasons'][$verdict->reason] ?? 0) + 1;
+                    $position++;
+                    continue;
+                }
+
+                if ($verdict->isIneligible()
+                    && $this->revokeMember($userId, $groupId, $config, $verdict)
+                ) {
+                    $stats['revoked']++;
+                    continue; // removed: the next row now sits at $position
+                }
+
+                // ELIGIBLE, or a removal PeepSo refused → still listed.
+                $position++;
+            }
+
+            $offset = $position;
+            if (count($members) < $pageSize) {
+                break; // Short page = end of group.
+            }
+        }
+
+        if ($touchedThisGroup) {
+            $stats['groups_touched']++;
+        }
+
+        return true;
+    }
+
+    /**
      * Re-derive a member's eligibility verdict. Isolated for testability
      * and so a single member's failure can't escape the loop.
      */
@@ -438,12 +460,18 @@ final class NftGroupRevokeService
             // `$config->contractAddress` — that is the legacy display alias,
             // and on the eight production Solana gates it is a marketplace
             // symbol that no provider can answer for.
+            //
+            // F-278: a cached "owns" observed before the index recorded this
+            // wallet losing the collection is not trusted here; the provider
+            // is asked instead.
             return HoldingsService::eligibilityVerdict(
                 $userId,
                 $chainSlug,
                 $canonicalIdentifier,
                 $config->minBalance,
-                $budget
+                $budget,
+                false,
+                true
             );
         } catch (\Throwable $e) {
             // Bounded: the exception class, never its message (which can

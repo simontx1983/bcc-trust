@@ -196,6 +196,7 @@ final class PrivacySettings
         return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
     }
 
+
     /** The wp_usermeta key a public flag is stored under. */
     private static function metaKey(string $key): string
     {

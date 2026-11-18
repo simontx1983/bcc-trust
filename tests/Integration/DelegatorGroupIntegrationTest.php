@@ -27,6 +27,8 @@ use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
+require_once __DIR__ . '/PeepSoBlocksTableFixture.php';
+
 /**
  * The delegator community, end to end: nothing creates one but its page's
  * operator, the operator sets and edits the minimum, and the join gate and the
@@ -49,6 +51,8 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(DelegatorGroupView::class)]
 final class DelegatorGroupIntegrationTest extends TestCase
 {
+    use PeepSoBlocksTableFixture;
+
     private const OPERATOR    = 610;
     private const STRANGER    = 611;
     private const RIVAL       = 612;
@@ -74,9 +78,16 @@ final class DelegatorGroupIntegrationTest extends TestCase
     private int $otherCosmosChain = 0;
     private int $evmChain = 0;
 
+    protected function tearDown(): void
+    {
+        $this->removePeepSoBlocksTable();
+    }
+
     protected function setUp(): void
     {
         require_once dirname(__DIR__) . '/Stubs/delegator-group-stubs.php';
+        // F-296: the bell reads exclude blocked members, fail-closed.
+        $this->ensurePeepSoBlocksTable();
 
         $GLOBALS['__bcc_actions']        = [];
         $GLOBALS['__bcc_hooks']          = [];

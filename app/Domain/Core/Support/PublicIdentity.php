@@ -47,14 +47,33 @@ final class PublicIdentity
     }
 
     /**
+     * A BCC signup login: `u_` + a handle (AuthSupport::deriveLogin), so
+     * `u_` followed by 3-20 of [a-z0-9-]. Case-insensitive, like the login
+     * column's collation.
+     */
+    private const SIGNUP_LOGIN_SHAPE = '/^u_[a-z0-9-]{3,20}$/i';
+
+    /**
      * Public display name. $handle is the already-resolved PUBLIC handle
      * (from handle()), never the login.
+     *
+     * A display name that is not a public name falls back to the handle:
+     *   - the member's own login (wp-admin / WP-CLI accounts default to it);
+     *   - ANY value shaped like a signup login, `u_<handle>` (F-328). A
+     *     display_name can still hold a login that is not the current one
+     *     (#540's rotation fixed handles, not display names), and every
+     *     such login is u_<the handle someone signed up with>: showing it
+     *     ties that old handle to this member.
      */
     public static function displayName(mixed $displayName, mixed $userLogin, string $handle): string
     {
         $name  = is_string($displayName) ? trim($displayName) : '';
         $login = is_string($userLogin) ? trim($userLogin) : '';
-        if ($name !== '' && ($login === '' || strcasecmp($name, $login) !== 0)) {
+        if (
+            $name !== ''
+            && ($login === '' || strcasecmp($name, $login) !== 0)
+            && preg_match(self::SIGNUP_LOGIN_SHAPE, $name) !== 1
+        ) {
             return $name;
         }
         return $handle !== '' ? $handle : self::FALLBACK_NAME;

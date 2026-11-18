@@ -393,6 +393,116 @@ final class NftRevocationFailSafeTest extends TestCase
         self::assertSame(1, \BccRevokeWorld::providerCalls());
     }
 
+    // ── F-278: a cached positive older than a recorded loss (revoke only) ─
+
+    private function revokeVerdict(string $slug, string $contract): EligibilityVerdict
+    {
+        return HoldingsService::eligibilityVerdict(
+            self::USER,
+            $slug,
+            $contract,
+            1,
+            HoldingsService::verificationBudget(HoldingsService::SURFACE_REVOKE),
+            false,
+            true
+        );
+    }
+
+    public function testOnTheRevokeSurfaceACachedPositiveOlderThanALossIsReVerified(): void
+    {
+        $this->linkCosmos();
+        $this->cachedList(self::COSMOS_CONTRACT, ['observed_at' => time() - 3600, 'served_from_cache' => false]);
+        \BccRevokeWorld::$losses[self::LINK] = time() - 60; // sold after the walk
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 0);
+
+        self::assertTrue($this->revokeVerdict('cosmos', self::COSMOS_CONTRACT)->isIneligible(), 'the cached positive predates the sale');
+        self::assertSame(1, \BccRevokeWorld::providerCalls());
+    }
+
+    public function testOnTheRevokeSurfaceACachedPositiveObservedAfterTheLossIsStillTrusted(): void
+    {
+        $this->linkCosmos();
+        $this->cachedList(self::COSMOS_CONTRACT, ['observed_at' => time() - 3600, 'served_from_cache' => false]);
+        \BccRevokeWorld::$losses[self::LINK] = time() - 7200; // an older sale, bought back since
+
+        self::assertTrue($this->revokeVerdict('cosmos', self::COSMOS_CONTRACT)->isEligible());
+        self::assertSame(0, \BccRevokeWorld::providerCalls());
+    }
+
+    public function testAFailedLossReadSendsTheRevokeCheckToTheProviderNeverToANegative(): void
+    {
+        $this->linkCosmos();
+        $this->cachedList(self::COSMOS_CONTRACT, ['observed_at' => time() - 3600, 'served_from_cache' => false]);
+        \BccRevokeWorld::$failLossRead = true;
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 1);
+
+        self::assertTrue($this->revokeVerdict('cosmos', self::COSMOS_CONTRACT)->isEligible(), 'a failed read is never a negative');
+        self::assertSame(1, \BccRevokeWorld::providerCalls(), 'the cached positive was not trusted');
+    }
+
+    public function testOtherSurfacesNeverReadTheLossTime(): void
+    {
+        $this->linkCosmos();
+        $this->cachedList(self::COSMOS_CONTRACT, ['observed_at' => time() - 3600, 'served_from_cache' => false]);
+        \BccRevokeWorld::$losses[self::LINK] = time() - 60;
+
+        self::assertTrue($this->verdict('cosmos', self::COSMOS_CONTRACT)->isEligible());
+        self::assertSame([], \BccRevokeWorld::$lossReads);
+        self::assertSame(0, \BccRevokeWorld::providerCalls());
+    }
+
+    public function testTheSweepRemovesASellerWhoseCachedPositivePredatesTheLoss(): void
+    {
+        $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT);
+        $this->linkCosmos();
+        $this->cachedList(self::COSMOS_CONTRACT, ['observed_at' => time() - 3600, 'served_from_cache' => false]);
+        \BccRevokeWorld::$losses[self::LINK] = time() - 60;
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 0);
+        \BccRevokeWorld::$members[self::GROUP] = [$this->member(self::OWNER, 'member_owner'), $this->member(self::USER)];
+
+        $stats = (new NftGroupRevokeService())->sweep();
+
+        self::assertSame(1, $stats['revoked']);
+        self::assertSame([self::GROUP . ':' . self::USER], \BccRevokeWorld::$leaves);
+    }
+
+    // ── F-278: the group walk is a keyset, with no 500-group ceiling ─────
+
+    public function testTheSweepReachesHolderGroupsPastTheFirst500(): void
+    {
+        $this->linkCosmos();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 0);
+        for ($gid = 1; $gid <= 600; $gid++) {
+            $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT, 1, $gid);
+        }
+        \BccRevokeWorld::$members[600] = [$this->member(self::USER)];
+
+        $first = (new NftGroupRevokeService())->sweep();
+        self::assertSame(0, $first['revoked'], 'one tick visits at most SWEEP_GROUP_BUDGET groups');
+        self::assertSame(['group_id' => NftGroupRevokeService::SWEEP_GROUP_BUDGET + 1, 'offset' => 0], \BccRevokeWorld::$options['bcc_gated_group_revoke_cursor']);
+
+        $second = (new NftGroupRevokeService())->sweep();
+        self::assertSame(1, $second['revoked'], 'the 600th holder group is reached');
+        self::assertSame(['600:' . self::USER], \BccRevokeWorld::$leaves);
+    }
+
+    public function testARemovedCursorGroupResumesAtTheNextGroupNotTheFirst(): void
+    {
+        $this->linkCosmos();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 0);
+        foreach ([1, 2, 4] as $gid) {
+            $this->gate('cosmos', self::COSMOS_CHAIN, self::COSMOS_CONTRACT, 1, $gid);
+            \BccRevokeWorld::$members[$gid] = [$this->member(self::USER)];
+        }
+        // The saved cursor points into group 3, which no longer exists.
+        \BccRevokeWorld::$options['bcc_gated_group_revoke_cursor'] = ['group_id' => 3, 'offset' => 2];
+
+        (new NftGroupRevokeService())->sweep();
+
+        self::assertSame(['4:' . self::USER, '1:' . self::USER, '2:' . self::USER], \BccRevokeWorld::$leaves, 'resumes at group 4 from its top, then wraps');
+        self::assertSame(['group_id' => 4, 'offset' => 0], \BccRevokeWorld::$options['bcc_gated_group_revoke_cursor'], 'a full rotation hands the next tick back to where it started');
+    }
+
     // ── EVM ERC-1155: the transfer index has no history ──────────────────
 
     private function erc1155(int $link = self::LINK): void

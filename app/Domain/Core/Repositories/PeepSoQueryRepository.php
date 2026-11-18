@@ -217,6 +217,61 @@ final class PeepSoQueryRepository
     }
 
     /**
+     * F-245: which of these activity ids still back a LIVE post — the
+     * activity row exists and its post is published (not trashed, drafted
+     * or deleted). Bounded by the caller's list (one bell page, <= 50).
+     *
+     * This is the "is the post gone" half of a notification's
+     * `target_available`. Per-viewer visibility (blocks, gated groups) is
+     * deliberately NOT judged here: the permalink applies those and answers
+     * 404, which the client already handles.
+     *
+     * Fail-closed in the sense that matters: a read that did not run returns
+     * NULL ("unknown"), never [] — `query()` is called explicitly because
+     * wpdb has failure paths that return false without setting last_error
+     * and leave the previous query's rows in last_result.
+     *
+     * @param list<int> $actIds
+     * @return list<int>|null the live subset, or null when the read failed
+     */
+    public static function liveActivityIds(array $actIds): ?array
+    {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', $actIds),
+            static fn(int $id): bool => $id > 0
+        )));
+        if ($ids === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $acts = $wpdb->prefix . 'peepso_activities';
+        $ph   = implode(',', array_fill(0, count($ids), '%d'));
+
+        self::clearLastError();
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT a.act_id
+               FROM {$acts} a
+               JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
+              WHERE a.act_id IN ({$ph})
+                AND p.post_status = 'publish'",
+            ...$ids
+        ));
+        if ($ok === false || self::lastError() !== '') {
+            return null;
+        }
+
+        $out = [];
+        foreach (is_array($wpdb->last_result) ? $wpdb->last_result : [] as $row) {
+            if (is_object($row) && isset($row->act_id)) {
+                $out[] = (int) $row->act_id;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * F-299 live guard: a DIFFERENT user holding `member_owner` on the page
      * (0 = none), so a verified claim never creates a second owner. NULL =
      * the read did not run; the caller then writes nothing.

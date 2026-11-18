@@ -126,10 +126,12 @@ final class EdgeCache
     /**
      * Whether a REST route falls under the BCC edge-cache exclusion.
      * Pure predicate (unit-tested) — both BCC namespaces, prefix or
-     * exact match.
+     * exact match, case-INSENSITIVE (F-337): WordPress dispatches
+     * /BCC/v1/… to the bcc/v1 handler, so it must be excluded too.
      */
     public static function appliesTo(string $route): bool
     {
+        $route = strtolower($route);
         foreach (['/bcc/v1', '/bcc-trust/v1'] as $ns) {
             if ($route === $ns || strncmp($route, $ns . '/', strlen($ns) + 1) === 0) {
                 return true;

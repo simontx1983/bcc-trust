@@ -167,6 +167,9 @@ final class TwoFactorController
         wp_set_auth_cookie($userId, true);
 
         $token = JwtToken::encodeNewSession($userId, $handle);
+        // F-281: a completed password sign-in — this network now skips the
+        // account-wide login ceiling for TRUSTED_LOGIN_NETWORKS_TTL.
+        AuthSupport::recordTrustedLoginNetwork($userId);
 
         Logger::audit('user_login', [
             'user_id' => $userId,

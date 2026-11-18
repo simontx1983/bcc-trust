@@ -74,19 +74,99 @@ final class AuthSupport
     /** Anon-IP-keyed throttle for login. Same budget as signup — login is the obvious brute-force target. */
     public const LOGIN_RATE_LIMIT = 5;
     /**
-     * Per-identifier login throttle (defense-in-depth vs distributed
-     * brute-force from many IPs against ONE account, which the IP bucket
-     * can't see). Keyed by a hash of the submitted identifier — so it fires
-     * the same whether or not the account exists (no enumeration oracle).
-     * Deliberately generous over a longer window: a legitimate user never
-     * makes 20 attempts in 15 minutes, while sustained probing of a single
-     * identifier is capped. Tradeoff: a determined attacker can trip this to
-     * briefly (one window) lock a targeted identifier — accepted because
-     * password login also requires the mandatory email OTP, so this only
-     * bounds password-probing rate, not account access.
+     * Per-identifier and per-account login throttles (defense-in-depth vs
+     * brute force against ONE account, which the per-IP `login` bucket
+     * can't see), both over LOGIN_ACCOUNT_RATE_WINDOW and counted before the
+     * bcrypt compare.
+     *
+     * F-281: the budget used to be one account-wide bucket per typed
+     * identifier, so anyone who knew a public handle could keep its owner
+     * locked out of password sign-in (about 1.4 requests a minute, under the
+     * per-IP limit). Now:
+     *   - LOGIN_ACCOUNT_RATE_LIMIT per (normalized TYPED identifier, client
+     *     network: IPv4 /24, IPv6 /48). A stranger elsewhere exhausts only
+     *     their own network's budget.
+     *   - LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT per normalized TYPED identifier
+     *     across all networks — the cap on a guess spread over many
+     *     networks. The handle and the email each get it, so one account's
+     *     total is about twice this. Networks the account has SIGNED IN from
+     *     lately (TRUSTED_LOGIN_NETWORKS_*) skip it, so even a botnet that
+     *     hits the ceiling can't lock the owner out at home.
+     *
+     * ⚠ Both buckets are keyed on what was TYPED, never on the account it
+     * resolves to — do not "simplify" this. A bucket shared by the handle
+     * and the email is an enumeration oracle: exhaust it through the public
+     * handle, then one attempt with a guessed email answers 429 if the email
+     * is that account's and 401 if not. (The first fix keyed only the
+     * network bucket on the typed text; review found the same probe on the
+     * account-wide ceiling, across ~10 networks.) With both keyed on the
+     * typed text, a guessed email answers exactly like an unknown one.
+     * A legitimate member never makes 20 attempts in 15 minutes.
      */
-    public const LOGIN_ACCOUNT_RATE_LIMIT  = 20;
-    public const LOGIN_ACCOUNT_RATE_WINDOW = 900;
+    public const LOGIN_ACCOUNT_RATE_LIMIT        = 20;
+    public const LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT = 100;
+    public const LOGIN_ACCOUNT_RATE_WINDOW       = 900;
+
+    /** User meta: { sha256(network) => last successful sign-in } (F-281). */
+    public const META_TRUSTED_LOGIN_NETWORKS = 'bcc_login_trusted_networks';
+    public const TRUSTED_LOGIN_NETWORKS_MAX  = 10;
+    public const TRUSTED_LOGIN_NETWORKS_TTL  = 30 * 86400;
+
+    /** The caller's network for login throttling: IPv4 /24, IPv6 /48. */
+    public static function loginNetwork(): string
+    {
+        return \BCC\Trust\Core\Security\RateLimiter::normalizeIpToSubnet(\BCC\Core\Security\Throttle::clientIp());
+    }
+
+    /**
+     * F-281: remember the caller's network as one this account signs in
+     * from. Call ONLY on a completed password sign-in (after the second
+     * factor). Keeps the latest TRUSTED_LOGIN_NETWORKS_MAX, drops entries
+     * older than TRUSTED_LOGIN_NETWORKS_TTL. Best-effort: never fails a
+     * sign-in.
+     */
+    public static function recordTrustedLoginNetwork(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+        try {
+            $now  = time();
+            $list = self::trustedLoginNetworks($userId);
+            $list[hash('sha256', self::loginNetwork())] = $now;
+            $list = array_filter($list, static fn (int $ts): bool => $ts >= $now - self::TRUSTED_LOGIN_NETWORKS_TTL);
+            arsort($list);
+            update_user_meta($userId, self::META_TRUSTED_LOGIN_NETWORKS, array_slice($list, 0, self::TRUSTED_LOGIN_NETWORKS_MAX, true));
+        } catch (\Throwable $e) {
+            // The sign-in already succeeded; losing the record only means
+            // this network keeps counting against the ceiling.
+            \BCC\Core\Log\Logger::warning('[bcc-trust] trusted login network not recorded', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /** Has this account signed in from $network within the TTL? */
+    public static function isTrustedLoginNetwork(int $userId, string $network): bool
+    {
+        $ts = self::trustedLoginNetworks($userId)[hash('sha256', $network)] ?? null;
+        return $ts !== null && $ts >= time() - self::TRUSTED_LOGIN_NETWORKS_TTL;
+    }
+
+    /** @return array<string, int> */
+    private static function trustedLoginNetworks(int $userId): array
+    {
+        $raw = get_user_meta($userId, self::META_TRUSTED_LOGIN_NETWORKS, true);
+        if (!is_array($raw)) {
+            return [];
+        }
+        $out = [];
+        foreach ($raw as $hash => $ts) {
+            $out[(string) $hash] = (int) $ts;
+        }
+        return $out;
+    }
     /** Anon-IP-keyed throttle for the public wallet-nonce route. Same budget as the authed nonce. */
     public const WALLET_NONCE_RATE_LIMIT = 10;
     /** Per-WALLET (chain + address) throttle for wallet-login, per minute (F-123; was per IP). */

@@ -53,6 +53,23 @@ if (!defined('ABSPATH')) {
 
 final class BearerAuth
 {
+    /** presentedTokenFailure() values. */
+    public const TOKEN_EXPIRED = 'expired';
+    public const TOKEN_INVALID = 'invalid';
+
+    /**
+     * Why the bearer token PRESENTED with this request failed, if it did
+     * (F-288): self::TOKEN_EXPIRED / TOKEN_INVALID, or null (no token, or it
+     * worked). Request-scoped; read by Envelope to turn a 401
+     * `bcc_unauthorized` into `bcc_token_expired` / `bcc_token_invalid`.
+     */
+    private static ?string $presentedTokenFailure = null;
+
+    public static function presentedTokenFailure(): ?string
+    {
+        return self::$presentedTokenFailure;
+    }
+
     public static function register(): void
     {
         add_filter('determine_current_user', [self::class, 'authenticateBearer'], 30);
@@ -99,12 +116,19 @@ final class BearerAuth
             // session expiry / clock skew. Logging at error would
             // drown the channel without revealing actual abuse.
             Logger::audit('jwt_verify_failed', ['error' => $result['error']]);
+            // F-288: only a plain expiry is refreshable; anything else
+            // (malformed, bad signature, revoked, signed out, superseded by
+            // a refresh) is a dead token.
+            self::$presentedTokenFailure = $result['error'] === JwtToken::ERR_EXPIRED
+                ? self::TOKEN_EXPIRED
+                : self::TOKEN_INVALID;
             return false;
         }
 
         $payload     = $result['payload'];
         $tokenUserId = (int) ($payload['user_id'] ?? 0);
         if ($tokenUserId <= 0) {
+            self::$presentedTokenFailure = self::TOKEN_INVALID;
             return false;
         }
 
@@ -113,9 +137,11 @@ final class BearerAuth
         // signature is still valid, but the principal isn't.
         if (get_userdata($tokenUserId) === false) {
             Logger::audit('jwt_user_missing', ['user_id' => $tokenUserId]);
+            self::$presentedTokenFailure = self::TOKEN_INVALID;
             return false;
         }
 
+        self::$presentedTokenFailure = null;
         return $tokenUserId;
     }
 

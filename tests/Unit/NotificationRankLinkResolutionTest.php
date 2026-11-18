@@ -73,9 +73,10 @@ final class NotificationRankLinkResolutionTest extends TestCase
     public function testNonRankArmsAreUntouched(): void
     {
         // Adjacent-arm sanity: the repair added arms, it did not reshape
-        // the match. REACTION keeps its focus link; WELCOME keeps the
-        // floor; unknown types keep the '/' default.
-        self::assertSame('/?focus=15823', self::resolve(NotificationType::REACTION, 0, 15823, ''));
+        // the match. REACTION opens the post's permalink (F-245; it was a
+        // `/?focus=` link nothing read); WELCOME keeps the floor; unknown
+        // types keep the '/' default.
+        self::assertSame('/post/15823', self::resolve(NotificationType::REACTION, 0, 15823, ''));
         self::assertSame('/', self::resolve(NotificationType::WELCOME, 0, 0, ''));
         self::assertSame('/', self::resolve('bcc_never_a_type', 1, 2, 'x'));
     }

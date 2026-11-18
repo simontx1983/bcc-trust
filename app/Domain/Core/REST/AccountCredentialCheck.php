@@ -238,6 +238,59 @@ final class AccountCredentialCheck
         return null;
     }
 
+    /** recoveryEmailAvailability() reasons. */
+    public const AVAILABLE_SIGNUP_WALLET = 'signup_wallet';
+    public const AVAILABLE_WALLET_AGE    = 'wallet_age';
+
+    /**
+     * F-332: when can THIS session attach the account's first recovery email
+     * (POST /me/account/recovery-email)? The same rules that route enforces
+     * (verifyOwnWallet with the signup-wallet exception), turned into a time
+     * for the settings UI — one source of truth.
+     *
+     *   - has a recovery email already, or no verified wallet that can ever
+     *     qualify in this session (none, or every one verified after this
+     *     sign-in — signing in again would help): at = null, reason = null;
+     *   - the signup-wallet exception applies: at = now, 'signup_wallet';
+     *   - else the earliest verified_at + WALLET_MIN_AGE_SECONDS over the
+     *     wallets verified BEFORE this session began (now if already past):
+     *     'wallet_age'.
+     *
+     * The session is the presented bearer token's (auth_time); none → 0, so
+     * only the signup-wallet exception can answer.
+     *
+     * @return array{at: int|null, reason: string|null}
+     */
+    public static function recoveryEmailAvailability(int $userId): array
+    {
+        $none = ['at' => null, 'reason' => null];
+        if ($userId <= 0 || AccountRecoveryService::hasRecoveryEmail($userId)) {
+            return $none;
+        }
+
+        $now          = time();
+        $sessionStart = JwtToken::presentedSessionStartedAt($userId);
+        $earliest     = null;
+
+        foreach (WalletRepository::getForUser($userId, null, true) as $wallet) {
+            $verifiedAt = (string) ($wallet->verified_at ?? '');
+            $verifiedTs = $verifiedAt !== '' ? strtotime($verifiedAt . ' UTC') : false;
+            if ($verifiedTs === false) {
+                continue;
+            }
+            if (self::isSignupWallet($userId, (int) $wallet->id, $verifiedAt)) {
+                return ['at' => $now, 'reason' => self::AVAILABLE_SIGNUP_WALLET];
+            }
+            if ($verifiedTs >= $sessionStart) {
+                continue; // verified after this sign-in: never in this session
+            }
+            $at       = max($now, $verifiedTs + self::WALLET_MIN_AGE_SECONDS);
+            $earliest = $earliest === null ? $at : min($earliest, $at);
+        }
+
+        return $earliest === null ? $none : ['at' => $earliest, 'reason' => self::AVAILABLE_WALLET_AGE];
+    }
+
     /**
      * Is this link the wallet the account was CREATED with, and is the
      * account still inside SIGNUP_WALLET_WINDOW_SECONDS of its creation?
