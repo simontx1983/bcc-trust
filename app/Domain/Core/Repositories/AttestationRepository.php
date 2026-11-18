@@ -154,7 +154,8 @@ final class AttestationRepository
     /**
      * F-340: the "Top vouched by" voucher ids for a SIGNED-OUT profile
      * view — the eligible vouchers of member `$ownerId`, highest trust
-     * score first, then the newest vouch. At most $limit (≤ 10).
+     * score first, then the newest vouch. At most $limit (≤ 50): the caller
+     * drops vouchers the viewer may not see (F-356) and keeps the first 3.
      *
      * @return list<int> attestor user ids, in display order
      * @throws RepositoryReadFailure when the read did not run
@@ -164,7 +165,7 @@ final class AttestationRepository
         if ($ownerId <= 0) {
             return [];
         }
-        $limit = max(1, min(10, $limit));
+        $limit = max(1, min(50, $limit));
 
         global $wpdb;
         [$from, $params] = self::eligibleProfileVouchSql($ownerId);
