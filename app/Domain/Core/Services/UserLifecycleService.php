@@ -6,6 +6,7 @@ use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\PageReadModelRepository;
 use BCC\Trust\Core\Repositories\ScoreRepository;
+use BCC\Trust\Core\REST\Auth\AuthSupport;
 use BCC\Trust\Core\Security\IpResolver;
 use BCC\Trust\Core\Support\JwtToken;
 use BCC\Trust\Infrastructure\EdgeCache;
@@ -120,6 +121,18 @@ class UserLifecycleService
                 JwtToken::revokeAllForUser($userId);
                 AccountRecoveryService::markHasPassword($userId);
             }
+
+            // H1: an email change made OUTSIDE PendingEmailService (core REST
+            // /wp/v2/users, wp-admin profile.php / user-edit.php, any plugin
+            // calling wp_update_user) puts an address nobody proved into
+            // user_email, while the account's '1' still vouched for the OLD
+            // one. OAuth links a Google sign-in into an account by email
+            // whenever that flag is '1', so a member could point their
+            // account at someone else's address and receive that person's
+            // first Google sign-in. Revoke the verification instead.
+            if ($fresh instanceof \WP_User) {
+                $this->revokeUnprovenEmail($userId, (string) $oldUserData->user_email, (string) $fresh->user_email);
+            }
         }
 
         // Attempt to auto-complete the profile quest whenever the user
@@ -128,6 +141,26 @@ class UserLifecycleService
         // PeepSo avatar + display name + bio/social link — so firing
         // the signal on every save is safe (no-op if conditions aren't met).
         do_action('bcc_trust_quest_signal', $userId, 'complete_profile');
+    }
+
+    /**
+     * H1: user_email went from $oldEmail to $newEmail. Unless that write was
+     * PendingEmailService's own (a proven address, marked while it writes),
+     * the new address is unproven: revoke the account's email verification
+     * (flag '0', pending code burned, emailed links voided). The audit entry
+     * carries no address.
+     */
+    private function revokeUnprovenEmail(int $userId, string $oldEmail, string $newEmail): void
+    {
+        if ($newEmail === $oldEmail || PendingEmailService::isOwnWrite($userId, $newEmail)) {
+            return;
+        }
+
+        AuthSupport::revokeEmailVerification($userId);
+        \BCC\Core\Log\Logger::audit('email_verification_revoked', [
+            'user_id' => $userId,
+            'via'     => 'profile_update',
+        ]);
     }
 
     /**

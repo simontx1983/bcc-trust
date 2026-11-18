@@ -421,6 +421,13 @@ final class AuthSupport
     public const META_EMAIL_VERIFIED = '_bcc_email_verified';
 
     /**
+     * H1: user meta holding the generation of the user's emailed
+     * verification links (see storeVerifyToken). Absent = 0. Only
+     * revokeEmailVerification() bumps it.
+     */
+    public const META_VERIFY_LINK_GEN = 'bcc_verify_link_gen';
+
+    /**
      * Per-ACCOUNT limit (per 60 s) on cheap self-scoped writes — profile, prefs,
      * privacy, onboarding, mark-read, highlights, primary hall… (F-134). One
      * shared 'me_write' bucket; generous, because mark-read and celebrations
@@ -681,12 +688,46 @@ final class AuthSupport
      * Store a verify token mapped to $userId.
      *
      * Key: `bcc_vt_{token}`, value: string userId, TTL: TOKEN_TTL (24 h).
-     * Multiple tokens can be live at once (one per resend call); they
-     * expire naturally since we can't bulk-invalidate by userId.
+     * Multiple tokens can be live at once (one per resend call). They are
+     * keyed by token, so they cannot be deleted by user; instead each one
+     * records the user's link generation (META_VERIFY_LINK_GEN), and
+     * revokeEmailVerification() bumps it to void them all. Generation 0
+     * stores the bare id, exactly as before; from 1 the value is `id:gen`.
      */
     public static function storeVerifyToken(string $token, int $userId): void
     {
-        set_transient('bcc_vt_' . $token, (string) $userId, self::TOKEN_TTL);
+        $gen = self::verifyLinkGeneration($userId);
+        set_transient('bcc_vt_' . $token, $gen === 0 ? (string) $userId : $userId . ':' . $gen, self::TOKEN_TTL);
+    }
+
+    private static function verifyLinkGeneration(int $userId): int
+    {
+        $gen = get_user_meta($userId, self::META_VERIFY_LINK_GEN, true);
+        return is_numeric($gen) ? max(0, (int) $gen) : 0;
+    }
+
+    /**
+     * H1: the account's email is no longer a proven address. Called when
+     * user_email changes OUTSIDE PendingEmailService (core REST, wp-admin,
+     * any plugin calling wp_update_user): nobody proved the new address.
+     *
+     *   - META_EMAIL_VERIFIED = '0', so OAuth stops linking by that email
+     *     (mayLinkOauthByEmail) and password sign-in asks for verification;
+     *   - the pending email-verification code is burned, and every emailed
+     *     verification link is voided (the link generation is bumped).
+     *
+     * The code and the links are bound to the USER, not to the address they
+     * were mailed to, so without the last two a code or link sent to the OLD
+     * address would still mark the NEW one verified.
+     */
+    public static function revokeEmailVerification(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+        update_user_meta($userId, self::META_EMAIL_VERIFIED, '0');
+        self::burnEmailOtp($userId);
+        update_user_meta($userId, self::META_VERIFY_LINK_GEN, (string) (self::verifyLinkGeneration($userId) + 1));
     }
 
     /**
@@ -831,6 +872,9 @@ final class AuthSupport
      * Consume a verify token and return the associated userId, or null
      * when the token is missing, malformed, or already used. Consuming
      * deletes the transient immediately so the link is single-use.
+     *
+     * H1: a token from an older link generation (the account's email
+     * verification was revoked after it was mailed) is consumed and refused.
      */
     public static function consumeVerifyToken(string $token): ?int
     {
@@ -843,12 +887,16 @@ final class AuthSupport
             return null;
         }
 
-        $userId = (int) $stored;
+        [$idPart, $genPart] = array_pad(explode(':', $stored, 2), 2, '0');
+        $userId = (int) $idPart;
         if ($userId <= 0) {
             return null;
         }
 
         delete_transient('bcc_vt_' . $token);
+        if ((int) $genPart !== self::verifyLinkGeneration($userId)) {
+            return null;
+        }
         return $userId;
     }
 
