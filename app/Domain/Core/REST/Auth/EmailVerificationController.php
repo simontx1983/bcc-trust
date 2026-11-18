@@ -152,32 +152,59 @@ final class EmailVerificationController
                     400
                 );
             }
-            $applied = self::applyPendingSignupEmail($userId);
-            if ($applied !== null) {
-                return $applied;
-            }
-            return AuthSupport::finalizeVerification($userId);
+            return self::completeVerification($userId);
         }
 
         // ── OTP path ──────────────────────────────────────────────────
-        $user = self::accountForAddress($email);
-        if (!($user instanceof \WP_User)) {
+        // The account whose email it is. Failing that, the wallet sign-ups
+        // holding it pending (F-294): one is answered as that account; with
+        // several, the code is checked against each, since a match proves
+        // the inbox for the account that code was sent for.
+        $owner = get_user_by('email', $email);
+        $accounts = $owner instanceof \WP_User ? [$owner] : self::pendingHolderAccounts($email);
+        if ($accounts === []) {
             // Generic error — don't reveal whether the address is registered.
-            return ApiResponse::error('bcc_invalid_otp', 'Invalid or expired code.', 400);
+            return self::invalidOtp();
+        }
+        if (count($accounts) > 1) {
+            return self::verifyCodeForHolders($accounts, $code);
         }
 
-        $userId = (int) $user->ID;
+        $userId = (int) $accounts[0]->ID;
+        $outcome = self::tryCode($userId, $code);
+        if ($outcome === self::CODE_MATCHED) {
+            return self::completeVerification($userId);
+        }
+        if ($outcome === self::CODE_VERIFIED) {
+            return ApiResponse::error('bcc_already_verified', 'This email is already verified.', 409);
+        }
+        return $outcome === self::CODE_BURNED ? self::otpExhausted() : self::invalidOtp();
+    }
 
+    /** tryCode() outcomes. */
+    private const CODE_MATCHED  = 'matched';
+    private const CODE_WRONG    = 'wrong';
+    private const CODE_BURNED   = 'burned';   // the attempt cap burned it; no new code yet
+    private const CODE_VERIFIED = 'verified'; // the account's email is already verified
+
+    /**
+     * One code attempt against one account, with that account's own
+     * attempt cap. Consumes the code on a match.
+     *
+     * @return self::CODE_*
+     */
+    private static function tryCode(int $userId, string $code): string
+    {
         $emailVerified = (string) get_user_meta($userId, AuthSupport::META_EMAIL_VERIFIED, true);
         if ($emailVerified === '1') {
-            return ApiResponse::error('bcc_already_verified', 'This email is already verified.', 409);
+            return self::CODE_VERIFIED;
         }
 
         // F-294: the code was burned by too many wrong attempts and no new
         // one has been sent. Say so, instead of "invalid or expired", so the
         // user knows to request a new code rather than retype this one.
         if (AuthSupport::emailOtpIdentity($userId) === null && get_transient(self::OTP_EXHAUSTED_PREFIX . $userId) !== false) {
-            return self::otpExhausted();
+            return self::CODE_BURNED;
         }
 
         // Count EVERY attempt BEFORE comparing (L2) — see TwoFactorController:
@@ -191,7 +218,8 @@ final class EmailVerificationController
             AuthSupport::OTP_TTL,
             'verify_email_attempt:' . $userId . ':' . $otpId
         )) {
-            return self::exhaustOtp($userId);
+            self::exhaustOtp($userId);
+            return self::CODE_BURNED;
         }
 
         if (!AuthSupport::consumeOtpForUser($userId, $code)) {
@@ -210,11 +238,70 @@ final class EmailVerificationController
                 AuthSupport::OTP_TTL,
                 'verify_email_fail:' . $userId . ':' . $otpId
             )) {
-                return self::exhaustOtp($userId);
+                self::exhaustOtp($userId);
+                return self::CODE_BURNED;
             }
-            return ApiResponse::error('bcc_invalid_otp', 'Invalid or expired code.', 400);
+            return self::CODE_WRONG;
         }
 
+        return self::CODE_MATCHED;
+    }
+
+    /**
+     * F-294: a code for an address several wallet sign-ups hold pending.
+     * Each holder's code is a separate code sent to that same inbox, so the
+     * code is tried against each (oldest first), each under its own attempt
+     * cap: a guess counts once against every holder. The first match proves
+     * the inbox for that account, and only that account is verified. No
+     * match is the generic answer, or "request a new code" only when every
+     * holder's code is burned.
+     *
+     * @param list<\WP_User> $holders
+     */
+    private static function verifyCodeForHolders(array $holders, string $code): WP_REST_Response
+    {
+        $tried  = 0;
+        $burned = 0;
+        foreach ($holders as $holder) {
+            $holderId = (int) $holder->ID;
+            $outcome  = self::tryCode($holderId, $code);
+            if ($outcome === self::CODE_MATCHED) {
+                return self::completeVerification($holderId);
+            }
+            if ($outcome === self::CODE_VERIFIED) {
+                continue; // nothing pending to prove for this one
+            }
+            $tried++;
+            if ($outcome === self::CODE_BURNED) {
+                $burned++;
+            }
+        }
+        return $tried > 0 && $burned === $tried ? self::otpExhausted() : self::invalidOtp();
+    }
+
+    /**
+     * F-294: the wallet sign-ups holding $email as their pending address
+     * (PendingEmailService::pendingSignupHolders(): oldest first, bounded).
+     * A wallet sign-up keeps the placeholder in user_email until the inbox
+     * is proven.
+     *
+     * @return list<\WP_User>
+     */
+    private static function pendingHolderAccounts(string $email): array
+    {
+        $accounts = [];
+        foreach (\BCC\Trust\Core\Services\PendingEmailService::pendingSignupHolders($email) as $holderId) {
+            $holder = get_userdata($holderId);
+            if ($holder instanceof \WP_User) {
+                $accounts[] = $holder;
+            }
+        }
+        return $accounts;
+    }
+
+    /** On a proven inbox: apply a wallet sign-up's pending address, then sign in. */
+    private static function completeVerification(int $userId): WP_REST_Response
+    {
         $applied = self::applyPendingSignupEmail($userId);
         if ($applied !== null) {
             return $applied;
@@ -222,21 +309,9 @@ final class EmailVerificationController
         return AuthSupport::finalizeVerification($userId);
     }
 
-    /**
-     * F-294: the account an address belongs to for the sign-up verify and
-     * resend routes: by user_email, or else the ONE wallet sign-up holding
-     * it as its pending address (two holding it = nobody). A wallet sign-up
-     * keeps the placeholder in user_email until the inbox is proven.
-     */
-    private static function accountForAddress(string $email): ?\WP_User
+    private static function invalidOtp(): WP_REST_Response
     {
-        $user = get_user_by('email', $email);
-        if ($user instanceof \WP_User) {
-            return $user;
-        }
-        $ownerId = \BCC\Trust\Core\Services\PendingEmailService::pendingSignupOwner($email);
-        $owner   = $ownerId !== null ? get_userdata($ownerId) : false;
-        return $owner instanceof \WP_User ? $owner : null;
+        return ApiResponse::error('bcc_invalid_otp', 'Invalid or expired code.', 400);
     }
 
     /**
@@ -269,12 +344,11 @@ final class EmailVerificationController
      */
     private const OTP_EXHAUSTED_PREFIX = 'bcc_otp_exhausted_';
 
-    private static function exhaustOtp(int $userId): WP_REST_Response
+    private static function exhaustOtp(int $userId): void
     {
         AuthSupport::burnEmailOtp($userId);
         set_transient(self::OTP_EXHAUSTED_PREFIX . $userId, '1', AuthSupport::OTP_TTL);
         \BCC\Core\Log\Logger::audit('verify_email_attempts_exhausted', ['user_id' => $userId]);
-        return self::otpExhausted();
     }
 
     private static function otpExhausted(): WP_REST_Response
@@ -310,7 +384,8 @@ final class EmailVerificationController
         // to the address on file; the response never says which, or whether.
         $email      = sanitize_email((string) $request->get_param('email'));
         $identifier = trim((string) $request->get_param('identifier'));
-        $user       = false;
+        /** @var list<\WP_User> $recipients */
+        $recipients = [];
 
         if ($email === '' && $identifier !== '' && is_email($identifier)) {
             $email = sanitize_email($identifier);
@@ -330,7 +405,13 @@ final class EmailVerificationController
                 AuthSupport::releaseThrottle('resend_verification', 3600);
                 return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
             }
-            $user = self::accountForAddress($email) ?? false;
+            // The account whose email it is; failing that, every wallet
+            // sign-up holding it pending (F-294; bounded, oldest first), each
+            // with its own code, as each would have had at sign-up. The
+            // per-address caps above count the request once, so a request
+            // mails at most MAX_PENDING_SIGNUP_HOLDERS codes.
+            $owner      = get_user_by('email', $email);
+            $recipients = $owner instanceof \WP_User ? [$owner] : self::pendingHolderAccounts($email);
         } elseif ($identifier !== '') {
             $handle = ltrim(strtolower($identifier), '@');
             // F-290 for the handle form: the same caps, keyed on the handle and
@@ -358,19 +439,19 @@ final class EmailVerificationController
             // here would say the handle exists). The network slot is NOT
             // given back here: a give-back only for handles that exist would
             // let the network bucket's count say which ones do.
-            if ($user instanceof \WP_User && !AuthSupport::allowMailToAddress(
+            if ($user instanceof \WP_User && AuthSupport::allowMailToAddress(
                 'resend_verification',
                 $email,
                 AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT,
                 AuthSupport::RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT
             )) {
-                $user = false;
+                $recipients = [$user];
             }
         } else {
             return ApiResponse::error('bcc_invalid_request', 'Supply an email or a handle.', 422);
         }
 
-        if ($user instanceof \WP_User) {
+        foreach ($recipients as $user) {
             $userId        = (int) $user->ID;
             $emailVerified = (string) get_user_meta($userId, AuthSupport::META_EMAIL_VERIFIED, true);
 

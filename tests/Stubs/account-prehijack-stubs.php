@@ -356,7 +356,15 @@ namespace {
                     $out[] = (int) $id;
                 }
             }
-            return $out;
+            // Like core: `orderby` ID (else the seeded order) and a `number` cap.
+            if (($args['orderby'] ?? '') === 'ID') {
+                sort($out);
+                if (strtoupper((string) ($args['order'] ?? 'ASC')) === 'DESC') {
+                    $out = array_reverse($out);
+                }
+            }
+            $number = (int) ($args['number'] ?? 0);
+            return $number > 0 ? array_slice($out, 0, $number) : $out;
         }
     }
     if (!function_exists('get_user_meta')) {
