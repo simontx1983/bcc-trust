@@ -48,6 +48,13 @@ final class PostEngagementRepository
     private const ACTIVITIES_TABLE_SUFFIX  = 'peepso_activities';
     private const SAVED_POSTS_TABLE_SUFFIX = 'peepso_saved_posts';
 
+    /**
+     * Bound on {@see viewerReposts()}. One member should have at most ONE
+     * repost of a given root; this caps the cleanup of a duplicate that
+     * slipped past the once-only check, it is not a page size.
+     */
+    private const VIEWER_REPOST_CAP = 50;
+
     private static function activitiesTable(): string
     {
         global $wpdb;
@@ -160,6 +167,84 @@ final class PostEngagementRepository
     }
 
     /**
+     * The viewer's OWN published reposts of this root.
+     *
+     * Answers both questions the repost routes need from one read: whether
+     * this member has already reposted (`[] !== $rows`), and which posts to
+     * trash when they un-repost.
+     *
+     * ⚠ $rootActId MUST BE THE ROOT, resolved through
+     * `PeepSoActivityRepository::resolveRepostRoot()`. `act_repost_id` always
+     * stores the chain root, so keying on a submitted repost's own act_id
+     * matches NOTHING and the once-only rule silently stops applying — the
+     * member reposts the same content twice.
+     *
+     * ⚠⚠ KEYED ON `act_owner_id`, THE SAME COLUMN `repostCount()` COUNTS
+     * DISTINCT, and the two must not drift. `act_owner_id` is the WALL the
+     * post sits on (PeepSo: `'act_owner_id' => $owner` in `add_post`), not
+     * necessarily its author — they coincide here only because
+     * `PeepSoStatusWriter::createSelfStatus()` passes the author as both.
+     * Were this keyed on `post_author` while the count stayed on
+     * `act_owner_id`, "already reposted" and "counted as a reposter" could
+     * answer differently for the same row.
+     *
+     * ⚠ PUBLISHED ONLY, matching `repostCount()`. An un-reposted (trashed)
+     * row must not block a fresh repost, or un-repost would be a one-way
+     * door.
+     *
+     * ⚠ BOUNDED (§2). One member should have at most ONE row here, so the
+     * cap is not about paging — it is about a duplicate that slipped past
+     * the once-only check still being cleaned up in bounded work rather
+     * than becoming an unbounded delete.
+     *
+     * @return list<array{act_id: int, post_id: int}>|null null when the
+     *         read failed; `[]` when this member has not reposted.
+     */
+    public static function viewerReposts(int $rootActId, int $ownerId): ?array
+    {
+        if ($rootActId <= 0 || $ownerId <= 0) {
+            return null;
+        }
+
+        $activities = self::activitiesTable();
+        if (!TableRegistry::exists($activities)) {
+            return null;
+        }
+
+        global $wpdb;
+
+        $rows = self::readRows($wpdb->prepare(
+            "SELECT a.act_id, a.act_external_id
+               FROM {$activities} a
+               INNER JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
+              WHERE a.act_repost_id = %d
+                AND a.act_owner_id = %d
+                AND p.post_status = 'publish'
+              ORDER BY a.act_id ASC
+              LIMIT %d",
+            $rootActId,
+            $ownerId,
+            self::VIEWER_REPOST_CAP
+        ));
+
+        if ($rows === null) {
+            return null;
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            /** @var object{act_id?: int|numeric-string, act_external_id?: int|numeric-string} $row */
+            $actId  = (int) ($row->act_id ?? 0);
+            $postId = (int) ($row->act_external_id ?? 0);
+            if ($actId > 0 && $postId > 0) {
+                $out[] = ['act_id' => $actId, 'post_id' => $postId];
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * Run a COUNT and return it, or null if the read failed.
      *
      * ⚠ `$wpdb->query()` returning false is not an exhaustive failure
@@ -174,6 +259,36 @@ final class PostEngagementRepository
      */
     private static function readCount(string $sql): ?int
     {
+        $rows = self::readRows($sql);
+
+        if ($rows === null || !isset($rows[0])) {
+            return null;
+        }
+
+        /** @var object{n?: int|numeric-string} $first */
+        $first = $rows[0];
+
+        return (int) ($first->n ?? 0);
+    }
+
+    /**
+     * Run a read and return its rows, or null if the read failed.
+     *
+     * ⚠ EXTRACTED FROM {@see readCount()} rather than written beside it, so
+     * the F-230 failure detection above lives in ONE place. A second copy is
+     * exactly how one of the two reads would later lose the `$ok === false`
+     * leg and start reporting a broken query as "no rows".
+     *
+     * ⚠ An EMPTY array is a successful read of nothing and is returned as
+     * `[]`, never as null. The distinction is the whole point: `[]` means
+     * "this member has not reposted", null means "I could not find out", and
+     * a caller that collapses them re-creates the bug this idiom exists to
+     * prevent.
+     *
+     * @return list<object>|null
+     */
+    private static function readRows(string $sql): ?array
+    {
         global $wpdb;
 
         self::clearLastError();
@@ -183,14 +298,15 @@ final class PostEngagementRepository
             return null;
         }
 
-        /** @var list<object{n?: int|numeric-string}>|mixed $rows */
+        /** @var mixed $rows */
         $rows = $wpdb->last_result;
 
-        if (!is_array($rows) || !isset($rows[0])) {
+        if (!is_array($rows)) {
             return null;
         }
 
-        return (int) ($rows[0]->n ?? 0);
+        /** @var list<object> $rows */
+        return array_values($rows);
     }
 
     private static function clearLastError(): void

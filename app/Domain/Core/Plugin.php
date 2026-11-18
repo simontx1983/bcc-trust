@@ -1574,6 +1574,14 @@ final class Plugin
         // StokeRepository); cosmetic for trust, real feed-ranking input.
         \BCC\Trust\Core\REST\StokeEndpoint::register();
 
+        // Repost — POST/DELETE /feed/{id}/repost (F-346). Unlike Stoke this
+        // is not a counter: a repost is a real post on the member's own
+        // wall, so the write goes through PeepSoStatusWriter and the
+        // relationship lives in PeepSo's own `act_repost_id`. Once per
+        // member per ROOT post, enforced under an advisory lock because no
+        // database constraint can express it.
+        \BCC\Trust\Core\REST\RepostEndpoint::register();
+
         // v1.5 hybrid PeepSo-proxy comments — GET / POST / DELETE under
         // /posts/:feed_id/comments. Reads peepso_activities directly via
         // CommentRepository (joined to wp_posts + wp_users); writes
