@@ -138,5 +138,46 @@ namespace BCC\Trust\Tests\Unit {
             self::assertSame([], $this->sent, 'an unreadable notice fails closed: no bell');
             self::assertNotEmpty($GLOBALS['__f307']['logs'], 'the skip is logged');
         }
+
+        /** F-307 B2 (Low a): a scheduler refusal is logged, not swallowed. */
+        public function testAFailedScheduleIsLogged(): void
+        {
+            $GLOBALS['__f307']['schedule_fails'] = true;
+            Svc::scheduleOutcomeNotice(self::ID, true);
+
+            self::assertSame([], $GLOBALS['__f307']['cron']);
+            self::assertCount(1, $GLOBALS['__f307']['logs']);
+            self::assertStringContainsString('could not be scheduled', $GLOBALS['__f307']['logs'][0]);
+        }
+
+        /** A successful schedule logs nothing. */
+        public function testASuccessfulScheduleLogsNothing(): void
+        {
+            Svc::scheduleOutcomeNotice(self::ID, true);
+            self::assertSame([], $GLOBALS['__f307']['logs']);
+        }
+
+        /**
+         * F-307 B2 (Low b): a dispatch that throws does NOT mark the bell as
+         * sent, so a later delivery still sends it.
+         */
+        public function testAThrowingDispatchLeavesTheBellUnsentForALaterDelivery(): void
+        {
+            $this->setHidden(true);
+
+            $sent = $this->svc->deliverOutcomeNotice(self::ID, true, static function (int $id, bool $h): void {
+                throw new \RuntimeException('dispatcher down');
+            });
+
+            self::assertFalse($sent);
+            self::assertArrayNotHasKey(Svc::META_LAST_NOTICE, $GLOBALS['__f307']['meta'][self::ID] ?? []);
+            self::assertNotEmpty($GLOBALS['__f307']['logs'], 'the failure is logged');
+
+            // The retry still warrants and sends the bell, then records it.
+            Svc::scheduleOutcomeNotice(self::ID, true);
+            $this->runCron();
+            self::assertSame([[self::ID, true]], $this->sent);
+            self::assertSame('hidden', $GLOBALS['__f307']['meta'][self::ID][Svc::META_LAST_NOTICE] ?? null);
+        }
     }
 }

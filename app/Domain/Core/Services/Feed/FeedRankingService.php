@@ -33,6 +33,7 @@
 namespace BCC\Trust\Core\Services\Feed;
 
 use BCC\Core\Feed\ActivityFeedService;
+use BCC\Core\Feed\FeedItemNormalizer;
 use BCC\Core\Repositories\PeepSoBlockRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Plugin;
@@ -42,6 +43,7 @@ use BCC\Trust\Core\Services\FeedItemReportVisibility;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Support\PeepSoFriendGate;
 use BCC\Trust\Core\Support\ProfileAccess;
+use BCC\Trust\Core\Support\ProfileSectionVisibility;
 use BCC\Trust\Core\Support\RestrictedGroups;
 
 if (!defined('ABSPATH')) {
@@ -262,6 +264,57 @@ final class FeedRankingService
             $cached['items'] = $kept;
             wp_cache_set($key, $cached, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
         }
+    }
+
+    /**
+     * F-294 (item 13): drop every cached anon hot-feed first page, so the
+     * next read (or the minutely warm tick) rebuilds it.
+     *
+     * For IDENTITY and PRIVACY changes, not freshness: an account deletion,
+     * a handle change, or "Hide my real name" switched on/off. The audit-
+     * confirmed choice above (a trending feed tolerates up to HOT_CACHE_TTL
+     * of stale SCORES and order, so votes never bust this cache) says
+     * nothing about a deleted account, an old handle or a real name the
+     * member just hid lingering for five minutes in a shared, publicly
+     * cacheable payload. Those events are rare, so the cost is one rebuild
+     * each; votes and scores still never call this.
+     *
+     * A member can appear in a cached page beyond the author block (names
+     * inside item content), so the whole page goes rather than items being
+     * patched. Per-viewer block filtering is untouched: it runs after this
+     * cache and never writes to it.
+     *
+     * ⚠ As with forgetDeletedPost(): the HTTP cache (`max-age=60`) is out of
+     * reach here.
+     */
+    public function forgetHotFeed(): void
+    {
+        for ($limit = 1; $limit <= self::HOT_CACHE_MAX_LIMIT; $limit++) {
+            wp_cache_delete(self::hotFeedCacheKey($limit), self::HOT_CACHE_GROUP);
+        }
+    }
+
+    /**
+     * The three events that call forgetHotFeed() (through $forget, which the
+     * caller wraps in its own error handling): an account deleted, a handle
+     * changed, and a privacy write that touched `real_name_hidden`. Here,
+     * not inline in Plugin, so a test can register them and fire them.
+     *
+     * @param callable(string $why, int $userId): void $forget
+     */
+    public static function registerIdentityHooks(callable $forget): void
+    {
+        add_action('deleted_user', static function ($userId) use ($forget): void {
+            $forget('account_deleted', (int) $userId);
+        }, 30, 1);
+        add_action('bcc_handle_changed', static function ($userId) use ($forget): void {
+            $forget('handle_changed', (int) $userId);
+        }, 30, 1);
+        add_action('bcc_privacy_settings_changed', static function ($userId, $keys) use ($forget): void {
+            if (is_array($keys) && in_array('real_name_hidden', $keys, true)) {
+                $forget('real_name_hidden', (int) $userId);
+            }
+        }, 30, 2);
     }
 
     /**
@@ -736,6 +789,14 @@ final class FeedRankingService
      * suppresses the wall when the wall owner is on it. §K1-C per-row
      * moderation hide is honored too.
      *
+     * F-341: the profile SECTION switches reach this tab as well. With
+     * Blogs switched off, the member's blog posts leave their Activity tab
+     * and not merely their Blogs tab — the Activity tab is the DEFAULT tab
+     * a visitor lands on, so leaving it unfiltered would have made the
+     * switch cosmetic. Reviews behaves the same way, for the reviews the
+     * member WROTE. Both stay visible in ordinary feeds and at their own
+     * permalink: the switch is a statement about the member's PROFILE.
+     *
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
     public function getActivityForAuthor(int $authorId, int $viewerId, ?string $cursor = null, int $limit = 20): array
@@ -761,6 +822,10 @@ final class FeedRankingService
         // not appear on it.
         [$friendIds, $enforceF02] = ProfileAccess::postVisibilityArgs($viewerId);
 
+        // F-341 — which KINDS this viewer may see on this member's wall.
+        // null = every public module, the unchanged query.
+        $moduleIds = self::wallModuleIds($authorId, $viewerId);
+
         $payload = $this->activityFeed->getActivityForAuthor(
             $authorId,
             $viewerId,
@@ -770,7 +835,8 @@ final class FeedRankingService
             $hidden === []   ? null : $hidden,
             $excludedGroups === [] ? null : $excludedGroups,
             viewerFriendIds: $friendIds,
-            enforcePostVisibility: $enforceF02
+            enforcePostVisibility: $enforceF02,
+            moduleIds: $moduleIds
         );
 
         // ⚠ F-54: EXACT mutual-block filter over THIS PAGE's authors. The
@@ -780,6 +846,92 @@ final class FeedRankingService
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
+    }
+
+    /**
+     * F-341 — the activity modules this viewer may see on this member's
+     * Activity tab, or `null` for "every public module" (the unchanged
+     * query, and the answer for almost every request).
+     *
+     * ⚠ FILTERED AS CANDIDATES, NOT AS A PAGE. The list goes into the
+     * WHERE through bcc-core's module allowlist. Dropping the rows after
+     * the page came back would return SHORT pages and make
+     * `has_more`/`next_cursor` describe a page the caller never got, which
+     * can end a cursor early and silently lose posts the viewer was
+     * entitled to see.
+     *
+     * ⚠ REUSES {@see ProfileSectionVisibility::hides()} — the single owner
+     * of the section switches — rather than reading the meta again. That
+     * is what keeps this tab agreeing with the profile payload, the Blogs
+     * tab route and the §K2 `*_hidden` flags about who may see what: the
+     * owner and §F-02-exempt admins are unaffected because `hides()`
+     * already says so, and a member who never touched a switch is
+     * unaffected because absent meta means SHOWN.
+     *
+     * ⚠ Only these two sections have a module of their own. About,
+     * Verifications, Halls and Operator are profile CONTENT, not activity
+     * kinds, so no wall row corresponds to them; Disputes posts
+     * (`dispute_signed`) are deliberately left alone, matching the
+     * decision that the Reviews switch covers only reviews the member
+     * WROTE.
+     *
+     * @return list<int>|null
+     */
+    private static function wallModuleIds(int $authorId, int $viewerId): ?array
+    {
+        $hiddenKinds = [];
+        if (ProfileSectionVisibility::hides(ProfileSectionVisibility::SECTION_BLOGS, $authorId, $viewerId)) {
+            $hiddenKinds[] = 'blog_excerpt';
+        }
+        if (ProfileSectionVisibility::hides(ProfileSectionVisibility::SECTION_REVIEWS, $authorId, $viewerId)) {
+            $hiddenKinds[] = 'review';
+        }
+        if ($hiddenKinds === []) {
+            return null;
+        }
+
+        return array_values(array_diff(
+            FeedItemNormalizer::publicFeedModuleIds(),
+            self::moduleIdsForKinds($hiddenKinds)
+        ));
+    }
+
+    /**
+     * The module ids that render as the given post KINDS.
+     *
+     * ⚠ Derived from `FeedItemNormalizer::MODULE_TO_KIND` rather than
+     * hard-coding 202/204, so this cannot drift from core: a second blog
+     * or review module added to that map is dropped by the switch
+     * automatically. Hard-coded ids would keep passing their tests while
+     * quietly leaking the new module onto a hidden section.
+     *
+     * ⚠ `is_int()` separates the real SMALLINT module ids from the legacy
+     * STRING keys in the same map ('review', 'status', …), which are a
+     * read-side shim for callers passing module NAMES and never appear as
+     * an `act_module_id`. It is the same test `publicFeedModuleIds()` uses.
+     *
+     * ⚠ Dropping that test is EQUIVALENT today, and no test can hold it in
+     * place — so this is defence, not a covered behaviour, and claiming
+     * otherwise would be the sort of false assurance a reviewer rightly
+     * distrusts. The reason it is equivalent: this list is the SUBTRAHEND
+     * of an `array_diff` over integer module ids, and `array_diff`
+     * compares as strings, so a stray 'review' simply matches nothing.
+     * It is kept because the day this list is used as an allowlist rather
+     * than a subtrahend, a non-numeric entry stops being harmless.
+     *
+     * @param  list<string> $kinds
+     * @return list<int>
+     */
+    private static function moduleIdsForKinds(array $kinds): array
+    {
+        $ids = [];
+        foreach (FeedItemNormalizer::MODULE_TO_KIND as $moduleId => $kind) {
+            if (is_int($moduleId) && in_array($kind, $kinds, true)) {
+                $ids[] = $moduleId;
+            }
+        }
+
+        return $ids;
     }
 
     /**

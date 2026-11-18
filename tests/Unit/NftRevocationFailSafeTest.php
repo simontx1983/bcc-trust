@@ -575,6 +575,128 @@ final class NftRevocationFailSafeTest extends TestCase
         $this->assertUnknownBecause('evidence_stale', $this->verdict('ethereum', self::EVM_CONTRACT));
     }
 
+    // ── F-278: ERC-1155, the index's zero is checked with the provider ───
+
+    /** A wallet whose index row for the contract is a balance-0 tombstone. */
+    private function erc1155ZeroInIndex(): void
+    {
+        $this->erc1155();
+        $this->checkpoint('healthy', 60);
+        \BccRevokeWorld::$erc1155Capable = true;
+    }
+
+    private function erc1155Answer(string $kind, int $n = 0): void
+    {
+        \BccRevokeWorld::$erc1155Answers[self::EVM_WALLET . '|' . self::EVM_CONTRACT] = [$kind, $n];
+    }
+
+    public function testAnErc1155SellerTheProviderShowsHoldingNoneIsIneligible(): void
+    {
+        // (a) sold their only token.
+        $this->erc1155ZeroInIndex();
+        $this->erc1155Answer('exact', 0);
+
+        self::assertTrue($this->verdict('ethereum', self::EVM_CONTRACT)->isIneligible());
+        self::assertContains('count_erc1155_holdings:' . self::EVM_WALLET . '|' . self::EVM_CONTRACT, \BccRevokeWorld::$fetcherCalls);
+    }
+
+    public function testAPreLinkHolderWhoSentSomeAwayIsKept(): void
+    {
+        // (b) held 3 of token #5 before linking, sent 1: the index clamps to 0,
+        // the provider still sees token #5.
+        $this->erc1155ZeroInIndex();
+        $this->erc1155Answer('atLeast', 1);
+
+        self::assertTrue($this->verdict('ethereum', self::EVM_CONTRACT)->isEligible());
+    }
+
+    public function testAHolderOfAnotherTokenIdFromBeforeLinkingIsKept(): void
+    {
+        // (c) holds #5 from before linking, sent #7 away.
+        $this->erc1155ZeroInIndex();
+        \BccRevokeWorld::$index = []; // nothing visible: #7's row is a tombstone
+        $this->erc1155Answer('atLeast', 1);
+
+        self::assertTrue($this->verdict('ethereum', self::EVM_CONTRACT)->isEligible());
+    }
+
+    public function testAProviderLowerBoundBelowAHigherMinimumIsUnknownNotIneligible(): void
+    {
+        $this->erc1155ZeroInIndex();
+        $this->erc1155Answer('atLeast', 1);
+
+        $this->assertUnknownBecause('evidence_incomplete', $this->verdict('ethereum', self::EVM_CONTRACT, 2));
+    }
+
+    public function testNoProviderAnswerIsUnknownNeverAZero(): void
+    {
+        $this->erc1155ZeroInIndex();
+        $this->erc1155Answer('null');
+
+        $this->assertUnknownBecause('provider_unavailable', $this->verdict('ethereum', self::EVM_CONTRACT));
+    }
+
+    public function testAThrowingProviderIsUnknown(): void
+    {
+        $this->erc1155ZeroInIndex();
+        $this->erc1155Answer('throw');
+
+        $this->assertUnknownBecause('provider_unavailable', $this->verdict('ethereum', self::EVM_CONTRACT));
+    }
+
+    public function testTheProviderReadIsChargedToTheBudgetBeforeAsking(): void
+    {
+        $this->erc1155ZeroInIndex();
+        $this->erc1155Answer('exact', 0);
+
+        $verdict = HoldingsService::eligibilityVerdict(
+            self::USER,
+            'ethereum',
+            self::EVM_CONTRACT,
+            1,
+            new \BCC\Trust\Onchain\Support\ProviderRequestBudget(0, 10)
+        );
+
+        $this->assertUnknownBecause('verification_budget_exhausted', $verdict);
+        self::assertSame(0, \BccRevokeWorld::providerCalls() + count(array_filter(
+            \BccRevokeWorld::$fetcherCalls,
+            static fn (string $c): bool => str_starts_with($c, 'count_erc1155_holdings')
+        )), 'nothing is asked without budget');
+    }
+
+    public function testAPositiveIndexNeverAsksTheProvider(): void
+    {
+        $this->erc1155ZeroInIndex();
+        \BccRevokeWorld::$index = [self::LINK => 2];
+
+        self::assertTrue($this->verdict('ethereum', self::EVM_CONTRACT)->isEligible());
+        self::assertSame([], array_values(array_filter(
+            \BccRevokeWorld::$fetcherCalls,
+            static fn (string $c): bool => str_starts_with($c, 'count_erc1155_holdings')
+        )));
+    }
+
+    public function testTheSweepRemovesAnErc1155SellerAndKeepsPreLinkHolders(): void
+    {
+        $this->gate('ethereum', self::EVM_CHAIN, self::EVM_CONTRACT);
+        \BccRevokeWorld::$tokenStandards[self::EVM_CHAIN . '|' . self::EVM_CONTRACT] = 'ERC-1155';
+        $this->checkpoint('healthy', 60);
+        \BccRevokeWorld::$erc1155Capable = true;
+
+        $seller = '0x' . str_repeat('a', 40);
+        $keeper = '0x' . str_repeat('b', 40);
+        \BccRevokeWorld::linkWallet(self::USER, self::LINK, self::EVM_CHAIN, $seller);
+        \BccRevokeWorld::linkWallet(self::USER + 1, self::LINK + 1, self::EVM_CHAIN, $keeper);
+        \BccRevokeWorld::$erc1155Answers[$seller . '|' . self::EVM_CONTRACT] = ['exact', 0];
+        \BccRevokeWorld::$erc1155Answers[$keeper . '|' . self::EVM_CONTRACT] = ['atLeast', 1];
+        \BccRevokeWorld::$members[self::GROUP] = [$this->member(self::USER), $this->member(self::USER + 1)];
+
+        $stats = (new NftGroupRevokeService())->sweep();
+
+        self::assertSame([self::GROUP . ':' . self::USER], \BccRevokeWorld::$leaves, 'only the seller is removed');
+        self::assertSame(1, $stats['revoked']);
+    }
+
     // ════════════════════════════════════════════════════════════════════
     // 3. Join
     // ════════════════════════════════════════════════════════════════════

@@ -291,12 +291,25 @@ final class AnnouncementViewService
         }
 
         $model['status'] = $status;
+
+        // F-307 B2 — the operator sees that an administrator took the notice
+        // down. Owner/detail only: a public row never carries a taken-down
+        // notice (the public predicate refuses it), so publicRow() has no
+        // field for it. Who took it down and which report it resolved stay
+        // server-side.
+        $hiddenRaw = self::moderationHiddenRaw($row);
+        $model['moderation'] = [
+            'hidden'    => $hiddenRaw !== null,
+            'hidden_at' => $hiddenRaw === null ? null : self::iso($hiddenRaw),
+        ];
+
         $model['capabilities'] = AnnouncementCapabilityResolver::forRow(
             $decision,
             [
-                'status'           => $status,
-                'is_archived'      => $model['is_archived'],
-                'comments_enabled' => $model['comments_enabled'],
+                'status'            => $status,
+                'is_archived'       => $model['is_archived'],
+                'comments_enabled'  => $model['comments_enabled'],
+                'moderation_hidden' => $model['moderation']['hidden'],
                 // ⚠⚠ A CAPABILITY INPUT, NOT A FIELD. It is read straight off
                 // the repository row and handed to the resolver's self-report
                 // rung; it is deliberately NOT written into `$model`, because
@@ -421,6 +434,28 @@ final class AnnouncementViewService
         $raw = self::archivedAtRaw($row);
 
         return $raw === null ? null : self::iso($raw);
+    }
+
+    /**
+     * F-307 B2 — the raw takedown marker, or null when the notice is not
+     * taken down. An empty marker is NOT a takedown, matching the public
+     * predicate's `meta_value <> ''`.
+     *
+     * ⚠ Presence decides `hidden`, not shape: a non-empty marker that does
+     * not parse as a date is still a takedown (the predicate refuses it), so
+     * the caller reports `hidden: true` with `hidden_at: null` rather than
+     * "not hidden" — the owner row must never offer a control the write path
+     * refuses.
+     */
+    private static function moderationHiddenRaw(object $row): ?string
+    {
+        $v = $row->moderation_hidden_at ?? null;
+        if (!is_scalar($v)) {
+            return null;
+        }
+        $v = trim((string) $v);
+
+        return $v === '' ? null : $v;
     }
 
     /**
@@ -559,6 +594,9 @@ final class AnnouncementViewService
         return [
             'archived_at'      => AnnouncementVisibility::META_ARCHIVED_AT,
             'comments_enabled' => AnnouncementVisibility::META_COMMENTS_ENABLED,
+            // F-307 B2 — read by the repository's owner-row column; the
+            // projection consumes it as `moderation.hidden_at`.
+            'moderation_hidden_at' => AnnouncementVisibility::META_MODERATION_HIDDEN_AT,
         ];
     }
 }

@@ -205,6 +205,57 @@ final class PageOwnerBackfillCandidatesIntegrationTest extends TestCase
         );
     }
 
+    /**
+     * F-360 live read (the claim path and the revoke release decide on it):
+     * the backfill's ranking on the real engines — a ban first, then an
+     * owner row, then the oldest row.
+     */
+    public function testTheLiveStatusReadRanksABanThenAnOwnerRowThenTheOldest(): void
+    {
+        $cases = [
+            [['member', 'banned'], 'banned'],
+            [['banned', 'member'], 'banned'],
+            [['member_owner', 'banned'], 'banned'],
+            [['banned', 'member_owner'], 'banned'],
+            [['member', 'member_owner'], 'member_owner'],
+            [['member', 'pending_user'], 'member'],
+            [['member'], 'member'],
+            [[], null],
+        ];
+        foreach ($cases as [$rows, $expected]) {
+            $page = $this->page(self::USER_A);
+            foreach ($rows as $status) {
+                $this->member(self::USER_A, $page, $status);
+            }
+            self::assertSame(
+                ['status' => $expected],
+                PeepSoQueryRepository::claimerPageStatus($page, self::USER_A),
+                $rows === [] ? 'no row' : implode(' then ', $rows)
+            );
+        }
+    }
+
+    public function testTheLiveStatusReadIgnoresOtherMembersRows(): void
+    {
+        $page = $this->page(self::USER_A);
+        $this->member(self::USER_B, $page, 'banned');
+        $this->member(self::USER_A, $page, 'member');
+
+        self::assertSame(['status' => 'member'], PeepSoQueryRepository::claimerPageStatus($page, self::USER_A));
+    }
+
+    public function testAFailedLiveStatusReadIsNullNotNoRow(): void
+    {
+        global $wpdb;
+        $page = $this->page(self::USER_A);
+        $wpdb->failQueriesMatching = '/peepso_page_members/i';
+
+        $read = PeepSoQueryRepository::claimerPageStatus($page, self::USER_A);
+
+        self::assertGreaterThan(0, $wpdb->injectedFailures, 'the fault must actually have fired');
+        self::assertNull($read);
+    }
+
     /** The live claim path's guard reads the same table (F-299 live guard). */
     public function testTheLivePathSeesADifferentOwnerButNotTheClaimerThemself(): void
     {

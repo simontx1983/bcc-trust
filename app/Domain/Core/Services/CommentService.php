@@ -35,6 +35,7 @@ use BCC\Core\PeepSo\PeepSoCommentWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Security\Throttle;
+use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\StokeRepository;
 use BCC\Trust\Core\Repositories\UserMiniRepository;
@@ -203,12 +204,12 @@ final class CommentService
         // F-265: a deleted (trashed) or moderation-hidden post is gone from
         // every feed and its permalink; its thread is too. Same answer as an
         // unknown id, for every viewer, before any membership check.
-        if ($parent === null || !$this->visibility()->isLive($parent)) {
+        if ($parent === null || !FeedItemGate::isFeedModule($parent->act_module_id ?? null) || !$this->visibility()->isLive($parent)) {
             return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
         }
         $parentPostId = (int) $parent->act_external_id;
 
-        $gate = $this->gateForParent($viewerId, $parentPostId);
+        $gate = $this->gateForParent($viewerId, $parentPostId, $actId);
         if (!$gate['can_read']) {
             return $this->refuseParent(
                 $viewerId,
@@ -406,7 +407,7 @@ final class CommentService
         // F-265: a deleted (trashed) or moderation-hidden post is gone from
         // every feed and its permalink; its thread is too. Same answer as an
         // unknown id, for every viewer, before any membership check.
-        if ($parent === null || !$this->visibility()->isLive($parent)) {
+        if ($parent === null || !FeedItemGate::isFeedModule($parent->act_module_id ?? null) || !$this->visibility()->isLive($parent)) {
             return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
         }
         $parentPostId   = (int) $parent->act_external_id;
@@ -417,7 +418,7 @@ final class CommentService
         // returns null and add_comment refuses with FALSE.
         $parentModuleId = (int) $parent->act_module_id;
 
-        $gate = $this->gateForParent($authorId, $parentPostId);
+        $gate = $this->gateForParent($authorId, $parentPostId, $actId);
         if (!$gate['can_create']) {
             return $this->refuseParent(
                 $authorId,
@@ -641,16 +642,24 @@ final class CommentService
      * Decide whether the viewer can read / create comments on the
      * given parent post.
      *
-     * Non-gated posts (no `peepso_group_id` meta or zero) → fully open
-     * for read; create still goes through PeepSo's own permission
-     * check inside add_comment.
+     * Non-gated posts (no `peepso_group_id` meta or zero) are NOT
+     * automatically open: they still owe the post's own §F-02 AUDIENCE
+     * ({@see FeedItemReportVisibility::audienceAllows()}). Before that
+     * check this branch returned `can_read => true` unconditionally, so
+     * anyone holding a feed id could read the thread — and the commenters
+     * — on a followers-only or only-me post. Create still goes through
+     * PeepSo's own permission check inside add_comment on top.
+     *
+     * ⚠ `$parentActId` is required, not optional: the audience rule reads
+     * the ACT's `act_access`, and a default would have let a new caller
+     * silently opt out of the gate.
      *
      * Gated posts → viewer must be a member. `member_readonly` can
      * read but not create; banned / pending / non-member cannot read.
      *
      * @return array{can_read: bool, can_create: bool}
      */
-    private function gateForParent(int $viewerId, int $parentPostId): array
+    private function gateForParent(int $viewerId, int $parentPostId, int $parentActId): array
     {
         if ($parentPostId <= 0) {
             return ['can_read' => false, 'can_create' => false];
@@ -658,11 +667,19 @@ final class CommentService
 
         $groupId = (int) get_post_meta($parentPostId, 'peepso_group_id', true);
         if ($groupId <= 0) {
-            // Open post — anyone can read; create still validates
-            // identity (PeepSo permissions handle blocked-by-author).
+            // Not group-scoped, so no membership gate — but the post's own
+            // §F-02 audience still decides. A refusal here reaches
+            // refuseParent(), which answers the SAME `bcc_not_found` a
+            // missing id gets, so the thread of a post this viewer may not
+            // see is indistinguishable from a post that is not there.
+            $visible = FeedItemReportVisibility::audienceAllows(
+                $viewerId,
+                $parentActId,
+                $parentPostId
+            );
             return [
-                'can_read'   => true,
-                'can_create' => $viewerId > 0,
+                'can_read'   => $visible,
+                'can_create' => $visible && $viewerId > 0,
             ];
         }
 

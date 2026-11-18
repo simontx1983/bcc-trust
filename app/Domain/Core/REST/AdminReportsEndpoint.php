@@ -88,7 +88,7 @@ final class AdminReportsEndpoint
                     'post_kind' => [
                         'required'          => false,
                         'type'              => 'string',
-                        'enum'              => ['status', 'blog', 'review', 'photo', 'gif'],
+                        'enum'              => ['status', 'blog', 'review', 'photo', 'gif', 'review_reply'],
                         'sanitize_callback' => 'sanitize_key',
                     ],
                     'since' => [
