@@ -165,4 +165,41 @@ final class AuthLimitsPerNetworkTest extends TestCase
         self::assertSame(30, AuthSupport::VERIFY_EMAIL_RATE_LIMIT, 'verify-email per network, per hour');
         self::assertSame(30, AuthSupport::RESET_PASSWORD_RATE_LIMIT, 'reset-password per network, per hour');
     }
+
+    // ── F-294: resend by handle (identifier) keeps F-290's guarantees ──────
+
+    private static function resendByHandle(string $handle): int
+    {
+        return (new EmailVerificationController())->resendVerification(
+            new \WP_REST_Request(['identifier' => $handle])
+        )->get_status();
+    }
+
+    public function testTheHandleFormIsCappedWhetherOrNotTheHandleExists(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][7] = ['email' => 'owner@example.com', 'login' => 'u7', 'display' => 'Owner'];
+        $GLOBALS['__bcc_ph']['meta'][7]  = ['bcc_handle' => 'owner', AuthSupport::META_EMAIL_VERIFIED => '0'];
+
+        $known = $unknown = [];
+        for ($i = 0; $i <= AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT; $i++) {
+            $known[]   = self::resendByHandle('owner');
+            $unknown[] = self::resendByHandle('nobody-here');
+        }
+
+        self::assertSame(429, end($known));
+        self::assertSame($known, $unknown, 'a known and an unknown handle answer exactly alike');
+    }
+
+    public function testAlternatingEmailAndHandleCannotDoubleTheMailToOneInbox(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][7] = ['email' => 'owner@example.com', 'login' => 'u7', 'display' => 'Owner'];
+        $GLOBALS['__bcc_ph']['meta'][7]  = ['bcc_handle' => 'owner', AuthSupport::META_EMAIL_VERIFIED => '0'];
+
+        for ($i = 0; $i < 2 * AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT; $i++) {
+            $i % 2 === 0 ? self::hit('resend', 'owner@example.com') : self::resendByHandle('owner');
+        }
+
+        $toOwner = array_filter($GLOBALS['__bcc_ph']['mail'], static fn (array $m): bool => $m['to'] === 'owner@example.com');
+        self::assertCount(AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT, $toOwner, 'the inbox cap binds across both forms');
+    }
 }
