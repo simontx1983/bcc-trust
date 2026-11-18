@@ -957,7 +957,10 @@ final class FeedHydrationPipeline
     {
         $author['reputation_tier']       = $badge['reputation_tier'];
         $author['reputation_tier_label'] = $badge['reputation_tier_label'];
-
+        // The profile hero's 0–100 score, e.g. "TRUSTED 72" (v1.NEXT).
+        if (isset($badge['trust_score'])) {
+            $author['trust_score'] = (int) $badge['trust_score'];
+        }
 
         $author['rank_label']            = $badge['rank_label'];
         $author['member_state']          = $badge['member_state'];

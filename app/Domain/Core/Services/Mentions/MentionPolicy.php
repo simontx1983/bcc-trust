@@ -18,9 +18,10 @@ declare(strict_types=1);
  *   - bidirectional `peepso_user_blocked` (viewer→target AND target→viewer,
  *     gated on `user_blocking_enable`)
  *   - hidden via `peepso_is_hide_profile_from_user_listing` user-meta
- *     (gated on `allow_hide_user_from_user_listing`)
- *   - BCC `bcc_privacy_discovery_optout` (PrivacySettings hooks
- *     `peepso_user_search_args` to splice this in — inherited for free)
+ *     (PeepSo gates its own clause on `allow_hide_user_from_user_listing`;
+ *     PrivacySettings hooks `peepso_user_search_args` to apply it always —
+ *     inherited for free). Since F-257 this is also /me/privacy's
+ *     `discovery_optout`: one flag.
  *
  * Strict-reject: filterMentionable returns ONLY the surviving ids.
  * Callers use array_diff against their input to find the rejected

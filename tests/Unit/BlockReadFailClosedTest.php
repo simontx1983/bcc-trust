@@ -277,21 +277,49 @@ final class BlockReadFailClosedTest extends TestCase
     }
 
     /**
-     * ⚠ And the two WRITE call sites must actually pass `true`. A
-     * correct default plus callers that never opt in would leave the
+     * ⚠ And BOTH send paths must actually reach a fail-closed block check.
+     * A correct default plus callers that never opt in would leave the
      * send gate exactly as fail-open as before, with every behavioural
      * test above still green because they call evaluatePolicy directly.
+     *
+     * Since F-246 the existing-conversation check lives in ONE method,
+     * existingConversationGate(), shared by the reply POST and the
+     * read-side can_reply. So the invariant is pinned per method body:
+     *  - the new-conversation path (sendToRecipient) opts in itself;
+     *  - the shared gate opts in;
+     *  - the reply POST (sendToExistingConversation) goes through that
+     *    gate, and so does can_reply (so the read cannot drift from it).
      */
     public function testBothWriteCallSitesOptIn(): void
     {
-        $src = (string) file_get_contents(
-            (string) (new ReflectionClass(MessagesService::class))->getFileName()
-        );
+        $optIn = 'refuseOnUnknownBlock: true';
 
-        $this->assertSame(
-            2,
-            substr_count($src, 'WRITE path: refuse with a retryable 503'),
-            'sendToRecipient and sendToExistingConversation must both opt in.'
+        $newConversation = self::methodBody('sendToRecipient');
+        $this->assertStringContainsString('self::evaluatePolicy(', $newConversation);
+        $this->assertStringContainsString($optIn, $newConversation, 'the new-conversation send must opt in');
+
+        $gate = self::methodBody('existingConversationGate');
+        $this->assertStringContainsString('self::evaluatePolicy(', $gate);
+        $this->assertStringContainsString($optIn, $gate, 'the shared existing-conversation gate must opt in');
+
+        $this->assertStringContainsString(
+            'self::existingConversationGate(',
+            self::methodBody('sendToExistingConversation'),
+            'the reply POST must go through the shared, opted-in gate'
         );
+        $this->assertStringContainsString(
+            'self::existingConversationGate(',
+            self::methodBody('canReply'),
+            'can_reply must read the same gate the reply POST enforces'
+        );
+    }
+
+    /** The source of one MessagesService method, by its reflected line range. */
+    private static function methodBody(string $method): string
+    {
+        $m     = new \ReflectionMethod(MessagesService::class, $method);
+        $lines = (array) file((string) $m->getFileName());
+
+        return implode('', array_slice($lines, $m->getStartLine() - 1, $m->getEndLine() - $m->getStartLine() + 1));
     }
 }

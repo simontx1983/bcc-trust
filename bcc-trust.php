@@ -222,6 +222,8 @@ require_once BCC_TRUST_PATH . 'includes/database/rotate-login-handles.php';
 // F-280: retire the original handle of members who renamed before renames
 // retired the outgoing handle (registered in migration-runner.php).
 require_once BCC_TRUST_PATH . 'includes/database/retire-renamed-original-handles.php';
+// F-257: fold the discovery opt-out into hide_from_search (registered in migration-runner.php).
+require_once BCC_TRUST_PATH . 'includes/database/fold-discovery-optout.php';
 require_once BCC_TRUST_PATH . 'includes/database/flush-object-cache-display-names.php';
 // One-shot repair of NFT-gate pointers orphaned by retire-stargaze-chain.php
 // (deleted chain + collections, surviving PeepSo group posts). Repoints only
@@ -1221,6 +1223,17 @@ add_action('bcc_gated_group_reconcile_sweep', function () {
 // breaker-open) members are SKIPPED — never revoked on a hiccup. Bounded
 // + rotated (see NftGroupRevokeService) so a single tick never does
 // unbounded RPC and every member is eventually covered.
+// F-278: a gated-group member who sells is re-checked within a minute.
+// The indexer announces each lost holding; the listener schedules one
+// re-check per affected (member, holder group). Zero-arg-safe closures:
+// do_action can hand '' to a typed [class, method] callback.
+add_action('bcc_nft_holding_lost', static function ($walletLinkId = 0, $chainId = 0, $contract = ''): void {
+    \BCC\Trust\Onchain\Services\NftHoldingLostListener::onHoldingLost((int) $walletLinkId, (int) $chainId, (string) $contract);
+}, 10, 3);
+add_action(\BCC\Trust\Onchain\Services\NftGroupRevokeService::RECHECK_HOOK, static function ($userId = 0, $groupId = 0, $attempt = 0): void {
+    \BCC\Trust\Onchain\Services\NftHoldingLostListener::runRecheck((int) $userId, (int) $groupId, (int) $attempt);
+}, 10, 3);
+
 add_action(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK, function () {
     try {
         $stats = \BCC\Trust\Onchain\OnchainPlugin::instance()
@@ -1296,6 +1309,30 @@ add_action(\BCC\Trust\Onchain\Services\ClaimReverifySweepService::CONTINUE_HOOK,
 // │      opt-out written (the intended behaviour — a banned user must    │
 // │      not be auto-re-added).                                          │
 // └─────────────────────────────────────────────────────────────────────┘
+// F-261 / F-29: a block removes the member-to-member follows between the
+// two members in BOTH directions, whichever door created it (BCC's
+// MyBlocksEndpoint, or PeepSo's own UI). PeepSoBlockWriter and PeepSo both
+// fire this on a NEW block. Idempotent: MyBlocksEndpoint also severs (to
+// clean up a block that predates F-29 on a repeat attempt), and the second
+// pass finds nothing left. A failure is logged, never thrown — the block is
+// already recorded.
+add_action('peepso_user_blocked', static function ($args): void {
+    $from = is_array($args) ? (int) ($args['from'] ?? 0) : 0;
+    $to   = is_array($args) ? (int) ($args['to'] ?? 0) : 0;
+    if ($from <= 0 || $to <= 0 || $from === $to) {
+        return;
+    }
+    try {
+        \BCC\Trust\Core\Plugin::instance()->watchingService()->severFollowsBetween($from, $to);
+    } catch (\Throwable $e) {
+        \BCC\Core\Log\Logger::error('[bcc-trust] peepso_user_blocked: removing follows failed', [
+            'from'  => $from,
+            'to'    => $to,
+            'error' => $e->getMessage(),
+        ]);
+    }
+}, 10, 1);
+
 add_action('peepso_action_group_user_delete', function ($groupId, $userId) {
     $groupId = (int) $groupId;
     $userId  = (int) $userId;
@@ -1589,6 +1626,12 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
 \BCC\Trust\Core\Support\CorsHandler::register();
 \BCC\Trust\Infrastructure\EdgeCache::init();
 
+// F-305: suspended members are signed in READ-ONLY. One gate refuses every
+// BCC write from a known-suspended member, except an explicit allow-list
+// (auth, appeal, prefs, push unsubscribe, blocks, password change); see
+// SuspendedWriteGate.
+\BCC\Trust\Core\Security\SuspendedWriteGate::register();
+
 // Validator announcements, unit A1 (api-contract-v1.md §4.32): the private
 // `bcc_announcement` post type plus the four guards that stop WordPress's
 // own comment surfaces serving announcement comments.
@@ -1615,8 +1658,9 @@ add_action('bcc.trust.admin_report_penalty', function (int $userId, int $points,
 // publication path.
 \BCC\Trust\Core\Announcements\AnnouncementPublicationGuard::register();
 
-// §K2 / §G1: hook PeepSo's user-search filter so users with
-// `bcc_privacy_discovery_optout = 1` are excluded from search results.
+// §K2 / §G1: hook PeepSo's user-search filter so users hidden from search
+// (hide_from_search, which /me/privacy's discovery_optout aliases since
+// F-257) are excluded from search results.
 // Registered at file load (top-level) so the filter is in place by the
 // time PeepSo's UserSearch fires — before any REST or AJAX request.
 \BCC\Trust\Core\Support\PrivacySettings::registerSearchFilter();
@@ -2223,6 +2267,14 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust hall-ownership',
         \BCC\Trust\Onchain\CLI\HallOwnershipRepairCommand::class
     );
+    // F-261 — remove the follows that blocks made before F-29 left behind.
+    // THIS IS ITS ONLY ENTRY POINT. Dry run by default; --apply needs the
+    // exact --confirm token (bound to BCC_ENV and the planned pairs) and an
+    // explicit --user-id holding manage_options. Idempotent.
+    \WP_CLI::add_command(
+        'bcc-trust block-follows',
+        \BCC\Trust\Core\CLI\BlockFollowsBackfillCommand::class
+    );
 }
 
 /*
@@ -2431,8 +2483,16 @@ function bcc_trust_deactivate() {
         $cron_lists['cleanup_only']
     );
 
+    // wp_unschedule_hook(), not wp_clear_scheduled_hook(): the latter, called
+    // without args, only clears events scheduled WITHOUT args, and some
+    // fire-once hooks carry them (F-307's per-notice moderation bell).
     foreach ($cron_hooks as $hook) {
-        wp_clear_scheduled_hook($hook);
+        wp_unschedule_hook($hook);
+    }
+    // F-278: the member re-check carries [user_id, group_id] args;
+    // wp_clear_scheduled_hook() above only clears arg-less events.
+    if (function_exists('wp_unschedule_hook')) {
+        wp_unschedule_hook('bcc_gated_group_member_recheck');
     }
 
     // Clear chain-refresh + enrichment crons owned by ChainRefreshService.

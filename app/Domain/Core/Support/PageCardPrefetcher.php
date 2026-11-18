@@ -63,7 +63,7 @@ if (!defined('ABSPATH')) {
  *   claimed_pages: array<int, bool>,
  *   viewer_claims: array<int, ClaimRow>,
  *   viewer_votes: array<int, true>,
- *   viewer_watches: array<int, array{follow_id: int, source: 'peepso'|'page'}>,
+ *   viewer_watches: array<int, array{follow_id: int, source: 'peepso'|'page'}|'unknown'>,
  *   viewer_attestations: array<int, array{vouch: object|null, stand_behind: object|null}>,
  *   endorse_eligibility: array<int, array{allowed: bool, unlock_hint: string|null, reason_code: string|null}>,
  *   dispute_active_counts: array<int, int>,

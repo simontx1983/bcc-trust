@@ -219,6 +219,9 @@ final class SessionController
             'user_id'          => $userId,
             'handle'           => $handle,
             'in_good_standing' => AuthSupport::resolveInGoodStanding($userId),
+            // F-305: a suspended member signs in READ-ONLY; the client shows
+            // the suspension notice from this flag. Every write gate refuses.
+            'suspended'        => AuthSupport::resolveSuspended($userId),
             'expires_at'       => $exp,
         ]));
     }
@@ -322,9 +325,15 @@ final class SessionController
      *   - Grace window is bounded (REFRESH_GRACE_SECONDS = 86400). After
      *     that the path 401s and the user re-authenticates fully.
      *
+     *   - F-282: the presented token is RETIRED once the new one is minted
+     *     (JwtToken::retireAfterRefresh): it keeps working for
+     *     REFRESH_OVERLAP_SECONDS so the session's other tabs and in-flight
+     *     requests can pick up the new token, then fails everywhere. Before,
+     *     it stayed usable until exp + the refresh grace, so a copy taken
+     *     before the refresh outlived it by days.
+     *
      * Not in scope:
      *   - Rotating refresh tokens (single-use, separate from access JWT).
-     *     V1 design accepts a stolen JWT being refreshable within grace;
      *     revokeAllForUser is the kill switch for compromised accounts.
      */
     public function refresh(WP_REST_Request $request): WP_REST_Response
@@ -346,6 +355,22 @@ final class SessionController
 
         $decoded = JwtToken::decodeForRefresh($token);
         if ($decoded['ok'] !== true) {
+            // F-305: a suspension revokes every token (F-119), so a suspended
+            // member's refresh fails HERE, before any suspension check, and
+            // read as a plain sign-out. Say why, so the client can show the
+            // notice and send them to sign in again (read-only). Only for a
+            // REVOKED token (the signature verified) of a user KNOWN to be
+            // suspended; everything else stays the uniform 401.
+            if ($decoded['error'] === JwtToken::ERR_REVOKED
+                && AuthSupport::resolveSuspended((int) ($decoded['user_id'] ?? 0))
+            ) {
+                return ApiResponse::error(
+                    'bcc_forbidden',
+                    'Your account is suspended. Sign in again to browse read-only.',
+                    403,
+                    ['reason_code' => 'account_suspended']
+                );
+            }
             // Don't leak the specific JWT failure code — every failure
             // is bcc_unauthorized to the client. The PHP-side audit log
             // is the place to inspect the underlying error if needed.
@@ -358,20 +383,11 @@ final class SessionController
             return ApiResponse::error('bcc_unauthorized', 'Token cannot be refreshed.', 401);
         }
 
-        // Mid-session compromise mitigation: a user flagged suspended
-        // can no longer refresh, forcing them through the canonical
-        // signOut → re-login path where the suspension is surfaced.
-        //
-        // ⚠ Only a KNOWN suspension refuses. An UNKNOWN state (null: the
-        // suspension could not be read) lets the refresh through. A refused
-        // refresh SIGNS THE USER OUT (the frontend's tryRefresh treats any
-        // non-OK answer as a dead session), so a DB blip must never refuse
-        // it. A genuinely suspended user is still caught by every write gate
-        // and by the next refresh once the read works.
-        $suspension = \BCC\Core\Permissions\Permissions::suspensionState($userId);
-        if ($suspension === true) {
-            return ApiResponse::error('bcc_forbidden', 'Account is not in good standing.', 403);
-        }
+        // F-305 (user decision 2026-11-12): a suspended member stays signed
+        // in READ-ONLY, so a suspension no longer refuses the refresh. The
+        // response carries `suspended` for the notice; every write gate
+        // refuses on its own. (The suspension itself revoked every token
+        // minted before it — see the REVOKED branch above.)
 
         // Re-read the handle from authoritative storage rather than
         // trusting the JWT payload — a handle change since the original
@@ -389,6 +405,9 @@ final class SessionController
         // "wallet linked before this sign-in" rule must not reset here).
         $fresh = JwtToken::encodeContinuation($userId, $handle, JwtToken::sessionStartedAt($payload));
 
+        // F-282: the old token stops working once the overlap has passed.
+        JwtToken::retireAfterRefresh($payload);
+
         Logger::audit('token_refreshed', [
             'user_id' => $userId,
         ]);
@@ -397,6 +416,7 @@ final class SessionController
             'token'      => $fresh,
             'expires_in' => AuthSupport::JWT_TTL_SECONDS,
             'token_type' => 'Bearer',
+            'suspended'  => AuthSupport::resolveSuspended($userId),
         ]);
         $response->header('Cache-Control', 'no-store');
 

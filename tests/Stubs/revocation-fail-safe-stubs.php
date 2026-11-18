@@ -140,12 +140,22 @@ namespace {
             /** @var list<int> walletLinkIds whose stored rows were read */
             public static array $storedReads = [];
 
-            /** F-69: make GatedGroupRepository::listAllGatedGroupIds() throw mid-sweep. */
+            /** F-69: make GatedGroupRepository's group walk throw mid-sweep. */
             public static bool $throwOnGroupList = false;
+
+            /** F-278: walletLinkId => unix time the index last recorded a loss */
+            public static array $losses = [];
+            /** F-278: make the loss read fail */
+            public static bool $failLossRead = false;
+            /** @var list<int> walletLinkIds whose loss time was read */
+            public static array $lossReads = [];
 
             public static function reset(): void
             {
                 self::$throwOnGroupList = false;
+                self::$losses         = [];
+                self::$failLossRead   = false;
+                self::$lossReads      = [];
                 self::$currentUser    = 0;
                 self::$userMeta       = [];
                 self::$stanceWrites   = [];
@@ -357,9 +367,13 @@ namespace BCC\Core\DB {
             /** @var list<string> "acquire:<key>" / "release:<key>", in order */
             public static array $calls = [];
 
+            /** @var list<int> the wait each acquire asked for, in order */
+            public static array $waits = [];
+
             public static function acquire(string $key, int $timeout = 0): bool
             {
                 self::$calls[] = 'acquire:' . $key;
+                self::$waits[] = $timeout;
                 return !in_array($key, self::$heldElsewhere, true);
             }
 
@@ -372,6 +386,7 @@ namespace BCC\Core\DB {
             {
                 self::$heldElsewhere = [];
                 self::$calls         = [];
+                self::$waits         = [];
             }
         }
     }
@@ -759,6 +774,17 @@ namespace BCC\Trust\Onchain\Repositories {
                 return array_intersect_key(\BccRevokeWorld::$index, array_flip($walletLinkIds));
             }
 
+            /** F-278: when the index last recorded the wallet losing a holding. */
+            public static function latestLossAtOrThrow(int $walletLinkId, string $contract): ?int
+            {
+                \BccRevokeWorld::$lossReads[] = $walletLinkId;
+                if (\BccRevokeWorld::$failLossRead) {
+                    throw new RepositoryReadFailure(self::class, 'latestLossAtOrThrow', 'injected fault');
+                }
+
+                return \BccRevokeWorld::$losses[$walletLinkId] ?? null;
+            }
+
             /** The stance panel's stored-index lookup. Every read is recorded. @return list<object> */
             public static function findVisibleForWallet(int $walletLinkId, int $chainId): array
             {
@@ -790,6 +816,21 @@ namespace BCC\Trust\Onchain\Repositories {
             public static function getGateConfig(int $groupId): ?\BCC\Trust\Onchain\ValueObjects\GatedGroupConfig
             {
                 return \BccRevokeWorld::$gateConfigs[$groupId] ?? null;
+            }
+
+            /** F-278: the sweep's keyset walk. @return list<int> */
+            public static function listGatedGroupIdsAfter(int $afterId, int $limit): array
+            {
+                if (\BccRevokeWorld::$throwOnGroupList) {
+                    throw new \RuntimeException('scripted group-list failure');
+                }
+                $ids = array_values(array_filter(
+                    array_keys(\BccRevokeWorld::$gateConfigs),
+                    static fn (int $id): bool => $id > $afterId
+                ));
+                sort($ids);
+
+                return array_slice($ids, 0, max(0, $limit));
             }
 
             /** @return list<int> */

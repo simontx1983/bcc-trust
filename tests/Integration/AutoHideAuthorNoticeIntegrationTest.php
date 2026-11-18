@@ -16,6 +16,7 @@ use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/FeedActivityFixture.php';
+require_once __DIR__ . '/PeepSoBlocksTableFixture.php';
 
 /**
  * F-73 (PR E) — the author is told when their post is hidden AUTOMATICALLY.
@@ -36,6 +37,7 @@ require_once __DIR__ . '/FeedActivityFixture.php';
 final class AutoHideAuthorNoticeIntegrationTest extends TestCase
 {
     use FeedActivityFixture;
+    use PeepSoBlocksTableFixture;
 
     private const ACT_ID   = 2500000001;
     private const POST_ID  = 2500000001;
@@ -49,6 +51,9 @@ final class AutoHideAuthorNoticeIntegrationTest extends TestCase
         $GLOBALS['bcc_scheduled']     = [];
         $GLOBALS['__bcc_usermeta']    = [];
         $GLOBALS['__bcc_test_object_cache'] = [];
+
+        // F-296: the digest read excludes blocked members, fail-closed.
+        $this->ensurePeepSoBlocksTable();
 
         global $wpdb;
         self::assertNotFalse($wpdb->query(
@@ -75,6 +80,7 @@ final class AutoHideAuthorNoticeIntegrationTest extends TestCase
     {
         $this->deleteOurNotices();
         $this->removeFeedActivities();
+        $this->removePeepSoBlocksTable();
     }
 
     public function testTheAuthorGetsExactlyTheApprovedNotice(): void

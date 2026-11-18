@@ -217,6 +217,29 @@ namespace BCC\Trust\Tests\Integration {
 
         // ── fixtures ────────────────────────────────────────────────────
 
+        /**
+         * The production sweep with its real SURFACE_REVOKE budget, but a
+         * FROZEN clock (F-338).
+         *
+         * The budget's other arm is 20 s of WALL CLOCK. Under PHPUnit on a
+         * loaded machine a tick could stop on that deadline anywhere, so the
+         * paging tests here (which are about the request budget, the cap and
+         * the cursor) failed about one run in two. Freezing the clock leaves
+         * the request budget, the per-tick cap and the cursor as the only
+         * things that stop a tick, so every tick is reproducible. The
+         * deadline itself is pinned separately, on a scripted clock, by the
+         * two "runs out of time" tests below.
+         */
+        private static function service(): NftGroupRevokeService
+        {
+            return new NftGroupRevokeService(
+                static fn (): \BCC\Trust\Onchain\Support\ProviderRequestBudget => HoldingsService::verificationBudget(
+                    HoldingsService::SURFACE_REVOKE,
+                    static fn (): float => 0.0
+                )
+            );
+        }
+
         private function members(): string
         {
             return $GLOBALS['wpdb']->prefix . 'peepso_group_members';
@@ -383,7 +406,7 @@ namespace BCC\Trust\Tests\Integration {
             $this->seedGroup(1);
             $GLOBALS['wpdb']->failQueriesMatching = self::tableRegex(WalletRepository::table());
 
-            $stats = (new NftGroupRevokeService())->sweep();
+            $stats = self::service()->sweep();
 
             self::assertSame([self::FIRST_USER], $this->remainingMembers(), 'a failed wallet read removed a member');
             self::assertSame(0, $stats['revoked']);
@@ -393,7 +416,7 @@ namespace BCC\Trust\Tests\Integration {
 
             // Anti-vacuity: the same member, the same complete zero, a healthy database.
             $GLOBALS['wpdb']->clearFaultInjection();
-            $stats = (new NftGroupRevokeService())->sweep();
+            $stats = self::service()->sweep();
 
             self::assertSame([], $this->remainingMembers());
             self::assertSame(1, $stats['revoked']);
@@ -471,26 +494,14 @@ namespace BCC\Trust\Tests\Integration {
 
         public function testEveryMemberIsEvaluatedAndRemovedExactlyOnceAcrossPagesAndTicks(): void
         {
-            // 250 complete zeros. Default tick cap 200, page size 100.
-            //
-            // ⚠ CLOCK-TOLERANT. The sweep's real budget is 20 s of WALL CLOCK
-            // (HoldingsService::SURFACE_REVOKE), and on a loaded machine tick 1
-            // can legitimately stop on that deadline before 200. Asserting "tick
-            // 1 checked exactly 200" made this test fail ~2 runs in 5 under load
-            // while the code was right. What must hold wherever a tick stops is
-            // asserted below; the deadline path itself is pinned
-            // deterministically, with a fake clock, in
-            // testATickThatRunsOutOfTimeResumesOnTheFirstUnevaluatedMember.
+            // 250 complete zeros. Default tick cap 200, page size 100. The
+            // clock is frozen (self::service(), F-338), so this is exact: tick
+            // 1 runs to the 200 cap, tick 2 takes the remaining 50.
             $addresses = $this->seedGroup(250);
 
             $ticks = $this->sweepUntilEmpty();
 
-            if (!$ticks[0]['stopped_on_budget']) {
-                self::assertSame(200, $ticks[0]['checked'], 'a tick the clock did not stop runs to the 200 cap');
-            }
-            foreach ($ticks as $i => $tick) {
-                self::assertLessThanOrEqual(200, $tick['checked'], 'tick ' . ($i + 1) . ' stayed inside the cap');
-            }
+            self::assertSame([200, 50], array_column($ticks, 'checked'), 'tick 1 runs to the cap, tick 2 takes the rest');
             self::assertSame($addresses, RevocationScriptedFetcher::$asked, 'every member asked about exactly once, in order, across however many ticks it took');
             self::assertSame(250, array_sum(array_column($ticks, 'revoked')));
             self::assertSame([], $this->remainingMembers());
@@ -516,10 +527,11 @@ namespace BCC\Trust\Tests\Integration {
                 }
             }
 
-            // ⚠ CLOCK-TOLERANT, for the same reason as the 250-member test:
-            // tick until the rotation has covered the group, however many
-            // ticks the wall clock allows.
+            // Clock frozen (self::service(), F-338): 230 members against the
+            // 200 cap is exactly two ticks.
             $ticks = $this->sweepUntilCovered(count($addresses));
+
+            self::assertSame([200, 30], array_column($ticks, 'checked'));
 
             self::assertSame(230, array_sum(array_column($ticks, 'checked')));
             self::assertSame(77, array_sum(array_column($ticks, 'revoked')));
@@ -543,13 +555,15 @@ namespace BCC\Trust\Tests\Integration {
             $perTick = [];
             for ($tick = 1; $tick <= 4; $tick++) {
                 $before = count(RevocationScriptedFetcher::$asked);
-                (new NftGroupRevokeService())->sweep();
+                self::service()->sweep();
                 $perTick[] = count(RevocationScriptedFetcher::$asked) - $before;
             }
 
-            foreach ($perTick as $tick => $calls) {
-                self::assertLessThanOrEqual(75, $calls, 'tick ' . ($tick + 1) . ' stayed inside its budget');
-            }
+            // Clock frozen (self::service(), F-338), so this is exact: ticks 1
+            // and 2 spend their whole 300 units (75 checks of 4), tick 3 reaches
+            // the end of the group after the last 10 members and stops there,
+            // and tick 4 wraps to the start with a full budget again.
+            self::assertSame([75, 75, 10, 75], $perTick, 'budget-bound ticks, then the end of the rotation, then the wrap');
 
             $asked       = RevocationScriptedFetcher::$asked;
             $firstRepeat = count($asked);
@@ -564,6 +578,42 @@ namespace BCC\Trust\Tests\Integration {
 
             self::assertSame($addresses, array_slice($asked, 0, $firstRepeat), 'every member, in order, before anyone was checked twice');
             self::assertCount(120, $this->remainingMembers(), 'the 40 complete zeros were removed, the 120 holders kept');
+        }
+
+        public function testTheHolderGroupWalkIsAKeysetWithNoCeiling(): void
+        {
+            // F-278: listAllGatedGroupIds() stopped at 500 groups, so the
+            // sweep never reached the rest. The keyset walk reaches them all,
+            // and only published holder groups.
+            $wpdb = $GLOBALS['wpdb'];
+            $ids  = [];
+            for ($i = 0; $i < 520; $i++) {
+                $id = 80_000 + $i;
+                $wpdb->query($wpdb->prepare(
+                    "INSERT INTO `{$wpdb->posts}` (ID, post_title, post_name, post_type, post_status) VALUES (%d, 'h', 'h', 'peepso-group', 'publish')",
+                    $id
+                ));
+                $wpdb->query($wpdb->prepare(
+                    "INSERT INTO `{$wpdb->postmeta}` (post_id, meta_key, meta_value) VALUES (%d, %s, %s)",
+                    $id,
+                    GatedGroupRepository::META_KIND,
+                    GatedGroupRepository::KIND_HOLDERS
+                ));
+                $ids[] = $id;
+            }
+            // Not holder groups: a draft holder group and a different kind.
+            $wpdb->query("INSERT INTO `{$wpdb->posts}` (ID, post_title, post_name, post_type, post_status) VALUES (80600, 'd', 'd', 'peepso-group', 'draft'), (80601, 'v', 'v', 'peepso-group', 'publish')");
+            $wpdb->query($wpdb->prepare(
+                "INSERT INTO `{$wpdb->postmeta}` (post_id, meta_key, meta_value) VALUES (80600, %s, %s), (80601, %s, 'delegators')",
+                GatedGroupRepository::META_KIND,
+                GatedGroupRepository::KIND_HOLDERS,
+                GatedGroupRepository::META_KIND
+            ));
+
+            self::assertSame(array_slice($ids, 0, 500), GatedGroupRepository::listGatedGroupIdsAfter(0, 500));
+            self::assertSame(array_slice($ids, 500), GatedGroupRepository::listGatedGroupIdsAfter($ids[499], 500));
+            self::assertSame([], GatedGroupRepository::listGatedGroupIdsAfter($ids[519], 500));
+            self::assertSame([], GatedGroupRepository::listGatedGroupIdsAfter(0, 0));
         }
 
         public function testWalletOrderIsDeterministicAmongWalletsLinkedInTheSameSecond(): void
@@ -611,12 +661,12 @@ namespace BCC\Trust\Tests\Integration {
             RevocationScriptedFetcher::$maxRequestsPerRead = 100;
             $addresses = $this->seedGroup(5);
 
-            $first = (new NftGroupRevokeService())->sweep();
+            $first = self::service()->sweep();
             self::assertTrue($first['stopped_on_budget']);
             self::assertSame(3, $first['revoked']);
             self::assertSame(array_slice($addresses, 0, 3), RevocationScriptedFetcher::$asked);
 
-            $second = (new NftGroupRevokeService())->sweep();
+            $second = self::service()->sweep();
             self::assertSame(2, $second['revoked']);
             self::assertSame($addresses, RevocationScriptedFetcher::$asked);
             self::assertSame([], $this->remainingMembers());
@@ -698,7 +748,7 @@ namespace BCC\Trust\Tests\Integration {
         {
             $ticks = [];
             for ($i = 0; $i < $maxTicks; $i++) {
-                $ticks[] = (new NftGroupRevokeService())->sweep();
+                $ticks[] = self::service()->sweep();
                 if ($this->remainingMembers() === []) {
                     return $ticks;
                 }
@@ -715,12 +765,98 @@ namespace BCC\Trust\Tests\Integration {
         {
             $ticks = [];
             for ($i = 0; $i < $maxTicks; $i++) {
-                $ticks[] = (new NftGroupRevokeService())->sweep();
+                $ticks[] = self::service()->sweep();
                 if (count(RevocationScriptedFetcher::$asked) >= $members) {
                     return $ticks;
                 }
             }
             self::fail('the sweep did not cover the group within ' . $maxTicks . ' ticks');
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        // F-278: the targeted re-check after a holding is lost
+        // ════════════════════════════════════════════════════════════════
+
+        public function testARecheckRemovesAMemberWhoNoLongerHolds(): void
+        {
+            $this->seedGroup(2); // both answer 0 (sold)
+            RevocationScriptedFetcher::$answers[self::cosmosAddress(self::FIRST_USER + 1)] = 1; // still holds
+
+            self::assertSame('revoked', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP));
+
+            self::assertSame([self::FIRST_USER + 1], $this->remainingMembers(), 'only the seller is removed');
+            self::assertSame(1, $this->revokeAuditRows());
+            $wpdb = $GLOBALS['wpdb'];
+            self::assertSame(1, (int) $wpdb->get_var(
+                'SELECT COUNT(*) FROM `' . $wpdb->prefix . "bcc_trust_activity` WHERE action = 'holder_group_revoked' AND meta LIKE '%holding_lost_recheck%'"
+            ), 'audited as the targeted re-check, not the sweep');
+        }
+
+        public function testARecheckKeepsAMemberWhoStillHolds(): void
+        {
+            $this->seedGroup(1);
+            RevocationScriptedFetcher::$answers[self::cosmosAddress(self::FIRST_USER)] = 1;
+
+            self::assertSame('kept', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP));
+            self::assertSame([self::FIRST_USER], $this->remainingMembers());
+            self::assertSame(0, $this->revokeAuditRows());
+        }
+
+        public function testARecheckKeepsAMemberWhoMovedTheNftToTheirOtherWallet(): void
+        {
+            // Lost on wallet A, now held on the same member's wallet B, which
+            // the index has not seen yet. The re-check reads every linked
+            // wallet live, so the move is not a sale.
+            $this->seedGroup(1); // wallet A answers 0
+            $walletB = self::cosmosAddress(self::FIRST_USER + 500);
+            $this->insertWallet(self::FIRST_USER, $this->chainId('cosmos'), $walletB);
+            RevocationScriptedFetcher::$answers[$walletB] = 1;
+
+            self::assertSame('kept', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP));
+            self::assertContains($walletB, RevocationScriptedFetcher::$asked, 'wallet B was read live');
+            self::assertSame([self::FIRST_USER], $this->remainingMembers());
+            self::assertSame(0, $this->revokeAuditRows());
+        }
+
+        public function testARecheckNeverRemovesOnAnUnknownAnswer(): void
+        {
+            $this->seedGroup(1);
+            RevocationScriptedFetcher::$answers[self::cosmosAddress(self::FIRST_USER)] = null; // provider could not answer
+
+            self::assertSame('unknown', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP));
+            self::assertSame([self::FIRST_USER], $this->remainingMembers(), 'remove only when sure');
+        }
+
+        public function testARecheckNeverRemovesTheOwnerOrTouchesANonMember(): void
+        {
+            $this->seedGroup(1);
+
+            self::assertSame('owner', (new NftGroupRevokeService())->recheckMember(self::OWNER, self::GROUP));
+            self::assertSame('not_member', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER + 50, self::GROUP));
+            self::assertSame('not_holder_group', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP + 999));
+            self::assertSame(0, $this->revokeAuditRows());
+        }
+
+        public function testARecheckWaitsForARunningSweep(): void
+        {
+            $this->seedGroup(1);
+            $other = new \mysqli(
+                getenv('BCC_TEST_DB_HOST') ?: '127.0.0.1',
+                getenv('BCC_TEST_DB_USER') ?: 'root',
+                getenv('BCC_TEST_DB_PASS') ?: 'root',
+                getenv('BCC_TEST_DB_NAME') ?: 'bcc_test',
+                (int) (getenv('BCC_TEST_DB_PORT') ?: 10005)
+            );
+            try {
+                $other->query("SELECT GET_LOCK('" . NftGroupRevokeService::SWEEP_LOCK . "', 0)");
+                self::assertSame('locked', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP));
+                self::assertSame([self::FIRST_USER], $this->remainingMembers(), 'nothing done while a sweep runs');
+            } finally {
+                $other->query("SELECT RELEASE_LOCK('" . NftGroupRevokeService::SWEEP_LOCK . "')");
+                $other->close();
+            }
+
+            self::assertSame('revoked', (new NftGroupRevokeService())->recheckMember(self::FIRST_USER, self::GROUP), 'and runs once it ends');
         }
     }
 }

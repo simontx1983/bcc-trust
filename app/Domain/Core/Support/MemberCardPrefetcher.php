@@ -60,6 +60,7 @@ use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\MemberSelfPageService;
+use BCC\Trust\Core\Services\MessagesService;
 use BCC\Trust\Disputes\Repositories\DisputeRepository;
 
 if (!defined('ABSPATH')) {
@@ -147,6 +148,19 @@ final class MemberCardPrefetcher
         // bounded IN() for the page. Same key the page-card bundle uses.
         $map['viewer_watches'] = $viewerId > 0 && $idList !== []
             ? \BCC\Trust\Core\Plugin::instance()->viewerWatchResolver()->forMembers($viewerId, $idList)
+            : [];
+
+        // F-246: the viewer's can_message for every card on the page, so
+        // the /messages/new recipient picker can say "can't message"
+        // before the user writes anything. canMessageMany is the batch
+        // sibling of the send path's evaluator: flat cost (sender gates
+        // once, one block read, the friend set at most once) on top of
+        // the cache_users() above. Viewer-scoped by construction; empty
+        // for anon viewers, whose member cards carry no can_message.
+        // ⚠ VIEWER-SCOPED: this map (and the can_message it feeds) must
+        // never enter a shared or anonymous card cache.
+        $map['message_eligibility'] = $viewerId > 0 && $idList !== []
+            ? MessagesService::canMessageMany($viewerId, $idList)
             : [];
 
         return $map;

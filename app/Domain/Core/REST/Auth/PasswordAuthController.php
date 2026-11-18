@@ -186,13 +186,19 @@ final class PasswordAuthController
             return ApiResponse::error($err, AuthSupport::handleErrorMessage($err), 422);
         }
 
+        // F-285: a sign-up that was never confirmed and can never sign in
+        // (see isAbandonedEmailSignup) stops holding this handle or email
+        // after ABANDONED_SIGNUP_SECONDS, so a mistyped address or an
+        // abandoned attempt does not block it forever.
+        self::reclaimAbandonedSignups($handle, $email);
+
         // Fast-path collision check — UX shortcut so 99% of duplicates
         // get a clean 409 without spinning up wp_insert_user. The
         // remaining race window (a winning concurrent signup that
         // claims this handle between here and our wp_insert_user)
         // is closed below by the wp_users.user_login UNIQUE constraint.
         if (!$handleService->isAvailable($handle)) {
-            return ApiResponse::error('bcc_conflict', 'That handle is already taken.', 409);
+            return ApiResponse::error('bcc_conflict', self::TAKEN_HANDLE, 409);
         }
 
         // wp_insert_user requires a unique user_login. We mint an internal
@@ -230,12 +236,12 @@ final class PasswordAuthController
             $code = $userId->get_error_code();
             if ($code === 'existing_user_login' || AuthSupport::isDuplicateKeyError($userId)) {
                 // Race lost on handle uniqueness.
-                return ApiResponse::error('bcc_conflict', 'That handle is already taken.', 409);
+                return ApiResponse::error('bcc_conflict', self::TAKEN_HANDLE, 409);
             }
             if ($code === 'existing_user_email') {
                 return ApiResponse::error(
                     'bcc_conflict',
-                    'An account with that email already exists.',
+                    self::TAKEN_EMAIL,
                     409
                 );
             }
@@ -279,6 +285,97 @@ final class PasswordAuthController
         return $response;
     }
 
+    /**
+     * F-285: how long a never-confirmed email sign-up keeps its handle and
+     * email before another sign-up may take them (user-approved: 7 days).
+     */
+    public const ABANDONED_SIGNUP_SECONDS = 7 * 86400;
+
+    /** F-285 copy (user-approved) for a sign-up's handle / email 409. */
+    private const TAKEN_HANDLE = 'That handle is taken. If it\'s yours from an unfinished sign-up, check your email for the confirmation link; unconfirmed sign-ups free up after 7 days.';
+    private const TAKEN_EMAIL  = 'An account with that email already exists. If it\'s yours from an unfinished sign-up, check your email for the confirmation link; unconfirmed sign-ups free up after 7 days.';
+
+    /**
+     * A PURE email-signup account still waiting on email confirmation:
+     * created by password signup (bcc_has_password '1'), email never proven
+     * (_bcc_email_verified exactly '0'), and NO other way in — no OAuth
+     * link and no linked wallet. Such an account can never have signed in:
+     * the password sign-in gate refuses '0' and there is no other
+     * credential. Shared by F-285 (reclaim) and F-287 (a reset confirms it).
+     *
+     * Fails closed: an unreadable wallet list counts as "has a wallet".
+     */
+    private static function isPendingEmailSignup(int $userId): bool
+    {
+        if ($userId <= 0
+            || (string) get_user_meta($userId, AuthSupport::META_EMAIL_VERIFIED, true) !== '0'
+            || (string) get_user_meta($userId, \BCC\Trust\Core\Services\AccountRecoveryService::META_HAS_PASSWORD, true) !== '1'
+        ) {
+            return false;
+        }
+        foreach (array_keys((array) get_user_meta($userId)) as $metaKey) {
+            if (str_starts_with((string) $metaKey, AuthSupport::META_OAUTH_PREFIX)) {
+                return false;
+            }
+        }
+        try {
+            return \BCC\Trust\Onchain\Repositories\WalletRepository::getForUserOrThrow($userId) === [];
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /** isPendingEmailSignup(), registered more than ABANDONED_SIGNUP_SECONDS ago (F-285). */
+    private static function isAbandonedEmailSignup(int $userId): bool
+    {
+        $user = get_userdata($userId);
+        if (!($user instanceof \WP_User)) {
+            return false;
+        }
+        // user_registered is WordPress core's UTC column.
+        $registered = strtotime((string) $user->user_registered . ' UTC');
+        if ($registered === false || $registered > time() - self::ABANDONED_SIGNUP_SECONDS) {
+            return false;
+        }
+        return self::isPendingEmailSignup($userId);
+    }
+
+    /**
+     * F-285: delete the abandoned sign-up (if any) holding this handle — as
+     * its current handle or its u_<handle> login — or this email, so the
+     * sign-up in progress can take them. Hard delete (user-approved): the
+     * account never signed in, so nothing references it. Audited by user id
+     * only. A live account is never touched; the 409 below still applies.
+     */
+    private static function reclaimAbandonedSignups(string $handle, string $email): void
+    {
+        $candidates = [];
+        $byHandle = HandleService::currentOwner($handle);
+        if ($byHandle !== null) {
+            $candidates[] = $byHandle;
+        }
+        $byLogin = username_exists(AuthSupport::deriveLogin($handle));
+        if (is_int($byLogin) && $byLogin > 0) {
+            $candidates[] = $byLogin;
+        }
+        $byEmail = email_exists($email);
+        if (is_int($byEmail) && $byEmail > 0) {
+            $candidates[] = $byEmail;
+        }
+
+        foreach (array_unique($candidates) as $userId) {
+            if (!self::isAbandonedEmailSignup($userId)) {
+                continue;
+            }
+            if (!function_exists('wp_delete_user')) {
+                require_once ABSPATH . 'wp-admin/includes/user.php';
+            }
+            if (wp_delete_user($userId)) {
+                AuditLogger::log('abandoned_signup_reclaimed', $userId, [], 'user', $userId);
+            }
+        }
+    }
+
     public function login(WP_REST_Request $request): WP_REST_Response
     {
         // Throttle::allow buckets unauthenticated requests by client IP
@@ -295,22 +392,6 @@ final class PasswordAuthController
 
         if ($identifier === '' || $password === '') {
             return ApiResponse::error('bcc_invalid_request', 'Email/handle and password are required.', 422);
-        }
-
-        // Per-identifier throttle — the IP bucket above can't see a
-        // distributed brute-force (many IPs, one account). Keyed by a hash
-        // of the normalized identifier so it applies whether or not the
-        // account exists (no account-enumeration oracle) and fires before the
-        // CPU-bound bcrypt compare. See AuthSupport::LOGIN_ACCOUNT_RATE_* for
-        // the limit rationale + the targeted-lockout tradeoff.
-        $identifierKey = 'bcc_throttle_login_account_' . hash('sha256', strtolower($identifier));
-        if (!\BCC\Core\Security\Throttle::allow(
-            'login_account',
-            AuthSupport::LOGIN_ACCOUNT_RATE_LIMIT,
-            AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
-            $identifierKey
-        )) {
-            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
 
         // Accept either an email address or a handle on the same field.
@@ -331,6 +412,38 @@ final class PasswordAuthController
         } else {
             $ownerId = HandleService::currentOwner(ltrim(strtolower($identifier), '@'));
             $user    = $ownerId !== null ? get_userdata($ownerId) : false;
+        }
+
+        // Login throttles (F-281), still before the CPU-bound bcrypt compare.
+        // See AuthSupport::LOGIN_ACCOUNT_*.
+        //  - This network's budget for what was TYPED (normalized), so a
+        //    stranger elsewhere can't lock the owner out.
+        //  - A ceiling for what was TYPED across all networks, against a
+        //    guess spread over many networks; networks the account recently
+        //    signed in from skip it, so the owner at home is never locked out.
+        //  Both are keyed on the typed text, NOT the resolved account: a
+        //  bucket shared by a handle and an email would make a 429 reveal
+        //  that the two are one account (see AuthSupport::LOGIN_ACCOUNT_*).
+        $typedKey = 'id:' . hash('sha256', is_email($identifier)
+            ? strtolower(sanitize_email($identifier))
+            : ltrim(strtolower($identifier), '@'));
+        $network = AuthSupport::loginNetwork();
+        if (!\BCC\Core\Security\Throttle::allow(
+            'login_account_net',
+            AuthSupport::LOGIN_ACCOUNT_RATE_LIMIT,
+            AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
+            'bcc_throttle_login_account_net_' . hash('sha256', $typedKey . '|' . $network)
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
+        }
+        $trustedNetwork = $user !== false && AuthSupport::isTrustedLoginNetwork((int) $user->ID, $network);
+        if (!$trustedNetwork && !\BCC\Core\Security\Throttle::allow(
+            'login_account',
+            AuthSupport::LOGIN_ACCOUNT_GLOBAL_RATE_LIMIT,
+            AuthSupport::LOGIN_ACCOUNT_RATE_WINDOW,
+            'bcc_throttle_login_account_' . hash('sha256', $typedKey)
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many login attempts.', 429);
         }
 
         // Generic error for "not found" and "wrong password" alike —
@@ -408,6 +521,7 @@ final class PasswordAuthController
             wp_set_auth_cookie($userId, true);
 
             $token = JwtToken::encodeNewSession($userId, $handle);
+            AuthSupport::recordTrustedLoginNetwork($userId); // F-281: a completed sign-in
 
             Logger::audit('user_login', [
                 'user_id' => $userId,
@@ -424,6 +538,9 @@ final class PasswordAuthController
                 'expires_in'       => AuthSupport::JWT_TTL_SECONDS,
                 'token_type'       => 'Bearer',
                 'in_good_standing' => AuthSupport::resolveInGoodStanding($userId),
+                // F-305: a suspended member signs in READ-ONLY; the client shows
+                // the suspension notice from this flag. Every write gate refuses.
+                'suspended'        => AuthSupport::resolveSuspended($userId),
             ]);
             $response->header('Cache-Control', 'no-store');
 
@@ -501,9 +618,9 @@ final class PasswordAuthController
      */
     public function forgotPassword(WP_REST_Request $request): WP_REST_Response
     {
-        // Throttle first — IP-bucketed, before any DB lookup or mail
-        // dispatch. Caps email-bomb spam against any one inbox from a
-        // single source.
+        // Throttle first — per network, before any DB lookup or mail
+        // dispatch (F-290: office scale, so a shared NAT doesn't lock
+        // members out of each other's resets).
         if (!\BCC\Core\Security\Throttle::allow('forgot_password', AuthSupport::FORGOT_PASSWORD_RATE_LIMIT, 3600)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many password-reset requests. Try again later.', 429);
         }
@@ -511,6 +628,18 @@ final class PasswordAuthController
         $email = sanitize_email((string) $request->get_param('email'));
         if ($email === '' || !is_email($email)) {
             return ApiResponse::error('bcc_invalid_request', 'A valid email is required.', 422);
+        }
+
+        // ... and per ADDRESS (AuthSupport::allowMailToAddress): tight per
+        // network, looser across networks unless this is a network the
+        // account signs in from — existence-blind either way.
+        if (!AuthSupport::allowMailToAddress(
+            'forgot_password',
+            $email,
+            AuthSupport::FORGOT_PASSWORD_EMAIL_RATE_LIMIT,
+            AuthSupport::FORGOT_PASSWORD_EMAIL_GLOBAL_RATE_LIMIT
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Too many password-reset requests. Try again later.', 429);
         }
 
         $user = get_user_by('email', $email);
@@ -601,6 +730,24 @@ final class PasswordAuthController
         // user_activation_key (single-use), and fires the `password_reset`
         // action hook. Returns void.
         reset_password($user, $password);
+
+        // F-287: the reset key was mailed to user_email and came back, which
+        // proves the inbox — so a PURE email-signup account still waiting
+        // on confirmation is confirmed now, instead of the very next sign-in
+        // answering "verify your email". Deliberately NOT for an account
+        // with a wallet or OAuth link: its email may be one someone else
+        // typed (the pre-hijack case), and marking it verified would let the
+        // inbox owner's Google sign-in auto-link INTO an account the other
+        // person still controls. Sessions are revoked just below anyway.
+        if (self::isPendingEmailSignup($userId)) {
+            update_user_meta($userId, AuthSupport::META_EMAIL_VERIFIED, '1');
+            AuthSupport::burnEmailOtp($userId);
+            Logger::audit('email_verified', [
+                'user_id' => $userId,
+                'via'     => 'password_reset',
+            ]);
+            do_action('bcc_email_verified', $userId);
+        }
 
         // Revoke every outstanding bearer JWT for this user. reset_password()
         // clears WP session tokens, but BCC JWTs are self-contained and only

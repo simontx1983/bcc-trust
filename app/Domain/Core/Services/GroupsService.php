@@ -84,6 +84,9 @@ final class GroupsService
      */
     private array $membershipStatusCache = [];
 
+    /** @var array<int, int> Request-scoped viewer reputation (trust-gate checks over a list). */
+    private array $viewerScoreMemo = [];
+
     /**
      * Server-pinned copy for the NFT-gate unlock hint surfaced on
      * permissions.can_join.unlock_hint when a non-holder views an
@@ -240,7 +243,7 @@ final class GroupsService
         $permissions['can_request_join'] = $this->resolveCanRequestJoin($ctx, $viewerId, $isMember, $rawStatus, $groupId);
 
         $feedVisible    = $permissions['can_read_feed']['allowed'];
-        $membersVisible = $this->resolveMembersVisible($ctx, $isMember);
+        $membersVisible = self::resolveMembersVisible($ctx, $isMember);
 
         // Owners/managers see how many requests wait on them; everyone
         // else gets null (no disclosure of the queue size).
@@ -302,6 +305,11 @@ final class GroupsService
                 'viewer_is_member' => $isMember,
                 'posts_last_7d'    => (int) $activity['posts_last_7d'],
                 'active_members_7d' => (int) ($activity['active_members_7d'] ?? 0),
+                // F-244: the page's own verdicts (real holder check here),
+                // so the hero card and the membership strip cannot disagree.
+                'can_join'                 => $permissions['can_join'],
+                'can_request_join'         => $permissions['can_request_join'],
+                'viewer_membership_status' => $viewerMembership['status'] ?? null,
             ],
             $viewerId
         );
@@ -811,7 +819,7 @@ final class GroupsService
         GroupContext $ctx,
         int $viewerId,
         bool $isMember,
-        bool $isNftHolder,
+        ?bool $isNftHolder,
         int $trustGateMin = 0,
         ?string $validatorMinStakeDisplay = null,
         bool $isBanned = false
@@ -844,6 +852,16 @@ final class GroupsService
         }
 
         if ($ctx->type === GroupType::Nft) {
+            // F-244: list surfaces don't run the live wallet check (too
+            // costly per item). The join itself verifies ownership, so the
+            // button is offered and says so.
+            if ($isNftHolder === null) {
+                return [
+                    'allowed'     => true,
+                    'unlock_hint' => null,
+                    'reason_code' => 'verify_on_join',
+                ];
+            }
             if ($isNftHolder) {
                 return [
                     'allowed'     => true,
@@ -880,7 +898,10 @@ final class GroupsService
         // Same threshold semantics as MyGroupsEndpoint::postJoin so
         // the FE hint and the server reject can't drift.
         if ($trustGateMin > 0) {
-            $viewerScore = (int) round($this->reputationRepo->getScore($viewerId));
+            // Memoized per request: a list of trust-gated groups reads the
+            // viewer's score once, not once per item.
+            $viewerScore = $this->viewerScoreMemo[$viewerId]
+                ??= (int) round($this->reputationRepo->getScore($viewerId));
             if ($viewerScore < $trustGateMin) {
                 return [
                     'allowed'     => false,
@@ -921,6 +942,78 @@ final class GroupsService
             'unlock_hint' => null,
             'reason_code' => null,
         ];
+    }
+
+    /**
+     * F-244 — the join verdict for LIST surfaces (community cards, the
+     * profile Groups tab), from the same logic the group page uses, so a
+     * card can never offer what the page refuses.
+     *
+     * $rawStatus is the viewer's gm_user_status in the group from
+     * PeepSoGroupRepository::findUserMembershipStatuses() (null = no row,
+     * FALSE = the batched read failed). A failed read answers `unavailable`
+     * rather than guessing a Join. Holder groups are not wallet-checked
+     * here unless the caller already knows ($nftHolder; null →
+     * `verify_on_join`); the page and the join door always are.
+     *
+     * @return array{
+     *   can_join: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},
+     *   can_request_join: array{allowed: bool, unlock_hint: string|null, reason_code: string|null},
+     *   viewer_membership_status: 'none'|'requested'|'invited'|'member'|null
+     * }
+     */
+    public function listJoinFields(
+        GroupContext $ctx,
+        int $viewerId,
+        string|null|false $rawStatus,
+        int $trustGateMin = 0,
+        ?string $validatorMinStakeDisplay = null,
+        ?bool $nftHolder = null
+    ): array {
+        if ($viewerId > 0 && $rawStatus === false) {
+            $unavailable = ['allowed' => false, 'unlock_hint' => null, 'reason_code' => 'unavailable'];
+            return ['can_join' => $unavailable, 'can_request_join' => $unavailable, 'viewer_membership_status' => null];
+        }
+        $status   = is_string($rawStatus) ? $rawStatus : null;
+        $isMember = $status !== null && in_array($status, CommentService::READ_ALLOWED_STATUSES, true);
+
+        return [
+            'can_join'         => $this->resolveCanJoin(
+                $ctx,
+                $viewerId,
+                $isMember,
+                $nftHolder,
+                $trustGateMin,
+                $validatorMinStakeDisplay,
+                $status === 'banned'
+            ),
+            'can_request_join' => $this->resolveCanRequestJoin($ctx, $viewerId, $isMember, $status, $ctx->groupId),
+            'viewer_membership_status' => $viewerId > 0 ? self::membershipStatusLabel($isMember, $status) : null,
+        ];
+    }
+
+    /**
+     * F-244 — the leave verdict from a raw status (the profile Groups tab).
+     *
+     * @return array{allowed: bool, unlock_hint: string|null, reason_code: string|null}
+     */
+    public function leavePermission(int $viewerId, ?string $rawStatus): array
+    {
+        $isMember = $rawStatus !== null && in_array($rawStatus, CommentService::READ_ALLOWED_STATUSES, true);
+        return $this->resolveCanLeave($viewerId, $isMember, $rawStatus === 'member_owner');
+    }
+
+    /** @return 'none'|'requested'|'invited'|'member' */
+    private static function membershipStatusLabel(bool $isMember, ?string $status): string
+    {
+        if ($isMember) {
+            return 'member';
+        }
+        return match ($status) {
+            PeepSoGroupRepository::PENDING_REQUEST => 'requested',
+            PeepSoGroupRepository::PENDING_INVITE  => 'invited',
+            default                                => 'none', // a banned row reads as none
+        };
     }
 
     /**
@@ -1031,7 +1124,12 @@ final class GroupsService
         ];
     }
 
-    private function resolveMembersVisible(GroupContext $ctx, bool $isMember): bool
+    /**
+     * May a viewer see this group's member roster? THE rule — the group
+     * page's `members_visible` and the profile's role disclosure
+     * (UserViewService) both call it, so the two cannot drift.
+     */
+    public static function resolveMembersVisible(GroupContext $ctx, bool $isMember): bool
     {
         if ($ctx->privacy === PeepSoPrivacy::Open) {
             return true;

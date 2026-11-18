@@ -713,7 +713,10 @@ final class AnnouncementViewServiceTest extends TestCase
         sort($methods);
 
         self::assertSame(
-            ['detail', 'metaKeysRead', 'ownerPage', 'publicPage', 'rotatorPage'],
+            // permalinkFor (F-307) is not a producer: it exposes the ONE
+            // permalink composer so the admin moderation queue can link a
+            // reported notice without a second copy of the URL shape.
+            ['detail', 'metaKeysRead', 'ownerPage', 'permalinkFor', 'publicPage', 'rotatorPage'],
             $methods,
             'a new public producer needs a contract decision, not just a method'
         );

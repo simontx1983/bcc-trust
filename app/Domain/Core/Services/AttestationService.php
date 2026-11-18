@@ -1335,8 +1335,9 @@ final class AttestationService
                 $this->dormancyDetector
             );
             if ($attestor === null) {
-                // Deleted attestor — drop the row (the underlying
-                // attestation stays in DB; we just don't render it).
+                // Deleted attestor, or one THIS viewer may not see — drop
+                // the row (the attestation stays in DB and still counts in
+                // `summary` and every score; this is display only).
                 continue;
             }
 
@@ -1438,6 +1439,18 @@ final class AttestationService
         }
         $user = get_userdata($userId);
         if (!($user instanceof \WP_User)) {
+            return null;
+        }
+
+        // May the CURRENT viewer see this attestor at all? ONE rule, the
+        // profile gate (ProfileAccess::canViewProfile: the F-02 profile
+        // ladder + F-182 suspension, owner and admin exemptions). Without
+        // it an anonymous visitor read the handle, name, avatar and score
+        // of attestors whose profile is private to them. The profile vouch
+        // line's "Top vouched by" uses the same rule. `hide_from_search` is
+        // deliberately NOT applied: it hides a member from search and the
+        // directory, and a roster is neither (user decision).
+        if (!\BCC\Trust\Core\Support\ProfileAccess::canViewProfile($userId)) {
             return null;
         }
 

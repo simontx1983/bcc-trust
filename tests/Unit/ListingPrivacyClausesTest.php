@@ -77,15 +77,31 @@ final class ListingPrivacyClausesTest extends TestCase
         );
     }
 
-    public function testTheDiscoveryOptOutClauseSurvivesAlongsideIt(): void
+    /**
+     * F-257 rollout: until fold_discovery_optout_v1 has copied every legacy
+     * opt-out into hide_from_search, the legacy key is honoured too, so
+     * nobody hidden before the deploy is listed while the copy runs.
+     */
+    public function testTheLegacyOptOutClauseStaysUntilTheFoldIsDone(): void
     {
-        // Control: adding the new clause must not displace the existing
-        // one. Both are privacy filters; losing either is a silent leak.
         $json = json_encode(PrivacySettings::filterPeepSoSearchArgs([]));
         self::assertIsString($json);
 
         self::assertStringContainsString('bcc_privacy_discovery_optout', $json);
         self::assertStringContainsString('peepso_is_hide_profile_from_user_listing', $json);
+    }
+
+    /** F-257: once folded, search excludes on the ONE flag. */
+    public function testOnceFoldedSearchChecksOnlyTheOneFlag(): void
+    {
+        $GLOBALS['__bcc_lp']['options'][PrivacySettings::FOLD_DONE_OPTION] = 1_700_000_000;
+
+        $json = json_encode(PrivacySettings::filterPeepSoSearchArgs([]));
+        self::assertIsString($json);
+
+        self::assertStringNotContainsString('bcc_privacy_discovery_optout', $json);
+        self::assertStringContainsString('peepso_is_hide_profile_from_user_listing', $json);
+        self::assertSame(1, substr_count($json, 'NOT EXISTS'), 'the one flag keeps its NOT-EXISTS-OR-FALSY shape');
     }
 
     /**

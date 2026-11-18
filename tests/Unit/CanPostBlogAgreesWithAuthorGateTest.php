@@ -153,14 +153,14 @@ namespace BCC\Trust\Tests\Unit\CanPostBlogAgreement {
         {
             $method = new ReflectionMethod(UserGroupsEndpoint::class, 'canPostBlog');
             $method->setAccessible(true);
-            $sibling = new ReflectionMethod(UserGroupsEndpoint::class, 'canLeave');
-            $sibling->setAccessible(true);
             $endpoint = (new ReflectionClass(UserGroupsEndpoint::class))->newInstanceWithoutConstructor();
+            // F-244: the tab's can_leave is GroupsService's shared verdict now.
+            $groups = (new ReflectionClass(\BCC\Trust\Core\Services\GroupsService::class))->newInstanceWithoutConstructor();
 
             /** @var array<string, mixed> $mine */
             $mine = $method->invoke($endpoint, true, 'member');
             /** @var array<string, mixed> $theirs */
-            $theirs = $sibling->invoke($endpoint, true);
+            $theirs = $groups->leavePermission(7, 'member');
 
             self::assertSame(
                 array_keys($theirs),

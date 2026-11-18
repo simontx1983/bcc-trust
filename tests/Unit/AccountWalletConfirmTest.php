@@ -131,13 +131,20 @@ final class AccountWalletConfirmTest extends TestCase
         );
     }
 
-    private static function verifiedAgo(int $linkId, int $seconds): void
+    /**
+     * Stamp link $linkId as verified $seconds ago and return that instant,
+     * so an assertion derives from the SAME value the code reads (one clock
+     * read): a second time() later can land on the next second.
+     */
+    private static function verifiedAgo(int $linkId, int $seconds): int
     {
+        $verifiedAt = time() - $seconds;
         foreach ($GLOBALS['__bcc_wc']['links'] as $i => $l) {
             if ($l['id'] === $linkId) {
-                $GLOBALS['__bcc_wc']['links'][$i]['verified_at'] = time() - $seconds;
+                $GLOBALS['__bcc_wc']['links'][$i]['verified_at'] = $verifiedAt;
             }
         }
+        return $verifiedAt;
     }
 
     private function user(int $id, string $email): void
@@ -255,8 +262,8 @@ final class AccountWalletConfirmTest extends TestCase
 
     public function testAWalletVerifiedAnHourAgoCannotConfirmYet(): void
     {
-        self::verifiedAgo(1, 3600);
-        $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_ACCOUNT_DELETE);
+        $verifiedAt = self::verifiedAgo(1, 3600);
+        $sig        = self::sign(WalletChallenge::PURPOSE_CONFIRM_ACCOUNT_DELETE);
 
         $res = (new MyAccountEndpoint())->deleteAccount(new \WP_REST_Request(['confirm' => 'DELETE'] + self::walletProof($sig)));
         $err = $res->get_data()['error'];
@@ -264,7 +271,10 @@ final class AccountWalletConfirmTest extends TestCase
         self::assertSame(403, $res->get_status());
         self::assertSame('bcc_forbidden', $err['code']);
         self::assertStringContainsString('verified too recently', $err['message']);
-        self::assertSame(gmdate('Y-m-d\TH:i:s\Z', time() - 3600 + 48 * 3600), $err['data']['usable_at']);
+        // usable_at = verified_at + 48 h. Derived from the stamped instant,
+        // not a fresh time(): that raced the code's own read across a
+        // second boundary on CI (#656: expected :23Z, got :22Z).
+        self::assertSame(gmdate('Y-m-d\TH:i:s\Z', $verifiedAt + 48 * 3600), $err['data']['usable_at']);
         self::assertSame([], $GLOBALS['__bcc_wc']['deleted']);
         self::assertTrue(self::challengeIsLive(), 'checked before the challenge is spent');
     }
@@ -387,8 +397,12 @@ final class AccountWalletConfirmTest extends TestCase
     {
         $jwt = \BCC\Trust\Core\Support\JwtToken::class;
 
-        $fresh = $jwt::decode($jwt::encodeNewSession(self::USER, 'h'))['payload'];
-        self::assertSame(time(), $fresh['auth_time']);
+        $before = time();
+        $fresh  = $jwt::decode($jwt::encodeNewSession(self::USER, 'h'))['payload'];
+        // Bracketed, not assertSame(time(), …): the encoder's own clock read
+        // can fall in the previous second.
+        self::assertGreaterThanOrEqual($before, $fresh['auth_time']);
+        self::assertLessThanOrEqual(time(), $fresh['auth_time']);
 
         $cont = $jwt::decode($jwt::encodeContinuation(self::USER, 'h', 1234))['payload'];
         self::assertSame(1234, $jwt::sessionStartedAt($cont));
@@ -406,14 +420,15 @@ final class AccountWalletConfirmTest extends TestCase
         // The re-mint after a credential change (here: a wallet-only member
         // setting a password with their wallet) continues the SAME session.
         self::verifiedAgo(1, 5 * 86400);
-        self::signIn(['auth_time' => time() - 4 * 86400]);
+        $authTime = time() - 4 * 86400;
+        self::signIn(['auth_time' => $authTime]);
         $sig = self::sign(WalletChallenge::PURPOSE_CONFIRM_PASSWORD_CHANGE);
 
         [$status, $data] = self::call([new MyAccountEndpoint(), 'patchPassword'], ['password' => 'a brand new passphrase'] + self::walletProof($sig));
 
         self::assertSame(200, $status);
         $payload = \BCC\Trust\Core\Support\JwtToken::decode($data['token'])['payload'];
-        self::assertSame(time() - 4 * 86400, $payload['auth_time']);
+        self::assertSame($authTime, $payload['auth_time'], 'the continuation keeps the sign-in start');
     }
 
     public function testAWalletLinkedMidSessionStillCannotConfirmAfterAReMint(): void
@@ -795,6 +810,136 @@ final class AccountWalletConfirmTest extends TestCase
         self::assertSame(403, $status);
         self::assertStringContainsString('verified too recently', $err['message']);
         self::assertSame([], $GLOBALS['__bcc_wc']['deleted']);
+    }
+
+    // ── F-332: an email given at wallet sign-up; recovery availability ──
+
+    private static function verifyCode(string $email, string $code): int
+    {
+        return (new \BCC\Trust\Core\REST\Auth\EmailVerificationController())->verifyEmail(
+            new \WP_REST_Request(['email' => $email, 'code' => $code])
+        )->get_status();
+    }
+
+    public function testAnEmailGivenAtWalletSignUpCountsOnlyOnceItsCodeIsVerified(): void
+    {
+        // Wallet sign-up with an email: user_email set, flag '0', code mailed.
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = 'typed@example.com';
+        $GLOBALS['__bcc_ph']['meta'][self::USER]['_bcc_email_verified'] = '0';
+        \BCC\Trust\Core\REST\Auth\AuthSupport::storeOtpForUser(self::USER, '123456');
+        self::assertFalse(AccountRecoveryService::hasRecoveryEmail(self::USER), 'pending: not a way back in yet');
+
+        self::assertNotSame(200, self::verifyCode('typed@example.com', '000000'));
+        self::assertFalse(AccountRecoveryService::hasRecoveryEmail(self::USER), 'a wrong code changes nothing');
+
+        self::assertSame(200, self::verifyCode('typed@example.com', '123456'));
+        self::assertTrue(AccountRecoveryService::hasRecoveryEmail(self::USER));
+    }
+
+    public function testAnExpiredCodeLeavesThePendingEmailUncounted(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = 'typed@example.com';
+        $GLOBALS['__bcc_ph']['meta'][self::USER]['_bcc_email_verified'] = '0';
+        // No stored code: expired (or never sent).
+
+        self::assertNotSame(200, self::verifyCode('typed@example.com', '123456'));
+        self::assertFalse(AccountRecoveryService::hasRecoveryEmail(self::USER));
+    }
+
+    public function testALegacyEmailWithNoFlagStillCounts(): void
+    {
+        unset($GLOBALS['__bcc_ph']['meta'][self::USER]['_bcc_email_verified']);
+        self::assertTrue(AccountRecoveryService::hasRecoveryEmail(self::USER));
+
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+        self::assertFalse(AccountRecoveryService::hasRecoveryEmail(self::USER), 'the placeholder never counts');
+    }
+
+    public function testAPendingTypoCanBeReplacedThroughTheRecoveryRoute(): void
+    {
+        // Signed up with a wallet and a mistyped email that was never verified.
+        self::newWalletAccount(600);
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = 'typo@exmaple.com';
+        $GLOBALS['__bcc_ph']['meta'][self::USER]['_bcc_email_verified'] = '0';
+
+        [$status, $data] = self::addRecoveryEmail();
+
+        self::assertSame(200, $status);
+        self::assertTrue($data['ok']);
+    }
+
+    public function testAvailabilityIsNowForTheSignupWallet(): void
+    {
+        self::newWalletAccount(600);
+
+        self::assertSame(
+            ['at' => time(), 'reason' => 'signup_wallet'],
+            AccountCredentialCheck::recoveryEmailAvailability(self::USER)
+        );
+    }
+
+    public function testAvailabilityWaitsFor48HoursOnANewWallet(): void
+    {
+        // A placeholder account whose only wallet (not a signup wallet)
+        // was verified an hour ago, before this sign-in.
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+        self::verifiedAgo(1, 3600);
+
+        self::assertSame(
+            ['at' => time() - 3600 + 48 * 3600, 'reason' => 'wallet_age'],
+            AccountCredentialCheck::recoveryEmailAvailability(self::USER)
+        );
+    }
+
+    public function testAvailabilityIsNowForAnOldWallet(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+
+        self::assertSame(
+            ['at' => time(), 'reason' => 'wallet_age'],
+            AccountCredentialCheck::recoveryEmailAvailability(self::USER)
+        );
+    }
+
+    public function testAvailabilityTakesTheEarliestQualifyingWallet(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+        self::verifiedAgo(1, 10 * 3600);
+        $earliest = time() - 20 * 3600;
+        $GLOBALS['__bcc_wc']['links'][] = ['id' => 7, 'user_id' => self::USER, 'chain_id' => 1, 'address' => '0x00000000000000000000000000000000000000ff', 'verified_at' => $earliest];
+
+        self::assertSame($earliest + 48 * 3600, AccountCredentialCheck::recoveryEmailAvailability(self::USER)['at']);
+    }
+
+    public function testAvailabilityIsNullForAWalletVerifiedAfterThisSignIn(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+        self::verifiedAgo(1, 3600);
+        self::signIn(['auth_time' => time() - 2 * 3600]);
+
+        self::assertSame(['at' => null, 'reason' => null], AccountCredentialCheck::recoveryEmailAvailability(self::USER));
+    }
+
+    public function testAvailabilityIsNullOnceTheAccountHasARecoveryEmail(): void
+    {
+        self::assertTrue(AccountRecoveryService::hasRecoveryEmail(self::USER));
+        self::assertSame(['at' => null, 'reason' => null], AccountCredentialCheck::recoveryEmailAvailability(self::USER));
+    }
+
+    public function testTheWalletsPostureRendersAvailabilityAsIsoOrNull(): void
+    {
+        $render = new \ReflectionMethod(\BCC\Trust\Onchain\Controllers\WalletController::class, 'recoveryAvailability');
+        $render->setAccessible(true);
+
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = self::PLACEHOLDER;
+        $verifiedAt = self::verifiedAgo(1, 3600);
+        self::assertSame(
+            ['available_at' => gmdate('Y-m-d\TH:i:s\Z', $verifiedAt + 48 * 3600), 'available_reason' => 'wallet_age'],
+            $render->invoke(null, self::USER)
+        );
+
+        $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = 'real@example.com';
+        self::assertSame(['available_at' => null, 'available_reason' => null], $render->invoke(null, self::USER));
     }
 
     public function testRecoveryEmailStillAttachesAFirstEmailToAPlaceholderAccount(): void

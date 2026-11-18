@@ -510,12 +510,14 @@ final class WatchingRepository
      * cards, however many follows the viewer has. Chunked so a long id
      * list never builds an oversized IN().
      *
-     * A failed read logs (runRead) and answers with what was read so far:
-     * the flag degrades to "not watching" for those ids, which a click
-     * then corrects (`already_watching`), rather than failing the page.
+     * Fail-closed: a failed read is logged (runRead) and THROWS, so the
+     * caller can tell "not watching" from "could not tell" — cards show
+     * the latter as `viewer_is_watching: null` (ViewerWatchResolver), never
+     * as a wrong "Watch".
      *
      * @param list<int> $followeeIds
      * @return array<int, int> followee user id => uf_id
+     * @throws RepositoryReadFailure when a read did not run
      */
     public function findActiveFollowIdsForFollowees(int $viewerId, array $followeeIds): array
     {
@@ -546,7 +548,7 @@ final class WatchingRepository
                   LIMIT %d",
                 $viewerId,
                 ...array_merge($chunk, [count($chunk)])
-            ), __FUNCTION__, false);
+            ), __FUNCTION__, true);
             foreach ($rows as $row) {
                 $out[(int) $row->followee_id] = (int) $row->uf_id;
             }

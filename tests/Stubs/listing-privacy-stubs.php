@@ -33,6 +33,19 @@ namespace {
         }
     }
 
+    // F-257: the search filter reads the fold migration's done-marker
+    // (PrivacySettings::FOLD_DONE_OPTION). $GLOBALS['__bcc_lp']['options'].
+    if (!function_exists('get_option')) {
+        /**
+         * @param mixed $default
+         * @return mixed
+         */
+        function get_option(string $key, $default = false)
+        {
+            return $GLOBALS['__bcc_lp']['options'][$key] ?? $default;
+        }
+    }
+
     if (!class_exists('PeepSo', false)) {
         class PeepSo
         {
