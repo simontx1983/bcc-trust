@@ -186,7 +186,7 @@ final class ContentReportRepository
      *
      * @var list<string>
      */
-    private const ALLOWED_POST_KINDS = ['status', 'blog', 'review', 'photo', 'gif', 'announcement'];
+    private const ALLOWED_POST_KINDS = ['status', 'blog', 'review', 'photo', 'gif', 'announcement', 'review_reply'];
 
     /**
      * Queue kind → numeric `peepso_activities.act_module_id`.
@@ -214,6 +214,8 @@ final class ContentReportRepository
         // this map and ALLOWED_POST_KINDS are closed sets. A report that
         // is visible but unfilterable gets lost in a busy queue.
         'announcement' => 205,
+        // F-345 — review replies (PeepSoActivityWriter 'review_reply').
+        'review_reply' => 206,
     ];
 
     /**
