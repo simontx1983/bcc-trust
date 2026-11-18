@@ -131,7 +131,7 @@ final class GroupMembersService
         $hasMore = ($offset + count($rows)) < $total;
 
         // ── 3b. An open roster omits members this viewer may not see. ─
-        $rows = self::rowsTheViewerMaySee($ctx->privacy, $rows);
+        $rows = self::rowsTheViewerMaySee($ctx->privacy, $rows, $viewerId, $groupId);
 
         // ── 4. Bulk-prime UserSummary prefetch maps. ─────────────────
         // Mirrors `UsersEndpoint::members` exactly so the wire shape
@@ -192,6 +192,13 @@ final class GroupMembersService
      * for the page; the viewer always sees themselves, admins see
      * everyone). Display only: `total` and the member count are unchanged.
      *
+     * NOT hide_from_search: that setting scopes to member search and the
+     * directory (user decision 2026-11-12); rosters follow profile privacy.
+     *
+     * This group's OWNER and MANAGERS (and site admins) see the whole
+     * roster — they already decide its membership, and they need every
+     * member for managing it and for the transfer-ownership picker.
+     *
      * Closed and secret rosters are shown only to the group's own members
      * and are not filtered here.
      *
@@ -201,9 +208,12 @@ final class GroupMembersService
      * @param list<object> $rows
      * @return list<object>
      */
-    private static function rowsTheViewerMaySee(PeepSoPrivacy $privacy, array $rows): array
+    private static function rowsTheViewerMaySee(PeepSoPrivacy $privacy, array $rows, int $viewerId, int $groupId): array
     {
         if ($privacy !== PeepSoPrivacy::Open || $rows === []) {
+            return $rows;
+        }
+        if (GroupJoinRequestService::isGroupAdmin($viewerId, $groupId)) {
             return $rows;
         }
 
@@ -215,7 +225,7 @@ final class GroupMembersService
             }
         }
 
-        $visible = array_flip(ProfileAccess::filterVisible($ids));
+        $visible = array_flip(ProfileAccess::filterVisible($ids, false));
 
         return array_values(array_filter(
             $rows,

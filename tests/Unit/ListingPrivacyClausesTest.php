@@ -167,6 +167,37 @@ final class ListingPrivacyClausesTest extends TestCase
         self::assertSame($incoming, PrivacySettings::filterPeepSoSearchArgs($incoming));
     }
 
+    /**
+     * hide_from_search scopes to member search and the directory (user
+     * decision 2026-11-12). A roster asks with ARG_IGNORE_SEARCH_OPTOUT:
+     * neither opt-out clause is added, the caller's args come back
+     * otherwise untouched, and the marker itself is not passed on to
+     * WP_User_Query.
+     */
+    public function testARosterListingSkipsOnlyTheSearchOptOut(): void
+    {
+        $incoming = [
+            'include'    => [11, 12],
+            'meta_query' => [['key' => 'peepso_vip', 'value' => '1', 'compare' => '=']],
+            PrivacySettings::ARG_IGNORE_SEARCH_OPTOUT => true,
+        ];
+
+        $args = PrivacySettings::filterPeepSoSearchArgs($incoming);
+        $json = (string) json_encode($args);
+
+        self::assertStringNotContainsString('peepso_is_hide_profile_from_user_listing', $json);
+        self::assertArrayNotHasKey(PrivacySettings::ARG_IGNORE_SEARCH_OPTOUT, $args);
+        unset($incoming[PrivacySettings::ARG_IGNORE_SEARCH_OPTOUT]);
+        self::assertSame($incoming, $args);
+    }
+
+    public function testAFalsyMarkerStillAppliesTheSearchOptOut(): void
+    {
+        $json = (string) json_encode(PrivacySettings::filterPeepSoSearchArgs([PrivacySettings::ARG_IGNORE_SEARCH_OPTOUT => false]));
+
+        self::assertStringContainsString('peepso_is_hide_profile_from_user_listing', $json);
+    }
+
     public function testAnExistingMetaQueryIsPreservedNotOverwritten(): void
     {
         $args = PrivacySettings::filterPeepSoSearchArgs([
