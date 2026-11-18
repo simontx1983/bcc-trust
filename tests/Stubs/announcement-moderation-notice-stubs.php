@@ -60,6 +60,11 @@ namespace {
         /** @param list<mixed> $args */
         function wp_schedule_single_event(int $at, string $hook, array $args = []): bool
         {
+            // F-307 B2: `$GLOBALS['__f307']['schedule_fails'] = true` makes
+            // the scheduler refuse, as WP does when a filter vetoes the event.
+            if (($GLOBALS['__f307']['schedule_fails'] ?? false) === true) {
+                return false;
+            }
             $GLOBALS['__f307']['cron'][] = ['at' => $at, 'hook' => $hook, 'args' => $args];
             return true;
         }

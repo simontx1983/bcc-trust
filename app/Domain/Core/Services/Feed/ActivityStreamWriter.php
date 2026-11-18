@@ -218,6 +218,68 @@ final class ActivityStreamWriter
     }
 
     /**
+     * F-345 — publish a review reply: its backing post (body as content) plus
+     * ONE activity row (module `review_reply`), the act_id that the existing
+     * report / hide / moderation machinery keys on.
+     *
+     * The activity is never in a feed: module 206 is deliberately absent from
+     * bcc-core's feed allowlist (see PeepSoActivityWriter::MODULE_ID_BY_NAME).
+     *
+     * Order matters for readers: the post is created with an empty body, the
+     * body is written, and only THEN is the activity inserted. Readers join
+     * the activity, so a reply is invisible until it is complete. If the
+     * activity insert fails the post is deleted, so a half-written reply
+     * never occupies the review's slot.
+     *
+     * @return array{post_id: int, act_id: int}|null null when either write failed
+     */
+    public function publishReviewReply(int $replierId, int $voteId, string $body): ?array
+    {
+        $module = \BCC\Trust\Core\Repositories\ReviewReplyRepository::MODULE_NAME;
+
+        $postId = $this->createBackingPost($replierId, $module, $voteId);
+        if ($postId <= 0) {
+            return null;
+        }
+
+        $updated = wp_update_post(['ID' => $postId, 'post_content' => $body], true);
+        if (is_wp_error($updated) || (int) $updated <= 0) {
+            wp_delete_post($postId, true);
+            return null;
+        }
+
+        $actId = $this->insertActivityOnce($replierId, $replierId, $module, $postId);
+        if ($actId <= 0) {
+            wp_delete_post($postId, true);
+            return null;
+        }
+
+        return ['post_id' => $postId, 'act_id' => $actId];
+    }
+
+    /**
+     * F-345 — remove a review reply completely: its activity row and its
+     * backing post, HARD-deleted.
+     *
+     * ⚠ Not trashed: createBackingPost() reuses an existing post in ANY
+     * status, so a trashed reply would be revived by the author's next
+     * reply to the same review, carrying the deleted body.
+     */
+    public function deleteReviewReply(int $postId, int $actId): bool
+    {
+        // $actId comes from ReviewReplyRepository, whose read joins on
+        // act_module_id = 206, so it is a BCC-owned row (deleteByActId's
+        // SECURITY note). Its false means "nothing deleted", which includes
+        // "already gone", so it must not stop the post from being removed:
+        // the post is what occupies the review's slot.
+        if ($actId > 0) {
+            $this->activityWriter->deleteByActId($actId);
+        }
+
+        return $postId <= 0 || wp_delete_post($postId, true) instanceof \WP_Post;
+    }
+
+    /**
      * Subscriber for bcc_watch_batch_emitted.
      *
      * Two writes (best-effort sequencing — no transaction):

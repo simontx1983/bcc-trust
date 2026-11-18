@@ -198,7 +198,12 @@ final class RecoveryEmailEndpoint
                 case PendingEmailService::ERR_NONE:
                     return ApiResponse::error('bcc_invalid_request', 'No pending recovery email. Please start again.', 400);
                 case PendingEmailService::ERR_BAD_CODE:
-                    return ApiResponse::error('bcc_invalid_request', 'Incorrect or expired code.', 422);
+                    // F-294: the code /auth/verify-email and the email-change
+                    // confirm use for a wrong code, so a client tells "retry
+                    // the code" from "start again" (400 above) by code, not
+                    // status. Was bcc_invalid_request; the frontend accepts
+                    // both (FE #301). An expired code is ERR_NONE above.
+                    return ApiResponse::error('bcc_invalid_otp', 'Incorrect code. Check the latest email and try again.', 422);
                 case PendingEmailService::ERR_CONFLICT:
                     return ApiResponse::error('bcc_conflict', 'That email is already in use.', 409);
                 default:

@@ -53,6 +53,7 @@ use BCC\Core\Feed\ReactionGrammarMap;
 use BCC\Core\PeepSo\PeepSoReactionWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Support\GroupInteractionGate;
 use BCC\Trust\Core\Support\NoReactionsGate;
 use BCC\Trust\Core\Support\ReactionGrammarRegistry;
@@ -149,6 +150,14 @@ final class ReactionsEndpoint
         // No engagement of any kind on an announcement (§4.32.15). Runs
         // before the group gate because it is a property of the CONTENT,
         // not of the viewer, and the answer is the same for everyone.
+        // F-345: only a FEED ITEM takes engagement here. A review reply
+        // (module 206) and any other off-feed activity is not a post on
+        // this route; same 404 as an unknown id (FeedItemGate).
+        $notFeedItem = FeedItemGate::check($actId);
+        if ($notFeedItem !== null) {
+            return $notFeedItem;
+        }
+
         $noReactions = NoReactionsGate::check($actId);
         if ($noReactions !== null) {
             return $noReactions;
@@ -224,6 +233,14 @@ final class ReactionsEndpoint
         // No engagement of any kind on an announcement (§4.32.15). Runs
         // before the group gate because it is a property of the CONTENT,
         // not of the viewer, and the answer is the same for everyone.
+        // F-345: only a FEED ITEM takes engagement here. A review reply
+        // (module 206) and any other off-feed activity is not a post on
+        // this route; same 404 as an unknown id (FeedItemGate).
+        $notFeedItem = FeedItemGate::check($actId);
+        if ($notFeedItem !== null) {
+            return $notFeedItem;
+        }
+
         $noReactions = NoReactionsGate::check($actId);
         if ($noReactions !== null) {
             return $noReactions;

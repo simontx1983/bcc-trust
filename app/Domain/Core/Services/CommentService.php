@@ -35,6 +35,7 @@ use BCC\Core\PeepSo\PeepSoCommentWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Core\Security\Throttle;
+use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Repositories\CommentRepository;
 use BCC\Trust\Core\Repositories\StokeRepository;
 use BCC\Trust\Core\Repositories\UserMiniRepository;
@@ -203,7 +204,7 @@ final class CommentService
         // F-265: a deleted (trashed) or moderation-hidden post is gone from
         // every feed and its permalink; its thread is too. Same answer as an
         // unknown id, for every viewer, before any membership check.
-        if ($parent === null || !$this->visibility()->isLive($parent)) {
+        if ($parent === null || !FeedItemGate::isFeedModule($parent->act_module_id ?? null) || !$this->visibility()->isLive($parent)) {
             return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
         }
         $parentPostId = (int) $parent->act_external_id;
@@ -406,7 +407,7 @@ final class CommentService
         // F-265: a deleted (trashed) or moderation-hidden post is gone from
         // every feed and its permalink; its thread is too. Same answer as an
         // unknown id, for every viewer, before any membership check.
-        if ($parent === null || !$this->visibility()->isLive($parent)) {
+        if ($parent === null || !FeedItemGate::isFeedModule($parent->act_module_id ?? null) || !$this->visibility()->isLive($parent)) {
             return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
         }
         $parentPostId   = (int) $parent->act_external_id;

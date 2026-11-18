@@ -230,6 +230,51 @@ final class NotificationDispatcher
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // bcc_review_reply_published — the reviewed party replied (F-345)
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Bell the reviewer when the reviewed party replies to their review.
+     * In-app only (NotificationType::BELL_ONLY), behind the
+     * `bell_bcc_review_reply` preference (default on). external_id is the
+     * reviewed page, so the row links to it like a review bell does.
+     */
+    public function onReviewReplyPublished(int $replierId, int $reviewerId, int $pageId, int $voteId, int $actId): void
+    {
+        unset($voteId, $actId); // the bell is the meta event; the reply renders on the review
+        if ($replierId <= 0 || $reviewerId <= 0 || $replierId === $reviewerId) {
+            return;
+        }
+        try {
+            $actorHandle = self::resolveHandle($replierId);
+            if (MemberSelfPageService::isSelfPage($pageId)) {
+                $message = sprintf('@%s replied to your review.', $actorHandle);
+            } else {
+                $pageName = self::resolvePageName($pageId);
+                $message  = $pageName !== ''
+                    ? sprintf('@%s replied to your review of %s.', $actorHandle, $pageName)
+                    : sprintf('@%s replied to your review.', $actorHandle);
+            }
+
+            $this->dispatch(
+                $replierId,
+                $reviewerId,
+                $message,
+                NotificationType::REVIEW_REPLY,
+                $pageId,
+                0
+            );
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] review reply dispatch failed', [
+                'replier_id'  => $replierId,
+                'reviewer_id' => $reviewerId,
+                'page_id'     => $pageId,
+                'error'       => $e->getMessage(),
+            ]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // bcc_card_watched — someone watched (followed) you
     // ──────────────────────────────────────────────────────────────────
 

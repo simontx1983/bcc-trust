@@ -28,6 +28,7 @@ use BCC\Core\PeepSo\PeepSoPhotoWriter;
 use BCC\Core\PeepSo\PeepSoStatusWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Security\Throttle;
+use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\BlogChainTagRepository;
 use BCC\Trust\Core\Repositories\VoteRepository;
@@ -781,7 +782,10 @@ final class PostsService
         }
 
         $activity = PeepSoActivityRepository::getById($actId);
-        if ($activity === null) {
+        // F-345: only a feed item is a post here. A review reply (module 206)
+        // is deleted through DELETE /reviews/{id}/reply, whose rules (a
+        // moderation-hidden reply stays) this route must not bypass.
+        if ($activity === null || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)) {
             return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
         }
 

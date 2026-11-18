@@ -272,3 +272,20 @@ namespace BCC\Trust\Core\Repositories {
         }
     }
 }
+
+namespace BCC\Core\Feed {
+    // F-345: FeedItemGate reads bcc-core's public-feed allowlist, and
+    // bcc-core is not autoloadable in this suite. This double carries the
+    // allowlist's shape; FeedItemGateTest pins the gate against the REAL
+    // bcc-core FeedItemNormalizer.
+    if (!class_exists(__NAMESPACE__ . '\FeedItemNormalizer', false)) {
+        final class FeedItemNormalizer
+        {
+            /** @return list<int> */
+            public static function publicFeedModuleIds(): array
+            {
+                return [1, 4, 200, 201, 202, 203, 204, 205];
+            }
+        }
+    }
+}

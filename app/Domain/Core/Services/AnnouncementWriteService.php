@@ -79,6 +79,14 @@ final class AnnouncementWriteService
     public const ERR_UNAVAILABLE = 'bcc_unavailable';
 
     /**
+     * F-307 B2 — an administrator took the notice down. 409 like the archived
+     * refusal (a state conflict, not a permission failure: the operator owns
+     * the row). edit() and pin(true) refuse it BEFORE any write; the matching
+     * capability reason is Caps::REASON_MODERATION_HIDDEN.
+     */
+    public const ERR_MODERATION_HIDDEN = 'bcc_announcement_moderation_hidden';
+
+    /**
      * F-147: audit action for an archive of a row the actor did not author —
      * the page's CURRENT operator archiving a predecessor's notice, or a site
      * administrator archiving any notice.
@@ -279,6 +287,9 @@ final class AnnouncementWriteService
         }
         if (self::isArchived($announcementId)) {
             return self::fail(self::ERR_CONFLICT, 'An archived announcement cannot be edited.', 409);
+        }
+        if (AnnouncementModerationService::isTakenDown($announcementId)) {
+            return self::fail(self::ERR_MODERATION_HIDDEN, 'This announcement was taken down by a moderator and cannot be edited.', 409);
         }
 
         $update = ['ID' => $announcementId];
@@ -611,6 +622,12 @@ final class AnnouncementWriteService
         // row; the writer enforces it rather than trusting the client read it.
         if (self::isArchived($announcementId)) {
             return self::fail(self::ERR_CONFLICT, 'An archived announcement cannot be pinned.', 409);
+        }
+        // F-307 B2 — after archival, like the capability ladder. Unpin above
+        // stays allowed on a taken-down row exactly as on an archived one
+        // (F-151): it only reduces what the notice could ever promote.
+        if (AnnouncementModerationService::isTakenDown($announcementId)) {
+            return self::fail(self::ERR_MODERATION_HIDDEN, 'This announcement was taken down by a moderator and cannot be pinned.', 409);
         }
         if ((string) ($row->post_status ?? '') !== Verb::STATUS_PUBLIC) {
             return self::fail(self::ERR_CONFLICT, 'Only a published announcement can be pinned.', 409);

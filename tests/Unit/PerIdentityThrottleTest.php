@@ -23,14 +23,17 @@ use PHPUnit\Framework\TestCase;
  *     oauth = provider + provider_id (10/min), each with an EXPLICIT key
  *     (never split or merged by IP), plus a 300/min route-wide ceiling;
  *   - exhausting one identity's bucket does not touch another's;
- *   - wallet-login counts only requests for an address with a live,
- *     server-issued challenge (a bare junk request does not count — though nonces for
- *     any address can be minted via /auth/wallet-nonce); /auth/oauth counts
- *     only requests that pass the signed bridge gate.
+ *   - wallet-login counts only VERIFIED sign-ins (a bad signature gives its
+ *     slots back; WalletLoginChallengeCapTest pins that and the per-challenge
+ *     cap that bounds junk instead), and a bare junk request with no live
+ *     challenge touches no bucket; /auth/oauth counts only requests that pass
+ *     the signed bridge gate, refused ones included.
  *
  * ## Isolation
- * Subprocess-only; setUp() loads tests/Stubs/wallet-login-throttle-stubs.php,
- * then tests/Stubs/account-prehijack-stubs.php.
+ * Subprocess-only; setUp() loads tests/Stubs/wallet-signup-stubs.php (its DB
+ * stub serves the wallet lookup after a verified signature),
+ * tests/Stubs/wallet-login-throttle-stubs.php, then
+ * tests/Stubs/account-prehijack-stubs.php.
  */
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
@@ -39,6 +42,7 @@ final class PerIdentityThrottleTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        require_once __DIR__ . '/../Stubs/wallet-signup-stubs.php';
         require_once __DIR__ . '/../Stubs/wallet-login-throttle-stubs.php';
         require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
         $GLOBALS['__bcc_ph'] = [
@@ -51,6 +55,26 @@ final class PerIdentityThrottleTest extends TestCase
             'throttle_counting' => true,
         ];
         $GLOBALS['__bcc_wl'] = ['nonces' => []];
+        // A verified wallet signature goes on to the wallet lookup: no account
+        // is linked, so it ends 404 bcc_wallet_not_linked.
+        $GLOBALS['wpdb'] = new class {
+            public string $prefix = 'wp_';
+            /** @param mixed ...$args */
+            public function prepare(string $sql, ...$args): string
+            {
+                return $sql;
+            }
+            /** @return null */
+            public function get_var(string $sql)
+            {
+                return null;
+            }
+            /** @param array<int, mixed> $args */
+            public function __call(string $name, array $args): never
+            {
+                throw new \RuntimeException('unexpected $wpdb->' . $name);
+            }
+        };
     }
 
     // ── /auth/oauth (F-131) ─────────────────────────────────────────────
@@ -103,6 +127,19 @@ final class PerIdentityThrottleTest extends TestCase
         self::assertSame(['auth_throttle:oauth_login_ceiling'], $GLOBALS['__bcc_ph']['metrics'] ?? [], 'a tripped ceiling is counted, never silent');
     }
 
+    public function testOauthStillCountsRefusedCalls(): void
+    {
+        for ($i = 1; $i <= AuthSupport::OAUTH_LOGIN_RATE_LIMIT + 2; $i++) {
+            self::oauth('sub-a');
+        }
+
+        self::assertSame(
+            AuthSupport::OAUTH_LOGIN_RATE_LIMIT + 2,
+            (int) $GLOBALS['__bcc_ph']['throttle_hits'][self::oauthKey('sub-a')],
+            'pessimistic: the two refused calls were recorded (only wallet-login opts out)'
+        );
+    }
+
     public function testAPerIdentityLimitDoesNotCountAsACeilingTrip(): void
     {
         for ($i = 1; $i <= AuthSupport::OAUTH_LOGIN_RATE_LIMIT + 1; $i++) {
@@ -114,10 +151,13 @@ final class PerIdentityThrottleTest extends TestCase
 
     // ── /auth/wallet-login (F-123) ──────────────────────────────────────
 
-    private static function walletLogin(string $address, bool $withNonce = true): int
+    private static function walletLogin(string $address, bool $withNonce = true, bool $validSig = false): int
     {
         if ($withNonce) {
             $GLOBALS['__bcc_wl']['nonces'][$address] = ($GLOBALS['__bcc_wl']['nonces'][$address] ?? 0) + 1;
+        }
+        if ($validSig) {
+            $GLOBALS['__bcc_wl']['valid'][] = 'cosmos|sign me ' . $address . '|sig';
         }
         $req = new \WP_REST_Request(['wallet_address' => $address, 'signature' => 'sig']);
         return (new WalletAuthController())->walletLogin($req)->get_status();
@@ -131,7 +171,7 @@ final class PerIdentityThrottleTest extends TestCase
     public function testWalletLoginIsThrottledPerWalletNotShared(): void
     {
         for ($i = 1; $i <= AuthSupport::WALLET_LOGIN_RATE_LIMIT; $i++) {
-            self::assertSame(401, self::walletLogin('cosmos1walleta'), "attempt #$i reaches the verify (bad sig → 401)");
+            self::assertSame(404, self::walletLogin('cosmos1walleta', validSig: true), "verified sign-in #$i (no account linked → 404)");
         }
 
         self::assertSame(429, self::walletLogin('cosmos1walleta'), "wallet A's 6th within the minute is limited");
@@ -152,7 +192,7 @@ final class PerIdentityThrottleTest extends TestCase
     public function testCaseVariantsOfAnAddressShareABucket(): void
     {
         for ($i = 1; $i <= AuthSupport::WALLET_LOGIN_RATE_LIMIT; $i++) {
-            self::walletLogin('cosmos1CaseWallet');
+            self::walletLogin('cosmos1CaseWallet', validSig: true);
         }
 
         self::assertSame(429, self::walletLogin('COSMOS1CASEWALLET'), 'fail-closed: no extra budget from case variants');
