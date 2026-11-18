@@ -38,7 +38,7 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/moderation-suspend-stubs.php';
-        $GLOBALS['__bcc_ms'] = ['tv' => [], 'rows' => [], 'synced' => [], 'suspended' => [], 'audit' => [], 'errors' => [], 'fail_suspend' => false];
+        $GLOBALS['__bcc_ms'] = ['tv' => [], 'rows' => [], 'synced' => [], 'suspended' => [], 'audit' => [], 'errors' => [], 'fail_suspend' => false, 'wp_sessions_destroyed' => []];
     }
 
     private function service(): ModerationService
@@ -403,5 +403,47 @@ final class ModerationSuspendRevokesTokensTest extends TestCase
             'each user\'s fraud fields are written; the failure is skipped'
         );
         self::assertSame(['bulk' => 2, 'bulk_skipped' => 0], $GLOBALS['__bcc_ms']['query'], 'only real successes are counted');
+    }
+    // ── WordPress cookie sessions end too ───────────────────────────────
+
+    public function testASingleSuspendAlsoDestroysTheMembersWordPressSessions(): void
+    {
+        $GLOBALS['__bcc_ms']['rows'][self::UID] = true;
+
+        ob_start();
+        $this->service()->suspendUser(self::UID, 'manual_suspension');
+        ob_end_clean();
+
+        self::assertSame([self::UID], $GLOBALS['__bcc_ms']['wp_sessions_destroyed']);
+    }
+
+    public function testBulkSuspendDestroysEveryMembersWordPressSessions(): void
+    {
+        foreach ([4701, 4702] as $uid) {
+            $GLOBALS['__bcc_ms']['rows'][$uid] = true;
+        }
+
+        self::runAdminHandler(fn () => $this->service()->handleBulkAction([4701, 4702], 'suspend'));
+
+        self::assertSame([4701, 4702], $GLOBALS['__bcc_ms']['wp_sessions_destroyed']);
+    }
+
+    public function testUnsuspendDestroysNothing(): void
+    {
+        $GLOBALS['__bcc_ms']['rows'][4801] = true;
+
+        ob_start();
+        $this->service()->unsuspendUser(4801);
+        ob_end_clean();
+
+        self::assertSame([], $GLOBALS['__bcc_ms']['wp_sessions_destroyed']);
+    }
+
+    public function testAFailedTokenRevokeStillEndsTheWordPressSessions(): void
+    {
+        // The two revokes are separate after-commit steps (source pin: the
+        // revoke helpers are each wrapped on their own).
+        $src = (string) preg_replace('/\s+/', ' ', (string) file_get_contents(dirname(__DIR__, 2) . '/app/Domain/Core/Services/Admin/ModerationService.php'));
+        self::assertStringContainsString("\$this->afterCommit('revoke_sessions', \$userId, fn () => \$this->revokeSessions(\$userId)); // Its own step, so a failure in one revoke cannot skip the other. \$this->afterCommit('destroy_wp_sessions', \$userId, fn () => \$this->destroyWordPressSessions(\$userId));", $src);
     }
 }
