@@ -428,7 +428,8 @@ final class AccountPreHijackTest extends TestCase
         // Wallet signup: never marks the address verified, and starts verification.
         $wallet = self::src('WalletAuthController.php');
         self::assertDoesNotMatchRegularExpression("/META_EMAIL_VERIFIED,\s*'1'/", $wallet);
-        self::assertStringContainsString('AuthSupport::startWalletSignupEmailVerification($userIdInt, $email)', $wallet);
+        // F-294: the code and link go to the typed address (held pending).
+        self::assertStringContainsString('AuthSupport::startWalletSignupEmailVerification($userIdInt, $typedEmail !== \'\' ? $typedEmail : $email)', $wallet);
 
         // Password signup, X signup, resend: one sequence, no inline copies left.
         foreach (['PasswordAuthController.php', 'OAuthController.php', 'EmailVerificationController.php'] as $file) {
