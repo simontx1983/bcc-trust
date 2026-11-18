@@ -357,4 +357,36 @@ final class MyProfilePrefsEndpointAtomicityTest extends TestCase
 
         self::assertSame(200, $response->get_status());
     }
+
+    /** @return iterable<string, array{string}> */
+    public static function switches(): iterable
+    {
+        foreach (['hide_from_search', 'hide_online', 'show_groups_on_profile', 'show_reviews_on_profile', 'mentor_opt_in'] as $param) {
+            yield $param => [$param];
+        }
+    }
+
+    /**
+     * F-294: a switch whose value is not a boolean used to read as false and
+     * switch the setting OFF with a 200. It is a 422 now, and nothing is
+     * written, including the other, valid fields in the same request.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('switches')]
+    public function testANonBooleanSwitchIs422AndWritesNothing(string $param): void
+    {
+        $res = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(['hide_online' => true, $param => 'maybe']));
+
+        self::assertSame(422, $res->get_status());
+        self::assertSame(sprintf('`%s` must be true or false.', $param), $res->get_data()['error']['message'] ?? null);
+        self::assertSame([], $GLOBALS['__bcc_prefs_writes'], 'validated before any write');
+    }
+
+    public function testTheAcceptedSpellingsStillWork(): void
+    {
+        $res = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(['hide_online' => 'off', 'hide_birthday_year' => 'YES']));
+
+        self::assertSame(200, $res->get_status());
+        self::assertFalse($res->get_data()['data']['hide_online']);
+        self::assertTrue($res->get_data()['data']['hide_birthday_year']);
+    }
 }

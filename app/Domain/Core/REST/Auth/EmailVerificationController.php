@@ -114,7 +114,9 @@ final class EmailVerificationController
      */
     public function verifyEmail(WP_REST_Request $request): WP_REST_Response
     {
-        if (!\BCC\Core\Security\Throttle::allow('verify_email', AuthSupport::VERIFY_EMAIL_RATE_LIMIT, 3600)) {
+        // F-290: refused calls aren't recorded; the per-code cap below is
+        // the brute-force guard.
+        if (!\BCC\Core\Security\Throttle::allow('verify_email', AuthSupport::VERIFY_EMAIL_RATE_LIMIT, 3600, null, false)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many attempts. Try again later.', 429);
         }
 
@@ -215,13 +217,27 @@ final class EmailVerificationController
      */
     public function resendVerification(WP_REST_Request $request): WP_REST_Response
     {
-        if (!\BCC\Core\Security\Throttle::allow('resend_verification', AuthSupport::RESEND_VERIFICATION_RATE_LIMIT, 3600)) {
+        // F-290: as forgot-password — the network bucket doesn't record
+        // refused calls; the per-address mail caps count every request.
+        if (!\BCC\Core\Security\Throttle::allow('resend_verification', AuthSupport::RESEND_VERIFICATION_RATE_LIMIT, 3600, null, false)) {
             return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
         }
 
         $email = sanitize_email((string) $request->get_param('email'));
         if ($email === '' || !is_email($email)) {
             return ApiResponse::error('bcc_invalid_request', 'A valid email is required.', 422);
+        }
+
+        // F-290: the per-network bucket above is office scale; this caps mail
+        // to any one inbox, before the lookup and whether or not it exists.
+        if (!AuthSupport::allowMailToAddress(
+            'resend_verification',
+            $email,
+            AuthSupport::RESEND_VERIFICATION_EMAIL_RATE_LIMIT,
+            AuthSupport::RESEND_VERIFICATION_EMAIL_GLOBAL_RATE_LIMIT
+        )) {
+            AuthSupport::releaseThrottle('resend_verification', 3600);
+            return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
         }
 
         $user = get_user_by('email', $email);

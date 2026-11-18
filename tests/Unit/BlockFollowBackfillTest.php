@@ -72,6 +72,42 @@ final class BlockFollowBackfillTest extends TestCase
         self::assertSame([0, 500, 1000, 1200], $GLOBALS['__bcc_bfb']['cursors'], 'cursor = last id seen');
     }
 
+    /**
+     * Core #117 review INFO: the cursor is the page's highest RAW id, so a
+     * page made entirely of rows the repository drops must not end the walk
+     * and hide every block after it.
+     */
+    public function testAPageOfOnlyDroppedRowsDoesNotEndTheWalk(): void
+    {
+        $blocks = [];
+        for ($i = 1; $i <= 500; $i++) {
+            $blocks[] = ['id' => $i, 'blocker' => 0, 'blocked' => 9]; // a full page, all malformed
+        }
+        $blocks[] = ['id' => 501, 'blocker' => 10, 'blocked' => 20];
+        $GLOBALS['__bcc_bfb']['blocks']  = $blocks;
+        $GLOBALS['__bcc_bfb']['follows'] = ['10:20'];
+
+        $plan = $this->backfill()->plan();
+
+        self::assertTrue($plan['ok']);
+        self::assertSame([[10, 20]], $plan['pairs'], 'the block after the malformed page is still planned');
+        self::assertSame([0, 500, 501], $GLOBALS['__bcc_bfb']['cursors']);
+    }
+
+    public function testThePageCountIsBoundedEvenWhenNoRowIsUsable(): void
+    {
+        $blocks = [];
+        for ($i = 1; $i <= (BlockFollowBackfill::MAX_PAGES + 1) * BlockFollowBackfill::PAGE_SIZE; $i++) {
+            $blocks[] = ['id' => $i, 'blocker' => 0, 'blocked' => 0];
+        }
+        $GLOBALS['__bcc_bfb']['blocks'] = $blocks;
+
+        $plan = $this->backfill()->plan();
+
+        self::assertFalse($plan['ok']);
+        self::assertCount(BlockFollowBackfill::MAX_PAGES + 1, $GLOBALS['__bcc_bfb']['cursors']);
+    }
+
     public function testAFailedBlockPageFailsTheWholePlan(): void
     {
         $GLOBALS['__bcc_bfb']['page_fails'] = true;

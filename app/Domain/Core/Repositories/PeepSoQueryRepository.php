@@ -134,6 +134,93 @@ final class PeepSoQueryRepository
     }
 
     /**
+     * F-299 backfill: claimed pages whose claimer has no PeepSo
+     * `member_owner` row — the rows a claim made before F-299 never wrote.
+     *
+     * A candidate is a VERIFIED operator/creator PAGE claim (the page-mirror
+     * row) whose claimer IS the page's author (published `peepso-page`), with
+     * no `member_owner` row for that pair. Pages whose author is not the
+     * claimer are excluded on purpose: ownership is never assigned by a
+     * repair (onPageClaimed's no-automatic-transfer rule), and an author-0
+     * page heals when its claim is resubmitted.
+     *
+     * Keyset by page id, bounded by $limit (capped at 500). NULL = the read
+     * did not run (e.g. PeepSo Pages' table is missing) — never an empty
+     * list, so a caller cannot report "nothing to do" on a failure.
+     *
+     * Each row also carries what the backfill needs to decide and to be
+     * rolled back exactly: `current_role` (the claimer's existing
+     * peepso_page_members status on the page, null = no row; F-360: ranked
+     * by claimerStatusOrder(), so with several rows a `banned` one wins and
+     * the backfill's ban skip can never be hidden behind an older non-banned
+     * row — the same read as the live path's claimerPageStatus()) and
+     * `other_owner` (a DIFFERENT user already holding `member_owner` on the
+     * page, 0 = none).
+     *
+     * @return list<array{page_id: int, user_id: int, current_role: ?string, other_owner: int}>|null
+     */
+    public static function claimedPagesMissingOwnerRow(int $afterPageId, int $limit): ?array
+    {
+        global $wpdb;
+        $limit   = max(1, min(500, $limit));
+        $claims  = \BCC\Core\DB\DB::table('onchain_claims');
+        $members = $wpdb->prefix . 'peepso_page_members';
+
+        self::clearLastError();
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT c.entity_id AS page_id, c.user_id,
+                    (SELECT cur.pm_user_status FROM {$members} cur
+                      WHERE cur.pm_page_id = c.entity_id AND cur.pm_user_id = c.user_id
+                      ORDER BY " . self::claimerStatusOrder('cur') . "
+                      LIMIT 1) AS claimer_status,
+                    (SELECT oth.pm_user_id FROM {$members} oth
+                      WHERE oth.pm_page_id = c.entity_id AND oth.pm_user_status = 'member_owner'
+                        AND oth.pm_user_id <> c.user_id
+                      ORDER BY oth.pm_id ASC LIMIT 1) AS other_owner
+               FROM {$claims} c
+               JOIN {$wpdb->posts} p
+                 ON p.ID = c.entity_id
+                AND p.post_type = 'peepso-page'
+                AND p.post_status = 'publish'
+                AND p.post_author = c.user_id
+              WHERE c.entity_type = 'page'
+                AND c.status = 'verified'
+                AND c.claim_role IN ('operator', 'creator')
+                AND c.entity_id > %d
+                AND NOT EXISTS (
+                    SELECT 1 FROM {$members} pm
+                     WHERE pm.pm_page_id = c.entity_id
+                       AND pm.pm_user_id = c.user_id
+                       AND pm.pm_user_status = 'member_owner'
+                )
+              ORDER BY c.entity_id ASC
+              LIMIT %d",
+            max(0, $afterPageId),
+            $limit
+        ));
+        if ($ok === false || self::lastError() !== '') {
+            return null;
+        }
+
+        $out = [];
+        foreach (is_array($wpdb->last_result) ? $wpdb->last_result : [] as $row) {
+            if (is_object($row) && isset($row->page_id, $row->user_id)) {
+                $out[] = [
+                    'page_id'      => (int) $row->page_id,
+                    'user_id'      => (int) $row->user_id,
+                    // SQL alias `claimer_status`, NOT `current_role`: that is a
+                    // reserved word in MariaDB (CURRENT_ROLE()), a syntax error
+                    // there while MySQL 8 accepts it. Production is MariaDB.
+                    'current_role' => isset($row->claimer_status) && is_string($row->claimer_status) ? $row->claimer_status : null,
+                    'other_owner'  => isset($row->other_owner) ? (int) $row->other_owner : 0,
+                ];
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * F-245: which of these activity ids still back a LIVE post — the
      * activity row exists and its post is published (not trashed, drafted
      * or deleted). Bounded by the caller's list (one bell page, <= 50).
@@ -186,6 +273,95 @@ final class PeepSoQueryRepository
         }
 
         return $out;
+    }
+
+    /**
+     * F-299 live guard: a DIFFERENT user holding `member_owner` on the page
+     * (0 = none), so a verified claim never creates a second owner. NULL =
+     * the read did not run; the caller then writes nothing.
+     */
+    public static function otherPageOwnerId(int $pageId, int $userId): ?int
+    {
+        if ($pageId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $members = $wpdb->prefix . 'peepso_page_members';
+
+        self::clearLastError();
+        $owner = $wpdb->get_var($wpdb->prepare(
+            "SELECT pm_user_id FROM {$members}
+              WHERE pm_page_id = %d AND pm_user_status = 'member_owner' AND pm_user_id <> %d
+              ORDER BY pm_id ASC
+              LIMIT 1",
+            $pageId,
+            $userId
+        ));
+        if (self::lastError() !== '') {
+            return null;
+        }
+
+        return $owner === null ? 0 : (int) $owner;
+    }
+
+    /**
+     * F-360 live read: the claimer's OWN status on the page, ranked by
+     * claimerStatusOrder() — the same read the backfill makes. The live
+     * claim path (ensurePageOwnerMembership) and the revoke release
+     * (releaseClaimedPage) decide on this, never on PeepSoPageUser's flags:
+     * PeepSo's model reads ONE arbitrary row of the pair (`LIMIT 1`, no
+     * ORDER BY), and peepso_page_members has no unique (page, user) key.
+     *
+     * `status` is null when the pair has no row. NULL overall = the read did
+     * not run; the caller then writes nothing.
+     *
+     * @return array{status: ?string}|null
+     */
+    public static function claimerPageStatus(int $pageId, int $userId): ?array
+    {
+        if ($pageId <= 0 || $userId <= 0) {
+            return ['status' => null];
+        }
+
+        global $wpdb;
+        $members = $wpdb->prefix . 'peepso_page_members';
+
+        self::clearLastError();
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT cur.pm_user_status FROM {$members} cur
+              WHERE cur.pm_page_id = %d AND cur.pm_user_id = %d
+              ORDER BY " . self::claimerStatusOrder('cur') . "
+              LIMIT 1",
+            $pageId,
+            $userId
+        ));
+        if ($ok === false || self::lastError() !== '') {
+            return null;
+        }
+
+        $row = is_array($wpdb->last_result) ? ($wpdb->last_result[0] ?? null) : null;
+
+        return [
+            'status' => is_object($row) && isset($row->pm_user_status) && is_string($row->pm_user_status)
+                ? $row->pm_user_status
+                : null,
+        ];
+    }
+
+    /**
+     * F-360: the ONE order for "the claimer's status on a page" when the pair
+     * has several peepso_page_members rows: a `banned` row first (a ban is
+     * never hidden), then a `member_owner` row (an owner is never missed),
+     * then the oldest. So `banned` means a ban exists, `member_owner` means
+     * an owner row exists and no ban, and anything else means neither.
+     * $alias is always a literal from this class.
+     */
+    private static function claimerStatusOrder(string $alias): string
+    {
+        return "({$alias}.pm_user_status = 'banned') DESC, "
+            . "({$alias}.pm_user_status = 'member_owner') DESC, "
+            . "{$alias}.pm_id ASC";
     }
 
     // Separate helpers (bcc-core's shape) so static analysis does not narrow

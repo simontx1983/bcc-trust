@@ -1225,7 +1225,12 @@ class ScoreRepository {
      *
      * @throws Exception on database failure
      */
-    public function applyPenalty(int $pageId, float $delta): void {
+    /**
+     * @return int rows updated. 0 means the page has no score row, so no
+     *         penalty landed (F-310: the admin Penalize path refuses that).
+     * @throws Exception on a failed UPDATE
+     */
+    public function applyPenalty(int $pageId, float $delta): int {
         global $wpdb;
 
         $totalScoreSql = \BCC\Trust\Core\Services\TrustScoreService::formulaSql();
@@ -1259,11 +1264,14 @@ class ScoreRepository {
         }
 
         $this->mirrorSelfPageTierToUserInfo($pageId);
+        $updated = (int) $result;
 
         // Bump the score-cache generation like every other score writer —
         // without this a penalty served a stale getByPageId() score for up
         // to CACHE_TTL (the generation-counter invariant, ScoreRepository:141).
         $this->invalidateCache($pageId);
+
+        return $updated;
     }
 
     /**

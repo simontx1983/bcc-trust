@@ -190,6 +190,10 @@ class PeepSoIntegration
                         'note'           => 'no automatic transfer by design; needs an explicit reassignment decision',
                     ]
                 );
+            } else {
+                // F-299: already this user's page — make sure the PeepSo
+                // owner row exists too (idempotent; heals pre-F-299 claims).
+                self::ensurePageOwnerMembership($pageId, $userId);
             }
 
             return;
@@ -210,6 +214,31 @@ class PeepSoIntegration
         }
 
         $this->userInfoRepo->incrementPageCount($userId, $pageId);
+
+        // F-334: a page freed by a revoked claim keeps its score rows, which
+        // are keyed to the PREVIOUS owner (`page_owner_id` is stamped when a
+        // row is created and only handleOwnerChange() moves it). The new
+        // operator takes the page over, its score history included. A page
+        // claimed for the first time has no score row (an unowned page cannot
+        // get one), so this is a no-op there.
+        $previousScoreOwner = $this->scoreRepo->getPageOwnerId($pageId);
+        if ($previousScoreOwner > 0 && $previousScoreOwner !== $userId) {
+            $this->scoreRepo->updateOwner($pageId, $userId);
+            AuditLogger::log('page_owner_changed', $pageId, [
+                'old_owner' => $previousScoreOwner,
+                'new_owner' => $userId,
+                'via'       => 'claim_after_release',
+            ], 'page');
+        }
+
+        // F-299: record the claimer as the page's PeepSo OWNER too. Every
+        // directory and card owner signal (the /members VALIDATORS filter
+        // and chip counts, owned-page counts on member cards) reads the
+        // `peepso_page_members` `member_owner` row, and moving post_author
+        // alone never wrote one — so a verified operator never appeared as
+        // the owner of the page they had just claimed. Best-effort and
+        // logged: the claim itself is already recorded.
+        self::ensurePageOwnerMembership($pageId, $userId);
 
         // V1.6 follower migration — drain bcc_page_follows for this
         // page into real PeepSo user→user follows on the new operator.
@@ -296,7 +325,258 @@ class PeepSoIntegration
             return;
         }
 
+        // F-299: the resubmitted-claim path for a page this user already
+        // owns. It also heals a missing `member_owner` row — a claim made
+        // before F-299, or one whose owner write failed — idempotently.
+        self::ensurePageOwnerMembership($pageId, $userId);
+
         $this->migratePageFollowersToPeepSo($pageId, $userId);
+    }
+
+    /**
+     * F-334 (user decision): a REVOKED claim frees the page, so the next
+     * verified operator's claim takes it over.
+     *
+     * For a page the revoked user lost (ClaimRepository::revoke()'s
+     * `mirror_page_ids`):
+     *   - nothing happens if ANY verified operator/creator claim still binds
+     *     the page (a multi-chain page can be held through another
+     *     validator) — read fail-closed: unknown never frees a page;
+     *   - nothing happens either if the old owner is BANNED on the page
+     *     (F-360: no ban is lifted and no page is split automatically; one
+     *     `page_owner_release_skipped` audit row asks for manual review);
+     *   - their PeepSo `member_owner` row is demoted to `member` (F-299
+     *     wrote it); they stay a member/follower;
+     *   - `post_author` goes back to 0, only if it is still this user (an
+     *     admin reassignment since the claim is left alone), and their
+     *     owned-page count drops;
+     *   - one `page_owner_released` audit row records the old owner.
+     *
+     * ⚠ The DEMOTION RUNS FIRST, so a step that fails can never leave a
+     * page half-freed. A failed demotion stops before `post_author` is
+     * touched, and the page stays fully owned. A failed author reset after
+     * the demotion leaves `post_author` on the old owner, and onPageClaimed()
+     * refuses a page with a different author. Author-first, a failed
+     * demotion left an author-0 page: the next claimer became its author
+     * while the old `member_owner` row kept PeepSo ownership.
+     *
+     * The score rows stay keyed to the old owner until the next claim moves
+     * them (onPageClaimed). Called from ClaimService::revokeClaim's isolated
+     * post-commit steps: answers false on any failure, never throws.
+     */
+    public function releaseClaimedPage(int $pageId, int $userId): bool
+    {
+        if ($pageId <= 0 || $userId <= 0) {
+            return false;
+        }
+
+        try {
+            if (\BCC\Trust\Onchain\Repositories\ClaimRepository::anyPrimaryClaimBoundToPage($pageId)) {
+                \BCC\Core\Log\Logger::info('[bcc-trust] page release skipped - another verified claim still holds the page', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                ]);
+                return false;
+            }
+
+            // 1. Demote first (see the ⚠ above). Nothing has changed yet,
+            //    so any stop here leaves the page fully owned.
+            //    F-360: decided on ONE ranked read of the old owner's rows,
+            //    never on PeepSoPageUser's flags (one ARBITRARY row of the
+            //    pair, while member_modify() rewrites EVERY row of it).
+            $read = \BCC\Trust\Core\Repositories\PeepSoQueryRepository::claimerPageStatus($pageId, $userId);
+            if ($read === null) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] page release: owner status read failed - page left owned', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                ]);
+                return false;
+            }
+            if ($read['status'] === 'banned') {
+                // A ban on the pair: member_modify() would lift it, and
+                // resetting the author alone could leave an owner row behind
+                // (a split page). Neither is done automatically.
+                \BCC\Core\Log\Logger::warning('[bcc-trust] page release skipped for manual review - the old owner is banned on the page', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                ]);
+                AuditLogger::log('page_owner_release_skipped', $pageId, [
+                    'old_owner' => $userId,
+                    'reason'    => 'banned',
+                ], 'page');
+                return false;
+            }
+
+            $ownerRow = 'none';
+            if ($read['status'] === 'member_owner') {
+                if (!class_exists('PeepSoPageUser')) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] page release: PeepSo Pages is not loaded - page left owned', [
+                        'page_id' => $pageId,
+                        'user_id' => $userId,
+                    ]);
+                    return false;
+                }
+                $member = new \PeepSoPageUser($pageId, $userId);
+                if ($member->member_modify('member') !== true) {
+                    \BCC\Core\Log\Logger::error('[bcc-trust] page release: member_owner demotion failed - page left owned', [
+                        'page_id' => $pageId,
+                        'user_id' => $userId,
+                    ]);
+                    return false;
+                }
+                $ownerRow = 'demoted';
+            }
+
+            // 2. Then the author.
+            $authorReset       = false;
+            $authorResetFailed = false;
+            if ((int) get_post_field('post_author', $pageId) === $userId) {
+                $update = wp_update_post(['ID' => $pageId, 'post_author' => 0], true);
+                if (is_wp_error($update)) {
+                    $authorResetFailed = true;
+                    \BCC\Core\Log\Logger::error('[bcc-trust] page release: post_author reset failed', [
+                        'page_id'   => $pageId,
+                        'user_id'   => $userId,
+                        'owner_row' => $ownerRow,
+                        'error'     => $update->get_error_message(),
+                    ]);
+                } else {
+                    $this->userInfoRepo->decrementPageCount($userId, $pageId);
+                    $authorReset = true;
+                }
+            }
+
+            if ($authorResetFailed && $ownerRow === 'none') {
+                return false; // nothing changed: no release to record
+            }
+
+            $meta = [
+                'old_owner'    => $userId,
+                'author_reset' => $authorReset,
+                'owner_row'    => $ownerRow,
+            ];
+            if ($authorResetFailed) {
+                $meta['author_reset_failed'] = true; // the demotion DID happen
+            }
+            AuditLogger::log('page_owner_released', $pageId, $meta, 'page');
+
+            return !$authorResetFailed;
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] page release failed', [
+                'page_id' => $pageId,
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return false;
+        }
+    }
+
+    /**
+     * F-299: make $userId the PeepSo `member_owner` of $pageId, through
+     * PeepSo's own model — the same `member_join()` + `member_modify(
+     * 'member_owner')` pair PeepSoPage::create() runs for a page's creator,
+     * which also recounts the page's members.
+     *
+     * Idempotent: an existing owner row is left alone; an existing row of
+     * another status is promoted without a join (a join on an existing row
+     * would rewrite it to plain `member` first). Silent on success; any
+     * failure is logged and answered `false`, never thrown — the claim is
+     * already committed when this runs, and the drain retry heals it.
+     *
+     * Exposed (public static) for the one-off backfill command, which must
+     * write exactly what a claim writes.
+     */
+    public static function ensurePageOwnerMembership(int $pageId, int $userId): bool
+    {
+        if ($pageId <= 0 || $userId <= 0) {
+            return false;
+        }
+
+        if (!class_exists('PeepSoPageUser')) {
+            \BCC\Core\Log\Logger::warning('[bcc-trust] page owner membership not written - PeepSo Pages is not loaded', [
+                'page_id' => $pageId,
+                'user_id' => $userId,
+            ]);
+            return false;
+        }
+
+        try {
+            // F-360: decide on ONE ranked read of the claimer's own rows,
+            // never on PeepSoPageUser's flags. PeepSo's model reads one
+            // ARBITRARY row of the pair, and member_modify() rewrites EVERY
+            // row of it, so [member, banned] read as `member` would have been
+            // promoted, rewriting the banned row and lifting the ban.
+            $read = \BCC\Trust\Core\Repositories\PeepSoQueryRepository::claimerPageStatus($pageId, $userId);
+            if ($read === null) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] page owner membership not written - claimer status read failed', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                ]);
+                return false;
+            }
+            $claimerStatus = $read['status'];
+            if ($claimerStatus === 'member_owner') {
+                return true; // ranked read: an owner row and no ban
+            }
+
+            // F-299 live guard — the SAME decision the backfill makes
+            // (PageOwnerDecision): a claim never lifts a ban and never adds
+            // a second owner. Either case is skipped, logged and recorded in
+            // the admin audit log for manual review. An unreadable owner
+            // check writes nothing (never risk a second owner).
+            $otherOwner = \BCC\Trust\Core\Repositories\PeepSoQueryRepository::otherPageOwnerId($pageId, $userId);
+            if ($otherOwner === null) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] page owner membership not written - owner check failed', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                ]);
+                return false;
+            }
+            $decision = \BCC\Trust\Core\Support\PageOwnerDecision::decide($claimerStatus, $otherOwner);
+            if (\BCC\Trust\Core\Support\PageOwnerDecision::isSkip($decision)) {
+                \BCC\Core\Log\Logger::warning('[bcc-trust] page owner membership skipped for manual review', [
+                    'page_id'     => $pageId,
+                    'user_id'     => $userId,
+                    'reason'      => $decision,
+                    'other_owner' => $otherOwner,
+                ]);
+                AuditLogger::log('page_owner_membership_skipped', $pageId, [
+                    'user_id'     => $userId,
+                    'reason'      => $decision,
+                    'other_owner' => $otherOwner,
+                ], 'page', $userId);
+                return false;
+            }
+
+            // Only JOIN or PROMOTE reach here: the pair has no `banned` row
+            // (that is SKIP_BANNED), so member_modify() lifts no ban.
+            $member = new \PeepSoPageUser($pageId, $userId);
+            if ($decision === \BCC\Trust\Core\Support\PageOwnerDecision::JOIN && $member->member_join() !== true) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] page owner membership: member_join failed', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                ]);
+                return false;
+            }
+
+            if ($member->member_modify('member_owner') !== true || $member->is_owner !== true) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] page owner membership: promotion to member_owner failed', [
+                    'page_id' => $pageId,
+                    'user_id' => $userId,
+                    'role'    => is_string($member->role) ? $member->role : '',
+                ]);
+                return false;
+            }
+
+            return true;
+        } catch (\Throwable $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] page owner membership: write threw', [
+                'page_id' => $pageId,
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return false;
+        }
     }
 
     /**
