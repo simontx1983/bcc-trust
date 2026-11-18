@@ -34,10 +34,8 @@ if (!defined('ABSPATH')) {
 
 final class BlockFollowsBackfillCommand
 {
-    private const ALLOWED_FLAGS = ['apply', 'confirm', 'user-id'];
-
-    private const EXIT_INVALID_ARGS = 2;
-    private const EXIT_FAILED       = 3;
+    private const EXIT_INVALID_ARGS = ApplyGuard::EXIT_INVALID_ARGS;
+    private const EXIT_FAILED       = ApplyGuard::EXIT_FAILED;
 
     /**
      * Remove member-to-member follows between every blocked pair.
@@ -111,66 +109,30 @@ final class BlockFollowsBackfillCommand
     }
 
     /**
+     * The flags --apply, --confirm=<token> and --user-id=<id> (the shared
+     * ApplyGuard rules every dry-run-first repair command uses).
+     *
      * @param list<string>         $args
      * @param array<string, mixed> $assoc
      * @return array{ok: true, apply: bool, confirm: string|null, user_id: string|null}|array{ok: false, error: string}
      */
     public static function parse(array $args, array $assoc): array
     {
-        if ($args !== []) {
-            return ['ok' => false, 'error' => 'This command takes no positional arguments.'];
-        }
-        $unknown = array_values(array_diff(array_keys($assoc), self::ALLOWED_FLAGS));
-        if ($unknown !== []) {
-            return ['ok' => false, 'error' => 'Unknown flag(s): --' . implode(', --', array_map('strval', $unknown)) . '. Accepted: --apply, --confirm=<token>, --user-id=<id>.'];
-        }
-
-        $apply = false;
-        if (array_key_exists('apply', $assoc)) {
-            if ($assoc['apply'] !== true) {
-                return ['ok' => false, 'error' => '--apply must be the bare flag.'];
-            }
-            $apply = true;
-        }
-        $confirm = null;
-        if (array_key_exists('confirm', $assoc)) {
-            if (!is_string($assoc['confirm']) || $assoc['confirm'] === '') {
-                return ['ok' => false, 'error' => '--confirm requires a value.'];
-            }
-            $confirm = $assoc['confirm'];
-        }
-        $userId = null;
-        if (array_key_exists('user-id', $assoc)) {
-            if (!is_string($assoc['user-id']) && !is_int($assoc['user-id'])) {
-                return ['ok' => false, 'error' => '--user-id requires a numeric value.'];
-            }
-            $userId = (string) $assoc['user-id'];
-        }
-
-        return ['ok' => true, 'apply' => $apply, 'confirm' => $confirm, 'user_id' => $userId];
+        return ApplyGuard::parse($args, $assoc);
     }
 
     private static function requireOperator(?string $raw): int
     {
-        if ($raw === null || !ctype_digit($raw) || (int) $raw <= 0) {
-            self::fail('--apply requires --user-id=<administrator-id>.', self::EXIT_INVALID_ARGS);
-        }
-        $id = (int) $raw;
-        if (get_userdata($id) === false || !user_can($id, 'manage_options')) {
-            self::fail('--user-id must be an existing user holding manage_options.', self::EXIT_INVALID_ARGS);
-        }
-        return $id;
+        return ApplyGuard::requireOperator($raw);
     }
 
     private static function environment(): string
     {
-        $env = defined('BCC_ENV') ? (string) constant('BCC_ENV') : 'unknown';
-        return preg_replace('/[^a-z0-9_-]/i', '', $env) ?: 'unknown';
+        return ApplyGuard::environment();
     }
 
     private static function fail(string $message, int $code): never
     {
-        \WP_CLI::error($message, false);
-        \WP_CLI::halt($code);
+        ApplyGuard::fail($message, $code);
     }
 }
