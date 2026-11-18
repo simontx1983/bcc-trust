@@ -241,19 +241,6 @@ namespace BCC\Trust\Onchain\Repositories {
     }
 }
 
-namespace BCC\Trust\Core\Security {
-    if (!class_exists(__NAMESPACE__ . '\\AuditLogger', false)) {
-        final class AuditLogger
-        {
-            /** @param array<string, mixed> $meta */
-            public static function log(string $action, ?int $targetId = null, array $meta = [], ?string $targetType = null, ?int $userId = null): void
-            {
-                $GLOBALS['__bcc_drain']['audits'][] = [$action, $targetId, $meta];
-            }
-        }
-    }
-}
-
 namespace BCC\Trust\Core {
     if (!class_exists(Plugin::class, false)) {
         final class Plugin

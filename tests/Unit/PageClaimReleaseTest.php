@@ -68,10 +68,22 @@ final class PageClaimReleaseTest extends TestCase
         return $instance;
     }
 
-    /** @return list<array{0: string, 1: int|null, 2: array<string, mixed>}> */
+    /**
+     * The stubs' AuditLogger records keyed rows (`action`, `target`, `meta`);
+     * normalised here to [action, target, meta] for terse assertions.
+     *
+     * @return list<array{0: string, 1: int|null, 2: array<string, mixed>}>
+     */
     private static function audits(string $action): array
     {
-        return array_values(array_filter($GLOBALS['__bcc_drain']['audits'], static fn (array $a): bool => $a[0] === $action));
+        $out = [];
+        foreach ($GLOBALS['__bcc_drain']['audits'] as $a) {
+            if (($a['action'] ?? null) === $action) {
+                $out[] = [$a['action'], $a['target'] ?? null, $a['meta'] ?? []];
+            }
+        }
+
+        return $out;
     }
 
     // ── the release ─────────────────────────────────────────────────────
