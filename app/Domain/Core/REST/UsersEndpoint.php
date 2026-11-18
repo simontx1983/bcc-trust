@@ -792,8 +792,9 @@ final class UsersEndpoint
         //
         // It also honours three things this endpoint never implemented:
         // banned and unvalidated accounts are excluded (`usr_role`), blocks
-        // are respected in both directions when `user_blocking_enable` is
-        // on, and `hide_from_search` finally works — the contract has
+        // are respected in both directions (PeepSo gates that on
+        // `user_blocking_enable`, which PrivacySettings pins ON, F-295), and
+        // `hide_from_search` finally works — the contract has
         // promised since v1.64 that it "excludes the user from directory +
         // member search", and nothing enforced it. ⚠ So member COUNTS can
         // legitimately drop with this change; that is the setting starting
