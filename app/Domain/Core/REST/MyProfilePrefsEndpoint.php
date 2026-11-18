@@ -436,6 +436,13 @@ final class MyProfilePrefsEndpoint
                         '`hidden_hall_ids` must contain positive integer group ids.'
                     );
                 }
+                // The (int) cast is DEFENCE, not behaviour: PHP coerces a
+                // numeric-string array key to int by itself, so storing via
+                // $seen[] normalises '12' to 12 whether or not this casts.
+                // Mutating it away changes no answer and PHPStan still infers
+                // list<int> through it, so no test and no type check can hold
+                // it. Kept because the list is a PUBLIC wire field and the
+                // guarantee should not rest on a language coercion.
                 $value = (int) $id;
                 if ($value <= 0) {
                     return self::badHallIds(
