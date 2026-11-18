@@ -268,6 +268,32 @@ final class CollectionHolderCannotClaimPageIntegrationTest extends TestCase
         }
     }
 
+    /**
+     * F-339: the two Solana unknowns map to their own codes and reasons —
+     * an outage is retryable (503), a creator the chain cannot prove is
+     * final (403) — never the wallet-mismatch default.
+     */
+    public function testTheTwoSolanaUnknownsMapToTheirOwnResponses(): void
+    {
+        $map = new \ReflectionMethod(PagesEndpoint::class, 'mapClaimFailure');
+        $map->setAccessible(true);
+
+        $cases = [
+            'verification_unavailable' => [503, 'bcc_unavailable', "We couldn't verify this collection's creator on-chain right now. Try again in a few minutes."],
+            'creator_unverifiable'     => [403, 'bcc_forbidden', "We can't confirm this collection's creator on-chain."],
+        ];
+        foreach ($cases as $reason => [$status, $code, $message]) {
+            /** @var \WP_REST_Response $response */
+            $response = $map->invoke(null, ['success' => false, 'error' => $reason, 'message' => 'x']);
+            $error    = $this->errorOf($response);
+
+            self::assertSame($status, $response->get_status(), $reason);
+            self::assertSame($code, $error['code'], $reason);
+            self::assertSame($message, $error['message'], $reason);
+            self::assertSame($reason, $error['data']['reason'] ?? null, $reason);
+        }
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────
 
     private function claim(int $collectionId): \WP_REST_Response

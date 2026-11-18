@@ -192,9 +192,9 @@ namespace BCC\Trust\Onchain\Tests\Unit {
             self::assertSame([], TestSweep::$ownerCalls);
         }
 
-        public function testACreatorClaimOnANonEvmChainIsUnknown(): void
+        public function testACreatorClaimOnAnUnsupportedChainIsUnknown(): void
         {
-            TestSweep::$rows = [self::creatorClaim(1, 'solana')];
+            TestSweep::$rows = [self::creatorClaim(1, 'cosmos')];
             TestSweep::$wallets[6] = [self::wallet('0xabc', 1)];
 
             $stats = (new TestSweep())->sweep();
@@ -202,6 +202,54 @@ namespace BCC\Trust\Onchain\Tests\Unit {
             self::assertSame(['creator_check_unsupported_chain' => 1], $stats['skipped_reasons']);
             self::assertSame([], TestSweep::$wouldRevoke);
             self::assertSame([], TestSweep::$ownerCalls);
+            self::assertSame([], TestSweep::$solanaCalls);
+        }
+
+        /**
+         * F-339: a Solana creator claim is re-verified against the collection
+         * mint's current full update authority. Same mapping and rule as EVM
+         * (F-14 decision A): true keeps, a different real authority revokes,
+         * unknown (renounced, unreadable, outage) never revokes.
+         */
+        public function testSolanaAuthorityVerdictsMapToKeepRevokeAndUnknown(): void
+        {
+            TestSweep::$rows = [self::creatorClaim(1, 'solana'), self::creatorClaim(2, 'solana'), self::creatorClaim(3, 'solana')];
+            TestSweep::$wallets[6] = [self::wallet('0xabc', 1)];
+            TestSweep::$solanaVerdicts = [true, false, null];
+
+            $stats = (new TestSweep())->sweep();
+
+            self::assertSame(1, $stats['kept']);
+            self::assertSame([[2, 'no_longer_owner']], TestSweep::$wouldRevoke);
+            self::assertSame(['owner_unknown' => 1], $stats['skipped_reasons'], 'renounced or unreadable never revokes');
+            self::assertSame(['ethereum', '0xabc', '0xc0ffee'], TestSweep::$solanaCalls[0], "asked on the collection's chain, for the claim wallet and mint");
+            self::assertSame([], TestSweep::$ownerCalls, 'no EVM owner() read for a Solana claim');
+            self::assertSame(0, TestSweep::$verdictCalls, 'no holdings read for a creator claim');
+        }
+
+        public function testASolanaClaimWalletMustMatchExactlyBase58IsCaseSensitive(): void
+        {
+            TestSweep::$rows = [self::creatorClaim(1, 'solana')];
+            TestSweep::$wallets[6] = [self::wallet('0xABC', 1)]; // the claim wallet is 0xabc
+
+            (new TestSweep())->sweep();
+
+            self::assertSame([[1, 'wallet_link_gone']], TestSweep::$wouldRevoke);
+            self::assertSame([], TestSweep::$solanaCalls);
+        }
+
+        public function testTheSolanaReadIsChargedToTheBudgetAndStopsTheTick(): void
+        {
+            TestSweep::$rows = [self::creatorClaim(1, 'solana'), self::creatorClaim(2, 'solana')];
+            TestSweep::$wallets[6] = [self::wallet('0xabc', 1)];
+            TestSweep::$solanaVerdicts = [true, false];
+            TestSweep::$budgetRequests = 1;
+
+            $stats = (new TestSweep())->sweep();
+
+            self::assertCount(1, TestSweep::$solanaCalls, 'the second read is never made');
+            self::assertTrue($stats['stopped_on_budget']);
+            self::assertSame([], TestSweep::$wouldRevoke);
         }
 
         public function testACreatorClaimOnAVanishedCollectionIsUnknown(): void
@@ -418,6 +466,10 @@ namespace BCC\Trust\Onchain\Tests\Unit {
         public static int $secondsPerClaim = 0;
         /** @var list<string> */
         public static array $ownerVerdicts = [];
+        /** @var list<bool|null> */
+        public static array $solanaVerdicts = [];
+        /** @var list<array{0: string, 1: string, 2: string}> */
+        public static array $solanaCalls = [];
         /** @var list<array{string, string, string}> */
         public static array $ownerCalls = [];
         public static int $budgetRequests = 300;
@@ -430,6 +482,7 @@ namespace BCC\Trust\Onchain\Tests\Unit {
             self::$cursor = null; self::$continuations = 0; self::$lockHeldElsewhere = false; self::$releases = 0;
             self::$clock = 0; self::$secondsPerClaim = 0;
             self::$ownerVerdicts = []; self::$ownerCalls = []; self::$budgetRequests = 300;
+            self::$solanaVerdicts = []; self::$solanaCalls = [];
         }
 
         public function enforcing(): bool { return self::$enforce; }
@@ -469,6 +522,13 @@ namespace BCC\Trust\Onchain\Tests\Unit {
             self::$clock += self::$secondsPerClaim;
             $v = self::$verdicts[self::$verdictCalls] ?? EligibilityVerdict::eligible(1, 1);
             self::$verdictCalls++;
+            return $v;
+        }
+
+        protected function solanaAuthority(string $chainSlug, string $wallet, string $collectionMint): ?bool
+        {
+            $v = array_key_exists(count(self::$solanaCalls), self::$solanaVerdicts) ? self::$solanaVerdicts[count(self::$solanaCalls)] : null;
+            self::$solanaCalls[] = [$chainSlug, $wallet, $collectionMint];
             return $v;
         }
 
