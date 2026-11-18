@@ -584,7 +584,7 @@ HTML;
                   </table>
 
                   <p style="margin:0 0 20px;font-size:13px;line-height:1.6;color:#6e7681;">
-                    This link is single-use and expires in&nbsp;24&nbsp;hours.
+                    This link is single-use and expires in&nbsp;24&nbsp;hours. Only the most recent link works: requesting another one cancels this one.
                   </p>
 
                   <p style="margin:0;font-size:13px;line-height:1.65;color:#6e7681;">

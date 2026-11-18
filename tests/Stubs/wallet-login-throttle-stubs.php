@@ -79,6 +79,17 @@ namespace BCC\Core {
                     }
                 };
             }
+
+            /** F-294: the link write; answers $GLOBALS['__bcc_wl']['link_result'] (default 0 = failed). */
+            public static function resolveWalletLinkWrite(): object
+            {
+                return new class {
+                    public function linkWallet(int $userId, string $chainSlug, string $address, int $a = 0, string $b = 'user', string $c = ''): int
+                    {
+                        return (int) ($GLOBALS['__bcc_wl']['link_result'] ?? 0);
+                    }
+                };
+            }
         }
     }
 }

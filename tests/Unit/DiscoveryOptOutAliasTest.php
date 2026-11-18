@@ -30,7 +30,11 @@ final class DiscoveryOptOutAliasTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $GLOBALS['__bcc_um'] = [];
+        $GLOBALS['__bcc_um']      = [];
+        $GLOBALS['__bcc_actions'] = [];
+        if (!\function_exists('do_action')) {
+            eval('function do_action(string $hook, ...$args): void { $GLOBALS["__bcc_actions"][] = [$hook, $args]; }');
+        }
         if (!\function_exists('get_user_meta')) {
             eval(<<<'PHP'
                 function get_user_meta(int $userId, string $key = '', bool $single = false)
@@ -99,5 +103,23 @@ final class DiscoveryOptOutAliasTest extends TestCase
     {
         self::assertContains('discovery_optout', PrivacySettings::ALL_KEYS);
         self::assertArrayHasKey('discovery_optout', PrivacySettings::readAll(self::USER));
+    }
+
+    /** F-294 item 13: a write announces the keys it actually wrote, so caches can react. */
+    public function testAWriteAnnouncesTheKeysItWrote(): void
+    {
+        PrivacySettings::writePartial(self::USER, ['real_name_hidden' => true, 'not_a_key' => true]);
+
+        self::assertSame(
+            [['bcc_privacy_settings_changed', [self::USER, ['real_name_hidden']]]],
+            $GLOBALS['__bcc_actions']
+        );
+    }
+
+    public function testNothingWrittenNothingAnnounced(): void
+    {
+        PrivacySettings::writePartial(self::USER, ['not_a_key' => true]);
+
+        self::assertSame([], $GLOBALS['__bcc_actions']);
     }
 }

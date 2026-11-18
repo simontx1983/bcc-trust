@@ -192,6 +192,17 @@ final class PasswordAuthController
         // abandoned attempt does not block it forever.
         self::reclaimAbandonedSignups($handle, $email);
 
+        // F-294: a double submit (or a retry after a lost response) used to
+        // answer "handle taken" for the account the FIRST submit had just
+        // created. An identical retry (same email, handle and password)
+        // against that still-pending account, within a few minutes, gets the
+        // same 201 again. No second account, no second mail.
+        if (self::isIdenticalRecentSignup($handle, $email, $password)) {
+            $retry = ApiResponse::ok(['ok' => true, 'email' => $email], 201);
+            $retry->header('Cache-Control', 'no-store');
+            return $retry;
+        }
+
         // Fast-path collision check — UX shortcut so 99% of duplicates
         // get a clean 409 without spinning up wp_insert_user. The
         // remaining race window (a winning concurrent signup that
@@ -290,6 +301,40 @@ final class PasswordAuthController
      * email before another sign-up may take them (user-approved: 7 days).
      */
     public const ABANDONED_SIGNUP_SECONDS = 7 * 86400;
+
+    /**
+     * F-294: how long an identical sign-up retry counts as the same sign-up
+     * (user-approved: 10 minutes).
+     */
+    public const IDENTICAL_RETRY_SECONDS = 600;
+
+    /**
+     * True when the account holding $email is a still-pending email sign-up
+     * (isPendingEmailSignup), created for exactly this $handle, less than
+     * IDENTICAL_RETRY_SECONDS ago, with this $password. Every part has to
+     * match: a different handle or password is a different sign-up, and the
+     * 409 stands.
+     */
+    private static function isIdenticalRecentSignup(string $handle, string $email, string $password): bool
+    {
+        $userId = email_exists($email);
+        if (!is_int($userId) || $userId <= 0) {
+            return false;
+        }
+        $user = get_userdata($userId);
+        if (!($user instanceof \WP_User)
+            || strcasecmp((string) $user->user_login, AuthSupport::deriveLogin($handle)) !== 0
+        ) {
+            return false;
+        }
+        // user_registered is WordPress core's UTC column.
+        $registered = strtotime((string) $user->user_registered . ' UTC');
+        if ($registered === false || $registered < time() - self::IDENTICAL_RETRY_SECONDS) {
+            return false;
+        }
+        return self::isPendingEmailSignup($userId)
+            && wp_check_password($password, (string) $user->user_pass, $userId);
+    }
 
     /** F-285 copy (user-approved) for a sign-up's handle / email 409. */
     private const TAKEN_HANDLE = 'That handle is taken. If it\'s yours from an unfinished sign-up, check your email for the confirmation link; unconfirmed sign-ups free up after 7 days.';

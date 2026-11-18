@@ -125,6 +125,7 @@ use BCC\Trust\Core\Repositories\DbWriteCheck;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\ProfileAccess;
+use BCC\Trust\Core\Support\StrictBoolParam;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -324,8 +325,10 @@ final class MyProfilePrefsEndpoint
             $meta['peepso_last_used_post_privacy'] = (string) self::POST_AUDIENCE_TOKENS[$defaultAudience];
         }
 
-        // Boolean flags: any value is accepted (FILTER_VALIDATE_BOOLEAN), so
-        // they cannot fail validation.
+        // Boolean flags (F-294): a value that is not a boolean is a 422,
+        // checked here in the validation phase, before anything is written.
+        // A bare FILTER_VALIDATE_BOOLEAN read "maybe" (or a typo) as false
+        // and silently switched the setting OFF with a 200.
         foreach ([
             'hide_birthday_year'     => 'peepso_hide_birthday_year',
             'hide_online'            => 'peepso_hide_online_status',
@@ -341,7 +344,11 @@ final class MyProfilePrefsEndpoint
         ] as $param => $metaKey) {
             $raw = $request->get_param($param);
             if ($raw !== null) {
-                $meta[$metaKey] = filter_var($raw, FILTER_VALIDATE_BOOLEAN) ? '1' : '0';
+                $bool = StrictBoolParam::parse($raw);
+                if ($bool === null) {
+                    return self::notABoolean($param);
+                }
+                $meta[$metaKey] = $bool ? '1' : '0';
             }
         }
 
@@ -361,7 +368,11 @@ final class MyProfilePrefsEndpoint
         ] as $param => $flag) {
             $rawFlag = $request->get_param($param);
             if ($rawFlag !== null) {
-                $privacyFlags[$flag] = !filter_var($rawFlag, FILTER_VALIDATE_BOOLEAN);
+                $bool = StrictBoolParam::parse($rawFlag);
+                if ($bool === null) {
+                    return self::notABoolean($param);
+                }
+                $privacyFlags[$flag] = !$bool;
             }
         }
 
@@ -369,7 +380,10 @@ final class MyProfilePrefsEndpoint
         // eligibility check on the WRITE: listing composes opt-in AND the
         // live capability at read time.
         $mentorOptIn = $request->get_param('mentor_opt_in');
-        $mentorValue = $mentorOptIn !== null ? filter_var($mentorOptIn, FILTER_VALIDATE_BOOLEAN) : null;
+        $mentorValue = $mentorOptIn !== null ? StrictBoolParam::parse($mentorOptIn) : null;
+        if ($mentorOptIn !== null && $mentorValue === null) {
+            return self::notABoolean('mentor_opt_in');
+        }
 
         if ($profileAcc === null && $meta === [] && $privacyFlags === [] && $mentorValue === null) {
             return ApiResponse::error(
@@ -440,6 +454,16 @@ final class MyProfilePrefsEndpoint
     // ──────────────────────────────────────────────────────────────────
     // Helpers
     // ──────────────────────────────────────────────────────────────────
+
+    /** F-294: the 422 for a switch whose value is not a boolean. */
+    private static function notABoolean(string $param): WP_REST_Response
+    {
+        return ApiResponse::error(
+            'bcc_invalid_request',
+            sprintf('`%s` must be true or false.', $param),
+            422
+        );
+    }
 
     /**
      * @return array{
