@@ -69,10 +69,50 @@ final class HeliusSubscriptionManager
 
     /**
      * Provision the shared webhook ONCE. No-op (returns existing id) if
-     * the option is already set. Returns the webhook id on success or
-     * null on failure.
+     * the option is already set. Returns the webhook id on success, or
+     * null on failure or when the address-list lock is busy
+     * (provisionSharedWebhookResult() tells the two apart).
      */
     public static function provisionSharedWebhook(string $callbackUrl): ?string
+    {
+        return self::provisionSharedWebhookResult($callbackUrl)['webhook_id'];
+    }
+
+    /**
+     * F-314 follow-up: provision under the address-list lock.
+     *
+     * ⚠ The stored-id check and the create POST used to run with no lock.
+     * Two Provisions at once (a double click, two admins) each saw no id,
+     * each POSTed, and the second id overwrote the first: a second billable
+     * webhook, the first still delivering on Helius with no id left to
+     * delete it by. Under the lock, a Provision that waited sees the id the
+     * first one stored and sends nothing.
+     *
+     * Outcomes: `provisioned` (an id is stored, new or already there),
+     * `failed` (not configured, or Helius refused), `busy` (another change
+     * holds the lock; nothing was read or sent).
+     *
+     * @return array{outcome: 'provisioned'|'failed'|'busy', webhook_id: ?string}
+     */
+    public static function provisionSharedWebhookResult(string $callbackUrl): array
+    {
+        $locked = self::withListLock(static fn (): array => ['webhook_id' => self::provisionLocked($callbackUrl)]);
+        if ($locked === null) {
+            return ['outcome' => 'busy', 'webhook_id' => null];
+        }
+        return [
+            'outcome'    => $locked['webhook_id'] !== null ? 'provisioned' : 'failed',
+            'webhook_id' => $locked['webhook_id'],
+        ];
+    }
+
+    /**
+     * The check-then-create. Runs ONLY under the list lock
+     * (provisionSharedWebhookResult()), so the stored-id check below is
+     * made with the lock held and no second create can slip in between it
+     * and the POST.
+     */
+    private static function provisionLocked(string $callbackUrl): ?string
     {
         $existing = (string) get_option(self::OPTION_WEBHOOK_ID, '');
         if ($existing !== '') {

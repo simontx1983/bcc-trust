@@ -847,13 +847,20 @@ final class NftIndexerStatusView
         AdminActionSupport::requireNonce(self::ACTION_HELIUS_PROVISION);
 
         try {
-            $id = HeliusSubscriptionManager::provisionSharedWebhook(HeliusWebhookEndpoint::callbackUrl());
+            $result = HeliusSubscriptionManager::provisionSharedWebhookResult(HeliusWebhookEndpoint::callbackUrl());
         } catch (\Throwable $e) {
             $ref = AdminActionSupport::failure($e, 'admin_helius_webhook_provision_failed', 'helius_webhook');
             self::redirect('helius_provision_failed', 0, $ref);
         }
 
-        if ($id === null) {
+        // F-314 follow-up: another change held the address-list lock, so
+        // nothing was read or sent. Not a failure: try again.
+        if ($result['outcome'] === 'busy') {
+            AdminActionSupport::audit('admin_helius_webhook_provision_busy', 'helius_webhook');
+            self::redirect('helius_provision_busy', 0);
+        }
+
+        if ($result['webhook_id'] === null) {
             AdminActionSupport::audit('admin_helius_webhook_provision_failed', 'helius_webhook');
             self::redirect('helius_provision_failed', 0);
         }
@@ -1011,6 +1018,7 @@ final class NftIndexerStatusView
             'state_invalid'           => ['error',   'Invalid state — no change was made.'],
             'helius_provisioned'      => ['updated', 'Helius shared webhook provisioned.'],
             'helius_provision_failed' => ['error',   'Provisioning failed. Check BCC_HELIUS_API_KEY + BCC_HELIUS_WEBHOOK_SECRET in wp-config.php.'],
+            'helius_provision_busy'   => ['error',   'Another change is in progress, so nothing was sent. Try again in a moment.'],
             'helius_resync_failed'    => ['error',   'Resync failed.'],
             // F-314: re-register outcomes.
             'helius_reregister_updated'         => ['updated', 'The Helius webhook now posts to this site\'s callback URL.'],

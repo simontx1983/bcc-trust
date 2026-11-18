@@ -512,10 +512,27 @@ namespace BCC\Trust\Onchain\Services {
 
             public static ?string $provisionResult = 'wh_123';
             public static ?\Throwable $provisionThrows = null;
+            public static bool $provisionBusy = false;
 
             /** @var array{applied: bool, remote_count: int, local_count: int}|null */
             public static ?array $resyncResult = ['applied' => true, 'remote_count' => 5, 'local_count' => 5];
             public static ?\Throwable $resyncThrows = null;
+
+            /** @return array{outcome: 'provisioned'|'failed'|'busy', webhook_id: ?string} */
+            public static function provisionSharedWebhookResult(string $callbackUrl): array
+            {
+                self::$provisionCalls++;
+                if (self::$provisionThrows !== null) {
+                    throw self::$provisionThrows;
+                }
+                if (self::$provisionBusy) {
+                    return ['outcome' => 'busy', 'webhook_id' => null];
+                }
+                return [
+                    'outcome'    => self::$provisionResult !== null ? 'provisioned' : 'failed',
+                    'webhook_id' => self::$provisionResult,
+                ];
+            }
 
             public static function provisionSharedWebhook(string $callbackUrl): ?string
             {
@@ -547,6 +564,7 @@ namespace BCC\Trust\Onchain\Services {
                 self::$resyncArgs = [];
                 self::$provisionResult = 'wh_123';
                 self::$provisionThrows = null;
+                self::$provisionBusy = false;
                 self::$resyncResult = ['applied' => true, 'remote_count' => 5, 'local_count' => 5];
                 self::$resyncThrows = null;
             }

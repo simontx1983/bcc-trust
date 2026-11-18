@@ -72,6 +72,12 @@ namespace {
         /** @var list<array<string, mixed>> the args of every ApiRetry::post call */
         public static array $postArgs = [];
 
+        /** @var list<int> F-314: $lockHeld at each read of the stored webhook id */
+        public static array $idReadLocks = [];
+
+        /** @var list<int> F-314: $lockHeld at each create-webhook POST */
+        public static array $createLocks = [];
+
         /** @var list<array{code: int, body: string}> F-314: create-webhook POST responses */
         public static array $createResponses = [];
 
@@ -84,6 +90,8 @@ namespace {
             self::$putBodies       = [];
             self::$rawRequests   = 0;
             self::$postArgs      = [];
+            self::$idReadLocks   = [];
+            self::$createLocks   = [];
             $GLOBALS['wpdb']     = (object) ['prefix' => 'wpsa6_'];
             self::$options       = ['bcc_helius_shared_webhook_id' => 'wh-1'];
             self::$gets          = [];
@@ -217,6 +225,7 @@ namespace BCC\Trust\Onchain\Support {
             {
                 \HeliusWorld::$postArgs[] = $args;
                 if (($args['method'] ?? 'POST') !== 'PUT') {
+                    \HeliusWorld::$createLocks[] = \HeliusWorld::$lockHeld;
                     // F-314: the create-webhook POST, when a test queued an answer.
                     if (\HeliusWorld::$createResponses !== []) {
                         return array_shift(\HeliusWorld::$createResponses);
@@ -284,6 +293,9 @@ namespace BCC\Trust\Onchain\Services {
     if (!function_exists(__NAMESPACE__ . '\\get_option')) {
         function get_option(string $name, mixed $default = false): mixed
         {
+            if ($name === 'bcc_helius_shared_webhook_id') {
+                \HeliusWorld::$idReadLocks[] = \HeliusWorld::$lockHeld;
+            }
             return array_key_exists($name, \HeliusWorld::$options) ? \HeliusWorld::$options[$name] : $default;
         }
     }
