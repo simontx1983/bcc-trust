@@ -149,7 +149,8 @@ final class EntityAttestationsEndpoint
         // For user_profile the target_id IS the user id.
         if ($targetKind === 'user_profile') {
             if (!ProfileAccess::canViewProfile($targetId)) {
-                return ProfileAccess::forbidden();
+                // Never shared-cached: the success below is public for anon.
+                return self::noStore(ProfileAccess::forbidden());
             }
         }
 

@@ -140,7 +140,8 @@ final class CardReviewsEndpoint
         // Asked about the RAW user id, before the self-page translation.
         if ($targetKind === 'user_profile') {
             if (!ProfileAccess::canViewProfile($targetId)) {
-                return ProfileAccess::forbidden();
+                // Never shared-cached: the success below is public for anon.
+                return self::noStore(ProfileAccess::forbidden());
             }
         }
 

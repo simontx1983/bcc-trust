@@ -260,7 +260,10 @@ final class ProfileGateWiringTest extends TestCase
                 // A service-layer gate refuses with null; its endpoint owns
                 // the 403 and is pinned in the next test.
                 $service = self::SERVICE_LAYER_GATES["{$file}::{$method}"] ?? null;
-                $refusal = $service === null ? 'return ProfileAccess::forbidden\(\);' : 'return null;';
+                // An endpoint may wrap the refusal in its own no-store helper.
+                $refusal = $service === null
+                    ? 'return (?:ProfileAccess::forbidden\(\)|self::noStore\(ProfileAccess::forbidden\(\)\));'
+                    : 'return null;';
                 $work    = $service === null ? ['ApiResponse::ok(', '->respond('] : $service['work'];
 
                 self::assertMatchesRegularExpression(

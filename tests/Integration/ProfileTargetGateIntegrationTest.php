@@ -132,6 +132,11 @@ final class ProfileTargetGateIntegrationTest extends TestCase
             self::assertSame('bcc_forbidden', $body['error']['code'] ?? null, $route);
             self::assertSame('profile_private', $body['error']['data']['reason'] ?? null, $route);
             self::assertArrayNotHasKey('data', $body, "{$route}: nothing about the member leaves the server");
+            self::assertSame(
+                'private, no-store',
+                $this->get($route, 'user_profile', self::ONLY_ME_C)->get_headers()['Cache-Control'] ?? null,
+                "{$route}: a refusal is never shared-cached"
+            );
         }
     }
 
