@@ -642,12 +642,21 @@ final class PasswordAuthController
         // Always-ok response below. We branch ONLY for the side effects
         // (key generation + email + audit) — never for the response.
         //
-        // F-294: key generation hashes the key (one password hash), which an
-        // unknown address used to skip, so it answered measurably faster.
-        // It pays the same hash now. Mail delivery time can still differ;
-        // the contract says so.
+        // F-294: key generation hashes the key, which an unknown address
+        // used to skip, so it answered measurably faster. It pays the SAME
+        // hash now, mirroring get_password_reset_key(): WordPress 6.8+
+        // hashes the key with wp_fast_hash() (BLAKE2b, microseconds), so a
+        // password hash here (bcrypt, tens of ms) would make an unknown
+        // address the SLOWER one. Before 6.8 core hashed it with phpass,
+        // the cost of wp_hash_password(). The key write and mail delivery
+        // can still differ; the contract says so.
         if (!($user instanceof \WP_User)) {
-            wp_hash_password(wp_generate_password(20, false));
+            $decoyKey = wp_generate_password(20, false);
+            if (function_exists('wp_fast_hash')) {
+                wp_fast_hash($decoyKey);
+            } else {
+                wp_hash_password($decoyKey);
+            }
         }
         if ($user instanceof \WP_User) {
             $userId = (int) $user->ID;

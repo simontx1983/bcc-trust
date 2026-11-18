@@ -17,8 +17,11 @@ use PHPUnit\Framework\TestCase;
  *   - sign-in: an unknown account skipped the bcrypt compare;
  *   - forgot-password: an unknown address skipped key generation, which
  *     hashes the key.
- * Each now pays one password hash. Counted, not timed: the stubs record
- * how many hashes / checks a request ran. Against the REAL controller.
+ * Sign-in now pays one password hash; forgot-password pays the hash
+ * get_password_reset_key() would have: wp_fast_hash() on WordPress 6.8+
+ * (a password hash there would make an unknown address the SLOWER one),
+ * a password hash before. Counted, not timed: the stubs record how many
+ * hashes a request ran. Against the REAL controller.
  */
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
@@ -29,11 +32,14 @@ final class AuthTimingParityTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        if ($this->name() === 'testBeforeWordPress68ForgotPasswordPaysAPasswordHash') {
+            $GLOBALS['__bcc_no_fast_hash'] = true; // no wp_fast_hash(), like core < 6.8
+        }
         require_once __DIR__ . '/../Stubs/handle-rename-identity-stubs.php';
         require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
         $GLOBALS['__bcc_ph'] = [
             'users' => [], 'meta' => [], 'passwords' => [], 'transients' => [],
-            'mail' => [], 'actions' => [], 'audit' => [], 'hashes' => 0,
+            'mail' => [], 'actions' => [], 'audit' => [], 'hashes' => 0, 'fast_hashes' => 0, 'generated' => [],
         ];
         $GLOBALS['__bcc_ph']['users'][self::ALICE] = ['email' => 'alice@example.test', 'login' => AuthSupport::deriveLogin('alice'), 'display' => 'Alice'];
         $GLOBALS['__bcc_ph']['meta'][self::ALICE]  = [HandleService::META_HANDLE => 'alice'];
@@ -70,7 +76,19 @@ final class AuthTimingParityTest extends TestCase
         $resp = (new PasswordAuthController())->forgotPassword(new \WP_REST_Request(['email' => 'nobody@example.test']));
 
         self::assertSame(200, $resp->get_status(), 'always ok');
-        self::assertSame(1, $GLOBALS['__bcc_ph']['hashes'], 'the hash a real key generation would have cost');
+        self::assertSame(1, $GLOBALS['__bcc_ph']['fast_hashes'], "get_password_reset_key()'s own hash (WordPress 6.8+)");
+        self::assertSame(0, $GLOBALS['__bcc_ph']['hashes'], 'NOT a password hash: that would make an unknown address the slower one');
+        self::assertSame(['20'], $GLOBALS['__bcc_ph']['generated'], 'a key shaped like the real one: 20 chars, no specials');
         self::assertSame([], $GLOBALS['__bcc_ph']['mail']);
+    }
+
+    public function testBeforeWordPress68ForgotPasswordPaysAPasswordHash(): void
+    {
+        self::assertFalse(function_exists('wp_fast_hash'), 'playing core < 6.8');
+
+        $resp = (new PasswordAuthController())->forgotPassword(new \WP_REST_Request(['email' => 'nobody@example.test']));
+
+        self::assertSame(200, $resp->get_status());
+        self::assertSame(1, $GLOBALS['__bcc_ph']['hashes'], 'core < 6.8 hashed the key with phpass: a password hash');
     }
 }
