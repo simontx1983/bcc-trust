@@ -150,7 +150,10 @@ final class PeepSoQueryRepository
      *
      * Each row also carries what the backfill needs to decide and to be
      * rolled back exactly: `current_role` (the claimer's existing
-     * peepso_page_members status on the page, null = no row) and
+     * peepso_page_members status on the page, null = no row; F-360: when
+     * the claimer has several rows on the page, a `banned` one wins, so the
+     * backfill's ban skip can never be hidden behind an older non-banned
+     * row — peepso_page_members has no unique (page, user) key) and
      * `other_owner` (a DIFFERENT user already holding `member_owner` on the
      * page, 0 = none).
      *
@@ -168,7 +171,8 @@ final class PeepSoQueryRepository
             "SELECT c.entity_id AS page_id, c.user_id,
                     (SELECT cur.pm_user_status FROM {$members} cur
                       WHERE cur.pm_page_id = c.entity_id AND cur.pm_user_id = c.user_id
-                      ORDER BY cur.pm_id ASC LIMIT 1) AS claimer_status,
+                      ORDER BY (cur.pm_user_status = 'banned') DESC, cur.pm_id ASC
+                      LIMIT 1) AS claimer_status,
                     (SELECT oth.pm_user_id FROM {$members} oth
                       WHERE oth.pm_page_id = c.entity_id AND oth.pm_user_status = 'member_owner'
                         AND oth.pm_user_id <> c.user_id
