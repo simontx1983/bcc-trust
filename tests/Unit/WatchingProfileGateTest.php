@@ -8,6 +8,7 @@ namespace BCC\Trust\Tests\Unit {
     use BCC\Trust\Core\REST\WatchingEndpoint;
     use BCC\Trust\Core\Services\WatchingService;
     use BCC\Trust\Core\Support\MemberCardPrefetcher;
+    use BCC\Trust\Core\Support\PageCardPrefetcher;
     use PHPUnit\Framework\Attributes\PreserveGlobalState;
     use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
     use PHPUnit\Framework\TestCase;
@@ -22,7 +23,11 @@ namespace BCC\Trust\Tests\Unit {
      *  - GET /me/watching?include=cards builds no card for such a member:
      *    the row stays (the viewer's own follow), its `card` is null.
      *
-     * Pages are not people: neither surface gates a page kind.
+     * Pages are not people: the profile gate never asks about a page kind.
+     * A SECRET page answers to PageAccess instead (over the REAL bcc-core
+     * PeepSoPagePrivacy and a `$wpdb` that answers its reads,
+     * tests/Stubs/secret-page-list-stubs.php): a viewer the page does not
+     * admit keeps the row, and its card is null.
      */
     #[RunTestsInSeparateProcesses]
     #[PreserveGlobalState(false)]
@@ -32,12 +37,17 @@ namespace BCC\Trust\Tests\Unit {
         private const VISIBLE  = 11; // public profile (10)
         private const HIDDEN   = 12; // "only me" (40)
         private const PAGE     = 900;
+        private const SECRET   = 901;
 
         protected function setUp(): void
         {
             // Doubles first: they must exist before the real classes autoload.
             require_once dirname(__DIR__) . '/Stubs/watching-profile-gate-stubs.php';
             require_once dirname(__DIR__) . '/Stubs/profile-access-stubs.php';
+            require_once dirname(__DIR__) . '/Stubs/secret-page-list-stubs.php';
+            \bcc_spl_load_core();
+            $GLOBALS['__bcc_spl'] = ['secret' => [self::SECRET => true]];
+            $GLOBALS['wpdb']      = new \BccSecretPageListWpdb();
 
             $GLOBALS['__bcc_profile_access'] = [
                 'viewer_id' => self::VIEWER,
@@ -48,6 +58,12 @@ namespace BCC\Trust\Tests\Unit {
             Plugin::$watchCalls       = [];
             Plugin::$cardViewResolved = 0;
             MemberCardPrefetcher::$primed = [];
+            PageCardPrefetcher::$primed   = [];
+        }
+
+        protected function tearDown(): void
+        {
+            unset($GLOBALS['wpdb'], $GLOBALS['__bcc_spl']);
         }
 
         // ── POST /me/watching/watch ─────────────────────────────────────
@@ -93,7 +109,7 @@ namespace BCC\Trust\Tests\Unit {
             self::assertSame(['kind' => 'member', 'id' => self::VISIBLE], $out[0]['card']);
             self::assertNull($out[1]['card'], 'no card for a profile the viewer may not open');
             self::assertSame(2, $out[1]['follow_id'], 'the row keeps the follow_id the viewer unwatches with');
-            self::assertSame(['kind' => 'validator', 'id' => self::PAGE], $out[2]['card'], 'pages are not gated');
+            self::assertSame(['kind' => 'validator', 'id' => self::PAGE], $out[2]['card'], 'an open page is not gated');
             self::assertSame([[self::VISIBLE]], MemberCardPrefetcher::$primed, "the hidden member's card is never built");
         }
 
@@ -104,6 +120,41 @@ namespace BCC\Trust\Tests\Unit {
             self::assertNull($out[0]['card']);
             self::assertSame(0, Plugin::$cardViewResolved, 'nothing to hydrate, so the card builder is never resolved');
             self::assertSame([], MemberCardPrefetcher::$primed);
+        }
+
+        // ── SECRET pages ────────────────────────────────────────────────
+
+        public function testAPageFollowOnASecretPageKeepsTheRowButGetsNoCard(): void
+        {
+            $out = $this->attachCards([
+                self::pageFollowRow(3, self::PAGE),
+                self::pageFollowRow(4, self::SECRET),
+            ]);
+
+            self::assertCount(2, $out, 'no row is dropped');
+            self::assertSame(['kind' => 'validator', 'id' => self::PAGE], $out[0]['card']);
+            self::assertNull($out[1]['card'], 'no card for a secret page the viewer is not in');
+            self::assertSame(4, $out[1]['follow_id'], 'the row keeps the follow_id the viewer unwatches with');
+            self::assertSame([[self::PAGE]], PageCardPrefetcher::$primed, "the secret page's card is never built");
+            self::assertCount(1, $GLOBALS['wpdb']->ofKind('batch'), 'one batched privacy read for the page');
+        }
+
+        public function testAMemberOfTheSecretPageGetsItsCard(): void
+        {
+            $GLOBALS['__bcc_spl']['statuses'][self::SECRET][self::VIEWER] = ['member'];
+
+            $out = $this->attachCards([self::pageFollowRow(4, self::SECRET)]);
+
+            self::assertSame(['kind' => 'validator', 'id' => self::SECRET], $out[0]['card']);
+        }
+
+        public function testWhenEveryPageIsHiddenNoCardIsBuiltAtAll(): void
+        {
+            $out = $this->attachCards([self::pageFollowRow(4, self::SECRET)]);
+
+            self::assertNull($out[0]['card']);
+            self::assertSame(0, Plugin::$cardViewResolved, 'nothing to hydrate, so the card builder is never resolved');
+            self::assertSame([], PageCardPrefetcher::$primed);
         }
 
         // ── helpers ─────────────────────────────────────────────────────
@@ -141,6 +192,23 @@ namespace BCC\Trust\Tests\Unit {
                 'card_id'       => $userId,
                 'card_handle'   => 'm' . $userId,
                 'page_id'       => null,
+            ];
+        }
+
+        /**
+         * A bcc_page_follows row: it names its page directly.
+         *
+         * @return array<string, mixed>
+         */
+        private static function pageFollowRow(int $followId, int $pageId): array
+        {
+            return [
+                'follow_id'     => $followId,
+                'follow_source' => 'page',
+                'card_kind'     => 'validator',
+                'card_id'       => $pageId,
+                'card_handle'   => 'page-' . $pageId,
+                'page_id'       => $pageId,
             ];
         }
 
