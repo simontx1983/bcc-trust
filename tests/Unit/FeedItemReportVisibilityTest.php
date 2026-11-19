@@ -9,6 +9,7 @@ use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Services\FeedItemReportVisibility;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\GroupsService;
+use BCC\Trust\Tests\Support\CoreSibling;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -44,17 +45,23 @@ final class FeedItemReportVisibilityTest extends TestCase
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/halls-gate-stubs.php';
-        require_once dirname(__DIR__, 2) . '/../bcc-core/src/Repositories/PeepSoGroupRepository.php';
+        // F-94: the three sibling reads below go through CoreSibling, which
+        // FAILS in CI when the checkout is missing (a skip would be invisible
+        // in a green run) and SKIPS in a bare local worktree. A raw
+        // require_once did neither: it raised Error "Failed opening required"
+        // on every test in the file, which reads as a crash rather than as a
+        // missing checkout.
+        require_once CoreSibling::require('src/Repositories/PeepSoGroupRepository.php');
         // The REAL public-feed module allowlist, not a copy, so this suite
         // fails if the two ever disagree.
         if (!\class_exists('BCC\\Core\\Feed\\FeedItemNormalizer', false)) {
-            require_once dirname(__DIR__, 2) . '/../bcc-core/src/Feed/FeedItemNormalizer.php';
+            require_once CoreSibling::require('src/Feed/FeedItemNormalizer.php');
         }
         // The syndication gate the group rule now consults DIRECTLY, because
         // bcc-core #111 defers it to this layer. REAL class, like the two
         // above, so this suite fails if the gate's own logic ever changes.
         if (!\class_exists('BCC\\Core\\Feed\\GroupSyndicationGate', false)) {
-            require_once dirname(__DIR__, 2) . '/../bcc-core/src/Feed/GroupSyndicationGate.php';
+            require_once CoreSibling::require('src/Feed/GroupSyndicationGate.php');
         }
         require_once __DIR__ . '/../Stubs/nonopen-groups-seed.php';
         // §F-02: canSee() now also asks the post's own AUDIENCE, which
