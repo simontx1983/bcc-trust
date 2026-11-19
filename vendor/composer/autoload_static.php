@@ -358,6 +358,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Security\\TransactionManager' => __DIR__ . '/../..' . '/app/Domain/Core/Security/TransactionManager.php',
         'BCC\\Trust\\Core\\Security\\TrustGraph' => __DIR__ . '/../..' . '/app/Domain/Core/Security/TrustGraph.php',
         'BCC\\Trust\\Core\\Security\\TurnstileVerifier' => __DIR__ . '/../..' . '/app/Domain/Core/Security/TurnstileVerifier.php',
+        'BCC\\Trust\\Core\\Security\\WordPressSignInGate' => __DIR__ . '/../..' . '/app/Domain/Core/Security/WordPressSignInGate.php',
         'BCC\\Trust\\Core\\Services\\AccountRecoveryService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/AccountRecoveryService.php',
         'BCC\\Trust\\Core\\Services\\AccountSecurityMailer' => __DIR__ . '/../..' . '/app/Domain/Core/Services/AccountSecurityMailer.php',
         'BCC\\Trust\\Core\\Services\\Admin\\ModerationService' => __DIR__ . '/../..' . '/app/Domain/Core/Services/Admin/ModerationService.php',

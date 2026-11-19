@@ -424,8 +424,10 @@ final class FeedRankingService
      * posts carrying a single hashtag.
      *
      * SECURITY INVARIANT (load-bearing): the tag feed must NEVER surface a
-     * post the public hot feed would not. This method is therefore a literal
-     * mirror of `getHotFeed()` for everything that governs VISIBILITY:
+     * post the public hot feed would not, except the posts §F-02 admits for
+     * THIS viewer (the three listed under the §F-02 bullet below). This
+     * method is therefore a literal mirror of `getHotFeed()` for everything
+     * that governs VISIBILITY:
      *
      *   - same `$excluded` set: $this->reputationRepo->getCautionAndRiskyUserIds()
      *     (§O4.1 caution/risky shadow-limit) — IDENTICAL call, PLUS the
@@ -453,12 +455,20 @@ final class FeedRankingService
      *     not either; see both call sites.
      *     ⚠ This is the one place the subset relation is no longer
      *     literal. The tag feed passes the REAL `$viewerId` — the same
-     *     argument the query already needed — so §F-02's own-post branch
-     *     admits the VIEWER'S OWN restricted posts here, which the
-     *     anonymous hot feed withholds, plus level-30 posts by authors
-     *     who friended them (none in production: peepso-friends is not
-     *     installed). What the invariant protects is unchanged: no
-     *     STRANGER's restricted post can appear here and not there.
+     *     argument the query already needed — so §F-02 is read as this
+     *     viewer, not anonymously, and admits THREE kinds of post that
+     *     the anonymous hot feed withholds:
+     *       1. the VIEWER'S OWN restricted posts (the own-post branch,
+     *          F-269);
+     *       2. level-20 (members-only) posts by ANY author: level 20
+     *          admits every signed-in viewer, and `profile_visibility:
+     *          members` writes it;
+     *       3. level-30 (friends-only) posts by the viewer's friends
+     *          (none in production: peepso-friends is not installed, so
+     *          viewerFriendIdList() returns [] — see PeepSoFriendGate).
+     *     Each is a post the gate admits for THIS viewer, and level 40
+     *     by anyone else never appears. What the invariant protects is
+     *     unchanged: no post this viewer may not see can appear here.
      *   - same global-feed visibility gate: `onlyForGroupId = null` →
      *     PeepSoActivityRepository applies the `public_all` LEFT JOIN gate
      *     (group posts surface only when `_bcc_post_visibility = 'public_all'`;
@@ -505,9 +515,11 @@ final class FeedRankingService
      * ⭐ This is the tag feed without the hashtag: the same visibility
      * gates and the same hydration, so the invariants in
      * {@see getTagFeed()}'s docblock hold here word for word, including
-     * the one deliberate widening: the VIEWER'S OWN restricted posts
-     * (F-269) and level-30 posts by authors who friended them. No
-     * STRANGER's restricted post can appear here and not on /feed/hot.
+     * its three deliberate widenings over /feed/hot, all from §F-02 being
+     * read as this viewer: the VIEWER'S OWN restricted posts (F-269),
+     * level-20 (members-only) posts by any author, and level-30 posts by
+     * the viewer's friends (none in production). No post this viewer may
+     * not see can appear here.
      *
      * ⚠ It never reads or writes the shared anonymous cache. Anonymous
      * (`$viewerId <= 0`) is sent to the cached getHotFeed() instead,
@@ -572,12 +584,13 @@ final class FeedRankingService
         //
         // ⚠ The real `$viewerId` still reaches the gate, because it is
         // the same argument the query already takes. So this feed widens
-        // by exactly two things relative to the anonymous hot feed: the
-        // viewer's OWN posts, and level-30 posts by authors who friended
-        // them (none in production — see ProfileAccess). Neither is a
-        // stranger's restricted post, which is what the invariant
-        // protects; the docblock above states this rather than leaving
-        // the literal wording to carry it.
+        // by exactly THREE things relative to the anonymous hot feed: the
+        // viewer's OWN posts, level-20 (members-only) posts by any author
+        // (level 20 admits every signed-in viewer), and level-30 posts by
+        // the viewer's friends (none in production — see ProfileAccess).
+        // Each is a post the gate admits for THIS viewer, which is what
+        // the invariant protects; getTagFeed()'s docblock lists them
+        // rather than leaving the literal wording to carry it.
         $friendIds = $viewerId > 0
             ? (PeepSoFriendGate::viewerFriendIdList($viewerId) ?: null)
             : null;
