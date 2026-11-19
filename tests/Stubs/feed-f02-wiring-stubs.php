@@ -157,6 +157,8 @@ namespace BCC\Core\Feed {
         public const SCOPE_FOLLOWING = 'following';
         public const SCOPE_SIGNALS   = 'signals';
         public const SCOPE_GROUP     = 'group';
+        public const SCOPE_GROUPS    = 'groups';
+        public const MEMBER_GROUPS_CAP = 200;
 
         /** @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}} */
         public function getFeed(
@@ -172,7 +174,10 @@ namespace BCC\Core\Feed {
             ?string $hashtag = null,
             ?string $hallFeed = null,
             ?array $viewerFriendIds = null,
-            bool $enforcePostVisibility = false
+            bool $enforcePostVisibility = false,
+            ?array $onlyForGroupIds = null,
+            ?array $softExcludedAuthorIds = null,
+            ?array $softExclusionExemptGroupIds = null
         ): array {
             // F-276: every argument, in call order, so a surface's
             // limit / cursor / hashtag can be asserted and a refactor
@@ -191,6 +196,10 @@ namespace BCC\Core\Feed {
                 'hallFeed'              => $hallFeed,
                 'viewerFriendIds'       => $viewerFriendIds,
                 'enforcePostVisibility' => $enforcePostVisibility,
+                // F-416, the "My Groups" channel.
+                'onlyForGroupIds'             => $onlyForGroupIds,
+                'softExcludedAuthorIds'       => $softExcludedAuthorIds,
+                'softExclusionExemptGroupIds' => $softExclusionExemptGroupIds,
             ];
 
             unset(
