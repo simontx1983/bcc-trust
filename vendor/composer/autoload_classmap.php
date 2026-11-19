@@ -367,6 +367,7 @@ return array(
     'BCC\\Trust\\Core\\Support\\NoReactionsGate' => $baseDir . '/app/Domain/Core/Support/NoReactionsGate.php',
     'BCC\\Trust\\Core\\Support\\NotificationPrefs' => $baseDir . '/app/Domain/Core/Support/NotificationPrefs.php',
     'BCC\\Trust\\Core\\Support\\NotificationType' => $baseDir . '/app/Domain/Core/Support/NotificationType.php',
+    'BCC\\Trust\\Core\\Support\\PageAccess' => $baseDir . '/app/Domain/Core/Support/PageAccess.php',
     'BCC\\Trust\\Core\\Support\\PageCardPrefetcher' => $baseDir . '/app/Domain/Core/Support/PageCardPrefetcher.php',
     'BCC\\Trust\\Core\\Support\\PageOwnerDecision' => $baseDir . '/app/Domain/Core/Support/PageOwnerDecision.php',
     'BCC\\Trust\\Core\\Support\\PageTypeMap' => $baseDir . '/app/Domain/Core/Support/PageTypeMap.php',
