@@ -98,6 +98,53 @@ final class HarnessActAsTest extends TestCase
         self::assertArrayNotHasKey('HTTP_AUTHORIZATION', $_SERVER, 'signed out presents no token');
     }
 
+    /**
+     * The helper mints credentials, so outside the PHP command line it refuses
+     * before doing anything (review agent, LOW).
+     *
+     * @return iterable<string, array{0: string}>
+     */
+    public static function webSapis(): iterable
+    {
+        yield 'PHP-FPM'           => ['fpm-fcgi'];
+        yield 'Apache mod_php'    => ['apache2handler'];
+        yield 'CGI / LiteSpeed'   => ['cgi-fcgi'];
+        yield 'LiteSpeed LSAPI'   => ['litespeed'];
+        yield 'the built-in server' => ['cli-server'];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('webSapis')]
+    public function testOutsideTheCommandLineItRefuses(string $sapi): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('bcc_harness_act_as is for CLI harnesses only');
+
+        bcc_harness_require_cli($sapi);
+    }
+
+    public function testOnTheCommandLineItRuns(): void
+    {
+        bcc_harness_require_cli('cli');
+
+        self::assertSame('cli', PHP_SAPI, 'PHPUnit runs on the command line, so the helper is usable here');
+    }
+
+    /**
+     * The guard is the helper's FIRST statement, with the real SAPI, so a
+     * web request stops before a token is minted or a header set. (PHP_SAPI
+     * is fixed per process, so this is the only way to pin the call.)
+     */
+    public function testTheGuardIsTheHelpersFirstStatement(): void
+    {
+        $fn   = new \ReflectionFunction('bcc_harness_act_as');
+        $src  = file((string) $fn->getFileName());
+        self::assertIsArray($src);
+        $body = implode('', array_slice($src, $fn->getStartLine() - 1, $fn->getEndLine() - $fn->getStartLine() + 1));
+        $afterBrace = trim(substr($body, (int) strpos($body, '{') + 1));
+
+        self::assertStringStartsWith('bcc_harness_require_cli(PHP_SAPI);', $afterBrace);
+    }
+
     /** A token the app would refuse stops the harness instead of running it as nobody. */
     public function testARefusedTokenFailsLoudly(): void
     {

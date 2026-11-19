@@ -26,6 +26,22 @@
 
 declare(strict_types=1);
 
+if (!function_exists('bcc_harness_require_cli')) {
+    /**
+     * Refuse to run anywhere but the PHP command line. This file MINTS
+     * credentials, so if it were ever loaded in a web request it must do
+     * nothing. PHP_SAPI rather than WP_CLI, so PHPUnit (also `cli`) can load
+     * it. The SAPI is a parameter only so a test can show the refusal;
+     * bcc_harness_act_as() always passes PHP_SAPI.
+     */
+    function bcc_harness_require_cli(string $sapi): void
+    {
+        if ($sapi !== 'cli') {
+            throw new \RuntimeException('bcc_harness_act_as is for CLI harnesses only');
+        }
+    }
+}
+
 if (!function_exists('bcc_harness_act_as')) {
     /**
      * Make $userId the request's user exactly as an app request does:
@@ -44,6 +60,8 @@ if (!function_exists('bcc_harness_act_as')) {
      */
     function bcc_harness_act_as(int $userId): void
     {
+        bcc_harness_require_cli(PHP_SAPI);
+
         unset($_SERVER['HTTP_AUTHORIZATION'], $_SERVER['REDIRECT_HTTP_AUTHORIZATION']);
 
         if ($userId > 0) {
