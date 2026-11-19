@@ -80,6 +80,7 @@ final class WordPressSignInGateTest extends TestCase
             $hooks[$hook] = [$callback, $priority, $args];
         }
         self::assertSame([[WordPressSignInGate::class, 'refuseMemberSignIn'], PHP_INT_MAX, 3], $hooks['authenticate']);
+        self::assertSame([[WordPressSignInGate::class, 'refuseWordPressAjax'], PHP_INT_MIN, 1], $hooks['init']);
         self::assertSame([[WordPressSignInGate::class, 'keepMembersOutOfAdmin'], 1, 1], $hooks['admin_init']);
         self::assertSame([[WordPressSignInGate::class, 'filterRest'], 1, 3], $hooks['rest_pre_dispatch']);
         self::assertSame([[WordPressSignInGate::class, 'allowPasswordReset'], PHP_INT_MAX, 2], $hooks['allow_password_reset']);
@@ -238,14 +239,15 @@ final class WordPressSignInGateTest extends TestCase
         self::assertSame('https://app.example.test/', $where('https://app.example.test/'), 'an allowed host stands');
     }
 
+    /** The same decision as `init` (refuseWordPressAjax), asked again here. */
     public function testASignedInMemberIsRefusedAtAdminAjax(): void
     {
         $GLOBALS['__bcc_sig']['current'] = self::MEMBER;
         $GLOBALS['__bcc_sig']['ajax']    = true;
+        $_REQUEST['action'] = 'peepso_embed_content';
 
-        self::assertSame('wp_die', self::runAdminInit());
-        self::assertSame(['-1', 403], $GLOBALS['__bcc_sig']['die']);
-        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
+        self::assertSame('status', self::runAdminInit());
+        self::assertBare403();
     }
 
     /** @return array<string, array{int, bool}> */
@@ -268,6 +270,219 @@ final class WordPressSignInGateTest extends TestCase
         self::assertNull(self::runAdminInit());
         self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
         self::assertArrayNotHasKey('die', $GLOBALS['__bcc_sig']);
+    }
+
+    // ── 2. init: WordPress's and PeepSo's ajax doors ────────────────────
+
+    private static function runInit(string $uri, ?string $action = null): ?string
+    {
+        $_SERVER['REQUEST_URI'] = $uri;
+        if ($action === null) {
+            unset($_REQUEST['action']);
+        } else {
+            $_REQUEST['action'] = $action;
+        }
+
+        ob_start();
+        try {
+            WordPressSignInGate::refuseWordPressAjax();
+            return null;
+        } catch (\SignInGateHalt $halt) {
+            return $halt->getMessage();
+        } finally {
+            self::assertSame('', ob_get_clean(), 'a refusal prints nothing: no page, no nonce');
+        }
+    }
+
+    /** A bare 403: status and no-cache headers, never a wp_die() page or a redirect. */
+    private static function assertBare403(): void
+    {
+        self::assertSame(403, $GLOBALS['__bcc_sig']['status'] ?? null);
+        self::assertTrue($GLOBALS['__bcc_sig']['nocache'] ?? false, 'no-cache headers');
+        self::assertArrayNotHasKey('die', $GLOBALS['__bcc_sig']);
+        self::assertArrayNotHasKey('redirect', $GLOBALS['__bcc_sig']);
+    }
+
+    /** @return array<string, array{string}> */
+    public static function memberAjaxActions(): array
+    {
+        return [
+            'peepso_embed_content (the SSRF)'          => ['peepso_embed_content'],
+            "core's rest-nonce"                        => ['rest-nonce'],
+            'heartbeat'                                => ['heartbeat'],
+            "Action Scheduler's async runner"          => ['as_async_request_queue_runner'],
+            "LiteSpeed's async task (with a cookie)"   => ['async_litespeed'],
+            'no action at all'                         => [''],
+        ];
+    }
+
+    #[DataProvider('memberAjaxActions')]
+    public function testASignedInMemberGetsABare403AtAdminAjax(string $action): void
+    {
+        $GLOBALS['__bcc_sig']['current'] = self::MEMBER;
+        $GLOBALS['__bcc_sig']['ajax']    = true;
+
+        self::assertSame('status', self::runInit('/wp-admin/admin-ajax.php', $action));
+        self::assertBare403();
+    }
+
+    public function testAnArrayActionIsRefusedToo(): void
+    {
+        $GLOBALS['__bcc_sig']['current'] = self::MEMBER;
+        $GLOBALS['__bcc_sig']['ajax']    = true;
+        $_SERVER['REQUEST_URI'] = '/wp-admin/admin-ajax.php';
+        $_REQUEST['action'] = ['peepso_embed_content'];
+
+        try {
+            WordPressSignInGate::refuseWordPressAjax();
+            self::fail('not refused');
+        } catch (\SignInGateHalt) {
+        }
+        self::assertBare403();
+    }
+
+    public function testNoAdminAjaxActionIsOpenToMembers(): void
+    {
+        self::assertSame([], WordPressSignInGate::MEMBER_AJAX_ACTIONS);
+    }
+
+    /** @return array<string, array{int}> */
+    public static function untouchedAjaxCallers(): array
+    {
+        return [
+            'an admin'                     => [self::ADMIN],
+            'signed out (nopriv, LiteSpeed\'s cookie-less loopback)' => [0],
+        ];
+    }
+
+    #[DataProvider('untouchedAjaxCallers')]
+    public function testAdminsAndSignedOutCallersKeepAdminAjax(int $user): void
+    {
+        $GLOBALS['__bcc_sig']['current'] = $user;
+        $GLOBALS['__bcc_sig']['ajax']    = true;
+
+        self::assertNull(self::runInit('/wp-admin/admin-ajax.php', 'async_litespeed'));
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    /**
+     * PeepSo::check_ajax_query() (peepso.php, 9.0.5.5), verbatim but for
+     * the global: does PeepSo route this URI to its ajax handler?
+     */
+    private static function peepsoRoutes(string $requestUri): bool
+    {
+        $path = trim((string) parse_url($requestUri, PHP_URL_PATH), '/');
+        $parts = explode('/', $path);
+        $segment = count($parts) - 2;
+
+        return $segment >= 0 && 'peepsoajax' === $parts[$segment];
+    }
+
+    /** @return array<string, array{string}> */
+    public static function peepsoAjaxUris(): array
+    {
+        return [
+            'the router'                 => ['/peepsoajax/a.b'],
+            'below a prefix'             => ['/x/peepsoajax/a.b'],
+            'after index.php'            => ['/index.php/peepsoajax/a.b'],
+            'a trailing slash'           => ['/peepsoajax/a.b/'],
+            'a query string'             => ['/peepsoajax/a.b?x=1'],
+            'tags.get_taggable'          => ['/peepsoajax/tags.get_taggable?act_id=12'],
+            'any case'                   => ['/PeepSoAjax/tags.get_taggable'],
+            'a doubled leading slash'    => ['//peepsoajax/a.b'],
+            'a host-looking path'        => ['//cms.example.test/peepsoajax/a.b'],
+            'absolute-form'              => ['https://cms.example.test/peepsoajax/a.b'],
+            'deep below a prefix'        => ['/a/b/c/peepsoajax/a.b'],
+            'the bare router'            => ['/peepsoajax'],
+            'the bare router, slashed'   => ['/peepsoajax/'],
+            'the bare router, any case'  => ['/PeepSoAjax'],
+        ];
+    }
+
+    #[DataProvider('peepsoAjaxUris')]
+    public function testPeepSoAjaxIsMatchedAsPeepSoRoutesIt(string $uri): void
+    {
+        self::assertTrue(WordPressSignInGate::isPeepSoAjax($uri));
+    }
+
+    /** @return array<string, array{string}> */
+    public static function otherUris(): array
+    {
+        return [
+            'the front page'       => ['/'],
+            'a BCC REST call'      => ['/wp-json/bcc/v1/me'],
+            'admin-ajax'           => ['/wp-admin/admin-ajax.php?action=peepso_embed_content'],
+            'a longer segment'     => ['/peepsoajaxx/a.b'],
+            'a prefixed segment'   => ['/xpeepsoajax/a.b'],
+            'split words'          => ['/peepso/ajax/a.b'],
+            'PeepSo REST'          => ['/wp-json/peepso/v1/x'],
+        ];
+    }
+
+    #[DataProvider('otherUris')]
+    public function testOtherUrisAreNotPeepSoAjax(string $uri): void
+    {
+        self::assertFalse(WordPressSignInGate::isPeepSoAjax($uri));
+    }
+
+    /** Whatever PeepSo would route, the matcher catches (a superset). */
+    public function testEveryUriPeepSoRoutesIsMatched(): void
+    {
+        $corpus = array_merge(
+            array_column(self::peepsoAjaxUris(), 0),
+            array_column(self::otherUris(), 0),
+            ['/peepsoajax/a.b/c', '/x/y/peepsoajax/z', '/peepsoajax//a.b', '/peepsoajax/a.b#frag', '/%70eepsoajax/a.b', 'peepsoajax/a.b']
+        );
+        $routed = 0;
+        foreach ($corpus as $uri) {
+            if (self::peepsoRoutes($uri)) {
+                $routed++;
+                self::assertTrue(WordPressSignInGate::isPeepSoAjax($uri), $uri);
+            }
+        }
+        self::assertGreaterThanOrEqual(10, $routed, 'the corpus exercises what PeepSo routes');
+    }
+
+    /** @return array<string, array{int}> */
+    public static function nonAdmins(): array
+    {
+        return ['a member' => [self::MEMBER], 'signed out' => [0]];
+    }
+
+    #[DataProvider('nonAdmins')]
+    public function testANonAdminGetsABare403AtPeepSoAjax(int $user): void
+    {
+        $GLOBALS['__bcc_sig']['current'] = $user;
+
+        self::assertSame('status', self::runInit('/x/peepsoajax/tags.get_taggable'));
+        self::assertBare403();
+    }
+
+    public function testAnAdminKeepsPeepSoAjax(): void
+    {
+        $GLOBALS['__bcc_sig']['current'] = self::ADMIN;
+
+        self::assertNull(self::runInit('/peepsoajax/tags.get_taggable'));
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
+    }
+
+    /** @return array<string, array{string}> */
+    public static function memberElsewhere(): array
+    {
+        return [
+            'a BCC REST call' => ['/wp-json/bcc/v1/me'],
+            'a cms page'      => ['/no-such-page/'],
+            'wp-admin'        => ['/wp-admin/'],
+        ];
+    }
+
+    #[DataProvider('memberElsewhere')]
+    public function testInitLeavesAMemberAloneEverywhereElse(string $uri): void
+    {
+        $GLOBALS['__bcc_sig']['current'] = self::MEMBER;
+
+        self::assertNull(self::runInit($uri));
+        self::assertArrayNotHasKey('status', $GLOBALS['__bcc_sig']);
     }
 
     // ── 3. rest_pre_dispatch ────────────────────────────────────────────

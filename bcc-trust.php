@@ -1658,8 +1658,9 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 
 // Security review 2026-11-18 (H2): members sign in at the app only.
 // wp-login.php / XML-RPC refuse member accounts, wp-admin sends members
-// away, and a member on a bcc route must be authenticated by the bearer
-// token (never a WordPress cookie or application password); see
+// away, admin-ajax and PeepSo's /peepsoajax/ refuse them (2026-11-19),
+// and a member on a bcc route must be authenticated by the bearer token
+// (never a WordPress cookie or application password); see
 // WordPressSignInGate.
 \BCC\Trust\Core\Security\WordPressSignInGate::register();
 
