@@ -290,9 +290,23 @@ final class RepostEndpoint
             }
 
             if ($mine === []) {
-                // See the docblock: nothing of this caller's here, so this
-                // route says nothing about whether the root exists.
-                return ApiResponse::error('bcc_not_found', 'You have not reposted this.', 404);
+                // ⚠⚠ BYTE-IDENTICAL to the "root did not resolve" 404 above,
+                // and that is the whole point of the message being this
+                // unhelpful.
+                //
+                // This route is deliberately NOT audience-gated, and
+                // `resolveRepostRoot()` takes ANY act id — it carries no
+                // module allowlist. So a distinguishable body here ("you
+                // have not reposted this" vs "post not found") answered
+                // *does act N exist* for any id a caller cared to try,
+                // including ids this route would never act on. One body, and
+                // the route tells them only that nothing happened.
+                //
+                // ⚠ The cost is a member who taps undo with nothing to undo
+                // reading "Post not found.", which is confusing. The client
+                // should not offer undo unless `viewer_has_reposted`, and a
+                // confusing message is the cheaper of the two problems.
+                return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
             }
 
             foreach ($mine as $row) {

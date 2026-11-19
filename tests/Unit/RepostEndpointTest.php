@@ -607,6 +607,43 @@ final class RepostEndpointTest extends TestCase
         );
     }
 
+    /**
+     * ⚠⚠ THE TWO 404s MUST BE BYTE-IDENTICAL, which is what closes the
+     * oracle the test above only half-closed.
+     *
+     * Withholding the count is not enough while the MESSAGE differs. This
+     * route is deliberately not audience-gated and `resolveRepostRoot()`
+     * carries no module allowlist, so it resolves ANY act id — and a
+     * distinguishable body ("you have not reposted this" for a real act vs
+     * "post not found" for a missing one) answered *does act N exist* for
+     * anything a caller cared to try.
+     *
+     * Raised by the security pass on this PR; the old comment at that
+     * refusal even claimed the route "says nothing about whether the root
+     * exists", which the different message flatly contradicted.
+     */
+    public function testBothUnRepostRefusalsAreIndistinguishable(): void
+    {
+        $GLOBALS['__bcc_repost_mine'] = [];
+
+        // A REAL act the caller simply has not reposted.
+        $noRepostOfMine = self::delete(self::ROOT);
+
+        // An act that does not resolve to a root at all. ⚠ A POSITIVE id
+        // mapped to root 0 — passing 0 itself would hit the id-validation
+        // 400 instead and compare the wrong two refusals.
+        $GLOBALS['__bcc_repost_trace'] = [];
+        $GLOBALS['__bcc_repost_roots'] = [self::PLAIN => 0];
+        $unresolvable                  = self::delete(self::PLAIN);
+
+        self::assertSame(404, $noRepostOfMine->get_status());
+        self::assertSame(
+            $noRepostOfMine->get_data(),
+            $unresolvable->get_data(),
+            'the two refusals must not differ by a single byte'
+        );
+    }
+
     public function testUnRepostFailsClosedWhenTheReadFails(): void
     {
         $GLOBALS['__bcc_repost_read_fails'] = true;

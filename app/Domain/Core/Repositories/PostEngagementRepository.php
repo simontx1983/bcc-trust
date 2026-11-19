@@ -274,22 +274,6 @@ final class PostEngagementRepository
     }
 
     /**
-     * Run a read and return its rows, or null if the read failed.
-     *
-     * ⚠ EXTRACTED FROM {@see readCount()} rather than written beside it, so
-     * the F-230 failure detection above lives in ONE place. A second copy is
-     * exactly how one of the two reads would later lose the `$ok === false`
-     * leg and start reporting a broken query as "no rows".
-     *
-     * ⚠ An EMPTY array is a successful read of nothing and is returned as
-     * `[]`, never as null. The distinction is the whole point: `[]` means
-     * "this member has not reposted", null means "I could not find out", and
-     * a caller that collapses them re-creates the bug this idiom exists to
-     * prevent.
-     *
-     * @return list<object>|null
-     */
-    /**
      * How many QUOTE reposts of this root exist — a raw total, not distinct
      * members, because quotes are UNLIMITED per member (the X model, user
      * decision 2026-11-18) and two quotes by one member are two posts.
@@ -336,6 +320,22 @@ final class PostEngagementRepository
         ));
     }
 
+    /**
+     * Run a read and return its rows, or null if the read failed.
+     *
+     * ⚠ EXTRACTED FROM {@see readCount()} rather than written beside it, so
+     * the F-230 failure detection above lives in ONE place. A second copy is
+     * exactly how one of the two reads would later lose the `$ok === false`
+     * leg and start reporting a broken query as "no rows".
+     *
+     * ⚠ An EMPTY array is a successful read of nothing and is returned as
+     * `[]`, never as null. The distinction is the whole point: `[]` means
+     * "this member has not reposted", null means "I could not find out", and
+     * a caller that collapses them re-creates the bug this idiom exists to
+     * prevent.
+     *
+     * @return list<object>|null
+     */
     private static function readRows(string $sql): ?array
     {
         global $wpdb;
