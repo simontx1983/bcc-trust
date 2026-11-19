@@ -40,7 +40,11 @@ if (!defined('ABSPATH')) {
  *        `rest_output_link_header` on `template_redirect`);
  *      - XML-RPC's RSD document (`rsd_link`);
  *      - the `?p=` shortlink (`wp_shortlink_wp_head`, and its
- *        `Link: rel=shortlink` header from `wp_shortlink_header`).
+ *        `Link: rel=shortlink` header from `wp_shortlink_header`);
+ *      - oEmbed discovery (`wp_oembed_add_discovery_links`, which core
+ *        hooks twice: at 4, and at 10 for back-compat). The links point
+ *        at `/wp-json/oembed/…`, which RestRouteAllowlist refuses to a
+ *        signed-out caller anyway, and cms serves nothing to embed.
  *
  * The sitemaps need nothing here: Rank Math already 301s `/wp-sitemap.xml`
  * to the app.
@@ -68,6 +72,8 @@ final class WordPressFrontEndGate
         remove_action('wp_head', 'rsd_link');
         remove_action('wp_head', 'wp_shortlink_wp_head', 10);
         remove_action('template_redirect', 'wp_shortlink_header', 11);
+        remove_action('wp_head', 'wp_oembed_add_discovery_links', 4);
+        remove_action('wp_head', 'wp_oembed_add_discovery_links', 10);
     }
 
     /**

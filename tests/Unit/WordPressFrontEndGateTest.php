@@ -67,6 +67,8 @@ final class WordPressFrontEndGateTest extends TestCase
                 ['wp_head', 'rsd_link', 10],
                 ['wp_head', 'wp_shortlink_wp_head', 10],
                 ['template_redirect', 'wp_shortlink_header', 11],
+                ['wp_head', 'wp_oembed_add_discovery_links', 4],
+                ['wp_head', 'wp_oembed_add_discovery_links', 10],
             ],
             $GLOBALS['__bcc_sig']['removed']
         );
@@ -93,6 +95,8 @@ final class WordPressFrontEndGateTest extends TestCase
             ['template_redirect', 'wp_shortlink_header', 11], ['template_redirect', 'wp_old_slug_redirect', 10],
             ['wp_head', 'wp_post_preview_js', 1], ['template_redirect', 'redirect_canonical', 10],
             ['template_redirect', 'wp_redirect_admin_locations', 1000], ['template_redirect', '_wp_admin_bar_init', 0],
+            ['wp_head', 'wp_oembed_add_discovery_links', 4], ['wp_head', 'wp_oembed_add_discovery_links', 10],
+            ['wp_head', 'wp_oembed_add_host_js', 10],
         ];
     }
 
@@ -111,10 +115,10 @@ final class WordPressFrontEndGateTest extends TestCase
         ));
         $leftNames = array_column($left, 1);
 
-        foreach (['wp_generator', 'feed_links', 'feed_links_extra', 'rest_output_link_wp_head', 'rest_output_link_header', 'rsd_link', 'wp_shortlink_wp_head', 'wp_shortlink_header'] as $advert) {
-            self::assertNotContains($advert, $leftNames, $advert . ' is gone');
+        foreach (['wp_generator', 'feed_links', 'feed_links_extra', 'rest_output_link_wp_head', 'rest_output_link_header', 'rsd_link', 'wp_shortlink_wp_head', 'wp_shortlink_header', 'wp_oembed_add_discovery_links'] as $advert) {
+            self::assertNotContains($advert, $leftNames, $advert . ' is gone (at every priority core hooks it)');
         }
-        self::assertCount(count(self::coresHeadAndRedirectHooks()) - 8, $left, 'and nothing else came off');
+        self::assertCount(count(self::coresHeadAndRedirectHooks()) - 10, $left, 'and nothing else came off');
         foreach (['wp_enqueue_scripts', 'rel_canonical', 'wp_robots', 'redirect_canonical'] as $kept) {
             self::assertContains($kept, $leftNames, $kept . ' stays');
         }
