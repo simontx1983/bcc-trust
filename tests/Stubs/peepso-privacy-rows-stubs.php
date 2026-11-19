@@ -31,6 +31,16 @@ namespace BCC\Trust\Core\ValueObjects {
                 return $single ? '' : [];
             }
 
+            // ⚠ WordPress returns FALSE, not an empty array, for a
+            // non-positive object id: get_metadata_raw() starts with
+            // `if (!$object_id = absint($object_id)) return false;`. The
+            // resolver's `!is_array($rows)` branch depends on that, so a stub
+            // that answered [] for every id left the branch unreachable and a
+            // mutation of it survived.
+            if ((int) $id <= 0) {
+                return false;
+            }
+
             /** @var array<int, list<mixed>> $fixture */
             $fixture = $GLOBALS['__bcc_privacy_rows'] ?? [];
             $rows    = $fixture[(int) $id] ?? [];
