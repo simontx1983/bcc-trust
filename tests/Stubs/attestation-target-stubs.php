@@ -24,6 +24,10 @@ namespace {
         public static ?object $attestation = null;
         /** @var int how often the reaffirm reached its per-attestor lock */
         public static int $lockAttempts = 0;
+        /** @var list<int> attestors Permissions::is_not_suspended() refuses */
+        public static array $suspended = [];
+        /** @var list<int> attestors with no rank_state row (New Members) */
+        public static array $newMembers = [];
         /** @var array<int, list<int>> SECRET page id => the viewers bcc-core's rule lets in */
         public static array $secretPages = [];
         /** Is the current viewer a site admin (ProfileAccess's shared exemption)? */
@@ -37,6 +41,8 @@ namespace {
             self::$blocked      = [];
             self::$attestation  = null;
             self::$lockAttempts = 0;
+            self::$suspended    = [];
+            self::$newMembers   = [];
             self::$secretPages  = [];
             self::$admin        = false;
 
@@ -127,9 +133,13 @@ namespace BCC\Core\Permissions {
     if (!class_exists(__NAMESPACE__ . '\\Permissions', false)) {
         final class Permissions
         {
+            /** The admin bypass applies only when the caller asks for it ($admin = the user is a site admin). */
             public static function is_not_suspended(?int $userId, bool $allowAdminBypass = true): bool
             {
-                return true;
+                if ($allowAdminBypass && \AttestTargetWorld::$admin) {
+                    return true;
+                }
+                return !in_array((int) $userId, \AttestTargetWorld::$suspended, true);
             }
         }
     }
@@ -212,13 +222,13 @@ namespace BCC\Trust\Core {
                 return self::$instance ??= new self();
             }
 
-            /** Every attestor in this world is an Apprentice or higher. */
+            /** Every attestor is an Apprentice or higher, unless listed in $newMembers. */
             public function rankStateRepository(): object
             {
                 return new class {
-                    public function getForUser(int $userId): object
+                    public function getForUser(int $userId): ?object
                     {
-                        return (object) ['user_id' => $userId];
+                        return in_array($userId, \AttestTargetWorld::$newMembers, true) ? null : (object) ['user_id' => $userId];
                     }
                 };
             }

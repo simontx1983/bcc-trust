@@ -297,4 +297,70 @@ final class AttestationTargetValidationTest extends TestCase
         self::assertSame(503, $status);
         self::assertSame(0, \AttestTargetWorld::$lockAttempts);
     }
+
+    // ── reaffirm owes the cast's attestor and self rules too ────────────
+
+    /**
+     * A reaffirm refused with exactly what a cast answers, before the lock.
+     *
+     * @param array{0: string, 1: int, 2: string} $refusal code, status, message
+     */
+    private static function reaffirmAnsweredAsACast(array $refusal, string $targetKind, int $targetId): void
+    {
+        self::assertSame($refusal, self::outcome($targetKind, $targetId), 'precondition: the cast refuses it so');
+        $before = \AttestTargetWorld::$lockAttempts;
+        self::assertSame($refusal, self::reaffirmOutcome($targetKind, $targetId));
+        self::assertSame($before, \AttestTargetWorld::$lockAttempts, 'refused before the lock, so nothing is renewed');
+    }
+
+    public function testASuspendedAttestorCannotReaffirm(): void
+    {
+        \AttestTargetWorld::$suspended = [self::ATTESTOR];
+
+        self::reaffirmAnsweredAsACast([AttestationException::CODE_INELIGIBLE, 403, 'Your account is suspended.'], 'user_profile', self::MEMBER);
+    }
+
+    /** Participation paths opt out of the admin bypass, a renewal included. */
+    public function testASuspendedSiteAdminCannotReaffirmEither(): void
+    {
+        \AttestTargetWorld::$suspended = [self::ATTESTOR];
+        \AttestTargetWorld::$admin     = true;
+
+        self::assertSame(
+            [AttestationException::CODE_INELIGIBLE, 403, 'Your account is suspended.'],
+            self::reaffirmOutcome('user_profile', self::MEMBER)
+        );
+    }
+
+    public function testANewMemberCannotReaffirm(): void
+    {
+        \AttestTargetWorld::$newMembers = [self::ATTESTOR];
+
+        self::reaffirmAnsweredAsACast(
+            [AttestationException::CODE_INELIGIBLE, 403, 'Become an Apprentice to do this — post or comment, then keep it up for a day.'],
+            'user_profile',
+            self::MEMBER
+        );
+    }
+
+    /** As in a cast, the attestor is judged before the target: a gone target still answers the 403. */
+    public function testTheAttestorRuleRunsBeforeTheTargetRules(): void
+    {
+        \AttestTargetWorld::$suspended = [self::ATTESTOR];
+
+        self::reaffirmAnsweredAsACast([AttestationException::CODE_INELIGIBLE, 403, 'Your account is suspended.'], 'user_profile', 999999);
+    }
+
+    /** A member who came to own the page they once vouched for cannot keep renewing a self-vouch. */
+    public function testAVouchOnAPageTheAttestorNowOwnsCannotBeReaffirmed(): void
+    {
+        \AttestTargetWorld::$posts[self::VALIDATOR_PAGE]['author'] = self::ATTESTOR;
+
+        self::reaffirmAnsweredAsACast([AttestationException::CODE_SELF, 422, 'You cannot attest on yourself.'], 'validator_card', self::VALIDATOR_PAGE);
+    }
+
+    public function testAProfileVouchOnOneselfCannotBeReaffirmed(): void
+    {
+        self::reaffirmAnsweredAsACast([AttestationException::CODE_SELF, 422, 'You cannot attest on yourself.'], 'user_profile', self::ATTESTOR);
+    }
 }
