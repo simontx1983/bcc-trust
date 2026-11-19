@@ -37,6 +37,7 @@ final class HarnessActAsTest extends TestCase
         require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
         require_once __DIR__ . '/../Stubs/wp-signin-gate-stubs.php';
         require_once __DIR__ . '/../Stubs/harness-act-as-stubs.php';
+        require_once __DIR__ . '/../Stubs/rest-request-stubs.php';
         require_once __DIR__ . '/../../scripts/tests/lib/act-as.php';
         $GLOBALS['__bcc_envelope_meta_throttle'] = ['allow' => true];
         $GLOBALS['__bcc_ph'] = [
@@ -51,7 +52,11 @@ final class HarnessActAsTest extends TestCase
             'options'    => [],
         ];
         $GLOBALS['__bcc_sig'] = ['admins' => [], 'current' => 0, 'ajax' => false, 'hooks' => []];
-        unset($_SERVER['HTTP_AUTHORIZATION'], $_SERVER['REDIRECT_HTTP_AUTHORIZATION'], $GLOBALS['current_user']);
+        unset($_SERVER['HTTP_AUTHORIZATION'], $_SERVER['REDIRECT_HTTP_AUTHORIZATION'], $GLOBALS['current_user'], $GLOBALS['__bcc_harness_request']);
+        // What `wp eval-file` and PHPUnit look like: not the front
+        // controller, no REST path. The bearer counts on REST only.
+        $_SERVER['SCRIPT_NAME'] = 'vendor/bin/phpunit';
+        $_SERVER['REQUEST_URI'] = '';
         BearerAuth::register();
     }
 
@@ -143,6 +148,76 @@ final class HarnessActAsTest extends TestCase
         $afterBrace = trim(substr($body, (int) strpos($body, '{') + 1));
 
         self::assertStringStartsWith('bcc_harness_require_cli(PHP_SAPI);', $afterBrace);
+    }
+
+    /** The REST-only rule (BearerAuth) is why the helper presents a REST request. */
+    public function testItPresentsTheAppsRestRequestAndRestoresTheRealOne(): void
+    {
+        bcc_harness_act_as(self::MEMBER);
+
+        self::assertSame('/index.php', $_SERVER['SCRIPT_NAME']);
+        self::assertSame('/wp-json/', $_SERVER['REQUEST_URI']);
+        self::assertTrue(BearerAuth::isRestRequest());
+
+        bcc_harness_act_as(self::OTHER);
+        bcc_harness_act_as(0);
+
+        self::assertSame('vendor/bin/phpunit', $_SERVER['SCRIPT_NAME'], 'the real values, not the first switch\'s');
+        self::assertSame('', $_SERVER['REQUEST_URI']);
+        self::assertFalse(BearerAuth::isRestRequest());
+    }
+
+    /** Each sign-in / sign-out round restores what was there when that round began. */
+    public function testEachRoundRestoresItsOwnRequest(): void
+    {
+        bcc_harness_act_as(self::MEMBER);
+        bcc_harness_act_as(0);
+
+        $_SERVER['REQUEST_URI'] = '/somewhere-else';
+        bcc_harness_act_as(self::OTHER);
+        bcc_harness_act_as(0);
+
+        self::assertSame('/somewhere-else', $_SERVER['REQUEST_URI'], 'not the first round\'s value');
+    }
+
+    public function testItUsesTheConfiguredRestPrefix(): void
+    {
+        $GLOBALS['__bcc_sig']['rest_prefix'] = 'api';
+
+        bcc_harness_act_as(self::MEMBER);
+
+        self::assertSame('/api/', $_SERVER['REQUEST_URI']);
+        self::assertSame(self::MEMBER, BearerAuth::authenticatedUserId());
+    }
+
+    /**
+     * The control, part 1: the helper's own steps minus presenting the REST
+     * request. On the CLI's request shape the same minted token is ignored,
+     * because BearerAuth counts a bearer on REST only.
+     */
+    public function testWithoutTheRestShapeTheSameTokenIsIgnored(): void
+    {
+        $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . \BCC\Trust\Core\Support\JwtToken::encodeNewSession(self::MEMBER, 'alice');
+        $GLOBALS['current_user'] = null;
+
+        self::assertSame(0, (int) wp_get_current_user()->ID, 'a CLI request is not REST, so the bearer is ignored');
+        self::assertSame(0, BearerAuth::authenticatedUserId());
+    }
+
+    /**
+     * The control, part 2: when the request cannot be REST at all (here an
+     * admin request, which BearerAuth never treats as REST), the helper's
+     * REST shape is not enough, the token is ignored, and the helper throws
+     * instead of running the harness as nobody. BearerAuth stays strict.
+     */
+    public function testWhenTheRequestCannotBeRestTheHelperThrows(): void
+    {
+        $GLOBALS['__bcc_sig']['admin'] = true;
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('bcc_harness_act_as(' . self::MEMBER . '): the request resolved user 0 (bearer user 0)');
+
+        bcc_harness_act_as(self::MEMBER);
     }
 
     /** A token the app would refuse stops the harness instead of running it as nobody. */
