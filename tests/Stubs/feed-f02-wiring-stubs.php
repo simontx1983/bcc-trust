@@ -157,6 +157,8 @@ namespace BCC\Core\Feed {
         public const SCOPE_FOLLOWING = 'following';
         public const SCOPE_SIGNALS   = 'signals';
         public const SCOPE_GROUP     = 'group';
+        public const SCOPE_GROUPS    = 'groups';
+        public const MEMBER_GROUPS_CAP = 200;
 
         /** @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}} */
         public function getFeed(
@@ -172,7 +174,10 @@ namespace BCC\Core\Feed {
             ?string $hashtag = null,
             ?string $hallFeed = null,
             ?array $viewerFriendIds = null,
-            bool $enforcePostVisibility = false
+            bool $enforcePostVisibility = false,
+            ?array $onlyForGroupIds = null,
+            ?array $softExcludedAuthorIds = null,
+            ?array $softExclusionExemptGroupIds = null
         ): array {
             // F-276: every argument, in call order, so a surface's
             // limit / cursor / hashtag can be asserted and a refactor
@@ -191,6 +196,10 @@ namespace BCC\Core\Feed {
                 'hallFeed'              => $hallFeed,
                 'viewerFriendIds'       => $viewerFriendIds,
                 'enforcePostVisibility' => $enforcePostVisibility,
+                // F-416, the "My Groups" channel.
+                'onlyForGroupIds'             => $onlyForGroupIds,
+                'softExcludedAuthorIds'       => $softExcludedAuthorIds,
+                'softExclusionExemptGroupIds' => $softExclusionExemptGroupIds,
             ];
 
             unset(
@@ -306,12 +315,23 @@ namespace BCC\Core\Repositories {
             return $GLOBALS['__bcc_f02feed']['blockers'] ?? [];
         }
 
-        /** @return array<int, true>|null */
+        /**
+         * `mutual_blocked` (list<int> author ids, default none): the
+         * authors the viewer and they have blocked between them.
+         *
+         * @return array<int, true>|null
+         */
         public static function getMutuallyBlockedSetOrUnknown(int $viewerId, array $candidateIds): ?array
         {
-            unset($viewerId, $candidateIds);
+            unset($viewerId);
+            $set = [];
+            foreach ($GLOBALS['__bcc_f02feed']['mutual_blocked'] ?? [] as $id) {
+                if (in_array((int) $id, array_map('intval', $candidateIds), true)) {
+                    $set[(int) $id] = true;
+                }
+            }
 
-            return [];
+            return $set;
         }
     }
 }
@@ -463,6 +483,25 @@ namespace BCC\Trust\Core\Support {
         function get_current_user_id(): int
         {
             return 0;
+        }
+    }
+
+    // ProfileAccess::userIsExemptFromVisibility() asks about a GIVEN user
+    // (canView()'s mentionee), unlike the `is_admin` key, which models the
+    // request's user. Fixture key `admin_ids` (list<int>) lists the users
+    // holding `manage_options`. Outside this suite's fixture it defers to
+    // whatever global user_can() another suite defined, so it changes
+    // nothing for them.
+    if (!\function_exists('BCC\Trust\Core\Support\user_can')) {
+        function user_can($user, string $capability, ...$args): bool
+        {
+            if (!isset($GLOBALS['__bcc_f02feed'])) {
+                return \function_exists('user_can') && \user_can($user, $capability, ...$args);
+            }
+            $id = is_object($user) ? (int) ($user->ID ?? 0) : (int) $user;
+
+            return $capability === 'manage_options'
+                && in_array($id, $GLOBALS['__bcc_f02feed']['admin_ids'] ?? [], true);
         }
     }
 

@@ -38,6 +38,8 @@ if (!defined('ABSPATH')) {
     exit(1);
 }
 
+require_once __DIR__ . '/lib/act-as.php'; // F-441: a member signs in by bearer, as in the app
+
 use BCC\Trust\Core\Announcements\AnnouncementPostType as CPT;
 use BCC\Trust\Core\Announcements\AnnouncementVisibility as VIS;
 use BCC\Trust\Core\Repositories\AnnouncementRepository as REPO;
@@ -119,7 +121,7 @@ if ($role === 'pin') {
         }
     }
 
-    wp_set_current_user((int) $s['op']);
+    bcc_harness_act_as((int) $s['op']);
     $req = new WP_REST_Request('POST', '/bcc/v1/validators/' . (int) $s['page'] . '/announcements/' . $id . '/pin');
     $req->set_param('pageId', (int) $s['page']);
     $req->set_param('id', $id);

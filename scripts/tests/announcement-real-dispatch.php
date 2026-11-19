@@ -59,6 +59,8 @@ use BCC\Trust\Core\Announcements\AnnouncementVisibility as VIS;
 use BCC\Trust\Core\Repositories\AnnouncementRepository as REPO;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority as AUTH;
 
+require_once __DIR__ . '/lib/act-as.php'; // F-441: a member signs in by bearer, as in the app
+
 global $wpdb;
 
 $PASS = 0;
@@ -82,7 +84,7 @@ function ck(string $label, $expected, $actual): void
 
 function dsp(string $route, array $params = array(), int $asUser = 0): array
 {
-    wp_set_current_user($asUser);
+    bcc_harness_act_as($asUser);
     $req = new WP_REST_Request('GET', $route);
     foreach ($params as $k => $v) {
         $req->set_param($k, $v);

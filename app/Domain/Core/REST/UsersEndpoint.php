@@ -39,6 +39,7 @@ use BCC\Trust\Core\Support\MemberCardPrefetcher;
 use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\UserSlugResolver;
 use BCC\Trust\Infrastructure\EdgeCache;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Repositories\WalletRepository;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -509,7 +510,13 @@ final class UsersEndpoint
         // so it belongs with the read rather than with one route — a gate
         // here would be bypassed the moment a second caller appeared, which
         // is exactly the F-283 failure.
-        $payload  = Plugin::instance()->blogService()->getUserBlog($userId, $viewerId, $cursor, $limit);
+        try {
+            $payload = Plugin::instance()->blogService()->getUserBlog($userId, $viewerId, $cursor, $limit);
+        } catch (ActivityReadFailedException) {
+            // F-275: a read that did not run is "try again", never an
+            // empty Blog tab ("this member has written nothing").
+            return FeedUnavailable::response();
+        }
 
         $response = ApiResponse::ok($payload);
         // Same posture as /feed — per-viewer + scope-filtered, short shared
@@ -606,9 +613,16 @@ final class UsersEndpoint
             return ProfileAccess::forbidden();
         }
 
-        $service      = Plugin::instance()->endorsementService();
-        $endorsements = $service->getUserEndorsements($userId, $limit);
-        $items        = $service->hydrateEndorsementItems($endorsements);
+        $service = Plugin::instance()->endorsementService();
+        try {
+            $endorsements = $service->getUserEndorsements($userId, $limit);
+        } catch (RepositoryReadFailure) {
+            // F-421: a read that did not run is not "hasn't vouched for any
+            // pages yet". The 503 is answered `private, no-store`, never
+            // under the max-age below.
+            return UserEndorsementsEndpoint::unavailable();
+        }
+        $items = $service->hydrateEndorsementItems($endorsements);
 
         $response = ApiResponse::ok([
             'items' => $items,
