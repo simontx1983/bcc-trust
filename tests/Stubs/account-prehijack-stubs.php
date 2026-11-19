@@ -350,9 +350,12 @@ namespace {
          */
         function get_users(array $args = []): array
         {
+            // Like MySQL under WordPress's default (`_ci`) collation, a
+            // meta_value match ignores letter case.
             $out = [];
             foreach ($GLOBALS['__bcc_ph']['meta'] as $id => $meta) {
-                if (($meta[(string) $args['meta_key']] ?? null) === (string) $args['meta_value']) {
+                $value = $meta[(string) $args['meta_key']] ?? null;
+                if (is_string($value) && strtolower($value) === strtolower((string) $args['meta_value'])) {
                     $out[] = (int) $id;
                 }
             }

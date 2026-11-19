@@ -425,6 +425,23 @@ final class WalletSignupPendingEmailTest extends TestCase
         self::assertStillPending(10);
     }
 
+    public function testTheAddressesBudgetIgnoresLetterCase(): void
+    {
+        // The holders are found in any letter case (MySQL's collation), so
+        // the budget must be one budget in any letter case too: otherwise
+        // alternating the case would give a guesser a fresh one each time.
+        [$other, $new] = self::twoHolders();
+        $GLOBALS['__bcc_ph']['throttle_counting'] = true;
+        $wrong = self::wrongCode($other, $new);
+
+        self::assertSame('bcc_invalid_otp', self::errorCode(self::verify(['email' => self::TYPED, 'code' => $wrong])));
+        self::assertSame('bcc_invalid_otp', self::errorCode(self::verify(['email' => strtoupper(self::TYPED), 'code' => $wrong])), 'found in upper case too');
+
+        $res = self::verify(['email' => ucfirst(self::TYPED), 'code' => $new]);
+        self::assertSame('bcc_otp_exhausted', self::errorCode($res), 'the same budget, whatever the case');
+        self::assertStillPending(self::NEW);
+    }
+
     public function testAResendDoesNotReArmTheAddressesBudget(): void
     {
         [$other, $new] = self::twoHolders();
