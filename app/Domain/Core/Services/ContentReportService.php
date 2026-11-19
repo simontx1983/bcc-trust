@@ -37,6 +37,7 @@ use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Repositories\ContentReportRepository;
+use BCC\Trust\Core\Support\PageAccess;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -179,7 +180,7 @@ final class ContentReportService
         // be reported at all. Splitting those into two passes would invite a
         // later edit that authorises one and forgets the other.
         if ($targetKind === self::KIND_ANNOUNCEMENT) {
-            $resolved = $this->resolveAnnouncementTarget($targetId);
+            $resolved = $this->resolveAnnouncementTarget($reporterUserId, $targetId);
             if (isset($resolved['error'])) {
                 return $resolved;
             }
@@ -311,13 +312,25 @@ final class ContentReportService
      * ⚠ A read failure is `bcc_unavailable`, never "not found": failing closed
      * on an unreadable database must not look like a row that does not exist.
      *
+     * ⚠ SECRET PAGES: a notice on a page the REPORTER may not see
+     * ({@see PageAccess}: its author, then admins, then members and invitees)
+     * is the same "Not found." as an id that does not exist, as on the detail
+     * route and the comment routes. Without it, sequential ids told a member
+     * that a secret page's notice exists, and filed reports about content
+     * they cannot read. It is decided BEFORE the readability read, because a
+     * missing id never reaches that read either: a failing database must not
+     * answer 503 for a hidden notice where a missing one gets 404. The
+     * reporter is the only extra input, and it is the authenticated caller,
+     * not anything the request names.
+     *
      * @return array{author_id: int}|array{error: string, message: string}
      */
-    private function resolveAnnouncementTarget(int $announcementId): array
+    private function resolveAnnouncementTarget(int $reporterUserId, int $announcementId): array
     {
         $post = get_post($announcementId);
         if (!$post instanceof \WP_Post
             || $post->post_type !== AnnouncementPostType::POST_TYPE
+            || !PageAccess::viewerMaySeeId((int) $post->post_parent, $reporterUserId)
         ) {
             return ['error' => 'bcc_not_found', 'message' => 'Not found.'];
         }
