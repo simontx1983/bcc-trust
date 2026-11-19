@@ -463,6 +463,30 @@ final class PagePostsIntegrationTest extends TestCase
         self::assertSame(404, $this->feed(self::PAGE_A)->get_status(), 'banned wins over member');
     }
 
+    /**
+     * The secret-page gate answers BEFORE the feed is read (F-275 added a 503
+     * for a read that fails). Otherwise a failing database would tell a
+     * stranger a secret page (503) from a missing one (404).
+     */
+    public function testASecretPagesFeedIsStillAMissingPageWhenTheFeedReadFails(): void
+    {
+        $this->postedActId(self::OPERATOR, self::PAGE_A);
+        $missing = $this->feed(999999);
+        $this->makeSecret(self::PAGE_A);
+        $GLOBALS['wpdb']->failQueriesMatching = self::ACTIVITY_READ;
+        $GLOBALS['__bcc_current_user']        = self::STRANGER;
+
+        $response = $this->feed(self::PAGE_A);
+
+        self::assertSame(404, $response->get_status(), 'never the 503 a page the viewer may see gets');
+        self::assertSame($missing->get_data(), $response->get_data(), 'exactly the missing-page answer');
+        self::assertSame(0, $GLOBALS['wpdb']->injectedFailures, 'the feed is never read');
+
+        // Control: a member of the same page reaches the read, and gets the 503.
+        $this->addPageMember(self::PAGE_A, self::STRANGER, 'member');
+        self::assertUnavailable($this->feed(self::PAGE_A), 'The feed is temporarily unavailable. Please try again.');
+    }
+
     public function testPaginationWalksEveryPostOnceAndStops(): void
     {
         $expected = [];
