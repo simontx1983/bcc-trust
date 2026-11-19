@@ -68,6 +68,7 @@ use BCC\Core\Repositories\PeepSoGroupRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Repositories\ChainRepository;
 use BCC\Trust\Onchain\Repositories\HallRepository;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -864,8 +865,21 @@ final class HallProvisioningService {
         ];
 
         try {
-            /** @phpstan-ignore-next-line — PeepSo classes are runtime-only. */
-            $group = new \PeepSoGroup(null, $data);
+            // ⚠⚠ F-361 — A PEEPSO MODEL WRITE, and this file already said so
+            // at the top: `new PeepSoGroup(null, $data)` runs
+            // `wp_insert_post()` (peepso-groups group.php:308). TWO arguments
+            // CREATE; one argument only loads, which is why the
+            // `new \PeepSoGroup($groupId)` reads elsewhere in this file are
+            // left alone.
+            //
+            // So the three request-reading listeners (moods.php:47,
+            // location.php:90, peepso-anon) see whatever the member sent on
+            // the request that triggered a Hall's provisioning.
+            $group = PeepSoAddPostGuard::pinOnly(
+                [], // provisioning drives nothing through the request
+                /** @phpstan-ignore-next-line — PeepSo classes are runtime-only. */
+                static fn () => new \PeepSoGroup(null, $data)
+            );
             /** @phpstan-ignore-next-line */
             $id = (int) $group->get('id');
             return $id > 0 ? $id : 0;

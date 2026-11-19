@@ -34,8 +34,14 @@ final class PostDeleteOracleTest extends TestCase
     protected function setUp(): void
     {
         require_once dirname(__DIR__) . '/Stubs/post-delete-stubs.php';
+        // F-361 — deletePost()'s trash is now inside
+        // PeepSoAddPostGuard::pinOnly(), so the REAL guard has to be
+        // present. The loader THROWS rather than skipping, because a skip
+        // would turn the pin assertion below into a false green.
+        require_once dirname(__DIR__) . '/Stubs/peepso-add-post-guard-real.php';
         CommentDeleteFakes::reset();
-        $GLOBALS['__bcc_trashed'] = [];
+        $GLOBALS['__bcc_trashed']      = [];
+        $GLOBALS['__bcc_pin_at_write'] = [];
 
         CommentDeleteFakes::$activities[self::ACT] = (object) [
             'act_id'          => self::ACT,
@@ -103,6 +109,54 @@ final class PostDeleteOracleTest extends TestCase
      *    told a stranger that a comment exists inside a group they cannot
      *    see, which is the exact oracle F-47 closed for posts.
      */
+
+    /**
+     * ⭐ F-361 BEHAVIOURAL PIN TEST — a member trashing their OWN post.
+     *
+     * `wp_trash_post()` calls `wp_update_post()` in its own body, which
+     * calls `wp_insert_post()`, which fires the `wp_insert_post` action —
+     * so moods (moods.php:47), location (location.php:90) and the
+     * anonymous-OP marker all read THIS member's request on a delete.
+     *
+     * ⚠ Asserted from a snapshot taken INSIDE the write. The guard
+     * restores the request in a `finally`, so an assertion after the call
+     * sees the original whether the pin ran or not — the ordering is the
+     * whole property.
+     *
+     * ⚠ `save_mood`'s "no mood, no touch" guard does not protect a trash:
+     * the action passes `$post`, so only the DELETE-meta branch is
+     * skipped while `else if ($mood)` still fires.
+     */
+    public function testTheOwnerDeleteTrashIsPinned(): void
+    {
+        $_GET = $_POST = $_REQUEST = [
+            'mood'     => '7',
+            'location' => 'somewhere else',
+            'anon_id'  => '41',
+            'group_id' => '900',
+        ];
+
+        self::service(true)->deletePost('feed_' . self::ACT, self::OWNER);
+
+        self::assertNotSame([], $GLOBALS['__bcc_trashed'], 'precondition: the post was trashed');
+
+        /** @var list<array{fn: string, get: array<string, mixed>, post: array<string, mixed>}> $writes */
+        $writes = $GLOBALS['__bcc_pin_at_write'];
+        self::assertNotEmpty($writes, 'the write never ran — the fixture is not measuring anything');
+
+        foreach ($writes as $w) {
+            self::assertSame([], $w['get'], $w['fn'] . ': $_GET must be empty — PeepSoInput reads it FIRST');
+            // ⚠ PINNED, NOT UNSET: PeepSoInput::int() falls back to the RAW
+            // request body for an absent key, so unsetting `mood`/`anon_id`
+            // would OPEN that leg rather than close it.
+            self::assertArrayHasKey('mood', $w['post'], $w['fn'] . ': mood must be pinned, not unset');
+            self::assertSame(0, $w['post']['mood'], $w['fn'] . ': mood neutral during the write');
+            self::assertSame(0, $w['post']['anon_id'], $w['fn'] . ': anon_id neutral during the write');
+            self::assertSame('', $w['post']['location'], $w['fn'] . ': location neutral during the write');
+            self::assertSame(0, $w['post']['group_id'], $w['fn'] . ': group_id neutral during the write');
+        }
+    }
+
     public function testACommentActIdIsNotDeletableThroughThePostRoute(): void
     {
         CommentDeleteFakes::$commentActs = [self::ACT];

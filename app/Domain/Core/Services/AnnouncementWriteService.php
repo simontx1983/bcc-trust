@@ -14,6 +14,7 @@ use BCC\Trust\Core\Exceptions\RepositoryException;
 use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Trust\Core\Security\AuditLogger;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority as Authority;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 /**
  * A3 — the announcement write layer.
@@ -226,7 +227,12 @@ final class AnnouncementWriteService
         // withPlainTextColumns() because core's title/excerpt kses would turn
         // the plain-text "Q&A" back into "Q&amp;A". post_content keeps core
         // kses on purpose (other consumers render it).
-        $postId = self::withPlainTextColumns(static fn () => wp_insert_post(wp_slash([
+        // ⚠ F-361 — pinned INSIDE withPlainTextColumns(), so that helper's
+        // filter juggling still spans the write and the pin covers only the
+        // write itself. Safe in either order: it reads no request input.
+        // An operator IS a member making a request, so `anon_id` here would
+        // mark the post the feed projects as posted anonymously.
+        $postId = self::withPlainTextColumns(static fn () => PeepSoAddPostGuard::pinOnly([], static fn () => wp_insert_post(wp_slash([
             'post_type'     => AnnouncementPostType::POST_TYPE,
             'post_status'   => Verb::statusFor($verb),
             'post_title'    => $title,
@@ -241,7 +247,7 @@ final class AnnouncementWriteService
             'post_date'     => $date,
             'post_parent'   => $pageId,
             'post_password' => '',
-        ]), true));
+        ]), true)));
 
         if (is_wp_error($postId) || !is_int($postId) || $postId <= 0) {
             return self::fail(self::ERR_UNAVAILABLE, 'The announcement could not be stored.', 503);
@@ -388,7 +394,13 @@ final class AnnouncementWriteService
         }
 
         // F-151: same slashing / plain-text-column handling as create().
-        $res = self::withPlainTextColumns(static fn () => wp_update_post(wp_slash($update), true));
+        // F-361 — pinned, same reasoning as create().
+        $res = self::withPlainTextColumns(
+            static fn () => PeepSoAddPostGuard::pinOnly(
+                [],
+                static fn () => wp_update_post(wp_slash($update), true)
+            )
+        );
         if (is_wp_error($res)) {
             return self::fail(self::ERR_UNAVAILABLE, 'The announcement could not be updated.', 503);
         }
@@ -425,12 +437,16 @@ final class AnnouncementWriteService
             return self::fail(self::ERR_CONFLICT, 'Already published.', 409);
         }
 
-        $res = wp_update_post([
-            'ID'            => $announcementId,
-            'post_status'   => Verb::STATUS_PUBLIC,
-            'post_date_gmt' => $now,
-            'post_date'     => $now,
-        ], true);
+        // F-361 — pinned. This is the operator's publish request.
+        $res = PeepSoAddPostGuard::pinOnly(
+            [],
+            static fn () => wp_update_post([
+                'ID'            => $announcementId,
+                'post_status'   => Verb::STATUS_PUBLIC,
+                'post_date_gmt' => $now,
+                'post_date'     => $now,
+            ], true)
+        );
         if (is_wp_error($res)) {
             return self::fail(self::ERR_UNAVAILABLE, 'The announcement could not be published.', 503);
         }
@@ -752,7 +768,14 @@ final class AnnouncementWriteService
     {
         delete_post_meta($postId, Vis::META_AUTHORIZED_AT);
         delete_post_meta($postId, Vis::META_AUTHORIZED_USER_ID);
-        wp_update_post(['ID' => $postId, 'post_status' => Verb::STATUS_DRAFT], true);
+        // ⚠ F-361 — pinned, and this one is reached from THREE request paths
+        // (create / edit / publish) AND from cron. Pinning is a no-op on the
+        // cron path, where there is no attacker request at all; it matters on
+        // the three request paths, where the operator's own request is live.
+        PeepSoAddPostGuard::pinOnly(
+            [],
+            static fn () => wp_update_post(['ID' => $postId, 'post_status' => Verb::STATUS_DRAFT], true)
+        );
 
         $leaked = false;
         try {

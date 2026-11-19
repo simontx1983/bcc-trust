@@ -32,8 +32,14 @@ final class AnnouncementModerationWriteRefusalTest extends TestCase
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/announcement-moderation-write-stubs.php';
-        $GLOBALS['wpdb']           = new \AnnouncementArchiveFakeWpdb();
-        $GLOBALS['__bcc_arch_own'] = self::row('publish');
+        // F-361 — create/edit/publish now wrap their writes in
+        // PeepSoAddPostGuard::pinOnly(), so the REAL guard must be present.
+        // The loader THROWS rather than skipping: a skip would turn the pin
+        // assertion below into a false green.
+        require_once __DIR__ . '/../Stubs/peepso-add-post-guard-real.php';
+        $GLOBALS['wpdb']               = new \AnnouncementArchiveFakeWpdb();
+        $GLOBALS['__bcc_arch_own']     = self::row('publish');
+        $GLOBALS['__bcc_pin_at_write'] = [];
     }
 
     /** @return array{decision: string, reason: string|null, operator_user_id: int|null} */
@@ -141,6 +147,62 @@ final class AnnouncementModerationWriteRefusalTest extends TestCase
      * takedown) both writes get past the refusal — edit reaches validation,
      * pin reaches the publication rung.
      */
+    /**
+     * ⭐ F-361 BEHAVIOURAL PIN TEST — an operator editing an announcement.
+     *
+     * An operator IS a member making a request, and an announcement is
+     * PROJECTED INTO FEEDS, so `anon_id` on the edit request would mark the
+     * projected item as posted anonymously, and `mood` / `location` would
+     * stamp meta nobody asked for.
+     *
+     * ⚠ Asserted from a snapshot taken INSIDE the write, because the guard
+     * restores the request in a `finally` — an assertion after the call sees
+     * the original whether the pin ran or not. The ordering IS the property.
+     *
+     * ⚠ The pin sits INSIDE `withPlainTextColumns()`, so this also covers
+     * that composition: the helper's filter juggling still spans the write
+     * while the pin covers only the write.
+     */
+    public function testTheAnnouncementEditWriteIsPinned(): void
+    {
+        $_GET = $_POST = $_REQUEST = [
+            'mood'     => '7',
+            'location' => 'somewhere else',
+            'anon_id'  => '41',
+            'group_id' => '900',
+        ];
+
+        (new AnnouncementWriteService())->edit(
+            self::PAGE,
+            self::ANN,
+            self::operator(),
+            ['title' => 'an edited title'],
+            self::NOW
+        );
+
+        self::assertNotSame([], $GLOBALS['__bcc_arch_post_writes'], 'precondition: the edit reached its write');
+
+        /** @var list<array{fn: string, get: array<string, mixed>, post: array<string, mixed>}> $writes */
+        $writes = $GLOBALS['__bcc_pin_at_write'];
+        self::assertNotEmpty($writes, 'no snapshot — the fixture is not measuring anything');
+
+        foreach ($writes as $w) {
+            self::assertSame([], $w['get'], '$_GET must be empty — PeepSoInput reads it FIRST');
+            // ⚠ PINNED, NOT UNSET: PeepSoInput::int() falls back to the RAW
+            // request body for an absent key, so unsetting `mood`/`anon_id`
+            // would OPEN that leg rather than close it.
+            self::assertArrayHasKey('mood', $w['post'], 'mood must be pinned, not unset');
+            self::assertSame(0, $w['post']['mood'], 'mood neutral during the write');
+            self::assertSame(0, $w['post']['anon_id'], 'anon_id neutral during the write');
+            self::assertSame('', $w['post']['location'], 'location neutral during the write');
+            self::assertSame(0, $w['post']['group_id'], 'group_id neutral during the write');
+        }
+
+        // ⚠ ANTI-VACUITY: the hostile request really was in flight, and the
+        // guard really put it back.
+        self::assertSame('7', $_POST['mood'], 'the request is restored after the write');
+    }
+
     public function testWithoutATakedownBothWritesPassTheRefusal(): void
     {
         foreach ([null, ''] as $marker) {

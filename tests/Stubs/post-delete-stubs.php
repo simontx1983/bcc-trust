@@ -42,6 +42,15 @@ namespace BCC\Trust\Core\Services {
         function wp_trash_post(int $postId)
         {
             $GLOBALS['__bcc_trashed'][] = $postId;
+            // F-361 — the superglobals AT the write. The guard restores
+            // them in a `finally`, so a check after the call sees the
+            // original whether the pin ran or not.
+            $GLOBALS['__bcc_pin_at_write'][] = [
+                'fn'   => 'wp_trash_post',
+                'get'  => $_GET,
+                'post' => $_POST,
+            ];
+
             return false;
         }
     }

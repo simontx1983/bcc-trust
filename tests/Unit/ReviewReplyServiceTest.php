@@ -47,6 +47,10 @@ final class ReviewReplyServiceTest extends TestCase
     protected function setUp(): void
     {
         require_once __DIR__ . '/../Stubs/review-reply-service-stubs.php';
+        // F-361 — edit() now wraps its write in PeepSoAddPostGuard::pinOnly().
+        // The REAL guard, and the loader throws rather than skipping.
+        require_once __DIR__ . '/../Stubs/peepso-add-post-guard-real.php';
+        $GLOBALS['__bcc_pin_at_write'] = [];
         \ReplyWorld::reset();
         \ReplyWorld::$reviews[self::VOTE] = ['voter' => self::REVIEWER, 'page' => self::selfPage()];
     }
@@ -263,6 +267,54 @@ final class ReviewReplyServiceTest extends TestCase
 
         self::assertNull(self::code(self::service()->create(self::NEW_OPERATOR, self::VOTE, 'from the new operator')));
         self::assertSame('from the new operator', self::service()->forReviews(0, self::rows(self::VOTE))[self::VOTE]['reply']['body'] ?? null);
+    }
+
+
+    /**
+     * ⭐ F-361 BEHAVIOURAL PIN TEST — an operator editing their own reply.
+     *
+     * #772 pinned the reply PUBLISH (inside ActivityStreamWriter); this is
+     * the EDIT, a separate `wp_update_post()` on the same post, reached
+     * straight from the operator's own request. An update is not a quieter
+     * write than an insert as far as the three request-reading listeners
+     * are concerned.
+     *
+     * ⚠ The snapshot is taken INSIDE the write, because the guard restores
+     * the request in a `finally`.
+     */
+    public function testTheReplyEditWriteIsPinned(): void
+    {
+        $this->onValidatorPage(self::OPERATOR);
+        self::service()->create(self::OPERATOR, self::VOTE, 'original');
+
+        // Only the EDIT is under test — the create's own (already pinned)
+        // writes are discarded so a pass cannot come from them.
+        $GLOBALS['__bcc_pin_at_write'] = [];
+
+        $_GET = $_POST = $_REQUEST = [
+            'mood'     => '7',
+            'location' => 'somewhere else',
+            'anon_id'  => '41',
+            'group_id' => '900',
+        ];
+
+        self::assertNull(self::code(self::service()->update(self::OPERATOR, self::VOTE, 'edited')));
+
+        /** @var list<array{fn: string, get: array<string, mixed>, post: array<string, mixed>}> $writes */
+        $writes = $GLOBALS['__bcc_pin_at_write'];
+        self::assertNotEmpty($writes, 'the write never ran — the fixture is not measuring anything');
+
+        foreach ($writes as $w) {
+            self::assertSame([], $w['get'], $w['fn'] . ': $_GET must be empty — PeepSoInput reads it FIRST');
+            // ⚠ PINNED, NOT UNSET: PeepSoInput::int() falls back to the RAW
+            // request body for an absent key, so unsetting `mood`/`anon_id`
+            // would OPEN that leg rather than close it.
+            self::assertArrayHasKey('mood', $w['post'], $w['fn'] . ': mood must be pinned, not unset');
+            self::assertSame(0, $w['post']['mood'], $w['fn'] . ': mood neutral during the write');
+            self::assertSame(0, $w['post']['anon_id'], $w['fn'] . ': anon_id neutral during the write');
+            self::assertSame('', $w['post']['location'], $w['fn'] . ': location neutral during the write');
+            self::assertSame(0, $w['post']['group_id'], $w['fn'] . ': group_id neutral during the write');
+        }
     }
 
     public function testTheOldAuthorCanDeleteButNotEditAStaleReply(): void

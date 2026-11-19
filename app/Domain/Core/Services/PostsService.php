@@ -38,6 +38,7 @@ use BCC\Trust\Core\ValueObjects\BlogCategory;
 use BCC\Trust\Core\ValueObjects\GroupType;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
 use Exception;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -833,7 +834,17 @@ final class PostsService
         }
 
         $postId  = (int) $activity->act_external_id;
-        $trashed = wp_trash_post($postId);
+        // ⚠⚠ F-361 — PINNED, AND A TRASH IS NOT EXEMPT. `wp_trash_post()`
+        // calls `wp_update_post()` in its own body, which calls
+        // `wp_insert_post()`, which fires the action — so moods, location
+        // and the anonymous-OP marker all read this member's request here.
+        // `save_mood`'s "no mood, no touch" guard does not help: the action
+        // passes `$post`, so only the DELETE-meta branch is skipped while
+        // `else if ($mood)` still fires.
+        $trashed = PeepSoAddPostGuard::pinOnly(
+            [], // deleting a post drives nothing through the request
+            static fn () => wp_trash_post($postId)
+        );
         if ($trashed === false || $trashed === null) {
             Logger::error('[PostsService] deletePost trash failed', [
                 'act_id'  => $actId,
@@ -1700,7 +1711,20 @@ final class PostsService
         // change since the last revision). Retries on the same post
         // do NOT double-create revisions — WP handles idempotency.
         if (function_exists('wp_save_post_revision')) {
-            wp_save_post_revision($postId);
+            // ⚠ F-361 — A REVISION IS A POST INSERT.
+            // `wp_save_post_revision()` calls `_wp_put_post_revision()`
+            // (revision.php:99), which calls `wp_insert_post($post, true)`
+            // (revision.php:19) — so the action fires and the three
+            // request-reading listeners run on the REVISION row.
+            //
+            // ⚠⚠ THIS IS THE SAME MEMBER REQUEST as the `wp_update_post` 36
+            // lines below, which F-361's first pass pinned while leaving
+            // this one open. Pinning the update and not the revision
+            // protects the post and not its history.
+            PeepSoAddPostGuard::pinOnly(
+                [], // a revision drives nothing through the request
+                static fn () => wp_save_post_revision($postId)
+            );
         }
 
         // ── wp_update_post (title / excerpt / content / status) ─────
@@ -1733,7 +1757,11 @@ final class PostsService
         // to bump the wp_post row. (Skipping the call also avoids a
         // no-op revision insert when only sidecar meta changes.)
         if (count($postUpdate) > 1) {
-            $result = wp_update_post($postUpdate, true);
+            // F-361 — pinned: this is the member's own edit request.
+            $result = PeepSoAddPostGuard::pinOnly(
+                [], // a blog edit drives nothing through the request
+                static fn () => wp_update_post($postUpdate, true)
+            );
             if (is_wp_error($result) || (int) $result <= 0) {
                 $errMsg = is_wp_error($result) ? $result->get_error_message() : 'wp_update_post returned non-positive id';
                 Logger::warning('[PostsService] updateBlog wp_update_post failed', [
@@ -2487,10 +2515,17 @@ final class PostsService
             // the gate for the rest of the request.
             self::$revertingParkedBlog[$postId] = true;
             try {
-                wp_update_post([
-                    'ID'          => $postId,
-                    'post_status' => 'draft',
-                ]);
+                // F-361 — pinned INSIDE the reverting flag, so the flag's
+                // try/finally still owns the gate and the pin owns only the
+                // write. Reached during a member's request, so the request
+                // is theirs.
+                PeepSoAddPostGuard::pinOnly(
+                    [],
+                    static fn () => wp_update_post([
+                        'ID'          => $postId,
+                        'post_status' => 'draft',
+                    ])
+                );
             } finally {
                 unset(self::$revertingParkedBlog[$postId]);
             }

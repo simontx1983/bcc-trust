@@ -10,6 +10,7 @@ use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Services\Feed\ActivityStreamWriter;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -310,7 +311,13 @@ final class ReviewReplyService
             return self::error('bcc_rate_limited', 'You are replying too fast. Try again in a few minutes.');
         }
 
-        $updated = wp_update_post(['ID' => $reply['post_id'], 'post_content' => $clean], true);
+        // ⚠ F-361 — pinned. #772 pinned the reply PUBLISH (in
+        // ActivityStreamWriter); this is the EDIT, a separate write on the
+        // same post from the operator's own request.
+        $updated = PeepSoAddPostGuard::pinOnly(
+            [], // a reply edit drives nothing through the request
+            static fn () => wp_update_post(['ID' => $reply['post_id'], 'post_content' => $clean], true)
+        );
         if (is_wp_error($updated) || (int) $updated <= 0) {
             return self::unavailable();
         }
