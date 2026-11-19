@@ -100,15 +100,12 @@ final class ProfileGroupVisibility
             return [];
         }
 
-        // The owner's own tab is never filtered — they chose the setting
-        // and must be able to see what it is hiding.
-        if ($viewerId > 0 && $viewerId === $ownerId) {
-            return $contexts;
-        }
-
-        // Same exemption the rest of F-02 grants, so an admin's view of a
-        // profile does not silently differ between surfaces.
-        if (ProfileAccess::viewerIsExemptFromVisibility()) {
+        // The owner's own view is never filtered, and an admin keeps the
+        // F-02 exemption. ONE copy of both, shared with
+        // hidesPrimaryHall() below: before F-401 these two rules lived
+        // only here, and the home-Hall chip published by getSummary()
+        // answered to neither.
+        if (self::viewerSeesEverything($ownerId, $viewerId)) {
             return $contexts;
         }
 
@@ -173,5 +170,64 @@ final class ProfileGroupVisibility
         }
 
         return $contexts;
+    }
+
+    /**
+     * Does $viewerId see $ownerId's groups exactly as the owner does?
+     *
+     * The owner chose the setting and must be able to see what it is
+     * hiding; an admin keeps the exemption the rest of F-02 grants, so a
+     * moderator's view of a profile does not silently differ between
+     * surfaces.
+     *
+     * ⭐ Extracted for F-401 rather than copied into the new rule. Two
+     * copies of an EXEMPTION fail in the direction that hides a Hall
+     * from the one person entitled to see it, and this class already
+     * carries the scar of two copies of a visibility rule (F-323).
+     */
+    private static function viewerSeesEverything(int $ownerId, int $viewerId): bool
+    {
+        if ($viewerId > 0 && $viewerId === $ownerId) {
+            return true;
+        }
+
+        return ProfileAccess::viewerIsExemptFromVisibility();
+    }
+
+    /**
+     * F-401 — is the owner's HOME-HALL chip withheld from this viewer?
+     *
+     * The user decision (2026-11-18): hiding a Hall hides the home-Hall
+     * chip too when that Hall is the member's primary. Rule 4 above
+     * already drops it from the `halls` LIST; the chip is the same fact
+     * published as a single field, and leaving it visible would have
+     * defeated the choice in the one place it is most prominent.
+     *
+     * ⚠ The group TYPE is not re-resolved here, deliberately. The
+     * pointer this id comes from (`bcc_primary_hall_group_id`) is written
+     * only by {@see \BCC\Trust\Core\Services\HallsService::setPrimaryHall()},
+     * which requires a Hall, so a context lookup would buy nothing and
+     * would cost one resolver call PER ROW on every directory page. If
+     * the pointer ever did aim at a non-Hall, hiding it is the harmless
+     * direction — rule 4's type scope exists to stop the hide list
+     * reaching OTHER groups, not to protect this one id.
+     *
+     * ⚠ Costs no query on a list path: the hidden-list read is
+     * `get_user_meta`, and WP caches a user's whole meta row set on
+     * first touch — `MemberSummaryPrefetcher::primeFor()` primes it for
+     * the entire page via `update_meta_cache()`, and `getSummary()`
+     * reads privacy meta for the row before reaching this.
+     */
+    public static function hidesPrimaryHall(int $ownerId, int $groupId, int $viewerId): bool
+    {
+        if ($ownerId <= 0 || $groupId <= 0) {
+            return false;
+        }
+
+        if (self::viewerSeesEverything($ownerId, $viewerId)) {
+            return false;
+        }
+
+        return in_array($groupId, ProfileAccess::hiddenHallIds($ownerId), true);
     }
 }
