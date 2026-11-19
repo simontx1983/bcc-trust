@@ -96,22 +96,35 @@ final class Envelope
         // throttle call in the request (the shared me_write bucket, 60 s),
         // which used to overwrite the real wait with "60" (account-flows
         // review, F-294).
+        //
+        // F-289: the wait advertised is the time LEFT on the bucket that
+        // refused, not its window. A sliding-window bucket can need anything
+        // from 0 up to two windows, so the window was wrong both ways, and
+        // a retry that comes too early on a counting bucket extends the block.
+        // bcc-core records it with the denial (`retry_after`, solved exactly
+        // by RateLimiter::retryAfterByKey()); the seconds since come off. An
+        // older bcc-core records no `retry_after`, and the window stays the
+        // fallback. Since F-289 bcc-core also records ONLY denials, so a 429
+        // no throttle caused (the captcha step-up's bcc_captcha_required, with
+        // every bucket having let the request through) gets nothing injected.
         $ownRetryAfter = isset($response->get_headers()['Retry-After']);
         if ($status === 429 && !$ownRetryAfter && class_exists(\BCC\Core\Security\Throttle::class)) {
             $denial = \BCC\Core\Security\Throttle::lastDenial();
             if (is_array($denial)) {
-                $window = max(1, (int) ($denial['window'] ?? 60));
-                $limit  = max(0, (int) ($denial['limit'] ?? 0));
-                $response->header('Retry-After', (string) $window);
+                $window     = max(1, (int) ($denial['window'] ?? 60));
+                $limit      = max(0, (int) ($denial['limit'] ?? 0));
+                $since      = max(0, time() - (int) ($denial['at'] ?? time()));
+                $retryAfter = max(1, (int) ($denial['retry_after'] ?? $window) - $since);
+                $response->header('Retry-After', (string) $retryAfter);
                 $response->header('X-RateLimit-Limit', (string) $limit);
                 $response->header('X-RateLimit-Remaining', '0');
-                $response->header('X-RateLimit-Reset', (string) (time() + $window));
+                $response->header('X-RateLimit-Reset', (string) (time() + $retryAfter));
 
                 if (is_array($data) && isset($data['error']) && is_array($data['error'])) {
                     $errData = (isset($data['error']['data']) && is_array($data['error']['data']))
                         ? $data['error']['data']
                         : [];
-                    $errData['retry_after_seconds'] = $window;
+                    $errData['retry_after_seconds'] = $retryAfter;
                     $data['error']['data'] = $errData;
                     $response->set_data($data);
                 }
