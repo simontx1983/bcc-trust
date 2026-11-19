@@ -17,6 +17,8 @@ use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
+require_once __DIR__ . '/PeepSoActivitiesTable.php';
+
 /**
  * Posts an operator writes for a validator page: who may write one, and where
  * it shows up afterwards.
@@ -831,16 +833,6 @@ final class PagePostsIntegrationTest extends TestCase
         }
         $statements = [
             ...$statements,
-            "CREATE TABLE {$wpdb->prefix}peepso_activities (
-                act_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                act_owner_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                act_module_id VARCHAR(20) NOT NULL DEFAULT '0',
-                act_external_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                act_access INT NOT NULL DEFAULT 10,
-                act_repost_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                act_comment_object_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                PRIMARY KEY (act_id)
-            ) DEFAULT CHARSET=utf8mb4",
             "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}peepso_blocks (
                 blk_user_id BIGINT UNSIGNED NOT NULL,
                 blk_blocked_id BIGINT UNSIGNED NOT NULL,
@@ -863,6 +855,9 @@ final class PagePostsIntegrationTest extends TestCase
         foreach ($statements as $sql) {
             self::assertNotFalse($wpdb->query($sql), 'feed fixture: ' . $wpdb->last_error);
         }
+        // This suite owns peepso_activities (tearDown drops it). The helper
+        // builds it with the full column set bcc-core reads.
+        PeepSoActivitiesTable::ensure();
 
         require_once dirname(__DIR__, 2) . '/includes/database/schema-hidden-activities.php';
         bcc_trust_create_hidden_activities_table();

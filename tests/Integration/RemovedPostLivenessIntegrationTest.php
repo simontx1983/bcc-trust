@@ -54,25 +54,8 @@ final class RemovedPostLivenessIntegrationTest extends TestCase
         $this->seedFeedActivity(self::COMMENT_ACT, self::COMMENT_POST, '1', self::AUTHOR);
 
         global $wpdb;
-        $acts = $wpdb->prefix . 'peepso_activities';
-        // The fixture's minimal table lacks PeepSo's comment columns; add
-        // only what is missing (the shared harness table may have them).
-        $existing = (array) $wpdb->get_col($wpdb->prepare(
-            'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s',
-            $acts
-        ));
-        $adds = [];
-        foreach ([
-            'act_comment_object_id' => 'BIGINT UNSIGNED NOT NULL DEFAULT 0',
-            'act_comment_module_id' => 'SMALLINT UNSIGNED NOT NULL DEFAULT 0',
-        ] as $column => $definition) {
-            if (!in_array($column, $existing, true)) {
-                $adds[] = "ADD COLUMN {$column} {$definition}";
-            }
-        }
-        if ($adds !== []) {
-            self::assertNotFalse($wpdb->query("ALTER TABLE {$acts} " . implode(', ', $adds)), $wpdb->last_error);
-        }
+        // PeepSo's comment columns come from PeepSoActivitiesTable::ensure(), via the fixture.
+        $acts = PeepSoActivitiesTable::name();
 
         // The second activity is a COMMENT on the first.
         self::assertNotFalse($wpdb->update(
