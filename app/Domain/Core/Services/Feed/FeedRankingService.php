@@ -32,6 +32,7 @@
 
 namespace BCC\Trust\Core\Services\Feed;
 
+use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Core\Feed\ActivityFeedService;
 use BCC\Core\Feed\FeedItemNormalizer;
 use BCC\Core\Repositories\PeepSoBlockRepository;
@@ -45,6 +46,7 @@ use BCC\Trust\Core\Support\PeepSoFriendGate;
 use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\ProfileSectionVisibility;
 use BCC\Trust\Core\Support\RestrictedGroups;
+use BCC\Trust\Core\ValueObjects\GroupContext;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -616,13 +618,19 @@ final class FeedRankingService
     }
 
     /**
-     * Personalized feed (§N6) — auth-required, three scopes.
+     * Personalized feed (§N6) — auth-required, four scopes. 'groups' ("My
+     * Groups", F-416) reads under each room's rules, see getMyGroupsFeed().
      *
-     * @param 'for_you'|'following'|'signals' $scope
+     * @param 'for_you'|'following'|'signals'|'groups' $scope
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     * @throws ActivityReadFailedException when the activity or membership read did not run
      */
     public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20): array
     {
+        if ($scope === ActivityFeedService::SCOPE_GROUPS) {
+            return $this->getMyGroupsFeed($viewerId, $cursor, $limit);
+        }
+
         $excluded = self::mergeExclusions(
             $this->cautionListExceptViewer($viewerId),
             // §K1 mutual-invisibility: hide both directions of any
@@ -675,6 +683,110 @@ final class FeedRankingService
 
         $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
         return $payload;
+    }
+
+    /**
+     * "My Groups" (F-416, user decision 2026-11-18): the posts of every group
+     * and Hall the viewer is an ACTIVE member of. Backs `GET /feed?scope=groups`.
+     *
+     * ⭐ ONE PRINCIPLE: the union of the viewer's own rooms, each post under
+     * its ROOM's rules. It must never show more or less than the member
+     * would see by opening the room ({@see getGroupFeed()}). So:
+     *
+     *   - membership: published groups, ranked so a ban beside a stale member
+     *     row wins (F-354), at most the 200 most recently joined
+     *     ({@see PeepSoGroupRepository::getActiveMemberGroupIdsOrFail()});
+     *   - a MEMBER read: members_only posts included, no public_all gate,
+     *     both Hall channels (main and ranked — the room only splits them
+     *     into two tabs);
+     *   - §F-02 is NOT enforced, exactly as in the room. Ratified 2026-11-18
+     *     as within the 2026-11-12 decision's intent: its "/feed keeps F-02"
+     *     line is about the mixed feed surfacing group posts to NON-members,
+     *     while this scope only ever returns posts from rooms the viewer is a
+     *     member of;
+     *   - the §O4.1 shadow-limit applies except in the rooms that lift it,
+     *     decided per room by the same {@see roomLiftsShadowLimit()} the room
+     *     itself uses (NFT holder rooms today);
+     *   - blocks in both directions and the moderation-hidden list apply
+     *     everywhere, as in every feed. The module gate is the repository's
+     *     default public-feed allow-list.
+     *
+     * No groups → an empty page (has_more false), not an error. A membership
+     * read that did not run THROWS, so the endpoint answers a retryable 503
+     * instead of telling a member they are in no group.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     * @throws ActivityReadFailedException
+     */
+    private function getMyGroupsFeed(int $viewerId, ?string $cursor, int $limit): array
+    {
+        $empty = ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
+        if ($viewerId <= 0) {
+            return $empty;
+        }
+
+        $groupIds = PeepSoGroupRepository::getActiveMemberGroupIdsOrFail($viewerId, ActivityFeedService::MEMBER_GROUPS_CAP);
+        if ($groupIds === null) {
+            throw new ActivityReadFailedException(
+                '[bcc-trust] FeedRankingService: the "My Groups" membership read failed. An empty result here is NOT "a member of nothing".'
+            );
+        }
+        if ($groupIds === []) {
+            return $empty;
+        }
+
+        // The room's own shadow-limit decision, asked per room.
+        $liftsShadowLimit = [];
+        foreach ($this->groupContextResolver->forManyGroups($groupIds) as $groupId => $ctx) {
+            if (self::roomLiftsShadowLimit($ctx)) {
+                $liftsShadowLimit[] = $groupId;
+            }
+        }
+
+        $blockExclusions = self::mergeExclusions(
+            PeepSoBlockRepository::getBlockedIds($viewerId),
+            PeepSoBlockRepository::getBlockerIds($viewerId)
+        );
+        $caution = $this->cautionListExceptViewer($viewerId);
+        $hidden  = $this->hiddenRepo->getAllHiddenIds();
+
+        // ⚠ F-54: EXACT mutual-block filter over each page's authors; the
+        // block list above is only the cheap pre-filter. F-297: a page it
+        // empties is read past, see fetchPastBlockedPages().
+        $payload = self::fetchPastBlockedPages(
+            fn (?string $pageCursor): array => $this->activityFeed->getFeed(
+                $viewerId,
+                ActivityFeedService::SCOPE_GROUPS,
+                $pageCursor,
+                $limit,
+                $blockExclusions === [] ? null : $blockExclusions,
+                $hidden === []          ? null : $hidden,
+                onlyForGroupIds: $groupIds,
+                softExcludedAuthorIds: $caution === [] ? null : $caution,
+                softExclusionExemptGroupIds: $liftsShadowLimit === [] ? null : $liftsShadowLimit
+            ),
+            $cursor,
+            $viewerId
+        );
+
+        $payload['items'] = $this->hydrationPipeline->hydrate($payload['items'], $viewerId);
+        return $payload;
+    }
+
+    /**
+     * Does this ROOM lift the §O4.1 reputation shadow-limit for its own
+     * posts? The ONE decision {@see getGroupFeed()} and
+     * {@see getMyGroupsFeed()} share, so a post can never be shown in its room
+     * and hidden in "My Groups", or the reverse.
+     *
+     * Today: NFT holder rooms. There the on-chain gate plus membership IS the
+     * moderation boundary, so a verified low-trust holder is not hidden from
+     * the fellow holders of the room they qualified for. See getGroupFeed()
+     * for the full reasoning.
+     */
+    private static function roomLiftsShadowLimit(?GroupContext $ctx): bool
+    {
+        return $ctx !== null && $ctx->isHolderGroup();
     }
 
     /**
@@ -1131,7 +1243,7 @@ final class FeedRankingService
         // request-cached (the feed gate already resolved this group), so the
         // lookup is free.
         $ctx        = $this->groupContextResolver->forGroup($groupId);
-        $isNftGroup = $ctx !== null && $ctx->isHolderGroup();
+        $isNftGroup = self::roomLiftsShadowLimit($ctx);
 
         $excluded = $isNftGroup
             ? $blockExclusions

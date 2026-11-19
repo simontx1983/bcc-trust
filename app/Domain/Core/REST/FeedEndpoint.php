@@ -59,7 +59,13 @@ final class FeedEndpoint
     private const MAX_LIMIT       = 50;
 
     /** @var list<string> */
-    private const VALID_SCOPES = ['for_you', 'following', 'signals'];
+    /**
+     * 'groups' = "My Groups" (F-416): posts from the groups and Halls the
+     * viewer belongs to. ⚠ Needs bcc-core's SCOPE_GROUPS: against an older
+     * core the scope would fall back to for_you silently, so core deploys
+     * first.
+     */
+    private const VALID_SCOPES = ['for_you', 'following', 'signals', 'groups'];
 
     public static function register(): void
     {
@@ -268,7 +274,7 @@ final class FeedEndpoint
             : 'for_you';
 
         try {
-            /** @var 'for_you'|'following'|'signals' $scope */
+            /** @var 'for_you'|'following'|'signals'|'groups' $scope */
             $payload = Plugin::instance()->feedRankingService()->getFeed($viewerId, $scope, $cursor, $limit);
         } catch (ActivityReadFailedException) {
             return FeedUnavailable::response();
