@@ -83,6 +83,7 @@ final class WordPressSignInGateTest extends TestCase
         self::assertSame([[WordPressSignInGate::class, 'keepMembersOutOfAdmin'], 1, 1], $hooks['admin_init']);
         self::assertSame([[WordPressSignInGate::class, 'filterRest'], 1, 3], $hooks['rest_pre_dispatch']);
         self::assertSame([[WordPressSignInGate::class, 'allowPasswordReset'], PHP_INT_MAX, 2], $hooks['allow_password_reset']);
+        self::assertSame([[WordPressSignInGate::class, 'sameLostPasswordAnswer'], PHP_INT_MAX, 2], $hooks['lostpassword_errors']);
     }
 
     // ── 1. authenticate ─────────────────────────────────────────────────
@@ -504,6 +505,117 @@ final class WordPressSignInGateTest extends TestCase
         }
         $GLOBALS['__bcc_sig']['reset_throws'] = false;
         self::assertResetRefused(get_password_reset_key($member), 'after a throw inside the app flow');
+    }
+
+    // ── 4b. wp-login.php's lost-password form ───────────────────────────
+
+    /**
+     * Core's retrieve_password() (user.php, 7.0.2), cut down to what
+     * decides the answer: the account lookup and its `invalid_email`, the
+     * `lostpassword_errors` filters add_filter() recorded (another plugin's
+     * first, when a test adds one), `invalidcombo`, then
+     * get_password_reset_key().
+     *
+     * @return \WP_Error|string the error the form shows, or 'mailed'
+     */
+    private static function lostPassword(string $userLogin)
+    {
+        $errors = new \WP_Error();
+        $user   = false;
+        if ($userLogin === '') {
+            $errors->add('empty_username', 'Please enter a username or email address.');
+        } elseif (str_contains($userLogin, '@')) {
+            $user = get_user_by('email', $userLogin) ?: self::accountByLogin($userLogin);
+            if (!$user) {
+                $errors->add('invalid_email', 'There is no account with that username or email address.');
+            }
+        } else {
+            $user = self::accountByLogin($userLogin);
+        }
+
+        foreach ($GLOBALS['__bcc_sig']['hooks'] as [$hook, $callback]) {
+            if ($hook === 'lostpassword_errors') {
+                $errors = $callback($errors, $user);
+            }
+        }
+        if ($errors->has_errors()) {
+            return $errors;
+        }
+        if (!$user) {
+            return new \WP_Error('invalidcombo', 'There is no account with that username or email address.');
+        }
+        $key = get_password_reset_key($user);
+
+        return $key instanceof \WP_Error ? $key : 'mailed';
+    }
+
+    private static function accountByLogin(string $login): ?\WP_User
+    {
+        foreach ($GLOBALS['__bcc_ph']['users'] as $id => $u) {
+            if ($u['login'] === $login) {
+                return self::account($id);
+            }
+        }
+        return null;
+    }
+
+    /** @return array<string, array{string}> */
+    public static function lostPasswordNames(): array
+    {
+        return [
+            'a member, by login'  => ['alice'],
+            'a member, by email'  => ['alice@example.com'],
+            'an admin, by login'  => ['boss'],
+            'an admin, by email'  => ['boss@example.com'],
+            'an unknown login'    => ['nobody'],
+            'an unknown email'    => ['nobody@example.com'],
+        ];
+    }
+
+    /**
+     * Core said "There is no account with that username or email address"
+     * for an unknown account, while a known one got the reset refusal:
+     * side by side they told which accounts exist. Every named account,
+     * known or not, admin or member, now gets the same answer.
+     */
+    #[DataProvider('lostPasswordNames')]
+    public function testTheLostPasswordFormGivesEveryAccountTheSameAnswer(string $name): void
+    {
+        WordPressSignInGate::register();
+
+        self::assertResetRefused(self::lostPassword($name), $name);
+        self::assertArrayNotHasKey('reset_keys', $GLOBALS['__bcc_sig']);
+    }
+
+    public function testAnEmptyLostPasswordFormStillSaysSo(): void
+    {
+        WordPressSignInGate::register();
+
+        $answer = self::lostPassword('');
+
+        self::assertInstanceOf(\WP_Error::class, $answer);
+        self::assertSame(['empty_username'], $answer->get_error_codes());
+    }
+
+    /** Another plugin's error (a captcha) reads the same for a known and an unknown account. */
+    #[DataProvider('lostPasswordNames')]
+    public function testAnotherPluginsErrorStandsAndReadsTheSameForEveryAccount(string $name): void
+    {
+        add_filter('lostpassword_errors', static function (\WP_Error $errors): \WP_Error {
+            $errors->add('captcha_failed', 'Please complete the captcha.');
+            return $errors;
+        }, 10, 2);
+        WordPressSignInGate::register();
+
+        $answer = self::lostPassword($name);
+
+        self::assertInstanceOf(\WP_Error::class, $answer);
+        self::assertSame(['captcha_failed'], $answer->get_error_codes(), $name);
+    }
+
+    public function testSomethingThatIsNotAnErrorListIsLeftAlone(): void
+    {
+        self::assertSame('odd', WordPressSignInGate::sameLostPasswordAnswer('odd', false));
     }
 
     /** PeepSo hooks its own allow_password_reset checks; inside the app's flow they still decide. */
