@@ -404,9 +404,10 @@ final class MyProfilePrefsEndpoint
         $saved = [];
 
         if ($profileAcc !== null) {
-            $err = null;
-            $ok  = self::checkedWrite(static function () use ($userId, $profileAcc, &$err): void {
-                $err = self::writeProfileAccessibility($userId, $profileAcc);
+            $err       = null;
+            $accBefore = null;
+            $ok        = self::checkedWrite(static function () use ($userId, $profileAcc, &$err, &$accBefore): void {
+                $err = self::writeProfileAccessibility($userId, $profileAcc, $accBefore);
             });
             if ($err instanceof WP_REST_Response) {
                 return $err;
@@ -415,6 +416,12 @@ final class MyProfilePrefsEndpoint
                 return self::writeFailed($userId, 'profile_visibility', $saved);
             }
             $saved[] = 'profile_visibility';
+            // A saved CHANGE only (a settings form resends the same value):
+            // caches that hold this member's posts react, e.g. the shared
+            // anon hot feed drops its pages (F-02; FeedRankingService).
+            if ($accBefore !== $profileAcc) {
+                do_action('bcc_profile_visibility_changed', $userId, $profileAcc);
+            }
         }
         foreach ($meta as $metaKey => $value) {
             $field = self::META_FIELDS[$metaKey];
@@ -628,13 +635,15 @@ final class MyProfilePrefsEndpoint
         );
     }
 
-    private static function writeProfileAccessibility(int $userId, int $accInt): ?WP_REST_Response
+    /** @param int|null $before set to the stored level before this write */
+    private static function writeProfileAccessibility(int $userId, int $accInt, ?int &$before = null): ?WP_REST_Response
     {
         if (!class_exists('\\PeepSoUser')) {
             return self::peepsoUnavailable();
         }
         $user = \PeepSoUser::get_instance($userId);
         $row = $user->get_peepso_user();
+        $before = isset($row['usr_profile_acc']) ? (int) $row['usr_profile_acc'] : null;
         $row['usr_profile_acc'] = $accInt;
         $user->update_peepso_user($row);
 
