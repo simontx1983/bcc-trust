@@ -54,15 +54,19 @@ final class PageAccess
      * author, so only the admin exemption and the core rule apply; with no
      * privacy rows the rule says visible, and the caller goes on to give its
      * usual missing-page answer.
+     *
+     * @param bool|null $viewerIsExempt the VIEWER's admin exemption; null =
+     *        the request's user's, which is right only when the viewer IS the
+     *        request's user (see ProfileAccess::postVisibilityArgs()).
      */
-    public static function viewerMaySeeId(int $pageId, int $viewerId): bool
+    public static function viewerMaySeeId(int $pageId, int $viewerId, ?bool $viewerIsExempt = null): bool
     {
         if ($pageId <= 0) {
             return false;
         }
         $page = get_post($pageId);
 
-        return self::decide($pageId, $page instanceof \WP_Post ? (int) $page->post_author : 0, $viewerId);
+        return self::decide($pageId, $page instanceof \WP_Post ? (int) $page->post_author : 0, $viewerId, $viewerIsExempt);
     }
 
     /**
@@ -75,15 +79,16 @@ final class PageAccess
      * by everyone. Admins skip the read.
      *
      * @param list<int> $pageIds
+     * @param bool|null $viewerIsExempt as {@see viewerMaySeeId()}
      * @return list<int>
      */
-    public static function visibleAmong(array $pageIds, int $viewerId): array
+    public static function visibleAmong(array $pageIds, int $viewerId, ?bool $viewerIsExempt = null): array
     {
         $pageIds = array_values(array_unique(array_filter(
             $pageIds,
             static fn (int $id): bool => $id > 0
         )));
-        if ($pageIds === [] || ProfileAccess::viewerIsExemptFromVisibility()) {
+        if ($pageIds === [] || ($viewerIsExempt ?? ProfileAccess::viewerIsExemptFromVisibility())) {
             return $pageIds;
         }
 
@@ -94,16 +99,16 @@ final class PageAccess
 
         return array_values(array_filter(
             $pageIds,
-            static fn (int $id): bool => !isset($secret[$id]) || self::viewerMaySeeId($id, $viewerId)
+            static fn (int $id): bool => !isset($secret[$id]) || self::viewerMaySeeId($id, $viewerId, $viewerIsExempt)
         ));
     }
 
-    private static function decide(int $pageId, int $authorId, int $viewerId): bool
+    private static function decide(int $pageId, int $authorId, int $viewerId, ?bool $viewerIsExempt = null): bool
     {
         if ($viewerId > 0 && $authorId === $viewerId) {
             return true;
         }
-        if (ProfileAccess::viewerIsExemptFromVisibility()) {
+        if ($viewerIsExempt ?? ProfileAccess::viewerIsExemptFromVisibility()) {
             return true;
         }
         return PeepSoPagePrivacy::isVisibleTo($pageId, $viewerId);

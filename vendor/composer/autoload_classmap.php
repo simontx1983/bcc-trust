@@ -19,6 +19,7 @@ return array(
     'BCC\\Trust\\Core\\Announcements\\AnnouncementCommentPolicy' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementCommentPolicy.php',
     'BCC\\Trust\\Core\\Announcements\\AnnouncementFeature' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementFeature.php',
     'BCC\\Trust\\Core\\Announcements\\AnnouncementModerationPolicy' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementModerationPolicy.php',
+    'BCC\\Trust\\Core\\Announcements\\AnnouncementPageAccess' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementPageAccess.php',
     'BCC\\Trust\\Core\\Announcements\\AnnouncementPostType' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementPostType.php',
     'BCC\\Trust\\Core\\Announcements\\AnnouncementPublicationGuard' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementPublicationGuard.php',
     'BCC\\Trust\\Core\\Announcements\\AnnouncementTransition' => $baseDir . '/app/Domain/Core/Announcements/AnnouncementTransition.php',

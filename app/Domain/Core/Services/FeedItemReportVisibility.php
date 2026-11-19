@@ -49,6 +49,7 @@ namespace BCC\Trust\Core\Services;
 use BCC\Core\Feed\GroupSyndicationGate;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Trust\Core\Announcements\AnnouncementPageAccess;
 use BCC\Trust\Core\Repositories\HiddenActivityRepository;
 use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Support\ProfileAccess;
@@ -157,6 +158,14 @@ class FeedItemReportVisibility
         }
         if (!$this->isLive($activity)) {
             return false; // trashed/unpublished or moderation-hidden: no feed shows it
+        }
+        // A SECRET page's announcement (§4.32.8 writes it as the operator's
+        // own activity): a viewer the page does not admit gets what a missing
+        // post gets, so the delete and comment refusals and a `feed_item`
+        // report cannot tell them it exists. The feeds and the permalink
+        // apply the same rule (FeedRankingService::pageFilters()).
+        if (!AnnouncementPageAccess::mayViewerSeeRow($activity, $viewerId)) {
+            return false;
         }
 
         if (!$this->groupRuleAllows($viewerId, $postId)) {
