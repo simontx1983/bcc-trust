@@ -117,6 +117,7 @@ namespace BCC\Core\Log {
             /** @param array<string, mixed> $context */
             public static function audit(string $message, array $context = []): void
             {
+                $GLOBALS['__bcc_ph']['audit_log'][] = [$message, $context];
             }
 
             /** @param array<string, mixed> $context */
@@ -405,12 +406,18 @@ namespace {
         function set_transient(string $key, $value, int $ttl = 0): bool
         {
             $GLOBALS['__bcc_ph']['transients'][$key] = $value;
+            $GLOBALS['__bcc_ph']['transient_ttls'][$key] = $ttl;
             return true;
         }
     }
     if (!function_exists('delete_transient')) {
         function delete_transient(string $key): bool
         {
+            // A test sets delete_transient_fails to make a delete fail (the
+            // value stays, as with a cache that refused the write).
+            if (!empty($GLOBALS['__bcc_ph']['delete_transient_fails'])) {
+                return false;
+            }
             unset($GLOBALS['__bcc_ph']['transients'][$key]);
             return true;
         }

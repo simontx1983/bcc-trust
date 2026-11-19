@@ -22,6 +22,12 @@ namespace BCC\Core\Permissions {
             {
                 return true;
             }
+
+            /** null = unknown, as the real one answers when it cannot read. */
+            public static function suspensionState(?int $userId = null, bool $allowAdminBypass = true): ?bool
+            {
+                return null;
+            }
         }
     }
 }
