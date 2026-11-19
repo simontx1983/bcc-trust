@@ -392,6 +392,21 @@ class FeedItemReportVisibility
      * {@see ProfileAccess::canonicalProfileLevelFor()} means "cannot tell",
      * and a post whose reach cannot be established is not republished.
      *
+     * ⚠ THE RUNG SNAPPING IS NOT LOAD-BEARING FOR *THIS* COMPARISON, and
+     * saying so matters because an earlier version of this note claimed it
+     * was. Snapping sends 11-20 to 20 and 21-30 to 30, so it never moves a
+     * value ACROSS the <= 20 boundary: `raw <= 20` and `snapped <= 20` agree
+     * for every possible input, negatives included. Measured — a mutation
+     * reading the rung RAW survives this suite, and it survives because it
+     * is EQUIVALENT, not because the tests are thin.
+     *
+     * The call still goes through `canonicalProfileLevelFor()` for the two
+     * things that ARE load-bearing: it owns the PeepSo read and the
+     * null-means-cannot-tell contract above, and it hands back a canonical
+     * rung so that a future change to this comparison (an `=== 10`, say, or
+     * a check against `is_accessible_static()`, which has no `case 15`)
+     * cannot be bitten by an unvalidated column.
+     *
      * ⛔ The canonical §F-02 rule lives in bcc-core's SQL and is not
      * exposed as a value, so this is the one place that restates the
      * comparison. If a core helper for the effective level ever lands,

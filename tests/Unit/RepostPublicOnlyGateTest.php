@@ -94,36 +94,48 @@ final class RepostPublicOnlyGateTest extends TestCase
     }
 
     /**
-     * ⭐ STRAY COLUMN VALUES, which is why this uses
-     * ProfileAccess::canonicalProfileLevelFor() rather than comparing the
-     * raw number.
+     * ⭐ STRAY COLUMN VALUES — asserted at the SEAM THAT SNAPS THEM, not
+     * through the predicate.
      *
-     * `usr_profile_acc` is a TINYINT nobody validates — PeepSo writes it
-     * straight from request input — so values off the rungs exist. Snapping
-     * sends them to the nearest STRICTER rung, which is what bcc-core's
-     * range ladder does too: 15 reads as the members rung, 25 as friends. A
-     * naive `=== 10` would call 15 non-public and a naive `<= 20` would call
-     * 25 public; both would disagree with the feed.
+     * `usr_profile_acc` is a TINYINT nobody validates (PeepSo writes it
+     * straight from request input), so off-rung values exist, and
+     * `canonicalProfileLevelFor()` sends them to the nearest STRICTER rung.
+     *
+     * ⚠⚠ THIS IS TESTED HERE RATHER THAN THROUGH
+     * `isPublicToEveryMember()` BECAUSE IT CANNOT BE TESTED THROUGH IT.
+     * Snapping moves 11-20 to 20 and 21-30 to 30, so it never crosses the
+     * `<= 20` boundary that predicate tests: `raw <= 20` and `snapped <= 20`
+     * agree on every input. A mutation reading the rung RAW therefore
+     * SURVIVES the predicate tests — measured, and equivalent rather than
+     * uncovered. The snapping is still worth asserting, because it is what
+     * keeps a FUTURE comparison (an `=== 10`, or `is_accessible_static()`,
+     * which has no `case 15`) safe from an unvalidated column.
      */
-    public function testStrayAuthorLevelsSnapToTheSameRungTheFeedUses(): void
+    public function testOffRungAuthorLevelsSnapToTheNearestStricterRung(): void
+    {
+        foreach ([0 => 10, 9 => 10, 10 => 10, 11 => 20, 15 => 20, 20 => 20,
+                  21 => 30, 25 => 30, 30 => 30, 31 => 40, 127 => 40, -5 => 10] as $raw => $expected) {
+            PublicOnlyFakes::$profileAcc[self::AUTHOR] = $raw;
+
+            self::assertSame(
+                $expected,
+                \BCC\Trust\Core\Support\ProfileAccess::canonicalProfileLevelFor(self::AUTHOR),
+                "raw {$raw} must snap to {$expected}"
+            );
+        }
+    }
+
+    /**
+     * And the boundary the predicate itself cares about: an off-rung value
+     * either side of the members rung still lands on the right answer.
+     */
+    public function testTheMembersBoundaryHoldsForOffRungAuthorLevels(): void
     {
         PublicOnlyFakes::$profileAcc[self::AUTHOR] = 15;
-        self::assertTrue(
-            FeedItemReportVisibility::isPublicToEveryMember(self::row(10)),
-            '15 snaps to the MEMBERS rung, which every member can see'
-        );
+        self::assertTrue(FeedItemReportVisibility::isPublicToEveryMember(self::row(10)), '15 is within "every member"');
 
-        PublicOnlyFakes::$profileAcc[self::AUTHOR] = 25;
-        self::assertFalse(
-            FeedItemReportVisibility::isPublicToEveryMember(self::row(10)),
-            '25 snaps to FRIENDS, which excludes members'
-        );
-
-        PublicOnlyFakes::$profileAcc[self::AUTHOR] = 127;
-        self::assertFalse(
-            FeedItemReportVisibility::isPublicToEveryMember(self::row(10)),
-            'anything above the ladder is nobody'
-        );
+        PublicOnlyFakes::$profileAcc[self::AUTHOR] = 21;
+        self::assertFalse(FeedItemReportVisibility::isPublicToEveryMember(self::row(10)), '21 is past it');
     }
 
     // ── fail-closed ──────────────────────────────────────────────────
