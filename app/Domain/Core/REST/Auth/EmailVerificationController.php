@@ -319,6 +319,13 @@ final class EmailVerificationController
      * A wallet sign-up keeps the placeholder in user_email until the inbox
      * is proven.
      *
+     * H1: only a holder whose verification address $email IS
+     * (AuthSupport::isVerificationAddress()). A sign-up whose user_email
+     * has since moved off the placeholder may still carry the pending
+     * address, but its codes prove user_email now. So it is no holder here:
+     * never compared, never charged to the address budget, never mailed,
+     * and it does not make the address "several holders".
+     *
      * @return list<\WP_User>
      */
     private static function pendingHolderAccounts(string $email): array
@@ -326,7 +333,7 @@ final class EmailVerificationController
         $accounts = [];
         foreach (\BCC\Trust\Core\Services\PendingEmailService::pendingSignupHolders($email) as $holderId) {
             $holder = get_userdata($holderId);
-            if ($holder instanceof \WP_User) {
+            if ($holder instanceof \WP_User && AuthSupport::isVerificationAddress($holderId, $email)) {
                 $accounts[] = $holder;
             }
         }

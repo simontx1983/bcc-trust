@@ -462,31 +462,51 @@ final class WalletSignupPendingEmailTest extends TestCase
     }
 
     /**
-     * #748: a holder whose user_email is no longer the wallet placeholder
-     * may not have its stale pending address applied. Its code, mailed to
-     * its real address (its verification target now), still matches by the
-     * pending address here, and completeVerification() must answer the
-     * refusal instead of finalizing. The other holder is unaffected.
+     * H1 (#766) on the several-holder path. A sign-up whose user_email is no
+     * longer the wallet placeholder still carries a stale pending address,
+     * but that is no longer its verification address, so it is NOT a
+     * holder: only NEW holds the address. The single-holder path answers,
+     * no address budget is charged, and a resend mails NEW alone. OTHER's
+     * code proves only the inbox it was mailed to, and there #748's refusal
+     * answers instead of applying the stale address.
      */
-    public function testAHolderWhoseEmailIsNoLongerThePlaceholderIsRefusedNotVerified(): void
+    public function testAHolderWhoseEmailIsNoLongerThePlaceholderIsNoLongerAHolder(): void
     {
-        [, $new] = self::twoHolders();
+        self::twoHolders();
         $GLOBALS['__bcc_ph']['users'][self::OTHER]['email'] = 'real@example.net';
         AuthSupport::beginEmailVerification(self::OTHER, 'real@example.net');
         $otherCode = self::lastCodeTo('real@example.net');
+        $GLOBALS['__bcc_ph']['throttle_counting'] = true;
 
+        // By the pending address, OTHER's code is no holder's: the generic answer.
         $res = self::verify(['email' => self::TYPED, 'code' => $otherCode]);
+        self::assertSame(400, $res->get_status());
+        self::assertSame('bcc_invalid_otp', self::errorCode($res));
+        self::assertSame(0, self::attemptsOn(self::OTHER), 'OTHER was not compared');
+        self::assertSame(1, self::attemptsOn(self::NEW), 'NEW, the one holder, was');
+        self::assertArrayNotHasKey(self::addressBudgetKey(), $GLOBALS['__bcc_ph']['throttle_hits'], 'one holder: no address budget');
+        self::assertSame('0', self::flag(self::OTHER));
+        self::assertSame('real@example.net', self::email(self::OTHER));
 
+        // A resend by that address mails NEW alone.
+        $before = count($GLOBALS['__bcc_ph']['mail']);
+        self::assertSame(200, self::resend(['email' => self::TYPED]));
+        self::assertCount($before + 1, $GLOBALS['__bcc_ph']['mail'], 'one mail, to the one holder');
+        self::assertStringContainsString('@newhandle', end($GLOBALS['__bcc_ph']['mail'])['html']);
+
+        // NEW still verifies, with its fresh code.
+        self::assertSame(200, self::verify(['email' => self::TYPED, 'code' => self::lastCodeTo(self::TYPED)])->get_status());
+        self::assertSame(self::TYPED, self::email(self::NEW));
+        self::assertSame('1', self::flag(self::NEW));
+
+        // #748, by the inbox OTHER's code was mailed to: the stale pending
+        // address is refused, never applied.
+        $res = self::verify(['email' => 'real@example.net', 'code' => $otherCode]);
         self::assertSame(409, $res->get_status());
         self::assertSame('bcc_invalid_state', self::errorCode($res));
         self::assertSame('0', self::flag(self::OTHER), 'nothing finalized');
         self::assertSame('real@example.net', self::email(self::OTHER), 'the real address is never replaced');
         self::assertArrayNotHasKey(PendingEmailService::META_PENDING_SIGNUP_EMAIL, $GLOBALS['__bcc_ph']['meta'][self::OTHER], 'the stale pending address is dropped');
-
-        // NEW, the remaining holder, still verifies with its own code.
-        self::assertSame(200, self::verify(['email' => self::TYPED, 'code' => $new])->get_status());
-        self::assertSame(self::TYPED, self::email(self::NEW));
-        self::assertSame('1', self::flag(self::NEW));
     }
 
     public function testOneAccountIsNotChargedToAnAddressBudget(): void
