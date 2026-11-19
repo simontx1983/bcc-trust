@@ -139,6 +139,26 @@ class RateLimiter {
     }
 
     /**
+     * F-391: the last DENY allow() returned in this request, as
+     * {limit, window, at, retry_after}: the same shape bcc-core's
+     * Throttle::lastDenial() records (F-289). Only denials are recorded, so a
+     * request no limit refused has null. `retry_after` is the seconds from
+     * `at` until a retry would pass every bucket allow() checks, at least 1.
+     *
+     * @var array{limit: int, window: int, at: int, retry_after: int}|null
+     */
+    private static ?array $lastDenial = null;
+
+    /**
+     * Read by the REST Envelope to put the time left on a rate-limit 429.
+     *
+     * @return array{limit: int, window: int, at: int, retry_after: int}|null
+     */
+    public static function lastDenial(): ?array {
+        return self::$lastDenial;
+    }
+
+    /**
      * Current unix time, honouring an installed test clock.
      */
     private static function now(): int {
@@ -439,13 +459,34 @@ class RateLimiter {
             $allowedByUser = self::slidingWindowCheck($userKey, $adjustedLimit, $window, true);
             $allowedByIp   = $allowedByUser && self::slidingWindowCheck($ipKey, $ipLimit, $window, true);
             $allowed = $allowedByUser && $allowedByIp;
-            $slidingKey = $allowedByUser ? $ipKey : $userKey;
+            $slidingKey   = $allowedByUser ? $ipKey : $userKey;
+            $slidingLimit = $allowedByUser ? $ipLimit : $adjustedLimit;
+            // A retry has to pass BOTH buckets, so its wait is the longer one.
+            $retryBuckets = [[$userKey, $adjustedLimit], [$ipKey, $ipLimit]];
         } else {
             // Normalize IP to /24 (IPv4) or /48 (IPv6) subnet to bound
             // key cardinality and prevent DB growth from rotating IPs.
             $subnet = self::normalizeIpToSubnet($ip);
-            $slidingKey = "{$action}_anon_{$subnet}";
+            $slidingKey   = "{$action}_anon_{$subnet}";
+            $slidingLimit = $adjustedLimit;
+            $retryBuckets = [[$slidingKey, $adjustedLimit]];
             $allowed = self::slidingWindowCheck($slidingKey, $adjustedLimit, $window, true);
+        }
+
+        if (!$allowed) {
+            // F-391: record the refusal for the Envelope, which puts the time
+            // left on the 429 (Retry-After, X-RateLimit-*, retry_after_seconds)
+            // exactly as it does for a bcc-core Throttle denial (F-289).
+            $retryAfter = 0;
+            foreach ($retryBuckets as [$bucketKey, $bucketLimit]) {
+                $retryAfter = max($retryAfter, self::retryAfterByKey($bucketKey, $bucketLimit, $window));
+            }
+            self::$lastDenial = [
+                'limit'       => $slidingLimit,
+                'window'      => $window,
+                'at'          => time(),
+                'retry_after' => max(1, $retryAfter),
+            ];
         }
 
         // Log excessive abuse when denied.

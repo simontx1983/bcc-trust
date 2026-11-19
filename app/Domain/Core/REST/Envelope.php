@@ -2,6 +2,7 @@
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Trust\Core\Security\RateLimiter;
 use BCC\Trust\Core\Support\ApiResponse;
 
 if (!defined('ABSPATH')) {
@@ -107,9 +108,12 @@ final class Envelope
         // fallback. Since F-289 bcc-core also records ONLY denials, so a 429
         // no throttle caused (the captcha step-up's bcc_captcha_required, with
         // every bucket having let the request through) gets nothing injected.
+        //
+        // F-391: bcc-trust's own RateLimiter::allow() records its denials in
+        // the same shape, and latestDenial() picks whichever refused.
         $ownRetryAfter = isset($response->get_headers()['Retry-After']);
-        if ($status === 429 && !$ownRetryAfter && class_exists(\BCC\Core\Security\Throttle::class)) {
-            $denial = \BCC\Core\Security\Throttle::lastDenial();
+        if ($status === 429 && !$ownRetryAfter) {
+            $denial = self::latestDenial();
             if (is_array($denial)) {
                 $window     = max(1, (int) ($denial['window'] ?? 60));
                 $limit      = max(0, (int) ($denial['limit'] ?? 0));
@@ -211,6 +215,35 @@ final class Envelope
         ]);
 
         return $response;
+    }
+
+    /**
+     * F-391: the rate-limit denial that refused this request, or null.
+     *
+     * Two limiters record one: bcc-core's Throttle (most routes, and the
+     * permission-stage buckets) and bcc-trust's RateLimiter::allow() (watch,
+     * unwatch, user status, X share). Both record only denials. If both did in
+     * one request, the later one is what refused it; on the same second the
+     * RateLimiter one wins, because its calls run inside handlers, after the
+     * permission stage. bcc-core may be absent (degradation), so Throttle is
+     * feature-detected.
+     *
+     * @return array<string, mixed>|null
+     */
+    private static function latestDenial(): ?array
+    {
+        $core = class_exists(\BCC\Core\Security\Throttle::class)
+            ? \BCC\Core\Security\Throttle::lastDenial()
+            : null;
+        $trust = RateLimiter::lastDenial();
+
+        if (!is_array($core)) {
+            return $trust;
+        }
+        if ($trust === null) {
+            return $core;
+        }
+        return $trust['at'] >= (int) ($core['at'] ?? 0) ? $trust : $core;
     }
 
     private static function isOurNamespace(string $route): bool
