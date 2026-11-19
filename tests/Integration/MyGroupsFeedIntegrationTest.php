@@ -68,6 +68,9 @@ final class MyGroupsFeedIntegrationTest extends TestCase
     /** @var list<int> */
     private array $postIds = [];
 
+    /** @var list<int> act ids this case moderation-hid */
+    private array $hiddenActIds = [];
+
     private int $clock = 0;
 
     protected function setUp(): void
@@ -136,6 +139,10 @@ final class MyGroupsFeedIntegrationTest extends TestCase
             self::G_OTHER, self::G_BANNED, self::G_PENDING, self::G_TRASHED,
         ]);
         $in = implode(',', array_map('intval', $postIds));
+        foreach ($this->hiddenActIds as $actId) {
+            Plugin::instance()->hiddenActivityRepository()->remove($actId);
+        }
+        $this->hiddenActIds = [];
         $wpdb->query("DELETE FROM {$wpdb->prefix}peepso_activities WHERE act_external_id IN ({$in})");
         $wpdb->query("DELETE FROM {$wpdb->postmeta} WHERE post_id IN ({$in})");
         $wpdb->query("DELETE FROM {$wpdb->posts} WHERE ID IN ({$in})");
@@ -199,6 +206,21 @@ final class MyGroupsFeedIntegrationTest extends TestCase
     {
         self::assertNotContains($this->p['blocked'], $this->myGroups(self::VIEWER));
         self::assertNotContains($this->p['blocked'], $this->room(self::G_OPEN), 'control: the room hides them too');
+    }
+
+    public function testAModerationHiddenPostLeavesMyGroupsAsItLeavesTheRoom(): void
+    {
+        global $wpdb;
+        $actId = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT act_id FROM {$wpdb->prefix}peepso_activities WHERE act_external_id = %d",
+            $this->p['open']
+        ));
+        self::assertTrue(Plugin::instance()->hiddenActivityRepository()->add($actId, self::STRANGER, 'spam'));
+        $this->hiddenActIds[] = $actId;
+
+        self::assertNotContains($this->p['open'], $this->myGroups(self::VIEWER));
+        self::assertNotContains($this->p['open'], $this->room(self::G_OPEN), 'control: the room hides it too');
+        self::assertContains($this->p['closed'], $this->myGroups(self::VIEWER), 'only that post');
     }
 
     /**
