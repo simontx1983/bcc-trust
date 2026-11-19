@@ -103,12 +103,18 @@ final class EligibilityVerdict
      *                 widen the outcome.
      * @param string   $reason Machine-readable cause; '' for a decided
      *                 outcome (ELIGIBLE / INELIGIBLE), which has no "why".
+     * @param bool     $mayLag INELIGIBLE only: a wallet's decisive zero came
+     *                 from a source that can trail the chain
+     *                 ({@see HoldingsCount::$mayLag}). Still INELIGIBLE for
+     *                 every caller; the revoke sweep alone waits for a second
+     *                 zero before acting on it (F-278).
      */
     private function __construct(
         public readonly string $outcome,
         public readonly int    $minBalance,
         public readonly ?int   $bestKnownBalance,
         public readonly string $reason = '',
+        public readonly bool   $mayLag = false,
     ) {}
 
     public static function eligible(int $minBalance, int $bestKnownBalance): self
@@ -116,9 +122,9 @@ final class EligibilityVerdict
         return new self(self::ELIGIBLE, $minBalance, $bestKnownBalance);
     }
 
-    public static function ineligible(int $minBalance, int $bestKnownBalance): self
+    public static function ineligible(int $minBalance, int $bestKnownBalance, bool $mayLag = false): self
     {
-        return new self(self::INELIGIBLE, $minBalance, $bestKnownBalance);
+        return new self(self::INELIGIBLE, $minBalance, $bestKnownBalance, '', $mayLag);
     }
 
     /**

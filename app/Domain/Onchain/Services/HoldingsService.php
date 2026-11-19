@@ -192,7 +192,10 @@ final class HoldingsService
      *                  cached count proves "at least N" and is enough.
      *   - INELIGIBLE → the wallet list was read, and every wallet gave a
      *                  COMPLETE, successful count below minBalance. An empty
-     *                  wallet list is INELIGIBLE with reason ''.
+     *                  wallet list is INELIGIBLE with reason ''. When a zero
+     *                  came from the ERC-1155 provider count, the verdict is
+     *                  marked `mayLag` (F-278): the revoke sweep waits for a
+     *                  second one, every other caller treats it as INELIGIBLE.
      *   - UNKNOWN    → anything else, with a bounded reason: the chain is
      *                  missing or inactive (`chain_unavailable`), no driver can
      *                  count (`holdings_driver_unsupported`), a repository read
@@ -384,6 +387,7 @@ final class HoldingsService
 
         $best   = null;  // highest count any wallet actually showed
         $reason = null;  // why a wallet could not settle the question
+        $mayLag = false; // a wallet's shortfall was read from a source that can lag
         foreach ($ordered as $i => $w) {
             $evidence = self::countFromCacheOrFetch(
                 $fetcher,
@@ -413,6 +417,8 @@ final class HoldingsService
             }
             if ($decision === null) {
                 $reason = self::strongerReason($reason, EligibilityVerdict::REASON_EVIDENCE_INCOMPLETE);
+            } elseif ($evidence->mayLag) {
+                $mayLag = true;
             }
         }
 
@@ -421,7 +427,7 @@ final class HoldingsService
         }
 
         // Every wallet answered completely and none reached the bar.
-        return EligibilityVerdict::ineligible($min, $best ?? 0);
+        return EligibilityVerdict::ineligible($min, $best ?? 0, $mayLag);
     }
 
     /**
@@ -1338,6 +1344,11 @@ final class HoldingsService
      * at zero. One request, charged to `$budget` before asking. A throw or a
      * null is `provider_unavailable` (UNKNOWN, which never revokes); only
      * the provider's complete "owns none" is a zero.
+     *
+     * The provider answers from its own NFT index, which can trail a
+     * transfer-in by minutes, so its answer is marked
+     * {@see HoldingsCount::fromLaggingSource()}: the revoke sweep removes on
+     * a second zero, not the first (F-278, review INFO 1).
      */
     private static function erc1155ProviderCount(
         CountsErc1155Holdings $fetcher,
@@ -1353,7 +1364,7 @@ final class HoldingsService
         $budget->spend(1);
 
         try {
-            return $fetcher->count_erc1155_holdings($walletAddress, $contract)
+            return $fetcher->count_erc1155_holdings($walletAddress, $contract)?->fromLaggingSource()
                 ?? EligibilityVerdict::REASON_PROVIDER_UNAVAILABLE;
         } catch (\Throwable $e) {
             \BCC\Core\Log\Logger::warning('[HoldingsService] ERC-1155 ownership read threw; treated as unavailable', [

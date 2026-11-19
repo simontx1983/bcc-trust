@@ -15,7 +15,9 @@ declare(strict_types=1);
  * The re-check uses the revoke sweep's own rules
  * (NftGroupRevokeService::recheckMember): ELIGIBLE keeps, INELIGIBLE revokes,
  * UNKNOWN keeps — a member is removed only when it is certain they no longer
- * hold. The twice-daily sweep stays as the backstop (Cosmos has no indexer).
+ * hold. An ERC-1155 zero from the provider waits for a second one, booked on
+ * the same hook (NftGroupRevokeService::removalIsConfirmed). The twice-daily
+ * sweep stays as the backstop (Cosmos has no indexer).
  *
  * @package BCC\Trust\Onchain\Services
  */
@@ -104,10 +106,7 @@ final class NftHoldingLostListener
 
     private static function schedule(int $userId, int $groupId, int $delay, int $attempt): void
     {
-        $args = $attempt === 0 ? [$userId, $groupId] : [$userId, $groupId, $attempt];
-        if (!wp_next_scheduled(NftGroupRevokeService::RECHECK_HOOK, $args)) {
-            wp_schedule_single_event(time() + $delay, NftGroupRevokeService::RECHECK_HOOK, $args);
-        }
+        NftGroupRevokeService::scheduleRecheck($userId, $groupId, time() + $delay, $attempt);
     }
 
     private static function walletOwner(int $walletLinkId): ?int
