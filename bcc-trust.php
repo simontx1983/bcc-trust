@@ -1686,6 +1686,12 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 // publication path.
 \BCC\Trust\Core\Announcements\AnnouncementPublicationGuard::register();
 
+// Security review 2026-11-18: BCC's password rules (the 8-character minimum
+// and the breach check) on WordPress's own password paths too: the core
+// reset form, wp-admin profile / user-edit / user-new, and core REST user
+// writes. See CorePasswordPolicy.
+\BCC\Trust\Core\Security\CorePasswordPolicy::register();
+
 // §K2 / §G1: hook PeepSo's user-search filter so users hidden from search
 // (hide_from_search, which /me/privacy's discovery_optout aliases since
 // F-257) are excluded from search results.
