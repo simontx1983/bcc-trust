@@ -458,7 +458,16 @@ final class FeedColdStartService
         // either way with them. That filter runs on this request's copy,
         // AFTER the shared anonymous cache and never written back into it,
         // so the warm cache is still hit. Anonymous (0) is unchanged.
-        $payload = $this->feedRankingService->getHotFeed(null, FeedRankingService::HOT_WARM_LIMIT, $viewerId);
+        //
+        // F-276: a SIGNED-IN viewer reads their own hot page instead. The
+        // shared page is hydrated anonymously, so through it their own
+        // reaction, vouch state and report/delete menu all read as a
+        // stranger's. getHotFeedForViewer() is the tag feed's visibility
+        // without the hashtag, hydrated for them, and never touches the
+        // shared cache. It asks only for the posts shown here.
+        $payload = $viewerId > 0
+            ? $this->feedRankingService->getHotFeedForViewer($viewerId, self::HOT_POSTS_LIMIT)
+            : $this->feedRankingService->getHotFeed(null, FeedRankingService::HOT_WARM_LIMIT, 0);
 
         $items = $payload['items'] ?? [];
         if (!is_array($items)) {
