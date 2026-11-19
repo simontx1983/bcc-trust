@@ -400,9 +400,10 @@ final class AccountPreHijackTest extends TestCase
         self::assertCount(1, $tokens);
         self::assertSame((string) self::OWNER, $GLOBALS['__bcc_ph']['transients'][$tokens[0]]);
         $token = substr($tokens[0], strlen('bcc_vt_'));
+        // F-410: the token, and nothing but the token.
         self::assertStringContainsString(
             htmlspecialchars(
-                'https://app.example.test/verify-email?email=' . rawurlencode('owner@example.com') . '&token=' . $token,
+                'https://app.example.test/verify-email?token=' . $token,
                 ENT_QUOTES,
                 'UTF-8'
             ),
@@ -411,6 +412,80 @@ final class AccountPreHijackTest extends TestCase
 
         // It does not decide verification state — callers do.
         self::assertSame('0', self::flag(self::OWNER));
+    }
+
+    /**
+     * ⭐ F-410: THE MAILED LINK CARRIES NO ADDRESS.
+     *
+     * A verification link travels further than the inbox it was sent to —
+     * forwarded, pasted into a support chat, logged by a proxy or leaked
+     * through a referrer. While it carried `email=`, every one of those was
+     * a disclosure of whose account it is, on top of the token.
+     *
+     * Nothing server-side ever needed it there:
+     * {@see \BCC\Trust\Core\REST\Auth\EmailVerificationController::verifyEmail()}
+     * takes the token path BEFORE it reads `email`, and the token encodes the
+     * user id. The address was only pre-filling the OTP form.
+     *
+     * ⚠ Asserted on the URL EXTRACTED from the mail, not on the body. A body
+     * assertion would pass today for the wrong reason (this fixture's display
+     * name and login are not the address) and would start failing the day the
+     * template legitimately greets someone by address. The claim is about the
+     * LINK.
+     */
+    public function testTheMailedVerifyLinkCarriesNoAddress(): void
+    {
+        self::addUser(self::OWNER, 'owner@example.com', '0');
+
+        AuthSupport::beginEmailVerification(self::OWNER, 'owner@example.com');
+
+        $url = self::verifyUrlFrom(self::mail()[0]['html']);
+
+        // The token still arrives — otherwise "no address" is satisfied by a
+        // link that verifies nothing, and every assertion below is vacuous.
+        self::assertStringContainsString('token=', $url, 'the link must still carry its token');
+
+        self::assertStringNotContainsString('email=', $url, 'no address parameter');
+        self::assertStringNotContainsString('owner@example.com', $url, 'not in the clear');
+        self::assertStringNotContainsString(
+            rawurlencode('owner@example.com'),
+            $url,
+            'and not percent-encoded either'
+        );
+        self::assertStringNotContainsString('@', $url, 'no address in any form');
+
+        // Exact shape, so an extra parameter cannot creep back in beside the
+        // token without this failing.
+        $token = self::storedVerifyToken();
+        self::assertSame('https://app.example.test/verify-email?token=' . $token, $url);
+    }
+
+    /** The one stored verify token, without its transient prefix. */
+    private static function storedVerifyToken(): string
+    {
+        $tokens = array_values(array_filter(
+            array_keys($GLOBALS['__bcc_ph']['transients']),
+            static fn(string $k): bool => str_starts_with($k, 'bcc_vt_')
+        ));
+        self::assertCount(1, $tokens, 'exactly one verify token should be stored');
+
+        return substr($tokens[0], strlen('bcc_vt_'));
+    }
+
+    /**
+     * The /verify-email URL as the recipient would follow it: pulled out of
+     * the mail HTML and entity-decoded, so `&amp;` cannot hide a parameter
+     * from the assertions above.
+     */
+    private static function verifyUrlFrom(string $html): string
+    {
+        self::assertSame(
+            1,
+            preg_match('#https?://[^\s"\'<>]*?/verify-email\?[^\s"\'<>]+#', $html, $m),
+            'the mail should contain exactly one followable verify link'
+        );
+
+        return html_entity_decode($m[0], ENT_QUOTES, 'UTF-8');
     }
 
     public function testVerificationMailTellsANonOwnerToIgnoreIt(): void

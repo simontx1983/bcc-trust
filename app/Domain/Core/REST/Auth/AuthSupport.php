@@ -718,7 +718,20 @@ final class AuthSupport
         self::storeOtpForUser($userId, $otpCode);
         self::storeVerifyToken($verifyToken, $userId);
 
-        $verifyPath = '/verify-email?email=' . rawurlencode($email) . '&token=' . rawurlencode($verifyToken);
+        // F-410: the link carries the TOKEN ONLY — never the address.
+        //
+        // The token is self-identifying (it encodes the user id), and
+        // EmailVerificationController::verifyEmail() takes the token path
+        // BEFORE it reads `email`, so nothing server-side needed the
+        // address here; it was there to pre-fill the OTP form.
+        //
+        // ⚠ A verification link leaks further than the inbox it was sent
+        // to: it is forwarded, pasted into support chats, and lands in
+        // proxy and referrer logs. Carrying the address made every one of
+        // those a disclosure of who the account belongs to, on top of the
+        // token. Dropping it costs only the pre-fill, which the frontend
+        // handles by asking.
+        $verifyPath = '/verify-email?token=' . rawurlencode($verifyToken);
         AuthMailer::sendVerificationEmail(
             $userId,
             $email,
