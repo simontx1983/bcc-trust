@@ -388,11 +388,52 @@ class FeedItemReportVisibility
      * a check against `is_accessible_static()`, which has no `case 15`)
      * cannot be bitten by an unvalidated column.
      *
-     * ⛔ The canonical §F-02 rule lives in bcc-core's SQL and is not
-     * exposed as a value, so this is the one place that restates the
-     * comparison. If a core helper for the effective level ever lands,
-     * delete this arithmetic and call it — and until then, a test pins
-     * this against the documented ladder.
+     * ⛔⛔ THE CORE HELPER HAS LANDED, AND SWITCHING TO IT NAIVELY IS A
+     * FAIL-OPEN. This paragraph used to say "if a core helper for the
+     * effective level ever lands, delete this arithmetic and call it".
+     * bcc-core #145 landed exactly that — `BCC\Core\Feed\PostVisibilityLevel`
+     * — so the instruction is now live, and followed literally it
+     * REINTRODUCES the bug the refusal above exists to prevent:
+     *
+     *   PostVisibilityLevel::rung(?int $stored): int
+     *       $stored === null  →  PUBLIC
+     *
+     * and `effective()` passes straight through it. So handing the raw
+     * `usr_profile_acc` to the helper turns "I COULD NOT READ the author's
+     * rung" into "the author is PUBLIC" — the widest possible answer for
+     * the one input that must produce the narrowest. Core documents this on
+     * its own class ("NO ROW IS NOT COULD NOT READ"); the burden is on the
+     * CALLER, and this is the caller.
+     *
+     * ⭐ So the switch-over keeps the null check and replaces only the
+     * arithmetic:
+     *
+     *     $authorLevel = ProfileAccess::canonicalProfileLevelFor($authorId);
+     *     if ($authorLevel === null) {
+     *         return false;                        // ← MUST SURVIVE
+     *     }
+     *
+     *     return PostVisibilityLevel::effective(
+     *         (int) ($activity->act_access ?? 0),  // raw: rung() does the 0 → 10
+     *         $authorLevel                         // snapped: rung() is idempotent
+     *     ) <= PostVisibilityLevel::MEMBERS;
+     *
+     * That deletes `max()`, the `$postLevel <= 0` normalisation and the
+     * literal 20, and keeps the two things the helper deliberately does
+     * NOT own: the PeepSo read, and the contract that null means "cannot
+     * tell". `canonicalProfileLevelFor()` is what holds both.
+     *
+     * ⛔ The tempting one-liner —
+     * `PostVisibilityLevel::effective($activity->act_access, $rawUsrProfileAcc)`
+     * — is the wrong version, and it is wrong precisely because it looks
+     * like the tidy one.
+     *
+     * ⚠ SA6 owns the adoption and has this warning; it is restated here
+     * because this is where a maintainer reads it, and because the note
+     * that used to live in this spot is what would mislead them. Until
+     * then a test pins the arithmetic against the documented ladder, and
+     * `RepostPublicOnlyGateTest::testAnUnreadableAuthorRungRefuses` is the
+     * case that would go red on a naive switch.
      *
      * @param object $activity a PeepSoActivityRepository::getById() row
      */
