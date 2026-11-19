@@ -477,6 +477,25 @@ namespace BCC\Trust\Core\Support {
         }
     }
 
+    // ProfileAccess::userIsExemptFromVisibility() asks about a GIVEN user
+    // (canView()'s mentionee), unlike the `is_admin` key, which models the
+    // request's user. Fixture key `admin_ids` (list<int>) lists the users
+    // holding `manage_options`. Outside this suite's fixture it defers to
+    // whatever global user_can() another suite defined, so it changes
+    // nothing for them.
+    if (!\function_exists('BCC\Trust\Core\Support\user_can')) {
+        function user_can($user, string $capability, ...$args): bool
+        {
+            if (!isset($GLOBALS['__bcc_f02feed'])) {
+                return \function_exists('user_can') && \user_can($user, $capability, ...$args);
+            }
+            $id = is_object($user) ? (int) ($user->ID ?? 0) : (int) $user;
+
+            return $capability === 'manage_options'
+                && in_array($id, $GLOBALS['__bcc_f02feed']['admin_ids'] ?? [], true);
+        }
+    }
+
     // ⚠⚠ REQUIRED, not optional. F-341 made the author wall consult
     // ProfileSectionVisibility, which reads user_meta with an UNQUALIFIED
     // call from THIS namespace — as does PrivacySettings, for the §K2

@@ -641,4 +641,43 @@ final class FeedPostVisibilityWiringTest extends TestCase
         $call = $this->onlyCall();
         self::assertFalse($call['enforce'], 'the exemption read it unenforced the first time');
     }
+
+    // ── canView(): the admin exemption is the VIEWER's, not the request's ──
+
+    /**
+     * A mention is checked during the AUTHOR's request, so the current user
+     * is the author, not the mentionee. An admin author must not lend the
+     * mentionee an admin's read. canView() must answer every situation as the
+     * member's own permalink request does, with the very same reads: the gate
+     * enforced, and the group second look taken when it is owed.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('permalinkSituations')]
+    public function testAnAdminRequestDoesNotLendTheViewerItsExemption(string $situation, bool $expected): void
+    {
+        $this->arrange($situation);
+        $item = $this->service()->getActivityById(1138, self::VIEWER); // the member's own request
+        $memberCalls = $this->calls();
+        $GLOBALS['__bcc_f02feed']['calls'] = [];
+        $GLOBALS['__bcc_f02feed']['group_rule_calls'] = [];
+
+        $GLOBALS['__bcc_f02feed']['is_admin'] = true; // now the request's user is an admin
+
+        self::assertSame($expected, $item !== null, 'the member\'s permalink');
+        self::assertSame($expected, $this->service()->canView(1138, self::VIEWER), 'canView() during an admin\'s request');
+        self::assertSame($memberCalls, $this->calls(), 'the same reads as the member\'s own request');
+        self::assertTrue($this->calls()[0]['enforce'], 'the viewer is no admin, so the gate runs');
+    }
+
+    /** The reverse: an admin mentionee reads as an admin, whoever makes the request. */
+    public function testAnAdminViewerIsExemptWhoeverMakesTheRequest(): void
+    {
+        $this->arrange('profile_restricted');
+        $GLOBALS['__bcc_f02feed']['admin_ids'] = [self::VIEWER];
+
+        self::assertTrue(
+            $this->service()->canView(1138, self::VIEWER),
+            'an admin opens what the profile gate withholds, as on their own permalink'
+        );
+        self::assertFalse($this->onlyCall()['enforce'], 'read unenforced, by the viewer\'s own exemption');
+    }
 }

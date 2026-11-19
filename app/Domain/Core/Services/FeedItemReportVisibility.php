@@ -302,7 +302,10 @@ class FeedItemReportVisibility
      * ⚠ The admin exemption is {@see ProfileAccess::postVisibilityArgs()},
      * the SAME definition the profile and feed halves use, so the three
      * cannot drift into the listed-but-unopenable state F-02 exists to
-     * remove. Safe here because every caller is a per-viewer request path.
+     * remove. Safe here because every caller is a per-viewer request path
+     * whose viewer IS the request's user. A caller asking about someone
+     * else (as `FeedRankingService::canView()` does for a mentionee) must
+     * pass that viewer's own exemption instead; see postVisibilityArgs().
      * ⛔ A globally cached, viewer-independent payload (the hot feed, warmed
      * by cron into one shared blob) must NEVER reach this method: taking
      * the exemption there would store an ungated payload and serve it to
