@@ -564,6 +564,72 @@ final class FeedPostVisibilityWiringTest extends TestCase
         );
     }
 
+    // ── canView(): the permalink's yes/no, without the hydration ────
+
+    /**
+     * The permalink situations a mention bell must follow (N1): the cases
+     * are NAMES so they survive separate-process serialisation.
+     *
+     * @return array<string, array{0: string, 1: bool}>
+     */
+    public static function permalinkSituations(): array
+    {
+        return [
+            'a post the viewer can open'                           => ['visible', true],
+            'a non-group post its author restricted (followers-only, only me)' => ['profile_restricted', false],
+            'a secret or closed group post, viewer not a member'   => ['group_refuses', false],
+            'a closed group post, viewer a member'                 => ['group_member', true],
+            'a group post bcc-core refuses outright'               => ['core_refuses', false],
+            'a post by an author the viewer is blocked with'       => ['mutually_blocked', false],
+        ];
+    }
+
+    private function arrange(string $situation): void
+    {
+        $row = ['external_id' => 5150, 'author' => ['id' => self::AUTHOR]];
+        $f   = &$GLOBALS['__bcc_f02feed'];
+        $f['row_enforced']   = $row;
+        $f['row_unenforced'] = $row;
+        $f['group_by_post']  = [];
+        match ($situation) {
+            'visible'            => null,
+            'profile_restricted' => $f['row_enforced'] = null,
+            'group_refuses'      => [$f['row_enforced'], $f['group_by_post'], $f['group_rule']] = [null, [5150 => 1138], false],
+            'group_member'       => [$f['row_enforced'], $f['group_by_post'], $f['group_rule']] = [null, [5150 => 1138], true],
+            'core_refuses'       => [$f['row_enforced'], $f['row_unenforced'], $f['group_by_post']] = [null, null, [5150 => 1138]],
+            'mutually_blocked'   => $f['mutual_blocked'] = [self::AUTHOR],
+        };
+    }
+
+    /**
+     * canView() is the permalink's answer, in lockstep: it says yes exactly
+     * when getActivityById() returns the item, and forwards the very same
+     * reads (same viewer, friend list, gate and second look). A mention bell
+     * relies on it to reach only a member the link would show the post to.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('permalinkSituations')]
+    public function testCanViewAnswersExactlyWhatThePermalinkShows(string $situation, bool $expected): void
+    {
+        $this->arrange($situation);
+        $item = $this->service()->getActivityById(1138, self::VIEWER);
+        $permalinkCalls = $this->calls();
+        $GLOBALS['__bcc_f02feed']['calls'] = [];
+        $GLOBALS['__bcc_f02feed']['group_rule_calls'] = [];
+
+        $canView = $this->service()->canView(1138, self::VIEWER);
+
+        self::assertSame($expected, $item !== null, 'the permalink itself');
+        self::assertSame($item !== null, $canView, 'canView() agrees with the permalink');
+        self::assertSame($permalinkCalls, $this->calls(), 'the same reads, with the same arguments');
+    }
+
+    public function testCanViewAsksAboutTheGivenViewer(): void
+    {
+        $this->service()->canView(1138, self::FRIEND);
+
+        self::assertSame(self::FRIEND, $this->onlyCall()['viewer']);
+    }
+
     public function testAnExemptReaderNeverTakesTheSecondLook(): void
     {
         $GLOBALS['__bcc_f02feed']['is_admin']       = true;
@@ -574,5 +640,44 @@ final class FeedPostVisibilityWiringTest extends TestCase
 
         $call = $this->onlyCall();
         self::assertFalse($call['enforce'], 'the exemption read it unenforced the first time');
+    }
+
+    // ── canView(): the admin exemption is the VIEWER's, not the request's ──
+
+    /**
+     * A mention is checked during the AUTHOR's request, so the current user
+     * is the author, not the mentionee. An admin author must not lend the
+     * mentionee an admin's read. canView() must answer every situation as the
+     * member's own permalink request does, with the very same reads: the gate
+     * enforced, and the group second look taken when it is owed.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('permalinkSituations')]
+    public function testAnAdminRequestDoesNotLendTheViewerItsExemption(string $situation, bool $expected): void
+    {
+        $this->arrange($situation);
+        $item = $this->service()->getActivityById(1138, self::VIEWER); // the member's own request
+        $memberCalls = $this->calls();
+        $GLOBALS['__bcc_f02feed']['calls'] = [];
+        $GLOBALS['__bcc_f02feed']['group_rule_calls'] = [];
+
+        $GLOBALS['__bcc_f02feed']['is_admin'] = true; // now the request's user is an admin
+
+        self::assertSame($expected, $item !== null, 'the member\'s permalink');
+        self::assertSame($expected, $this->service()->canView(1138, self::VIEWER), 'canView() during an admin\'s request');
+        self::assertSame($memberCalls, $this->calls(), 'the same reads as the member\'s own request');
+        self::assertTrue($this->calls()[0]['enforce'], 'the viewer is no admin, so the gate runs');
+    }
+
+    /** The reverse: an admin mentionee reads as an admin, whoever makes the request. */
+    public function testAnAdminViewerIsExemptWhoeverMakesTheRequest(): void
+    {
+        $this->arrange('profile_restricted');
+        $GLOBALS['__bcc_f02feed']['admin_ids'] = [self::VIEWER];
+
+        self::assertTrue(
+            $this->service()->canView(1138, self::VIEWER),
+            'an admin opens what the profile gate withholds, as on their own permalink'
+        );
+        self::assertFalse($this->onlyCall()['enforce'], 'read unenforced, by the viewer\'s own exemption');
     }
 }

@@ -45,12 +45,25 @@ final class FeedItemReportVisibilityTest extends TestCase
     {
         parent::setUp();
         require_once __DIR__ . '/../Stubs/halls-gate-stubs.php';
-        // F-94: the three sibling reads below go through CoreSibling, which
-        // FAILS in CI when the checkout is missing (a skip would be invisible
-        // in a green run) and SKIPS in a bare local worktree. A raw
-        // require_once did neither: it raised Error "Failed opening required"
-        // on every test in the file, which reads as a crash rather than as a
-        // missing checkout.
+        // F-94: the sibling reads below go through CoreSibling, which FAILS in
+        // CI when the checkout is missing (a skip would be invisible in a
+        // green run) and SKIPS in a bare local worktree. A raw require_once
+        // did neither: it raised Error "Failed opening required" on every test
+        // in the file, which reads as a crash rather than as a missing
+        // checkout.
+        //
+        // ⚠ That guarantee belongs to the FIRST read only, and the comment
+        // used to claim it for all three. The other two sit behind
+        // `class_exists(..., false)`, so they reach CoreSibling only when the
+        // class is not already loaded — if an earlier test in the same process
+        // has loaded them, a missing checkout would pass those two unnoticed.
+        //
+        // It is not a hole in practice: the unguarded read below runs FIRST,
+        // so a missing checkout fails the file before either guard is reached.
+        // And the guards are themselves correct and must keep their `false`
+        // second argument — a bare `class_exists()` would ask the autoloader,
+        // which loads the real class and makes the guard always true, exactly
+        // the trap this file is guarding against.
         require_once CoreSibling::require('src/Repositories/PeepSoGroupRepository.php');
         // The REAL public-feed module allowlist, not a copy, so this suite
         // fails if the two ever disagree.

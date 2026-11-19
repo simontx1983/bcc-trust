@@ -7,7 +7,7 @@
  * Text Domain: bcc-trust
  * Domain Path: /languages
  * Requires at least: 5.8
- * Requires PHP: 8.1
+ * Requires PHP: 8.2
  * GitHub Plugin URI: https://github.com/simontx1983/bcc-trust
  * Primary Branch: main
  */
@@ -1663,6 +1663,11 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 // (never a WordPress cookie or application password); see
 // WordPressSignInGate.
 \BCC\Trust\Core\Security\WordPressSignInGate::register();
+
+// Security review 2026-11-19: WordPress's own front end on the cms host
+// serves no feeds (they 301 to the app), names no WordPress version and
+// links no feeds from its head; see WordPressFrontEndGate.
+\BCC\Trust\Core\Security\WordPressFrontEndGate::register();
 
 // F-305: suspended members are signed in READ-ONLY. One gate refuses every
 // BCC write from a known-suspended member, except an explicit allow-list

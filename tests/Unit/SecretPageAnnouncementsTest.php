@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Tests\Unit;
 
+use BCC\Trust\Core\Repositories\ContentReportRepository;
 use BCC\Trust\Core\REST\AnnouncementsEndpoint;
 use BCC\Trust\Core\Services\AnnouncementCommentService;
+use BCC\Trust\Core\Services\ContentReportService;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -21,7 +23,9 @@ use PHPUnit\Framework\TestCase;
  *   - list and rotator: the EMPTY page (a missing page has no
  *     announcements; it is not a 404);
  *   - detail: the same 404;
- *   - the thread, a new comment, a removal: the same 404.
+ *   - the thread, a new comment, a removal: the same 404;
+ *   - a report (`POST /me/reports`, kind `announcement`): the same "Not
+ *     found." as an id that does not exist.
  *
  * The repository reads still RUN for a hidden page, so a failing database
  * answers 503 for it exactly as for a missing page.
@@ -256,7 +260,56 @@ final class SecretPageAnnouncementsTest extends TestCase
         self::assertTrue($result['ok'] ?? false);
     }
 
+    // ── reporting (POST /me/reports, target_kind announcement) ───────────
+
+    public function testReportingAHiddenPagesAnnouncementIsTheMissingAnswerAndFilesNothing(): void
+    {
+        $missing = $this->report(self::ANN_MISSING);
+        $hidden  = $this->report(self::ANN_SECRET);
+
+        self::assertSame(['error' => 'bcc_not_found', 'message' => 'Not found.'], $missing);
+        self::assertSame($missing, $hidden);
+        self::assertNotContains('findPublic:' . self::SECRET, $GLOBALS['__bcc_ann']['calls'], 'decided before the readability read');
+        self::assertNotContains('report:create:' . self::ANN_SECRET, $GLOBALS['__bcc_ann']['calls'], 'no report is filed');
+    }
+
+    public function testAMemberReportsTheAnnouncement(): void
+    {
+        $GLOBALS['__bcc_ann']['secret'][self::SECRET] = [self::VIEWER];
+
+        self::assertSame(['ok' => true, 'report_id' => 1, 'status' => 'created'], $this->report(self::ANN_SECRET));
+        self::assertContains('report:create:' . self::ANN_SECRET, $GLOBALS['__bcc_ann']['calls']);
+    }
+
+    /**
+     * A missing id never reaches the readability read, so a failing database
+     * still answers it "Not found.". A hidden notice must too, so the page
+     * gate runs BEFORE the read; a member's failed read is the
+     * `bcc_unavailable` it always was.
+     */
+    public function testAFailedReadStillAnswersAHiddenPagesAnnouncementAsMissing(): void
+    {
+        $GLOBALS['__bcc_ann']['fail'] = true;
+
+        self::assertSame($this->report(self::ANN_MISSING), $this->report(self::ANN_SECRET));
+
+        $GLOBALS['__bcc_ann']['secret'][self::SECRET] = [self::VIEWER];
+        self::assertSame('bcc_unavailable', $this->report(self::ANN_SECRET)['error'] ?? null, 'a member, past the gate, gets the failed read');
+    }
+
+    public function testReportingAnOpenPagesAnnouncementIsUnchanged(): void
+    {
+        self::assertSame('created', $this->report(self::ANN_OPEN)['status'] ?? null);
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────
+
+    /** @return array<string, mixed> */
+    private function report(int $announcementId): array
+    {
+        return (new ContentReportService(new ContentReportRepository()))
+            ->fileReport(self::VIEWER, ContentReportService::KIND_ANNOUNCEMENT, $announcementId, 'spam', '');
+    }
 
     /** @param array<string, string> $extra */
     private function read(string $handler, int $pageId, array $extra = []): \WP_REST_Response

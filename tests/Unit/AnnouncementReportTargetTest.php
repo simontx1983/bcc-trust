@@ -109,20 +109,34 @@ final class AnnouncementReportTargetTest extends TestCase
 
     /**
      * ⚠⚠ MUST-NOT-HAPPEN #1 — nothing about the target comes from the
-     * request. The resolver takes ONE argument, the announcement id, and
+     * request. The resolver takes the REPORTER and the announcement id, and
      * derives the page from `post_parent`. There is no page id, author id
      * or activity id in its signature or its body to be supplied.
+     *
+     * The reporter is not a request field: it is fileReport()'s own
+     * authenticated `$reporterUserId`, passed through so a SECRET page's
+     * notice answers "Not found." to a reporter the page does not admit
+     * (SecretPageAnnouncementsTest has the behaviour).
      */
-    public function testTheAnnouncementResolverTakesOnlyTheNoticeIdAndDerivesTheRest(): void
+    public function testTheAnnouncementResolverTakesOnlyTheReporterAndTheNoticeIdAndDerivesTheRest(): void
     {
         $method = new ReflectionMethod(ContentReportService::class, 'resolveAnnouncementTarget');
 
         self::assertTrue($method->isPrivate(), 'an internal resolution step, not a surface');
-        self::assertSame(1, $method->getNumberOfParameters());
+        self::assertSame(2, $method->getNumberOfParameters());
 
         $params = $method->getParameters();
-        self::assertSame('announcementId', $params[0]->getName());
+        self::assertSame('reporterUserId', $params[0]->getName());
         self::assertSame('int', (string) $params[0]->getType());
+        self::assertSame('announcementId', $params[1]->getName());
+        self::assertSame('int', (string) $params[1]->getType());
+
+        // The reporter is fileReport()'s authenticated caller, passed through.
+        self::assertStringContainsString(
+            'resolveAnnouncementTarget($reporterUserId, $targetId)',
+            self::methodBody('fileReport'),
+            'the reporter passed in is the authenticated caller'
+        );
 
         $body = self::methodBody('resolveAnnouncementTarget');
 

@@ -21,6 +21,7 @@ namespace BCC\Trust\Core\REST;
 
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -73,9 +74,13 @@ final class UserEndorsementsEndpoint
         $user_id = get_current_user_id();
         $limit   = (int) $request->get_param('limit');
 
-        $service      = Plugin::instance()->endorsementService();
-        $endorsements = $service->getUserEndorsements($user_id, $limit);
-        $items        = $service->hydrateEndorsementItems($endorsements);
+        $service = Plugin::instance()->endorsementService();
+        try {
+            $endorsements = $service->getUserEndorsements($user_id, $limit);
+        } catch (RepositoryReadFailure) {
+            return self::unavailable();
+        }
+        $items = $service->hydrateEndorsementItems($endorsements);
 
         return rest_ensure_response([
             'items' => $items,
@@ -94,9 +99,30 @@ final class UserEndorsementsEndpoint
         }
 
         $user_id = get_current_user_id();
-        $stats   = Plugin::instance()->endorsementService()
-            ->getUserEndorsementStats($user_id);
+        try {
+            $stats = Plugin::instance()->endorsementService()
+                ->getUserEndorsementStats($user_id);
+        } catch (RepositoryReadFailure) {
+            // Zeroed stats would say "0 given", which is not what we know.
+            return self::unavailable();
+        }
 
         return rest_ensure_response($stats);
+    }
+
+    /**
+     * F-421: the given-vouches read did not run. Shared by the three routes
+     * that read it: these two and GET /users/:handle/endorsements.
+     *
+     * ⚠ A failed read is 503, never `items: []` or zeroed stats: both are
+     * real answers ("hasn't vouched for any pages yet"), so returning one
+     * would hide the fault behind a plausible page. `private, no-store`, so
+     * no cache replays the outage after the database recovers.
+     */
+    public static function unavailable(): WP_REST_Response
+    {
+        $response = ApiResponse::error('bcc_unavailable', 'Vouches are temporarily unavailable. Please try again.', 503);
+        $response->header('Cache-Control', 'private, no-store');
+        return $response;
     }
 }

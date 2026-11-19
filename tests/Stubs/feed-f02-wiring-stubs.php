@@ -315,12 +315,23 @@ namespace BCC\Core\Repositories {
             return $GLOBALS['__bcc_f02feed']['blockers'] ?? [];
         }
 
-        /** @return array<int, true>|null */
+        /**
+         * `mutual_blocked` (list<int> author ids, default none): the
+         * authors the viewer and they have blocked between them.
+         *
+         * @return array<int, true>|null
+         */
         public static function getMutuallyBlockedSetOrUnknown(int $viewerId, array $candidateIds): ?array
         {
-            unset($viewerId, $candidateIds);
+            unset($viewerId);
+            $set = [];
+            foreach ($GLOBALS['__bcc_f02feed']['mutual_blocked'] ?? [] as $id) {
+                if (in_array((int) $id, array_map('intval', $candidateIds), true)) {
+                    $set[(int) $id] = true;
+                }
+            }
 
-            return [];
+            return $set;
         }
     }
 }
@@ -472,6 +483,25 @@ namespace BCC\Trust\Core\Support {
         function get_current_user_id(): int
         {
             return 0;
+        }
+    }
+
+    // ProfileAccess::userIsExemptFromVisibility() asks about a GIVEN user
+    // (canView()'s mentionee), unlike the `is_admin` key, which models the
+    // request's user. Fixture key `admin_ids` (list<int>) lists the users
+    // holding `manage_options`. Outside this suite's fixture it defers to
+    // whatever global user_can() another suite defined, so it changes
+    // nothing for them.
+    if (!\function_exists('BCC\Trust\Core\Support\user_can')) {
+        function user_can($user, string $capability, ...$args): bool
+        {
+            if (!isset($GLOBALS['__bcc_f02feed'])) {
+                return \function_exists('user_can') && \user_can($user, $capability, ...$args);
+            }
+            $id = is_object($user) ? (int) ($user->ID ?? 0) : (int) $user;
+
+            return $capability === 'manage_options'
+                && in_array($id, $GLOBALS['__bcc_f02feed']['admin_ids'] ?? [], true);
         }
     }
 
