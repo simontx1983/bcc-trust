@@ -2112,27 +2112,30 @@ final class AttestationRepository
      * cast on still-living pages are removed via attestor_user_id; the page
      * itself (if also deleted) is handled by deleteForPageTarget.
      *
-     * Answers false when either DELETE did not run, after logging which leg
+     * Answers PER LEG whether its DELETE ran, after logging each leg that
      * failed: a failure used to be ignored, so the rows silently survived
-     * the account they belong to. Both legs always run.
+     * the account they belong to. Both legs always run. The caller needs the
+     * legs apart: the targets the user backed must be re-synthesized
+     * whenever the CAST leg ran, even if the targeted leg did not.
      *
      * Called through UserLifecycleService::purgeAttestationsFor (account
      * deletion, and the orphan prune CLI).
+     *
+     * @return array{cast: bool, targeted: bool}
      */
-    public function deleteForUser(int $userId): bool
+    public function deleteForUser(int $userId): array
     {
         if ($userId <= 0) {
-            return true;
+            return ['cast' => true, 'targeted' => true];
         }
 
         /** @var wpdb $wpdb */
         global $wpdb;
         $table = TableRegistry::trustAttestations();
-        $ok    = true;
 
         // Rows the user cast.
-        if ($wpdb->delete($table, ['attestor_user_id' => $userId], ['%d']) === false) {
-            $ok = false;
+        $cast = $wpdb->delete($table, ['attestor_user_id' => $userId], ['%d']) !== false;
+        if (!$cast) {
             self::logPurgeFailure($userId, 'cast', (string) $wpdb->last_error);
         }
 
@@ -2141,13 +2144,12 @@ final class AttestationRepository
             $table,
             ['target_kind' => 'user_profile', 'target_id' => $userId],
             ['%s', '%d']
-        );
-        if ($targeted === false) {
-            $ok = false;
+        ) !== false;
+        if (!$targeted) {
             self::logPurgeFailure($userId, 'targeted', (string) $wpdb->last_error);
         }
 
-        return $ok;
+        return ['cast' => $cast, 'targeted' => $targeted];
     }
 
     private static function logPurgeFailure(int $userId, string $leg, string $error): void
