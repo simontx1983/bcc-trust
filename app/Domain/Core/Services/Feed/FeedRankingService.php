@@ -705,6 +705,42 @@ final class FeedRankingService
      */
     public function getActivityById(int $actId, int $viewerId): ?array
     {
+        $item = $this->visibleActivity($actId, $viewerId);
+        if ($item === null) {
+            return null;
+        }
+
+        $hydrated = $this->hydrationPipeline->hydrate([$item], $viewerId);
+        return $hydrated[0] ?? null;
+    }
+
+    /**
+     * May $viewerId open $actId's permalink? Exactly `getActivityById() !==
+     * null` (every gate is in visibleActivity(); hydration only decorates
+     * and never drops an item), without paying for the hydration.
+     *
+     * For a caller that needs only the yes/no: a mention bell is owed only
+     * to a member the post's own permalink would show it to
+     * (NotificationDispatcher::dispatchMentionsFor()).
+     *
+     * Throws ActivityReadFailedException, as getActivityById() does, when
+     * the read did not run: "unknown" is not "no", and each caller decides
+     * which way to fail.
+     */
+    public function canView(int $actId, int $viewerId): bool
+    {
+        return $this->visibleActivity($actId, $viewerId) !== null;
+    }
+
+    /**
+     * The permalink's visibility gates, before hydration: the shared core of
+     * getActivityById() and canView(), so the two cannot disagree. See
+     * getActivityById() for what each gate is.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function visibleActivity(int $actId, int $viewerId): ?array
+    {
         $excluded = self::mergeExclusions(
             $this->cautionListExceptViewer($viewerId),
             $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
@@ -747,8 +783,7 @@ final class FeedRankingService
             return null;
         }
 
-        $hydrated = $this->hydrationPipeline->hydrate([$item], $viewerId);
-        return $hydrated[0] ?? null;
+        return $item;
     }
 
     /**

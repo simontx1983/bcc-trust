@@ -306,12 +306,23 @@ namespace BCC\Core\Repositories {
             return $GLOBALS['__bcc_f02feed']['blockers'] ?? [];
         }
 
-        /** @return array<int, true>|null */
+        /**
+         * `mutual_blocked` (list<int> author ids, default none): the
+         * authors the viewer and they have blocked between them.
+         *
+         * @return array<int, true>|null
+         */
         public static function getMutuallyBlockedSetOrUnknown(int $viewerId, array $candidateIds): ?array
         {
-            unset($viewerId, $candidateIds);
+            unset($viewerId);
+            $set = [];
+            foreach ($GLOBALS['__bcc_f02feed']['mutual_blocked'] ?? [] as $id) {
+                if (in_array((int) $id, array_map('intval', $candidateIds), true)) {
+                    $set[(int) $id] = true;
+                }
+            }
 
-            return [];
+            return $set;
         }
     }
 }
