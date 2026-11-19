@@ -423,6 +423,43 @@ final class AccountPreHijackTest extends TestCase
         self::assertStringNotContainsString('your address will not be used', $html);
     }
 
+    public function testVerificationMailNamesTheAccountsHandle(): void
+    {
+        self::addUser(self::OWNER, 'owner@example.com', '0');
+
+        AuthSupport::beginEmailVerification(self::OWNER, 'owner@example.com');
+
+        self::assertStringContainsString(
+            'This code confirms the email for <strong>@handle' . self::OWNER . '</strong>. If that isn&rsquo;t your account, ignore this email.',
+            self::mail()[0]['html']
+        );
+    }
+
+    public function testTheHandleInTheVerificationMailIsEscaped(): void
+    {
+        self::addUser(self::OWNER, 'owner@example.com', '0');
+        $GLOBALS['__bcc_ph']['meta'][self::OWNER]['bcc_handle'] = '<b>x</b>';
+
+        AuthSupport::beginEmailVerification(self::OWNER, 'owner@example.com');
+
+        $html = self::mail()[0]['html'];
+        self::assertStringContainsString('<strong>@&lt;b&gt;x&lt;/b&gt;</strong>', $html);
+        self::assertStringNotContainsString('<b>x</b>', $html);
+    }
+
+    public function testWithNoHandleTheVerificationMailLeavesTheAccountLineOut(): void
+    {
+        self::addUser(self::OWNER, 'owner@example.com', '0');
+        unset($GLOBALS['__bcc_ph']['meta'][self::OWNER]['bcc_handle']);
+
+        AuthSupport::beginEmailVerification(self::OWNER, 'owner@example.com');
+
+        $html = self::mail()[0]['html'];
+        self::assertStringNotContainsString('This code confirms the email for', $html);
+        self::assertStringNotContainsString('<strong>@</strong>', $html);
+        self::assertStringContainsString('If you didn&rsquo;t create this account, ignore this email.', $html, 'the rest of the mail is unchanged');
+    }
+
     public function testEveryCallerUsesTheSharedSequence(): void
     {
         // Wallet signup: never marks the address verified, and starts verification.

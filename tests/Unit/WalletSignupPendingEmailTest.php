@@ -417,6 +417,14 @@ final class WalletSignupPendingEmailTest extends TestCase
         self::assertSame('bcc_invalid_otp', self::errorCode(self::verify(['email' => self::TYPED, 'code' => $new])), 'the old codes are replaced');
         self::assertSame('bcc_invalid_otp', self::errorCode(self::verify(['email' => self::TYPED, 'code' => $other])));
 
+        // Each mail names the account its code confirms (the handles are
+        // unique; the display names are whatever each sign-up chose).
+        $names = static fn(int $at): string => 'This code confirms the email for <strong>@' . ($at === $before ? 'handle' . self::OTHER : 'newhandle') . '</strong>';
+        self::assertStringContainsString($names($before), $mails[$before]['html']);
+        self::assertStringContainsString($names($before + 1), $mails[$before + 1]['html']);
+        self::assertStringNotContainsString('@newhandle', $mails[$before]['html']);
+        self::assertStringNotContainsString('@handle' . self::OTHER, $mails[$before + 1]['html']);
+
         // Oldest first: OTHER's fresh code, then NEW's.
         self::assertSame(1, preg_match('/>\s*(\d{6})\s*</', $mails[$before]['html'], $m));
         self::assertSame(200, self::verify(['email' => self::TYPED, 'code' => $m[1]])->get_status());
