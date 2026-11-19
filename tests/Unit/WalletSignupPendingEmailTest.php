@@ -391,6 +391,8 @@ final class WalletSignupPendingEmailTest extends TestCase
         self::assertSame(3, self::attemptsOn(self::OTHER), 'OTHER was compared all three times');
         self::assertSame(2, self::attemptsOn(self::NEW), 'NEW was not compared, or charged, the third time');
         self::assertSame(6, $GLOBALS['__bcc_ph']['throttle_hits'][self::addressBudgetKey()], 'a refused comparison still counts');
+        self::assertSame(AuthSupport::VERIFY_EMAIL_MAX_FAILURES, $GLOBALS['__bcc_ph']['throttle_limits'][self::addressBudgetKey()]);
+        self::assertSame(AuthSupport::OTP_TTL, $GLOBALS['__bcc_ph']['throttle_windows'][self::addressBudgetKey()], 'the budget lasts as long as a code does');
 
         // The link names its account and is not affected.
         self::assertSame(200, self::verify(['token' => self::tokenFor(self::NEW)])->get_status());

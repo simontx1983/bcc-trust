@@ -48,10 +48,13 @@ namespace BCC\Core\Security {
                 // throttle_counting set it COUNTS per bucket like the real
                 // limiter (increment, then allow while count <= limit), and
                 // like it (F-290) gives a denied call's slot back when the
-                // caller passes countDenied = false.
+                // caller passes countDenied = false. It also records each
+                // bucket's limit and window (seconds), so a test can pin them.
                 $bucket = $key ?? $action;
                 $GLOBALS['__bcc_ph']['throttle_keys'][] = $bucket;
                 $GLOBALS['__bcc_ph']['throttle_count_denied'][$bucket] = $countDenied;
+                $GLOBALS['__bcc_ph']['throttle_limits'][$bucket] = $limit;
+                $GLOBALS['__bcc_ph']['throttle_windows'][$bucket] = $window;
                 if (!empty($GLOBALS['__bcc_ph']['throttle_deny'])) {
                     return false;
                 }
