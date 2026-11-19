@@ -17,6 +17,8 @@ use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
+require_once __DIR__ . '/PeepSoActivitiesTable.php';
+
 /**
  * User decision: a moderation-hidden review stops counting toward the
  * reviewed page's trust score and vote tallies while hidden, and counts
@@ -73,19 +75,8 @@ final class HiddenReviewScoreIntegrationTest extends TestCase
         $GLOBALS['__bcc_test_object_cache'] = [];
 
         global $wpdb;
-        $acts = $wpdb->prefix . 'peepso_activities';
-        if ((string) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $acts)) !== $acts) {
-            self::assertNotFalse($wpdb->query(
-                "CREATE TABLE IF NOT EXISTS `{$acts}` (
-                    act_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                    act_owner_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                    act_module_id VARCHAR(20) NOT NULL DEFAULT '0',
-                    act_external_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                    act_access INT NOT NULL DEFAULT 10,
-                    act_repost_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                    PRIMARY KEY (act_id)
-                ) DEFAULT CHARSET=utf8mb4"
-            ), $wpdb->last_error);
+        // Creates the table, or widens a copy another suite built, to the full column set.
+        if (PeepSoActivitiesTable::ensure()) {
             $this->activitiesWasOurs = true;
         }
 
