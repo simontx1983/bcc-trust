@@ -163,6 +163,9 @@ namespace BCC\Trust\Core\REST {
                 'route'     => $route,
                 'methods'   => $args['methods'] ?? null,
                 'callback'  => $args['callback'] ?? null,
+                // Kept so a test can assert what the route DECLARES about
+                // its parameters, not only where it points.
+                'args'      => $args['args'] ?? null,
             ];
 
             return true;

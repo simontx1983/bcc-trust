@@ -93,6 +93,18 @@ final class RepostEndpointTest extends TestCase
         return (new RepostEndpoint())->addQuote(new WP_REST_Request(['id' => $id, 'body' => $body]));
     }
 
+    /**
+     * A quote request built from RAW params, so a test can send no `body`
+     * key at all or a non-string one — neither of which the typed helper
+     * above can express.
+     *
+     * @param array<string, mixed> $params
+     */
+    private static function quoteRaw(array $params): WP_REST_Response
+    {
+        return (new RepostEndpoint())->addQuote(new WP_REST_Request($params));
+    }
+
     /** @return list<mixed> */
     private static function trace(): array
     {
@@ -940,6 +952,90 @@ final class RepostEndpointTest extends TestCase
             self::assertSame('bcc_invalid_request', self::errorCode($response));
             self::assertNotContains('createStatus', self::events(), 'nothing may be written');
         }
+    }
+
+    /**
+     * ⚠⚠ THE HANDLER OWNS THE BODY REFUSAL, and the route must not take it
+     * back. `body` carries neither `required` nor `type` on purpose:
+     * `WP_REST_Request::has_valid_params()` runs inside dispatch after the
+     * permission callback and BEFORE the handler, so a `required` body made
+     * WordPress answer its own `rest_missing_callback_param` 400 — a
+     * non-envelope error, ahead of this route's 401, telling an ANONYMOUS
+     * caller which parameter was missing instead of to sign in.
+     *
+     * `type` is absent for a different reason: it was never load-bearing.
+     * `register_rest_route()` attaches no default `validate_callback` and
+     * `has_valid_params()` calls only one that is set, so a declared type
+     * with no callback of its own validates nothing. Declaring it would
+     * imply a check that does not run.
+     *
+     * ⭐ Asserted on the DECLARATION rather than through a response,
+     * because this layer cannot reach WordPress's dispatch at all: the
+     * handler is called directly here, so a `required` flag coming back
+     * would change NO test below. The route array is the only place the
+     * regression is visible.
+     */
+    public function testTheQuoteRouteLeavesItsBodyUnvalidatedByWordPress(): void
+    {
+        RepostEndpoint::register();
+
+        /** @var list<array{route: string, args: mixed}> $routes */
+        $routes = $GLOBALS['__bcc_repost_routes'];
+        $quote  = null;
+        foreach ($routes as $route) {
+            if (str_ends_with($route['route'], '/quote')) {
+                $quote = $route;
+            }
+        }
+
+        self::assertNotNull($quote, 'the quote route must be registered');
+        self::assertIsArray($quote['args']);
+        self::assertArrayHasKey('body', $quote['args']);
+        self::assertIsArray($quote['args']['body']);
+        self::assertArrayNotHasKey('required', $quote['args']['body'], 'WordPress must not answer the missing body');
+        self::assertArrayNotHasKey('type', $quote['args']['body'], 'and must not claim a check it does not run');
+    }
+
+    /**
+     * A body that is ABSENT or not a string is the same refusal as a blank
+     * one — one `bcc_invalid_request`, from here, in the envelope.
+     *
+     * ⚠ `null` is what an omitted parameter reads as, and it is the case
+     * the route previously never saw: WordPress refused it first.
+     */
+    public function testAMissingOrNonStringQuoteBodyIsRefusedByTheHandler(): void
+    {
+        $cases = [
+            'omitted'  => ['id' => self::A_REPOST],
+            'null'     => ['id' => self::A_REPOST, 'body' => null],
+            'array'    => ['id' => self::A_REPOST, 'body' => ['nope']],
+            'int'      => ['id' => self::A_REPOST, 'body' => 7],
+            'bool'     => ['id' => self::A_REPOST, 'body' => true],
+        ];
+
+        foreach ($cases as $why => $params) {
+            $response = self::quoteRaw($params);
+
+            self::assertSame(400, $response->get_status(), "a {$why} body must be refused");
+            self::assertSame('bcc_invalid_request', self::errorCode($response), $why);
+            self::assertNotContains('createStatus', self::events(), "nothing may be written for a {$why} body");
+        }
+    }
+
+    /**
+     * ⭐ THE PROPERTY THE `required` FLAG BROKE: an anonymous caller is told
+     * to sign in, whatever is or is not in the body. A missing parameter is
+     * not something an unauthenticated caller should be able to learn about.
+     */
+    public function testAnAnonymousQuoteIsRefusedBeforeTheBodyIsEvenLookedAt(): void
+    {
+        $GLOBALS['__bcc_repost_user'] = 0;
+
+        $response = self::quoteRaw(['id' => self::A_REPOST]);
+
+        self::assertSame(401, $response->get_status());
+        self::assertSame('bcc_unauthorized', self::errorCode($response));
+        self::assertSame([], self::events(), 'nothing may run before auth');
     }
 
     /** A service-side refusal (the cap, mentions, moderation) is forwarded as-is. */

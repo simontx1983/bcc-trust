@@ -117,10 +117,27 @@ final class RepostEndpoint
                 'methods'             => WP_REST_Server::CREATABLE,
                 'callback'            => [$instance, 'addQuote'],
                 'permission_callback' => '__return_true',
+                // ⚠⚠ NO `required` AND NO `type`, DELIBERATELY.
+                //
+                // `WP_REST_Request::has_valid_params()` runs inside
+                // dispatch AFTER the permission callback and BEFORE this
+                // handler, so `required` made WordPress answer its own
+                // `rest_missing_callback_param` 400 — outside the §9
+                // envelope, and ahead of the handler's 401, so an
+                // ANONYMOUS caller who omitted the body was told which
+                // parameter was missing instead of to sign in. The handler
+                // owns the refusal and answers one `bcc_invalid_request`
+                // 400 for missing, blank and non-string alike.
+                //
+                // `type` was never load-bearing: `register_rest_route()`
+                // attaches no default `validate_callback`, and
+                // `has_valid_params()` only calls one that is set, so a
+                // declared type with no callback of its own validates
+                // nothing. Removed rather than left to imply a check that
+                // does not exist.
                 'args'                => [
                     'body' => [
-                        'required' => true,
-                        'type'     => 'string',
+                        'description' => 'The quote text; the handler validates it.',
                     ],
                 ],
             ]
@@ -647,8 +664,7 @@ final class RepostEndpoint
      * successful write can still answer null here (the write and the count
      * are two reads); that is honest rather than a contradiction, and the
      * client shows no number rather than a wrong one.
-     */
-    /**
+     *
      * @param array<string, mixed> $extra route-specific fields merged on top
      *   of the shared state block, so both write routes answer the SAME
      *   shape plus whatever only one of them can say.

@@ -340,25 +340,6 @@ class FeedItemReportVisibility
     }
 
     /**
-     * May a `public_all` group post be served OUTSIDE its group right now?
-     *
-     * ⚠ MIRROR of the syndication tail of bcc-core
-     * `ActivityFeedService::isVisibleGlobally()`, which is private — keep
-     * the two in lockstep. The rule: a post deliberately made `public_all`
-     * while its group was ALREADY non-open stays public whatever the group
-     * does later; otherwise the group must still be open now.
-     *
-     * ⚠ FAIL-CLOSED. `getNonOpenGroupIdsStrict()` answers `null` when it
-     * cannot prove a complete list (query error, or over its cap), and
-     * {@see GroupSyndicationGate::allows()} then admits only the posts
-     * recorded as made while non-open. That is deliberately the strict
-     * direction: an unreadable deny-list must not widen what is public.
-     *
-     * Reads the MULTI-VALUE form of `peepso_group_id`, as bcc-core does —
-     * a post can carry more than one group id, and the single-value read
-     * used for the gate below would silently consider only the first.
-     */
-    /**
      * Is this activity visible to EVERY member — the "public post" test
      * F-346 reposting requires (user decision 2026-11-18, X's
      * protected-post rule: only public posts can be reposted or quoted).
@@ -453,6 +434,25 @@ class FeedItemReportVisibility
         return max($postLevel, $authorLevel) <= 20;
     }
 
+    /**
+     * May a `public_all` group post be served OUTSIDE its group right now?
+     *
+     * ⚠ MIRROR of the syndication tail of bcc-core
+     * `ActivityFeedService::isVisibleGlobally()`, which is private — keep
+     * the two in lockstep. The rule: a post deliberately made `public_all`
+     * while its group was ALREADY non-open stays public whatever the group
+     * does later; otherwise the group must still be open now.
+     *
+     * ⚠ FAIL-CLOSED. `getNonOpenGroupIdsStrict()` answers `null` when it
+     * cannot prove a complete list (query error, or over its cap), and
+     * {@see GroupSyndicationGate::allows()} then admits only the posts
+     * recorded as made while non-open. That is deliberately the strict
+     * direction: an unreadable deny-list must not widen what is public.
+     *
+     * Reads the MULTI-VALUE form of `peepso_group_id`, as bcc-core does —
+     * a post can carry more than one group id, and the single-value read
+     * used for the gate below would silently consider only the first.
+     */
     private static function syndicationAllows(int $postId): bool
     {
         $groupIds = array_values(array_filter(
