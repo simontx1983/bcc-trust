@@ -845,7 +845,7 @@ final class AccountWalletConfirmTest extends TestCase
         // Wallet sign-up with an email: user_email set, flag '0', code mailed.
         $GLOBALS['__bcc_ph']['users'][self::USER]['email'] = 'typed@example.com';
         $GLOBALS['__bcc_ph']['meta'][self::USER]['_bcc_email_verified'] = '0';
-        \BCC\Trust\Core\REST\Auth\AuthSupport::storeOtpForUser(self::USER, '123456');
+        \BCC\Trust\Core\REST\Auth\AuthSupport::storeOtpForUser(self::USER, '123456', 'typed@example.com');
         self::assertFalse(AccountRecoveryService::hasRecoveryEmail(self::USER), 'pending: not a way back in yet');
 
         self::assertNotSame(200, self::verifyCode('typed@example.com', '000000'));

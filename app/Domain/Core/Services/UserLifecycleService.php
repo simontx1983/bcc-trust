@@ -152,7 +152,7 @@ class UserLifecycleService
      */
     private function revokeUnprovenEmail(int $userId, string $oldEmail, string $newEmail): void
     {
-        if ($newEmail === $oldEmail || PendingEmailService::isOwnWrite($userId, $newEmail)) {
+        if (strtolower(trim($newEmail)) === strtolower(trim($oldEmail)) || PendingEmailService::isOwnWrite($userId, $newEmail)) {
             return;
         }
 

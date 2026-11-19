@@ -93,6 +93,15 @@ final class PendingEmailService
     }
 
     /**
+     * applyPendingSignupEmail() outcome (H1): a pending address was held but
+     * user_email is no longer the wallet placeholder, because it was changed
+     * outside BCC meanwhile. The code or link proved the PENDING inbox, not
+     * the address now in user_email, so the caller must not finalise. The
+     * pending one is dropped.
+     */
+    public const SIGNUP_EMAIL_REFUSED = 'refused';
+
+    /**
      * On a proven inbox (a correct sign-up code, or the link): move the
      * pending sign-up address into user_email. Only while user_email is
      * still the wallet placeholder; the address is re-checked first, and if
@@ -106,9 +115,13 @@ final class PendingEmailService
             return self::SIGNUP_EMAIL_NONE;
         }
         $user = get_userdata($userId);
-        if (!$user instanceof \WP_User || !AccountRecoveryService::isPlaceholderEmail((string) $user->user_email)) {
+        if (!$user instanceof \WP_User) {
             delete_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL);
             return self::SIGNUP_EMAIL_NONE;
+        }
+        if (!AccountRecoveryService::isPlaceholderEmail((string) $user->user_email)) {
+            delete_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL);
+            return self::SIGNUP_EMAIL_REFUSED;
         }
         $holder = email_exists($pending);
         if ($holder !== false && (int) $holder !== $userId) {

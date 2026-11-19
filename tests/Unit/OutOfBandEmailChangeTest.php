@@ -37,10 +37,16 @@ use ReflectionClass;
  * PendingEmailService:
  *   - an outside change sets the flag to '0', and a Google sign-in by the
  *     new address then links nothing and mints nothing;
- *   - re-saving the same address, or another field, keeps '1' (and Google
- *     still links, so the harness is not vacuous);
- *   - a code or link mailed BEFORE the change dies with it (both are bound
- *     to the user, not to the address); a link mailed after it works;
+ *   - re-saving the same address (in any case), or another field, keeps
+ *     '1' (and Google still links, so the harness is not vacuous);
+ *   - a code or link mailed BEFORE the change dies with it; a link mailed
+ *     after it works;
+ *   - a wallet sign-up's typed address is dropped by the change, so the
+ *     REAL resend (email and handle forms) mails it nothing, and a stale
+ *     one can neither be verified into the new user_email nor applied;
+ *   - every code and link is bound to the address it was mailed to: one
+ *     mailed elsewhere, or with no recorded address, never verifies, even
+ *     after a user_email write that fires no hook at all;
  *   - PendingEmailService's own writes (the email change, a wallet
  *     sign-up's address) stay verified and revoke nothing;
  *   - the audit entry names no address.
@@ -194,6 +200,37 @@ final class OutOfBandEmailChangeTest extends TestCase
         return (new EmailVerificationController())->verifyEmail(new \WP_REST_Request($params));
     }
 
+    /**
+     * The REAL POST /auth/resend-verification.
+     *
+     * @param array<string, string> $params
+     */
+    private static function resend(array $params): void
+    {
+        $res = (new EmailVerificationController())->resendVerification(new \WP_REST_Request($params));
+        self::assertSame(200, $res->get_status(), 'resend always answers ok');
+    }
+
+    private static function mailsTo(string $to): int
+    {
+        return count(array_filter($GLOBALS['__bcc_ph']['mail'], static fn(array $m): bool => $m['to'] === $to));
+    }
+
+    /** The newest verify-link token in the most recent mail to $to. */
+    private static function lastTokenTo(string $to): string
+    {
+        $mails = array_values(array_filter($GLOBALS['__bcc_ph']['mail'], static fn(array $m): bool => $m['to'] === $to));
+        self::assertNotEmpty($mails, 'a link was mailed to ' . $to);
+        self::assertSame(1, preg_match('/token=([0-9a-f]{64})/', end($mails)['html'], $m));
+        return $m[1];
+    }
+
+    /** A user_email write that fires no profile_update (a direct database write). */
+    private static function writeEmailWithoutAnyHook(int $id, string $email): void
+    {
+        $GLOBALS['__bcc_ph']['users'][$id]['email'] = $email;
+    }
+
     private static function errorCode(\WP_REST_Response $res): ?string
     {
         $data = $res->get_data();
@@ -260,6 +297,7 @@ final class OutOfBandEmailChangeTest extends TestCase
     {
         self::account(self::USER, self::OWN, '1');
 
+        wp_update_user(['ID' => self::USER, 'user_email' => ' Me@Example.COM ']); // same inbox, other case
         wp_update_user(['ID' => self::USER, 'user_email' => self::OWN]); // profile.php re-save
         wp_update_user(['ID' => self::USER, 'display_name' => 'Renamed']);
 
@@ -310,9 +348,9 @@ final class OutOfBandEmailChangeTest extends TestCase
 
         // Resend mails the address now on the account; its owner opens the link.
         $mailed = self::mailVerification(self::USER, self::VICTIM);
-        self::assertSame(
-            self::USER . ':1',
-            $GLOBALS['__bcc_ph']['transients']['bcc_vt_' . $mailed['token']] ?? null,
+        self::assertStringStartsWith(
+            self::USER . ':1:',
+            (string) ($GLOBALS['__bcc_ph']['transients']['bcc_vt_' . $mailed['token']] ?? ''),
             'stored under the new link generation'
         );
 
@@ -320,6 +358,157 @@ final class OutOfBandEmailChangeTest extends TestCase
 
         self::assertSame(200, $res->get_status());
         self::assertSame('1', self::flag(self::USER), 'the inbox owner proved it');
+    }
+
+    // ── a wallet sign-up's typed address (review MEDIUM) ────────────────
+
+    /**
+     * The chain: a wallet sign-up types an inbox the attacker owns (OWN),
+     * user_email is pointed at the victim outside BCC, then the REAL resend
+     * is asked, by that address and by handle. The typed address went with
+     * the change, so nothing new reaches it, and what reached it before
+     * verifies nothing.
+     */
+    public function testAfterAnOutsideChangeAResendMailsTheTypedAddressNothing(): void
+    {
+        self::walletSignup(self::USER, self::OWN);
+        $mailed = self::mailVerification(self::USER, self::OWN); // the sign-up mail
+        self::changeOutsideBcc(self::USER, self::VICTIM);
+
+        self::assertArrayNotHasKey(PendingEmailService::META_PENDING_SIGNUP_EMAIL, $GLOBALS['__bcc_ph']['meta'][self::USER], 'the typed address is dropped');
+        $toTyped = self::mailsTo(self::OWN);
+        self::resend(['email' => self::OWN]);
+        self::resend(['identifier' => '@handle' . self::USER]);
+        self::assertSame($toTyped, self::mailsTo(self::OWN), 'NOTHING new is mailed to the typed address');
+        self::assertSame(1, self::mailsTo(self::VICTIM), 'control: the handle form ran, and mailed the address on file');
+
+        foreach ([
+            ['token' => $mailed['token']],
+            ['email' => self::OWN, 'code' => $mailed['code']],
+            ['email' => self::VICTIM, 'code' => $mailed['code']],
+        ] as $attempt) {
+            self::assertSame(400, self::verify($attempt)->get_status(), (string) json_encode($attempt));
+        }
+        self::assertSame('0', self::flag(self::USER), 'the victim address is NOT marked verified');
+        self::assertArrayNotHasKey('token', self::googleSignIn(self::VICTIM), 'and Google links nothing');
+    }
+
+    /**
+     * The same chain from a state this fix does not leave behind: the typed
+     * address is still pending although user_email is now the victim's (a
+     * change made before the fix shipped). The REAL resend mails the typed
+     * inbox, by that address and by handle, and neither its link nor its
+     * code verifies: each proves the typed inbox, not the address now on
+     * the account.
+     */
+    public function testAStalePendingAddressCannotBeVerifiedIntoTheNewEmail(): void
+    {
+        self::walletSignup(self::USER, self::OWN);
+        self::changeOutsideBcc(self::USER, self::VICTIM);
+        $GLOBALS['__bcc_ph']['meta'][self::USER][PendingEmailService::META_PENDING_SIGNUP_EMAIL] = self::OWN;
+
+        self::resend(['identifier' => '@handle' . self::USER]);
+        $link = self::lastTokenTo(self::OWN);
+        self::resend(['email' => self::OWN]);
+        $code = self::lastCodeTo(self::OWN);
+        self::assertSame(2, self::mailsTo(self::OWN), 'control: both forms mailed the typed inbox');
+
+        $byLink = self::verify(['token' => $link]);
+        self::assertSame(400, $byLink->get_status());
+        self::assertSame('bcc_invalid_verify_token', self::errorCode($byLink));
+        $byCode = self::verify(['email' => self::OWN, 'code' => $code]);
+        self::assertSame(400, $byCode->get_status());
+        self::assertSame('bcc_invalid_otp', self::errorCode($byCode));
+
+        self::assertSame('0', self::flag(self::USER), 'the victim address is NOT marked verified');
+        self::assertSame(self::VICTIM, self::email(self::USER));
+        self::assertArrayNotHasKey('token', self::googleSignIn(self::VICTIM), 'and Google links nothing');
+    }
+
+    /**
+     * A stale pending address is never applied over a real user_email: the
+     * verification is refused (409 bcc_invalid_state), not finalised, even
+     * when the code itself was mailed to user_email. The pending one is
+     * dropped, so the next resend verifies user_email normally.
+     */
+    public function testAStalePendingAddressIsRefusedNotApplied(): void
+    {
+        self::account(self::USER, self::VICTIM, '0');
+        $GLOBALS['__bcc_ph']['meta'][self::USER][PendingEmailService::META_PENDING_SIGNUP_EMAIL] = self::OWN;
+
+        self::resend(['email' => self::VICTIM]);
+        $res = self::verify(['email' => self::VICTIM, 'code' => self::lastCodeTo(self::VICTIM)]);
+
+        self::assertSame(409, $res->get_status());
+        self::assertSame('bcc_invalid_state', self::errorCode($res));
+        self::assertSame('0', self::flag(self::USER), 'not finalised');
+        self::assertSame(self::VICTIM, self::email(self::USER), 'the pending address was not applied');
+        self::assertArrayNotHasKey(PendingEmailService::META_PENDING_SIGNUP_EMAIL, $GLOBALS['__bcc_ph']['meta'][self::USER], 'and it is dropped');
+
+        self::resend(['email' => self::VICTIM]);
+        self::assertSame(200, self::verify(['token' => self::lastTokenTo(self::VICTIM)])->get_status(), 'recoverable: a fresh mail verifies');
+        self::assertSame('1', self::flag(self::USER));
+    }
+
+    // ── every code and link is bound to the address it was mailed to ────
+
+    public function testACodeMailedToAnotherAddressNeverVerifiesTheCurrentOne(): void
+    {
+        self::account(self::USER, self::OWN, '0');
+        $mailed = self::mailVerification(self::USER, self::OWN);
+        self::writeEmailWithoutAnyHook(self::USER, self::VICTIM); // no revocation runs
+
+        $res = self::verify(['email' => self::VICTIM, 'code' => $mailed['code']]);
+
+        self::assertSame(400, $res->get_status());
+        self::assertSame('bcc_invalid_otp', self::errorCode($res));
+        self::assertSame('0', self::flag(self::USER), 'the victim address is NOT marked verified');
+        self::assertArrayNotHasKey('bcc_otp_' . self::USER, $GLOBALS['__bcc_ph']['transients'], 'the right code is consumed');
+    }
+
+    public function testALinkMailedToAnotherAddressNeverVerifiesTheCurrentOne(): void
+    {
+        self::account(self::USER, self::OWN, '0');
+        $mailed = self::mailVerification(self::USER, self::OWN);
+        self::writeEmailWithoutAnyHook(self::USER, self::VICTIM);
+
+        $res = self::verify(['token' => $mailed['token']]);
+
+        self::assertSame(400, $res->get_status());
+        self::assertSame('bcc_invalid_verify_token', self::errorCode($res));
+        self::assertSame('0', self::flag(self::USER), 'the victim address is NOT marked verified');
+        self::assertArrayNotHasKey('bcc_vt_' . $mailed['token'], $GLOBALS['__bcc_ph']['transients'], 'the link is consumed');
+    }
+
+    /** Codes and links stored before the binding existed carry no address: refused. */
+    public function testACodeOrLinkWithNoRecordedAddressIsRefused(): void
+    {
+        self::account(self::USER, self::OWN, '0');
+        $mailed = self::mailVerification(self::USER, self::OWN);
+        // Strip the address, leaving each value in its pre-binding shape.
+        $otpKey = 'bcc_otp_' . self::USER;
+        $vtKey  = 'bcc_vt_' . $mailed['token'];
+        $GLOBALS['__bcc_ph']['transients'][$otpKey] = explode(':', (string) $GLOBALS['__bcc_ph']['transients'][$otpKey])[0];
+        $GLOBALS['__bcc_ph']['transients'][$vtKey]  = explode(':', (string) $GLOBALS['__bcc_ph']['transients'][$vtKey])[0];
+
+        self::assertSame(400, self::verify(['email' => self::OWN, 'code' => $mailed['code']])->get_status(), 'unbound code');
+        self::assertSame(400, self::verify(['token' => $mailed['token']])->get_status(), 'unbound link');
+        self::assertSame('0', self::flag(self::USER));
+    }
+
+    /** The binding is to the inbox: the address's case and stray spaces do not matter. */
+    public function testTheBindingIgnoresCaseAndSpaces(): void
+    {
+        self::account(self::USER, self::OWN, '0');
+        AuthSupport::beginEmailVerification(self::USER, ' Me@Example.COM ');
+        $tokens = array_values(array_filter(
+            array_keys($GLOBALS['__bcc_ph']['transients']),
+            static fn($k): bool => str_starts_with((string) $k, 'bcc_vt_')
+        ));
+        self::assertCount(1, $tokens);
+
+        self::assertSame(200, self::verify(['token' => substr((string) $tokens[0], strlen('bcc_vt_'))])->get_status());
+        self::assertSame('1', self::flag(self::USER));
     }
 
     // ── PendingEmailService's own writes stay verified ──────────────────
