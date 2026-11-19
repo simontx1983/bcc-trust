@@ -506,6 +506,7 @@ namespace BCC\Trust\Onchain\Services {
             public const REMOTE_MISSING         = 'missing';
             public const REMOTE_UNREACHABLE     = 'unreachable';
             public const REMOTE_NOT_PROVISIONED = 'not_provisioned';
+            public const STATUS_CACHE_TTL       = 60;
 
             public static int $provisionCalls = 0;
             public static int $resyncCalls = 0;

@@ -40,6 +40,16 @@ final class HeliusSubscriptionManager
     public const OPTION_WEBHOOK_ID = 'bcc_helius_shared_webhook_id';
     public const HELIUS_API_BASE   = 'https://api.helius.xyz';
     private const HTTP_TIMEOUT     = 15;
+
+    /**
+     * F-314 follow-up: the admin panel's remote check. One attempt, a short
+     * timeout, and a healthy answer kept for STATUS_CACHE_TTL seconds, so a
+     * slow Helius cannot hold the settings page for a minute of retries and
+     * every page load does not spend an API call.
+     */
+    public const STATUS_CACHE_TTL      = 60;
+    private const STATUS_CACHE_KEY     = 'bcc_helius_remote_status';
+    private const STATUS_HTTP_TIMEOUT  = 5;
     private const MAX_ADDRESSES    = 100000;
 
     /**
@@ -93,6 +103,7 @@ final class HeliusSubscriptionManager
             'authHeader'         => $authVal,
         ]);
 
+        self::forgetRemoteStatus();
         $response = ApiRetry::post(
             self::HELIUS_API_BASE . '/v0/webhooks?api-key=' . rawurlencode($apiKey),
             [
@@ -384,7 +395,11 @@ final class HeliusSubscriptionManager
      * failure (`unreachable`), and `callback_matches` compares the remote
      * webhookURL with $expectedCallback when both are known.
      *
-     * @return array{webhook_id: string, remote_address_count: ?int, local_managed_count: int, callback_url: ?string, remote_state: string, callback_matches: ?bool}
+     * The remote half comes from remoteSnapshot(): `checked_at` is when
+     * Helius was asked (null when nothing was asked). The local count is
+     * always read live.
+     *
+     * @return array{webhook_id: string, remote_address_count: ?int, local_managed_count: int, callback_url: ?string, remote_state: string, checked_at: ?int, callback_matches: ?bool}
      */
     public static function status(?string $expectedCallback = null): array
     {
@@ -401,33 +416,94 @@ final class HeliusSubscriptionManager
                 'local_managed_count'  => $localManaged,
                 'callback_url'         => null,
                 'remote_state'         => self::REMOTE_NOT_PROVISIONED,
+                'checked_at'           => null,
                 'callback_matches'     => null,
             ];
         }
 
-        $result   = self::fetchWebhookResult($webhookId);
-        $detail   = $result['code'] === 200 ? $result['body'] : null;
-        $remoteCt = is_array($detail) && isset($detail['accountAddresses']) && is_array($detail['accountAddresses'])
-            ? count($detail['accountAddresses'])
-            : null;
-        $callback = is_array($detail) && isset($detail['webhookURL']) && is_string($detail['webhookURL'])
-            ? $detail['webhookURL']
-            : null;
-
-        $state = $detail !== null
-            ? self::REMOTE_OK
-            : ($result['code'] === 404 ? self::REMOTE_MISSING : self::REMOTE_UNREACHABLE);
+        $remote   = self::remoteSnapshot($webhookId);
+        $callback = $remote['callback_url'];
 
         return [
             'webhook_id'           => $webhookId,
-            'remote_address_count' => $remoteCt,
+            'remote_address_count' => $remote['remote_address_count'],
             'local_managed_count'  => $localManaged,
             'callback_url'         => $callback,
-            'remote_state'         => $state,
+            'remote_state'         => $remote['remote_state'],
+            'checked_at'           => $remote['checked_at'],
             'callback_matches'     => ($callback !== null && $expectedCallback !== null && $expectedCallback !== '')
                 ? $callback === $expectedCallback
                 : null,
         ];
+    }
+
+    /**
+     * What Helius said about $webhookId, asked at most once per
+     * STATUS_CACHE_TTL while it is healthy.
+     *
+     * ⚠ Only a HEALTHY answer (`ok`) is kept. `missing` and `unreachable` are
+     * never served from the cache: a timeout, a transport error, a 5xx or an
+     * auth refusal is "couldn't check", never "missing", and the next page
+     * load asks again, so a recovered Helius or a fixed API key shows at
+     * once. A 404 answers quickly, so not caching it costs no stall.
+     *
+     * The entry names the webhook id it describes; a different stored id
+     * (provisioned or recreated since) is a miss. Every remote write clears
+     * it (forgetRemoteStatus()).
+     *
+     * @return array{remote_address_count: ?int, callback_url: ?string, remote_state: string, checked_at: int}
+     */
+    private static function remoteSnapshot(string $webhookId): array
+    {
+        $cached = get_transient(self::STATUS_CACHE_KEY);
+        if (
+            is_array($cached)
+            && ($cached['webhook_id'] ?? null) === $webhookId
+            && ($cached['remote_state'] ?? null) === self::REMOTE_OK
+            && is_int($cached['checked_at'] ?? null)
+            && (($cached['remote_address_count'] ?? null) === null || is_int($cached['remote_address_count']))
+            && (($cached['callback_url'] ?? null) === null || is_string($cached['callback_url']))
+        ) {
+            return [
+                'remote_address_count' => $cached['remote_address_count'] ?? null,
+                'callback_url'         => $cached['callback_url'] ?? null,
+                'remote_state'         => self::REMOTE_OK,
+                'checked_at'           => $cached['checked_at'],
+            ];
+        }
+
+        // One attempt with a short timeout: this runs while an operator waits
+        // for the page, and "couldn't check" is an answer the panel can show.
+        $result = self::fetchWebhookResult($webhookId, self::STATUS_HTTP_TIMEOUT, 0);
+        $detail = $result['code'] === 200 ? $result['body'] : null;
+
+        $snapshot = [
+            'remote_address_count' => is_array($detail) && isset($detail['accountAddresses']) && is_array($detail['accountAddresses'])
+                ? count($detail['accountAddresses'])
+                : null,
+            'callback_url'         => is_array($detail) && isset($detail['webhookURL']) && is_string($detail['webhookURL'])
+                ? $detail['webhookURL']
+                : null,
+            'remote_state'         => $detail !== null
+                ? self::REMOTE_OK
+                : ($result['code'] === 404 ? self::REMOTE_MISSING : self::REMOTE_UNREACHABLE),
+            'checked_at'           => time(),
+        ];
+
+        if ($snapshot['remote_state'] === self::REMOTE_OK) {
+            set_transient(self::STATUS_CACHE_KEY, ['webhook_id' => $webhookId] + $snapshot, self::STATUS_CACHE_TTL);
+        }
+        return $snapshot;
+    }
+
+    /**
+     * Drop the cached remote snapshot. Called before every remote write
+     * (provision, the re-register PUT, the address-list PUT), so the panel
+     * never shows the webhook as it was before a change.
+     */
+    public static function forgetRemoteStatus(): void
+    {
+        delete_transient(self::STATUS_CACHE_KEY);
     }
 
     /**
@@ -581,6 +657,9 @@ final class HeliusSubscriptionManager
             return false;
         }
 
+        // Before the send, not after: a PUT that timed out may still have
+        // been applied on Helius's side.
+        self::forgetRemoteStatus();
         $response = ApiRetry::post(
             self::HELIUS_API_BASE . '/v0/webhooks/' . rawurlencode($webhookId)
             . '?api-key=' . rawurlencode(self::apiKey()),
@@ -695,9 +774,12 @@ final class HeliusSubscriptionManager
      * side) can be told apart from a transport or auth failure. `code` is
      * null for a transport error or a missing API key.
      *
+     * $timeout / $maxRetries tighten the defaults for the admin panel's
+     * check; null retries keeps ApiRetry's default.
+     *
      * @return array{code: ?int, body: ?array<string, mixed>}
      */
-    private static function fetchWebhookResult(string $webhookId): array
+    private static function fetchWebhookResult(string $webhookId, int $timeout = self::HTTP_TIMEOUT, ?int $maxRetries = null): array
     {
         $apiKey = self::apiKey();
         if ($apiKey === '') {
@@ -707,8 +789,8 @@ final class HeliusSubscriptionManager
         $response = ApiRetry::get(
             self::HELIUS_API_BASE . '/v0/webhooks/' . rawurlencode($webhookId)
             . '?api-key=' . rawurlencode($apiKey),
-            ['timeout' => self::HTTP_TIMEOUT, 'sslverify' => true],
-            ['label' => 'Helius webhook fetch']
+            ['timeout' => $timeout, 'sslverify' => true],
+            ['label' => 'Helius webhook fetch'] + ($maxRetries !== null ? ['max_retries' => $maxRetries] : [])
         );
 
         if (is_wp_error($response)) {
@@ -743,6 +825,7 @@ final class HeliusSubscriptionManager
         // webhook GET and the provisioning POST already went this way; only
         // this PUT did not. wp_remote_post() lets the caller's `method`
         // override POST, so the request is still a PUT.
+        self::forgetRemoteStatus();
         $response = ApiRetry::post(
             self::HELIUS_API_BASE . '/v0/webhooks/' . rawurlencode($webhookId)
             . '?api-key=' . rawurlencode($apiKey),
