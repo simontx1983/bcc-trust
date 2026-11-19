@@ -66,6 +66,21 @@ final class AttestationOrphanPurgeTest extends TestCase
         self::assertSame(7, \OrphanWorld::$errors[0][1]['user_id'] ?? null);
     }
 
+    /**
+     * Only the rows cast against the profile survived: the cast rows ARE
+     * gone, so the targets the user backed must stop counting now. The purge
+     * is still reported as incomplete.
+     */
+    public function testAFailedTargetedLegStillRecomputesTheBackedTargetsAndIsReported(): void
+    {
+        \OrphanWorld::$active[7]      = [(object) ['target_kind' => 'validator_card', 'target_id' => 10]];
+        \OrphanWorld::$targetedFails = [7];
+
+        self::assertFalse(self::lifecycle()->purgeAttestationsFor(7), 'rows against the profile survived');
+
+        self::assertSame([['validator_card', 10]], \OrphanWorld::$recomputed);
+    }
+
     /** Account deletion goes through the same cleanup, not a second copy. */
     public function testAccountDeletionUsesTheOneCleanup(): void
     {
