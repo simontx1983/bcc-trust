@@ -224,6 +224,8 @@ require_once BCC_TRUST_PATH . 'includes/database/rotate-login-handles.php';
 require_once BCC_TRUST_PATH . 'includes/database/retire-renamed-original-handles.php';
 // F-257: fold the discovery opt-out into hide_from_search (registered in migration-runner.php).
 require_once BCC_TRUST_PATH . 'includes/database/fold-discovery-optout.php';
+// F-294: release unverified wallet sign-up emails (registered in migration-runner.php).
+require_once BCC_TRUST_PATH . 'includes/database/release-wallet-signup-unverified-emails.php';
 require_once BCC_TRUST_PATH . 'includes/database/flush-object-cache-display-names.php';
 // One-shot repair of NFT-gate pointers orphaned by retire-stargaze-chain.php
 // (deleted chain + collections, surviving PeepSo group posts). Repoints only
@@ -1239,7 +1241,7 @@ add_action(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK, functio
         $stats = \BCC\Trust\Onchain\OnchainPlugin::instance()
             ->nftGroupRevokeService()
             ->sweep();
-        if ($stats['revoked'] > 0 || $stats['skipped_unknown'] > 0) {
+        if ($stats['revoked'] > 0 || $stats['skipped_unknown'] > 0 || $stats['awaiting_second_zero'] > 0) {
             \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group revoke sweep', $stats);
         }
     } catch (\Throwable $e) {
@@ -1690,6 +1692,12 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 // scheduling and the due instant. Turning the feature off must never OPEN a
 // publication path.
 \BCC\Trust\Core\Announcements\AnnouncementPublicationGuard::register();
+
+// Security review 2026-11-18: BCC's password rules (the 8-character minimum
+// and the breach check) on WordPress's own password paths too: the core
+// reset form, wp-admin profile / user-edit / user-new, and core REST user
+// writes. See CorePasswordPolicy.
+\BCC\Trust\Core\Security\CorePasswordPolicy::register();
 
 // §K2 / §G1: hook PeepSo's user-search filter so users hidden from search
 // (hide_from_search, which /me/privacy's discovery_optout aliases since
@@ -2314,6 +2322,15 @@ if (defined('WP_CLI') && WP_CLI) {
     \WP_CLI::add_command(
         'bcc-trust block-follows',
         \BCC\Trust\Core\CLI\BlockFollowsBackfillCommand::class
+    );
+
+    // Attestation rows of accounts that no longer exist (the cleanup account
+    // deletion runs, for rows that survived it). Dry run by default, counts
+    // only; --apply needs the --confirm token and a --user-id holding
+    // manage_options (ApplyGuard). Nothing runs it on deploy.
+    \WP_CLI::add_command(
+        'bcc-trust attestations',
+        \BCC\Trust\Core\CLI\AttestationOrphansCommand::class
     );
 }
 

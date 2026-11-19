@@ -24,6 +24,10 @@ namespace {
         public static ?object $attestation = null;
         /** @var int how often the reaffirm reached its per-attestor lock */
         public static int $lockAttempts = 0;
+        /** @var array<int, list<int>> SECRET page id => the viewers bcc-core's rule lets in */
+        public static array $secretPages = [];
+        /** Is the current viewer a site admin (ProfileAccess's shared exemption)? */
+        public static bool $admin = false;
 
         public static function reset(): void
         {
@@ -33,6 +37,8 @@ namespace {
             self::$blocked      = [];
             self::$attestation  = null;
             self::$lockAttempts = 0;
+            self::$secretPages  = [];
+            self::$admin        = false;
 
             // The one $wpdb read a reaffirm makes before its lock:
             // AttestationRepository::findOneById().
@@ -163,6 +169,18 @@ namespace BCC\Core\Repositories {
             }
         }
     }
+
+    if (!class_exists(__NAMESPACE__ . '\\PeepSoPagePrivacy', false)) {
+        /** The shared secret-page rule; its own SQL is tested in bcc-core and bcc-trust's integration suite. */
+        final class PeepSoPagePrivacy
+        {
+            public static function isVisibleTo(int $pageId, int $viewerId): bool
+            {
+                return !isset(\AttestTargetWorld::$secretPages[$pageId])
+                    || in_array($viewerId, \AttestTargetWorld::$secretPages[$pageId], true);
+            }
+        }
+    }
 }
 
 namespace BCC\Trust\Core\Support {
@@ -172,6 +190,12 @@ namespace BCC\Trust\Core\Support {
             public static function canViewProfile(int $ownerId): bool
             {
                 return \AttestTargetWorld::$viewable[$ownerId] ?? true;
+            }
+
+            /** PageAccess's admin exemption. */
+            public static function viewerIsExemptFromVisibility(): bool
+            {
+                return \AttestTargetWorld::$admin;
             }
         }
     }

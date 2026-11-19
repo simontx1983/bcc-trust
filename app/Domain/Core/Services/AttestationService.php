@@ -1939,7 +1939,8 @@ final class AttestationService
      *                    /endorse handler already applies). A feed post, a
      *                    group post or another kind of page is not a card;
      *                    vouching for one used to bell its author and feed
-     *                    rank evidence.
+     *                    rank evidence. A SECRET page also has to be one
+     *                    the attestor may see (PageAccess).
      *   - user_profile → a member the attestor may view
      *                    (ProfileAccess::canViewProfile: the profile ladder
      *                    plus suspension; it judges the CURRENT viewer, who
@@ -1959,6 +1960,13 @@ final class AttestationService
 
         if ($targetKind !== 'user_profile') {
             if (get_post_type($targetId) !== 'peepso-page' || self::targetKindForPage($targetId) !== $targetKind) {
+                throw $notFound;
+            }
+            // A SECRET page the attestor may not see (PageAccess: its author,
+            // a site admin, or a member or invitee) is a page that does not
+            // exist to them. Vouching for it used to bell its owner and count
+            // as score evidence. A failed privacy read refuses too.
+            if (!\BCC\Trust\Core\Support\PageAccess::viewerMaySeeId($targetId, $attestorUserId)) {
                 throw $notFound;
             }
             return;

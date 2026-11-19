@@ -116,7 +116,7 @@ class XController {
             return new WP_REST_Response(['success' => true, 'data' => ['auth_url' => $authUrl]], 200);
 
         } catch (Exception $e) {
-            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'X API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
+            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'X API error', ['endpoint' => __FUNCTION__, 'exception' => get_class($e), 'code' => $e->getCode()]);
             return new WP_Error('bcc_internal', 'An unexpected error occurred. Please try again.', ['status' => 500]);
         }
     }
@@ -197,7 +197,7 @@ class XController {
             exit;
 
         } catch (Exception $e) {
-            \BCC\Core\Log\Logger::error('[bcc-trust] X callback error', ['detail' => $e->getMessage()]);
+            \BCC\Core\Log\Logger::error('[bcc-trust] X callback error', ['exception' => get_class($e), 'code' => $e->getCode()]);
 
             $errorReturnUrl = '';
             if ($userId) {
@@ -261,7 +261,7 @@ class XController {
             ], 200);
 
         } catch (Exception $e) {
-            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'X API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
+            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'X API error', ['endpoint' => __FUNCTION__, 'exception' => get_class($e), 'code' => $e->getCode()]);
             return new WP_Error('bcc_internal', 'An unexpected error occurred. Please try again.', ['status' => 500]);
         }
     }
@@ -315,7 +315,7 @@ class XController {
             ], 200);
 
         } catch (Exception $e) {
-            \BCC\Core\Log\Logger::error('[bcc-trust] verifyShare() error', ['error' => $e->getMessage()]);
+            \BCC\Core\Log\Logger::error('[bcc-trust] verifyShare() error', ['exception' => get_class($e), 'code' => $e->getCode()]);
             return new WP_Error('bcc_internal', 'Verification failed. Please try again.', ['status' => 500]);
         }
     }
@@ -340,7 +340,7 @@ class XController {
             ], 200);
 
         } catch (Exception $e) {
-            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'X API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
+            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'X API error', ['endpoint' => __FUNCTION__, 'exception' => get_class($e), 'code' => $e->getCode()]);
             return new WP_Error('bcc_internal', 'An unexpected error occurred. Please try again.', ['status' => 500]);
         }
     }

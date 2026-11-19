@@ -35,6 +35,8 @@
  * existence check here, because `CardReviewsService::getReviews`
  * returns an empty page when the page has no active votes — which is
  * also the correct response for a nonexistent or invalid `target_id`.
+ * A SECRET page the viewer may not see (PageAccess) gets that same empty
+ * page.
  *
  * @package BCC\Trust\Core\REST
  * @since 2026-05-14 (Phase 2 entity tab parity)
@@ -48,6 +50,7 @@ use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\CardReviewsService;
 use BCC\Trust\Core\Services\MemberSelfPageService;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Core\Support\ProfileAccess;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -154,6 +157,13 @@ final class CardReviewsEndpoint
         $page    = (int) $request->get_param('page');
         $perPage = (int) $request->get_param('per_page');
         $viewer  = get_current_user_id();
+
+        // ⚠ SECRET PAGES (the three card kinds). A viewer PageAccess refuses
+        // gets the service's empty page, which is also what a page that does
+        // not exist gets, so the answer never shows that the page is there.
+        if ($targetKind !== 'user_profile' && !PageAccess::viewerMaySeeId($pageId, $viewer)) {
+            $pageId = 0;
+        }
 
         $data = (new CardReviewsService(Plugin::instance()->voteRepository()))
             ->getReviews($pageId, $viewer, $page, $perPage);

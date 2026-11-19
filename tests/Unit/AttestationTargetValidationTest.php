@@ -185,6 +185,37 @@ final class AttestationTargetValidationTest extends TestCase
         self::assertSame(self::notFound(), self::outcome('validator_card', self::DRAFT_PAGE));
     }
 
+    // ── SECRET pages (PageAccess) ───────────────────────────────────────
+
+    public function testASecretPageTheAttestorMayNotSeeLooksLikeNobody(): void
+    {
+        \AttestTargetWorld::$secretPages[self::VALIDATOR_PAGE] = [self::MEMBER];
+
+        self::assertSame(self::notFound(), self::outcome('validator_card', self::VALIDATOR_PAGE));
+    }
+
+    public function testAMemberOfASecretPageMayVouchForIt(): void
+    {
+        \AttestTargetWorld::$secretPages[self::VALIDATOR_PAGE] = [self::ATTESTOR];
+
+        self::passedTheTargetGate('validator_card', self::VALIDATOR_PAGE);
+    }
+
+    public function testASiteAdminMayVouchForASecretPage(): void
+    {
+        \AttestTargetWorld::$secretPages[self::VALIDATOR_PAGE] = [];
+        \AttestTargetWorld::$admin = true;
+
+        self::passedTheTargetGate('validator_card', self::VALIDATOR_PAGE);
+    }
+
+    public function testAVouchOnAPageThatTurnedSecretCannotBeReaffirmed(): void
+    {
+        \AttestTargetWorld::$secretPages[self::VALIDATOR_PAGE] = [self::MEMBER];
+
+        self::reaffirmRefused('validator_card', self::VALIDATOR_PAGE);
+    }
+
     // ── user_profile ────────────────────────────────────────────────────
 
     public function testAViewableUnblockedMemberIsAccepted(): void

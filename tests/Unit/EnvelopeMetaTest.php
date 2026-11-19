@@ -181,6 +181,8 @@ final class EnvelopeMetaTest extends TestCase
         self::assertSame('bcc_rate_limited', $body['error']['code'] ?? null);
         self::assertSame(429, $body['error']['status'] ?? null);
         // Envelope's 429 block now reaches this route: backoff guidance rides along.
+        // This stub records no `retry_after` (an older bcc-core), so the
+        // window is the fallback (F-289).
         self::assertSame(60, $body['error']['data']['retry_after_seconds'] ?? null);
         self::assertSame('60', $r->get_headers()['Retry-After'] ?? null);
         self::assertSame('30', $r->get_headers()['X-RateLimit-Limit'] ?? null);
@@ -209,5 +211,95 @@ final class EnvelopeMetaTest extends TestCase
         self::assertSame('561600', $r->get_headers()['Retry-After'] ?? null);
         $body = self::body($r);
         self::assertSame(['next_change_at' => '2026-11-19T10:00:00Z'], $body['error']['data'] ?? null);
+    }
+
+    /** Deny through the stub with an F-289 denial, then wrap a plain throttle 429. */
+    private static function throttled(int $window, int $retryAfter, int $at): \WP_REST_Response
+    {
+        $GLOBALS['__bcc_envelope_meta_throttle'] = ['allow' => false, 'retry_after' => $retryAfter, 'at' => $at];
+        \BCC\Core\Security\Throttle::allow('me_write', 120, $window);
+
+        $r = Envelope::wrap(
+            ApiResponse::error('bcc_rate_limited', 'Too many requests. Please slow down.', 429),
+            new \WP_REST_Server(),
+            new \WP_REST_Request('/bcc/v1/me', 'PATCH')
+        );
+        self::assertInstanceOf(\WP_REST_Response::class, $r);
+        return $r;
+    }
+
+    /**
+     * F-289: a throttle 429 advertises the time LEFT on the bucket that
+     * refused (bcc-core's `retry_after`), not the bucket's window — in the
+     * header, in X-RateLimit-Reset and in retry_after_seconds alike.
+     */
+    public function testAThrottle429CarriesTheTimeLeftNotTheWindow(): void
+    {
+        $before = time();
+        $r      = self::throttled(60, 17, $before);
+        $after  = time();
+
+        $h = $r->get_headers();
+        self::assertSame('17', $h['Retry-After'] ?? null);
+        self::assertSame(17, self::body($r)['error']['data']['retry_after_seconds'] ?? null);
+        self::assertSame('120', $h['X-RateLimit-Limit'] ?? null);
+        self::assertSame('0', $h['X-RateLimit-Remaining'] ?? null);
+        $reset = (int) ($h['X-RateLimit-Reset'] ?? 0);
+        self::assertGreaterThanOrEqual($before + 17, $reset);
+        self::assertLessThanOrEqual($after + 17, $reset);
+    }
+
+    /** It can be LONGER than the window: the refused bucket still weighs on the next one. */
+    public function testTheWaitCanBeLongerThanTheWindow(): void
+    {
+        $r = self::throttled(60, 95, time());
+
+        self::assertSame('95', $r->get_headers()['Retry-After'] ?? null);
+        self::assertSame(95, self::body($r)['error']['data']['retry_after_seconds'] ?? null);
+    }
+
+    /** The seconds since the denial come off, so a slow request doesn't overstate the wait. */
+    public function testTheSecondsSinceTheDenialComeOff(): void
+    {
+        $r = self::throttled(60, 17, time() - 5);
+
+        $wait = (int) ($r->get_headers()['Retry-After'] ?? 0);
+        self::assertContains($wait, [11, 12], 'the 5 s since the denial come off (±1 s for a tick)');
+        self::assertSame($wait, self::body($r)['error']['data']['retry_after_seconds'] ?? null);
+    }
+
+    /** Contract §1.4.4: retry_after_seconds is a POSITIVE integer, even once the wait has passed. */
+    public function testTheWaitIsNeverBelowOneSecond(): void
+    {
+        foreach ([[0, time()], [17, time() - 100]] as [$retryAfter, $at]) {
+            $r = self::throttled(60, $retryAfter, $at);
+            self::assertSame('1', $r->get_headers()['Retry-After'] ?? null);
+            self::assertSame(1, self::body($r)['error']['data']['retry_after_seconds'] ?? null);
+        }
+    }
+
+    /**
+     * F-289: a 429 that no throttle caused gets NOTHING injected. The captcha
+     * step-up's bcc_captcha_required (bcc-trust #715) answers after every
+     * login bucket has let the request through, and bcc-core now records
+     * only denials, so lastDenial() is null. The client must retry at once
+     * with a token, not wait out an unrelated bucket's window.
+     */
+    public function testACaptcha429GetsNoInjectedWait(): void
+    {
+        $captcha = ['captcha' => ['provider' => 'turnstile', 'site_key' => 'site-key']];
+        $resp    = ApiResponse::error('bcc_captcha_required', 'Please complete the verification to continue.', 429, $captcha);
+        $before  = (string) json_encode($resp->get_data());
+
+        $r = Envelope::wrap($resp, new \WP_REST_Server(), new \WP_REST_Request('/bcc/v1/auth/login', 'POST'));
+        self::assertInstanceOf(\WP_REST_Response::class, $r);
+
+        self::assertNull(\BCC\Core\Security\Throttle::lastDenial());
+        $h = $r->get_headers();
+        foreach (['Retry-After', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'] as $name) {
+            self::assertArrayNotHasKey($name, $h, $name);
+        }
+        self::assertSame($captcha, self::body($r)['error']['data'] ?? null);
+        self::assertSame($before, (string) json_encode($r->get_data()));
     }
 }

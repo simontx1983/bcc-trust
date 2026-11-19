@@ -117,6 +117,7 @@ namespace BCC\Core\Log {
             /** @param array<string, mixed> $context */
             public static function audit(string $message, array $context = []): void
             {
+                $GLOBALS['__bcc_ph']['audit_log'][] = [$message, $context];
             }
 
             /** @param array<string, mixed> $context */
@@ -374,6 +375,14 @@ namespace {
             return true;
         }
     }
+    if (!function_exists('delete_user_meta')) {
+        /** @param mixed $value */
+        function delete_user_meta(int $userId, string $key, $value = ''): bool
+        {
+            unset($GLOBALS['__bcc_ph']['meta'][$userId][$key]);
+            return true;
+        }
+    }
 
     if (!function_exists('wp_cache_delete')) {
         /** @param int|string $key */
@@ -397,12 +406,18 @@ namespace {
         function set_transient(string $key, $value, int $ttl = 0): bool
         {
             $GLOBALS['__bcc_ph']['transients'][$key] = $value;
+            $GLOBALS['__bcc_ph']['transient_ttls'][$key] = $ttl;
             return true;
         }
     }
     if (!function_exists('delete_transient')) {
         function delete_transient(string $key): bool
         {
+            // A test sets delete_transient_fails to make a delete fail (the
+            // value stays, as with a cache that refused the write).
+            if (!empty($GLOBALS['__bcc_ph']['delete_transient_fails'])) {
+                return false;
+            }
             unset($GLOBALS['__bcc_ph']['transients'][$key]);
             return true;
         }
@@ -455,8 +470,39 @@ namespace {
         }
     }
     if (!function_exists('wp_set_auth_cookie')) {
+        // Recorded so a test can pin that no BCC sign-in sets one (H3).
         function wp_set_auth_cookie(int $id, bool $remember = false): void
         {
+            $GLOBALS['__bcc_ph']['auth_cookies'][] = $id;
+        }
+    }
+    // WordPress-side credentials ended by POST /auth/logout-everywhere (H3).
+    if (!class_exists('WP_Session_Tokens', false)) {
+        class WP_Session_Tokens
+        {
+            private function __construct(private int $userId)
+            {
+            }
+
+            public static function get_instance(int $userId): self
+            {
+                return new self($userId);
+            }
+
+            public function destroy_all(): void
+            {
+                $GLOBALS['__bcc_ph']['wp_sessions_destroyed'][] = $this->userId;
+            }
+        }
+    }
+    if (!class_exists('WP_Application_Passwords', false)) {
+        class WP_Application_Passwords
+        {
+            public static function delete_all_application_passwords(int $userId): int
+            {
+                $GLOBALS['__bcc_ph']['app_passwords_deleted'][] = $userId;
+                return 0;
+            }
         }
     }
     if (!function_exists('get_option')) {

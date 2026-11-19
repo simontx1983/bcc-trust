@@ -94,15 +94,15 @@ namespace BCC\Trust\Tests\Unit {
             self::assertNull(\PeepSoUserSearch::$calls[0]['viewer']);
         }
 
-        public function testHotPostsAreFetchedForTheViewerSoBlockedAuthorsDrop(): void
+        public function testHotPostsAreComposedForTheViewer(): void
         {
-            // FeedRankingService is final; getHotFeed() drops authors blocked
-            // either way with the viewer it is given, after the shared cache.
-            // Cold-start used to pass none. Pinned at the call site.
+            // The payload hands composeHotPosts() the viewer. What it then
+            // reads, and for whom it is hydrated (blocks dropped, F-276
+            // viewer chrome), is proven behaviourally in
+            // ColdStartHotPostsViewerTest.
             $source = file_get_contents(__DIR__ . '/../../app/Domain/Core/Services/FeedColdStartService.php');
             self::assertIsString($source);
             self::assertStringContainsString("'hot_posts'        => \$this->composeHotPosts(\$viewerIdInt),", $source);
-            self::assertStringContainsString('->getHotFeed(null, FeedRankingService::HOT_WARM_LIMIT, $viewerId);', $source);
         }
     }
 }

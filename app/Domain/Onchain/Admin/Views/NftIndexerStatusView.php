@@ -450,18 +450,10 @@ final class NftIndexerStatusView
                     <td><?php echo $status['webhook_id'] !== '' ? '<code>' . esc_html($status['webhook_id']) . '</code>' : '<em>not provisioned</em>'; ?></td></tr>
                 <tr><th>Configured callback (remote)</th>
                     <td><?php echo $status['callback_url'] !== null ? '<code>' . esc_html($status['callback_url']) . '</code>' : '—'; ?></td></tr>
+                <tr><th>Checked on Helius</th>
+                    <td><?php echo esc_html(self::heliusCheckedLine($status['remote_state'], $status['checked_at'])); ?></td></tr>
                 <?php
-                // F-314: say WHY the remote fields are empty, and flag a callback
-                // that points somewhere else (e.g. after a domain cutover).
-                $remoteWarning = match (true) {
-                    $status['remote_state'] === HeliusSubscriptionManager::REMOTE_MISSING
-                        => 'Helius has no webhook with this ID (it was deleted on Helius\'s side). Nothing is being delivered. Use Re-register below.',
-                    $status['remote_state'] === HeliusSubscriptionManager::REMOTE_UNREACHABLE
-                        => 'Helius could not be reached, or refused the request. Check BCC_HELIUS_API_KEY and Helius status; nothing has been changed.',
-                    $status['callback_matches'] === false
-                        => 'The remote webhook posts to a different URL than this site\'s callback above, so deliveries are not arriving here. Use Re-register below.',
-                    default => null,
-                };
+                $remoteWarning = self::heliusRemoteWarning($status['remote_state'], $status['callback_matches'], $status['checked_at']);
                 if ($remoteWarning !== null): ?>
                 <tr><th>Remote webhook problem</th>
                     <td><strong style="color:var(--bcc-danger);"><?php echo esc_html($remoteWarning); ?></strong></td></tr>
@@ -511,6 +503,48 @@ final class NftIndexerStatusView
             (string) $status['remote_state'],
             $status['callback_matches']
         );
+    }
+
+    /**
+     * F-314: say WHY the remote fields are empty, and flag a callback that
+     * points somewhere else (e.g. after a domain cutover). Public so the
+     * copy is assertable without rendering the page.
+     *
+     * A failed or timed-out check is "couldn't check", with when it was
+     * tried — never "missing": only a 404 from Helius means missing.
+     */
+    public static function heliusRemoteWarning(string $remoteState, ?bool $callbackMatches, ?int $checkedAt): ?string
+    {
+        return match (true) {
+            $remoteState === HeliusSubscriptionManager::REMOTE_MISSING
+                => 'Helius has no webhook with this ID (it was deleted on Helius\'s side). Nothing is being delivered. Use Re-register below.',
+            $remoteState === HeliusSubscriptionManager::REMOTE_UNREACHABLE
+                => 'Couldn\'t check (' . self::heliusCheckTime($checkedAt) . '): Helius did not answer in time, or refused the request. Check BCC_HELIUS_API_KEY and Helius status. Nothing has been changed, and the next page load checks again.',
+            $callbackMatches === false
+                => 'The remote webhook posts to a different URL than this site\'s callback above, so deliveries are not arriving here. Use Re-register below.',
+            default => null,
+        };
+    }
+
+    /** F-314: the "Checked on Helius" row. */
+    public static function heliusCheckedLine(string $remoteState, ?int $checkedAt): string
+    {
+        if ($checkedAt === null) {
+            return '—';
+        }
+        if ($remoteState === HeliusSubscriptionManager::REMOTE_UNREACHABLE) {
+            return 'couldn\'t check (' . self::heliusCheckTime($checkedAt) . ')';
+        }
+        if ($remoteState === HeliusSubscriptionManager::REMOTE_OK) {
+            return self::heliusCheckTime($checkedAt)
+                . ' (kept for up to ' . HeliusSubscriptionManager::STATUS_CACHE_TTL . ' seconds)';
+        }
+        return self::heliusCheckTime($checkedAt);
+    }
+
+    private static function heliusCheckTime(?int $at): string
+    {
+        return $at !== null ? gmdate('Y-m-d H:i:s', $at) . ' UTC' : 'time unknown';
     }
 
     /**
@@ -853,13 +887,20 @@ final class NftIndexerStatusView
         AdminActionSupport::requireNonce(self::ACTION_HELIUS_PROVISION);
 
         try {
-            $id = HeliusSubscriptionManager::provisionSharedWebhook(HeliusWebhookEndpoint::callbackUrl());
+            $result = HeliusSubscriptionManager::provisionSharedWebhookResult(HeliusWebhookEndpoint::callbackUrl());
         } catch (\Throwable $e) {
             $ref = AdminActionSupport::failure($e, 'admin_helius_webhook_provision_failed', 'helius_webhook');
             self::redirect('helius_provision_failed', 0, $ref);
         }
 
-        if ($id === null) {
+        // F-314 follow-up: another change held the address-list lock, so
+        // nothing was read or sent. Not a failure: try again.
+        if ($result['outcome'] === 'busy') {
+            AdminActionSupport::audit('admin_helius_webhook_provision_busy', 'helius_webhook');
+            self::redirect('helius_provision_busy', 0);
+        }
+
+        if ($result['webhook_id'] === null) {
             AdminActionSupport::audit('admin_helius_webhook_provision_failed', 'helius_webhook');
             self::redirect('helius_provision_failed', 0);
         }
@@ -1017,6 +1058,7 @@ final class NftIndexerStatusView
             'state_invalid'           => ['error',   'Invalid state — no change was made.'],
             'helius_provisioned'      => ['updated', 'Helius shared webhook provisioned.'],
             'helius_provision_failed' => ['error',   'Provisioning failed. Check BCC_HELIUS_API_KEY + BCC_HELIUS_WEBHOOK_SECRET in wp-config.php.'],
+            'helius_provision_busy'   => ['error',   'Another change is in progress, so nothing was sent. Try again in a moment.'],
             'helius_resync_failed'    => ['error',   'Resync failed.'],
             // F-314: re-register outcomes.
             'helius_reregister_updated'         => ['updated', 'The Helius webhook now posts to this site\'s callback URL.'],

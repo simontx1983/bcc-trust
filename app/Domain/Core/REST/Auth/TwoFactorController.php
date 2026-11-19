@@ -163,8 +163,9 @@ final class TwoFactorController
             return ApiResponse::error('bcc_invalid_state', 'Account is missing a handle.', 409);
         }
 
+        // Bearer only, no WordPress auth cookie (see
+        // SessionController::logoutEverywhere).
         wp_set_current_user($userId);
-        wp_set_auth_cookie($userId, true);
 
         $token = JwtToken::encodeNewSession($userId, $handle);
         // F-281: a completed password sign-in — this network now skips the

@@ -152,13 +152,13 @@ final class MyBlocksEndpoint
             return ApiResponse::error('bcc_invalid_request', "You can't block yourself.", 400);
         }
 
-        // Confirm the target exists so a malformed POST returns a 404
-        // rather than silently writing a row pointing at a phantom user.
-        $target = get_userdata($targetId);
-        if ($target === false) {
-            return ApiResponse::error('bcc_not_found', 'User not found.', 404);
-        }
-
+        // ⚠ NO "does this user exist?" check, on purpose. A 404 for a
+        // missing id and a 200 for a real one told any member which user
+        // ids exist. Every positive id now gets the same answer: the row is
+        // written ('created', then 'existing'), whether or not anyone holds
+        // the id. A block on an id nobody holds affects only the blocker
+        // (main agent's call, 2026-11-18), and the per-viewer throttle above
+        // still bounds how many rows one member can write.
         $result = PeepSoBlockWriter::block($viewerId, $targetId);
         if ($result === 'error') {
             return ApiResponse::error('bcc_unavailable', 'Could not record the block.', 503);

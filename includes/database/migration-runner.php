@@ -459,6 +459,15 @@ if (!function_exists('bcc_trust_pending_migrations')) {
                 'done_option' => \BCC\Trust\Core\Support\PrivacySettings::FOLD_DONE_OPTION,
                 'callback'    => 'bcc_trust_fold_discovery_optout',
             ],
+            // F-294: addresses wallet sign-ups typed but never verified move
+            // out of user_email into the pending sign-up address, so they
+            // stop reserving the address against its real owner. See
+            // release-wallet-signup-unverified-emails.php.
+            [
+                'id'          => 'release_wallet_signup_unverified_emails_v1',
+                'done_option' => 'bcc_trust_wallet_signup_unverified_emails_released',
+                'callback'    => 'bcc_trust_release_wallet_signup_unverified_emails',
+            ],
         ];
     }
 

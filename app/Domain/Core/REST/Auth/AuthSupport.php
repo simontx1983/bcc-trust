@@ -568,8 +568,9 @@ final class AuthSupport
             );
         }
 
+        // No WordPress auth cookie: BCC sessions are bearer tokens only
+        // (see SessionController::logoutEverywhere).
         wp_set_current_user($userId);
-        wp_set_auth_cookie($userId, true);
 
         // Email ownership just changed hands from "unproven" to "proven".
         // Revoke every Bearer token minted before this point: if someone
