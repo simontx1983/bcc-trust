@@ -152,11 +152,15 @@ final class EmailVerificationController
                     400
                 );
             }
+            $applied = self::applyPendingSignupEmail($userId);
+            if ($applied !== null) {
+                return $applied;
+            }
             return AuthSupport::finalizeVerification($userId);
         }
 
         // ── OTP path ──────────────────────────────────────────────────
-        $user = get_user_by('email', $email);
+        $user = self::accountForAddress($email);
         if (!($user instanceof \WP_User)) {
             // Generic error — don't reveal whether the address is registered.
             return ApiResponse::error('bcc_invalid_otp', 'Invalid or expired code.', 400);
@@ -211,7 +215,51 @@ final class EmailVerificationController
             return ApiResponse::error('bcc_invalid_otp', 'Invalid or expired code.', 400);
         }
 
+        $applied = self::applyPendingSignupEmail($userId);
+        if ($applied !== null) {
+            return $applied;
+        }
         return AuthSupport::finalizeVerification($userId);
+    }
+
+    /**
+     * F-294: the account an address belongs to for the sign-up verify and
+     * resend routes: by user_email, or else the ONE wallet sign-up holding
+     * it as its pending address (two holding it = nobody). A wallet sign-up
+     * keeps the placeholder in user_email until the inbox is proven.
+     */
+    private static function accountForAddress(string $email): ?\WP_User
+    {
+        $user = get_user_by('email', $email);
+        if ($user instanceof \WP_User) {
+            return $user;
+        }
+        $ownerId = \BCC\Trust\Core\Services\PendingEmailService::pendingSignupOwner($email);
+        $owner   = $ownerId !== null ? get_userdata($ownerId) : false;
+        return $owner instanceof \WP_User ? $owner : null;
+    }
+
+    /**
+     * F-294: on a proven inbox, move a wallet sign-up's pending address into
+     * user_email before the account is finalised. Null = carry on; otherwise
+     * the response to return (the address was taken meanwhile, or the write
+     * failed).
+     */
+    private static function applyPendingSignupEmail(int $userId): ?WP_REST_Response
+    {
+        $outcome = \BCC\Trust\Core\Services\PendingEmailService::applyPendingSignupEmail($userId);
+        if ($outcome === \BCC\Trust\Core\Services\PendingEmailService::SIGNUP_EMAIL_CONFLICT) {
+            return ApiResponse::error('bcc_conflict', 'An account with that email already exists.', 409);
+        }
+        if ($outcome === \BCC\Trust\Core\Services\PendingEmailService::SIGNUP_EMAIL_FAILED) {
+            return ApiResponse::error('bcc_internal_error', 'Could not confirm your email. Please try again.', 500);
+        }
+        // H1: the account's email was changed outside BCC after this code
+        // or link was mailed; it proves a different inbox. Never finalised.
+        if ($outcome === \BCC\Trust\Core\Services\PendingEmailService::SIGNUP_EMAIL_REFUSED) {
+            return ApiResponse::error('bcc_invalid_state', 'This email can no longer be confirmed for this account.', 409);
+        }
+        return null;
     }
 
     /**
@@ -287,7 +335,7 @@ final class EmailVerificationController
                 AuthSupport::releaseThrottle('resend_verification', 3600);
                 return ApiResponse::error('bcc_rate_limited', 'Too many requests. Try again later.', 429);
             }
-            $user = get_user_by('email', $email);
+            $user = self::accountForAddress($email) ?? false;
         } elseif ($identifier !== '') {
             $handle = ltrim(strtolower($identifier), '@');
             // F-290 for the handle form: the same caps, keyed on the handle and
@@ -304,7 +352,11 @@ final class EmailVerificationController
             }
             $ownerId = HandleService::currentOwner($handle);
             $user    = $ownerId !== null ? get_userdata($ownerId) : false;
-            $email   = $user instanceof \WP_User ? (string) $user->user_email : '';
+            $email   = '';
+            if ($user instanceof \WP_User) {
+                $pending = \BCC\Trust\Core\Services\PendingEmailService::pendingSignupEmail((int) $user->ID);
+                $email   = $pending !== '' ? $pending : (string) $user->user_email;
+            }
             // The resolved inbox's own cap still binds, so alternating the
             // email and handle forms cannot double the mail to one address.
             // Over it, nothing is sent and the answer is the same ok (a 429

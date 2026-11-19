@@ -37,6 +37,12 @@
  *                       post that received the comment;
  *                       mirrors REACTION + MENTION shape — the FE has
  *                       no comment-anchor consumer in V1).
+ *   - GROUP_JOIN_REQUESTED
+ *                    → `/communities/<slug>/members#requests` (F-389: the
+ *                       Members tab's requests block, where the owner or
+ *                       manager decides); `/communities` if the group has
+ *                       since gone. GROUP_JOIN_APPROVED + GROUP_INVITED
+ *                       → `/communities/<slug>`, same fallback.
  *
  * Rows whose type is unrecognized (e.g. a future migration or a
  * corrupt row) are filtered out rather than surfaced as "Unknown" —
@@ -407,11 +413,14 @@ final class NotificationViewService
             // post is moderation-hidden, so every feed (the author's
             // included) excludes it and a permalink would dead-end.
             NotificationType::CONTENT_AUTO_HIDDEN => '/',
-            // F-272: external_id is the group. Requests land the
-            // owner/manager on the group page (where the request list
-            // lives); invites land the invitee on it (an invitee may view
-            // a secret group); approvals land the new member there.
-            NotificationType::GROUP_JOIN_REQUESTED,
+            // F-272: external_id is the group. Invites land the invitee on
+            // the group page (an invitee may view a secret group);
+            // approvals land the new member there. F-389: a request lands
+            // the owner/manager on the Members tab's "Requests &
+            // invitations" block, where it is decided (the frontend's
+            // `id="requests"` anchor; without it, the tab's top, which is
+            // that block).
+            NotificationType::GROUP_JOIN_REQUESTED => self::resolveCommunityLink($externalId, '/members#requests'),
             NotificationType::GROUP_JOIN_APPROVED,
             NotificationType::GROUP_INVITED => self::resolveCommunityLink($externalId),
             // F-307: a taken-down notice 404s for everyone but its owner's
@@ -430,13 +439,18 @@ final class NotificationViewService
      * Falls back to /halls on any resolution failure so the bell row
      * never produces a 404 URL.
      */
-    /** A plain (user/system) community's page, or the directory when it no longer resolves. */
-    private static function resolveCommunityLink(int $groupId): string
+    /**
+     * A plain (user/system) community's page, plus `$suffix` (a sub-route
+     * and/or anchor, e.g. '/members#requests'), or the bare directory when
+     * the group no longer resolves. The suffix never rides on the fallback:
+     * '/communities/members' is not a route.
+     */
+    private static function resolveCommunityLink(int $groupId, string $suffix = ''): string
     {
         $group = $groupId > 0 ? (PeepSoGroupRepository::findManyByIds([$groupId])[$groupId] ?? null) : null;
         $slug  = $group !== null && isset($group->post_name) ? (string) $group->post_name : '';
         return $slug !== ''
-            ? \BCC\Trust\Core\Support\CardUrlMap::groupUrl('user', $slug)
+            ? \BCC\Trust\Core\Support\CardUrlMap::groupUrl('user', $slug) . $suffix
             : '/communities';
     }
 

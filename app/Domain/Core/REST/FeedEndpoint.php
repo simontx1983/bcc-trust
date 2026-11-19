@@ -18,6 +18,10 @@
  *   - /feed/hot — public, short TTL with stale-while-revalidate (anonymous-cacheable, SEO-relevant)
  *   - /feed     — private, no shared cache (per-viewer scope filtering + auth)
  *
+ * F-275: a feed read that did not run answers 503 `bcc_unavailable`,
+ * `private, no-store`, on every route here (FeedUnavailable), never an empty
+ * page or a 404.
+ *
  * ─────────────────────────────────────────────────────────────────
  *  Pagination convention (LOCKED — see also WatchingEndpoint for the
  *  inverse rule):
@@ -36,8 +40,10 @@
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\FeedUnavailable;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -166,7 +172,12 @@ final class FeedEndpoint
         // so the viewer is passed through; 0 keeps the anonymous posture.
         $viewerId = get_current_user_id();
 
-        $payload = Plugin::instance()->feedRankingService()->getHotFeed($cursor, $limit, $viewerId);
+        try {
+            $payload = Plugin::instance()->feedRankingService()->getHotFeed($cursor, $limit, $viewerId);
+        } catch (ActivityReadFailedException) {
+            // ⚠ Not hotCacheHeaders(): an outage must never be shared-cached.
+            return FeedUnavailable::response();
+        }
 
         $response = ApiResponse::ok($payload);
         foreach (self::hotCacheHeaders($viewerId) as $header => $value) {
@@ -227,7 +238,11 @@ final class FeedEndpoint
             return ApiResponse::error('bcc_invalid_request', 'A tag is required.', 400);
         }
 
-        $payload = Plugin::instance()->feedRankingService()->getTagFeed($viewerId, $tag, $cursor, $limit);
+        try {
+            $payload = Plugin::instance()->feedRankingService()->getTagFeed($viewerId, $tag, $cursor, $limit);
+        } catch (ActivityReadFailedException) {
+            return FeedUnavailable::response();
+        }
 
         $response = ApiResponse::ok($payload);
         // Same cache style as the existing personalized feed: viewer state
@@ -252,8 +267,12 @@ final class FeedEndpoint
             ? $scopeParam
             : 'for_you';
 
-        /** @var 'for_you'|'following'|'signals' $scope */
-        $payload = Plugin::instance()->feedRankingService()->getFeed($viewerId, $scope, $cursor, $limit);
+        try {
+            /** @var 'for_you'|'following'|'signals' $scope */
+            $payload = Plugin::instance()->feedRankingService()->getFeed($viewerId, $scope, $cursor, $limit);
+        } catch (ActivityReadFailedException) {
+            return FeedUnavailable::response();
+        }
 
         $response = ApiResponse::ok($payload);
         // Per-viewer scope filtering — no shared cache.
@@ -303,7 +322,13 @@ final class FeedEndpoint
     {
         $viewerId = get_current_user_id();
 
-        $item = Plugin::instance()->feedRankingService()->getActivityById($actId, $viewerId);
+        try {
+            $item = Plugin::instance()->feedRankingService()->getActivityById($actId, $viewerId);
+        } catch (ActivityReadFailedException) {
+            // A read that did not run is not "not found": a 404 here would
+            // tell the client the post is gone.
+            return FeedUnavailable::response(FeedUnavailable::POST_MESSAGE);
+        }
         if ($item === null) {
             return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
         }

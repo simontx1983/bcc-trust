@@ -15,6 +15,10 @@ use ReflectionProperty;
  * F-334 (user decision) — a REVOKED claim frees the page, and the next
  * verified operator's claim takes it over, score rows included.
  *
+ * Owner-0 (user decision 2026-11-17): the release moves the page's score
+ * rows off the old owner — to 0, or to an admin-reassigned owner — so
+ * getPageForOwner() stops resolving them to a page they lost.
+ *
  * Runs the real PeepSoIntegration against tests/Stubs/page-follow-drain-stubs.php
  * (post_author, PeepSo page membership, score-row owner, the "still held"
  * read, audit rows — all in memory).
@@ -99,7 +103,66 @@ final class PageClaimReleaseTest extends TestCase
         $released = self::audits('page_owner_released');
         self::assertCount(1, $released, 'one audit row per page');
         self::assertSame(self::PAGE, $released[0][1]);
-        self::assertSame(['old_owner' => self::OLD, 'author_reset' => true, 'owner_row' => 'demoted'], $released[0][2]);
+        self::assertSame(['old_owner' => self::OLD, 'author_reset' => true, 'owner_row' => 'demoted', 'score_rows_moved' => 0, 'score_owner' => 0], $released[0][2]);
+    }
+
+    // ── owner-0: the score rows leave the old owner ─────────────────────
+
+    public function testTheReleaseMovesTheScoreRowsToNobody(): void
+    {
+        $GLOBALS['__bcc_drain']['score_owner'][self::PAGE] = self::OLD;
+
+        self::assertTrue($this->integration()->releaseClaimedPage(self::PAGE, self::OLD));
+
+        self::assertSame(0, $GLOBALS['__bcc_drain']['score_owner'][self::PAGE], 'owned by nobody, like the page');
+        self::assertSame([[self::PAGE, self::OLD, 0]], $GLOBALS['__bcc_drain']['release_owner_calls'], 'guarded on the old owner');
+        $meta = self::audits('page_owner_released')[0][2];
+        self::assertSame(1, $meta['score_rows_moved']);
+        self::assertSame(0, $meta['score_owner']);
+    }
+
+    public function testAReassignedPagesRowsFollowItsNewOwner(): void
+    {
+        $GLOBALS['__bcc_drain']['post_author'][self::PAGE] = 999;
+        $GLOBALS['__bcc_drain']['score_owner'][self::PAGE] = self::OLD;
+
+        self::assertTrue($this->integration()->releaseClaimedPage(self::PAGE, self::OLD));
+
+        self::assertSame(999, $GLOBALS['__bcc_drain']['score_owner'][self::PAGE]);
+        self::assertSame(999, self::audits('page_owner_released')[0][2]['score_owner']);
+    }
+
+    public function testRowsAlreadyMovedByAnotherWriterAreNotUndone(): void
+    {
+        $GLOBALS['__bcc_drain']['score_owner'][self::PAGE] = 777; // a concurrent reassignment got there first
+
+        self::assertTrue($this->integration()->releaseClaimedPage(self::PAGE, self::OLD));
+
+        self::assertSame(777, $GLOBALS['__bcc_drain']['score_owner'][self::PAGE]);
+        self::assertSame(0, self::audits('page_owner_released')[0][2]['score_rows_moved']);
+    }
+
+    public function testAFailedRowMoveIsAuditedAndLoggedAndTheReleaseStands(): void
+    {
+        $GLOBALS['__bcc_drain']['score_owner'][self::PAGE] = self::OLD;
+        $GLOBALS['__bcc_drain']['release_owner_fails']     = true;
+
+        self::assertTrue($this->integration()->releaseClaimedPage(self::PAGE, self::OLD), 'the page IS released');
+
+        self::assertSame(0, $GLOBALS['__bcc_drain']['post_author'][self::PAGE]);
+        self::assertTrue(self::audits('page_owner_released')[0][2]['score_rows_move_failed'] ?? false);
+        self::assertCount(1, $GLOBALS['__bcc_drain']['errors'], 'logged, never thrown');
+    }
+
+    public function testAFailedAuthorResetMovesNoScoreRow(): void
+    {
+        $GLOBALS['__bcc_drain']['fail_author_write'] = true;
+        $GLOBALS['__bcc_drain']['score_owner'][self::PAGE] = self::OLD;
+
+        $this->integration()->releaseClaimedPage(self::PAGE, self::OLD);
+
+        self::assertSame(self::OLD, $GLOBALS['__bcc_drain']['score_owner'][self::PAGE], 'the page is still theirs');
+        self::assertArrayNotHasKey('release_owner_calls', $GLOBALS['__bcc_drain']);
     }
 
     /** A multi-chain page can still be held through another validator. */
@@ -262,6 +325,7 @@ final class PageClaimReleaseTest extends TestCase
         $integration = $this->integration();
 
         self::assertTrue($integration->releaseClaimedPage(self::PAGE, self::OLD));
+        self::assertSame(0, $GLOBALS['__bcc_drain']['score_owner'][self::PAGE], 'released to nobody');
         $integration->onPageClaimed(self::NEW, self::PAGE);
 
         self::assertSame(self::NEW, $GLOBALS['__bcc_drain']['post_author'][self::PAGE], 'the new operator is the author');
@@ -271,7 +335,70 @@ final class PageClaimReleaseTest extends TestCase
 
         $changed = self::audits('page_owner_changed');
         self::assertCount(1, $changed);
-        self::assertSame(['old_owner' => self::OLD, 'new_owner' => self::NEW, 'via' => 'claim_after_release'], $changed[0][2]);
+        self::assertSame(['old_owner' => 0, 'new_owner' => self::NEW, 'via' => 'claim_after_release'], $changed[0][2]);
+    }
+
+    /** A row whose release move failed is still keyed to the old owner: the claim takes it from there. */
+    public function testAClaimTakesRowsStillKeyedToTheOldOwner(): void
+    {
+        $GLOBALS['__bcc_drain']['post_author'][self::PAGE] = 0;
+        $GLOBALS['__bcc_drain']['score_owner'][self::PAGE] = self::OLD;
+
+        $this->integration()->onPageClaimed(self::NEW, self::PAGE);
+
+        self::assertSame(self::NEW, $GLOBALS['__bcc_drain']['score_owner'][self::PAGE]);
+        self::assertSame(self::OLD, self::audits('page_owner_changed')[0][2]['old_owner']);
+    }
+
+    // ── handleOwnerChange (an admin edit of post_author) ────────────────
+
+    private function ownerChange(int $newOwner): void
+    {
+        $m = new \ReflectionMethod(PeepSoIntegration::class, 'handleOwnerChange');
+        $m->setAccessible(true);
+        $m->invoke($this->integration(), self::PAGE, $newOwner);
+    }
+
+    public function testAnAdminAssignedOwnerTakesAReleasedPagesRows(): void
+    {
+        $GLOBALS['__bcc_drain']['score_owner'][self::PAGE] = 0;
+
+        $this->ownerChange(self::NEW);
+
+        self::assertSame(self::NEW, $GLOBALS['__bcc_drain']['score_owner'][self::PAGE]);
+        self::assertSame([[self::NEW, self::PAGE]], $GLOBALS['__bcc_drain']['page_counts'], 'counted for the new owner');
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_count_drops'], 'nobody to drop');
+        self::assertSame(['old_owner' => 0, 'new_owner' => self::NEW], self::audits('page_owner_changed')[0][2]);
+    }
+
+    public function testAPageWithNoScoreRowHasNothingToMove(): void
+    {
+        $this->ownerChange(self::NEW);
+
+        self::assertArrayNotHasKey(self::PAGE, $GLOBALS['__bcc_drain']['score_owner']);
+        self::assertSame([], self::audits('page_owner_changed'));
+    }
+
+    public function testAnOwnerToOwnerChangeTransfersTheCount(): void
+    {
+        $GLOBALS['__bcc_drain']['score_owner'][self::PAGE] = self::OLD;
+
+        $this->ownerChange(self::NEW);
+
+        self::assertSame(self::NEW, $GLOBALS['__bcc_drain']['score_owner'][self::PAGE]);
+        self::assertSame([[self::OLD, self::PAGE]], $GLOBALS['__bcc_drain']['page_count_drops']);
+        self::assertSame([[self::NEW, self::PAGE]], $GLOBALS['__bcc_drain']['page_counts']);
+    }
+
+    public function testAnOwnerRemovedByAnAdminLeavesTheRowsWithNobody(): void
+    {
+        $GLOBALS['__bcc_drain']['score_owner'][self::PAGE] = self::OLD;
+
+        $this->ownerChange(0);
+
+        self::assertSame(0, $GLOBALS['__bcc_drain']['score_owner'][self::PAGE]);
+        self::assertSame([[self::OLD, self::PAGE]], $GLOBALS['__bcc_drain']['page_count_drops']);
+        self::assertSame([], $GLOBALS['__bcc_drain']['page_counts'], 'nobody gains a page');
     }
 
     public function testAFirstEverClaimMovesNoScoreRow(): void

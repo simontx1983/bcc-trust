@@ -453,6 +453,28 @@ final class UserViewService
             $primaryHall = $this->resolvePrimaryHall($userId, $halls);
         }
 
+        // F-401 — the home-Hall chip follows the per-Hall hide list.
+        //
+        // ⭐ Applied to the RESULT of the branch above, not inside the
+        // prefetched arm. The two arms had already drifted: the fallback
+        // inherits the drop from ProfileGroupVisibility::filter() through
+        // resolveHalls(), while the prefetch reads the pointer straight
+        // from the batch and published a chip the member had hidden. One
+        // call here is idempotent on the fallback and cannot be reopened
+        // by a refactor of either arm — two copies of one fact that later
+        // disagreed is the shape of both F-283 and F-323.
+        if ($primaryHall !== null && ProfileGroupVisibility::hidesPrimaryHall(
+            $userId,
+            $primaryHall['id'],
+            $viewerId
+        )) {
+            // A documented NULL, never an omitted key — same rule as the
+            // F-341 sections and as `primary_hall` already uses for a
+            // member with no primary Hall, so no client learns that one
+            // is being withheld.
+            $primaryHall = null;
+        }
+
         // Owned-pages count — `member_owner` rows in
         // `peepso_page_members`. Distinguishes "regular community
         // member" from "operator/builder" at a glance on the directory.

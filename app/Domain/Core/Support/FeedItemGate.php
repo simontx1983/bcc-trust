@@ -34,6 +34,8 @@ namespace BCC\Trust\Core\Support;
 
 use BCC\Core\Feed\FeedItemNormalizer;
 use BCC\Core\Repositories\PeepSoActivityRepository;
+use BCC\Trust\Core\Plugin;
+use BCC\Trust\Core\Repositories\CommentRepository;
 use WP_REST_Response;
 
 if (!defined('ABSPATH')) {
@@ -55,12 +57,62 @@ final class FeedItemGate
     {
         if ($actId > 0) {
             $module = PeepSoActivityRepository::getModuleIdByActId($actId);
-            if ($module !== null && self::isFeedModule($module)) {
+            if ($module !== null && self::isFeedModule($module) && !self::isCommentAct($actId)) {
                 return null;
             }
         }
 
         return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
+    }
+
+    /**
+     * Is this act a COMMENT rather than a top-level post?
+     *
+     * ⚠⚠ THE MODULE CANNOT ANSWER THIS, which is why the check above is not
+     * redundant. PeepSo writes an activities row for EVERY comment and
+     * stores `act_module_id = PeepSoActivity::MODULE_ID` (1) on it — the
+     * SAME module a status post carries ("comments always belong to the
+     * activity module"). So a comment act id passes
+     * {@see isFeedModule()} and, before this, passed {@see check()}.
+     *
+     * The feed's candidate query has always excluded these rows with its own
+     * `act_comment_object_id = 0` predicate, because they otherwise "INNER
+     * JOIN a published wp_post and leak into the feed as if they were
+     * top-level posts". This gate claims to enforce the same rule as that
+     * query, and until now it enforced only half of it.
+     *
+     * ⛔ Why it matters beyond tidiness: a comment's own wp_post carries NO
+     * `peepso_group_id` — PeepSo's groups add-on walks UP to the parent to
+     * find the group — so any rule keyed on the resolved post reads "not
+     * group-tagged" for a comment and admits it.
+     *
+     * Comments are NOT second-class here: they have their own routes, which
+     * gate on the PARENT post ({@see GroupInteractionGate::checkComment()}).
+     * Per-comment reaction rails do not exist in v1 (contract §3.3, "V2"),
+     * and comment stoke has its own `/comments/:id/stoke` pair. So no caller
+     * of {@see check()} legitimately receives a comment act id.
+     *
+     * ⚠ SCOPE, stated honestly: `getCommentMeta()` answers only for a
+     * PUBLISHED comment, so an unpublished one is not detected here. That is
+     * already covered downstream and needs no second read — every caller of
+     * this gate then passes through
+     * {@see GroupInteractionGate::resolveLiveTarget()}, which refuses an act
+     * whose post is a `peepso-comment` and whose parent it cannot resolve.
+     */
+    public static function isCommentAct(int $actId, ?CommentRepository $repo = null): bool
+    {
+        if ($actId <= 0) {
+            return false;
+        }
+
+        // ⚠ $repo exists so a caller that ALREADY HOLDS the repository passes
+        // it instead of reaching back through the container for a second
+        // handle on the same thing. CommentService does. Omitting it falls
+        // back to the container, which is what the REST gates need, since
+        // they are static and hold no dependencies.
+        $repo ??= Plugin::instance()->commentRepository();
+
+        return $repo->getCommentMeta($actId) !== null;
     }
 
     /**

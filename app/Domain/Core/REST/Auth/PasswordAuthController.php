@@ -264,10 +264,12 @@ final class PasswordAuthController
                     409
                 );
             }
+            // Never the typed email (security review, 2026-11-18): the code
+            // and WordPress's own message are enough to triage an insert
+            // failure, and a log is no place for a member's address.
             Logger::error('[bcc-trust] signup failed', [
                 'code'  => $code,
                 'error' => $userId->get_error_message(),
-                'email' => $email,
             ]);
             return ApiResponse::error('bcc_internal_error', 'Failed to create account.', 500);
         }
@@ -626,8 +628,9 @@ final class PasswordAuthController
             && defined('BCC_2FA_BYPASS_ACCOUNTS')
             && $this->identifierIsBypassAllowed($identifier, $handle)
         ) {
+            // Bearer only, no WordPress auth cookie (see
+            // SessionController::logoutEverywhere).
             wp_set_current_user($userId);
-            wp_set_auth_cookie($userId, true);
 
             $token = JwtToken::encodeNewSession($userId, $handle);
             AuthSupport::recordTrustedLoginNetwork($userId); // F-281: a completed sign-in
@@ -782,7 +785,10 @@ final class PasswordAuthController
             // get_password_reset_key writes a hash + timestamp to the
             // user_activation_key column. WP's own /wp-login.php?action=rp
             // flow reads from the same column — our path coexists with it.
-            $key = get_password_reset_key($user);
+            // ⚠ Through WordPressSignInGate::appResetKey(): this is the one
+            // flow allowed to mint a reset key (H2). A bare
+            // get_password_reset_key() is refused for every role.
+            $key = \BCC\Trust\Core\Security\WordPressSignInGate::appResetKey($user);
             if (!is_wp_error($key) && is_string($key) && $key !== '') {
                 $login = (string) $user->user_login;
                 $path  = '/reset-password?key=' . rawurlencode($key) . '&login=' . rawurlencode($login);
@@ -799,8 +805,8 @@ final class PasswordAuthController
                     'email_hash' => sha1($email),
                 ], 'user', $userId);
             } else {
-                // Key generation failed (e.g. user is admin and a filter
-                // blocks resets). Still respond ok=true — same anti-
+                // Key generation failed (an `allow_password_reset` filter,
+                // e.g. PeepSo's, refused it). Still respond ok=true — same anti-
                 // enumeration discipline. Log so ops can see why no mail
                 // went out.
                 Logger::warning('[bcc-trust] get_password_reset_key returned WP_Error / empty', [

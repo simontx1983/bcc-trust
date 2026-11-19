@@ -33,16 +33,21 @@ final class FeedItemGateTest extends TestCase
     private const REVIEW_ACT = 9202;
     private const POLL_ACT   = 9030;
 
+    /** A COMMENT act: module 1, exactly like a status post. */
+    private const COMMENT_ACT = 9777;
+
     protected function setUp(): void
     {
         require_once __DIR__ . '/../Stubs/feed-item-gate-stubs.php';
         require_once CoreSibling::require('src/Feed/FeedItemNormalizer.php');
 
+        $GLOBALS['__bcc_fig_comment_acts'] = [];
         $GLOBALS['__bcc_fig_module_by_act'] = [
             self::REPLY_ACT  => '206',
             self::STATUS_ACT => '1',
             self::REVIEW_ACT => '202',
             self::POLL_ACT   => '30',
+            self::COMMENT_ACT => '1',
         ];
     }
 
@@ -121,6 +126,62 @@ final class FeedItemGateTest extends TestCase
 
         // Anti-vacuity: the predicate is not simply false for everything.
         self::assertTrue(FeedItemGate::isFeedModule(1), 'a status post IS a feed item');
+    }
+
+    // ── a COMMENT act is not a feed item either ─────────────────────
+
+    /**
+     * ⚠⚠ THE MODULE RULE CANNOT CATCH THIS ONE, which is the whole point.
+     *
+     * A review reply is caught because module 206 is off the allowlist. A
+     * COMMENT carries `act_module_id = 1` — the SAME module a status post
+     * uses, because PeepSo puts every comment on the activity module. So
+     * `COMMENT_ACT` is seeded at module 1 here deliberately: it passes
+     * {@see FeedItemGate::isFeedModule()} and, before this gate learned to
+     * ask, passed {@see FeedItemGate::check()} too.
+     *
+     * ⛔ Why that mattered: a comment's own wp_post carries no
+     * `peepso_group_id` (PeepSo's groups add-on walks UP to the parent to
+     * find the group), so group rules keyed on the resolved post read "not
+     * group-tagged" for a comment and admit it.
+     */
+    public function testACommentActIsRefusedLikeAnUnknownPost(): void
+    {
+        $GLOBALS['__bcc_fig_comment_acts'] = [self::COMMENT_ACT];
+
+        $comment = FeedItemGate::check(self::COMMENT_ACT);
+        $unknown = FeedItemGate::check(424242);
+
+        self::assertNotNull($comment);
+        self::assertSame(404, $comment->get_status());
+        self::assertSame($unknown->get_data(), $comment->get_data(), 'byte-identical to an unknown id');
+    }
+
+    /**
+     * ⭐ The control. The SAME act id at the SAME module, with only the
+     * comment row removed, passes. Without this the test above would be
+     * satisfied by a gate that refused module 1 outright.
+     */
+    public function testTheSameActAtTheSameModulePassesWhenItIsNotAComment(): void
+    {
+        $GLOBALS['__bcc_fig_comment_acts'] = [];
+
+        self::assertNull(FeedItemGate::check(self::COMMENT_ACT));
+    }
+
+    public function testTheCommentPredicateAnswersDirectlyAndTakesAnInjectedRepository(): void
+    {
+        $GLOBALS['__bcc_fig_comment_acts'] = [self::COMMENT_ACT];
+
+        self::assertTrue(FeedItemGate::isCommentAct(self::COMMENT_ACT));
+        self::assertFalse(FeedItemGate::isCommentAct(self::STATUS_ACT));
+        self::assertFalse(FeedItemGate::isCommentAct(0), 'a non-positive id is not a comment');
+
+        // The injected form: a caller that already holds the repository
+        // passes it rather than reaching through the container.
+        $repo = new \BCC\Trust\Core\Repositories\CommentRepository();
+        $repo->metaByActId[self::STATUS_ACT] = (object) ['act_id' => self::STATUS_ACT];
+        self::assertTrue(FeedItemGate::isCommentAct(self::STATUS_ACT, $repo), 'the handed-in repository decides');
     }
 
     // ── the callers (a gate nothing calls is a defect no behaviour test sees) ──

@@ -24,8 +24,10 @@
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\FeedUnavailable;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -61,9 +63,16 @@ final class FeedColdStartEndpoint
         unset($request); // no query params
 
         $viewerId = get_current_user_id();
-        $payload  = Plugin::instance()
-            ->feedColdStartService()
-            ->getColdStart($viewerId > 0 ? $viewerId : null);
+        try {
+            $payload = Plugin::instance()
+                ->feedColdStartService()
+                ->getColdStart($viewerId > 0 ? $viewerId : null);
+        } catch (ActivityReadFailedException) {
+            // F-275: the hot-posts block reads the feed. A read that did not
+            // run answers "try again" for the panel, never a panel whose
+            // posts block is silently empty.
+            return FeedUnavailable::response();
+        }
 
         $response = ApiResponse::ok($payload);
         $response->header('Cache-Control', 'private, no-store');

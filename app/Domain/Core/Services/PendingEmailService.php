@@ -49,6 +49,95 @@ final class PendingEmailService
     /** Email-verified usermeta key (AuthSupport::META_EMAIL_VERIFIED). */
     private const META_EMAIL_VERIFIED = '_bcc_email_verified';
 
+    /**
+     * F-294: the address a WALLET sign-up typed, held pending until it is
+     * verified (user_email keeps the wallet placeholder meanwhile). An
+     * unverified address used to go straight into user_email, where it
+     * reserved the address against its real owner (user_email is UNIQUE)
+     * and nothing could reclaim it. Verified through the ordinary sign-up
+     * code and link (POST /auth/verify-email), which apply it with
+     * applyPendingSignupEmail().
+     */
+    public const META_PENDING_SIGNUP_EMAIL = 'bcc_pending_signup_email';
+
+    /** applyPendingSignupEmail() outcomes. */
+    public const SIGNUP_EMAIL_NONE     = 'none';     // nothing pending, or user_email is already real
+    public const SIGNUP_EMAIL_APPLIED  = 'applied';
+    public const SIGNUP_EMAIL_CONFLICT = 'conflict'; // someone else holds it now; the pending one is dropped
+    public const SIGNUP_EMAIL_FAILED   = 'failed';   // the write failed; pending kept for a retry
+
+    /**
+     * The one account whose pending sign-up address is $email, or null when
+     * none, or MORE than one, holds it (two wallet sign-ups can type the
+     * same address; neither owns it until one verifies).
+     */
+    public static function pendingSignupOwner(string $email): ?int
+    {
+        $email = strtolower(trim($email));
+        if ($email === '') {
+            return null;
+        }
+        $ids = get_users([
+            'meta_key'   => self::META_PENDING_SIGNUP_EMAIL,
+            'meta_value' => $email,
+            'fields'     => 'ID',
+            'number'     => 2,
+        ]);
+        return count($ids) === 1 && (int) $ids[0] > 0 ? (int) $ids[0] : null;
+    }
+
+    /** The pending sign-up address for $userId, or '' when there is none. */
+    public static function pendingSignupEmail(int $userId): string
+    {
+        return $userId > 0 ? (string) get_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL, true) : '';
+    }
+
+    /**
+     * applyPendingSignupEmail() outcome (H1): a pending address was held but
+     * user_email is no longer the wallet placeholder, because it was changed
+     * outside BCC meanwhile. The code or link proved the PENDING inbox, not
+     * the address now in user_email, so the caller must not finalise. The
+     * pending one is dropped.
+     */
+    public const SIGNUP_EMAIL_REFUSED = 'refused';
+
+    /**
+     * On a proven inbox (a correct sign-up code, or the link): move the
+     * pending sign-up address into user_email. Only while user_email is
+     * still the wallet placeholder; the address is re-checked first, and if
+     * another account holds it now the pending one is dropped. Does NOT set
+     * the verified flag: the caller's finalizeVerification() does.
+     */
+    public static function applyPendingSignupEmail(int $userId): string
+    {
+        $pending = self::pendingSignupEmail($userId);
+        if ($pending === '') {
+            return self::SIGNUP_EMAIL_NONE;
+        }
+        $user = get_userdata($userId);
+        if (!$user instanceof \WP_User) {
+            delete_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL);
+            return self::SIGNUP_EMAIL_NONE;
+        }
+        if (!AccountRecoveryService::isPlaceholderEmail((string) $user->user_email)) {
+            delete_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL);
+            return self::SIGNUP_EMAIL_REFUSED;
+        }
+        $holder = email_exists($pending);
+        if ($holder !== false && (int) $holder !== $userId) {
+            delete_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL);
+            return self::SIGNUP_EMAIL_CONFLICT;
+        }
+        // The old address is the placeholder: WordPress core's "Email
+        // Changed" mail would go to a dead inbox, so it is off for this write.
+        $result = self::writeEmail($userId, $pending);
+        if (is_wp_error($result)) {
+            return self::SIGNUP_EMAIL_FAILED;
+        }
+        delete_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL);
+        return self::SIGNUP_EMAIL_APPLIED;
+    }
+
     /** confirm() outcomes other than success. */
     public const ERR_NONE         = 'none';          // nothing pending for this purpose (or expired)
     public const ERR_BAD_CODE     = 'bad_code';      // wrong code — pending kept for a retry
@@ -116,17 +205,15 @@ final class PendingEmailService
         // The old address gets BCC's own notice (the caller's job). WordPress
         // core would send a second "Email Changed" mail from the same update
         // (F-294), so its notice is switched off for THIS write only.
-        add_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
-        try {
-            $result = wp_update_user(['ID' => $userId, 'user_email' => $pending['email']]);
-        } finally {
-            remove_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
-        }
+        $result = self::writeEmail($userId, $pending['email']);
         if (is_wp_error($result)) {
             return ['ok' => false, 'error' => self::ERR_WRITE_FAILED];
         }
 
         update_user_meta($userId, self::META_EMAIL_VERIFIED, '1');
+        // F-294: a real address is in place now; a wallet sign-up's
+        // still-pending one is moot.
+        delete_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL);
         delete_transient(self::PENDING_PREFIX . $userId);
 
         return ['ok' => true, 'email' => $pending['email'], 'old_email' => $oldEmail];
@@ -144,6 +231,48 @@ final class PendingEmailService
             return '***';
         }
         return substr($email, 0, 1) . str_repeat('*', max(1, $at - 1)) . substr($email, $at);
+    }
+
+    /**
+     * H1: the address this service is writing to user_email right now, per
+     * user. Set only for the duration of writeEmail()'s wp_update_user().
+     *
+     * @var array<int, string>
+     */
+    private static array $writing = [];
+
+    /**
+     * H1: is this email change PendingEmailService's own write of $email for
+     * $userId? UserLifecycleService asks on `profile_update`: every other
+     * user_email change is an address nobody proved, and revokes the
+     * account's email verification. True only inside writeEmail(), for that
+     * user and that address.
+     */
+    public static function isOwnWrite(int $userId, string $email): bool
+    {
+        return isset(self::$writing[$userId])
+            && strtolower(trim(self::$writing[$userId])) === strtolower(trim($email));
+    }
+
+    /**
+     * Write a PROVEN address to user_email, with WordPress core's "Email
+     * Changed" notice off for this write (both callers send their own, or
+     * none). Marked as this service's own write while wp_update_user() runs,
+     * so the `profile_update` it fires does not revoke the verification
+     * (isOwnWrite).
+     *
+     * @return int|\WP_Error
+     */
+    private static function writeEmail(int $userId, string $email)
+    {
+        self::$writing[$userId] = $email;
+        add_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
+        try {
+            return wp_update_user(['ID' => $userId, 'user_email' => $email]);
+        } finally {
+            remove_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
+            unset(self::$writing[$userId]);
+        }
     }
 
     /** @return array{email: string, otp_hash: string}|null */

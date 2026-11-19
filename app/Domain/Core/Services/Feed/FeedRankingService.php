@@ -201,6 +201,10 @@ final class FeedRankingService
             return $cached;
         }
 
+        // ⚠ F-275: the build THROWS on a feed read that did not run, so it
+        // never reaches this write. Keep the write after the build: caching
+        // a failed build would serve an empty hot feed to every reader for
+        // HOT_CACHE_TTL after the database recovered.
         $payload = $this->buildHotFeed(null, $limit);
         wp_cache_set($key, $payload, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
 
@@ -212,6 +216,10 @@ final class FeedRankingService
      * payload and stores it UNCONDITIONALLY (refresh-on-hit), so the
      * request path above stays a pure cache read between cron ticks.
      * Owned by CronService::warmHotFeed() on `bcc_trust_feed_hot_warm`.
+     *
+     * ⚠ F-275: a feed read that did not run throws out of the build, BEFORE
+     * the write, so a failed tick leaves the last good page in place rather
+     * than overwriting it with an empty one. CronService catches and logs.
      */
     public function warmHotFeed(int $limit = self::HOT_WARM_LIMIT): void
     {
@@ -271,7 +279,10 @@ final class FeedRankingService
      * next read (or the minutely warm tick) rebuilds it.
      *
      * For IDENTITY and PRIVACY changes, not freshness: an account deletion,
-     * a handle change, or "Hide my real name" switched on/off. The audit-
+     * a handle change, "Hide my real name" switched on/off, a profile
+     * visibility change (F-02: a profile just made private must not keep
+     * its posts on a shared anon page), or a suspension change (F-182: a
+     * suspended member's profile is hidden). The audit-
      * confirmed choice above (a trending feed tolerates up to HOT_CACHE_TTL
      * of stale SCORES and order, so votes never bust this cache) says
      * nothing about a deleted account, an old handle or a real name the
@@ -295,10 +306,13 @@ final class FeedRankingService
     }
 
     /**
-     * The three events that call forgetHotFeed() (through $forget, which the
+     * The events that call forgetHotFeed() (through $forget, which the
      * caller wraps in its own error handling): an account deleted, a handle
-     * changed, and a privacy write that touched `real_name_hidden`. Here,
-     * not inline in Plugin, so a test can register them and fire them.
+     * changed, a privacy write that touched `real_name_hidden`, a profile
+     * visibility that changed (MyProfilePrefsEndpoint), and a suspension or
+     * unsuspension (UserInfoRepository::notifySuspensionChanged, after the
+     * commit). Here, not inline in Plugin, so a test can register them and
+     * fire them.
      *
      * @param callable(string $why, int $userId): void $forget
      */
@@ -315,6 +329,12 @@ final class FeedRankingService
                 $forget('real_name_hidden', (int) $userId);
             }
         }, 30, 2);
+        add_action('bcc_profile_visibility_changed', static function ($userId) use ($forget): void {
+            $forget('profile_visibility_changed', (int) $userId);
+        }, 30, 1);
+        add_action('bcc_user_suspension_changed', static function ($userId) use ($forget): void {
+            $forget('suspension_changed', (int) $userId);
+        }, 30, 1);
     }
 
     /**
@@ -402,8 +422,10 @@ final class FeedRankingService
      * posts carrying a single hashtag.
      *
      * SECURITY INVARIANT (load-bearing): the tag feed must NEVER surface a
-     * post the public hot feed would not. This method is therefore a literal
-     * mirror of `getHotFeed()` for everything that governs VISIBILITY:
+     * post the public hot feed would not, except the posts §F-02 admits for
+     * THIS viewer (the three listed under the §F-02 bullet below). This
+     * method is therefore a literal mirror of `getHotFeed()` for everything
+     * that governs VISIBILITY:
      *
      *   - same `$excluded` set: $this->reputationRepo->getCautionAndRiskyUserIds()
      *     (§O4.1 caution/risky shadow-limit) — IDENTICAL call, PLUS the
@@ -431,12 +453,20 @@ final class FeedRankingService
      *     not either; see both call sites.
      *     ⚠ This is the one place the subset relation is no longer
      *     literal. The tag feed passes the REAL `$viewerId` — the same
-     *     argument the query already needed — so §F-02's own-post branch
-     *     admits the VIEWER'S OWN restricted posts here, which the
-     *     anonymous hot feed withholds, plus level-30 posts by authors
-     *     who friended them (none in production: peepso-friends is not
-     *     installed). What the invariant protects is unchanged: no
-     *     STRANGER's restricted post can appear here and not there.
+     *     argument the query already needed — so §F-02 is read as this
+     *     viewer, not anonymously, and admits THREE kinds of post that
+     *     the anonymous hot feed withholds:
+     *       1. the VIEWER'S OWN restricted posts (the own-post branch,
+     *          F-269);
+     *       2. level-20 (members-only) posts by ANY author: level 20
+     *          admits every signed-in viewer, and `profile_visibility:
+     *          members` writes it;
+     *       3. level-30 (friends-only) posts by the viewer's friends
+     *          (none in production: peepso-friends is not installed, so
+     *          viewerFriendIdList() returns [] — see PeepSoFriendGate).
+     *     Each is a post the gate admits for THIS viewer, and level 40
+     *     by anyone else never appears. What the invariant protects is
+     *     unchanged: no post this viewer may not see can appear here.
      *   - same global-feed visibility gate: `onlyForGroupId = null` →
      *     PeepSoActivityRepository applies the `public_all` LEFT JOIN gate
      *     (group posts surface only when `_bcc_post_visibility = 'public_all'`;
@@ -466,6 +496,60 @@ final class FeedRankingService
             return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
         }
 
+        return $this->personalizedHotFeed($viewerId, $hashtag, $cursor, $limit);
+    }
+
+    /**
+     * F-276: the hot feed for ONE signed-in viewer, uncached and hydrated
+     * for them. It backs the cold-start panel's "What's been happening"
+     * posts, which render as full feed cards.
+     *
+     * The shared hot page ({@see getHotFeed()}) is hydrated ANONYMOUSLY,
+     * because it is cached for every reader. Read through it, a signed-in
+     * viewer got viewer_reaction null, no vouch state, can_report and
+     * can_delete false, is_followed_by_viewer false, and group-gated
+     * counts zeroed even inside their own groups.
+     *
+     * ⭐ This is the tag feed without the hashtag: the same visibility
+     * gates and the same hydration, so the invariants in
+     * {@see getTagFeed()}'s docblock hold here word for word, including
+     * its three deliberate widenings over /feed/hot, all from §F-02 being
+     * read as this viewer: the VIEWER'S OWN restricted posts (F-269),
+     * level-20 (members-only) posts by any author, and level-30 posts by
+     * the viewer's friends (none in production). No post this viewer may
+     * not see can appear here.
+     *
+     * ⚠ It never reads or writes the shared anonymous cache. Anonymous
+     * (`$viewerId <= 0`) is sent to the cached getHotFeed() instead,
+     * which answers it with identical visibility for the price of a
+     * cache read.
+     *
+     * ⚠ Uncached on purpose: the payload is one viewer's. Callers ask for
+     * the few items they show (cold start asks for two), so the cost is
+     * one small candidate read plus hydration of those items.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    public function getHotFeedForViewer(int $viewerId, int $limit = self::HOT_WARM_LIMIT): array
+    {
+        if ($viewerId <= 0) {
+            return $this->getHotFeed(null, $limit, 0);
+        }
+
+        return $this->personalizedHotFeed($viewerId, null, null, $limit);
+    }
+
+    /**
+     * The hot feed's visibility, read and hydrated for one viewer: the
+     * body shared by {@see getTagFeed()} (a hashtag) and
+     * {@see getHotFeedForViewer()} (no hashtag). `$hashtag` is forwarded
+     * to bcc-core as a pure NARROWING predicate, and null means no
+     * narrowing. Every invariant is stated on getTagFeed().
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    private function personalizedHotFeed(int $viewerId, ?string $hashtag, ?string $cursor, int $limit): array
+    {
         // Visibility gates — computed IDENTICALLY to getHotFeed (see docblock),
         // which now includes NOT computing a restricted-group list: the
         // `$excludedGroupIds` parameter below is a no-op in bcc-core, so the
@@ -498,12 +582,13 @@ final class FeedRankingService
         //
         // ⚠ The real `$viewerId` still reaches the gate, because it is
         // the same argument the query already takes. So this feed widens
-        // by exactly two things relative to the anonymous hot feed: the
-        // viewer's OWN posts, and level-30 posts by authors who friended
-        // them (none in production — see ProfileAccess). Neither is a
-        // stranger's restricted post, which is what the invariant
-        // protects; the docblock above states this rather than leaving
-        // the literal wording to carry it.
+        // by exactly THREE things relative to the anonymous hot feed: the
+        // viewer's OWN posts, level-20 (members-only) posts by any author
+        // (level 20 admits every signed-in viewer), and level-30 posts by
+        // the viewer's friends (none in production — see ProfileAccess).
+        // Each is a post the gate admits for THIS viewer, which is what
+        // the invariant protects; getTagFeed()'s docblock lists them
+        // rather than leaving the literal wording to carry it.
         $friendIds = $viewerId > 0
             ? (PeepSoFriendGate::viewerFriendIdList($viewerId) ?: null)
             : null;

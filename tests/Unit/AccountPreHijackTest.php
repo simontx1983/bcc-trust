@@ -237,6 +237,7 @@ final class AccountPreHijackTest extends TestCase
 
         self::assertSame(JwtToken::ERR_REVOKED, self::decodeError($creatorSession), 'the pre-verification session is dead');
         self::assertNull(self::decodeError((string) ($data['data']['token'] ?? '')), "the verifier's fresh token works");
+        self::assertSame([], $GLOBALS['__bcc_ph']['auth_cookies'] ?? [], 'a bearer token only: no WordPress auth cookie (H3)');
     }
 
     /** @return array<string, array{0: ?string, 1: bool}> */
@@ -385,9 +386,11 @@ final class AccountPreHijackTest extends TestCase
         self::assertSame('owner@example.com', $mail['to']);
         self::assertSame('[BCC] Verify your email address', $mail['subject']);
 
-        // OTP: the mailed code is the one stored (as its HMAC).
+        // OTP: the mailed code is the one stored (as its HMAC), bound to the
+        // address it was mailed to (H1, a keyed hash of the address).
+        $addressMac = hash_hmac('sha256', 'bcc-verify-address|owner@example.com', 'test-salt-prehijack');
         self::assertSame(
-            hash_hmac('sha256', self::otpFrom($mail['html']), 'test-salt-prehijack'),
+            hash_hmac('sha256', self::otpFrom($mail['html']), 'test-salt-prehijack') . ':' . $addressMac,
             $GLOBALS['__bcc_ph']['transients']['bcc_otp_' . self::OWNER] ?? null
         );
 
@@ -397,7 +400,7 @@ final class AccountPreHijackTest extends TestCase
             static fn(string $k): bool => str_starts_with($k, 'bcc_vt_')
         ));
         self::assertCount(1, $tokens);
-        self::assertSame((string) self::OWNER, $GLOBALS['__bcc_ph']['transients'][$tokens[0]]);
+        self::assertSame(self::OWNER . ':0:' . $addressMac, $GLOBALS['__bcc_ph']['transients'][$tokens[0]]);
         $token = substr($tokens[0], strlen('bcc_vt_'));
         self::assertStringContainsString(
             htmlspecialchars(
@@ -428,7 +431,8 @@ final class AccountPreHijackTest extends TestCase
         // Wallet signup: never marks the address verified, and starts verification.
         $wallet = self::src('WalletAuthController.php');
         self::assertDoesNotMatchRegularExpression("/META_EMAIL_VERIFIED,\s*'1'/", $wallet);
-        self::assertStringContainsString('AuthSupport::startWalletSignupEmailVerification($userIdInt, $email)', $wallet);
+        // F-294: the code and link go to the typed address (held pending).
+        self::assertStringContainsString('AuthSupport::startWalletSignupEmailVerification($userIdInt, $typedEmail !== \'\' ? $typedEmail : $email)', $wallet);
 
         // Password signup, X signup, resend: one sequence, no inline copies left.
         foreach (['PasswordAuthController.php', 'OAuthController.php', 'EmailVerificationController.php'] as $file) {

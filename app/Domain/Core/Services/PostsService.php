@@ -802,7 +802,20 @@ final class PostsService
         // F-345: only a feed item is a post here. A review reply (module 206)
         // is deleted through DELETE /reviews/{id}/reply, whose rules (a
         // moderation-hidden reply stays) this route must not bypass.
-        if ($activity === null || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)) {
+        // ⚠ A COMMENT act id passes the module check above: PeepSo stores
+        // act_module_id = 1 on a comment, the same module a status post
+        // carries. Two things went wrong without this refusal. An OWNER
+        // could trash their own COMMENT through the post route, which skips
+        // the comment-delete path and the event the Rank ledger keys on. And
+        // a NON-owner got `bcc_forbidden` rather than the 404 below, because
+        // canSee() judges a comment on its own row — and a comment's wp_post
+        // carries no `peepso_group_id` — so 403-vs-404 told them a comment
+        // exists inside a group they cannot see. Comments are deleted
+        // through DELETE /comments/{id}.
+        if ($activity === null
+            || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)
+            || FeedItemGate::isCommentAct($actId)
+        ) {
             return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
         }
 

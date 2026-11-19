@@ -98,7 +98,14 @@ final class PostAnalyticsService
         }
 
         $activity = PeepSoActivityRepository::getById($actId);
-        if ($activity === null || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)) {
+        // ⚠ A COMMENT act id passes the module check (PeepSo stores
+        // act_module_id = 1 on a comment, as on a status post). Owner
+        // analytics is a POST surface; a comment has no reach row, so this
+        // would answer an all-zero report for an id that is not a post.
+        if ($activity === null
+            || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)
+            || FeedItemGate::isCommentAct($actId)
+        ) {
             return self::notFound();
         }
 

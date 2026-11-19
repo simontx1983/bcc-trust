@@ -389,4 +389,49 @@ final class MyProfilePrefsEndpointAtomicityTest extends TestCase
         self::assertFalse($res->get_data()['data']['hide_online']);
         self::assertTrue($res->get_data()['data']['hide_birthday_year']);
     }
+
+    // ── #706 follow-up: a visibility CHANGE is announced ─────────────────
+
+    /** @return list<array<int, mixed>> */
+    private static function visibilityAnnouncements(): array
+    {
+        return array_values(array_filter(
+            $GLOBALS['__bcc_prefs_actions'] ?? [],
+            static fn (array $a): bool => $a[0] === 'bcc_profile_visibility_changed'
+        ));
+    }
+
+    public function testAVisibilityChangeIsAnnouncedOnce(): void
+    {
+        require_once dirname(__DIR__) . '/Stubs/profile-prefs-peepso-stub.php';
+        $GLOBALS['__bcc_prefs_profile_acc'] = 10;
+
+        $response = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(['profile_visibility' => 'private']));
+
+        self::assertSame(200, $response->get_status());
+        self::assertSame([['bcc_profile_visibility_changed', self::USER_ID, 40]], self::visibilityAnnouncements());
+    }
+
+    public function testAnUnchangedVisibilityIsNotAnnounced(): void
+    {
+        require_once dirname(__DIR__) . '/Stubs/profile-prefs-peepso-stub.php';
+        $GLOBALS['__bcc_prefs_profile_acc'] = 40;
+
+        $response = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(['profile_visibility' => 'private']));
+
+        self::assertSame(200, $response->get_status());
+        self::assertSame([], self::visibilityAnnouncements(), 'a settings form resends the same value');
+    }
+
+    public function testAFailedVisibilityWriteIsNotAnnounced(): void
+    {
+        require_once dirname(__DIR__) . '/Stubs/profile-prefs-peepso-stub.php';
+        $GLOBALS['__bcc_prefs_profile_acc'] = 10;
+        $GLOBALS['__bcc_prefs_fail_on']     = 1;
+
+        $response = (new MyProfilePrefsEndpoint())->patch(new \WP_REST_Request(['profile_visibility' => 'private']));
+
+        self::assertSame(500, $response->get_status());
+        self::assertSame([], self::visibilityAnnouncements());
+    }
 }

@@ -95,6 +95,16 @@ final class PushSubscriptionsOnRevokeAllTest extends TestCase
         self::assertContains('sessionsRevokedAll:' . self::USER, $GLOBALS['__bcc_ph']['canary'], 'control: the revoke path ran');
     }
 
+    /** H3: "everywhere" includes WordPress's own credentials of the account. */
+    public function testLogoutEverywhereEndsEveryWordPressSessionAndApplicationPassword(): void
+    {
+        $res = (new SessionController())->logoutEverywhere(new \WP_REST_Request([]));
+
+        self::assertSame(200, $res->get_status());
+        self::assertSame([self::USER], $GLOBALS['__bcc_ph']['wp_sessions_destroyed'] ?? []);
+        self::assertSame([self::USER], $GLOBALS['__bcc_ph']['app_passwords_deleted'] ?? []);
+    }
+
     public function testAThrottledLogoutEverywhereDeletesNothing(): void
     {
         $GLOBALS['__bcc_ph']['throttle_deny'] = true;
@@ -103,6 +113,8 @@ final class PushSubscriptionsOnRevokeAllTest extends TestCase
 
         self::assertSame(429, $res->get_status());
         self::assertSame([], $GLOBALS['__bcc_ph']['deletes']);
+        self::assertSame([], $GLOBALS['__bcc_ph']['wp_sessions_destroyed'] ?? []);
+        self::assertSame([], $GLOBALS['__bcc_ph']['app_passwords_deleted'] ?? []);
     }
 
     public function testAPasswordChangeDropsEveryPushSubscription(): void
@@ -115,6 +127,7 @@ final class PushSubscriptionsOnRevokeAllTest extends TestCase
         self::assertSame(200, $res->get_status());
         self::assertSame([self::EXPECTED_DELETE], $GLOBALS['__bcc_ph']['deletes']);
         self::assertContains('passwordChanged:' . self::USER, $GLOBALS['__bcc_ph']['canary'], 'control: the rotation ran');
+        self::assertSame([], $GLOBALS['__bcc_ph']['auth_cookies'] ?? [], 'no WordPress auth cookie re-issued (H3)');
     }
 
     public function testAFailedDeleteIsLoggedAndTheRevokeStillSucceeds(): void

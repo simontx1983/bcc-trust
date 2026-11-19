@@ -884,8 +884,15 @@ final class Plugin
     public function feedRankingService(): Services\Feed\FeedRankingService
     {
         return $this->feedRankingService ??= new Services\Feed\FeedRankingService(
+            // F-275: `true` = a feed read that did not run throws
+            // ActivityReadFailedException instead of answering an empty
+            // page; every feed route turns it into a 503 (FeedUnavailable).
+            // ⚠ POSITIONAL ON PURPOSE: a bcc-core that predates the flag
+            // ignores an extra positional argument, where a named one would
+            // be a fatal. On such a core this is today's behaviour.
             new \BCC\Core\Feed\ActivityFeedService(
-                new \BCC\Core\PeepSo\PeepSoGraphService()
+                new \BCC\Core\PeepSo\PeepSoGraphService(),
+                true
             ),
             $this->reputationRepository(),
             $this->hiddenActivityRepository(),
