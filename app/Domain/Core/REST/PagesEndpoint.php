@@ -42,6 +42,7 @@ use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\BlogCoverImageWriter;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 use BCC\Trust\Onchain\Services\ClaimService;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority;
@@ -192,11 +193,17 @@ final class PagesEndpoint
      * GET /pages/:id/feed — the posts written for a validator page, newest
      * first. Public, and filtered by the post marker only: a post stays here
      * after its author stops being the page's operator.
+     *
+     * A SECRET page the viewer may not see (PageAccess) answers exactly as a
+     * missing page does.
      */
     public function feed(WP_REST_Request $request): WP_REST_Response
     {
         $pageId = (int) $request->get_param('id');
-        if ($pageId <= 0 || !ValidatorPageOperatorAuthority::isValidatorPage($pageId)) {
+        if ($pageId <= 0
+            || !ValidatorPageOperatorAuthority::isValidatorPage($pageId)
+            || !PageAccess::viewerMaySeeId($pageId, get_current_user_id())
+        ) {
             return ApiResponse::error('bcc_not_found', 'Page not found.', 404);
         }
 

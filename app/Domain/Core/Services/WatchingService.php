@@ -1020,6 +1020,12 @@ final class WatchingService
             return ['error' => 'bcc_invalid_request', 'message' => 'viewer and target_id are required.'];
         }
 
+        // A SECRET page the viewer may not see answers exactly as a missing
+        // page does, before anything is written or anyone is belled.
+        if ($targetKind !== 'member' && !PageAccess::viewerMaySeeId($targetId, $viewerId)) {
+            return ['error' => 'bcc_not_found', 'message' => 'Target not found.'];
+        }
+
         $followeeId = self::resolveFollowee($targetKind, $targetId);
         if ($followeeId === 0) {
             // Pre-claim fallback: system-minted placeholder pages have
