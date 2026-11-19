@@ -1462,7 +1462,12 @@ final class AttestationRepository
      * the 5000 defensive ceiling — a single operator's active vouch
      * count is realistically dozens).
      *
+     * F-421: FAIL-CLOSED. Every caller is a read a member sees, where `[]`
+     * is an ANSWER ("has not vouched for any pages yet", or zeroed stats).
+     * A read that did not run throws instead, and each route answers 503.
+     *
      * @return list<object{id: int, target_kind: string, target_id: int, weight_at_time: float, context_note: ?string, created_at: string}>
+     * @throws RepositoryReadFailure when the read did not run
      */
     public function listActiveVouchesByAttestor(int $attestorUserId, int $limit = 20): array
     {
@@ -1486,13 +1491,13 @@ final class AttestationRepository
         /** @phpstan-ignore-next-line argument.type */
         $prepared = $wpdb->prepare($sql, $attestorUserId, $limit);
         if (!is_string($prepared)) {
-            return [];
+            throw new RepositoryReadFailure(self::class, __FUNCTION__, 'wpdb::prepare() did not return a statement');
         }
 
-        $rows = $wpdb->get_results($prepared);
-        if (!is_array($rows)) {
-            return [];
-        }
+        // F-421: get_results() hands back [] on a failed query, which read as
+        // "no vouches". runRead() checks query()'s own return as well as
+        // last_error, so wpdb's silent failure paths throw too.
+        $rows = self::runRead($prepared, __FUNCTION__, true);
 
         $out = [];
         foreach ($rows as $row) {
