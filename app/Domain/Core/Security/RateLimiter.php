@@ -124,13 +124,10 @@ class RateLimiter {
      * Install (or clear) a fake clock, so a test can place a request at a
      * chosen offset inside a window instead of sleeping.
      *
-     * ⚠ SCOPE: only slidingWindowCheck() honours this. The other two clock
-     * reads — allow()'s denial-audit path (time() at :321) and resetIn()
-     * (time() at :480) — still call time() directly, because those lines sit
-     * inside hunks owned by open PRs #611 and #614 and editing them here
-     * would conflict. Unifying the three reads is a follow-up. Until then do
-     * NOT drive this clock through allow() or resetIn() and expect their
-     * bucket index to agree with the one computed here.
+     * ⚠ SCOPE: slidingWindowCheck() and retryAfterByKey() honour this.
+     * allow()'s denial-audit path and the `at` of a recorded denial still
+     * call time() directly, so do NOT expect the audit's bucket index to
+     * agree with the one computed here under a fake clock.
      *
      * @param (\Closure(): int)|null $clock
      */
@@ -610,76 +607,17 @@ class RateLimiter {
      */
     public static function enforce(string $action, ?int $limit = null, ?int $window = null): void {
         if (!self::allow($action, $limit, $window)) {
-            // Pass the caller's window through: an ad-hoc action such as
-            // `downvote_daily` (24h) is not in getLimits(), and resetIn()'s
-            // fallback DEFAULT_WINDOW (60s) indexes the wrong bucket (F-153).
-            $resetIn = self::resetIn($action, $window);
+            // F-391: the wait is the time left, the same number the 429's
+            // Retry-After carries. allow() records it on every deny. The old
+            // resetIn() read the bucket's EXPIRY instead, which is a window
+            // or more away whatever the count (F-153 had fixed only the
+            // window it indexed).
+            $wait = self::$lastDenial['retry_after'] ?? 1;
             throw new \Exception(
-                sprintf('Too many requests. Please wait %d seconds.', $resetIn),
+                sprintf('Too many requests. Please wait %d seconds.', $wait),
                 429
             );
         }
-    }
-
-    /**
-     * Get reset time in seconds.
-     *
-     * MUST reconstruct the exact key format that allow() writes (the bucketed
-     * sliding-window key with `_b{bucket}` suffix) — the earlier form hashed
-     * an un-bucketed key, so the lookup ALWAYS missed and resetIn() always
-     * returned 0. That silently broke every Retry-After / "wait N seconds"
-     * message and hid the `count > adjustedLimit * 2` abuse-detection branch
-     * in allow() which reads the same bucketed key.
-     *
-     * @param int|null $window The window the caller passed to allow()/enforce().
-     *                         Null resolves it from getLimits() (DEFAULT_WINDOW
-     *                         for unknown actions), mirroring allow()'s lookup.
-     */
-    public static function resetIn(string $action, ?int $window = null): int {
-        $userId = get_current_user_id();
-
-        // Resolve the action's window so the bucket index aligns with the
-        // writer.
-        if ($window === null) {
-            $config = self::getLimits()[$action] ?? [
-                'limit'  => self::DEFAULT_LIMIT,
-                'window' => self::DEFAULT_WINDOW,
-            ];
-            $window = (int) $config['window'];
-        }
-        $window = max(1, $window);
-
-        // Build the same sliding key allow() passes to slidingWindowCheck.
-        // Authenticated users check the per-user bucket (the IP bucket is
-        // coarser and typically wait-time-equivalent). Anonymous callers
-        // MUST go through normalizeIpToSubnet so this matches the
-        // writer's subnet key rather than the raw IP.
-        $slidingKey = $userId
-            ? "{$action}_u_{$userId}"
-            : "{$action}_anon_" . self::normalizeIpToSubnet(self::getIp());
-
-        // Check current bucket first; fall back to previous on the boundary.
-        // The stored "count|expires" value's expires is the bucket's own
-        // expiry (end of the CURRENT window + 1 window of slide overlap).
-        $now    = time();
-        $bucket = (int) floor($now / $window);
-
-        $curKey = '_transient_bcc_rl_' . md5($slidingKey . '_b' . $bucket);
-        $stored = RateLimitRepository::getBucketRaw($curKey);
-
-        if ($stored === null) {
-            $prevKey = '_transient_bcc_rl_' . md5($slidingKey . '_b' . ($bucket - 1));
-            $stored  = RateLimitRepository::getBucketRaw($prevKey);
-        }
-
-        if ($stored === null) {
-            return 0;
-        }
-
-        $parts     = explode('|', $stored, 2);
-        $expiresAt = (int) ($parts[1] ?? 0);
-
-        return max(0, $expiresAt - $now);
     }
 
     /**

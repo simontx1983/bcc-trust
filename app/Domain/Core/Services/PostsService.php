@@ -631,15 +631,7 @@ final class PostsService
             $result = $this->voteService->castPageVote($pageId, $voteType);
             $voteId = (int) ($result['vote_id'] ?? 0);
         } catch (\BCC\Trust\Core\Exceptions\VoteEligibilityException $e) {
-            // Eligibility/gate rejection with an operator-authored,
-            // user-safe message (rate limit / fraud / coordination) —
-            // safe to forward verbatim.
-            return [
-                'error'   => 'bcc_forbidden',
-                'message' => $e->getMessage() !== ''
-                    ? $e->getMessage()
-                    : 'Review could not be cast.',
-            ];
+            return self::reviewVoteRefusal($e);
         } catch (Exception $e) {
             // Unexpected runtime failure — never forward the internal
             // message to the client (γ-leak). Log it, return a generic.
@@ -676,6 +668,31 @@ final class PostsService
             'vote_id' => $voteId,
             'page_id' => $pageId,
             'grade'   => $grade,
+        ];
+    }
+
+    /**
+     * What a review refused by the vote gates answers. The message is
+     * operator-authored and user-safe (rate limit / fraud / coordination),
+     * so it is forwarded verbatim.
+     *
+     * F-391: a refusal by a rate limit (the daily downvote cap, the general
+     * vote limit) is bcc_rate_limited, which the endpoint answers 429. The
+     * RateLimiter recorded the denial, so the Envelope adds the time left.
+     * Every other refusal stays bcc_forbidden 403.
+     *
+     * @return array{error: string, message: string}
+     */
+    private static function reviewVoteRefusal(\BCC\Trust\Core\Exceptions\VoteEligibilityException $e): array
+    {
+        if ($e->getCode() === \BCC\Trust\Core\Exceptions\VoteEligibilityException::RATE_LIMITED) {
+            return ['error' => 'bcc_rate_limited', 'message' => $e->getMessage()];
+        }
+        return [
+            'error'   => 'bcc_forbidden',
+            'message' => $e->getMessage() !== ''
+                ? $e->getMessage()
+                : 'Review could not be cast.',
         ];
     }
 

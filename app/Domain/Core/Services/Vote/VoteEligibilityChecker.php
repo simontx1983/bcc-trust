@@ -409,13 +409,23 @@ class VoteEligibilityChecker {
             return;
         }
 
+        self::enforceLimit('downvote_daily', self::DOWNVOTE_DAILY_CAP, DAY_IN_SECONDS, 'Daily downvote limit reached.');
+    }
+
+    /**
+     * Enforce one RateLimiter limit. A refusal becomes a
+     * VoteEligibilityException with code RATE_LIMITED (F-391), so the review
+     * route answers bcc_rate_limited 429 with the time left, not a 403. Any
+     * other error is rethrown as it is.
+     *
+     * @throws VoteEligibilityException
+     */
+    private static function enforceLimit(string $action, int $limit, int $window, string $message): void {
         try {
-            RateLimiter::enforce('downvote_daily', self::DOWNVOTE_DAILY_CAP, DAY_IN_SECONDS);
+            RateLimiter::enforce($action, $limit, $window);
         } catch (\Exception $e) {
             if ($e->getCode() === 429) {
-                throw new VoteEligibilityException(
-                    'Daily downvote limit reached.'
-                );
+                throw new VoteEligibilityException($message, VoteEligibilityException::RATE_LIMITED);
             }
             throw $e; // Re-throw unexpected errors
         }
@@ -483,10 +493,14 @@ class VoteEligibilityChecker {
      *     }
      */
     protected function enforceRateLimit(): void {
-        RateLimiter::enforce(
+        // F-391: a refusal used to escape as a plain \Exception, so the
+        // review route logged it as an ERROR and told the member "Review
+        // could not be cast."
+        self::enforceLimit(
             'vote',
             BCC_TRUST_RATE_LIMIT_DEFAULT,
-            BCC_TRUST_RATE_WINDOW_DEFAULT
+            BCC_TRUST_RATE_WINDOW_DEFAULT,
+            'Too many reviews. Please wait a moment and try again.'
         );
     }
 

@@ -91,7 +91,15 @@ namespace BCC\Trust\Tests\Integration {
 
         protected function tearDown(): void
         {
+            RateLimiter::setClockForTesting(null);
+            self::clearDenial();
             unset($GLOBALS['bcc_itest_current_user'], $_SERVER['REMOTE_ADDR']);
+        }
+
+        /** RateLimiter's per-request denial record is static: start each test clean. */
+        private static function clearDenial(): void
+        {
+            (new \ReflectionProperty(RateLimiter::class, 'lastDenial'))->setValue(null, null);
         }
 
         /** The state a real burst runs in: user-level eligibility already cached. */
@@ -137,7 +145,47 @@ namespace BCC\Trust\Tests\Integration {
                 self::fail('the downvote past the daily cap must be refused, cached eligibility or not');
             } catch (VoteEligibilityException $e) {
                 self::assertSame('Daily downvote limit reached.', $e->getMessage());
+                // F-391: a rate-limit refusal, which the review route answers
+                // bcc_rate_limited 429, not an eligibility 403.
+                self::assertSame(VoteEligibilityException::RATE_LIMITED, $e->getCode());
             }
+
+            $denial = RateLimiter::lastDenial();
+            self::assertNotNull($denial, 'the refusal is recorded for the 429\'s Retry-After');
+            self::assertSame(VoteEligibilityChecker::DOWNVOTE_DAILY_CAP, $denial['limit']);
+            self::assertSame(DAY_IN_SECONDS, $denial['window']);
+        }
+
+        /**
+         * F-391: the general vote limit used to escape as a plain \Exception,
+         * which the review route logged as an ERROR and answered "Review could
+         * not be cast." It is now a rate-limit refusal like the downvote cap.
+         */
+        public function testTheGeneralVoteLimitIsARateLimitRefusal(): void
+        {
+            // A fixed clock, so the 60 s bucket cannot roll over mid-loop.
+            $t = (int) floor(time() / 60) * 60 + 20;
+            RateLimiter::setClockForTesting(static fn (): int => $t);
+            self::clearDenial();
+
+            $checker = new VoteEligibilityChecker(new VoteRepository(), new ReputationRepository(), new UserInfoRepository());
+            $limit   = new \ReflectionMethod(VoteEligibilityChecker::class, 'enforceRateLimit');
+
+            $refused = null;
+            for ($i = 0; $i < 200 && $refused === null; $i++) {
+                try {
+                    $limit->invoke($checker);
+                } catch (VoteEligibilityException $e) {
+                    $refused = $e;
+                }
+            }
+
+            self::assertNotNull($refused, 'the vote limit refuses within 200 calls');
+            self::assertSame(VoteEligibilityException::RATE_LIMITED, $refused->getCode());
+            self::assertSame('Too many reviews. Please wait a moment and try again.', $refused->getMessage());
+            $denial = RateLimiter::lastDenial();
+            self::assertNotNull($denial);
+            self::assertSame(BCC_TRUST_RATE_WINDOW_DEFAULT, $denial['window']);
         }
 
         public function testUpvotesDoNotSpendTheDownvoteCap(): void
@@ -198,8 +246,14 @@ namespace BCC\Trust\Tests\Integration {
                 self::assertSame(429, $e->getCode());
                 self::assertMatchesRegularExpression('/wait (\d+) seconds/', $e->getMessage());
                 preg_match('/wait (\d+) seconds/', $e->getMessage(), $m);
-                // The 24h bucket expires (bucket + 2) windows out: always > 1 day away.
-                self::assertGreaterThan(DAY_IN_SECONDS, (int) $m[1], 'reset time must come from the 24h bucket, not a 60s one');
+                // F-391: the wait is the time LEFT, the number the 429's
+                // Retry-After carries, not the bucket's expiry.
+                $denial = RateLimiter::lastDenial();
+                self::assertNotNull($denial);
+                self::assertSame($denial['retry_after'], (int) $m[1]);
+                // Still from the 24h bucket: a 60 s one can never need more
+                // than two windows (120 s).
+                self::assertGreaterThan(120, (int) $m[1], 'the wait must come from the 24h bucket, not a 60 s one');
             }
         }
     }
