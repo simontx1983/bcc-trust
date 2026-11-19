@@ -18,6 +18,8 @@ use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
+require_once __DIR__ . '/PeepSoActivitiesTable.php';
+
 /**
  * Trust-graph vote edges (voter → page owner), against real MySQL.
  *
@@ -64,17 +66,8 @@ final class TrustEdgeVoteIntegrityIntegrationTest extends TestCase
 
         global $wpdb;
         $acts = $wpdb->prefix . 'peepso_activities';
-        if ((string) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $acts)) !== $acts) {
-            self::assertNotFalse($wpdb->query(
-                "CREATE TABLE IF NOT EXISTS `{$acts}` (
-                    act_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                    act_owner_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                    act_module_id VARCHAR(20) NOT NULL DEFAULT '0',
-                    act_external_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                    act_access INT NOT NULL DEFAULT 10,
-                    PRIMARY KEY (act_id)
-                ) DEFAULT CHARSET=utf8mb4"
-            ), $wpdb->last_error);
+        // Creates the table, or widens a copy another suite built, to the full column set.
+        if (PeepSoActivitiesTable::ensure()) {
             $this->activitiesWasOurs = true;
         }
 
@@ -156,6 +149,31 @@ final class TrustEdgeVoteIntegrityIntegrationTest extends TestCase
         $this->edges->backfillFromSources();
 
         self::assertSame(['weight' => 2.5, 'vote_count' => 1], $this->edge(), 'F-142: the backfill joins the canonical row only');
+    }
+
+    /** Owner-0: a released page's rows belong to nobody, and nobody is not a trust target. */
+    public function testTheBackfillDrawsNoEdgeToAReleasedPage(): void
+    {
+        global $wpdb;
+        $wpdb->update($wpdb->prefix . 'bcc_trust_page_scores', ['page_owner_id' => 0], ['page_id' => $this->page]);
+
+        $this->edges->backfillFromSources();
+
+        self::assertSame(0, (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM `{$wpdb->prefix}bcc_trust_edges` WHERE source_user_id = %d",
+            self::VOTER
+        )));
+    }
+
+    /** Owner-0: BehavioralAnalyzer's single-owner focus counts owned pages only. */
+    public function testAReleasedPageIsNotAVotedPageWithAnOwner(): void
+    {
+        global $wpdb;
+        self::assertCount(1, $this->votes->getVotedPagesWithOwners(self::VOTER), 'control: an owned page');
+
+        $wpdb->update($wpdb->prefix . 'bcc_trust_page_scores', ['page_owner_id' => 0], ['page_id' => $this->page]);
+
+        self::assertSame([], $this->votes->getVotedPagesWithOwners(self::VOTER));
     }
 
     public function testAHiddenReviewConfersNoTrustAndRestoringItDoes(): void

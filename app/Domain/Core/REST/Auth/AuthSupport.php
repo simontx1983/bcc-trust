@@ -160,8 +160,9 @@ final class AuthSupport
             // The sign-in already succeeded; losing the record only means
             // this network keeps counting against the ceiling.
             \BCC\Core\Log\Logger::warning('[bcc-trust] trusted login network not recorded', [
-                'user_id' => $userId,
-                'error'   => $e->getMessage(),
+                'user_id'   => $userId,
+                'exception' => get_class($e),
+                'code'      => $e->getCode(),
             ]);
         }
     }
@@ -509,8 +510,9 @@ final class AuthSupport
             return UserViewService::isInGoodStanding($tier);
         } catch (\Throwable $e) {
             Logger::warning('[AuthEndpoint] in_good_standing lookup failed; fail-open', [
-                'user_id' => $userId,
-                'error'   => $e->getMessage(),
+                'user_id'   => $userId,
+                'exception' => get_class($e),
+                'code'      => $e->getCode(),
             ]);
             return true;
         }
@@ -568,8 +570,9 @@ final class AuthSupport
             );
         }
 
+        // No WordPress auth cookie: BCC sessions are bearer tokens only
+        // (see SessionController::logoutEverywhere).
         wp_set_current_user($userId);
-        wp_set_auth_cookie($userId, true);
 
         // Email ownership just changed hands from "unproven" to "proven".
         // Revoke every Bearer token minted before this point: if someone
@@ -635,8 +638,9 @@ final class AuthSupport
             return count(WalletRepository::getForUserOrThrow($userId));
         } catch (\Throwable $e) {
             Logger::warning('[bcc-trust] verify-email: linked wallet count unavailable', [
-                'user_id' => $userId,
-                'error'   => $e->getMessage(),
+                'user_id'   => $userId,
+                'exception' => get_class($e),
+                'code'      => $e->getCode(),
             ]);
             return 0;
         }

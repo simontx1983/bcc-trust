@@ -128,6 +128,16 @@ namespace BCC\Trust\Tests\Stubs {
         /** @var array<int, array<string, mixed>> post_id => meta key => value */
         public static array $postMeta = [];
 
+        /**
+         * Act ids the repository reports as PUBLISHED COMMENTS — what
+         * FeedItemGate::isCommentAct() asks.
+         *
+         * ⚠ Read by BOTH paths: the instance `metaByActId` (a caller that
+         * injects the repository) and the container's repository (a static
+         * gate that does not). They must not be able to disagree.
+         */
+        public static array $commentActs = [];
+
         /** @var array<int, array<int, string>> user_id => group_id => gm_user_status */
         public static array $memberships = [];
 
@@ -180,6 +190,7 @@ namespace BCC\Trust\Tests\Stubs {
             self::$getByIdCalls = [];
             self::$isAdmin      = false;
             self::$listReads    = [];
+            self::$commentActs  = [];
         }
     }
 }
@@ -243,6 +254,15 @@ namespace BCC\Trust\Core\Repositories {
 
             public function getCommentMeta(int $commentActId): ?object
             {
+                if (in_array($commentActId, \BCC\Trust\Tests\Stubs\CommentDeleteFakes::$commentActs, true)) {
+                    return (object) [
+                        'act_id'         => $commentActId,
+                        'parent_post_id' => 4242,
+                        'parent_act_id'  => 77,
+                        'author_id'      => 9,
+                    ];
+                }
+
                 return $this->metaByActId[$commentActId] ?? null;
             }
 
@@ -285,6 +305,34 @@ namespace BCC\Core\Feed {
             public static function publicFeedModuleIds(): array
             {
                 return [1, 4, 200, 201, 202, 203, 204, 205];
+            }
+        }
+    }
+}
+
+/*
+ * The container seam. `FeedItemGate::isCommentAct()` reaches through it when
+ * a caller hands in no repository — which is every static REST gate, and
+ * PostsService::deletePost among them.
+ *
+ * ⚠ Guarded with `false` as the 2nd argument: the default AUTOLOADS the real
+ * class and then skips the double, so the suite would silently run
+ * production code.
+ */
+namespace BCC\Trust\Core {
+    if (!class_exists(__NAMESPACE__ . '\\Plugin', false)) {
+        final class Plugin
+        {
+            private static ?self $instance = null;
+
+            public static function instance(): self
+            {
+                return self::$instance ??= new self();
+            }
+
+            public function commentRepository(): Repositories\CommentRepository
+            {
+                return new Repositories\CommentRepository();
             }
         }
     }

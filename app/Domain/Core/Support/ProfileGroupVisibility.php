@@ -36,6 +36,23 @@
  *      qualifying NFT on a named chain; that they delegate to a named
  *      validator), and the rows carry the chain slug, so publishing them
  *      to anonymous readers was the disclosure F-270 was filed about.
+ *   4. (F-341 PR 3) An individual HALL the owner has hidden is dropped,
+ *      even while the Halls section itself is shown. Absent meta means
+ *      nothing is hidden.
+ *
+ *      ⚠ This is NOT dominated by rule 1's toggle, which is the opposite
+ *      of what a reader might assume. Toggle OFF leaves halls — and ONLY
+ *      halls — visible, so with it off the hidden ones are the only
+ *      choice still doing any work. It therefore applies in both states.
+ *
+ *      ⚠ Scoped to `GroupType::Hall` deliberately, matching the ratified
+ *      name `bcc_hidden_hall_ids`. The check is keyed on group id, so
+ *      widening it to any group is a one-line change IF that is ever
+ *      decided — but it must be decided, not drifted into, because the
+ *      meta name would then be misleading and this codebase has already
+ *      paid for two of those (`halls` carrying every group;
+ *      `manual_collection_discovery_enabled` authorising nothing
+ *      chain-wide).
  *
  * ⚠ An empty result is NOT an error and must not become a 403. A refusal
  * would itself disclose that there are groups being withheld; an empty
@@ -83,25 +100,39 @@ final class ProfileGroupVisibility
             return [];
         }
 
-        // The owner's own tab is never filtered — they chose the setting
-        // and must be able to see what it is hiding.
-        if ($viewerId > 0 && $viewerId === $ownerId) {
-            return $contexts;
-        }
-
-        // Same exemption the rest of F-02 grants, so an admin's view of a
-        // profile does not silently differ between surfaces.
-        if (ProfileAccess::viewerIsExemptFromVisibility()) {
+        // The owner's own view is never filtered, and an admin keeps the
+        // F-02 exemption. ONE copy of both, shared with
+        // hidesPrimaryHall() below: before F-401 these two rules lived
+        // only here, and the home-Hall chip published by getSummary()
+        // answered to neither.
+        if (self::viewerSeesEverything($ownerId, $viewerId)) {
             return $contexts;
         }
 
         $showGroups = ProfileAccess::showsGroupsOnProfile($ownerId);
         $anonymous  = $viewerId <= 0;
+        // ONE read for the whole page, after the owner and admin
+        // short-circuits above — neither of them is filtered, so neither
+        // should pay for this.
+        $hiddenHalls = ProfileAccess::hiddenHallIds($ownerId);
 
         $secretIds = [];
         foreach ($contexts as $groupId => $ctx) {
             // Rule 1 — toggle OFF: halls survive, nothing else does.
             if (!$showGroups && $ctx->type !== GroupType::Hall) {
+                unset($contexts[$groupId]);
+                continue;
+            }
+
+            // Rule 4 — this HALL was hidden individually. Checked after
+            // rule 1 but before the queries below, keeping the ordering
+            // promise in the docblock: every in-memory drop happens
+            // before the membership read, so a hidden secret Hall never
+            // reaches it.
+            if ($hiddenHalls !== []
+                && $ctx->type === GroupType::Hall
+                && in_array($groupId, $hiddenHalls, true)
+            ) {
                 unset($contexts[$groupId]);
                 continue;
             }
@@ -139,5 +170,64 @@ final class ProfileGroupVisibility
         }
 
         return $contexts;
+    }
+
+    /**
+     * Does $viewerId see $ownerId's groups exactly as the owner does?
+     *
+     * The owner chose the setting and must be able to see what it is
+     * hiding; an admin keeps the exemption the rest of F-02 grants, so a
+     * moderator's view of a profile does not silently differ between
+     * surfaces.
+     *
+     * ⭐ Extracted for F-401 rather than copied into the new rule. Two
+     * copies of an EXEMPTION fail in the direction that hides a Hall
+     * from the one person entitled to see it, and this class already
+     * carries the scar of two copies of a visibility rule (F-323).
+     */
+    private static function viewerSeesEverything(int $ownerId, int $viewerId): bool
+    {
+        if ($viewerId > 0 && $viewerId === $ownerId) {
+            return true;
+        }
+
+        return ProfileAccess::viewerIsExemptFromVisibility();
+    }
+
+    /**
+     * F-401 — is the owner's HOME-HALL chip withheld from this viewer?
+     *
+     * The user decision (2026-11-18): hiding a Hall hides the home-Hall
+     * chip too when that Hall is the member's primary. Rule 4 above
+     * already drops it from the `halls` LIST; the chip is the same fact
+     * published as a single field, and leaving it visible would have
+     * defeated the choice in the one place it is most prominent.
+     *
+     * ⚠ The group TYPE is not re-resolved here, deliberately. The
+     * pointer this id comes from (`bcc_primary_hall_group_id`) is written
+     * only by {@see \BCC\Trust\Core\Services\HallsService::setPrimaryHall()},
+     * which requires a Hall, so a context lookup would buy nothing and
+     * would cost one resolver call PER ROW on every directory page. If
+     * the pointer ever did aim at a non-Hall, hiding it is the harmless
+     * direction — rule 4's type scope exists to stop the hide list
+     * reaching OTHER groups, not to protect this one id.
+     *
+     * ⚠ Costs no query on a list path: the hidden-list read is
+     * `get_user_meta`, and WP caches a user's whole meta row set on
+     * first touch — `MemberSummaryPrefetcher::primeFor()` primes it for
+     * the entire page via `update_meta_cache()`, and `getSummary()`
+     * reads privacy meta for the row before reaching this.
+     */
+    public static function hidesPrimaryHall(int $ownerId, int $groupId, int $viewerId): bool
+    {
+        if ($ownerId <= 0 || $groupId <= 0) {
+            return false;
+        }
+
+        if (self::viewerSeesEverything($ownerId, $viewerId)) {
+            return false;
+        }
+
+        return in_array($groupId, ProfileAccess::hiddenHallIds($ownerId), true);
     }
 }

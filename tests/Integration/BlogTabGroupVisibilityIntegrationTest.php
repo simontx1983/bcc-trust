@@ -14,6 +14,8 @@ use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
+require_once __DIR__ . '/PeepSoActivitiesTable.php';
+
 /**
  * Who can see a group blog on the author's profile Blog tab — proved on
  * REAL ROWS, not on a statement's shape.
@@ -578,15 +580,8 @@ final class BlogTabGroupVisibilityIntegrationTest extends TestCase
         if ($adds !== []) {
             $statements[] = "ALTER TABLE {$wpdb->posts} " . implode(', ', $adds);
         }
-        $statements[] = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}peepso_activities (
-            act_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-            act_owner_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-            act_module_id VARCHAR(20) NOT NULL DEFAULT '0',
-            act_external_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-            act_access INT NOT NULL DEFAULT 10,
-            act_comment_object_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-            PRIMARY KEY (act_id)
-        ) DEFAULT CHARSET=utf8mb4";
+        // Created, or widened to the full column set when another suite built it.
+        PeepSoActivitiesTable::ensure();
         // ⚠ Required by §F-02: the per-post visibility gate LEFT JOINs this
         // table to read each author's profile level. The join is LEFT, so an
         // author with no row reads as level 10 (public) and these fixtures

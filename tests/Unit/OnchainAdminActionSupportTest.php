@@ -130,6 +130,7 @@ final class OnchainAdminActionSupportTest extends TestCase
             'admin_helius_addresses_resynced',
             'admin_helius_resync_noop',
             'admin_helius_resync_failed',
+            'admin_helius_webhook_provision_busy',
             'admin_nft_spam_rule_added',
             'admin_nft_spam_rule_removed',
             'admin_nft_spam_rule_failed',

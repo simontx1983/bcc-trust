@@ -49,6 +49,87 @@ final class PendingEmailService
     /** Email-verified usermeta key (AuthSupport::META_EMAIL_VERIFIED). */
     private const META_EMAIL_VERIFIED = '_bcc_email_verified';
 
+    /**
+     * F-294: the address a WALLET sign-up typed, held pending until it is
+     * verified (user_email keeps the wallet placeholder meanwhile). An
+     * unverified address used to go straight into user_email, where it
+     * reserved the address against its real owner (user_email is UNIQUE)
+     * and nothing could reclaim it. Verified through the ordinary sign-up
+     * code and link (POST /auth/verify-email), which apply it with
+     * applyPendingSignupEmail().
+     */
+    public const META_PENDING_SIGNUP_EMAIL = 'bcc_pending_signup_email';
+
+    /** applyPendingSignupEmail() outcomes. */
+    public const SIGNUP_EMAIL_NONE     = 'none';     // nothing pending, or user_email is already real
+    public const SIGNUP_EMAIL_APPLIED  = 'applied';
+    public const SIGNUP_EMAIL_CONFLICT = 'conflict'; // someone else holds it now; the pending one is dropped
+    public const SIGNUP_EMAIL_FAILED   = 'failed';   // the write failed; pending kept for a retry
+
+    /**
+     * The one account whose pending sign-up address is $email, or null when
+     * none, or MORE than one, holds it (two wallet sign-ups can type the
+     * same address; neither owns it until one verifies).
+     */
+    public static function pendingSignupOwner(string $email): ?int
+    {
+        $email = strtolower(trim($email));
+        if ($email === '') {
+            return null;
+        }
+        $ids = get_users([
+            'meta_key'   => self::META_PENDING_SIGNUP_EMAIL,
+            'meta_value' => $email,
+            'fields'     => 'ID',
+            'number'     => 2,
+        ]);
+        return count($ids) === 1 && (int) $ids[0] > 0 ? (int) $ids[0] : null;
+    }
+
+    /** The pending sign-up address for $userId, or '' when there is none. */
+    public static function pendingSignupEmail(int $userId): string
+    {
+        return $userId > 0 ? (string) get_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL, true) : '';
+    }
+
+    /**
+     * On a proven inbox (a correct sign-up code, or the link): move the
+     * pending sign-up address into user_email. Only while user_email is
+     * still the wallet placeholder; the address is re-checked first, and if
+     * another account holds it now the pending one is dropped. Does NOT set
+     * the verified flag: the caller's finalizeVerification() does.
+     */
+    public static function applyPendingSignupEmail(int $userId): string
+    {
+        $pending = self::pendingSignupEmail($userId);
+        if ($pending === '') {
+            return self::SIGNUP_EMAIL_NONE;
+        }
+        $user = get_userdata($userId);
+        if (!$user instanceof \WP_User || !AccountRecoveryService::isPlaceholderEmail((string) $user->user_email)) {
+            delete_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL);
+            return self::SIGNUP_EMAIL_NONE;
+        }
+        $holder = email_exists($pending);
+        if ($holder !== false && (int) $holder !== $userId) {
+            delete_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL);
+            return self::SIGNUP_EMAIL_CONFLICT;
+        }
+        // The old address is the placeholder: WordPress core's "Email
+        // Changed" mail would go to a dead inbox, so it is off for this write.
+        add_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
+        try {
+            $result = wp_update_user(['ID' => $userId, 'user_email' => $pending]);
+        } finally {
+            remove_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
+        }
+        if (is_wp_error($result)) {
+            return self::SIGNUP_EMAIL_FAILED;
+        }
+        delete_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL);
+        return self::SIGNUP_EMAIL_APPLIED;
+    }
+
     /** confirm() outcomes other than success. */
     public const ERR_NONE         = 'none';          // nothing pending for this purpose (or expired)
     public const ERR_BAD_CODE     = 'bad_code';      // wrong code — pending kept for a retry
@@ -127,6 +208,9 @@ final class PendingEmailService
         }
 
         update_user_meta($userId, self::META_EMAIL_VERIFIED, '1');
+        // F-294: a real address is in place now; a wallet sign-up's
+        // still-pending one is moot.
+        delete_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL);
         delete_transient(self::PENDING_PREFIX . $userId);
 
         return ['ok' => true, 'email' => $pending['email'], 'old_email' => $oldEmail];

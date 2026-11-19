@@ -580,8 +580,10 @@ final class JwtToken
     /**
      * Read the user's revocation counter as int. Missing meta → 0.
      * Cached transparently by WP's user-meta cache; no extra plumbing.
+     * Public for F-294: the oauth-complete replay is refused once this has
+     * moved (a "sign out everywhere" since the sign-up).
      */
-    private static function currentTokenVersion(int $userId): int
+    public static function currentTokenVersion(int $userId): int
     {
         return (int) get_user_meta($userId, self::TOKEN_VERSION_META_KEY, true);
     }

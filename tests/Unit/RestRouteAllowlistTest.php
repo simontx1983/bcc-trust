@@ -1,0 +1,289 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BCC\Trust\Core\Tests\Unit;
+
+use BCC\Trust\Core\Security\RestRouteAllowlist;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
+use PHPUnit\Framework\TestCase;
+
+/**
+ * Security review (2026-11-18): BearerAuth authenticates every REST request,
+ * so a member's token reached core's routes (`PUT /wp/v2/users/me` changed
+ * the password or email around every BCC step-up) and every other plugin's.
+ * RestRouteAllowlist opens only BCC's namespaces to non-admins:
+ *   - members: `/bcc/v1` and `/bcc-trust/v1` only; anything else is 403;
+ *   - signed out: BCC's namespaces, plus GET/HEAD elsewhere except
+ *     `/wp/v2/users*`; anything else is 401;
+ *   - admins: untouched.
+ * Application passwords are for admins only.
+ *
+ * Runs the real filters over minimal WordPress doubles defined here.
+ */
+#[RunTestsInSeparateProcesses]
+#[PreserveGlobalState(false)]
+final class RestRouteAllowlistTest extends TestCase
+{
+    private const ALL_METHODS = ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'];
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $GLOBALS['__cug'] = ['user' => 0, 'caps' => [], 'filters' => [], 'user_caps' => []];
+        if (!class_exists('WP_REST_Request', false)) {
+            eval('class WP_REST_Request { public function __construct(private string $method = "GET", private string $route = "") {} public function get_route(): string { return $this->route; } public function get_method(): string { return $this->method; } }');
+        }
+        if (!class_exists('WP_Error', false)) {
+            eval('class WP_Error { public function __construct(public string $code = "", public string $message = "", public mixed $data = null) {} public function get_error_code(): string { return $this->code; } public function get_error_data(): mixed { return $this->data; } }');
+        }
+        if (!class_exists('WP_User', false)) {
+            eval('class WP_User { public function __construct(public int $ID = 0) {} }');
+        }
+        if (!function_exists('current_user_can')) {
+            eval('function current_user_can(string $cap): bool { return in_array($cap, $GLOBALS["__cug"]["caps"], true); }');
+        }
+        if (!function_exists('user_can')) {
+            eval('function user_can($user, string $cap): bool { return in_array($cap, $GLOBALS["__cug"]["user_caps"][$user->ID] ?? [], true); }');
+        }
+        if (!function_exists('get_current_user_id')) {
+            eval('function get_current_user_id(): int { return (int) $GLOBALS["__cug"]["user"]; }');
+        }
+        if (!function_exists('add_filter')) {
+            eval('function add_filter(string $hook, $cb, int $priority = 10, int $args = 1): bool { $GLOBALS["__cug"]["filters"][] = [$hook, $cb, $priority, $args]; return true; }');
+        }
+    }
+
+    /** @return mixed */
+    private static function dispatch(string $route, string $method = 'GET', mixed $earlier = null)
+    {
+        return RestRouteAllowlist::filter($earlier, null, new \WP_REST_Request($method, $route));
+    }
+
+    private static function member(): void
+    {
+        $GLOBALS['__cug']['user'] = 42;
+    }
+
+    private static function admin(): void
+    {
+        $GLOBALS['__cug']['user'] = 1;
+        $GLOBALS['__cug']['caps'] = ['manage_options'];
+    }
+
+    private static function assertRefused(mixed $res, int $status, string $what): void
+    {
+        self::assertInstanceOf(\WP_Error::class, $res, $what);
+        self::assertSame('rest_forbidden', $res->get_error_code(), $what);
+        self::assertSame(['status' => $status], $res->get_error_data(), $what);
+    }
+
+    // ── BCC's namespaces: open to everyone ────────────────────────────────
+
+    /** @return iterable<string, array{0: string}> */
+    public static function bccRoutes(): iterable
+    {
+        yield 'bcc/v1 route'                 => ['/bcc/v1/posts'];
+        yield 'bcc/v1 nested'                => ['/bcc/v1/me/account/password'];
+        yield 'bcc-trust/v1 route'           => ['/bcc-trust/v1/vote'];
+        yield 'bcc/v1 namespace index'       => ['/bcc/v1'];
+        yield 'bcc-trust/v1 namespace index' => ['/bcc-trust/v1'];
+        yield 'any letter case (core is case-blind)' => ['/BCC/V1/Posts'];
+        yield 'bcc-trust, any letter case'   => ['/Bcc-Trust/V1/vote'];
+        yield 'a users-looking BCC route'    => ['/bcc-trust/v1/users/me'];
+    }
+
+    #[DataProvider('bccRoutes')]
+    public function testAMemberReachesBccRoutesWithAnyMethod(string $route): void
+    {
+        self::member();
+        $earlier = new \stdClass();
+
+        foreach (self::ALL_METHODS as $method) {
+            self::assertNull(self::dispatch($route, $method), "{$method} {$route}");
+            self::assertSame($earlier, self::dispatch($route, $method, $earlier), 'whatever answered before stands');
+        }
+    }
+
+    #[DataProvider('bccRoutes')]
+    public function testASignedOutCallerReachesBccRoutesWithAnyMethod(string $route): void
+    {
+        foreach (self::ALL_METHODS as $method) {
+            self::assertNull(self::dispatch($route, $method), "{$method} {$route}");
+        }
+    }
+
+    // ── Members: nothing outside BCC's namespaces ─────────────────────────
+
+    /** @return iterable<string, array{0: string}> */
+    public static function nonBccRoutes(): iterable
+    {
+        yield 'core users/me'               => ['/wp/v2/users/me'];
+        yield 'core application-passwords'  => ['/wp/v2/users/me/application-passwords'];
+        yield 'core posts'                  => ['/wp/v2/posts'];
+        yield 'core media'                  => ['/wp/v2/media'];
+        yield 'core settings'               => ['/wp/v2/settings'];
+        yield 'the REST index'              => ['/'];
+        yield 'batch'                       => ['/batch/v1'];
+        yield 'oembed proxy'                => ['/oembed/1.0/proxy'];
+        yield 'site health'                 => ['/wp-site-health/v1/tests/background-updates'];
+        yield 'another plugin'              => ['/litespeed/v3/ping'];
+        yield 'PeepSo'                      => ['/peepso/v1/post'];
+        yield 'a look-alike namespace'      => ['/bcc/v1x/posts'];
+        yield 'a look-alike bcc-trust'      => ['/bcc-trustx/v1/vote'];
+        yield 'a look-alike version'        => ['/bcc/v2/posts'];
+        yield 'a BCC name, not a namespace' => ['/bcc'];
+        yield 'BCC under another prefix'    => ['/wp/v2/bcc/v1/posts'];
+        // Neither of these reaches a BCC handler (core matches the route as
+        // typed against anchored /bcc/v1/… patterns), so the allow side
+        // does not normalise them into one.
+        yield '//bcc/v1/posts'              => ['//bcc/v1/posts'];
+        yield 'no leading slash'            => ['bcc/v1/posts'];
+    }
+
+    #[DataProvider('nonBccRoutes')]
+    public function testAMemberIsRefusedEverythingElseWith403(string $route): void
+    {
+        self::member();
+
+        foreach (self::ALL_METHODS as $method) {
+            self::assertRefused(self::dispatch($route, $method), 403, "{$method} {$route}");
+        }
+    }
+
+    public function testAMemberRefusalWinsOverAnEarlierAnswer(): void
+    {
+        self::member();
+
+        self::assertRefused(self::dispatch('/wp/v2/users/me', 'PUT', new \stdClass()), 403, 'earlier answer');
+    }
+
+    // ── Signed out: GET/HEAD outside BCC, except /wp/v2/users ─────────────
+
+    /** @return iterable<string, array{0: string}> */
+    public static function coreUsersRoutes(): iterable
+    {
+        yield 'the collection'                 => ['/wp/v2/users'];
+        yield 'trailing slash'                 => ['/wp/v2/users/'];
+        yield 'me'                             => ['/wp/v2/users/me'];
+        yield 'a user by id'                   => ['/wp/v2/users/7'];
+        yield 'me/application-passwords'       => ['/wp/v2/users/me/application-passwords'];
+        yield 'an application password'        => ['/wp/v2/users/7/application-passwords/0b6f5f9e-1c1d-4c2e-9f00-000000000001'];
+        yield 'introspect'                     => ['/wp/v2/users/me/application-passwords/introspect'];
+        yield 'uppercase (core is case-blind)' => ['/WP/V2/Users/Me'];
+        yield '?rest_route=wp/v2/users/me'     => ['wp/v2/users/me'];
+        yield '?rest_route=//wp/v2//users/me'  => ['//wp/v2//users/me'];
+    }
+
+    #[DataProvider('coreUsersRoutes')]
+    public function testASignedOutCallerIsRefusedTheUsersRoutesWith401EvenToRead(string $route): void
+    {
+        foreach (self::ALL_METHODS as $method) {
+            self::assertRefused(self::dispatch($route, $method), 401, "{$method} {$route}");
+        }
+    }
+
+    /** @return iterable<string, array{0: string}> */
+    public static function readableElsewhere(): iterable
+    {
+        yield 'core posts'         => ['/wp/v2/posts'];
+        yield 'the REST index'     => ['/'];
+        yield 'oembed'             => ['/oembed/1.0/embed'];
+        yield 'a longer name'      => ['/wp/v2/usersx'];
+        yield 'a shorter name'     => ['/wp/v2/user'];
+        yield 'another namespace'  => ['/wp/v3/users'];
+    }
+
+    #[DataProvider('readableElsewhere')]
+    public function testASignedOutCallerMayStillReadOutsideBcc(string $route): void
+    {
+        $earlier = new \stdClass();
+
+        foreach (['GET', 'HEAD', 'get'] as $method) {
+            self::assertNull(self::dispatch($route, $method), "{$method} {$route}");
+            self::assertSame($earlier, self::dispatch($route, $method, $earlier), 'whatever answered before stands');
+        }
+    }
+
+    /** @return iterable<string, array{0: string}> */
+    public static function anonymousWrites(): iterable
+    {
+        foreach (['/wp/v2/comments', '/wp/v2/posts', '/batch/v1', '/litespeed/v3/ping', '/akismet/v1/webhook', '/peepso/v1/post', '/bcc/v1x/posts'] as $route) {
+            foreach (['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'post'] as $method) {
+                yield "{$method} {$route}" => [$route, $method];
+            }
+        }
+    }
+
+    #[DataProvider('anonymousWrites')]
+    public function testASignedOutCallerMayNotWriteOutsideBccWith401(string $route, string $method): void
+    {
+        self::assertRefused(self::dispatch($route, $method), 401, "{$method} {$route}");
+    }
+
+    // ── Admins: untouched ─────────────────────────────────────────────────
+
+    /** @return iterable<string, array{0: string}> */
+    public static function everyKindOfRoute(): iterable
+    {
+        yield from self::coreUsersRoutes();
+        yield from self::nonBccRoutes();
+        yield from self::bccRoutes();
+    }
+
+    #[DataProvider('everyKindOfRoute')]
+    public function testAnAdminPassesThroughUntouched(string $route): void
+    {
+        self::admin();
+        $earlier = new \stdClass();
+
+        foreach (self::ALL_METHODS as $method) {
+            self::assertNull(self::dispatch($route, $method), "{$method} {$route}");
+            self::assertSame($earlier, self::dispatch($route, $method, $earlier), 'whatever answered before stands');
+        }
+    }
+
+    public function testANonRequestIsLeftAlone(): void
+    {
+        self::member();
+        $earlier = new \stdClass();
+
+        self::assertSame($earlier, RestRouteAllowlist::filter($earlier, null, 'not a request'));
+    }
+
+    // ── Application passwords: admins only ────────────────────────────────
+
+    public function testApplicationPasswordsAreForAdminsOnly(): void
+    {
+        $GLOBALS['__cug']['user_caps'] = [1 => ['manage_options'], 42 => ['read']];
+
+        self::assertTrue(RestRouteAllowlist::applicationPasswordsAvailable(true, new \WP_User(1)), 'admin');
+        self::assertFalse(RestRouteAllowlist::applicationPasswordsAvailable(true, new \WP_User(42)), 'member');
+        self::assertFalse(RestRouteAllowlist::applicationPasswordsAvailable(false, new \WP_User(1)), 'switched off elsewhere stays off');
+        self::assertFalse(RestRouteAllowlist::applicationPasswordsAvailable(true, null), 'no user');
+    }
+
+    // ── Wiring ────────────────────────────────────────────────────────────
+
+    public function testItHooksRestPreDispatchFirstAndTheApplicationPasswordsFilter(): void
+    {
+        RestRouteAllowlist::register();
+
+        self::assertSame(
+            [
+                ['rest_pre_dispatch', [RestRouteAllowlist::class, 'filter'], 1, 3],
+                ['wp_is_application_passwords_available_for_user', [RestRouteAllowlist::class, 'applicationPasswordsAvailable'], 10, 2],
+            ],
+            $GLOBALS['__cug']['filters']
+        );
+    }
+
+    public function testItIsRegisteredAtBoot(): void
+    {
+        $boot = (string) file_get_contents(__DIR__ . '/../../bcc-trust.php');
+
+        self::assertStringContainsString("\\BCC\\Trust\\Core\\Security\\RestRouteAllowlist::register();", $boot);
+    }
+}

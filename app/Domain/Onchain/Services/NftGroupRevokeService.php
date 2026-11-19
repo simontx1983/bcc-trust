@@ -20,6 +20,14 @@
  *                  NEVER trigger a revoke. The next sweep retries. This
  *                  is the entire reason Part 1 (fail-open) exists.
  *
+ * One exception to "INELIGIBLE → revoke" (F-278, review INFO 1): a zero
+ * from a source that can trail the chain — today only the ERC-1155 provider
+ * count, which an NFT API answers from its own index — is not enough on its
+ * own. Its time is recorded and a re-check is booked SECOND_ZERO_AFTER
+ * later; a second zero at least that much later removes the member, and any
+ * holding seen in between starts over. See removalIsConfirmed(). The
+ * transfer index, Solana DAS, Cosmos and EVM balanceOf are unchanged.
+ *
  * Owner safety: PeepSoGroupWriter::leave refuses to remove group owners
  * (returns false). We never audit a non-removal.
  *
@@ -102,6 +110,32 @@ final class NftGroupRevokeService
      */
     public const RECHECK_HOOK = 'bcc_gated_group_member_recheck';
 
+    /**
+     * F-278 (review INFO 1): how long after a first zero from a source that
+     * can lag the second zero must come before the member is removed. That
+     * source trails a transfer-in by minutes, not hours, so a zero this much
+     * later is not the same lag again.
+     */
+    public const SECOND_ZERO_AFTER = 6 * 3600;
+
+    /**
+     * A first zero older than this is forgotten, so the next zero starts
+     * over instead of removing on a single read. Well above
+     * SECOND_ZERO_AFTER: the booked re-check normally confirms at 6 h, and
+     * the member's next sweep visit is the fallback when it could not run.
+     */
+    public const FIRST_ZERO_MAX_AGE = 2 * 86400;
+
+    /**
+     * Option holding the first zeros awaiting a second, as
+     * "{group_id}:{user_id}" => unix time. Read and written only under
+     * SWEEP_LOCK: the sweep and the re-check both hold it.
+     */
+    private const FIRST_ZERO_OPTION = 'bcc_gated_group_first_zeros';
+
+    /** Most first zeros kept, newest first; dropping one only delays a removal. */
+    private const FIRST_ZERO_MAX_ENTRIES = 1000;
+
     /** PeepSo statuses that hold access (the sweep's member list). */
     private const ACTIVE_STATUSES = ['member', 'member_owner', 'member_manager', 'member_moderator', 'member_readonly'];
 
@@ -123,9 +157,12 @@ final class NftGroupRevokeService
      *        per-tick provider budget, for TESTS ONLY — so the wall-clock stop
      *        can be pinned deterministically. Production constructs this with
      *        no arguments and always gets the SURFACE_REVOKE budget.
+     * @param (\Closure(): int)|null $clock Replaces time() for the first-zero
+     *        rule, for TESTS ONLY.
      */
     public function __construct(
         private readonly ?\Closure $budgetFactory = null,
+        private readonly ?\Closure $clock = null,
     ) {}
 
     /**
@@ -142,13 +179,16 @@ final class NftGroupRevokeService
      *     many members as were removed;
      *   - `skipped_reasons` counts skips by bounded reason code.
      *
+     * F-278: `awaiting_second_zero` counts members kept on a first zero from
+     * a source that can lag (see removalIsConfirmed()).
+     *
      * F-69: the whole tick runs under SWEEP_LOCK. When another tick or a
      * re-check still holds it after SWEEP_LOCK_WAIT seconds, this one does
      * nothing and reports `skipped_overlap: true`. When
      * the lock primitive itself is missing it also does nothing (fail
      * closed: an unserialized sweep is the bug) and logs an error.
      *
-     * @return array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool, skipped_overlap: bool}
+     * @return array{checked: int, revoked: int, skipped_unknown: int, awaiting_second_zero: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool, skipped_overlap: bool}
      */
     public function sweep(): array
     {
@@ -170,25 +210,26 @@ final class NftGroupRevokeService
     }
 
     /**
-     * @return array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool, skipped_overlap: bool}
+     * @return array{checked: int, revoked: int, skipped_unknown: int, awaiting_second_zero: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool, skipped_overlap: bool}
      */
     private static function emptyStats(bool $skippedOverlap): array
     {
         return [
-            'checked'           => 0,
-            'revoked'           => 0,
-            'skipped_unknown'   => 0,
-            'groups_touched'    => 0,
-            'skipped_reasons'   => [],
-            'stopped_on_budget' => false,
-            'skipped_overlap'   => $skippedOverlap,
+            'checked'              => 0,
+            'revoked'              => 0,
+            'skipped_unknown'      => 0,
+            'awaiting_second_zero' => 0,
+            'groups_touched'       => 0,
+            'skipped_reasons'      => [],
+            'stopped_on_budget'    => false,
+            'skipped_overlap'      => $skippedOverlap,
         ];
     }
 
     /**
      * The tick itself; only ever called under SWEEP_LOCK by sweep().
      *
-     * @return array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool, skipped_overlap: bool}
+     * @return array{checked: int, revoked: int, skipped_unknown: int, awaiting_second_zero: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool, skipped_overlap: bool}
      */
     private function runSweep(): array
     {
@@ -286,7 +327,12 @@ final class NftGroupRevokeService
      * sweep's lock; 'locked' means a sweep tick is running and the caller
      * should retry shortly.
      *
-     * @return 'revoked'|'kept'|'unknown'|'not_member'|'owner'|'not_holder_group'|'unresolved'|'locked'
+     * A first zero from a source that can lag keeps the member and books
+     * the second look ('awaiting_second_zero'). That second look runs
+     * through this method too, so a removal it confirms is audited as a
+     * re-check.
+     *
+     * @return 'revoked'|'kept'|'unknown'|'awaiting_second_zero'|'not_member'|'owner'|'not_holder_group'|'unresolved'|'locked'
      */
     public function recheckMember(int $userId, int $groupId): string
     {
@@ -318,8 +364,12 @@ final class NftGroupRevokeService
                 ? ($this->budgetFactory)()
                 : HoldingsService::verificationBudget(HoldingsService::SURFACE_REVOKE);
             $verdict = $this->verdictForMember($userId, $identity->chainSlug(), $identity->canonical(), $config, $budget);
+            $this->forgetFirstZeroIfHeld($userId, $groupId, $verdict);
 
             if ($verdict->isIneligible()) {
+                if (!$this->removalIsConfirmed($userId, $groupId, $verdict)) {
+                    return 'awaiting_second_zero';
+                }
                 return $this->revokeMember($userId, $groupId, $config, $verdict, 'holding_lost_recheck') ? 'revoked' : 'kept';
             }
             return $verdict->isUnknown() ? 'unknown' : 'kept';
@@ -337,7 +387,7 @@ final class NftGroupRevokeService
      * up one. A member who stayed, the owner, an UNKNOWN, or a refused leave()
      * is still listed, so they count; only a real removal doesn't.
      *
-     * @param array{checked: int, revoked: int, skipped_unknown: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool, skipped_overlap: bool} $stats
+     * @param array{checked: int, revoked: int, skipped_unknown: int, awaiting_second_zero: int, groups_touched: int, skipped_reasons: array<string, int>, stopped_on_budget: bool, skipped_overlap: bool} $stats
      */
     private function sweepGroup(
         int $groupId,
@@ -407,6 +457,9 @@ final class NftGroupRevokeService
                 $stats['checked']++;
                 $processed++;
 
+                // F-278 (review INFO 1): a holding seen ends a run of zeros.
+                $this->forgetFirstZeroIfHeld($userId, $groupId, $verdict);
+
                 if ($verdict->isUnknown()) {
                     // Not proven either way: a failed read, an unavailable
                     // chain, incomplete evidence, a provider outage — or a
@@ -415,6 +468,14 @@ final class NftGroupRevokeService
                     // proof.
                     $stats['skipped_unknown']++;
                     $stats['skipped_reasons'][$verdict->reason] = ($stats['skipped_reasons'][$verdict->reason] ?? 0) + 1;
+                    $position++;
+                    continue;
+                }
+
+                if ($verdict->isIneligible() && !$this->removalIsConfirmed($userId, $groupId, $verdict)) {
+                    // A first zero from a source that can lag: kept, with the
+                    // second look booked (F-278, review INFO 1).
+                    $stats['awaiting_second_zero']++;
                     $position++;
                     continue;
                 }
@@ -562,5 +623,114 @@ final class NftGroupRevokeService
             'group_id' => (int) $cursor['group_id'],
             'offset'   => max(0, (int) $cursor['offset']),
         ], false);
+    }
+
+    /**
+     * Book a re-check of one member, once: a pending one with the same
+     * arguments is left alone. The one place RECHECK_HOOK is scheduled.
+     */
+    public static function scheduleRecheck(int $userId, int $groupId, int $at, int $attempt = 0): void
+    {
+        $args = $attempt === 0 ? [$userId, $groupId] : [$userId, $groupId, $attempt];
+        if (!wp_next_scheduled(self::RECHECK_HOOK, $args)) {
+            wp_schedule_single_event($at, self::RECHECK_HOOK, $args);
+        }
+    }
+
+    /**
+     * F-278 (review INFO 1): may this INELIGIBLE verdict remove the member now?
+     *
+     * Yes, unless it rests on a zero from a source that can lag
+     * ({@see EligibilityVerdict::$mayLag}; today only the ERC-1155 provider
+     * count, which can trail a transfer-in). Then:
+     *
+     *   - no first zero on record, or one older than FIRST_ZERO_MAX_AGE: this
+     *     one is recorded, a re-check is booked for SECOND_ZERO_AFTER later,
+     *     and the member is kept;
+     *   - a first zero less than SECOND_ZERO_AFTER ago: kept. Its time does
+     *     not move, and the booking is made again only if none is pending;
+     *   - a first zero at least SECOND_ZERO_AFTER ago: confirmed.
+     *
+     * Any removal this confirms forgets the first zero, so whatever happens
+     * next starts from nothing. If the removal then does not happen (an
+     * owner, PeepSo refusing), the next zero only starts over.
+     */
+    private function removalIsConfirmed(int $userId, int $groupId, EligibilityVerdict $verdict): bool
+    {
+        $now   = $this->now();
+        $zeros = $this->readFirstZeros($now);
+        $key   = $groupId . ':' . $userId;
+        $first = $zeros[$key] ?? null;
+
+        if (!$verdict->mayLag || ($first !== null && $now - $first >= self::SECOND_ZERO_AFTER)) {
+            if ($first !== null) {
+                unset($zeros[$key]);
+                $this->writeFirstZeros($zeros);
+            }
+            return true;
+        }
+
+        if ($first === null) {
+            $first       = $now;
+            $zeros[$key] = $now;
+            $this->writeFirstZeros($zeros);
+        }
+        self::scheduleRecheck($userId, $groupId, $first + self::SECOND_ZERO_AFTER);
+
+        return false;
+    }
+
+    /**
+     * Any holding seen ends a run of zeros: proof of ownership, or any
+     * wallet showing a count above zero (an UNKNOWN can carry one).
+     */
+    private function forgetFirstZeroIfHeld(int $userId, int $groupId, EligibilityVerdict $verdict): void
+    {
+        if (!$verdict->isEligible() && (int) $verdict->bestKnownBalance <= 0) {
+            return;
+        }
+
+        $zeros = $this->readFirstZeros($this->now());
+        $key   = $groupId . ':' . $userId;
+        if (isset($zeros[$key])) {
+            unset($zeros[$key]);
+            $this->writeFirstZeros($zeros);
+        }
+    }
+
+    private function now(): int
+    {
+        return $this->clock !== null ? ($this->clock)() : time();
+    }
+
+    /**
+     * @return array<string, int> "{group_id}:{user_id}" => when the first zero
+     *         was seen; only well-formed entries no older than FIRST_ZERO_MAX_AGE
+     */
+    private function readFirstZeros(int $now): array
+    {
+        $raw = get_option(self::FIRST_ZERO_OPTION, []);
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($raw as $key => $at) {
+            if (!is_string($key) || !is_int($at) || $at > $now || $now - $at > self::FIRST_ZERO_MAX_AGE) {
+                continue;
+            }
+            $out[$key] = $at;
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param array<string, int> $zeros
+     */
+    private function writeFirstZeros(array $zeros): void
+    {
+        arsort($zeros); // newest first, so the bound drops the oldest
+        update_option(self::FIRST_ZERO_OPTION, array_slice($zeros, 0, self::FIRST_ZERO_MAX_ENTRIES, true), false);
     }
 }

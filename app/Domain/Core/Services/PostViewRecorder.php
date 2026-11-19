@@ -90,7 +90,14 @@ final class PostViewRecorder
             }
 
             $activity = PeepSoActivityRepository::getById($actId);
-            if ($activity === null || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)) {
+            // ⚠ A COMMENT act id passes the module check (PeepSo stores
+            // act_module_id = 1 on a comment, as on a status post). Reach is
+            // a POST metric: counting views against a comment act would
+            // attribute them to a row no reach report reads.
+            if ($activity === null
+                || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)
+                || FeedItemGate::isCommentAct($actId)
+            ) {
                 return 'ignored_unknown_post';
             }
 
@@ -168,7 +175,14 @@ final class PostViewRecorder
             }
 
             $activity = PeepSoActivityRepository::getById($actId);
-            if ($activity === null || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)) {
+            // ⚠ A COMMENT act id passes the module check (PeepSo stores
+            // act_module_id = 1 on a comment, as on a status post). Reach is
+            // a POST metric: counting views against a comment act would
+            // attribute them to a row no reach report reads.
+            if ($activity === null
+                || !FeedItemGate::isFeedModule($activity->act_module_id ?? null)
+                || FeedItemGate::isCommentAct($actId)
+            ) {
                 return 'ignored_unknown_post';
             }
 

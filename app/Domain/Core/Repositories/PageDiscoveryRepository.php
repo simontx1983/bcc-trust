@@ -2,6 +2,7 @@
 
 namespace BCC\Trust\Core\Repositories;
 
+use BCC\Core\Repositories\PeepSoPagePrivacy;
 use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Services\UserViewService;
 
@@ -69,7 +70,13 @@ final class PageDiscoveryRepository
         $validators_table = \BCC\Core\DB\DB::table('onchain_validators');
         $chains_table     = \BCC\Core\DB\DB::table('chains');
 
-        $where  = ["p.post_status = 'publish'", "p.post_type = 'peepso-page'"];
+        // SECRET pages never appear in discovery, for anyone (the shared
+        // bcc-core rule; PeepSo's own privacy filter never sees raw SQL).
+        $where  = [
+            "p.post_status = 'publish'",
+            "p.post_type = 'peepso-page'",
+            PeepSoPagePrivacy::notSecretSql('p.ID'),
+        ];
         $params = [];
 
         // Validator on-chain JOIN — shared by the chain filter and the
@@ -316,7 +323,12 @@ final class PageDiscoveryRepository
         $scores_table    = TableRegistry::scores();
         $user_info_table = TableRegistry::userInfo();
 
-        $where   = ["p.post_status = 'publish'", "p.post_type = 'peepso-page'"];
+        // SECRET pages never appear in discovery; see queryFromReadModel().
+        $where   = [
+            "p.post_status = 'publish'",
+            "p.post_type = 'peepso-page'",
+            PeepSoPagePrivacy::notSecretSql('p.ID'),
+        ];
         $join    = '';
         $params  = [];
 

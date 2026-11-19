@@ -237,6 +237,7 @@ final class AccountPreHijackTest extends TestCase
 
         self::assertSame(JwtToken::ERR_REVOKED, self::decodeError($creatorSession), 'the pre-verification session is dead');
         self::assertNull(self::decodeError((string) ($data['data']['token'] ?? '')), "the verifier's fresh token works");
+        self::assertSame([], $GLOBALS['__bcc_ph']['auth_cookies'] ?? [], 'a bearer token only: no WordPress auth cookie (H3)');
     }
 
     /** @return array<string, array{0: ?string, 1: bool}> */
@@ -428,7 +429,8 @@ final class AccountPreHijackTest extends TestCase
         // Wallet signup: never marks the address verified, and starts verification.
         $wallet = self::src('WalletAuthController.php');
         self::assertDoesNotMatchRegularExpression("/META_EMAIL_VERIFIED,\s*'1'/", $wallet);
-        self::assertStringContainsString('AuthSupport::startWalletSignupEmailVerification($userIdInt, $email)', $wallet);
+        // F-294: the code and link go to the typed address (held pending).
+        self::assertStringContainsString('AuthSupport::startWalletSignupEmailVerification($userIdInt, $typedEmail !== \'\' ? $typedEmail : $email)', $wallet);
 
         // Password signup, X signup, resend: one sequence, no inline copies left.
         foreach (['PasswordAuthController.php', 'OAuthController.php', 'EmailVerificationController.php'] as $file) {

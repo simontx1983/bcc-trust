@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Tests\Integration;
 
+require_once __DIR__ . '/PeepSoActivitiesTable.php';
+
 /**
  * One feed activity + its backing wp_post, seeded into the shared harness
  * tables WITHOUT touching anything the test did not create.
  *
- *   - `peepso_activities` is created only when absent and dropped only when
- *     this fixture created it;
+ *   - `peepso_activities` comes from PeepSoActivitiesTable::ensure(): it is
+ *     created when absent (and then dropped only by this fixture), or
+ *     widened to the full column set when another suite built it;
  *   - `wp_posts` is the SHARED harness table — only columns it lacks are
  *     added (other suites widen it too);
  *   - an id that is already taken SKIPS the test rather than overwriting a
@@ -29,19 +32,9 @@ trait FeedActivityFixture
     {
         global $wpdb;
 
-        $acts   = $wpdb->prefix . 'peepso_activities';
-        $exists = (string) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $acts)) === $acts;
-        if (!$exists) {
-            self::assertNotFalse($wpdb->query(
-                "CREATE TABLE {$acts} (
-                    act_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                    act_owner_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                    act_module_id VARCHAR(20) NOT NULL DEFAULT '0',
-                    act_external_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                    act_access INT NOT NULL DEFAULT 10,
-                    PRIMARY KEY (act_id)
-                ) DEFAULT CHARSET=utf8mb4"
-            ), 'create activities: ' . $wpdb->last_error);
+        $acts = PeepSoActivitiesTable::name();
+        // Creates the table, or widens a copy another suite built, to the full column set.
+        if (PeepSoActivitiesTable::ensure()) {
             $this->activitiesWasOurs = true;
         }
 

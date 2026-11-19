@@ -186,6 +186,7 @@ namespace {
                 self::$fetcherCalls = [];
                 self::$gateConfigs = self::$identities = self::$members = [];
                 self::$leaves = self::$joins = self::$audit = [];
+                $GLOBALS['__bcc_sched'] = [];
             }
 
             public static function seedChain(int $id, string $slug, string $type, bool $active = true): void
@@ -258,6 +259,30 @@ namespace {
         function update_option(string $key, $value, $autoload = null): bool
         {
             \BccRevokeWorld::$options[$key] = $value;
+
+            return true;
+        }
+    }
+    // Same storage and shape as NftHoldingLostTest's doubles, so whichever
+    // file defines them first, $GLOBALS['__bcc_sched'] means the same thing.
+    if (!function_exists('wp_next_scheduled')) {
+        /** @param array<int, mixed> $args */
+        function wp_next_scheduled(string $hook, array $args = [])
+        {
+            foreach ($GLOBALS['__bcc_sched'] ?? [] as $e) {
+                if ($e[1] === $hook && $e[2] === $args) {
+                    return $e[0];
+                }
+            }
+
+            return false;
+        }
+    }
+    if (!function_exists('wp_schedule_single_event')) {
+        /** @param array<int, mixed> $args */
+        function wp_schedule_single_event(int $ts, string $hook, array $args = []): bool
+        {
+            $GLOBALS['__bcc_sched'][] = [$ts, $hook, $args];
 
             return true;
         }

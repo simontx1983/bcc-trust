@@ -248,8 +248,16 @@ final class SessionController
      * POST /auth/logout-everywhere — destructive credential-class
      * mutation. Bumps the user's token-version counter so every
      * outstanding JWT (including the request's own bearer) fails the
-     * version check on its next use. Writes a `sessions_revoked_all`
-     * audit row + fires the AccountSecurityMailer confirmation email.
+     * version check on its next use, destroys every WordPress cookie
+     * session and deletes every application password (H3). Writes a
+     * `sessions_revoked_all` audit row + fires the AccountSecurityMailer
+     * confirmation email.
+     *
+     * BCC sessions are bearer tokens only: no BCC route sets a WordPress
+     * auth cookie (they used to, but every caller is the NextAuth server or
+     * a `credentials: "omit"` fetch, so no browser ever stored one; the
+     * cookie only left a 14-day WordPress session behind that sign-out
+     * could not end). So POST /auth/logout has no cookie to clear.
      *
      * The current token IS revoked; the response is the last
      * authenticated reply this session will get. The client MUST call
@@ -286,6 +294,14 @@ final class SessionController
         // for this user fails ERR_REVOKED on next use, including the
         // bearer that authenticated THIS request.
         JwtToken::revokeAllForUser($userId);
+
+        // ...and every WordPress-side credential of the account (security
+        // review 2026-11-18, H3): its cookie sessions (an admin's wp-admin;
+        // any member session from wp-login.php, or one of the 14-day
+        // sessions BCC's own sign-ins created while they still set a WP
+        // cookie) and its application passwords, which never expire.
+        \WP_Session_Tokens::get_instance($userId)->destroy_all();
+        \WP_Application_Passwords::delete_all_application_passwords($userId);
 
         // Revoking every token must also stop pushes to every device: a
         // push subscription outlives the session that registered it, so

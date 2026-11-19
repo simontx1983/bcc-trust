@@ -17,6 +17,14 @@
 declare(strict_types=1);
 
 namespace {
+    if (!function_exists('do_action')) {
+        /** Recorded, so "the endpoint announced a change" is assertable. */
+        function do_action(string $hook, mixed ...$args): void
+        {
+            $GLOBALS['__bcc_prefs_actions'][] = [$hook, ...$args];
+        }
+    }
+
     /**
      * Every recorded write goes through here (M1 fault injection). When
      * $GLOBALS['__bcc_prefs_fail_on'] is N, the Nth write fails the way a
