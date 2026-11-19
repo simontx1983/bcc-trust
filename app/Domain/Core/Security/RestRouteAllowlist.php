@@ -60,7 +60,10 @@ if (!defined('ABSPATH')) {
  * never decide a security boundary).
  *
  * A refusal wins over whatever an earlier filter answered. It is the core
- * `rest_forbidden` shape: 401 signed out, 403 signed in.
+ * `rest_forbidden` shape: 401 signed out, 403 signed in. It is a
+ * WP_REST_Response, never a bare WP_Error: core's /batch/v1 loop reads
+ * get_status() off whatever this filter answers, so a WP_Error there is a
+ * fatal and the whole batch a 500.
  *
  * Production had an mu-plugin as the immediate mitigation for the users
  * routes; this is the permanent version, widened.
@@ -122,17 +125,17 @@ final class RestRouteAllowlist
      *
      * @param list<string> $exemptions EXEMPT_ROUTES; a test passes its own
      */
-    public static function refusal(string $route, string $method, bool $signedIn, array $exemptions = self::EXEMPT_ROUTES): ?\WP_Error
+    public static function refusal(string $route, string $method, bool $signedIn, array $exemptions = self::EXEMPT_ROUTES): ?\WP_REST_Response
     {
         if (!$signedIn && in_array(strtoupper($method) . ' ' . strtolower($route), $exemptions, true)) {
             return null;
         }
 
-        return new \WP_Error(
+        return rest_convert_error_to_response(new \WP_Error(
             'rest_forbidden',
             'Sorry, you are not allowed to do that.',
             ['status' => $signedIn ? 403 : 401]
-        );
+        ));
     }
 
     /**

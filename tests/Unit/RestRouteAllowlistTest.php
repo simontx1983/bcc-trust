@@ -44,6 +44,14 @@ final class RestRouteAllowlistTest extends TestCase
         if (!class_exists('WP_Error', false)) {
             eval('class WP_Error { public function __construct(public string $code = "", public string $message = "", public mixed $data = null) {} public function get_error_code(): string { return $this->code; } public function get_error_data(): mixed { return $this->data; } }');
         }
+        if (!class_exists('WP_REST_Response', false)) {
+            eval('class WP_REST_Response { public function __construct(private mixed $data = null, private int $status = 200) {} public function get_data(): mixed { return $this->data; } public function get_status(): int { return $this->status; } }');
+        }
+        if (!function_exists('rest_convert_error_to_response')) {
+            // Core's shape for a one-error WP_Error (rest-api.php): the
+            // status from the error data, else 500.
+            eval('function rest_convert_error_to_response($error) { $data = $error->get_error_data(); return new WP_REST_Response(["code" => $error->get_error_code(), "message" => $error->message, "data" => $data], is_array($data) && isset($data["status"]) ? $data["status"] : 500); }');
+        }
         if (!class_exists('WP_User', false)) {
             eval('class WP_User { public function __construct(public int $ID = 0) {} }');
         }
@@ -78,11 +86,16 @@ final class RestRouteAllowlistTest extends TestCase
         $GLOBALS['__cug']['caps'] = ['manage_options'];
     }
 
+    /** A response object, never a bare WP_Error (see testARefusalInsideABatchKeepsItsOwnStatus). */
     private static function assertRefused(mixed $res, int $status, string $what): void
     {
-        self::assertInstanceOf(\WP_Error::class, $res, $what);
-        self::assertSame('rest_forbidden', $res->get_error_code(), $what);
-        self::assertSame(['status' => $status], $res->get_error_data(), $what);
+        self::assertInstanceOf(\WP_REST_Response::class, $res, $what);
+        self::assertSame($status, $res->get_status(), $what);
+        self::assertSame(
+            ['code' => 'rest_forbidden', 'message' => 'Sorry, you are not allowed to do that.', 'data' => ['status' => $status]],
+            $res->get_data(),
+            $what
+        );
     }
 
     // ── BCC's namespaces: open to everyone ────────────────────────────────
@@ -310,6 +323,49 @@ final class RestRouteAllowlistTest extends TestCase
     {
         self::assertRefused(RestRouteAllowlist::refusal('/litespeed/v1/notify_img', 'POST', false), 401, 'the real (empty) list');
         self::assertRefused(RestRouteAllowlist::refusal('/litespeed/v1/notify_img', 'POST', false, []), 401, 'an empty list');
+    }
+
+    // ── Inside /batch/v1 ──────────────────────────────────────────────────
+
+    /**
+     * Core's /batch/v1 loop (class-wp-rest-server.php,
+     * serve_batch_request_v1, 7.0.2), cut down to what touches this
+     * filter's answer: rest_pre_dispatch; the handler when nothing
+     * answered; rest_ensure_response(), which hands a WP_Error back as it
+     * came; then the envelope, which reads get_status(). A bare WP_Error
+     * there is a fatal, and the whole batch a 500.
+     *
+     * @param list<string> $routes
+     */
+    private static function asBatchWould(array $routes): \WP_REST_Response
+    {
+        $responses = [];
+        foreach ($routes as $route) {
+            $result = self::dispatch($route, 'POST') ?? new \WP_REST_Response(['handled' => $route], 200);
+            $responses[] = ['body' => $result->get_data(), 'status' => $result->get_status()];
+        }
+
+        return new \WP_REST_Response(['responses' => $responses], 207);
+    }
+
+    /** @return iterable<string, array{0: int, 1: int}> */
+    public static function batchCallers(): iterable
+    {
+        yield 'a member'   => [42, 403];
+        yield 'signed out' => [0, 401];
+    }
+
+    #[DataProvider('batchCallers')]
+    public function testARefusalInsideABatchKeepsItsOwnStatus(int $user, int $status): void
+    {
+        $GLOBALS['__cug']['user'] = $user;
+
+        $batch = self::asBatchWould(['/wp/v2/posts', '/bcc/v1/posts']);
+
+        self::assertSame(207, $batch->get_status());
+        $responses = $batch->get_data()['responses'];
+        self::assertSame([$status, 200], array_column($responses, 'status'), 'the refusal, then a BCC route');
+        self::assertSame('rest_forbidden', $responses[0]['body']['code']);
     }
 
     // ── Admins: untouched ─────────────────────────────────────────────────
