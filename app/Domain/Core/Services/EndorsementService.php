@@ -42,6 +42,7 @@
 namespace BCC\Trust\Core\Services;
 
 use BCC\Trust\Core\Repositories\AttestationRepository;
+use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
 use BCC\Trust\Core\Services\PeepSoPageResolver;
 
 if (!defined('ABSPATH')) {
@@ -224,6 +225,7 @@ class EndorsementService {
      * through; user_profile maps to the member self-page id.
      *
      * @return list<array<string, mixed>>
+     * @throws RepositoryReadFailure when the vouch read did not run (F-421)
      */
     public function getUserEndorsements(?int $endorserUserId = null, int $limit = 20): array {
         $endorserUserId = $endorserUserId ?? get_current_user_id();
@@ -432,6 +434,7 @@ class EndorsementService {
      *   - last_endorsement — newest active vouch created_at, or null.
      *
      * @return array<string, mixed>
+     * @throws RepositoryReadFailure when the vouch read did not run (F-421)
      */
     public function getUserEndorsementStats(int $userId): array {
         $rows   = $this->attestationRepo->listActiveVouchesByAttestor($userId, self::STATS_MAX_ROWS);
