@@ -56,7 +56,9 @@ if (!defined('ABSPATH')) {
  *    "reset your password at the app" instead. For every role, because a
  *    form that emails admins and turns members away would tell anyone
  *    which logins are admins. Admins reset at the app too; ops' wp-cli is
- *    the fallback.
+ *    the fallback. wp-login.php's form gives that same answer for an
+ *    account that does not exist (`lostpassword_errors`), so it does not
+ *    tell which accounts exist either.
  *
  * Admins keep the first three: wp-login.php, wp-admin, and cookie-plus-nonce
  * calls to bcc routes from wp-admin tooling.
@@ -100,6 +102,7 @@ final class WordPressSignInGate
         add_action('admin_init', [self::class, 'keepMembersOutOfAdmin'], 1);
         add_filter('rest_pre_dispatch', [self::class, 'filterRest'], self::REST_PRIORITY, 3);
         add_filter('allow_password_reset', [self::class, 'allowPasswordReset'], self::RESET_PRIORITY, 2);
+        add_filter('lostpassword_errors', [self::class, 'sameLostPasswordAnswer'], self::RESET_PRIORITY, 2);
     }
 
     /**
@@ -245,6 +248,43 @@ final class WordPressSignInGate
             return $allow;
         }
 
+        return self::resetRefusal();
+    }
+
+    /**
+     * `lostpassword_errors`, as the last filter: wp-login.php's
+     * lost-password form gives every named account the same answer.
+     *
+     * Core answers "There is no account with that username or email
+     * address" for an unknown account: `invalid_email` before this filter,
+     * `invalidcombo` just after it. A known account gets the reset refusal
+     * from allowPasswordReset(). Side by side, those told which accounts
+     * exist. So the unknown-email error is dropped, and a request left with
+     * no other error gets the reset refusal, account or not (a known
+     * account would get it a step later anyway). Errors that read the same
+     * for every account (an empty field, another plugin's captcha) stand.
+     *
+     * @param mixed $errors
+     * @param mixed $userData
+     * @return mixed
+     */
+    public static function sameLostPasswordAnswer($errors, $userData = null)
+    {
+        unset($userData);
+        if (!$errors instanceof \WP_Error) {
+            return $errors;
+        }
+
+        $errors->remove('invalid_email');
+        if ($errors->has_errors()) {
+            return $errors;
+        }
+
+        return self::resetRefusal();
+    }
+
+    private static function resetRefusal(): \WP_Error
+    {
         return new \WP_Error(self::RESET_ERROR_CODE, sprintf(
             'Reset your password at <a href="%s">the app</a>.',
             esc_url(FrontendRedirect::defaultReturn('/forgot-password'))

@@ -29,20 +29,49 @@ namespace {
     }
 
     if (!class_exists('WP_Error', false)) {
+        /** Core's shape: several codes, each with its messages, first code first. */
         class WP_Error
         {
-            public function __construct(private string $code = '', private string $message = '')
+            /** @var array<string, list<string>> */
+            public array $errors = [];
+
+            public function __construct(string $code = '', string $message = '')
             {
+                if ($code !== '') {
+                    $this->errors[$code][] = $message;
+                }
+            }
+
+            public function add(string $code, string $message): void
+            {
+                $this->errors[$code][] = $message;
+            }
+
+            public function remove(string $code): void
+            {
+                unset($this->errors[$code]);
+            }
+
+            public function has_errors(): bool
+            {
+                return $this->errors !== [];
+            }
+
+            /** @return list<string> */
+            public function get_error_codes(): array
+            {
+                return array_map('strval', array_keys($this->errors));
             }
 
             public function get_error_code(): string
             {
-                return $this->code;
+                return (string) (array_key_first($this->errors) ?? '');
             }
 
             public function get_error_message(): string
             {
-                return $this->message;
+                $first = array_key_first($this->errors);
+                return $first === null ? '' : $this->errors[$first][0];
             }
         }
     }
