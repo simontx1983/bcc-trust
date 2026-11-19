@@ -6,6 +6,7 @@ namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Core\Http\RequestContext;
 use BCC\Trust\Core\REST\Envelope;
+use BCC\Trust\Core\Security\RateLimiter;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Onchain\Controllers\WalletController;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -301,5 +302,106 @@ final class EnvelopeMetaTest extends TestCase
         }
         self::assertSame($captcha, self::body($r)['error']['data'] ?? null);
         self::assertSame($before, (string) json_encode($r->get_data()));
+    }
+
+    /**
+     * F-391: a denial bcc-trust's RateLimiter::allow() recorded, with
+     * bcc-core's Throttle silent. The value is set the way allow() sets it,
+     * through the private store, so this pins what the Envelope does with it;
+     * RateLimiterDenialIntegrationTest pins what allow() records.
+     *
+     * @param array{limit: int, window: int, at: int, retry_after: int}|null $denial
+     */
+    private static function rateLimiterDenial(?array $denial): void
+    {
+        (new \ReflectionProperty(RateLimiter::class, 'lastDenial'))->setValue(null, $denial);
+    }
+
+    /** The legacy-limiter 429 routes (watch, unwatch, user status, X share) and their wrap. */
+    private static function legacy429(int $status = 429): \WP_REST_Response
+    {
+        $r = Envelope::wrap(
+            ApiResponse::error('bcc_rate_limited', 'Too many watches. Please wait.', $status),
+            new \WP_REST_Server(),
+            new \WP_REST_Request('/bcc/v1/me/watching', 'POST')
+        );
+        self::assertInstanceOf(\WP_REST_Response::class, $r);
+        return $r;
+    }
+
+    public function testARateLimiter429CarriesItsTimeLeft(): void
+    {
+        $before = time();
+        self::rateLimiterDenial(['limit' => 30, 'window' => 3600, 'at' => $before, 'retry_after' => 23]);
+
+        $r     = self::legacy429();
+        $after = time();
+
+        self::assertNull(\BCC\Core\Security\Throttle::lastDenial(), 'only the RateLimiter refused');
+        $h = $r->get_headers();
+        self::assertSame('23', $h['Retry-After'] ?? null);
+        self::assertSame(23, self::body($r)['error']['data']['retry_after_seconds'] ?? null);
+        self::assertSame('30', $h['X-RateLimit-Limit'] ?? null);
+        self::assertSame('0', $h['X-RateLimit-Remaining'] ?? null);
+        $reset = (int) ($h['X-RateLimit-Reset'] ?? 0);
+        self::assertGreaterThanOrEqual($before + 23, $reset);
+        self::assertLessThanOrEqual($after + 23, $reset);
+    }
+
+    /** If both limiters refused in one request, the later denial is the one that answered. */
+    public function testTheLaterDenialWins(): void
+    {
+        $now = time();
+
+        $GLOBALS['__bcc_envelope_meta_throttle'] = ['allow' => false, 'retry_after' => 50, 'at' => $now - 30];
+        \BCC\Core\Security\Throttle::allow('me_write', 120, 60);
+        self::rateLimiterDenial(['limit' => 30, 'window' => 3600, 'at' => $now, 'retry_after' => 7]);
+        self::assertSame('7', self::legacy429()->get_headers()['Retry-After'] ?? null, 'the RateLimiter refused last');
+
+        $GLOBALS['__bcc_envelope_meta_throttle'] = ['allow' => false, 'retry_after' => 17, 'at' => $now];
+        \BCC\Core\Security\Throttle::allow('me_write', 120, 60);
+        self::rateLimiterDenial(['limit' => 30, 'window' => 3600, 'at' => $now - 30, 'retry_after' => 90]);
+        $r = self::legacy429();
+        self::assertSame('17', $r->get_headers()['Retry-After'] ?? null, 'bcc-core refused last');
+        self::assertSame('120', $r->get_headers()['X-RateLimit-Limit'] ?? null, 'with its own limit');
+    }
+
+    /** On the same second, the RateLimiter one: its calls run in handlers, after the permission stage. */
+    public function testOnTheSameSecondTheRateLimiterDenialWins(): void
+    {
+        $now = time();
+        $GLOBALS['__bcc_envelope_meta_throttle'] = ['allow' => false, 'retry_after' => 17, 'at' => $now];
+        \BCC\Core\Security\Throttle::allow('me_write', 120, 60);
+        self::rateLimiterDenial(['limit' => 30, 'window' => 3600, 'at' => $now, 'retry_after' => 41]);
+
+        $r = self::legacy429();
+        self::assertSame('41', $r->get_headers()['Retry-After'] ?? null);
+        self::assertSame('30', $r->get_headers()['X-RateLimit-Limit'] ?? null);
+    }
+
+    /** A 429 that set its own wait keeps it, as with a bcc-core denial (F-294). */
+    public function testA429WithItsOwnRetryAfterIgnoresARateLimiterDenial(): void
+    {
+        self::rateLimiterDenial(['limit' => 30, 'window' => 3600, 'at' => time(), 'retry_after' => 23]);
+        $resp = ApiResponse::error('bcc_rate_limited', 'Handle changes are limited.', 429);
+        $resp->header('Retry-After', '604800');
+
+        $r = Envelope::wrap($resp, new \WP_REST_Server(), new \WP_REST_Request('/bcc/v1/me/handle', 'PATCH'));
+        self::assertInstanceOf(\WP_REST_Response::class, $r);
+
+        self::assertSame('604800', $r->get_headers()['Retry-After'] ?? null);
+        self::assertArrayNotHasKey('X-RateLimit-Limit', $r->get_headers());
+        self::assertArrayNotHasKey('retry_after_seconds', self::body($r)['error']['data'] ?? []);
+    }
+
+    /** Only a 429 gets a wait: a 403 after a refusal (a vote cap today) is left alone. */
+    public function testANon429AfterARateLimiterDenialGetsNothing(): void
+    {
+        self::rateLimiterDenial(['limit' => 30, 'window' => 3600, 'at' => time(), 'retry_after' => 23]);
+
+        $h = self::legacy429(403)->get_headers();
+        foreach (['Retry-After', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'] as $name) {
+            self::assertArrayNotHasKey($name, $h, $name);
+        }
     }
 }
