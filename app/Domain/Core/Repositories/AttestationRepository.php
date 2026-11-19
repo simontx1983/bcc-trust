@@ -2112,26 +2112,123 @@ final class AttestationRepository
      * cast on still-living pages are removed via attestor_user_id; the page
      * itself (if also deleted) is handled by deleteForPageTarget.
      *
-     * Called from UserLifecycleService::onUserDelete (delete_user).
+     * Answers false when either DELETE did not run, after logging which leg
+     * failed: a failure used to be ignored, so the rows silently survived
+     * the account they belong to. Both legs always run.
+     *
+     * Called through UserLifecycleService::purgeAttestationsFor (account
+     * deletion, and the orphan prune CLI).
      */
-    public function deleteForUser(int $userId): void
+    public function deleteForUser(int $userId): bool
     {
         if ($userId <= 0) {
-            return;
+            return true;
         }
 
         /** @var wpdb $wpdb */
         global $wpdb;
         $table = TableRegistry::trustAttestations();
+        $ok    = true;
 
         // Rows the user cast.
-        $wpdb->delete($table, ['attestor_user_id' => $userId], ['%d']);
+        if ($wpdb->delete($table, ['attestor_user_id' => $userId], ['%d']) === false) {
+            $ok = false;
+            self::logPurgeFailure($userId, 'cast', (string) $wpdb->last_error);
+        }
 
         // Rows cast against the user's profile.
-        $wpdb->delete(
+        $targeted = $wpdb->delete(
             $table,
             ['target_kind' => 'user_profile', 'target_id' => $userId],
             ['%s', '%d']
         );
+        if ($targeted === false) {
+            $ok = false;
+            self::logPurgeFailure($userId, 'targeted', (string) $wpdb->last_error);
+        }
+
+        return $ok;
+    }
+
+    private static function logPurgeFailure(int $userId, string $leg, string $error): void
+    {
+        \BCC\Core\Log\Logger::error('[bcc-trust] attestation purge failed for a deleted account', [
+            'user_id' => $userId,
+            'leg'     => $leg,
+            'error'   => $error,
+        ]);
+    }
+
+    /**
+     * Accounts that no longer exist but still have attestation rows — cast
+     * by them, or cast against their profile. Bounded; ascending ids.
+     * For the orphan prune CLI only (an account deletion purges its own
+     * rows on delete_user).
+     *
+     * @return list<int>
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public function findOrphanedUserIds(int $limit = 1000): array
+    {
+        $limit = max(1, min(5000, $limit));
+
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+        $users = $wpdb->users;
+
+        $sql = "SELECT o.user_id FROM ("
+            . " SELECT a.attestor_user_id AS user_id FROM `{$table}` a"
+            . " LEFT JOIN `{$users}` u ON u.ID = a.attestor_user_id WHERE u.ID IS NULL"
+            . " UNION"
+            . " SELECT a.target_id AS user_id FROM `{$table}` a"
+            . " LEFT JOIN `{$users}` u ON u.ID = a.target_id"
+            . " WHERE a.target_kind = 'user_profile' AND u.ID IS NULL"
+            . ") o ORDER BY o.user_id ASC LIMIT %d";
+
+        /** @phpstan-ignore-next-line argument.type */
+        $rows = self::runRead((string) $wpdb->prepare($sql, $limit), __FUNCTION__, true);
+
+        $ids = [];
+        foreach ($rows as $row) {
+            if (isset($row->user_id)) {
+                $ids[] = (int) $row->user_id;
+            }
+        }
+        return $ids;
+    }
+
+    /**
+     * How many rows the orphan prune would delete: cast by a gone account,
+     * cast against a gone account's profile, and how many of either are
+     * still active. Counts only, no ids.
+     *
+     * @return array{cast: int, targeted: int, active: int}
+     * @throws RepositoryReadFailure when the read did not run
+     */
+    public function countOrphanedRows(): array
+    {
+        /** @var wpdb $wpdb */
+        global $wpdb;
+        $table = TableRegistry::trustAttestations();
+        $users = $wpdb->users;
+
+        $sql = "SELECT"
+            . " COALESCE(SUM(ua.ID IS NULL), 0) AS cast_rows,"
+            . " COALESCE(SUM(a.target_kind = 'user_profile' AND ut.ID IS NULL), 0) AS targeted_rows,"
+            . " COALESCE(SUM((ua.ID IS NULL OR (a.target_kind = 'user_profile' AND ut.ID IS NULL)) AND a.revoked_at IS NULL), 0) AS active_rows"
+            . " FROM `{$table}` a"
+            . " LEFT JOIN `{$users}` ua ON ua.ID = a.attestor_user_id"
+            . " LEFT JOIN `{$users}` ut ON a.target_kind = 'user_profile' AND ut.ID = a.target_id"
+            . " LIMIT 1";
+
+        $rows = self::runRead($sql, __FUNCTION__, true);
+        $row  = $rows[0] ?? null;
+
+        return [
+            'cast'     => (int) ($row->cast_rows ?? 0),
+            'targeted' => (int) ($row->targeted_rows ?? 0),
+            'active'   => (int) ($row->active_rows ?? 0),
+        ];
     }
 }

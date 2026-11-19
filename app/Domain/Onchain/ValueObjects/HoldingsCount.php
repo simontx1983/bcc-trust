@@ -35,9 +35,18 @@ if (!defined('ABSPATH')) {
 
 final class HoldingsCount
 {
+    /**
+     * @param bool $mayLag the read came from a source that can trail the
+     *             chain (an NFT API answering from its own index), so a zero
+     *             from it may predate a transfer-in that source has not
+     *             ingested yet. It never changes {@see decide()}; only the
+     *             revoke sweep reads it, to wait for a second zero before
+     *             removing anyone (F-278).
+     */
     private function __construct(
         public readonly int $count,
         public readonly bool $complete,
+        public readonly bool $mayLag = false,
     ) {}
 
     /** A finished read: `$count` is the wallet's whole balance. */
@@ -50,6 +59,16 @@ final class HoldingsCount
     public static function atLeast(int $count): self
     {
         return new self(max(0, $count), false);
+    }
+
+    /**
+     * The same evidence, marked as read from a source that can lag (see
+     * `$mayLag`). HoldingsService marks it, for the ERC-1155 provider count;
+     * a fetcher never vouches for its own lag.
+     */
+    public function fromLaggingSource(): self
+    {
+        return new self($this->count, $this->complete, true);
     }
 
     /**

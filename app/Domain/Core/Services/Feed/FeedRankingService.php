@@ -478,6 +478,58 @@ final class FeedRankingService
             return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
         }
 
+        return $this->personalizedHotFeed($viewerId, $hashtag, $cursor, $limit);
+    }
+
+    /**
+     * F-276: the hot feed for ONE signed-in viewer, uncached and hydrated
+     * for them. It backs the cold-start panel's "What's been happening"
+     * posts, which render as full feed cards.
+     *
+     * The shared hot page ({@see getHotFeed()}) is hydrated ANONYMOUSLY,
+     * because it is cached for every reader. Read through it, a signed-in
+     * viewer got viewer_reaction null, no vouch state, can_report and
+     * can_delete false, is_followed_by_viewer false, and group-gated
+     * counts zeroed even inside their own groups.
+     *
+     * ⭐ This is the tag feed without the hashtag: the same visibility
+     * gates and the same hydration, so the invariants in
+     * {@see getTagFeed()}'s docblock hold here word for word, including
+     * the one deliberate widening: the VIEWER'S OWN restricted posts
+     * (F-269) and level-30 posts by authors who friended them. No
+     * STRANGER's restricted post can appear here and not on /feed/hot.
+     *
+     * ⚠ It never reads or writes the shared anonymous cache. Anonymous
+     * (`$viewerId <= 0`) is sent to the cached getHotFeed() instead,
+     * which answers it with identical visibility for the price of a
+     * cache read.
+     *
+     * ⚠ Uncached on purpose: the payload is one viewer's. Callers ask for
+     * the few items they show (cold start asks for two), so the cost is
+     * one small candidate read plus hydration of those items.
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    public function getHotFeedForViewer(int $viewerId, int $limit = self::HOT_WARM_LIMIT): array
+    {
+        if ($viewerId <= 0) {
+            return $this->getHotFeed(null, $limit, 0);
+        }
+
+        return $this->personalizedHotFeed($viewerId, null, null, $limit);
+    }
+
+    /**
+     * The hot feed's visibility, read and hydrated for one viewer: the
+     * body shared by {@see getTagFeed()} (a hashtag) and
+     * {@see getHotFeedForViewer()} (no hashtag). `$hashtag` is forwarded
+     * to bcc-core as a pure NARROWING predicate, and null means no
+     * narrowing. Every invariant is stated on getTagFeed().
+     *
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    private function personalizedHotFeed(int $viewerId, ?string $hashtag, ?string $cursor, int $limit): array
+    {
         // Visibility gates — computed IDENTICALLY to getHotFeed (see docblock),
         // which now includes NOT computing a restricted-group list: the
         // `$excludedGroupIds` parameter below is a no-op in bcc-core, so the

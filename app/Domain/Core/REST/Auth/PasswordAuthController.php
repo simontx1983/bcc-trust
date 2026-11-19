@@ -628,8 +628,9 @@ final class PasswordAuthController
             && defined('BCC_2FA_BYPASS_ACCOUNTS')
             && $this->identifierIsBypassAllowed($identifier, $handle)
         ) {
+            // Bearer only, no WordPress auth cookie (see
+            // SessionController::logoutEverywhere).
             wp_set_current_user($userId);
-            wp_set_auth_cookie($userId, true);
 
             $token = JwtToken::encodeNewSession($userId, $handle);
             AuthSupport::recordTrustedLoginNetwork($userId); // F-281: a completed sign-in

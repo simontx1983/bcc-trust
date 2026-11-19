@@ -22,6 +22,7 @@
  *     "show_blogs_on_profile":         bool,
  *     "show_reviews_on_profile":       bool,
  *     "show_disputes_on_profile":      bool,
+ *     "hidden_hall_ids":        int[],
  *     "mentor_opt_in":          bool
  *   }
  *
@@ -97,6 +98,26 @@
  *                             F-341: /reviews and /disputes answer exactly
  *                             as they did. Only the new sections follow the
  *                             documented-empty rule.
+ *   - hidden_hall_ids        *(F-341 PR 3)* → `bcc_hidden_hall_ids`
+ *                             user_meta, a LIST of group ids. Individual
+ *                             Halls the owner has hidden while the Halls
+ *                             SECTION itself stays shown. Absent or empty
+ *                             means nothing is hidden.
+ *                             ⚠ The two controls are INDEPENDENT, and
+ *                             not in the direction a reader expects: with
+ *                             `show_groups_on_profile` OFF, other viewers
+ *                             see ONLY halls (they are kept so the
+ *                             home-Hall chip survives), so the hidden ones
+ *                             are the only choice still doing any work.
+ *                             This list therefore applies in BOTH states.
+ *                             ⚠ HALLS ONLY, by ratified decision. Other
+ *                             group types follow the section switch. The
+ *                             stored ids are plain group ids, so widening
+ *                             is a one-line change — but it is a decision,
+ *                             not a drift, because the field name would
+ *                             then be misleading.
+ *                             ⚠⚠ Over HIDDEN_HALL_IDS_MAX ids is a 422,
+ *                             NEVER a truncation. See the write path.
  *   - mentor_opt_in          → `bcc_mentor_opt_in` user_meta, "1"/"0"
  *                               (Rank Phase 7 §21.4, via
  *                               MentorListingService). Opting in needs NO
@@ -376,6 +397,84 @@ final class MyProfilePrefsEndpoint
             }
         }
 
+        // F-341 PR 3 — hidden_hall_ids. A LIST field, so it can ride
+        // neither the boolean loop above nor the string-valued $meta map.
+        //
+        // ⚠ null and [] are DIFFERENT and must stay so: null means the
+        // field was absent (leave the stored list alone), [] means "hide
+        // nothing" — the only way a member un-hides their last Hall.
+        // Collapsing them would make clearing the list impossible, which
+        // is the un-fixable direction for a privacy control.
+        $hiddenHalls = null;
+        $rawHalls    = $request->get_param('hidden_hall_ids');
+        if ($rawHalls !== null) {
+            if (!is_array($rawHalls) || !array_is_list($rawHalls)) {
+                return self::badHallIds('`hidden_hall_ids` must be an array of group ids.');
+            }
+
+            // ⚠⚠ REFUSED, NEVER TRUNCATED, and that is the whole point
+            // of the cap living here. This is a DENY list: dropping the
+            // entries past the ceiling would silently UN-HIDE exactly the
+            // Halls the member asked to hide, and the member would be told
+            // it saved.
+            //
+            // ⛔ Do not copy either neighbouring pattern:
+            //   · AuthSupport::recordTrustedLoginNetwork() array_slice()s
+            //     its list — safe there because it is SERVER-generated and
+            //     dropping a trusted network only asks for a second factor
+            //     again, the fail-closed direction;
+            //   · the PER_PAGE_MAX family CLAMPS instead of refusing — safe
+            //     because they bound a READ, where a smaller answer is a
+            //     smaller answer and nothing is lost.
+            // Both are the opposite shape to this one.
+            if (count($rawHalls) > ProfileAccess::HIDDEN_HALL_IDS_MAX) {
+                return self::badHallIds(sprintf(
+                    '`hidden_hall_ids` accepts at most %d ids.',
+                    ProfileAccess::HIDDEN_HALL_IDS_MAX
+                ));
+            }
+
+            // ⚠ The WRITE path REFUSES a malformed id; the READER
+            // ({@see ProfileAccess::hiddenHallIds()}) SKIPS one. The
+            // asymmetry is deliberate: a client sending junk has a bug and
+            // should hear about it, while a corrupt stored row must not
+            // blank a member's profile. Silently dropping an id here would
+            // also make the GET that follows disagree with what was sent.
+            $seen = [];
+            foreach ($rawHalls as $id) {
+                if (!is_int($id) && !(is_string($id) && $id !== '' && ctype_digit($id))) {
+                    return self::badHallIds(
+                        '`hidden_hall_ids` must contain positive integer group ids.'
+                    );
+                }
+                // The (int) cast is DEFENCE, not behaviour: PHP coerces a
+                // numeric-string array key to int by itself, so storing via
+                // $seen[] normalises '12' to 12 whether or not this casts.
+                // Mutating it away changes no answer and PHPStan still infers
+                // list<int> through it, so no test and no type check can hold
+                // it. Kept because the list is a PUBLIC wire field and the
+                // guarantee should not rest on a language coercion.
+                $value = (int) $id;
+                if ($value <= 0) {
+                    return self::badHallIds(
+                        '`hidden_hall_ids` must contain positive integer group ids.'
+                    );
+                }
+                $seen[$value] = true;
+            }
+            // Deduped before storage so a GET round-trips exactly what was
+            // stored. A settings form GETs and then PATCHes; a list that
+            // came back shorter than it went in would look like data loss.
+            //
+            // ⚠ NOT checked against the member's actual Hall membership,
+            // deliberately. This is a deny list, so an id the member does
+            // not belong to matches nothing and discloses nothing. A
+            // membership check would cost a query on every PATCH and would
+            // break hiding a Hall before joining it, or re-hiding one
+            // after a leave and rejoin.
+            $hiddenHalls = array_keys($seen);
+        }
+
         // mentor_opt_in → bcc_mentor_opt_in (Rank Phase 7 §21.4). No
         // eligibility check on the WRITE: listing composes opt-in AND the
         // live capability at read time.
@@ -385,7 +484,12 @@ final class MyProfilePrefsEndpoint
             return self::notABoolean('mentor_opt_in');
         }
 
-        if ($profileAcc === null && $meta === [] && $privacyFlags === [] && $mentorValue === null) {
+        if ($profileAcc === null
+            && $meta === []
+            && $privacyFlags === []
+            && $hiddenHalls === null
+            && $mentorValue === null
+        ) {
             return ApiResponse::error(
                 'bcc_invalid_request',
                 'No profile preferences provided.',
@@ -444,6 +548,20 @@ final class MyProfilePrefsEndpoint
             }
             $saved[] = $field;
         }
+        if ($hiddenHalls !== null) {
+            // Stored as an array of ints. ⚠ The whole validated list is
+            // written; nothing here trims it. The ceiling was enforced
+            // above, by refusing.
+            $ok = self::checkedWrite(static fn () => update_user_meta(
+                $userId,
+                ProfileAccess::META_HIDDEN_HALL_IDS,
+                $hiddenHalls
+            ));
+            if (!$ok) {
+                return self::writeFailed($userId, 'hidden_hall_ids', $saved);
+            }
+            $saved[] = 'hidden_hall_ids';
+        }
         if ($mentorValue !== null) {
             $ok = self::checkedWrite(static function () use ($userId, $mentorValue): void {
                 \BCC\Trust\Core\Plugin::instance()->mentorListingService()->setOptIn($userId, $mentorValue);
@@ -481,6 +599,13 @@ final class MyProfilePrefsEndpoint
      *   hide_from_search: bool,
      *   default_post_audience: string,
      *   show_groups_on_profile: bool,
+     *   show_about_on_profile: bool,
+     *   show_verifications_on_profile: bool,
+     *   show_operator_on_profile: bool,
+     *   show_blogs_on_profile: bool,
+     *   show_reviews_on_profile: bool,
+     *   show_disputes_on_profile: bool,
+     *   hidden_hall_ids: list<int>,
      *   mentor_opt_in: bool,
      *   mentor_listed: bool,
      *   mentor_eligibility_reason: string|null,
@@ -537,6 +662,10 @@ final class MyProfilePrefsEndpoint
             'show_blogs_on_profile'         => self::flag($userId, 'bcc_show_blogs_on_profile', true),
             'show_reviews_on_profile'       => !PrivacySettings::flag($userId, 'reviews_hidden'),
             'show_disputes_on_profile'      => !PrivacySettings::flag($userId, 'disputes_hidden'),
+            // F-341 PR 3 — read through the SAME reader the gate uses, so
+            // a client can never be shown a list that differs from the one
+            // actually being enforced on its profile.
+            'hidden_hall_ids'               => ProfileAccess::hiddenHallIds($userId),
             'mentor_opt_in'             => $mentor['opted_in'],
             'mentor_listed'             => $mentor['listed'],
             'mentor_eligibility_reason' => $mentor['reason'],
@@ -624,6 +753,15 @@ final class MyProfilePrefsEndpoint
             500,
             ['saved' => $saved, 'failed' => $field]
         );
+    }
+
+    /**
+     * One 422 shape for every `hidden_hall_ids` rejection, so a refusal
+     * cannot drift between the four places that can raise it.
+     */
+    private static function badHallIds(string $message): WP_REST_Response
+    {
+        return ApiResponse::error('bcc_invalid_request', $message, 422);
     }
 
     private static function peepsoUnavailable(): WP_REST_Response

@@ -347,6 +347,28 @@ control 29 "The sweep uses (and writes) join continuation" "$REVOKE" \
   "testTheSweepNeverWritesJoinContinuation|testTheSweepIgnoresAStoredJoinContinuation" \
   -
 
+# ── F-278 review INFO 1: an ERC-1155 provider zero needs a second one ───
+
+control 30 "A first ERC-1155 provider zero removes at once" "$REVOKE" \
+  "s = s.replace('        if (!\$verdict->mayLag || (\$first !== null && \$now - \$first >= self::SECOND_ZERO_AFTER)) {', '        if (true) {')" \
+  "testAFirstProviderZeroKeepsTheMemberAndBooksTheSecondLook|testTheRecheckWaitsForASecondZeroToo|testTheSweepRemovesAnErc1155SellerAndKeepsPreLinkHolders" \
+  -
+
+control 31 "The second zero needs no gap after the first" "$REVOKE" \
+  "s = s.replace('\$now - \$first >= self::SECOND_ZERO_AFTER', '\$now - \$first >= 0')" \
+  "testASecondZeroTooSoonKeepsTheMemberAndDoesNotMoveTheFirst" \
+  -
+
+control 32 "A holding seen between the zeros does not start over" "$REVOKE" \
+  "s = s.replace('        if (!\$verdict->isEligible() && (int) \$verdict->bestKnownBalance <= 0) {', '        if (true) {')" \
+  "testAHoldingBetweenTheZerosStartsOver|testANonZeroBelowAHigherMinimumAlsoStartsOver|testTheRecheckClearsAFirstZeroOnAHolding" \
+  -
+
+control 33 "The ERC-1155 provider zero is not marked as lagging" "$HOLDINGS" \
+  "s = s.replace('?->fromLaggingSource()', '')" \
+  "testAnErc1155SellerTheProviderShowsHoldingNoneIsIneligible|testAFirstProviderZeroKeepsTheMemberAndBooksTheSecondLook" \
+  -
+
 echo "──────────────────────────────────────────────────────────────"
 for line in "${REPORT[@]}"; do echo "$line"; done
 echo "──────────────────────────────────────────────────────────────"

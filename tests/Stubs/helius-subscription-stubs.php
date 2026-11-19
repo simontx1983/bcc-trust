@@ -66,11 +66,26 @@ namespace {
 
         public static bool $throwInsideLock = false;
 
+        /** @var list<array{args: array<string, mixed>, options: array<string, mixed>}> F-314: every webhook GET's args + ApiRetry options */
+        public static array $getCallArgs = [];
+
+        /** @var array<string, mixed> F-314: transients, by key */
+        public static array $transients = [];
+
+        /** @var list<array{0: string, 1: int}> F-314: every set_transient key + ttl */
+        public static array $transientSets = [];
+
         /** Calls that bypassed ApiRetry/SafeHttpClient via a bare wp_remote_request(). */
         public static int $rawRequests = 0;
 
         /** @var list<array<string, mixed>> the args of every ApiRetry::post call */
         public static array $postArgs = [];
+
+        /** @var list<int> F-314: $lockHeld at each read of the stored webhook id */
+        public static array $idReadLocks = [];
+
+        /** @var list<int> F-314: $lockHeld at each create-webhook POST */
+        public static array $createLocks = [];
 
         /** @var list<array{code: int, body: string}> F-314: create-webhook POST responses */
         public static array $createResponses = [];
@@ -97,6 +112,8 @@ namespace {
             self::$putBodies       = [];
             self::$rawRequests   = 0;
             self::$postArgs      = [];
+            self::$idReadLocks   = [];
+            self::$createLocks   = [];
             $GLOBALS['wpdb']     = (object) ['prefix' => 'wpsa6_'];
             self::$options       = ['bcc_helius_shared_webhook_id' => 'wh-1'];
             self::$gets          = [];
@@ -112,6 +129,9 @@ namespace {
             self::$countReadFails = false;
             self::$marked        = [];
             self::$throwInsideLock = false;
+            self::$getCallArgs   = [];
+            self::$transients    = [];
+            self::$transientSets = [];
         }
 
         /** @param mixed $addresses */
@@ -218,6 +238,7 @@ namespace BCC\Trust\Onchain\Support {
                 if (\HeliusWorld::$throwInsideLock) {
                     throw new \RuntimeException('boom inside the critical section');
                 }
+                \HeliusWorld::$getCallArgs[] = ['args' => $args, 'options' => $options];
                 return \HeliusWorld::$gets === [] ? new \WP_Error('down', 'no response queued') : array_shift(\HeliusWorld::$gets);
             }
 
@@ -242,6 +263,7 @@ namespace BCC\Trust\Onchain\Support {
             {
                 \HeliusWorld::$postArgs[] = $args;
                 if (($args['method'] ?? 'POST') !== 'PUT') {
+                    \HeliusWorld::$createLocks[] = \HeliusWorld::$lockHeld;
                     // F-314: the create-webhook POST, when a test queued an answer.
                     if (\HeliusWorld::$createResponses !== []) {
                         return array_shift(\HeliusWorld::$createResponses);
@@ -309,6 +331,9 @@ namespace BCC\Trust\Onchain\Services {
     if (!function_exists(__NAMESPACE__ . '\\get_option')) {
         function get_option(string $name, mixed $default = false): mixed
         {
+            if ($name === 'bcc_helius_shared_webhook_id') {
+                \HeliusWorld::$idReadLocks[] = \HeliusWorld::$lockHeld;
+            }
             return array_key_exists($name, \HeliusWorld::$options) ? \HeliusWorld::$options[$name] : $default;
         }
     }
@@ -354,6 +379,30 @@ namespace BCC\Trust\Onchain\Services {
         function wp_json_encode(mixed $data): string|false
         {
             return json_encode($data);
+        }
+    }
+
+    if (!function_exists(__NAMESPACE__ . '\\get_transient')) {
+        function get_transient(string $key): mixed
+        {
+            return array_key_exists($key, \HeliusWorld::$transients) ? \HeliusWorld::$transients[$key] : false;
+        }
+    }
+
+    if (!function_exists(__NAMESPACE__ . '\\set_transient')) {
+        function set_transient(string $key, mixed $value, int $ttl = 0): bool
+        {
+            \HeliusWorld::$transients[$key] = $value;
+            \HeliusWorld::$transientSets[] = [$key, $ttl];
+            return true;
+        }
+    }
+
+    if (!function_exists(__NAMESPACE__ . '\\delete_transient')) {
+        function delete_transient(string $key): bool
+        {
+            unset(\HeliusWorld::$transients[$key]);
+            return true;
         }
     }
 

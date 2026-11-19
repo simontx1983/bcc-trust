@@ -185,6 +185,7 @@ final class WalletSignupPendingEmailTest extends TestCase
         self::assertSame('0', self::flag(self::NEW));
         self::assertCount(1, self::mailTo(self::TYPED), 'the code and link go to the typed address');
         self::assertCount(1, $GLOBALS['__bcc_ph']['mail']);
+        self::assertSame([], $GLOBALS['__bcc_ph']['auth_cookies'] ?? [], 'a bearer token only: no WordPress auth cookie (H3)');
     }
 
     public function testSignupWithoutAnAddressHoldsNothingPendingAndMailsNothing(): void

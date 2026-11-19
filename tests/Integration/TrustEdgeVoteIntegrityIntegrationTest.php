@@ -72,6 +72,7 @@ final class TrustEdgeVoteIntegrityIntegrationTest extends TestCase
                     act_module_id VARCHAR(20) NOT NULL DEFAULT '0',
                     act_external_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
                     act_access INT NOT NULL DEFAULT 10,
+                    act_repost_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
                     PRIMARY KEY (act_id)
                 ) DEFAULT CHARSET=utf8mb4"
             ), $wpdb->last_error);
