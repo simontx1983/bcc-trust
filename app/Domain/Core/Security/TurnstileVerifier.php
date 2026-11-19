@@ -6,6 +6,7 @@ namespace BCC\Trust\Core\Security;
 
 use BCC\Core\Http\SafeHttpClient;
 use BCC\Core\Log\Logger;
+use BCC\Trust\Core\Support\FrontendOrigin;
 
 /**
  * Cloudflare Turnstile, checked server-side — the captcha behind the
@@ -18,7 +19,9 @@ use BCC\Core\Log\Logger;
  * behaves exactly as it did before the step-up existed.
  *
  * verify() never throws and answers one of three verdicts:
- *   - PASS        — Turnstile accepted the token;
+ *   - PASS        — Turnstile accepted the token, and it was solved on our
+ *                   frontend's /auth/login widget (action `login`, hostname
+ *                   ours; see solvedHere());
  *   - FAIL        — the token is missing, malformed, invalid, expired or
  *                   already used (and anything Turnstile rejects for a reason
  *                   we can't attribute to ourselves: unknown error codes fail
@@ -35,6 +38,12 @@ final class TurnstileVerifier
     public const PASS        = 'pass';
     public const FAIL        = 'fail';
     public const UNAVAILABLE = 'unavailable';
+
+    /**
+     * The `action` the /auth/login widget must render with
+     * (data-action="login"). A token solved for any other action is refused.
+     */
+    public const ACTION = 'login';
 
     private const SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 
@@ -111,7 +120,7 @@ final class TurnstileVerifier
             return self::unavailable('malformed reply');
         }
         if ($reply['success'] === true) {
-            return self::PASS;
+            return self::solvedHere($reply) ? self::PASS : self::FAIL;
         }
 
         $codes = is_array($reply['error-codes'] ?? null)
@@ -122,6 +131,51 @@ final class TurnstileVerifier
             return self::unavailable(implode(',', $ours));
         }
         return self::FAIL;
+    }
+
+    /**
+     * A valid token only counts if OUR /auth/login widget produced it.
+     * Turnstile reports where it was solved (`hostname`) and for which widget
+     * (`action`, the widget's data-action). This is defence in depth behind
+     * the Cloudflare dashboard's hostname list (security review of #715):
+     *   - a token solved on another site that renders our public site key
+     *     (a key can be allowed on several domains) is refused;
+     *   - so is a token from one of our other widgets, should we add any.
+     *
+     * Our sites: the hosts of BCC_FRONTEND_ORIGIN's exact entries (any
+     * scheme or port, so local dev works), plus the one Vercel preview shape
+     * FrontendOrigin accepts. A refusal is a FAIL, never UNAVAILABLE: a token
+     * from elsewhere must not fail open. It is logged at warning, since it
+     * means someone is shopping tokens or the widget is misconfigured.
+     *
+     * @param array<mixed> $reply
+     */
+    private static function solvedHere(array $reply): bool
+    {
+        $action   = $reply['action'] ?? null;
+        $hostname = $reply['hostname'] ?? null;
+        $hostname = is_string($hostname) ? strtolower(trim($hostname)) : '';
+
+        if ($action === self::ACTION && $hostname !== '' && self::isOurHost($hostname)) {
+            return true;
+        }
+        Logger::warning('[bcc-trust] Turnstile token not from our /auth/login widget; refused', [
+            'action'   => is_string($action) ? substr($action, 0, 64) : gettype($action),
+            'hostname' => substr($hostname, 0, 255),
+        ]);
+        return false;
+    }
+
+    private static function isOurHost(string $hostname): bool
+    {
+        foreach (FrontendOrigin::exactOrigins() as $origin) {
+            $host = parse_url($origin, PHP_URL_HOST);
+            if (is_string($host) && strtolower($host) === $hostname) {
+                return true;
+            }
+        }
+        // A Vercel preview: FrontendOrigin's one accepted regex shape.
+        return FrontendOrigin::match('https://' . $hostname) !== null;
     }
 
     /** @return self::UNAVAILABLE */

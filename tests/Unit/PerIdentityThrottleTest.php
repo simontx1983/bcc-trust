@@ -7,6 +7,7 @@ namespace BCC\Trust\Core\Tests\Unit;
 use BCC\Trust\Core\REST\Auth\AuthSupport;
 use BCC\Trust\Core\REST\Auth\OAuthController;
 use BCC\Trust\Core\REST\Auth\WalletAuthController;
+use BCC\Trust\Core\Services\HandleService;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -55,8 +56,9 @@ final class PerIdentityThrottleTest extends TestCase
             'throttle_counting' => true,
         ];
         $GLOBALS['__bcc_wl'] = ['nonces' => []];
-        // A verified wallet signature goes on to the wallet lookup: no account
-        // is linked, so it ends 404 bcc_wallet_not_linked.
+        // A verified wallet signature goes on to the wallet lookup. By default
+        // no account is linked, so it ends 404 bcc_wallet_not_linked;
+        // linkedAccount() makes the lookup find one.
         $GLOBALS['wpdb'] = new class {
             public string $prefix = 'wp_';
             /** @param mixed ...$args */
@@ -64,10 +66,11 @@ final class PerIdentityThrottleTest extends TestCase
             {
                 return $sql;
             }
-            /** @return null */
+            /** @return string|null */
             public function get_var(string $sql)
             {
-                return null;
+                $id = $GLOBALS['__bcc_wl']['user_id'] ?? null;
+                return $id === null ? null : (string) $id;
             }
             /** @param array<int, mixed> $args */
             public function __call(string $name, array $args): never
@@ -163,6 +166,17 @@ final class PerIdentityThrottleTest extends TestCase
         return (new WalletAuthController())->walletLogin($req)->get_status();
     }
 
+    /**
+     * Every wallet lookup finds account 42 (handle `alice`), so a verified
+     * signature completes the sign-in. Only COMPLETED sign-ins count against
+     * the buckets (security review of #708): a 404 gives its slots back.
+     */
+    private static function linkedAccount(): void
+    {
+        $GLOBALS['__bcc_wl']['user_id'] = 42;
+        $GLOBALS['__bcc_ph']['meta'][42][HandleService::META_HANDLE] = 'alice';
+    }
+
     private static function walletKey(string $address): string
     {
         return 'wallet_login:' . substr(hash('sha256', strtolower($address)), 0, 32);
@@ -170,8 +184,9 @@ final class PerIdentityThrottleTest extends TestCase
 
     public function testWalletLoginIsThrottledPerWalletNotShared(): void
     {
+        self::linkedAccount();
         for ($i = 1; $i <= AuthSupport::WALLET_LOGIN_RATE_LIMIT; $i++) {
-            self::assertSame(404, self::walletLogin('cosmos1walleta', validSig: true), "verified sign-in #$i (no account linked → 404)");
+            self::assertSame(200, self::walletLogin('cosmos1walleta', validSig: true), "completed sign-in #$i");
         }
 
         self::assertSame(429, self::walletLogin('cosmos1walleta'), "wallet A's 6th within the minute is limited");
@@ -191,8 +206,9 @@ final class PerIdentityThrottleTest extends TestCase
 
     public function testCaseVariantsOfAnAddressShareABucket(): void
     {
+        self::linkedAccount();
         for ($i = 1; $i <= AuthSupport::WALLET_LOGIN_RATE_LIMIT; $i++) {
-            self::walletLogin('cosmos1CaseWallet', validSig: true);
+            self::assertSame(200, self::walletLogin('cosmos1CaseWallet', validSig: true), "completed sign-in #$i");
         }
 
         self::assertSame(429, self::walletLogin('COSMOS1CASEWALLET'), 'fail-closed: no extra budget from case variants');

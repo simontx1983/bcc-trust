@@ -410,7 +410,7 @@ final class PushDispatcher
                 Logger::warning('[PushDispatcher] subscription build failed', [
                     'event_type' => $eventType,
                     'sub_id'     => (int) $row->id,
-                    'error'      => $e->getMessage(),
+                    'error'      => self::withoutEndpoint($e->getMessage(), $endpoint),
                 ]);
                 PushMetrics::recordFailure($eventType);
                 continue;
@@ -463,8 +463,9 @@ final class PushDispatcher
                 PushMetrics::recordFailure($eventType);
                 Logger::warning('[PushDispatcher] send failed', [
                     'event_type' => $eventType,
-                    'endpoint'   => $endpoint,
-                    'reason'     => $report->getReason(),
+                    'sub_id'     => $rowId,
+                ] + self::endpointForLog($endpoint) + [
+                    'reason'     => self::withoutEndpoint($report->getReason(), $endpoint),
                 ]);
             }
         } catch (\Throwable $e) {
@@ -475,9 +476,38 @@ final class PushDispatcher
             Logger::error('[PushDispatcher] flush exception', [
                 'event_type' => $eventType,
                 'sub_id'     => $rowId,
-                'error'      => $e->getMessage(),
+                'error'      => self::withoutEndpoint($e->getMessage(), $sub->getEndpoint()),
             ]);
         }
+    }
+
+    /**
+     * What a log line may say about a push endpoint.
+     *
+     * ⚠ Never the URL itself. A Web Push endpoint is a per-device address:
+     * with the subscription keys it reaches that one browser, and on its own
+     * it still identifies the device. So the logs get the push service's
+     * host, and the first 12 hex of the SHA-256 the subscriptions table
+     * stores in `endpoint_hash`, which is enough to find the row.
+     *
+     * @return array{endpoint_host: string, endpoint_fp: string}
+     */
+    private static function endpointForLog(string $endpoint): array
+    {
+        return [
+            'endpoint_host' => strtolower((string) wp_parse_url($endpoint, PHP_URL_HOST)),
+            'endpoint_fp'   => substr(PushSubscriptionRepository::hashEndpoint($endpoint), 0, 12),
+        ];
+    }
+
+    /**
+     * A library message with every copy of the endpoint taken out. Guzzle's
+     * errors quote the request line ("POST https://…/send/<token> resulted
+     * in …"), and WebPush passes them on as the report's reason.
+     */
+    private static function withoutEndpoint(string $message, string $endpoint): string
+    {
+        return $endpoint === '' ? $message : str_replace($endpoint, '[endpoint]', $message);
     }
 
     /**

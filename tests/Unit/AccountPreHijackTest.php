@@ -237,6 +237,7 @@ final class AccountPreHijackTest extends TestCase
 
         self::assertSame(JwtToken::ERR_REVOKED, self::decodeError($creatorSession), 'the pre-verification session is dead');
         self::assertNull(self::decodeError((string) ($data['data']['token'] ?? '')), "the verifier's fresh token works");
+        self::assertSame([], $GLOBALS['__bcc_ph']['auth_cookies'] ?? [], 'a bearer token only: no WordPress auth cookie (H3)');
     }
 
     /** @return array<string, array{0: ?string, 1: bool}> */

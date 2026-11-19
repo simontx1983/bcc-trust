@@ -11,6 +11,7 @@
 
 namespace BCC\Trust\Core\Repositories;
 
+use BCC\Core\Repositories\PeepSoPagePrivacy;
 use BCC\Trust\Core\Database\TableRegistry;
 
 if (!defined('ABSPATH')) {
@@ -212,7 +213,9 @@ final class ReadModelHealthRepository
     /**
      * Get trending pages ordered by trust_score descending.
      *
-     * Only returns published peepso-page posts.
+     * Only returns published peepso-page posts, never a SECRET one (the
+     * shared bcc-core rule, which also hides a page carrying two privacy
+     * rows when either says secret).
      *
      * @param int $limit Max pages to return.
      * @return object[]
@@ -221,16 +224,15 @@ final class ReadModelHealthRepository
     {
         global $wpdb;
 
+        $notSecret = PeepSoPagePrivacy::notSecretSql('p.ID');
+
         return $wpdb->get_results($wpdb->prepare(
             "SELECT rm.page_id AS ID, rm.trust_score AS total_score, rm.reputation_tier
              FROM {$this->rmTable} rm
              INNER JOIN {$wpdb->posts} p ON p.ID = rm.page_id
                                           AND p.post_type   = 'peepso-page'
                                           AND p.post_status = 'publish'
-             LEFT JOIN {$wpdb->postmeta} pm_priv ON pm_priv.post_id = p.ID
-                                                 AND pm_priv.meta_key = 'peepso_page_privacy'
-             WHERE (pm_priv.meta_value IS NULL
-                    OR CAST(pm_priv.meta_value AS UNSIGNED) <> 2)
+             WHERE {$notSecret}
              ORDER BY rm.trust_score DESC, rm.page_id ASC
              LIMIT %d",
             $limit
