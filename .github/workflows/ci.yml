@@ -61,12 +61,13 @@ jobs:
       - name: Composer classmap parity (committed vendor, pre-install)
         run: php scripts/composer-classmap-guard.php
 
-      # ⚠ `install`, NOT `update` — changed in #191, and the distinction is the
-      # whole point of that issue. composer.lock is now COMMITTED, so `install`
-      # reproduces exactly the set the deploy ships. `update` re-resolved on
-      # every run, which is how CI came to be testing guzzle 7.16.1 and
-      # brick/math 1.0.0 while production ran 7.10.0 and 0.17.1 — drift that
-      # nothing reported, because neither side ever looked at the other.
+      # ⚠ `install`, NOT `update` — changed in #379 (issue #191, still open),
+      # and the distinction is the whole point of that issue. composer.lock is
+      # now COMMITTED, so `install` reproduces exactly the set the deploy ships.
+      # `update` re-resolved on every run, which is how CI came to be testing
+      # guzzle 7.16.1 and brick/math 1.0.0 while production ran 7.10.0 and
+      # 0.17.1 — drift that nothing reported, because neither side ever
+      # looked at the other.
       #
       # If this step ever fails with "lock file is not up to date", the fix is
       # to run `composer update` locally and commit the lock as its own change.
@@ -286,7 +287,7 @@ jobs:
           extensions: gmp, mbstring, mysqli
           tools: composer:v2
           coverage: none
-      # `install`, not `update` — see the note in the php job above (#191).
+      # `install`, not `update` — see the note in the php job above (#379).
       - name: Install dependencies
         run: composer install --no-interaction --no-progress --prefer-dist
       # F-96: --fail-on-skipped, in CI only. A fresh CI database trips none of
@@ -457,7 +458,7 @@ jobs:
           extensions: gmp, mbstring, mysqli
           tools: composer:v2
           coverage: none
-      # `install`, not `update` — see the note in the php job above (#191).
+      # `install`, not `update` — see the note in the php job above (#379).
       - name: Install dependencies
         run: composer install --no-interaction --no-progress --prefer-dist
       - name: Integration tests — MariaDB compatibility group
