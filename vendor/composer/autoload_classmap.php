@@ -178,6 +178,7 @@ return array(
     'BCC\\Trust\\Core\\Repositories\\StokeRepository' => $baseDir . '/app/Domain/Core/Repositories/StokeRepository.php',
     'BCC\\Trust\\Core\\Repositories\\SuspensionRepository' => $baseDir . '/app/Domain/Core/Repositories/SuspensionRepository.php',
     'BCC\\Trust\\Core\\Repositories\\TargetDivergenceStateRepository' => $baseDir . '/app/Domain/Core/Repositories/TargetDivergenceStateRepository.php',
+    'BCC\\Trust\\Core\\Repositories\\TokenStateRepository' => $baseDir . '/app/Domain/Core/Repositories/TokenStateRepository.php',
     'BCC\\Trust\\Core\\Repositories\\UserInfoRepository' => $baseDir . '/app/Domain/Core/Repositories/UserInfoRepository.php',
     'BCC\\Trust\\Core\\Repositories\\UserMiniRepository' => $baseDir . '/app/Domain/Core/Repositories/UserMiniRepository.php',
     'BCC\\Trust\\Core\\Repositories\\UserSyncRepository' => $baseDir . '/app/Domain/Core/Repositories/UserSyncRepository.php',
