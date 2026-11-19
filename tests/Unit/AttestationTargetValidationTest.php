@@ -6,6 +6,7 @@ namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Core\Repositories\AttestationRepository;
 use BCC\Trust\Core\Repositories\ReputationRepository;
+use BCC\Trust\Core\Repositories\UserInfoRepository;
 use BCC\Trust\Core\Services\AttestationException;
 use BCC\Trust\Core\Services\AttestationService;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -75,18 +76,37 @@ final class AttestationTargetValidationTest extends TestCase
         ];
     }
 
-    private static function service(): AttestationService
+    /**
+     * @param string $tier the attestor's tier unless AttestTargetWorld::$tier
+     *                     overrides it. A cast's checks default to 'caution',
+     *                     so its good-standing gate is the "passed the target
+     *                     checks" signal; a reaffirm's default to 'neutral', so
+     *                     the busy lock is.
+     */
+    private static function service(string $tier = 'caution'): AttestationService
     {
         $svc = (new \ReflectionClass(AttestationService::class))->newInstanceWithoutConstructor();
         $rep = new class extends ReputationRepository {
+            public string $tier = 'caution';
+
             public function __construct() {}
 
             public function getTier(int $userId): string
             {
-                return 'caution';
+                return $this->tier;
             }
         };
+        $rep->tier = \AttestTargetWorld::$tier ?? $tier;
         (new \ReflectionProperty(AttestationService::class, 'reputationRepo'))->setValue($svc, $rep);
+        $info = new class extends UserInfoRepository {
+            public function __construct() {}
+
+            public function getByUserId(int $userId): ?object
+            {
+                return (object) ['user_id' => $userId, 'fraud_score' => \AttestTargetWorld::$fraudScore];
+            }
+        };
+        (new \ReflectionProperty(AttestationService::class, 'userInfoRepo'))->setValue($svc, $info);
         // The real repository; its one read goes to the world's $wpdb.
         $repo = (new \ReflectionClass(AttestationRepository::class))->newInstanceWithoutConstructor();
         (new \ReflectionProperty(AttestationService::class, 'repo'))->setValue($svc, $repo);
@@ -95,18 +115,18 @@ final class AttestationTargetValidationTest extends TestCase
     }
 
     /** @return array{0: string, 1: int, 2: string} code, status, message */
-    private static function reaffirmOutcome(string $targetKind, int $targetId): array
+    private static function reaffirmOutcome(string $targetKind, int $targetId, string $kind = 'vouch'): array
     {
         \AttestTargetWorld::$attestation = (object) [
             'id'               => 1,
             'attestor_user_id' => self::ATTESTOR,
             'target_kind'      => $targetKind,
             'target_id'        => $targetId,
-            'kind'             => 'vouch',
+            'kind'             => $kind,
             'revoked_at'       => null,
         ];
         try {
-            self::service()->reaffirm(self::ATTESTOR, 1);
+            self::service('neutral')->reaffirm(self::ATTESTOR, 1);
         } catch (AttestationException $e) {
             return [$e->errorCode, $e->status, $e->getMessage()];
         }
@@ -296,5 +316,104 @@ final class AttestationTargetValidationTest extends TestCase
         self::assertSame(AttestationException::CODE_UNAVAILABLE, $code);
         self::assertSame(503, $status);
         self::assertSame(0, \AttestTargetWorld::$lockAttempts);
+    }
+
+    // ── reaffirm owes the cast's attestor and self rules too ────────────
+
+    /**
+     * A reaffirm refused with exactly what a cast answers, before the lock.
+     *
+     * @param array{0: string, 1: int, 2: string} $refusal code, status, message
+     */
+    private static function reaffirmAnsweredAsACast(array $refusal, string $targetKind, int $targetId): void
+    {
+        self::assertSame($refusal, self::outcome($targetKind, $targetId), 'precondition: the cast refuses it so');
+        $before = \AttestTargetWorld::$lockAttempts;
+        self::assertSame($refusal, self::reaffirmOutcome($targetKind, $targetId));
+        self::assertSame($before, \AttestTargetWorld::$lockAttempts, 'refused before the lock, so nothing is renewed');
+    }
+
+    public function testASuspendedAttestorCannotReaffirm(): void
+    {
+        \AttestTargetWorld::$suspended = [self::ATTESTOR];
+
+        self::reaffirmAnsweredAsACast([AttestationException::CODE_INELIGIBLE, 403, 'Your account is suspended.'], 'user_profile', self::MEMBER);
+    }
+
+    /** Participation paths opt out of the admin bypass, a renewal included. */
+    public function testASuspendedSiteAdminCannotReaffirmEither(): void
+    {
+        \AttestTargetWorld::$suspended = [self::ATTESTOR];
+        \AttestTargetWorld::$admin     = true;
+
+        self::assertSame(
+            [AttestationException::CODE_INELIGIBLE, 403, 'Your account is suspended.'],
+            self::reaffirmOutcome('user_profile', self::MEMBER)
+        );
+    }
+
+    public function testANewMemberCannotReaffirm(): void
+    {
+        \AttestTargetWorld::$newMembers = [self::ATTESTOR];
+
+        self::reaffirmAnsweredAsACast(
+            [AttestationException::CODE_INELIGIBLE, 403, 'Become an Apprentice to do this — post or comment, then keep it up for a day.'],
+            'user_profile',
+            self::MEMBER
+        );
+    }
+
+    /** As in a cast, the attestor is judged before the target: a gone target still answers the 403. */
+    public function testTheAttestorRuleRunsBeforeTheTargetRules(): void
+    {
+        \AttestTargetWorld::$suspended = [self::ATTESTOR];
+
+        self::reaffirmAnsweredAsACast([AttestationException::CODE_INELIGIBLE, 403, 'Your account is suspended.'], 'user_profile', 999999);
+    }
+
+    /** A member who came to own the page they once vouched for cannot keep renewing a self-vouch. */
+    public function testAVouchOnAPageTheAttestorNowOwnsCannotBeReaffirmed(): void
+    {
+        \AttestTargetWorld::$posts[self::VALIDATOR_PAGE]['author'] = self::ATTESTOR;
+
+        self::reaffirmAnsweredAsACast([AttestationException::CODE_SELF, 422, 'You cannot attest on yourself.'], 'validator_card', self::VALIDATOR_PAGE);
+    }
+
+    public function testAProfileVouchOnOneselfCannotBeReaffirmed(): void
+    {
+        self::reaffirmAnsweredAsACast([AttestationException::CODE_SELF, 422, 'You cannot attest on yourself.'], 'user_profile', self::ATTESTOR);
+    }
+
+    /** Good standing: a sub-Neutral attestor is refused a renewal as a cast is, the hint worded for the row's kind. */
+    public function testASubNeutralAttestorCannotReaffirm(): void
+    {
+        \AttestTargetWorld::$tier = 'caution';
+
+        self::reaffirmAnsweredAsACast([AttestationException::CODE_INELIGIBLE, 403, 'Reach Neutral standing to vouch.'], 'user_profile', self::MEMBER);
+
+        $before = \AttestTargetWorld::$lockAttempts;
+        self::assertSame(
+            [AttestationException::CODE_INELIGIBLE, 403, 'Reach Neutral standing to back operators.'],
+            self::reaffirmOutcome('validator_card', self::VALIDATOR_PAGE, 'stand_behind'),
+            'a backing gets the backing hint'
+        );
+        self::assertSame($before, \AttestTargetWorld::$lockAttempts);
+    }
+
+    /** A HIGH fraud score blocks a renewal as it blocks a cast. */
+    public function testAHighFraudAttestorCannotReaffirm(): void
+    {
+        self::assertFalse(defined('BCC_TRUST_TEST_MODE'), 'precondition: the fraud gate is not bypassed in this world');
+        \AttestTargetWorld::$tier       = 'neutral';
+        \AttestTargetWorld::$fraudScore = (int) BCC_TRUST_FRAUD_HIGH;
+
+        self::reaffirmAnsweredAsACast(
+            [AttestationException::CODE_FRAUD_BLOCKED, 403, 'Your account has been flagged for unusual activity. Attestations are temporarily restricted.'],
+            'user_profile',
+            self::MEMBER
+        );
+
+        \AttestTargetWorld::$fraudScore = (int) BCC_TRUST_FRAUD_HIGH - 1;
+        self::reaffirmPassedTheTargetGate('user_profile', self::MEMBER);
     }
 }

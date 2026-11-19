@@ -479,32 +479,7 @@ final class AttestationService
             );
         }
 
-        // Participation paths opt out of the suspension admin-bypass
-        // (Permissions::is_not_suspended intent, §M / SuspensionGateParity)
-        // — a suspended member, admin included, cannot vouch or back.
-        // Mirrors DisputeVoteService's inline gate.
-        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($attestorUserId, false)) {
-            $hint = 'Your account is suspended.';
-            throw new AttestationException(
-                AttestationException::CODE_INELIGIBLE,
-                $hint,
-                403,
-                ['unlock_hint' => $hint]
-            );
-        }
-
-        // Rank Phase 5 final policy: New Members (no rank_state row)
-        // cannot perform reputation-bearing actions (§5.3). Apprentice
-        // or higher suffices — Journeyman is never required (§20.1).
-        if (\BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($attestorUserId) === null) {
-            $hint = 'Become an Apprentice to do this — post or comment, then keep it up for a day.';
-            throw new AttestationException(
-                AttestationException::CODE_INELIGIBLE,
-                $hint,
-                403,
-                ['unlock_hint' => $hint]
-            );
-        }
+        self::assertAttestorMayAttest($attestorUserId);
 
         if (!in_array($targetKind, AttestationRepository::TARGET_KINDS, true)) {
             throw new AttestationException(
@@ -537,30 +512,9 @@ final class AttestationService
             );
         }
         self::assertTargetAttestable($attestorUserId, $targetKind, $targetId);
-        if ($targetOwnerId === $attestorUserId) {
-            // Structural — §N7 self-target rule. The FE already hides
-            // the button (allowed=false, unlock_hint=null), so reaching
-            // here means a hand-crafted request. 422 with a flat code.
-            throw new AttestationException(
-                AttestationException::CODE_SELF,
-                'You cannot attest on yourself.',
-                422
-            );
-        }
+        self::assertNotSelfTarget($targetOwnerId, $attestorUserId);
 
-        $attestorTier = $this->reputationRepo->getTier($attestorUserId);
-        if (!in_array($attestorTier, UserViewService::GOOD_STANDING_TIERS, true)) {
-            $verb = $kind === 'vouch'
-                ? 'vouch'
-                : 'back operators';
-            $hint = sprintf('Reach Neutral standing to %s.', $verb);
-            throw new AttestationException(
-                AttestationException::CODE_INELIGIBLE,
-                $hint,
-                403,
-                ['unlock_hint' => $hint]
-            );
-        }
+        $this->assertAttestorInGoodStanding($attestorUserId, $kind);
 
         $this->assertFraudClear($attestorUserId);
 
@@ -931,11 +885,20 @@ final class AttestationService
         $kind       = (string) ($row->kind ?? '');
 
         // A reaffirm RENEWS the vouch (decay reset, owner belled), so it owes
-        // the cast's target rules: the target still exists and is still
-        // attestable by this attestor. Otherwise a row cast before those
-        // rules (on a feed post, on a member the attestor can no longer
-        // view, across a later block) could be renewed forever. The same
-        // 404 a cast answers, so a reaffirm reveals no more than a cast.
+        // the cast's rules, in the cast's order and with its answers:
+        //   - the attestor may attest at all (not suspended — unknown
+        //     included — and not a New Member);
+        //   - the target still exists and is still attestable by them.
+        //     Otherwise a row cast before those rules (on a feed post, on a
+        //     member they can no longer view, across a later block) could be
+        //     renewed forever; the same 404 a cast answers;
+        //   - it is not their own: a member who came to own the page they
+        //     once vouched for cannot keep renewing a self-vouch (§N7);
+        //   - the attestor is in good standing (Neutral or better, the hint
+        //     worded for the row's kind) and not fraud-flagged: a sub-Neutral
+        //     or HIGH-fraud member cannot keep renewing old vouches and
+        //     backings either.
+        self::assertAttestorMayAttest($attestorUserId);
         $targetOwnerId = self::resolveTargetOwnerUserId($targetKind, $targetId);
         if ($targetOwnerId <= 0) {
             throw new AttestationException(
@@ -945,6 +908,9 @@ final class AttestationService
             );
         }
         self::assertTargetAttestable($attestorUserId, $targetKind, $targetId);
+        self::assertNotSelfTarget($targetOwnerId, $attestorUserId);
+        $this->assertAttestorInGoodStanding($attestorUserId, $kind);
+        $this->assertFraudClear($attestorUserId);
 
         $attestorLockKey = self::LOCK_PREFIX_ATTESTOR . $attestorUserId;
         if (!AdvisoryLock::acquire($attestorLockKey, self::LOCK_WAIT_SECS)) {
@@ -1897,6 +1863,30 @@ final class AttestationService
     // ──────────────────────────────────────────────────────────────────
 
     /**
+     * Good standing: the attestor's tier must be Neutral or better
+     * (UserViewService::GOOD_STANDING_TIERS). The gate cast() and reaffirm()
+     * share; the hint is worded for the attestation's kind.
+     *
+     * @throws AttestationException
+     */
+    private function assertAttestorInGoodStanding(int $attestorUserId, string $kind): void
+    {
+        $attestorTier = $this->reputationRepo->getTier($attestorUserId);
+        if (!in_array($attestorTier, UserViewService::GOOD_STANDING_TIERS, true)) {
+            $verb = $kind === 'vouch'
+                ? 'vouch'
+                : 'back operators';
+            $hint = sprintf('Reach Neutral standing to %s.', $verb);
+            throw new AttestationException(
+                AttestationException::CODE_INELIGIBLE,
+                $hint,
+                403,
+                ['unlock_hint' => $hint]
+            );
+        }
+    }
+
+    /**
      * Block when the attestor's fraud_score is at or above the HIGH
      * threshold. Mirror of the EndorsementService pre-tx gate (line
      * 147-152) — single fraud entry point per §11 reuse rule.
@@ -1926,6 +1916,63 @@ final class AttestationService
     // ──────────────────────────────────────────────────────────────────
     // Resolution + sanitization (private)
     // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * May this member attest at all? The attestor step cast() and reaffirm()
+     * share, so the two can never disagree.
+     *
+     *   - Participation paths opt out of the suspension admin-bypass
+     *     (Permissions::is_not_suspended intent, §M / SuspensionGateParity):
+     *     a suspended member, admin included, cannot vouch or back — nor
+     *     renew one. Mirrors DisputeVoteService's inline gate. An UNKNOWN
+     *     suspension state refuses here too, where the REST gate may pass.
+     *   - Rank Phase 5 final policy: New Members (no rank_state row) cannot
+     *     perform reputation-bearing actions (§5.3). Apprentice or higher
+     *     suffices — Journeyman is never required (§20.1).
+     *
+     * @throws AttestationException
+     */
+    private static function assertAttestorMayAttest(int $attestorUserId): void
+    {
+        if (!\BCC\Core\Permissions\Permissions::is_not_suspended($attestorUserId, false)) {
+            $hint = 'Your account is suspended.';
+            throw new AttestationException(
+                AttestationException::CODE_INELIGIBLE,
+                $hint,
+                403,
+                ['unlock_hint' => $hint]
+            );
+        }
+
+        if (\BCC\Trust\Core\Plugin::instance()->rankStateRepository()->getForUser($attestorUserId) === null) {
+            $hint = 'Become an Apprentice to do this — post or comment, then keep it up for a day.';
+            throw new AttestationException(
+                AttestationException::CODE_INELIGIBLE,
+                $hint,
+                403,
+                ['unlock_hint' => $hint]
+            );
+        }
+    }
+
+    /**
+     * Structural — §N7 self-target rule. The FE already hides the button
+     * (allowed=false, unlock_hint=null), so reaching here means a
+     * hand-crafted request, or a reaffirm of a vouch on a page the attestor
+     * has since come to own. 422 with a flat code.
+     *
+     * @throws AttestationException
+     */
+    private static function assertNotSelfTarget(int $targetOwnerId, int $attestorUserId): void
+    {
+        if ($targetOwnerId === $attestorUserId) {
+            throw new AttestationException(
+                AttestationException::CODE_SELF,
+                'You cannot attest on yourself.',
+                422
+            );
+        }
+    }
 
     /**
      * May this attestor attest this target at all? Runs after existence
