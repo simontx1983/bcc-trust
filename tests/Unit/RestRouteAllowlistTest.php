@@ -321,49 +321,6 @@ final class RestRouteAllowlistTest extends TestCase
         self::assertRefused(RestRouteAllowlist::refusal('/litespeed/v1/notify_img', 'POST', false, []), 401, 'an empty list');
     }
 
-    // ── Inside /batch/v1 ──────────────────────────────────────────────────
-
-    /**
-     * Core's /batch/v1 loop (class-wp-rest-server.php,
-     * serve_batch_request_v1, 7.0.2), cut down to what touches this
-     * filter's answer: rest_pre_dispatch; the handler when nothing
-     * answered; rest_ensure_response(), which hands a WP_Error back as it
-     * came; then the envelope, which reads get_status(). A bare WP_Error
-     * there is a fatal, and the whole batch a 500.
-     *
-     * @param list<string> $routes
-     */
-    private static function asBatchWould(array $routes): \WP_REST_Response
-    {
-        $responses = [];
-        foreach ($routes as $route) {
-            $result = self::dispatch($route, 'POST') ?? new \WP_REST_Response(['handled' => $route], 200);
-            $responses[] = ['body' => $result->get_data(), 'status' => $result->get_status()];
-        }
-
-        return new \WP_REST_Response(['responses' => $responses], 207);
-    }
-
-    /** @return iterable<string, array{0: int, 1: int}> */
-    public static function batchCallers(): iterable
-    {
-        yield 'a member'   => [42, 403];
-        yield 'signed out' => [0, 401];
-    }
-
-    #[DataProvider('batchCallers')]
-    public function testARefusalInsideABatchKeepsItsOwnStatus(int $user, int $status): void
-    {
-        $GLOBALS['__cug']['user'] = $user;
-
-        $batch = self::asBatchWould(['/wp/v2/posts', '/bcc/v1/posts']);
-
-        self::assertSame(207, $batch->get_status());
-        $responses = $batch->get_data()['responses'];
-        self::assertSame([$status, 200], array_column($responses, 'status'), 'the refusal, then a BCC route');
-        self::assertSame('rest_forbidden', $responses[0]['body']['code']);
-    }
-
     // ── Admins: untouched ─────────────────────────────────────────────────
 
     /** @return iterable<string, array{0: string}> */
@@ -439,6 +396,17 @@ final class RestRouteAllowlistTest extends TestCase
 
         self::assertSame([401, 401], array_column($responses, 'status'));
         self::assertSame(self::refusalBody(401), $responses[1]['body']);
+    }
+
+    public function testASignedOutReadInsideABatchIsRefusedButABccRouteIsNot(): void
+    {
+        // Reads too (the media listing this class closes), each with its own
+        // 401, beside a BCC route that is dispatched as normal.
+        $responses = self::batch([['GET', '/wp/v2/media'], ['HEAD', '/wp/v2/comments'], ['GET', '/bcc/v1/posts']]);
+
+        self::assertSame([401, 401, 200], array_column($responses, 'status'));
+        self::assertSame(self::refusalBody(401), $responses[0]['body']);
+        self::assertSame(['ok' => true], $responses[2]['body'], 'the BCC route reached its handler');
     }
 
     public function testAnAdminsBatchIsDispatchedUntouched(): void
