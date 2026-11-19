@@ -461,6 +461,34 @@ final class WalletSignupPendingEmailTest extends TestCase
         self::assertSame(200, self::verify(['token' => self::tokenFor(self::NEW)])->get_status(), 'the new mail\'s link works at once');
     }
 
+    /**
+     * #748: a holder whose user_email is no longer the wallet placeholder
+     * may not have its stale pending address applied. Its code, mailed to
+     * its real address (its verification target now), still matches by the
+     * pending address here, and completeVerification() must answer the
+     * refusal instead of finalizing. The other holder is unaffected.
+     */
+    public function testAHolderWhoseEmailIsNoLongerThePlaceholderIsRefusedNotVerified(): void
+    {
+        [, $new] = self::twoHolders();
+        $GLOBALS['__bcc_ph']['users'][self::OTHER]['email'] = 'real@example.net';
+        AuthSupport::beginEmailVerification(self::OTHER, 'real@example.net');
+        $otherCode = self::lastCodeTo('real@example.net');
+
+        $res = self::verify(['email' => self::TYPED, 'code' => $otherCode]);
+
+        self::assertSame(409, $res->get_status());
+        self::assertSame('bcc_invalid_state', self::errorCode($res));
+        self::assertSame('0', self::flag(self::OTHER), 'nothing finalized');
+        self::assertSame('real@example.net', self::email(self::OTHER), 'the real address is never replaced');
+        self::assertArrayNotHasKey(PendingEmailService::META_PENDING_SIGNUP_EMAIL, $GLOBALS['__bcc_ph']['meta'][self::OTHER], 'the stale pending address is dropped');
+
+        // NEW, the remaining holder, still verifies with its own code.
+        self::assertSame(200, self::verify(['email' => self::TYPED, 'code' => $new])->get_status());
+        self::assertSame(self::TYPED, self::email(self::NEW));
+        self::assertSame('1', self::flag(self::NEW));
+    }
+
     public function testOneAccountIsNotChargedToAnAddressBudget(): void
     {
         $GLOBALS['__bcc_ph']['throttle_counting'] = true;
