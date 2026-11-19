@@ -112,6 +112,35 @@ final class PrimaryHallChipWiringTest extends TestCase
     }
 
     /**
+     * ⚠ The gate must be the REAL condition, not merely the token. A
+     * token walk cannot see a neutered one: `if (false &&
+     * hidesPrimaryHall($userId, 0, $viewerId))` satisfies every needle
+     * above and publishes the chip regardless. Three such mutations
+     * SURVIVED the first rounds of controls for this change, which is why
+     * these assertions exist — pinning the guard expression and the id
+     * argument is what closes them.
+     *
+     * The cost is that reformatting this one condition breaks the test.
+     * That is the right trade here: the alternative is a wiring test a
+     * one-word edit can hollow out while staying green.
+     */
+    public function testTheGateIsTheRealConditionOnTheRealId(): void
+    {
+        $body = GateOrder::body(GateOrder::code(self::USER_VIEW), 'getSummary');
+
+        self::assertStringContainsString(
+            '$primaryHall !== null && ProfileGroupVisibility::hidesPrimaryHall(',
+            $body,
+            'the gate must guard on the resolved chip, not on a constant'
+        );
+        self::assertStringContainsString(
+            "\$primaryHall['id'],",
+            $body,
+            "the gate must be asked about the member's actual primary Hall id"
+        );
+    }
+
+    /**
      * ⭐ ONE call site. A second copy is how this class of bug recurs
      * (F-283, F-323), and a copy placed in a surface that already
      * inherits would also pay for a second meta read per row.
