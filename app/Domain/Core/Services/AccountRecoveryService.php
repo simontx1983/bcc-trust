@@ -58,6 +58,28 @@ final class AccountRecoveryService
     }
 
     /**
+     * F-458: may a TYPED $email be stored as an account's address? Only a
+     * well-formed email that is not on the reserved PLACEHOLDER_EMAIL_DOMAIN.
+     *
+     * The domain is BCC's own marker for "minted by a wallet sign-up, no
+     * inbox". isPlaceholderEmail() decides on it in several places:
+     *   - knowsPassword(): an account on the domain never chose a password;
+     *   - AuthSupport::verificationAddress(): the pending address is proven
+     *     instead;
+     *   - MyAccountEndpoint's change notice: no old inbox to tell.
+     *
+     * So an ordinary account that typed an address on it would pass for a
+     * wallet account. Every input that stores a typed address refuses
+     * anything else, each with its own "not a valid email" answer:
+     * password sign-up, the wallet sign-up's typed email, OAuth completion,
+     * the email change, and the recovery email.
+     */
+    public static function isUsableEmail(string $email): bool
+    {
+        return $email !== '' && is_email($email) !== false && !self::isPlaceholderEmail($email);
+    }
+
+    /**
      * True when the user has a real (non-placeholder, well-formed) email
      * that is not pending verification — a channel /auth/forgot-password
      * can actually reach, owned by the member. This is the account's

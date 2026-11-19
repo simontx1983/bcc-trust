@@ -201,6 +201,21 @@ final class WalletSignupPendingEmailTest extends TestCase
         self::assertSame([], $GLOBALS['__bcc_ph']['mail']);
     }
 
+    /**
+     * F-458: the reserved placeholder domain is never a typed address. Held
+     * pending, it would make the account look like a wallet account even
+     * after verification moved it into user_email.
+     */
+    public function testAnAddressOnTheReservedDomainIsRefusedBeforeAnyAccount(): void
+    {
+        $res = self::signup(['email' => 'me@NoReply.BCC.Local']);
+
+        self::assertSame(400, $res->get_status());
+        self::assertSame('bcc_invalid_request', self::errorCode($res));
+        self::assertArrayNotHasKey(self::NEW, $GLOBALS['__bcc_ph']['users'], 'no account');
+        self::assertSame([], $GLOBALS['__bcc_ph']['mail']);
+    }
+
     public function testAnAddressAnotherSignupHoldsPendingIsNotTaken(): void
     {
         self::pendingAccount(self::OTHER, self::TYPED);

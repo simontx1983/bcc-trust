@@ -550,9 +550,13 @@ final class OAuthController
         // in oauthLogin()).
         $emailProviderVerified = ($data['email_verified'] ?? false) === true
             && AuthSupport::isProviderVerifiedEmail($provider, $email, true);
-        if ($email === '' || !is_email($email)) {
+        // F-458: an address on the reserved placeholder domain is not usable,
+        // from the provider or typed.
+        if (!\BCC\Trust\Core\Services\AccountRecoveryService::isUsableEmail($email)) {
+            // A typed address is never the provider's verified one.
+            $emailProviderVerified = false;
             $email = sanitize_email((string) $request->get_param('email'));
-            if ($email === '' || !is_email($email)) {
+            if (!\BCC\Trust\Core\Services\AccountRecoveryService::isUsableEmail($email)) {
                 return ApiResponse::error(
                     'bcc_invalid_email',
                     'A valid email address is required.',

@@ -169,7 +169,8 @@ final class PasswordAuthController
         $handle      = strtolower(trim((string) $request->get_param('handle')));
         $displayName = AuthSupport::sanitizePublicDisplayName((string) $request->get_param('display_name'));
 
-        if ($email === '' || !is_email($email)) {
+        // F-458: the reserved placeholder domain is refused too.
+        if (!\BCC\Trust\Core\Services\AccountRecoveryService::isUsableEmail($email)) {
             return ApiResponse::error('bcc_invalid_request', 'A valid email is required.', 400);
         }
         if (strlen($password) < AuthSupport::SIGNUP_MIN_PASSWORD_LENGTH) {
