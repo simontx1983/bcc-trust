@@ -34,17 +34,24 @@ namespace BCC\Core\Security {
     if (!class_exists(Throttle::class, false)) {
         final class Throttle
         {
-            /** @var array{key: string, limit: int, window: int}|null */
+            /** @var array<string, mixed>|null */
             private static ?array $denial = null;
 
+            /**
+             * A deny records {key, limit, window} like an older bcc-core, plus
+             * `retry_after` / `at` when the test sets them — the F-289 bcc-core
+             * shape.
+             */
             public static function allow(string $key, int $limit, int $window): bool
             {
-                $allow = (bool) ($GLOBALS['__bcc_envelope_meta_throttle']['allow'] ?? true);
-                self::$denial = $allow ? null : ['key' => $key, 'limit' => $limit, 'window' => $window];
+                $cfg   = $GLOBALS['__bcc_envelope_meta_throttle'] ?? [];
+                $allow = (bool) ($cfg['allow'] ?? true);
+                self::$denial = $allow ? null : ['key' => $key, 'limit' => $limit, 'window' => $window]
+                    + array_intersect_key($cfg, ['retry_after' => true, 'at' => true]);
                 return $allow;
             }
 
-            /** @return array{key: string, limit: int, window: int}|null */
+            /** @return array<string, mixed>|null */
             public static function lastDenial(): ?array
             {
                 return self::$denial;

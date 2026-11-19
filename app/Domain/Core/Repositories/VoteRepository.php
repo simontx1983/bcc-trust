@@ -2000,6 +2000,7 @@ class VoteRepository {
              FROM {$this->table} v
              JOIN {$scoresTable} s ON v.page_id = s.page_id AND s.category_id = 0
              WHERE v.voter_user_id = %d AND v.status = 1
+               AND s.page_owner_id > 0
              LIMIT %d",
             $userId,
             $limit

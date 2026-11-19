@@ -24,6 +24,8 @@ namespace {
         {
             public int $ID = 0;
             public string $user_pass = '';
+            // H1: onProfileUpdate also diffs user_email (equal here: no change).
+            public string $user_email = '';
         }
     }
 }

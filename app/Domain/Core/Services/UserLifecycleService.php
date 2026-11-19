@@ -6,6 +6,7 @@ use BCC\Trust\Core\Database\TableRegistry;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Repositories\PageReadModelRepository;
 use BCC\Trust\Core\Repositories\ScoreRepository;
+use BCC\Trust\Core\REST\Auth\AuthSupport;
 use BCC\Trust\Core\Security\IpResolver;
 use BCC\Trust\Core\Support\JwtToken;
 use BCC\Trust\Infrastructure\EdgeCache;
@@ -120,6 +121,18 @@ class UserLifecycleService
                 JwtToken::revokeAllForUser($userId);
                 AccountRecoveryService::markHasPassword($userId);
             }
+
+            // H1: an email change made OUTSIDE PendingEmailService (core REST
+            // /wp/v2/users, wp-admin profile.php / user-edit.php, any plugin
+            // calling wp_update_user) puts an address nobody proved into
+            // user_email, while the account's '1' still vouched for the OLD
+            // one. OAuth links a Google sign-in into an account by email
+            // whenever that flag is '1', so a member could point their
+            // account at someone else's address and receive that person's
+            // first Google sign-in. Revoke the verification instead.
+            if ($fresh instanceof \WP_User) {
+                $this->revokeUnprovenEmail($userId, (string) $oldUserData->user_email, (string) $fresh->user_email);
+            }
         }
 
         // Attempt to auto-complete the profile quest whenever the user
@@ -128,6 +141,26 @@ class UserLifecycleService
         // PeepSo avatar + display name + bio/social link — so firing
         // the signal on every save is safe (no-op if conditions aren't met).
         do_action('bcc_trust_quest_signal', $userId, 'complete_profile');
+    }
+
+    /**
+     * H1: user_email went from $oldEmail to $newEmail. Unless that write was
+     * PendingEmailService's own (a proven address, marked while it writes),
+     * the new address is unproven: revoke the account's email verification
+     * (flag '0', pending code burned, emailed links voided). The audit entry
+     * carries no address.
+     */
+    private function revokeUnprovenEmail(int $userId, string $oldEmail, string $newEmail): void
+    {
+        if (strtolower(trim($newEmail)) === strtolower(trim($oldEmail)) || PendingEmailService::isOwnWrite($userId, $newEmail)) {
+            return;
+        }
+
+        AuthSupport::revokeEmailVerification($userId);
+        \BCC\Core\Log\Logger::audit('email_verification_revoked', [
+            'user_id' => $userId,
+            'via'     => 'profile_update',
+        ]);
     }
 
     /**
@@ -163,6 +196,58 @@ class UserLifecycleService
     public function onPeepSoAvatarChange(int $userId): void
     {
         do_action('bcc_trust_quest_signal', $userId, 'complete_profile');
+    }
+
+    /**
+     * Remove every attestation tied to an account that is being (or has
+     * been) deleted: rows the user cast AND rows cast against the user's
+     * profile (target_kind='user_profile'). The ONE implementation, for
+     * account deletion and for the orphan prune CLI
+     * (`wp bcc-trust attestations prune-orphans`).
+     *
+     * The distinct targets the user actively backed are snapshotted FIRST so
+     * their scores can be re-synthesized after the delete — with the
+     * endorsement_count denorm + attestation_bonus both sourced from
+     * attestations, a deleted user's vouches must stop counting
+     * immediately, not at the next nightly decay sweep.
+     *
+     * The repository answers per leg (and logs each failed one):
+     *   - CAST leg did not run: the rows the user cast still count, so
+     *     there is nothing to recompute. Answers false and skips it;
+     *   - TARGETED leg did not run: the cast rows ARE gone, so their
+     *     targets are still re-synthesized; answers false afterwards, as the
+     *     rows cast against the profile survive.
+     */
+    public function purgeAttestationsFor(int $userId): bool
+    {
+        $plugin = Plugin::instance();
+
+        $castTargets = [];
+        foreach ($plugin->attestationRepository()->listActiveByAttestor($userId) as $row) {
+            $castTargets[$row->target_kind . ':' . $row->target_id] = [$row->target_kind, $row->target_id];
+        }
+
+        $legs = $plugin->attestationRepository()->deleteForUser($userId);
+        if (!$legs['cast']) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] user-delete attestation purge failed — target recompute skipped', [
+                'user_id' => $userId,
+            ]);
+            return false;
+        }
+
+        foreach ($castTargets as [$targetKind, $targetId]) {
+            try {
+                $plugin->attestationScoreSynthesis()->recomputeFor($targetKind, $targetId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] user-delete attestation recompute failed', [
+                    'target_kind' => $targetKind,
+                    'target_id'   => $targetId,
+                    'error'       => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return $legs['targeted'];
     }
 
     public function onUserDelete(int $userId): void
@@ -253,30 +338,8 @@ class UserLifecycleService
         (new \BCC\Trust\Core\Repositories\PushSubscriptionRepository())->deleteAllForUser($userId);
 
         // Trust attestations: rows the user cast AND rows cast against the
-        // user's profile (target_kind='user_profile'). Snapshot the distinct
-        // targets the user actively backed FIRST so their scores can be
-        // re-synthesized below — with the endorsement_count denorm +
-        // attestation_bonus both sourced from attestations, a deleted
-        // user's vouches must stop counting immediately, not at the next
-        // nightly decay sweep.
-        $castTargets = [];
-        foreach ($plugin->attestationRepository()->listActiveByAttestor($userId) as $row) {
-            $castTargets[$row->target_kind . ':' . $row->target_id] = [$row->target_kind, $row->target_id];
-        }
-
-        $plugin->attestationRepository()->deleteForUser($userId);
-
-        foreach ($castTargets as [$targetKind, $targetId]) {
-            try {
-                $plugin->attestationScoreSynthesis()->recomputeFor($targetKind, $targetId);
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] user-delete attestation recompute failed', [
-                    'target_kind' => $targetKind,
-                    'target_id'   => $targetId,
-                    'error'       => $e->getMessage(),
-                ]);
-            }
-        }
+        // user's profile, then the targets they backed are re-synthesized.
+        $this->purgeAttestationsFor($userId);
 
         // Dispute footprint: panel seats, credited participations, and
         // user-reports in both directions (reporter + reported). Dispute

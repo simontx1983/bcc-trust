@@ -363,6 +363,11 @@ final class EmailVerificationController
         if ($outcome === \BCC\Trust\Core\Services\PendingEmailService::SIGNUP_EMAIL_FAILED) {
             return ApiResponse::error('bcc_internal_error', 'Could not confirm your email. Please try again.', 500);
         }
+        // H1: the account's email was changed outside BCC after this code
+        // or link was mailed; it proves a different inbox. Never finalised.
+        if ($outcome === \BCC\Trust\Core\Services\PendingEmailService::SIGNUP_EMAIL_REFUSED) {
+            return ApiResponse::error('bcc_invalid_state', 'This email can no longer be confirmed for this account.', 409);
+        }
         return null;
     }
 

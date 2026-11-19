@@ -43,6 +43,9 @@ namespace BCC\Trust\Core\Tests\Unit {
             if (!defined('ABSPATH')) {
                 define('ABSPATH', sys_get_temp_dir() . '/');
             }
+            // Both queries put bcc-core's shared secret-page rule in their WHERE.
+            require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/ProbesReads.php');
+            require_once \BCC\Trust\Tests\Support\CoreSibling::require('src/Repositories/PeepSoPagePrivacy.php');
             $GLOBALS['wpdb'] = new PageDiscoverySqlCapturingWpdb();
         }
 
@@ -80,6 +83,43 @@ namespace BCC\Trust\Core\Tests\Unit {
                 $GLOBALS['wpdb']->results = [];
                 PageDiscoveryRepository::queryFromPostsTable([], $sort, false, '', 0.0, false, 0, 12, 2, '');
                 self::assertEndsInIdTiebreak(self::mainSql(), $sort);
+            }
+        }
+
+        /**
+         * SECRET pages: the COUNT and the paged SELECT of BOTH discovery
+         * queries carry bcc-core's shared rule on the posts alias, for every
+         * sort and with the validator and verified-only joins in play.
+         * `/cards` and `/onboarding/suggestions` both read through these.
+         * The SQL itself runs on a real server in
+         * SecretPageVisibilityIntegrationTest.
+         */
+        public function testEveryDiscoveryStatementCarriesTheSecretPageRule(): void
+        {
+            $rule = \BCC\Core\Repositories\PeepSoPagePrivacy::notSecretSql('p.ID');
+
+            $runs = [];
+            foreach (['trust', '', 'endorsements', 'newest', 'followers', 'self_stake'] as $sort) {
+                $runs["read model, {$sort}"] = static fn () => PageDiscoveryRepository::queryFromReadModel([], $sort, false, '', 0.0, false, 0, 12, 2, '');
+            }
+            $runs['read model, chain + status'] = static fn () => PageDiscoveryRepository::queryFromReadModel(['validator'], 'trust', true, '', 0.0, false, 0, 12, 2, 'x', false, 'cosmos', 'active', 1.0);
+            foreach (['trust', '', 'endorsements', 'newest', 'followers'] as $sort) {
+                $runs["posts table, {$sort}"] = static fn () => PageDiscoveryRepository::queryFromPostsTable([], $sort, false, '', 0.0, false, 0, 12, 2, '');
+            }
+            $runs['posts table, verified only + type'] = static fn () => PageDiscoveryRepository::queryFromPostsTable(['validator'], 'trust', true, '', 0.0, false, 0, 12, 2, 'x');
+
+            foreach ($runs as $label => $run) {
+                $GLOBALS['wpdb']->results = [];
+                $run();
+
+                $statements = array_values(array_filter(
+                    $GLOBALS['wpdb']->results,
+                    static fn (string $sql): bool => str_contains($sql, 'peepso-page')
+                ));
+                self::assertCount(2, $statements, "{$label}: the COUNT and the paged SELECT");
+                foreach ($statements as $sql) {
+                    self::assertSame(1, substr_count($sql, $rule), "{$label}: the shared rule, once");
+                }
             }
         }
     }

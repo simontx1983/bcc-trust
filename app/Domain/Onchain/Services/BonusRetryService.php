@@ -128,6 +128,8 @@ final class BonusRetryService
         $succeeded = [];
         $failed    = [];
         $exhausted = [];
+        /** @var array<int, true> $settleOwners owners whose entity page just took their bonus */
+        $settleOwners = [];
 
         foreach ($pending as $pageId => $entry) {
             if (($entry['attempts'] ?? 0) >= self::MAX_ATTEMPTS) {
@@ -159,28 +161,38 @@ final class BonusRetryService
             }
 
             try {
-                // Recalculate from signals + claims (full bonus, not signals only).
-                // F-101: a failed signal read must not be written as a
-                // claims-only bonus; count it as a failed attempt instead.
-                try {
-                    $signalRows = SignalRepository::get_for_page($pageIdInt);
-                } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
-                    $failed[$pageId] = ($entry['attempts'] ?? 0) + 1;
-                    continue;
-                }
-                $signalBonus = array_sum(array_column($signalRows, 'score_contribution'));
+                $ownerId = (int) \BCC\Core\PeepSo\PeepSo::get_page_owner($pageIdInt);
 
-                $ownerId = \BCC\Core\PeepSo\PeepSo::get_page_owner($pageIdInt);
-                $claimBonus = 0.0;
-                if ($ownerId) {
-                    $claimBonus = \BCC\Trust\Onchain\Repositories\ClaimRepository::computePageClaimBonus($ownerId);
-                }
+                if (!BonusService::carriesOnchainBonus($pageIdInt, $ownerId)) {
+                    // Option (a): a self-page whose owner runs an entity page
+                    // carries no share of the bonus.
+                    $totalBonus = 0.0;
+                } else {
+                    // Recalculate from signals + claims (full bonus, not signals only).
+                    // F-101: a failed signal read must not be written as a
+                    // claims-only bonus; count it as a failed attempt instead.
+                    try {
+                        $signalRows = SignalRepository::get_for_page($pageIdInt);
+                    } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+                        $failed[$pageId] = ($entry['attempts'] ?? 0) + 1;
+                        continue;
+                    }
+                    $signalBonus = array_sum(array_column($signalRows, 'score_contribution'));
 
-                $totalBonus = min($signalBonus + $claimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
-                $applied    = $contributor->applyBonus($pageIdInt, 'onchain', $totalBonus);
+                    $claimBonus = 0.0;
+                    if ($ownerId > 0) {
+                        $claimBonus = \BCC\Trust\Onchain\Repositories\ClaimRepository::computePageClaimBonus($ownerId);
+                    }
+
+                    $totalBonus = min($signalBonus + $claimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
+                }
+                $applied = $contributor->applyBonus($pageIdInt, 'onchain', $totalBonus);
 
                 if ($applied) {
                     $succeeded[] = $pageId;
+                    if ($ownerId > 0 && !\BCC\Trust\Core\Services\MemberSelfPageService::isSelfPage($pageIdInt)) {
+                        $settleOwners[$ownerId] = true;
+                    }
                 } else {
                     $failed[$pageId] = ($entry['attempts'] ?? 0) + 1;
                 }
@@ -249,6 +261,22 @@ final class BonusRetryService
             update_option(self::OPTION_KEY, $current, false);
         } finally {
             \BCC\Core\DB\AdvisoryLock::release(self::LOCK_KEY);
+        }
+
+        // Option (a): an owner whose entity page just took their bonus must
+        // not keep it on their self-page too (BonusService::settleSelfPageBonus;
+        // outside every per-page lock, after the queue write-back).
+        foreach (array_keys($settleOwners) as $settleOwnerId) {
+            try {
+                BonusService::settleSelfPageBonus($settleOwnerId);
+            } catch (\Throwable $e) {
+                if (class_exists('BCC\Core\Log\Logger')) {
+                    \BCC\Core\Log\Logger::error('[bcc-onchain-signals] self_page_bonus_settle_failed', [
+                        'user_id' => $settleOwnerId,
+                        'error'   => $e->getMessage(),
+                    ]);
+                }
+            }
         }
 
         } finally {

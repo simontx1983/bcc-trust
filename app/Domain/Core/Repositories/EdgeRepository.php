@@ -345,6 +345,7 @@ class EdgeRepository {
                     ON s.page_id = v.page_id
                    AND s.category_id = 0
               WHERE v.status = %d
+                AND s.page_owner_id > 0
                 AND " . $this->votes()->hiddenReviewExclusion('v') . "
            GROUP BY v.voter_user_id, s.page_owner_id",
             1

@@ -67,7 +67,7 @@ final class VerifyEmailAttemptCapTest extends TestCase
                 throw new \RuntimeException('no database in unit tests');
             }
         };
-        AuthSupport::storeOtpForUser(self::USER, self::CODE);
+        AuthSupport::storeOtpForUser(self::USER, self::CODE, self::EMAIL);
     }
 
     private static function verify(string $code, string $email = self::EMAIL): int
@@ -200,7 +200,7 @@ final class VerifyEmailAttemptCapTest extends TestCase
         for ($i = 1; $i <= AuthSupport::VERIFY_EMAIL_MAX_FAILURES - 1; $i++) {
             self::verify('000000');
         }
-        AuthSupport::storeOtpForUser(self::USER, '515151');         // a resend
+        AuthSupport::storeOtpForUser(self::USER, '515151', self::EMAIL); // a resend
 
         for ($i = 1; $i <= AuthSupport::VERIFY_EMAIL_MAX_FAILURES - 1; $i++) {
             self::verify('000000');
@@ -211,7 +211,7 @@ final class VerifyEmailAttemptCapTest extends TestCase
 
     public function testAnotherAccountsFailuresNeverCount(): void
     {
-        AuthSupport::storeOtpForUser(62, '626262');
+        AuthSupport::storeOtpForUser(62, '626262', 'other62@example.com');
         for ($i = 1; $i <= AuthSupport::VERIFY_EMAIL_MAX_FAILURES; $i++) {
             self::verify('000000', 'other62@example.com');
         }
@@ -265,7 +265,7 @@ final class VerifyEmailAttemptCapTest extends TestCase
 
     public function testABurnLeavesTheEmailedLinkWorking(): void
     {
-        $GLOBALS['__bcc_ph']['transients']['bcc_vt_linktoken61'] = (string) self::USER;
+        AuthSupport::storeVerifyToken('linktoken61', self::USER, self::EMAIL);
         for ($i = 1; $i <= AuthSupport::VERIFY_EMAIL_MAX_FAILURES; $i++) {
             self::verify('000000');
         }

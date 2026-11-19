@@ -76,8 +76,110 @@ final class HeliusReregisterTest extends TestCase
         self::assertSame(M::REMOTE_OK, $s['remote_state']);
         self::assertFalse($s['callback_matches']);
 
+        M::forgetRemoteStatus();   // a healthy answer is cached; ask again
         self::live(self::CB);
         self::assertTrue(M::status(self::CB)['callback_matches']);
+    }
+
+    // ── F-314 follow-up: the panel's remote check ─────────────────────
+
+    public function testAHealthyAnswerIsReusedForAMinute(): void
+    {
+        self::live(self::CB);
+        $first = M::status(self::CB);
+
+        $second = M::status(self::CB);   // nothing queued: a second GET would read as unreachable
+
+        self::assertSame(1, \HeliusWorld::$getCalls, 'the second render asks Helius nothing');
+        self::assertSame($first, $second);
+        self::assertSame([['bcc_helius_remote_status', M::STATUS_CACHE_TTL]], \HeliusWorld::$transientSets);
+        self::assertSame(60, M::STATUS_CACHE_TTL);
+    }
+
+    public function testTheCheckIsOneShortAttempt(): void
+    {
+        self::live(self::CB);
+        M::status(self::CB);
+
+        self::assertSame(5, \HeliusWorld::$getCallArgs[0]['args']['timeout']);
+        self::assertSame(0, \HeliusWorld::$getCallArgs[0]['options']['max_retries'] ?? null, 'no retries while the operator waits');
+    }
+
+    public function testAFailedCheckIsCouldNotCheckAndIsNeverCached(): void
+    {
+        $before = time();
+        // Transport error / timeout (nothing queued), then a 5xx, then an auth refusal.
+        foreach ([null, ['code' => 503, 'body' => '{}'], ['code' => 401, 'body' => '{}']] as $answer) {
+            if ($answer !== null) {
+                \HeliusWorld::$gets[] = $answer;
+            }
+            $s = M::status(self::CB);
+            self::assertSame(M::REMOTE_UNREACHABLE, $s['remote_state'], 'a failed check is never "missing"');
+            self::assertGreaterThanOrEqual($before, $s['checked_at'], 'it says when it tried');
+        }
+        self::assertSame([], \HeliusWorld::$transientSets, 'a failure is never kept');
+
+        self::live(self::CB);
+        self::assertSame(M::REMOTE_OK, M::status(self::CB)['remote_state'], 'a recovered Helius shows on the next load');
+    }
+
+    public function testMissingIsNeverServedFromTheCache(): void
+    {
+        \HeliusWorld::$gets[] = ['code' => 404, 'body' => '{}'];
+        self::assertSame(M::REMOTE_MISSING, M::status(self::CB)['remote_state']);
+        self::assertSame([], \HeliusWorld::$transientSets);
+
+        self::live(self::CB);
+        self::assertSame(M::REMOTE_OK, M::status(self::CB)['remote_state']);
+        self::assertSame(2, \HeliusWorld::$getCalls);
+    }
+
+    public function testTheCacheDescribesOneWebhookId(): void
+    {
+        self::live(self::CB);
+        M::status(self::CB);
+
+        \HeliusWorld::$options[M::OPTION_WEBHOOK_ID] = 'wh-2';   // recreated or re-provisioned since
+        \HeliusWorld::remoteDetail(['webhookID' => 'wh-2', 'webhookURL' => self::OLD, 'accountAddresses' => []]);
+
+        $s = M::status(self::CB);
+        self::assertSame(2, \HeliusWorld::$getCalls, 'another id is a miss');
+        self::assertFalse($s['callback_matches']);
+    }
+
+    public function testARemoteWriteForgetsTheCachedAnswer(): void
+    {
+        self::live(self::OLD);
+        M::status(self::CB);                       // cached: points at the old URL
+        self::live(self::OLD);                     // the re-register check
+        self::live(self::OLD);                     // the PUT's re-read
+
+        self::assertSame('updated', M::reregisterSharedWebhook(self::CB)['outcome']);
+        self::assertSame([], \HeliusWorld::$transients, 'the PUT dropped the cached answer');
+
+        self::live(self::CB);
+        self::assertTrue(M::status(self::CB)['callback_matches'], 'the panel shows the change at once');
+    }
+
+    public function testAnAddressListWriteForgetsTheCachedAnswer(): void
+    {
+        self::live(self::CB, []);
+        self::assertSame(0, M::status(self::CB)['remote_address_count']);
+
+        \HeliusWorld::remoteList([]);              // addAddress reads the list
+        self::assertTrue(M::addAddress(11, self::A));
+        self::assertSame([], \HeliusWorld::$transients, 'the address-list PUT dropped the cached answer');
+    }
+
+    public function testNothingIsAskedWithoutAStoredId(): void
+    {
+        unset(\HeliusWorld::$options[M::OPTION_WEBHOOK_ID]);
+
+        $s = M::status(self::CB);
+
+        self::assertSame(M::REMOTE_NOT_PROVISIONED, $s['remote_state']);
+        self::assertNull($s['checked_at']);
+        self::assertSame(0, \HeliusWorld::$getCalls);
     }
 
     // ── reregisterSharedWebhook() ─────────────────────────────────────

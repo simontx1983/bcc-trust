@@ -121,11 +121,23 @@ final class RefreshRetiresOldTokenTest extends TestCase
         $hash = self::hashOf($old);
 
         self::refresh($old);
-        $GLOBALS['__bcc_ph']['meta'][self::USER][JwtToken::RETIRED_META_KEY][$hash]['from'] = time() + 5;
+        // ONE time() call, captured. The test WRITES this cutoff and then
+        // asserts the second refresh left it alone, so both halves must name
+        // the same instant. Calling time() twice made the assertion fail
+        // whenever the second boundary fell between the two calls -- a latent
+        // 1-in-N flake that finally fired in CI, off by exactly one second.
+        //
+        // NOT assertEqualsWithDelta: a tolerance here would accept the cutoff
+        // being pushed OUT by a second or two, which is precisely the bug this
+        // test exists to catch. The value is the test's own, so it is readable
+        // back exactly. (Line 106's delta is correct for the opposite reason --
+        // there the value is computed by production from its own clock read.)
+        $cutoff = time() + 5;
+        $GLOBALS['__bcc_ph']['meta'][self::USER][JwtToken::RETIRED_META_KEY][$hash]['from'] = $cutoff;
 
         [$status] = self::refresh($old);
         self::assertSame(200, $status, 'a second tab refreshing during the overlap still gets a token');
-        self::assertSame(time() + 5, self::retired()[$hash]['from'], 'the first cutoff stands');
+        self::assertSame($cutoff, self::retired()[$hash]['from'], 'the first cutoff stands');
     }
 
     public function testTheEntryLastsAsLongAsTheTokenCouldBeUsed(): void

@@ -86,6 +86,63 @@ final class PostDeleteOracleTest extends TestCase
         self::assertSame([], $GLOBALS['__bcc_trashed']);
     }
 
+    // ── a COMMENT act id is not a post on this route ────────────────
+
+    /**
+     * ⚠⚠ TWO bugs in one, and the module check above cannot see either,
+     * because PeepSo stores `act_module_id = 1` on a comment — the same
+     * module a status post carries.
+     *
+     * 1. THE OWNER could trash their own COMMENT through the POST route.
+     *    That skips `DELETE /comments/{id}` entirely: no comment-delete
+     *    event, so the Rank evidence ledger never reverses the comment.
+     * 2. A NON-OWNER got `bcc_forbidden` instead of the 404 this whole file
+     *    exists to enforce — because `canSee()` judges a comment on its own
+     *    row, and a comment's wp_post carries no `peepso_group_id`, so the
+     *    group gate it relies on reads "not group-tagged". 403-vs-404 then
+     *    told a stranger that a comment exists inside a group they cannot
+     *    see, which is the exact oracle F-47 closed for posts.
+     */
+    public function testACommentActIdIsNotDeletableThroughThePostRoute(): void
+    {
+        CommentDeleteFakes::$commentActs = [self::ACT];
+
+        // The OWNER: refused, and nothing is trashed.
+        $owner = self::service(true)->deletePost('feed_' . self::ACT, self::OWNER);
+        self::assertSame(['error' => 'bcc_not_found', 'message' => 'Post not found.'], $owner);
+        self::assertSame([], $GLOBALS['__bcc_trashed'], 'a comment must not be trashed by the post route');
+
+        // A NON-OWNER who CAN see it: the 404, not the 403 — so the oracle
+        // this file closes for posts is closed for comments too.
+        $stranger = self::service(true)->deletePost('feed_' . self::ACT, self::VIEWER);
+        self::assertSame(['error' => 'bcc_not_found', 'message' => 'Post not found.'], $stranger);
+        self::assertSame(
+            $stranger,
+            self::service(true)->deletePost('feed_' . self::MISSING, self::VIEWER),
+            'byte-identical to a missing id'
+        );
+        self::assertSame([], $GLOBALS['__bcc_trashed']);
+    }
+
+    /**
+     * ⭐ The control. The SAME act, SAME module, SAME visibility — only the
+     * comment row is gone. Without this, the test above would be satisfied
+     * by a route that refused everything.
+     */
+    public function testTheSameActIsStillDeletableWhenItIsNotAComment(): void
+    {
+        CommentDeleteFakes::$commentActs = [];
+
+        self::service(true)->deletePost('feed_' . self::ACT, self::OWNER);
+
+        // ⚠ Asserted on the TRASH, not on the return, exactly as
+        // testTheOwnerReachesTheDelete does: this harness stubs the route
+        // only as far as the delete, so deletePost still reports an error
+        // from a later step it cannot complete. What matters here is that
+        // the act reached the delete at all.
+        self::assertSame([555], $GLOBALS['__bcc_trashed'], 'the owner must still reach the delete');
+    }
+
     /** The owner is never sent through the visibility check. */
     public function testTheOwnerReachesTheDelete(): void
     {

@@ -336,14 +336,49 @@ class ScoreRepository {
     }
 
     /**
-     * Find the first page_id owned by a user in the scores table.
+     * The owner's BONUS page: their oldest owned entity page, else their
+     * member self-page; 0 when they have no score row at all.
+     *
+     * The person-level on-chain bonus (signals + claims, contract §J.12) is
+     * written to this page, and the self-page carries it only while there is
+     * no entity page (BonusService::carriesOnchainBonus). It used to be
+     * `LIMIT 1` with no ORDER, which in practice returned the owner's
+     * LOWEST-SCORING row (idx_owner_scores), so a bonus write could flip the
+     * target and leave the full bonus on two pages.
      */
     public function getPageIdForOwner(int $userId): int {
+        return $this->getOwnedPageIds($userId, 1)[0] ?? 0;
+    }
+
+    /**
+     * Pages this owner's score rows belong to, in bonus-page order: entity
+     * pages oldest first, then the self-page. Bounded by $limit (1–200).
+     * A read failure answers [], like a missing owner.
+     *
+     * @return list<int>
+     */
+    public function getOwnedPageIds(int $ownerId, int $limit): array {
+        if ($ownerId <= 0) {
+            return [];
+        }
         global $wpdb;
-        return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT page_id FROM {$this->table} WHERE page_owner_id = %d LIMIT 1",
-            $userId
+        $limit = max(1, min(200, $limit));
+
+        // page_id ASC is the whole bonus-page order: a member self-page id
+        // is MemberSelfPageService::ID_BASE + user id, above every real post
+        // id, so entity pages (oldest first) always come before it. DISTINCT:
+        // a legacy page can hold several category rows.
+        $ids = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT page_id
+               FROM {$this->table}
+              WHERE page_owner_id = %d
+           ORDER BY page_id ASC
+              LIMIT %d",
+            $ownerId,
+            $limit
         ));
+
+        return array_values(array_map('intval', $ids));
     }
 
     /**
@@ -927,6 +962,14 @@ class ScoreRepository {
         }
 
         if (!$ownerId) {
+            // A RELEASED page (F-334 owner-0: its claim was revoked and
+            // nobody owns it) keeps its score row at page_owner_id 0. Writers
+            // that only need the row to exist — a bonus write of 0 — get it;
+            // an ownerless row is still never CREATED.
+            $existing = $this->getByPageId($pageId);
+            if ($existing) {
+                return $existing;
+            }
             throw new Exception('Cannot create score: No owner ID found for page ' . $pageId);
         }
 
@@ -2027,6 +2070,35 @@ class ScoreRepository {
         );
 
         $this->invalidateCache($pageId);
+    }
+
+    /**
+     * F-334 owner-0: move a released page's score rows off the owner who
+     * lost it — only rows STILL keyed to $fromOwner, so a concurrent claim or
+     * admin reassignment that already moved them is never undone.
+     *
+     * $toOwner is the page's owner after the release: 0 when nobody owns it,
+     * or the owner an admin reassigned it to. Returns the rows moved.
+     *
+     * @throws Exception when the UPDATE did not run
+     */
+    public function releaseOwner(int $pageId, int $fromOwner, int $toOwner): int
+    {
+        global $wpdb;
+
+        $moved = $wpdb->query($wpdb->prepare(
+            "UPDATE {$this->table} SET page_owner_id = %d WHERE page_id = %d AND page_owner_id = %d",
+            $toOwner,
+            $pageId,
+            $fromOwner
+        ));
+        if ($moved === false) {
+            throw new Exception('Failed to release score rows for page ' . $pageId . ': ' . $wpdb->last_error);
+        }
+
+        $this->invalidateCache($pageId);
+
+        return (int) $moved;
     }
 
     /**

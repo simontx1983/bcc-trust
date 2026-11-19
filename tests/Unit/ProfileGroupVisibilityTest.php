@@ -56,6 +56,7 @@ final class ProfileGroupVisibilityTest extends TestCase
             'show_groups'      => [],
             'memberships'      => [],
             'membership_calls' => [],
+            'hidden_halls'     => [],
         ];
     }
 
@@ -337,5 +338,272 @@ final class ProfileGroupVisibilityTest extends TestCase
 
         self::assertArrayHasKey(self::G_HALL, $out);
         self::assertSame(self::G_HALL, $out[self::G_HALL]->groupId);
+    }
+
+    // ── F-341 PR 3: hiding ONE Hall inside a shown Halls section ────────
+
+    /** Hide a list of group ids for the wall owner. */
+    private static function hideForOwner(mixed $value): void
+    {
+        $GLOBALS['__bcc_pgv']['hidden_halls'] = [self::OWNER => $value];
+    }
+
+    /**
+     * ⭐ The feature: an individually hidden Hall is dropped for another
+     * viewer while every other group is untouched.
+     */
+    public function testAHiddenHallIsDroppedForAnotherViewer(): void
+    {
+        self::hideForOwner([self::G_HALL]);
+
+        $ids = self::ids(ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::VIEWER));
+
+        self::assertNotContains(self::G_HALL, $ids, 'the hidden Hall must not be published');
+        self::assertContains(self::G_PLAIN, $ids, 'nothing else was hidden');
+        self::assertContains(self::G_NFT, $ids);
+    }
+
+    /**
+     * ⭐ CONTROL. The owner sees the Hall they hid — they chose the
+     * setting and must be able to see what it is hiding. Without this, a
+     * rule that dropped every Hall from everyone would pass the test
+     * above.
+     */
+    public function testTheOwnerStillSeesAHallTheyHid(): void
+    {
+        self::hideForOwner([self::G_HALL]);
+
+        $ids = self::ids(ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::OWNER));
+
+        self::assertContains(self::G_HALL, $ids);
+    }
+
+    /** ⭐ CONTROL. An admin keeps the §F-02 exemption here too. */
+    public function testAnAdminStillSeesAHiddenHall(): void
+    {
+        $GLOBALS['__bcc_pgv']['is_admin'] = true;
+        self::hideForOwner([self::G_HALL]);
+
+        $ids = self::ids(ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::VIEWER));
+
+        self::assertContains(self::G_HALL, $ids);
+    }
+
+    /**
+     * ⭐ CONTROL, and the one that protects every existing profile: an
+     * untouched hide list changes nothing. Absent meta means NOTHING is
+     * hidden, not "hide everything", so no account changes until its
+     * owner opts out.
+     */
+    public function testAnUntouchedHideListChangesNothing(): void
+    {
+        // Keyed by GROUP id — the viewer is a member of the secret group,
+        // so it survives rule 2 and the count is about the hide list alone.
+        $GLOBALS['__bcc_pgv']['memberships'] = [self::G_SECRET => true];
+
+        $ids = self::ids(ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::VIEWER));
+
+        self::assertContains(self::G_HALL, $ids);
+        self::assertCount(5, $ids, 'every kind survives an untouched hide list');
+    }
+
+    /**
+     * ⚠ THE INTERACTION THAT IS EASY TO GET BACKWARDS. Per-Hall hiding is
+     * NOT dominated by the "show my groups" toggle. Toggle OFF leaves
+     * Halls — and only Halls — visible, so with it off the hidden ones
+     * are the only choice still doing any work. Both must apply.
+     */
+    public function testPerHallHidingAlsoAppliesWithTheGroupsToggleOff(): void
+    {
+        $GLOBALS['__bcc_pgv']['show_groups'] = [self::OWNER => '0'];
+        self::hideForOwner([self::G_HALL]);
+
+        $ids = self::ids(ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::VIEWER));
+
+        self::assertSame([], $ids, 'toggle off leaves only Halls, and that Hall is hidden');
+    }
+
+    /**
+     * ⭐ SCOPE CONTROL. The list is `bcc_hidden_hall_ids` and is scoped to
+     * Halls, so a NON-Hall group whose id happens to be in it is NOT
+     * dropped. If this ever becomes "hide any group", that is a decision
+     * to take deliberately — and the meta name has to change with it.
+     */
+    public function testOnlyHallsAreHiddenByTheHallList(): void
+    {
+        self::hideForOwner([self::G_PLAIN]);
+
+        $ids = self::ids(ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::VIEWER));
+
+        self::assertContains(self::G_PLAIN, $ids, 'a non-Hall id in the Hall list hides nothing');
+        self::assertContains(self::G_HALL, $ids);
+    }
+
+    /**
+     * A corrupt row must not blank a profile. Non-array meta reads as
+     * "nothing hidden" — the permissive direction — because the write
+     * path is the only thing that may hide a Hall and it validates.
+     */
+    public function testAMalformedHideListMeansNothingIsHidden(): void
+    {
+        self::hideForOwner('not-an-array');
+
+        $ids = self::ids(ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::VIEWER));
+
+        self::assertContains(self::G_HALL, $ids);
+    }
+
+    /**
+     * Junk INSIDE the list is skipped rather than fatal, and a numeric
+     * string still hides: WordPress round-trips a serialized list and the
+     * values can come back as strings.
+     */
+    public function testJunkEntriesAreIgnoredAndNumericStringsStillHide(): void
+    {
+        $GLOBALS['__bcc_pgv']['memberships'] = [self::G_SECRET => true];
+        // ⚠ The int form is deliberately ABSENT: the numeric STRING must be
+        // the only thing that can hide this Hall, or dropping string
+        // support would still pass (it did — a surviving mutation caught it).
+        self::hideForOwner([0, -5, 'abc', null, (string) self::G_HALL]);
+
+        $ids = self::ids(ProfileGroupVisibility::filter(self::allKinds(), self::OWNER, self::VIEWER));
+
+        self::assertNotContains(self::G_HALL, $ids, 'a numeric-string id still hides');
+        self::assertCount(4, $ids, 'and nothing else was dropped by the junk');
+    }
+
+    // ── F-401: the home-Hall CHIP, not the list ──────────────────────
+    //
+    // `primary_hall` is the same membership fact as one row of the list
+    // above, published as a single field on the directory card, the
+    // member card and the profile header. Rule 4 drops it from the
+    // LIST; until F-401 the chip answered to nothing, so a member who
+    // hid their home Hall still had it rendered in the most prominent
+    // place it appears.
+
+    /**
+     * ⭐ THE FEATURE. The hidden Hall is the member's primary, and the
+     * chip is withheld from another viewer.
+     */
+    public function testAHiddenPrimaryHallIsWithheldFromAnotherViewer(): void
+    {
+        self::hideForOwner([self::G_HALL]);
+
+        self::assertTrue(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::VIEWER)
+        );
+    }
+
+    /**
+     * ⭐ CONTROL. The owner keeps their own chip. They chose the setting
+     * and the settings screen must not lie to them about what it did.
+     */
+    public function testTheOwnerStillSeesTheirOwnHiddenChip(): void
+    {
+        self::hideForOwner([self::G_HALL]);
+
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::OWNER)
+        );
+    }
+
+    /** ⭐ CONTROL. The §F-02 admin exemption reaches the chip too. */
+    public function testAnAdminStillSeesAHiddenChip(): void
+    {
+        $GLOBALS['__bcc_pgv']['is_admin'] = true;
+        self::hideForOwner([self::G_HALL]);
+
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::VIEWER)
+        );
+    }
+
+    /**
+     * ⭐ CONTROL, and the anti-vacuity one. An untouched account keeps
+     * its chip: a rule that answered TRUE unconditionally would satisfy
+     * the feature test above and blank the chip on every profile in the
+     * system.
+     */
+    public function testAnUntouchedHideListLeavesTheChipAlone(): void
+    {
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::VIEWER)
+        );
+    }
+
+    /**
+     * An anonymous reader is refused it as well. The chip is rendered on
+     * signed-out profile views, so a rule keyed on `$viewerId > 0` would
+     * have left it visible to exactly the widest audience.
+     */
+    public function testAnAnonymousViewerIsAlsoRefusedTheChip(): void
+    {
+        self::hideForOwner([self::G_HALL]);
+
+        self::assertTrue(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::ANON)
+        );
+    }
+
+    /**
+     * ⭐ The rule is keyed on the ID, not on "this member hid SOMETHING".
+     * Hiding one Hall must not blank the chip of a member whose primary
+     * is a different Hall — that is the difference between a deny list
+     * and a kill switch.
+     */
+    public function testHidingOneHallDoesNotWithholdADifferentPrimary(): void
+    {
+        self::hideForOwner([self::G_HALL]);
+
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_PLAIN, self::VIEWER)
+        );
+    }
+
+    /**
+     * A numeric STRING in the stored list still hides the chip —
+     * WordPress round-trips a serialized list and the ints can come back
+     * as strings. The int form is deliberately absent so string support
+     * is the only thing that can make this pass.
+     */
+    public function testANumericStringStoredIdStillWithholdsTheChip(): void
+    {
+        self::hideForOwner([(string) self::G_HALL]);
+
+        self::assertTrue(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::VIEWER)
+        );
+    }
+
+    /**
+     * ⚠ A corrupt stored row hides NOTHING rather than everything. Same
+     * direction as {@see ProfileAccess::hiddenHallIds()}: a bad meta row
+     * must not blank a member's profile.
+     */
+    public function testAMalformedHideListLeavesTheChipAlone(): void
+    {
+        self::hideForOwner('not-an-array');
+
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::VIEWER)
+        );
+    }
+
+    /**
+     * Degenerate ids answer FALSE, so a member with no primary Hall (the
+     * pointer absent, resolved to 0) is never reported as hiding one.
+     */
+    public function testDegenerateIdsAreNotTreatedAsHidden(): void
+    {
+        self::hideForOwner([self::G_HALL]);
+
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, 0, self::VIEWER),
+            'no primary Hall is not a hidden primary Hall'
+        );
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(0, self::G_HALL, self::VIEWER),
+            'no owner resolves to nothing hidden'
+        );
     }
 }

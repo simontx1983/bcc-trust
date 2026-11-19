@@ -215,14 +215,16 @@ class PeepSoIntegration
 
         $this->userInfoRepo->incrementPageCount($userId, $pageId);
 
-        // F-334: a page freed by a revoked claim keeps its score rows, which
-        // are keyed to the PREVIOUS owner (`page_owner_id` is stamped when a
-        // row is created and only handleOwnerChange() moves it). The new
-        // operator takes the page over, its score history included. A page
-        // claimed for the first time has no score row (an unowned page cannot
-        // get one), so this is a no-op there.
+        // F-334: a page freed by a revoked claim keeps its score rows: at
+        // owner 0 since the release moves them (owner-0), or still keyed to
+        // the previous owner if that move failed. The new operator takes the
+        // page over, its score history included. A page claimed for the first
+        // time has no score row (an unowned page cannot get one), so this is
+        // a no-op there.
         $previousScoreOwner = $this->scoreRepo->getPageOwnerId($pageId);
-        if ($previousScoreOwner > 0 && $previousScoreOwner !== $userId) {
+        if ($previousScoreOwner !== $userId
+            && ($previousScoreOwner > 0 || $this->scoreRepo->existsForPage($pageId))
+        ) {
             $this->scoreRepo->updateOwner($pageId, $userId);
             AuditLogger::log('page_owner_changed', $pageId, [
                 'old_owner' => $previousScoreOwner,
@@ -360,9 +362,16 @@ class PeepSoIntegration
      * demotion left an author-0 page: the next claimer became its author
      * while the old `member_owner` row kept PeepSo ownership.
      *
-     * The score rows stay keyed to the old owner until the next claim moves
-     * them (onPageClaimed). Called from ClaimService::revokeClaim's isolated
-     * post-commit steps: answers false on any failure, never throws.
+     * Then the page's score rows move off the old owner (owner-0, user
+     * decision 2026-11-17): to 0 when nobody owns the page now, or to the
+     * admin-reassigned owner. Rows still keyed to the old owner made
+     * getPageForOwner() pick a page they no longer own, so their bonus,
+     * owner fields and fraud reads followed it. The next claim moves the
+     * rows from 0 to the claimer (onPageClaimed). The caller clears the
+     * on-chain bonus of a page left unowned (BonusService::clearForUnownedPage).
+     *
+     * Called from ClaimService::revokeClaim's isolated post-commit steps:
+     * answers false on any failure, never throws.
      */
     public function releaseClaimedPage(int $pageId, int $userId): bool
     {
@@ -457,6 +466,20 @@ class PeepSoIntegration
             ];
             if ($authorResetFailed) {
                 $meta['author_reset_failed'] = true; // the demotion DID happen
+            } else {
+                // 3. The score rows follow the page's owner after the reset.
+                $toOwner = (int) get_post_field('post_author', $pageId);
+                try {
+                    $meta['score_rows_moved'] = $this->scoreRepo->releaseOwner($pageId, $userId, $toOwner);
+                    $meta['score_owner']      = $toOwner;
+                } catch (\Throwable $e) {
+                    $meta['score_rows_move_failed'] = true;
+                    \BCC\Core\Log\Logger::error('[bcc-trust] page release: score rows not moved off the old owner', [
+                        'page_id' => $pageId,
+                        'user_id' => $userId,
+                        'error'   => $e->getMessage(),
+                    ]);
+                }
             }
             AuditLogger::log('page_owner_released', $pageId, $meta, 'page');
 
@@ -860,17 +883,29 @@ class PeepSoIntegration
     private function handleOwnerChange(int $pageId, int $newOwnerId): void
     {
         $oldOwner = $this->scoreRepo->getPageOwnerId($pageId);
-
-        if ($oldOwner && $oldOwner !== $newOwnerId) {
-            $this->scoreRepo->updateOwner($pageId, $newOwnerId);
-
-            $this->userInfoRepo->transferPageOwnership($oldOwner, $newOwnerId, $pageId);
-
-            AuditLogger::log('page_owner_changed', $pageId, [
-                'old_owner' => $oldOwner,
-                'new_owner' => $newOwnerId,
-            ], 'page');
+        if ($oldOwner === $newOwnerId) {
+            return;
         }
+        // Old owner 0 is a RELEASED page's row (owner-0), which still moves;
+        // no row at all has nothing to move.
+        if ($oldOwner <= 0 && !$this->scoreRepo->existsForPage($pageId)) {
+            return;
+        }
+
+        $this->scoreRepo->updateOwner($pageId, $newOwnerId);
+
+        if ($oldOwner > 0 && $newOwnerId > 0) {
+            $this->userInfoRepo->transferPageOwnership($oldOwner, $newOwnerId, $pageId);
+        } elseif ($oldOwner > 0) {
+            $this->userInfoRepo->decrementPageCount($oldOwner, $pageId);
+        } else {
+            $this->userInfoRepo->incrementPageCount($newOwnerId, $pageId);
+        }
+
+        AuditLogger::log('page_owner_changed', $pageId, [
+            'old_owner' => $oldOwner,
+            'new_owner' => $newOwnerId,
+        ], 'page');
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────

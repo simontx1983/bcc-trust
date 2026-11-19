@@ -100,6 +100,8 @@ final class HotFeedIdentityInvalidationTest extends TestCase
         yield 'account deleted'   => ['deleted_user', [70], 'account_deleted'];
         yield 'handle changed'    => ['bcc_handle_changed', [70, 'old-handle', 'new-handle'], 'handle_changed'];
         yield 'real name hidden'  => ['bcc_privacy_settings_changed', [70, ['real_name_hidden']], 'real_name_hidden'];
+        yield 'profile made private' => ['bcc_profile_visibility_changed', [70, 40], 'profile_visibility_changed'];
+        yield 'suspended'            => ['bcc_user_suspension_changed', [70], 'suspension_changed'];
     }
 
     /** @param list<mixed> $args */

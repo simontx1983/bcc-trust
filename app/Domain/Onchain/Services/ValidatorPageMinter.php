@@ -401,8 +401,9 @@ final class ValidatorPageMinter
         // `ScoreRepository::createIfNotExists()` resolves the owner and
         // THROWS 'No owner ID found for page N' when there is none. That
         // refusal is the designed behaviour, not an obstacle: an ownerless
-        // score row would be meaningless, and production holds zero rows
-        // with `page_owner_id = 0`.
+        // score row is never CREATED. The only rows at `page_owner_id = 0`
+        // are RELEASED pages' (owner-0: a revoked claim's page keeps its
+        // score history at owner 0 until the next claim takes it over).
         //
         // Nothing here needs one. `PageReadModelRepository::syncPage()`
         // treats a null score row as 'no score yet' and projects the neutral

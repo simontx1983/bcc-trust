@@ -25,8 +25,10 @@ declare(strict_types=1);
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\FeedUnavailable;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_REST_Server;
@@ -179,14 +181,19 @@ final class GroupsDetailEndpoint
         $hallFeedRaw = $request->get_param('hall_feed');
         $hallFeed    = $hallFeedRaw === 'ranked' ? 'ranked' : 'main';
 
-        $payload = Plugin::instance()->feedRankingService()->getGroupFeed(
-            $viewerId,
-            $groupId,
-            $cursor,
-            $limit,
-            $publicOnly,
-            $hallFeed
-        );
+        try {
+            $payload = Plugin::instance()->feedRankingService()->getGroupFeed(
+                $viewerId,
+                $groupId,
+                $cursor,
+                $limit,
+                $publicOnly,
+                $hallFeed
+            );
+        } catch (ActivityReadFailedException) {
+            // F-275: a read that did not run, never an empty room.
+            return FeedUnavailable::response();
+        }
 
         $response = ApiResponse::ok($payload);
         // Group-scoped feed mirrors /feed cache policy — per-viewer

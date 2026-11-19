@@ -3,7 +3,10 @@
  * GitHub Controller
  *
  * Thin HTTP adapter — validates requests, delegates all domain logic to
- * GitHubVerificationService, and formats responses.
+ * GitHubVerificationService, and formats responses. *
+ * Logs carry an exception's class and code, never its message: provider
+ * exception text can echo request details (codes, tokens, URLs, response
+ * bodies). Security review, 2026-11-18.
  *
  * @package BCC\Trust\Core
  * @subpackage Controllers
@@ -103,7 +106,7 @@ class GitHubController {
             return new WP_REST_Response(['success' => true, 'data' => ['auth_url' => $authUrl]], 200);
 
         } catch (Exception $e) {
-            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'GitHub API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
+            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'GitHub API error', ['endpoint' => __FUNCTION__, 'exception' => get_class($e), 'code' => $e->getCode()]);
             return new WP_Error('bcc_internal', 'An unexpected error occurred. Please try again.', ['status' => 500]);
         }
     }
@@ -173,8 +176,9 @@ class GitHubController {
             // Log unconditionally — silent OAuth failures in production lose
             // all triage data for attacker probing or provider outages.
             \BCC\Core\Log\Logger::error('[bcc-trust] GitHub callback error', [
-                'detail'  => $e->getMessage(),
-                'user_id' => $userId ?? 0,
+                'exception' => get_class($e),
+                'code'      => $e->getCode(),
+                'user_id'   => $userId ?? 0,
             ]);
 
             $errorReturnUrl = '';
@@ -223,7 +227,7 @@ class GitHubController {
             ], 200);
 
         } catch (Exception $e) {
-            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'GitHub API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
+            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'GitHub API error', ['endpoint' => __FUNCTION__, 'exception' => get_class($e), 'code' => $e->getCode()]);
             return new WP_Error('bcc_internal', 'An unexpected error occurred. Please try again.', ['status' => 500]);
         }
     }
@@ -246,7 +250,7 @@ class GitHubController {
             ], 200);
 
         } catch (Exception $e) {
-            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'GitHub API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
+            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'GitHub API error', ['endpoint' => __FUNCTION__, 'exception' => get_class($e), 'code' => $e->getCode()]);
             return new WP_Error('bcc_internal', 'An unexpected error occurred. Please try again.', ['status' => 500]);
         }
     }
@@ -266,7 +270,7 @@ class GitHubController {
             ], 200);
 
         } catch (Exception $e) {
-            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'GitHub API error', ['endpoint' => __FUNCTION__, 'error' => $e->getMessage()]);
+            \BCC\Core\Log\Logger::info('[bcc-trust] ' . 'GitHub API error', ['endpoint' => __FUNCTION__, 'exception' => get_class($e), 'code' => $e->getCode()]);
             return new WP_Error('bcc_internal', 'An unexpected error occurred. Please try again.', ['status' => 500]);
         }
     }

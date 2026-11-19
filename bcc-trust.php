@@ -1241,7 +1241,7 @@ add_action(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK, functio
         $stats = \BCC\Trust\Onchain\OnchainPlugin::instance()
             ->nftGroupRevokeService()
             ->sweep();
-        if ($stats['revoked'] > 0 || $stats['skipped_unknown'] > 0) {
+        if ($stats['revoked'] > 0 || $stats['skipped_unknown'] > 0 || $stats['awaiting_second_zero'] > 0) {
             \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group revoke sweep', $stats);
         }
     } catch (\Throwable $e) {
@@ -1636,7 +1636,9 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 | BearerAuth → reads `Authorization: Bearer <jwt>`, verifies via
 |              JwtToken (HS256 + wp_salt('auth')), and authenticates
 |              the request as the JWT's user_id claim. WP cookie auth
-|              wins when both are present (same-origin admin tooling).
+|              wins when both are present (same-origin admin tooling;
+|              on a bcc route only an admin may be signed in that way,
+|              see WordPressSignInGate).
 |
 | CorsHandler → the SINGLE CORS authority for every WordPress REST
 |               route, gated by BCC_FRONTEND_ORIGIN (parsed by
@@ -1654,11 +1656,25 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 \BCC\Trust\Core\Support\CorsHandler::register();
 \BCC\Trust\Infrastructure\EdgeCache::init();
 
+// Security review 2026-11-18 (H2): members sign in at the app only.
+// wp-login.php / XML-RPC refuse member accounts, wp-admin sends members
+// away, and a member on a bcc route must be authenticated by the bearer
+// token (never a WordPress cookie or application password); see
+// WordPressSignInGate.
+\BCC\Trust\Core\Security\WordPressSignInGate::register();
+
 // F-305: suspended members are signed in READ-ONLY. One gate refuses every
 // BCC write from a known-suspended member, except an explicit allow-list
 // (auth, appeal, prefs, push unsubscribe, blocks, password change); see
 // SuspendedWriteGate.
 \BCC\Trust\Core\Security\SuspendedWriteGate::register();
+
+// Security review 2026-11-18: non-admins may call BCC's own REST namespaces
+// only (signed out: also GET elsewhere, except /wp/v2/users*), and only
+// admins get application passwords. A member's bearer token reaches every
+// REST route, and core's let it change the account's password or email
+// around every BCC step-up; see RestRouteAllowlist.
+\BCC\Trust\Core\Security\RestRouteAllowlist::register();
 
 // Validator announcements, unit A1 (api-contract-v1.md §4.32): the private
 // `bcc_announcement` post type plus the four guards that stop WordPress's
@@ -1685,6 +1701,12 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 // scheduling and the due instant. Turning the feature off must never OPEN a
 // publication path.
 \BCC\Trust\Core\Announcements\AnnouncementPublicationGuard::register();
+
+// Security review 2026-11-18: BCC's password rules (the 8-character minimum
+// and the breach check) on WordPress's own password paths too: the core
+// reset form, wp-admin profile / user-edit / user-new, and core REST user
+// writes. See CorePasswordPolicy.
+\BCC\Trust\Core\Security\CorePasswordPolicy::register();
 
 // §K2 / §G1: hook PeepSo's user-search filter so users hidden from search
 // (hide_from_search, which /me/privacy's discovery_optout aliases since
@@ -2309,6 +2331,15 @@ if (defined('WP_CLI') && WP_CLI) {
     \WP_CLI::add_command(
         'bcc-trust block-follows',
         \BCC\Trust\Core\CLI\BlockFollowsBackfillCommand::class
+    );
+
+    // Attestation rows of accounts that no longer exist (the cleanup account
+    // deletion runs, for rows that survived it). Dry run by default, counts
+    // only; --apply needs the --confirm token and a --user-id holding
+    // manage_options (ApplyGuard). Nothing runs it on deploy.
+    \WP_CLI::add_command(
+        'bcc-trust attestations',
+        \BCC\Trust\Core\CLI\AttestationOrphansCommand::class
     );
 }
 

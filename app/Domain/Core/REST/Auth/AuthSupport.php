@@ -26,6 +26,7 @@ use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\AccountRecoveryService;
 use BCC\Trust\Core\Services\AuthMailer;
 use BCC\Trust\Core\Services\HandleService;
+use BCC\Trust\Core\Services\PendingEmailService;
 use BCC\Trust\Core\Services\UserViewService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\FrontendRedirect;
@@ -160,8 +161,9 @@ final class AuthSupport
             // The sign-in already succeeded; losing the record only means
             // this network keeps counting against the ceiling.
             \BCC\Core\Log\Logger::warning('[bcc-trust] trusted login network not recorded', [
-                'user_id' => $userId,
-                'error'   => $e->getMessage(),
+                'user_id'   => $userId,
+                'exception' => get_class($e),
+                'code'      => $e->getCode(),
             ]);
         }
     }
@@ -421,6 +423,13 @@ final class AuthSupport
     public const META_EMAIL_VERIFIED = '_bcc_email_verified';
 
     /**
+     * H1: user meta holding the generation of the user's emailed
+     * verification links (see storeVerifyToken). Absent = 0. Only
+     * revokeEmailVerification() bumps it.
+     */
+    public const META_VERIFY_LINK_GEN = 'bcc_verify_link_gen';
+
+    /**
      * Per-ACCOUNT limit (per 60 s) on cheap self-scoped writes — profile, prefs,
      * privacy, onboarding, mark-read, highlights, primary hall… (F-134). One
      * shared 'me_write' bucket; generous, because mark-read and celebrations
@@ -509,8 +518,9 @@ final class AuthSupport
             return UserViewService::isInGoodStanding($tier);
         } catch (\Throwable $e) {
             Logger::warning('[AuthEndpoint] in_good_standing lookup failed; fail-open', [
-                'user_id' => $userId,
-                'error'   => $e->getMessage(),
+                'user_id'   => $userId,
+                'exception' => get_class($e),
+                'code'      => $e->getCode(),
             ]);
             return true;
         }
@@ -568,8 +578,9 @@ final class AuthSupport
             );
         }
 
+        // No WordPress auth cookie: BCC sessions are bearer tokens only
+        // (see SessionController::logoutEverywhere).
         wp_set_current_user($userId);
-        wp_set_auth_cookie($userId, true);
 
         // Email ownership just changed hands from "unproven" to "proven".
         // Revoke every Bearer token minted before this point: if someone
@@ -635,8 +646,9 @@ final class AuthSupport
             return count(WalletRepository::getForUserOrThrow($userId));
         } catch (\Throwable $e) {
             Logger::warning('[bcc-trust] verify-email: linked wallet count unavailable', [
-                'user_id' => $userId,
-                'error'   => $e->getMessage(),
+                'user_id'   => $userId,
+                'exception' => get_class($e),
+                'code'      => $e->getCode(),
             ]);
             return 0;
         }
@@ -655,8 +667,9 @@ final class AuthSupport
 
     /**
      * Generate a single-use verify token (64 hex chars = 256 bits).
-     * Stored in a transient keyed by the token string itself; the userId
-     * is the value. Consuming deletes the transient (single-use).
+     * Stored in a transient keyed by the token string itself; the value is
+     * the userId with its link generation and address (storeVerifyToken).
+     * Consuming deletes the transient (single-use).
      */
     public static function generateVerifyToken(): string
     {
@@ -664,29 +677,115 @@ final class AuthSupport
     }
 
     /**
-     * Store an HMAC-SHA256 hash of the OTP for $userId.
+     * Store an HMAC-SHA256 hash of the OTP for $userId, bound to $email,
+     * the address the code is mailed to.
      *
      * Keyed by `bcc_otp_{userId}` so any concurrent call (e.g. from
      * resendVerification) overwrites the previous OTP atomically.
-     * TTL: OTP_TTL seconds (15 minutes).
+     * Value: `{code hmac}:{address mac}` (see addressMac). TTL: OTP_TTL
+     * seconds (15 minutes).
      */
-    public static function storeOtpForUser(int $userId, string $otpCode): void
+    public static function storeOtpForUser(int $userId, string $otpCode, string $email): void
     {
         $key  = 'bcc_otp_' . (string) $userId;
         $hash = hash_hmac('sha256', $otpCode, (string) wp_salt('auth'));
-        set_transient($key, $hash, self::OTP_TTL);
+        set_transient($key, $hash . ':' . self::addressMac($email), self::OTP_TTL);
     }
 
     /**
-     * Store a verify token mapped to $userId.
+     * Store a verify token mapped to $userId, bound to $email, the address
+     * the link is mailed to.
      *
-     * Key: `bcc_vt_{token}`, value: string userId, TTL: TOKEN_TTL (24 h).
-     * Multiple tokens can be live at once (one per resend call); they
-     * expire naturally since we can't bulk-invalidate by userId.
+     * Key: `bcc_vt_{token}`, value: `{userId}:{gen}:{address mac}`, TTL:
+     * TOKEN_TTL (24 h). Multiple tokens can be live at once (one per resend
+     * call). They are keyed by token, so they cannot be deleted by user;
+     * instead each one records the user's link generation
+     * (META_VERIFY_LINK_GEN), and revokeEmailVerification() bumps it to void
+     * them all.
      */
-    public static function storeVerifyToken(string $token, int $userId): void
+    public static function storeVerifyToken(string $token, int $userId, string $email): void
     {
-        set_transient('bcc_vt_' . $token, (string) $userId, self::TOKEN_TTL);
+        set_transient(
+            'bcc_vt_' . $token,
+            $userId . ':' . self::verifyLinkGeneration($userId) . ':' . self::addressMac($email),
+            self::TOKEN_TTL
+        );
+    }
+
+    private static function verifyLinkGeneration(int $userId): int
+    {
+        $gen = get_user_meta($userId, self::META_VERIFY_LINK_GEN, true);
+        return is_numeric($gen) ? max(0, (int) $gen) : 0;
+    }
+
+    /**
+     * H1: a keyed hash of an address, case- and space-insensitive, so a
+     * verification code or link can record which address it was mailed to
+     * without storing the address. Keyed by the auth salt, so the stored
+     * value cannot be matched against a list of guessed addresses.
+     */
+    private static function addressMac(string $email): string
+    {
+        return hash_hmac('sha256', 'bcc-verify-address|' . strtolower(trim($email)), (string) wp_salt('auth'));
+    }
+
+    /**
+     * H1: is $addressMac the address a verification of $userId would prove
+     * NOW? That is the wallet sign-up's pending address while user_email is
+     * still the wallet placeholder (applyPendingSignupEmail then moves it
+     * into user_email), and user_email in every other case, including a
+     * pending address left behind after user_email changed.
+     *
+     * A code or link proves only the inbox it was mailed to. Without this a
+     * code or link mailed to one address could mark another verified once
+     * user_email changed, by any route, a direct database write included.
+     * An unbound value (mailed before this check existed, so with no address
+     * mac) never matches: fail closed, and the member asks for a new email.
+     */
+    private static function isBoundToVerificationTarget(int $userId, string $addressMac): bool
+    {
+        if ($addressMac === '') {
+            return false;
+        }
+        $user = get_userdata($userId);
+        if (!$user instanceof \WP_User) {
+            return false;
+        }
+        $target  = (string) $user->user_email;
+        $pending = PendingEmailService::pendingSignupEmail($userId);
+        if ($pending !== '' && AccountRecoveryService::isPlaceholderEmail($target)) {
+            $target = $pending;
+        }
+        return $target !== '' && hash_equals(self::addressMac($target), $addressMac);
+    }
+
+    /**
+     * H1: the account's email is no longer a proven address. Called when
+     * user_email changes OUTSIDE PendingEmailService (core REST, wp-admin,
+     * any plugin calling wp_update_user): nobody proved the new address.
+     *
+     *   - META_EMAIL_VERIFIED = '0', so OAuth stops linking by that email
+     *     (mayLinkOauthByEmail) and password sign-in asks for verification;
+     *   - the pending email-verification code is burned, and every emailed
+     *     verification link is voided (the link generation is bumped);
+     *   - a wallet sign-up's pending address is dropped. Otherwise a resend
+     *     would still mail a fresh code and link to it (the typed address,
+     *     perhaps the attacker's), and verifying them would finalise the
+     *     NEW user_email.
+     *
+     * Each code and link is also bound to the address it was mailed to
+     * (isBoundToVerificationTarget), so this is the first of two locks: a
+     * code or link for the old address no longer matches the new one either.
+     */
+    public static function revokeEmailVerification(int $userId): void
+    {
+        if ($userId <= 0) {
+            return;
+        }
+        update_user_meta($userId, self::META_EMAIL_VERIFIED, '0');
+        self::burnEmailOtp($userId);
+        update_user_meta($userId, self::META_VERIFY_LINK_GEN, (string) (self::verifyLinkGeneration($userId) + 1));
+        delete_user_meta($userId, PendingEmailService::META_PENDING_SIGNUP_EMAIL);
     }
 
     /**
@@ -706,13 +805,17 @@ final class AuthSupport
      *
      * Shared by password signup, X signup (oauth-complete), wallet signup and
      * resendVerification — one sequence, so the paths cannot drift.
+     *
+     * H1: the code and the link are bound to $email, and verify only while
+     * $email is the address a verification would prove (the pending sign-up
+     * address, else user_email; see isBoundToVerificationTarget).
      */
     public static function beginEmailVerification(int $userId, string $email): void
     {
         $otpCode     = self::generateOtp();
         $verifyToken = self::generateVerifyToken();
-        self::storeOtpForUser($userId, $otpCode);
-        self::storeVerifyToken($verifyToken, $userId);
+        self::storeOtpForUser($userId, $otpCode, $email);
+        self::storeVerifyToken($verifyToken, $userId, $email);
 
         $verifyPath = '/verify-email?email=' . rawurlencode($email) . '&token=' . rawurlencode($verifyToken);
         AuthMailer::sendVerificationEmail(
@@ -809,6 +912,11 @@ final class AuthSupport
      *
      * Uses hash_equals() for timing-safe comparison — the HMAC prevents
      * length-extension attacks; hash_equals() prevents timing oracles.
+     *
+     * H1: a RIGHT code mailed to an address other than the one this
+     * verification would prove (isBoundToVerificationTarget), or with no
+     * recorded address, is consumed and refused. A wrong code is left in
+     * place for a retry, as before.
      */
     public static function consumeOtpForUser(int $userId, string $otpCode): bool
     {
@@ -818,19 +926,27 @@ final class AuthSupport
             return false;
         }
 
+        [$storedHash, $addressMac] = array_pad(explode(':', $stored, 2), 2, '');
         $expected = hash_hmac('sha256', $otpCode, (string) wp_salt('auth'));
-        if (!hash_equals($expected, $stored)) {
+        if (!hash_equals($expected, $storedHash)) {
             return false;
         }
 
         delete_transient($key);
-        return true;
+        return self::isBoundToVerificationTarget($userId, $addressMac);
     }
 
     /**
      * Consume a verify token and return the associated userId, or null
      * when the token is missing, malformed, or already used. Consuming
      * deletes the transient immediately so the link is single-use.
+     *
+     * H1: these are consumed and refused:
+     *   - a token from an older link generation (the account's email
+     *     verification was revoked after it was mailed);
+     *   - a token mailed to an address other than the one this verification
+     *     would prove (isBoundToVerificationTarget), or with no recorded
+     *     address.
      */
     public static function consumeVerifyToken(string $token): ?int
     {
@@ -843,12 +959,19 @@ final class AuthSupport
             return null;
         }
 
-        $userId = (int) $stored;
+        [$idPart, $genPart, $addressMac] = array_pad(explode(':', $stored, 3), 3, '');
+        $userId = (int) $idPart;
         if ($userId <= 0) {
             return null;
         }
 
         delete_transient('bcc_vt_' . $token);
+        if ((int) $genPart !== self::verifyLinkGeneration($userId)) {
+            return null;
+        }
+        if (!self::isBoundToVerificationTarget($userId, $addressMac)) {
+            return null;
+        }
         return $userId;
     }
 

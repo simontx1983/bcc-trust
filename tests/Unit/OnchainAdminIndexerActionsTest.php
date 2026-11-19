@@ -459,6 +459,20 @@ final class OnchainAdminIndexerActionsTest extends TestCase
         $this->assertSame(['admin_helius_webhook_provisioned'], \BCC\Trust\Core\Security\AuditLogger::actions());
     }
 
+    public function testHeliusProvisionBusyIsReportedAsBusyNotAsFailure(): void
+    {
+        \BccAdminTestState::$validNonceAction = 'bcc_helius_provision';
+        \BCC\Trust\Onchain\Services\HeliusSubscriptionManager::$provisionBusy = true;
+
+        try {
+            NftIndexerStatusView::handleHeliusProvision();
+        } catch (\BccAdminRedirect $r) {
+            $this->assertSame('helius_provision_busy', $r->args['bcc_nft_result']);
+        }
+
+        $this->assertSame(['admin_helius_webhook_provision_busy'], \BCC\Trust\Core\Security\AuditLogger::actions());
+    }
+
     public function testHeliusProvisionNullResultIsAuditedAsFailureNotSuccess(): void
     {
         \BccAdminTestState::$validNonceAction = 'bcc_helius_provision';

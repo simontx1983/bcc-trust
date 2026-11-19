@@ -125,6 +125,16 @@ final class WalletSignInVerifyBeforeConsumeTest extends TestCase
         self::assertSame([7], self::live(), 'the other chain is untouched');
     }
 
+    /** H3: a completed sign-in is a bearer token only, never a WordPress auth cookie. */
+    public function testACompletedLoginSetsNoWordPressAuthCookie(): void
+    {
+        $GLOBALS['__bcc_wl']['get_var_queue'] = ['42'];
+        $GLOBALS['__bcc_ph']['meta'][42]['bcc_handle'] = 'alice';
+
+        self::assertSame(200, self::login('good-sig'));
+        self::assertSame([], $GLOBALS['__bcc_ph']['auth_cookies'] ?? []);
+    }
+
     public function testAReplayedLoginSignatureIsRejected(): void
     {
         self::login('good-sig');

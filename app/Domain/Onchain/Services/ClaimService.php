@@ -679,6 +679,31 @@ class ClaimService {
             ], 'claim', $userId);
         });
 
+        // F-334 (user decision): free each page the user LOST (revoke()'s
+        // mirror_page_ids already exclude pages they still hold through
+        // another claim), so the next verified operator's claim takes it
+        // over. One isolated step per page; it re-checks that no verified
+        // claim of ANY user still binds the page before touching it, and
+        // moves the page's score rows off the user (owner-0).
+        //
+        // ⚠ BEFORE the bonus step: with the rows moved, getPageForOwner()
+        // no longer resolves the user to a page they lost, so their bonus is
+        // recomputed onto a page they still own.
+        foreach ($result['mirror_page_ids'] as $lostPageId) {
+            self::afterCommit('page_release', $claimId, static function () use ($lostPageId, $userId): void {
+                \BCC\Trust\Core\Plugin::instance()->peepSoIntegration()->releaseClaimedPage((int) $lostPageId, $userId);
+            });
+            // A page nobody owns now carries no on-chain bonus. Its own step:
+            // it runs even when the release was partial, and only acts on a
+            // page whose author is 0 (a skipped or failed release leaves the
+            // author in place; an admin-reassigned page keeps its owner).
+            self::afterCommit('page_bonus_clear', $claimId, static function () use ($lostPageId): void {
+                if ((int) get_post_field('post_author', (int) $lostPageId) === 0) {
+                    BonusService::clearForUnownedPage((int) $lostPageId);
+                }
+            });
+        }
+
         // The bonus is claimant-centric: it lives on the claimant's own page.
         self::afterCommit('bonus', $claimId, static function () use ($userId): void {
             $pageId = \BCC\Core\ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($userId);
@@ -686,17 +711,6 @@ class ClaimService {
                 BonusService::recomputeAndApply($pageId, $userId);
             }
         });
-
-        // F-334 (user decision): free each page the user LOST (revoke()'s
-        // mirror_page_ids already exclude pages they still hold through
-        // another claim), so the next verified operator's claim takes it
-        // over. One isolated step per page; it re-checks that no verified
-        // claim of ANY user still binds the page before touching it.
-        foreach ($result['mirror_page_ids'] as $lostPageId) {
-            self::afterCommit('page_release', $claimId, static function () use ($lostPageId, $userId): void {
-                \BCC\Trust\Core\Plugin::instance()->peepSoIntegration()->releaseClaimedPage((int) $lostPageId, $userId);
-            });
-        }
 
         // The CLAIMED page's `has_verified_claim` (card badge, rank composite)
         // lives on the bound page, which `bcc_trust_verification_changed`

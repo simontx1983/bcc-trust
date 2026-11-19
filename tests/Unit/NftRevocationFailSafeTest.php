@@ -596,7 +596,9 @@ final class NftRevocationFailSafeTest extends TestCase
         $this->erc1155ZeroInIndex();
         $this->erc1155Answer('exact', 0);
 
-        self::assertTrue($this->verdict('ethereum', self::EVM_CONTRACT)->isIneligible());
+        $verdict = $this->verdict('ethereum', self::EVM_CONTRACT);
+        self::assertTrue($verdict->isIneligible());
+        self::assertTrue($verdict->mayLag, 'read from the provider\'s own index, so the sweep waits for a second zero');
         self::assertContains('count_erc1155_holdings:' . self::EVM_WALLET . '|' . self::EVM_CONTRACT, \BccRevokeWorld::$fetcherCalls);
     }
 
@@ -691,10 +693,339 @@ final class NftRevocationFailSafeTest extends TestCase
         \BccRevokeWorld::$erc1155Answers[$keeper . '|' . self::EVM_CONTRACT] = ['atLeast', 1];
         \BccRevokeWorld::$members[self::GROUP] = [$this->member(self::USER), $this->member(self::USER + 1)];
 
-        $stats = (new NftGroupRevokeService())->sweep();
+        $first = $this->clocked()->sweep();
+        self::assertSame([], \BccRevokeWorld::$leaves, 'one provider zero removes nobody');
+        self::assertSame(1, $first['awaiting_second_zero']);
+
+        $this->now += NftGroupRevokeService::SECOND_ZERO_AFTER;
+        $stats = $this->clocked()->sweep();
 
         self::assertSame([self::GROUP . ':' . self::USER], \BccRevokeWorld::$leaves, 'only the seller is removed');
         self::assertSame(1, $stats['revoked']);
+    }
+
+    // ── F-278 review INFO 1: a provider zero needs a second one ──────────
+
+    private const PAIR = self::GROUP . ':' . self::USER;
+
+    private int $now = 1_800_000_000;
+
+    private function clocked(): NftGroupRevokeService
+    {
+        return new NftGroupRevokeService(null, fn (): int => $this->now);
+    }
+
+    /** An ERC-1155 holder group; the member's index row is a tombstone and the provider answers. */
+    private function erc1155Member(string $kind, int $n = 0, int $min = 1): void
+    {
+        $this->gate('ethereum', self::EVM_CHAIN, self::EVM_CONTRACT, $min);
+        $this->erc1155ZeroInIndex();
+        $this->erc1155Answer($kind, $n);
+        \BccRevokeWorld::$members[self::GROUP] = [$this->member(self::OWNER, 'member_owner'), $this->member(self::USER)];
+    }
+
+    /** @return array<string, mixed> */
+    private function firstZeros(): array
+    {
+        $raw = \BccRevokeWorld::$options['bcc_gated_group_first_zeros'] ?? [];
+
+        return is_array($raw) ? $raw : [];
+    }
+
+    /** @return list<array{0: int, 1: string, 2: array<int, mixed>}> */
+    private function recheckBookings(): array
+    {
+        return array_values(array_filter(
+            $GLOBALS['__bcc_sched'] ?? [],
+            static fn (array $e): bool => $e[1] === NftGroupRevokeService::RECHECK_HOOK
+        ));
+    }
+
+    public function testNoZeroFromAnySourceButTheErc1155ProviderIsMarkedAsLagging(): void
+    {
+        $this->linkCosmos();
+        $this->answer(self::COSMOS_WALLET, self::COSMOS_CONTRACT, 'exact', 0);
+        \BccRevokeWorld::linkWallet(self::USER, self::LINK + 1, self::EVM_CHAIN, self::EVM_WALLET);
+        $this->answer(self::EVM_WALLET, self::EVM_CONTRACT, 'exact', 0);
+        \BccRevokeWorld::linkWallet(self::USER, self::LINK + 2, self::SOL_CHAIN, self::SOL_WALLET);
+        $this->answer(self::SOL_WALLET, self::SOL_COLLECTION, 'exact', 0);
+
+        foreach ([
+            'cosmos' => $this->verdict('cosmos', self::COSMOS_CONTRACT),
+            'evm balanceOf' => $this->verdict('ethereum', self::EVM_CONTRACT),
+            'solana' => $this->verdict('solana', self::SOL_COLLECTION),
+        ] as $source => $verdict) {
+            self::assertTrue($verdict->isIneligible(), $source);
+            self::assertFalse($verdict->mayLag, $source . ': removal on the first zero is unchanged');
+        }
+
+        \BccRevokeWorld::$wallets = [];
+        $noWallet = $this->verdict('cosmos', self::COSMOS_CONTRACT);
+        self::assertTrue($noWallet->isIneligible());
+        self::assertFalse($noWallet->mayLag, 'no linked wallet is our own record, not a lagging read');
+    }
+
+    public function testAFirstProviderZeroKeepsTheMemberAndBooksTheSecondLook(): void
+    {
+        $this->erc1155Member('exact', 0);
+
+        $stats = $this->clocked()->sweep();
+
+        self::assertSame([], \BccRevokeWorld::$leaves);
+        self::assertSame(0, $stats['revoked']);
+        self::assertSame(1, $stats['awaiting_second_zero']);
+        self::assertSame(0, $stats['skipped_unknown'], 'a decided zero, not an unknown');
+        self::assertSame([self::PAIR => $this->now], $this->firstZeros());
+        self::assertSame(
+            [[$this->now + NftGroupRevokeService::SECOND_ZERO_AFTER, NftGroupRevokeService::RECHECK_HOOK, [self::USER, self::GROUP]]],
+            $this->recheckBookings(),
+            'the second look does not wait for the member\'s turn in the sweep'
+        );
+    }
+
+    public function testASecondProviderZeroSixHoursLaterRemovesTheMember(): void
+    {
+        $this->erc1155Member('exact', 0);
+        $this->clocked()->sweep();
+
+        $this->now += NftGroupRevokeService::SECOND_ZERO_AFTER;
+        $stats = $this->clocked()->sweep();
+
+        self::assertSame([self::GROUP . ':' . self::USER], \BccRevokeWorld::$leaves);
+        self::assertSame(1, $stats['revoked']);
+        self::assertSame(0, $stats['awaiting_second_zero']);
+        self::assertSame([], $this->firstZeros(), 'a confirmed removal forgets the first zero');
+    }
+
+    public function testASecondZeroTooSoonKeepsTheMemberAndDoesNotMoveTheFirst(): void
+    {
+        $this->erc1155Member('exact', 0);
+        $first = $this->now;
+        $this->clocked()->sweep();
+
+        $this->now = $first + NftGroupRevokeService::SECOND_ZERO_AFTER - 1;
+        $stats = $this->clocked()->sweep();
+
+        self::assertSame([], \BccRevokeWorld::$leaves, 'one second short of the window');
+        self::assertSame(1, $stats['awaiting_second_zero']);
+        self::assertSame([self::PAIR => $first], $this->firstZeros(), 'the first zero keeps its time');
+        self::assertCount(1, $this->recheckBookings(), 'the pending second look is not booked twice');
+
+        $this->now = $first + NftGroupRevokeService::SECOND_ZERO_AFTER;
+        $this->clocked()->sweep();
+
+        self::assertSame([self::GROUP . ':' . self::USER], \BccRevokeWorld::$leaves, 'measured from the FIRST zero');
+    }
+
+    public function testAHoldingBetweenTheZerosStartsOver(): void
+    {
+        $this->erc1155Member('exact', 0);
+        $this->clocked()->sweep();
+
+        $this->now += 3600;
+        $this->erc1155Answer('atLeast', 1);
+        $this->clocked()->sweep();
+        self::assertSame([], $this->firstZeros(), 'proof of a holding ends the run of zeros');
+
+        $this->now += NftGroupRevokeService::SECOND_ZERO_AFTER;
+        $this->erc1155Answer('exact', 0);
+        $stats = $this->clocked()->sweep();
+
+        self::assertSame([], \BccRevokeWorld::$leaves, 'a zero after a holding is a FIRST zero again');
+        self::assertSame(1, $stats['awaiting_second_zero']);
+        self::assertSame([self::PAIR => $this->now], $this->firstZeros());
+    }
+
+    public function testANonZeroBelowAHigherMinimumAlsoStartsOver(): void
+    {
+        $this->erc1155Member('exact', 0, 2);
+        $this->clocked()->sweep();
+
+        $this->now += 3600;
+        $this->erc1155Answer('atLeast', 1);
+        $stats = $this->clocked()->sweep();
+
+        self::assertSame(1, $stats['skipped_unknown'], 'one token under a two-token gate decides nothing');
+        self::assertSame([], $this->firstZeros(), 'but it is not a zero, so the zeros were not consecutive');
+    }
+
+    public function testAnUnknownBetweenTheZerosNeitherConfirmsNorClears(): void
+    {
+        $this->erc1155Member('exact', 0);
+        $first = $this->now;
+        $this->clocked()->sweep();
+
+        $this->now += 3600;
+        $this->erc1155Answer('null');
+        $this->clocked()->sweep();
+        self::assertSame([self::PAIR => $first], $this->firstZeros(), 'no answer is no holding seen');
+
+        $this->now = $first + NftGroupRevokeService::SECOND_ZERO_AFTER;
+        $this->erc1155Answer('exact', 0);
+        $this->clocked()->sweep();
+
+        self::assertSame([self::GROUP . ':' . self::USER], \BccRevokeWorld::$leaves);
+    }
+
+    public function testAFirstZeroOlderThanTheMaximumAgeStartsOver(): void
+    {
+        $this->erc1155Member('exact', 0);
+        \BccRevokeWorld::$options['bcc_gated_group_first_zeros'] = [
+            self::PAIR => $this->now - NftGroupRevokeService::FIRST_ZERO_MAX_AGE - 1,
+        ];
+
+        $stats = $this->clocked()->sweep();
+
+        self::assertSame([], \BccRevokeWorld::$leaves, 'a forgotten first zero does not confirm anything');
+        self::assertSame(1, $stats['awaiting_second_zero']);
+        self::assertSame([self::PAIR => $this->now], $this->firstZeros());
+    }
+
+    public function testAFirstZeroAtTheMaximumAgeStillConfirms(): void
+    {
+        $this->erc1155Member('exact', 0);
+        \BccRevokeWorld::$options['bcc_gated_group_first_zeros'] = [
+            self::PAIR => $this->now - NftGroupRevokeService::FIRST_ZERO_MAX_AGE,
+        ];
+
+        $this->clocked()->sweep();
+
+        self::assertSame([self::GROUP . ':' . self::USER], \BccRevokeWorld::$leaves);
+    }
+
+    public function testFirstZerosAreKeptPerMemberAndGroup(): void
+    {
+        $this->erc1155Member('exact', 0);
+        $other = '0x' . str_repeat('c', 40);
+        \BccRevokeWorld::linkWallet(self::USER + 1, self::LINK + 1, self::EVM_CHAIN, $other);
+        \BccRevokeWorld::$erc1155Answers[$other . '|' . self::EVM_CONTRACT] = ['exact', 0];
+        \BccRevokeWorld::$members[self::GROUP][] = $this->member(self::USER + 1);
+        \BccRevokeWorld::$options['bcc_gated_group_first_zeros'] = [
+            self::GROUP . ':' . (self::USER + 1) => $this->now - NftGroupRevokeService::SECOND_ZERO_AFTER,
+            (self::GROUP + 1) . ':' . self::USER => $this->now - NftGroupRevokeService::SECOND_ZERO_AFTER,
+        ];
+
+        $this->clocked()->sweep();
+
+        self::assertSame([self::GROUP . ':' . (self::USER + 1)], \BccRevokeWorld::$leaves, 'another group\'s first zero confirms nothing here');
+        self::assertSame([
+            self::PAIR => $this->now,
+            (self::GROUP + 1) . ':' . self::USER => $this->now - NftGroupRevokeService::SECOND_ZERO_AFTER,
+        ], $this->firstZeros());
+    }
+
+    public function testAnyOtherRemovalForgetsAFirstZero(): void
+    {
+        $this->erc1155Member('exact', 0);
+        \BccRevokeWorld::$options['bcc_gated_group_first_zeros'] = [self::PAIR => $this->now - 60];
+        \BccRevokeWorld::$wallets = []; // every wallet unlinked: our own record
+
+        $stats = $this->clocked()->sweep();
+
+        self::assertSame([self::GROUP . ':' . self::USER], \BccRevokeWorld::$leaves, 'no wallet still removes at once');
+        self::assertSame(1, $stats['revoked']);
+        self::assertSame([], $this->firstZeros());
+    }
+
+    public function testTheRecheckWaitsForASecondZeroToo(): void
+    {
+        $this->erc1155Member('exact', 0);
+        $service = $this->clocked();
+
+        self::assertSame('awaiting_second_zero', $service->recheckMember(self::USER, self::GROUP));
+        self::assertSame([], \BccRevokeWorld::$leaves);
+        self::assertCount(1, $this->recheckBookings());
+
+        $this->now += NftGroupRevokeService::SECOND_ZERO_AFTER;
+
+        self::assertSame('revoked', $service->recheckMember(self::USER, self::GROUP));
+        self::assertSame([self::GROUP . ':' . self::USER], \BccRevokeWorld::$leaves);
+        self::assertSame([], $this->firstZeros());
+    }
+
+    public function testTheRecheckClearsAFirstZeroOnAHolding(): void
+    {
+        $this->erc1155Member('atLeast', 1);
+        \BccRevokeWorld::$options['bcc_gated_group_first_zeros'] = [self::PAIR => $this->now - 60];
+
+        self::assertSame('kept', $this->clocked()->recheckMember(self::USER, self::GROUP));
+        self::assertSame([], $this->firstZeros());
+    }
+
+    public function testAPendingHoldingLostRecheckStandsInForTheBooking(): void
+    {
+        // A +60 s re-check from the indexer is already queued for this pair:
+        // it will see the zero and book the second look itself.
+        $this->erc1155Member('exact', 0);
+        $GLOBALS['__bcc_sched'] = [[$this->now + 60, NftGroupRevokeService::RECHECK_HOOK, [self::USER, self::GROUP]]];
+
+        $this->clocked()->sweep();
+
+        self::assertCount(1, $this->recheckBookings(), 'one pending re-check per (member, group)');
+    }
+
+    public function testFirstZerosAreBoundedNewestFirst(): void
+    {
+        $this->erc1155Member('exact', 0);
+        $stored = [];
+        for ($i = 1; $i <= 1000; $i++) {
+            $stored['9:' . $i] = $this->now - 3600 - $i;
+        }
+        \BccRevokeWorld::$options['bcc_gated_group_first_zeros'] = $stored;
+
+        $this->clocked()->sweep();
+
+        $kept = $this->firstZeros();
+        self::assertCount(1000, $kept);
+        self::assertSame($this->now, $kept[self::PAIR] ?? null, 'the newest first zero is kept');
+        self::assertArrayNotHasKey('9:1000', $kept, 'the oldest is dropped');
+    }
+
+    public function testABookingMadeAgainIsStillTimedFromTheFirstZero(): void
+    {
+        $this->erc1155Member('exact', 0);
+        $first = $this->now;
+        $this->clocked()->sweep();
+        $GLOBALS['__bcc_sched'] = []; // the booked look ran and could not get the lock
+
+        $this->now += 3600;
+        $this->clocked()->sweep();
+
+        self::assertSame(
+            [[$first + NftGroupRevokeService::SECOND_ZERO_AFTER, NftGroupRevokeService::RECHECK_HOOK, [self::USER, self::GROUP]]],
+            $this->recheckBookings()
+        );
+    }
+
+    public function testMembersKeptOnAFirstZeroAreNeitherSkippedNorRevisited(): void
+    {
+        // 150 members across two pages of 100, every one a first provider
+        // zero. A kept member is still listed, so the offset must pass them.
+        \BccRevokeWorld::$filters['bcc_gated_group_revoke_batch_size'] = 1000;
+        $this->gate('ethereum', self::EVM_CHAIN, self::EVM_CONTRACT);
+        \BccRevokeWorld::$tokenStandards[self::EVM_CHAIN . '|' . self::EVM_CONTRACT] = 'ERC-1155';
+        $this->checkpoint('healthy', 60);
+        \BccRevokeWorld::$erc1155Capable = true;
+        $rows = [$this->member(self::OWNER, 'member_owner')];
+        for ($i = 0; $i < 150; $i++) {
+            $wallet = '0x' . str_pad(dechex(4096 + $i), 40, '0', STR_PAD_LEFT);
+            \BccRevokeWorld::linkWallet(self::USER + $i, self::LINK + $i, self::EVM_CHAIN, $wallet);
+            \BccRevokeWorld::$erc1155Answers[$wallet . '|' . self::EVM_CONTRACT] = ['exact', 0];
+            $rows[] = $this->member(self::USER + $i);
+        }
+        \BccRevokeWorld::$members[self::GROUP] = $rows;
+
+        $stats = $this->clocked()->sweep();
+
+        self::assertSame(150, $stats['checked']);
+        self::assertSame(150, $stats['awaiting_second_zero']);
+        self::assertSame([], \BccRevokeWorld::$leaves);
+        $asked = array_values(array_filter(
+            \BccRevokeWorld::$fetcherCalls,
+            static fn (string $c): bool => str_starts_with($c, 'count_erc1155_holdings:')
+        ));
+        self::assertCount(150, array_unique($asked), 'every member asked');
+        self::assertCount(150, $asked, 'nobody asked twice');
     }
 
     // ════════════════════════════════════════════════════════════════════
