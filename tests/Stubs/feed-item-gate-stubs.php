@@ -43,3 +43,49 @@ namespace {
         }
     }
 }
+
+/*
+ * The comment-repository seam FeedItemGate::isCommentAct() asks, reached
+ * through the container when no repository is handed in.
+ *
+ * ⚠ Both guards pass `false` to class_exists: the default AUTOLOADS the real
+ * class and then skips the double, which would silently run production code.
+ */
+namespace BCC\Trust\Core\Repositories {
+    if (!class_exists(__NAMESPACE__ . '\\CommentRepository', false)) {
+        class CommentRepository
+        {
+            /** @var array<int, object> act_id => a CommentMetaRow-shaped row */
+            public array $metaByActId = [];
+
+            public function getCommentMeta(int $commentActId): ?object
+            {
+                $seeded = $GLOBALS['__bcc_fig_comment_acts'] ?? [];
+                if (in_array($commentActId, (array) $seeded, true)) {
+                    return (object) ['act_id' => $commentActId, 'parent_post_id' => 4242, 'parent_act_id' => 77];
+                }
+
+                return $this->metaByActId[$commentActId] ?? null;
+            }
+        }
+    }
+}
+
+namespace BCC\Trust\Core {
+    if (!class_exists(__NAMESPACE__ . '\\Plugin', false)) {
+        final class Plugin
+        {
+            private static ?self $instance = null;
+
+            public static function instance(): self
+            {
+                return self::$instance ??= new self();
+            }
+
+            public function commentRepository(): Repositories\CommentRepository
+            {
+                return new Repositories\CommentRepository();
+            }
+        }
+    }
+}

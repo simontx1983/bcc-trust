@@ -204,7 +204,13 @@ final class CommentService
         // F-265: a deleted (trashed) or moderation-hidden post is gone from
         // every feed and its permalink; its thread is too. Same answer as an
         // unknown id, for every viewer, before any membership check.
-        if ($parent === null || !FeedItemGate::isFeedModule($parent->act_module_id ?? null) || !$this->visibility()->isLive($parent)) {
+        if ($parent === null
+            || !FeedItemGate::isFeedModule($parent->act_module_id ?? null)
+            // A COMMENT act id passes the module check: PeepSo stores the
+            // same act_module_id on a comment as on a status post. Without
+            // this, a comment could be used as a comment PARENT.
+            || FeedItemGate::isCommentAct($actId, $this->commentRepo)
+            || !$this->visibility()->isLive($parent)) {
             return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
         }
         $parentPostId = (int) $parent->act_external_id;
@@ -407,7 +413,13 @@ final class CommentService
         // F-265: a deleted (trashed) or moderation-hidden post is gone from
         // every feed and its permalink; its thread is too. Same answer as an
         // unknown id, for every viewer, before any membership check.
-        if ($parent === null || !FeedItemGate::isFeedModule($parent->act_module_id ?? null) || !$this->visibility()->isLive($parent)) {
+        if ($parent === null
+            || !FeedItemGate::isFeedModule($parent->act_module_id ?? null)
+            // A COMMENT act id passes the module check: PeepSo stores the
+            // same act_module_id on a comment as on a status post. Without
+            // this, a comment could be used as a comment PARENT.
+            || FeedItemGate::isCommentAct($actId, $this->commentRepo)
+            || !$this->visibility()->isLive($parent)) {
             return ['error' => 'bcc_not_found', 'message' => 'Post not found.'];
         }
         $parentPostId   = (int) $parent->act_external_id;
