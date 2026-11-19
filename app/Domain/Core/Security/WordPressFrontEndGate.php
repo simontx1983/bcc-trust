@@ -33,7 +33,14 @@ if (!defined('ABSPATH')) {
  *      the head's meta tag and a feed's `<generator>` element alike.
  *      `wp_generator` is also unhooked from `wp_head`, so it leaves no
  *      empty line.
- *   3. The head no longer links the feeds (`feed_links`, `feed_links_extra`).
+ *   3. Neither the head nor the headers advertise anything else:
+ *      - the feeds (`feed_links`, `feed_links_extra`);
+ *      - the REST API (`rest_output_link_wp_head`, and the
+ *        `Link: <…/wp-json/>; rel="https://api.w.org/"` header from
+ *        `rest_output_link_header` on `template_redirect`);
+ *      - XML-RPC's RSD document (`rsd_link`);
+ *      - the `?p=` shortlink (`wp_shortlink_wp_head`, and its
+ *        `Link: rel=shortlink` header from `wp_shortlink_header`).
  *
  * The sitemaps need nothing here: Rank Math already 301s `/wp-sitemap.xml`
  * to the app.
@@ -56,6 +63,11 @@ final class WordPressFrontEndGate
         remove_action('wp_head', 'wp_generator');
         remove_action('wp_head', 'feed_links', 2);
         remove_action('wp_head', 'feed_links_extra', 3);
+        remove_action('wp_head', 'rest_output_link_wp_head', 10);
+        remove_action('template_redirect', 'rest_output_link_header', 11);
+        remove_action('wp_head', 'rsd_link');
+        remove_action('wp_head', 'wp_shortlink_wp_head', 10);
+        remove_action('template_redirect', 'wp_shortlink_header', 11);
     }
 
     /**

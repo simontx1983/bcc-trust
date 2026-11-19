@@ -51,7 +51,7 @@ final class WordPressFrontEndGateTest extends TestCase
         );
     }
 
-    public function testItUnhooksTheGeneratorAndTheFeedLinksAtCoresPriorities(): void
+    public function testItUnhooksEveryAdvertisementAtCoresPriorities(): void
     {
         WordPressFrontEndGate::register();
 
@@ -62,9 +62,62 @@ final class WordPressFrontEndGateTest extends TestCase
                 ['wp_head', 'wp_generator', 10],
                 ['wp_head', 'feed_links', 2],
                 ['wp_head', 'feed_links_extra', 3],
+                ['wp_head', 'rest_output_link_wp_head', 10],
+                ['template_redirect', 'rest_output_link_header', 11],
+                ['wp_head', 'rsd_link', 10],
+                ['wp_head', 'wp_shortlink_wp_head', 10],
+                ['template_redirect', 'wp_shortlink_header', 11],
             ],
             $GLOBALS['__bcc_sig']['removed']
         );
+    }
+
+    /**
+     * What core hooks on `wp_head` and `template_redirect`
+     * (default-filters.php, 7.0.2), as [hook, callback, priority].
+     *
+     * @return list<array{0: string, 1: string, 2: int}>
+     */
+    private static function coresHeadAndRedirectHooks(): array
+    {
+        return [
+            ['wp_head', 'rest_output_link_wp_head', 10], ['template_redirect', 'rest_output_link_header', 11],
+            ['wp_head', '_wp_render_title_tag', 1], ['wp_head', 'wp_enqueue_scripts', 1],
+            ['wp_head', 'wp_resource_hints', 2], ['wp_head', 'wp_preload_resources', 1],
+            ['wp_head', 'feed_links', 2], ['wp_head', 'feed_links_extra', 3], ['wp_head', 'rsd_link', 10],
+            ['wp_head', 'locale_stylesheet', 10], ['wp_head', 'wp_robots', 1],
+            ['wp_head', 'print_emoji_detection_script', 7], ['wp_head', 'wp_print_styles', 8],
+            ['wp_head', 'wp_print_head_scripts', 9], ['wp_head', 'wp_generator', 10],
+            ['wp_head', 'rel_canonical', 10], ['wp_head', 'wp_shortlink_wp_head', 10],
+            ['wp_head', 'wp_custom_css_cb', 101], ['wp_head', 'wp_site_icon', 99],
+            ['template_redirect', 'wp_shortlink_header', 11], ['template_redirect', 'wp_old_slug_redirect', 10],
+            ['wp_head', 'wp_post_preview_js', 1], ['template_redirect', 'redirect_canonical', 10],
+            ['template_redirect', 'wp_redirect_admin_locations', 1000], ['template_redirect', '_wp_admin_bar_init', 0],
+        ];
+    }
+
+    /**
+     * remove_action() as core does it: only an exact hook, callback and
+     * priority comes off. So each advertisement must be gone from core's
+     * own table, and nothing else may be.
+     */
+    public function testEachAdvertisementIsGoneFromCoresHooksAndNothingElse(): void
+    {
+        WordPressFrontEndGate::register();
+
+        $left = array_values(array_filter(
+            self::coresHeadAndRedirectHooks(),
+            static fn(array $h): bool => !in_array($h, $GLOBALS['__bcc_sig']['removed'], true)
+        ));
+        $leftNames = array_column($left, 1);
+
+        foreach (['wp_generator', 'feed_links', 'feed_links_extra', 'rest_output_link_wp_head', 'rest_output_link_header', 'rsd_link', 'wp_shortlink_wp_head', 'wp_shortlink_header'] as $advert) {
+            self::assertNotContains($advert, $leftNames, $advert . ' is gone');
+        }
+        self::assertCount(count(self::coresHeadAndRedirectHooks()) - 8, $left, 'and nothing else came off');
+        foreach (['wp_enqueue_scripts', 'rel_canonical', 'wp_robots', 'redirect_canonical'] as $kept) {
+            self::assertContains($kept, $leftNames, $kept . ' stays');
+        }
     }
 
     public function testItIsRegisteredAtBoot(): void
