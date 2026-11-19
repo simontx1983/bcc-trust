@@ -1241,7 +1241,7 @@ add_action(\BCC\Trust\Onchain\Services\NftGroupRevokeService::CRON_HOOK, functio
         $stats = \BCC\Trust\Onchain\OnchainPlugin::instance()
             ->nftGroupRevokeService()
             ->sweep();
-        if ($stats['revoked'] > 0 || $stats['skipped_unknown'] > 0) {
+        if ($stats['revoked'] > 0 || $stats['skipped_unknown'] > 0 || $stats['awaiting_second_zero'] > 0) {
             \BCC\Core\Log\Logger::info('[bcc-trust] Holder-group revoke sweep', $stats);
         }
     } catch (\Throwable $e) {
@@ -1659,6 +1659,13 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 // (auth, appeal, prefs, push unsubscribe, blocks, password change); see
 // SuspendedWriteGate.
 \BCC\Trust\Core\Security\SuspendedWriteGate::register();
+
+// Security review 2026-11-18: non-admins may call BCC's own REST namespaces
+// only (signed out: also GET elsewhere, except /wp/v2/users*), and only
+// admins get application passwords. A member's bearer token reaches every
+// REST route, and core's let it change the account's password or email
+// around every BCC step-up; see RestRouteAllowlist.
+\BCC\Trust\Core\Security\RestRouteAllowlist::register();
 
 // Validator announcements, unit A1 (api-contract-v1.md §4.32): the private
 // `bcc_announcement` post type plus the four guards that stop WordPress's

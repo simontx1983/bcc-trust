@@ -58,6 +58,11 @@ namespace {
             'show_groups'      => is_array($f['show_groups'] ?? null) ? $f['show_groups'] : [],
             'memberships'      => is_array($f['memberships'] ?? null) ? $f['memberships'] : [],
             'membership_calls' => is_array($f['membership_calls'] ?? null) ? $f['membership_calls'] : [],
+            // F-341 PR 3: user_id => stored `bcc_hidden_hall_ids` value.
+            // Absent is deliberately NOT normalised to [] — WordPress
+            // answers '' for absent meta, and "'' means nothing hidden"
+            // is the behaviour under test.
+            'hidden_halls'     => is_array($f['hidden_halls'] ?? null) ? $f['hidden_halls'] : [],
         ];
     }
 }
@@ -120,6 +125,14 @@ namespace BCC\Trust\Core\Support {
         function get_user_meta(int $userId, string $key = '', bool $single = false)
         {
             unset($single);
+            // F-341 PR 3. ⚠ This branch is REQUIRED for the per-Hall rule
+            // to be observable at all: without it every key but
+            // META_SHOW_GROUPS answered '', so `hiddenHallIds()` always
+            // saw "nothing hidden" and the rule could not refuse anything.
+            // A green suite would then have been proving nothing.
+            if ($key === ProfileAccess::META_HIDDEN_HALL_IDS) {
+                return \bcc_pgv_fixture()['hidden_halls'][$userId] ?? '';
+            }
             if ($key !== ProfileAccess::META_SHOW_GROUPS) {
                 return '';
             }

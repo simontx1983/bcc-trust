@@ -589,9 +589,9 @@ final class WalletAuthController
             );
         }
 
-        // Cookie + JWT, identical to /auth/login.
+        // JWT only, identical to /auth/login: no WordPress auth cookie (see
+        // SessionController::logoutEverywhere).
         wp_set_current_user($userId);
-        wp_set_auth_cookie($userId, true);
 
         $token = JwtToken::encodeNewSession($userId, $handle);
 
@@ -881,8 +881,9 @@ final class WalletAuthController
         // longer delete it), so it is safe to mail.
         AuthSupport::startWalletSignupEmailVerification($userIdInt, $typedEmail !== '' ? $typedEmail : $email);
 
+        // Bearer only, no WordPress auth cookie (see
+        // SessionController::logoutEverywhere).
         wp_set_current_user($userIdInt);
-        wp_set_auth_cookie($userIdInt, true);
 
         $token = JwtToken::encodeNewSession($userIdInt, $handle);
 
