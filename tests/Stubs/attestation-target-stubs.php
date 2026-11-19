@@ -7,9 +7,17 @@ declare(strict_types=1);
  * AttestationService::checkCastEligibility()'s target checks.
  * Load only in a separate process, BEFORE AttestationService is autoloaded,
  * so these declarations win over the real collaborators.
+ *
+ * ⚠ BCC_TRUST_TEST_MODE is deliberately NOT defined here: assertFraudClear()
+ * returns early under it, and the fraud tests would pass vacuously. The
+ * real BCC_TRUST_FRAUD_* thresholds are loaded instead.
  */
 
 namespace {
+    if (!defined('BCC_TRUST_FRAUD_HIGH')) {
+        require_once dirname(__DIR__, 2) . '/includes/config/fraud-detection.php';
+    }
+
     final class AttestTargetWorld
     {
         /** @var array<int, array{type: string, status: string, author: int, page_type: string}> */
@@ -28,6 +36,10 @@ namespace {
         public static array $suspended = [];
         /** @var list<int> attestors with no rank_state row (New Members) */
         public static array $newMembers = [];
+        /** The attestor's reputation tier; null = the test helper's default. */
+        public static ?string $tier = null;
+        /** The attestor's fraud_score (UserInfoRepository::getByUserId). */
+        public static int $fraudScore = 0;
         /** @var array<int, list<int>> SECRET page id => the viewers bcc-core's rule lets in */
         public static array $secretPages = [];
         /** Is the current viewer a site admin (ProfileAccess's shared exemption)? */
@@ -43,6 +55,8 @@ namespace {
             self::$lockAttempts = 0;
             self::$suspended    = [];
             self::$newMembers   = [];
+            self::$tier         = null;
+            self::$fraudScore   = 0;
             self::$secretPages  = [];
             self::$admin        = false;
 

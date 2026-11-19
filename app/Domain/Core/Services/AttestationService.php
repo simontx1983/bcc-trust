@@ -514,19 +514,7 @@ final class AttestationService
         self::assertTargetAttestable($attestorUserId, $targetKind, $targetId);
         self::assertNotSelfTarget($targetOwnerId, $attestorUserId);
 
-        $attestorTier = $this->reputationRepo->getTier($attestorUserId);
-        if (!in_array($attestorTier, UserViewService::GOOD_STANDING_TIERS, true)) {
-            $verb = $kind === 'vouch'
-                ? 'vouch'
-                : 'back operators';
-            $hint = sprintf('Reach Neutral standing to %s.', $verb);
-            throw new AttestationException(
-                AttestationException::CODE_INELIGIBLE,
-                $hint,
-                403,
-                ['unlock_hint' => $hint]
-            );
-        }
+        $this->assertAttestorInGoodStanding($attestorUserId, $kind);
 
         $this->assertFraudClear($attestorUserId);
 
@@ -905,7 +893,11 @@ final class AttestationService
         //     member they can no longer view, across a later block) could be
         //     renewed forever; the same 404 a cast answers;
         //   - it is not their own: a member who came to own the page they
-        //     once vouched for cannot keep renewing a self-vouch (§N7).
+        //     once vouched for cannot keep renewing a self-vouch (§N7);
+        //   - the attestor is in good standing (Neutral or better, the hint
+        //     worded for the row's kind) and not fraud-flagged: a sub-Neutral
+        //     or HIGH-fraud member cannot keep renewing old vouches and
+        //     backings either.
         self::assertAttestorMayAttest($attestorUserId);
         $targetOwnerId = self::resolveTargetOwnerUserId($targetKind, $targetId);
         if ($targetOwnerId <= 0) {
@@ -917,6 +909,8 @@ final class AttestationService
         }
         self::assertTargetAttestable($attestorUserId, $targetKind, $targetId);
         self::assertNotSelfTarget($targetOwnerId, $attestorUserId);
+        $this->assertAttestorInGoodStanding($attestorUserId, $kind);
+        $this->assertFraudClear($attestorUserId);
 
         $attestorLockKey = self::LOCK_PREFIX_ATTESTOR . $attestorUserId;
         if (!AdvisoryLock::acquire($attestorLockKey, self::LOCK_WAIT_SECS)) {
@@ -1867,6 +1861,30 @@ final class AttestationService
     // ──────────────────────────────────────────────────────────────────
     // Pre-mutation gates (private)
     // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Good standing: the attestor's tier must be Neutral or better
+     * (UserViewService::GOOD_STANDING_TIERS). The gate cast() and reaffirm()
+     * share; the hint is worded for the attestation's kind.
+     *
+     * @throws AttestationException
+     */
+    private function assertAttestorInGoodStanding(int $attestorUserId, string $kind): void
+    {
+        $attestorTier = $this->reputationRepo->getTier($attestorUserId);
+        if (!in_array($attestorTier, UserViewService::GOOD_STANDING_TIERS, true)) {
+            $verb = $kind === 'vouch'
+                ? 'vouch'
+                : 'back operators';
+            $hint = sprintf('Reach Neutral standing to %s.', $verb);
+            throw new AttestationException(
+                AttestationException::CODE_INELIGIBLE,
+                $hint,
+                403,
+                ['unlock_hint' => $hint]
+            );
+        }
+    }
 
     /**
      * Block when the attestor's fraud_score is at or above the HIGH
