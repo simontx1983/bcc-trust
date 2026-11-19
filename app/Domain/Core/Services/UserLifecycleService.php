@@ -165,6 +165,53 @@ class UserLifecycleService
         do_action('bcc_trust_quest_signal', $userId, 'complete_profile');
     }
 
+    /**
+     * Remove every attestation tied to an account that is being (or has
+     * been) deleted: rows the user cast AND rows cast against the user's
+     * profile (target_kind='user_profile'). The ONE implementation, for
+     * account deletion and for the orphan prune CLI
+     * (`wp bcc-trust attestations prune-orphans`).
+     *
+     * The distinct targets the user actively backed are snapshotted FIRST so
+     * their scores can be re-synthesized after the delete — with the
+     * endorsement_count denorm + attestation_bonus both sourced from
+     * attestations, a deleted user's vouches must stop counting
+     * immediately, not at the next nightly decay sweep.
+     *
+     * When the delete did not run (logged by the repository) the rows still
+     * exist, so there is nothing to recompute: answers false and skips it.
+     */
+    public function purgeAttestationsFor(int $userId): bool
+    {
+        $plugin = Plugin::instance();
+
+        $castTargets = [];
+        foreach ($plugin->attestationRepository()->listActiveByAttestor($userId) as $row) {
+            $castTargets[$row->target_kind . ':' . $row->target_id] = [$row->target_kind, $row->target_id];
+        }
+
+        if (!$plugin->attestationRepository()->deleteForUser($userId)) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] user-delete attestation purge failed — target recompute skipped', [
+                'user_id' => $userId,
+            ]);
+            return false;
+        }
+
+        foreach ($castTargets as [$targetKind, $targetId]) {
+            try {
+                $plugin->attestationScoreSynthesis()->recomputeFor($targetKind, $targetId);
+            } catch (\Throwable $e) {
+                \BCC\Core\Log\Logger::error('[bcc-trust] user-delete attestation recompute failed', [
+                    'target_kind' => $targetKind,
+                    'target_id'   => $targetId,
+                    'error'       => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return true;
+    }
+
     public function onUserDelete(int $userId): void
     {
         $plugin = Plugin::instance();
@@ -253,30 +300,8 @@ class UserLifecycleService
         (new \BCC\Trust\Core\Repositories\PushSubscriptionRepository())->deleteAllForUser($userId);
 
         // Trust attestations: rows the user cast AND rows cast against the
-        // user's profile (target_kind='user_profile'). Snapshot the distinct
-        // targets the user actively backed FIRST so their scores can be
-        // re-synthesized below — with the endorsement_count denorm +
-        // attestation_bonus both sourced from attestations, a deleted
-        // user's vouches must stop counting immediately, not at the next
-        // nightly decay sweep.
-        $castTargets = [];
-        foreach ($plugin->attestationRepository()->listActiveByAttestor($userId) as $row) {
-            $castTargets[$row->target_kind . ':' . $row->target_id] = [$row->target_kind, $row->target_id];
-        }
-
-        $plugin->attestationRepository()->deleteForUser($userId);
-
-        foreach ($castTargets as [$targetKind, $targetId]) {
-            try {
-                $plugin->attestationScoreSynthesis()->recomputeFor($targetKind, $targetId);
-            } catch (\Throwable $e) {
-                \BCC\Core\Log\Logger::error('[bcc-trust] user-delete attestation recompute failed', [
-                    'target_kind' => $targetKind,
-                    'target_id'   => $targetId,
-                    'error'       => $e->getMessage(),
-                ]);
-            }
-        }
+        // user's profile, then the targets they backed are re-synthesized.
+        $this->purgeAttestationsFor($userId);
 
         // Dispute footprint: panel seats, credited participations, and
         // user-reports in both directions (reporter + reported). Dispute

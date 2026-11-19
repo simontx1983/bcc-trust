@@ -187,6 +187,8 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Application\\TrendingDataService' => __DIR__ . '/../..' . '/app/Domain/Core/Application/TrendingDataService.php',
         'BCC\\Trust\\Core\\Application\\TrustReadService' => __DIR__ . '/../..' . '/app/Domain/Core/Application/TrustReadService.php',
         'BCC\\Trust\\Core\\Application\\WalletVerificationReadService' => __DIR__ . '/../..' . '/app/Domain/Core/Application/WalletVerificationReadService.php',
+        'BCC\\Trust\\Core\\CLI\\ApplyGuard' => __DIR__ . '/../..' . '/app/Domain/Core/CLI/ApplyGuard.php',
+        'BCC\\Trust\\Core\\CLI\\AttestationOrphansCommand' => __DIR__ . '/../..' . '/app/Domain/Core/CLI/AttestationOrphansCommand.php',
         'BCC\\Trust\\Core\\CLI\\BackfillActivityModuleIdsCommand' => __DIR__ . '/../..' . '/app/Domain/Core/CLI/BackfillActivityModuleIdsCommand.php',
         'BCC\\Trust\\Core\\CLI\\BackfillPageOwnersCommand' => __DIR__ . '/../..' . '/app/Domain/Core/CLI/BackfillPageOwnersCommand.php',
         'BCC\\Trust\\Core\\CLI\\BlockFollowsBackfillCommand' => __DIR__ . '/../..' . '/app/Domain/Core/CLI/BlockFollowsBackfillCommand.php',

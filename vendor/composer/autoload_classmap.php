@@ -31,6 +31,8 @@ return array(
     'BCC\\Trust\\Core\\Application\\TrendingDataService' => $baseDir . '/app/Domain/Core/Application/TrendingDataService.php',
     'BCC\\Trust\\Core\\Application\\TrustReadService' => $baseDir . '/app/Domain/Core/Application/TrustReadService.php',
     'BCC\\Trust\\Core\\Application\\WalletVerificationReadService' => $baseDir . '/app/Domain/Core/Application/WalletVerificationReadService.php',
+    'BCC\\Trust\\Core\\CLI\\ApplyGuard' => $baseDir . '/app/Domain/Core/CLI/ApplyGuard.php',
+    'BCC\\Trust\\Core\\CLI\\AttestationOrphansCommand' => $baseDir . '/app/Domain/Core/CLI/AttestationOrphansCommand.php',
     'BCC\\Trust\\Core\\CLI\\BackfillActivityModuleIdsCommand' => $baseDir . '/app/Domain/Core/CLI/BackfillActivityModuleIdsCommand.php',
     'BCC\\Trust\\Core\\CLI\\BackfillPageOwnersCommand' => $baseDir . '/app/Domain/Core/CLI/BackfillPageOwnersCommand.php',
     'BCC\\Trust\\Core\\CLI\\BlockFollowsBackfillCommand' => $baseDir . '/app/Domain/Core/CLI/BlockFollowsBackfillCommand.php',

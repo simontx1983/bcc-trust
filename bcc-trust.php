@@ -2316,6 +2316,15 @@ if (defined('WP_CLI') && WP_CLI) {
         'bcc-trust block-follows',
         \BCC\Trust\Core\CLI\BlockFollowsBackfillCommand::class
     );
+
+    // Attestation rows of accounts that no longer exist (the cleanup account
+    // deletion runs, for rows that survived it). Dry run by default, counts
+    // only; --apply needs the --confirm token and a --user-id holding
+    // manage_options (ApplyGuard). Nothing runs it on deploy.
+    \WP_CLI::add_command(
+        'bcc-trust attestations',
+        \BCC\Trust\Core\CLI\AttestationOrphansCommand::class
+    );
 }
 
 /*
