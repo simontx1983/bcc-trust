@@ -470,8 +470,39 @@ namespace {
         }
     }
     if (!function_exists('wp_set_auth_cookie')) {
+        // Recorded so a test can pin that no BCC sign-in sets one (H3).
         function wp_set_auth_cookie(int $id, bool $remember = false): void
         {
+            $GLOBALS['__bcc_ph']['auth_cookies'][] = $id;
+        }
+    }
+    // WordPress-side credentials ended by POST /auth/logout-everywhere (H3).
+    if (!class_exists('WP_Session_Tokens', false)) {
+        class WP_Session_Tokens
+        {
+            private function __construct(private int $userId)
+            {
+            }
+
+            public static function get_instance(int $userId): self
+            {
+                return new self($userId);
+            }
+
+            public function destroy_all(): void
+            {
+                $GLOBALS['__bcc_ph']['wp_sessions_destroyed'][] = $this->userId;
+            }
+        }
+    }
+    if (!class_exists('WP_Application_Passwords', false)) {
+        class WP_Application_Passwords
+        {
+            public static function delete_all_application_passwords(int $userId): int
+            {
+                $GLOBALS['__bcc_ph']['app_passwords_deleted'][] = $userId;
+                return 0;
+            }
         }
     }
     if (!function_exists('get_option')) {
