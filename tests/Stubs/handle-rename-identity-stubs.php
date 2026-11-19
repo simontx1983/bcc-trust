@@ -220,9 +220,10 @@ namespace {
     if (!class_exists('WP_Error', false)) {
         class WP_Error
         {
-            public function __construct(private string $code = '', private string $message = '') {}
+            public function __construct(private string $code = '', private string $message = '', private mixed $data = '') {}
             public function get_error_code(): string { return $this->code; }
             public function get_error_message(): string { return $this->message; }
+            public function get_error_data(): mixed { return $this->data; }
         }
     }
     // F-294 timing parity: count the password hashes a request pays.
@@ -257,6 +258,10 @@ namespace {
          */
         function wp_insert_user(array $data)
         {
+            // A test sets insert_error to make the insert fail as a DB error does.
+            if (!empty($GLOBALS['__bcc_ph']['insert_error'])) {
+                return new \WP_Error('db_insert_error', 'Could not insert user into the database.');
+            }
             foreach ($GLOBALS['__bcc_ph']['users'] as $u) {
                 if (strcasecmp((string) $u['login'], (string) $data['user_login']) === 0) {
                     return new \WP_Error('existing_user_login', 'login taken');
