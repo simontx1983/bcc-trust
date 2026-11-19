@@ -69,6 +69,10 @@ final class RepostEndpointTest extends TestCase
         // F-346 X model: quotes are unlimited and counted separately.
         $GLOBALS['__bcc_repost_quote_count'] = 7;
         $GLOBALS['__bcc_repost_quote_error'] = null;
+
+        // F-346: only PUBLIC posts may be reposted or quoted.
+        $GLOBALS['__bcc_repost_not_public']    = [];
+        $GLOBALS['__bcc_repost_missing_rows']  = [];
     }
 
     // ── helpers ──────────────────────────────────────────────────────
@@ -1056,6 +1060,104 @@ final class RepostEndpointTest extends TestCase
         $payload = self::payload(self::quote(self::A_REPOST, 'hi'));
 
         self::assertNull($payload['quote_count']);
+    }
+
+    // ── only PUBLIC posts may be reposted (user decision 2026-11-18) ─
+
+    /**
+     * X's protected-post rule: a root that is not visible to EVERY member
+     * cannot be reposted by anyone, including its own author. Refused with a
+     * DISTINCT 403 rather than the route's usual 404 — see the ordering test
+     * below for why that is safe.
+     */
+    public function testANonPublicRootCannotBeReposted(): void
+    {
+        $GLOBALS['__bcc_repost_not_public'] = [self::ROOT];
+
+        $response = self::post(self::A_REPOST);
+
+        self::assertSame(403, $response->get_status());
+        self::assertSame('bcc_permission_denied', self::errorCode($response));
+        self::assertNotContains('createSelfStatus', self::events(), 'nothing may be written');
+        self::assertNotContains('lock_acquire', self::events(), 'and the lock is not taken');
+    }
+
+    public function testANonPublicRootCannotBeQuotedEither(): void
+    {
+        $GLOBALS['__bcc_repost_not_public'] = [self::ROOT];
+
+        $response = self::quote(self::A_REPOST, 'worth sharing');
+
+        self::assertSame(403, $response->get_status());
+        self::assertSame('bcc_permission_denied', self::errorCode($response));
+        self::assertNotContains('createStatus', self::events());
+    }
+
+    /**
+     * ⚠⚠ THE ORDERING TEST, and the one that makes the 403 defensible.
+     *
+     * A root that is BOTH unreadable to this viewer AND non-public must
+     * answer the opaque **404**, never the 403. The 403 names a real reason,
+     * which is only safe once the viewer has been shown they can read the
+     * post — otherwise it would confirm that an id they cannot see exists,
+     * and tell them something about its audience.
+     *
+     * So the publicness check runs strictly AFTER the read check, and this
+     * pins that order rather than trusting the source to keep it.
+     */
+    public function testAnUnreadableNonPublicRootGetsTheOpaque404NotThe403(): void
+    {
+        $GLOBALS['__bcc_repost_unreadable'] = [self::ROOT];
+        $GLOBALS['__bcc_repost_not_public'] = [self::ROOT];
+
+        $response = self::post(self::A_REPOST);
+
+        self::assertSame(404, $response->get_status(), 'an unreadable root must not get the explanatory 403');
+        self::assertSame('bcc_not_found', self::errorCode($response));
+        self::assertNotContains(
+            'isPublicToEveryMember',
+            self::events(),
+            'and the publicness question must not even be asked for a root the viewer cannot read'
+        );
+    }
+
+    /** The gate is asked about the ROOT, not the submitted id. */
+    public function testThePublicnessGateIsAskedAboutTheRoot(): void
+    {
+        self::post(self::A_REPOST);
+
+        self::assertSame(
+            [self::ROOT],
+            self::detailsOf('isPublicToEveryMember'),
+            'publicness is a property of the post being republished'
+        );
+    }
+
+    /** A row that vanished between reads is a missing answer, not a privacy one. */
+    public function testARootRowThatVanishedBetweenReadsIsNotFound(): void
+    {
+        $GLOBALS['__bcc_repost_missing_rows'] = [self::ROOT];
+
+        $response = self::post(self::A_REPOST);
+
+        self::assertSame(404, $response->get_status());
+        self::assertSame('bcc_not_found', self::errorCode($response));
+    }
+
+    /**
+     * ⚠ Anti-vacuity for the whole section: with the dial off, a public root
+     * still reaches the write on BOTH routes. Without this, a gate that
+     * refused everything would satisfy every test above.
+     */
+    public function testAPublicRootStillReachesBothWrites(): void
+    {
+        self::assertSame(200, self::post(self::A_REPOST)->get_status());
+        self::assertContains('createSelfStatus', self::events());
+
+        $GLOBALS['__bcc_repost_trace'] = [];
+        $GLOBALS['__bcc_repost_mine']  = [];
+        self::assertSame(200, self::quote(self::A_REPOST, 'hi')->get_status());
+        self::assertContains('createStatus', self::events());
     }
 
     // ── anti-vacuity ─────────────────────────────────────────────────

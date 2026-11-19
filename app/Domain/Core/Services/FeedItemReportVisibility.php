@@ -358,6 +358,86 @@ class FeedItemReportVisibility
      * a post can carry more than one group id, and the single-value read
      * used for the gate below would silently consider only the first.
      */
+    /**
+     * Is this activity visible to EVERY member — the "public post" test
+     * F-346 reposting requires (user decision 2026-11-18, X's
+     * protected-post rule: only public posts can be reposted or quoted).
+     *
+     * ⚠⚠ THIS IS NOT "can the viewer see it". It takes no viewer, because
+     * the question is about the POST's own reach: reposting republishes to
+     * an audience the original author never chose, so the test has to be
+     * that nobody is excluded from the original in the first place.
+     *
+     * TWO HALVES, and both are needed:
+     *
+     * 1. GROUP. A group-tagged post must be marked `public_all` AND pass
+     *    the syndication gate. ⚠ `public_all` alone is NOT a free pass —
+     *    {@see syndicationAllows()} carries the rule and the reason, and
+     *    it fails CLOSED when the non-open group list cannot be proven.
+     *
+     * 2. §F-02. The EFFECTIVE level must be at most `ACCESS_MEMBERS` (20),
+     *    where effective is the STRICTER of the post's own `act_access`
+     *    and its AUTHOR's profile rung — the same "GREATEST" rule
+     *    `PeepSoActivityRepository::f02PostVisibilityClause()` applies in
+     *    SQL. 10 and 0 are public, 20 is every signed-in member, 30 is
+     *    friends-only and 40 is nobody; the last two are exactly what this
+     *    refuses.
+     *
+     * ⚠ `members_only` (20) PASSES, deliberately. It is the default post
+     * audience (§F-291), so refusing it would refuse almost everything,
+     * and every member can see it — which is what the decision asked for.
+     * Anonymous visibility (10) is a STRICTER test than the rule wanted.
+     *
+     * ⚠ FAILS CLOSED on an unreadable author rung: null from
+     * {@see ProfileAccess::canonicalProfileLevelFor()} means "cannot tell",
+     * and a post whose reach cannot be established is not republished.
+     *
+     * ⛔ The canonical §F-02 rule lives in bcc-core's SQL and is not
+     * exposed as a value, so this is the one place that restates the
+     * comparison. If a core helper for the effective level ever lands,
+     * delete this arithmetic and call it — and until then, a test pins
+     * this against the documented ladder.
+     *
+     * @param object $activity a PeepSoActivityRepository::getById() row
+     */
+    public static function isPublicToEveryMember(object $activity): bool
+    {
+        $postId   = (int) ($activity->act_external_id ?? 0);
+        $authorId = (int) ($activity->act_user_id ?? 0);
+        if ($postId <= 0 || $authorId <= 0) {
+            return false;
+        }
+
+        // 1. the group half
+        $groupIds = array_values(array_filter(
+            array_map('intval', (array) get_post_meta($postId, 'peepso_group_id', false)),
+            static fn(int $id): bool => $id > 0
+        ));
+        if ($groupIds !== []) {
+            if ((string) get_post_meta($postId, '_bcc_post_visibility', true) !== 'public_all') {
+                return false;
+            }
+            if (!self::syndicationAllows($postId)) {
+                return false;
+            }
+        }
+
+        // 2. the §F-02 half. `act_access <= 0` normalises to 10 exactly as
+        // the SQL does — BCC's own writer stores 0, and PeepSo treats 0 as
+        // public.
+        $postLevel = (int) ($activity->act_access ?? 0);
+        if ($postLevel <= 0) {
+            $postLevel = 10;
+        }
+
+        $authorLevel = ProfileAccess::canonicalProfileLevelFor($authorId);
+        if ($authorLevel === null) {
+            return false;
+        }
+
+        return max($postLevel, $authorLevel) <= 20;
+    }
+
     private static function syndicationAllows(int $postId): bool
     {
         $groupIds = array_values(array_filter(

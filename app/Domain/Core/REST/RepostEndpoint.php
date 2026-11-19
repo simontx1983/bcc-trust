@@ -42,6 +42,7 @@ use BCC\Core\Log\Logger;
 use BCC\Core\PeepSo\PeepSoStatusWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Repositories\PostEngagementRepository;
+use BCC\Trust\Core\Services\FeedItemReportVisibility;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\FeedItemGate;
@@ -514,6 +515,37 @@ final class RepostEndpoint
 
         if (!self::viewerCanReadRoot($userId, $rootActId)) {
             return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
+        }
+
+        // ⭐ ONLY PUBLIC POSTS MAY BE REPOSTED OR QUOTED (user decision
+        // 2026-11-18 — X's protected-post rule). A root that is not visible
+        // to EVERY member is refused for everyone, including its own author:
+        // reposting republishes to an audience the original author never
+        // chose, so the test is that nobody was excluded from the original.
+        //
+        // That is a question about the POST, not about this viewer, which is
+        // why it takes no viewer id. `members_only` PASSES — it is the
+        // default audience (§F-291) and every member can see it; what this
+        // refuses is friends-only, only-me, and anything inside a group that
+        // is not `public_all`.
+        //
+        // ⚠⚠ ORDERED AFTER THE READ CHECK ON PURPOSE, and the 403 is only
+        // safe because of it. By this line the viewer has already been shown
+        // they CAN read the root, so naming the real reason discloses
+        // nothing they do not already see — and a 404 here would tell them
+        // "not found" about a post in front of them. The opaque 404 stays
+        // for the case that needs it: a root they cannot read.
+        $rootRow = PeepSoActivityRepository::getById($rootActId);
+        if ($rootRow === null) {
+            // Vanished between reads. Not a privacy answer — a missing one.
+            return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
+        }
+        if (!FeedItemReportVisibility::isPublicToEveryMember($rootRow)) {
+            return ApiResponse::error(
+                'bcc_permission_denied',
+                'Only public posts can be reposted.',
+                403
+            );
         }
 
         return $rootActId;

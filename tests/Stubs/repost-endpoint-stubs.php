@@ -416,6 +416,35 @@ namespace BCC\Core\Repositories {
              * the submitted id differ from the root, which is the whole
              * point of the double-gate case.
              */
+            /**
+             * The row the publicness gate reads. Returns null only when the
+             * test asks for it (the vanished-between-reads case).
+             */
+            public static function getById(
+                int $actId,
+                ?array $allowedModuleIds = null,
+                ?array $viewerFriendIds = null,
+                bool $enforcePostVisibility = false,
+                int $viewerId = 0,
+                bool $throwOnReadFailure = false,
+                ?bool $topLevelOnly = null
+            ): ?object {
+                \bcc_repost_trace('getById', $actId);
+
+                if (in_array($actId, (array) ($GLOBALS['__bcc_repost_missing_rows'] ?? []), true)) {
+                    return null;
+                }
+
+                return (object) [
+                    'act_id'          => $actId,
+                    'act_user_id'     => 9,
+                    'act_external_id' => 5000 + $actId,
+                    'act_module_id'   => '1',
+                    'act_access'      => 10,
+                    'act_status'      => 'publish',
+                ];
+            }
+
             public static function resolveRepostRoot(int $actId): int
             {
                 \bcc_repost_trace('resolveRoot', $actId);
@@ -611,5 +640,31 @@ namespace {
     }
     if (!defined('BCC_TRUST_RATE_WINDOW_STATUS_POST')) {
         define('BCC_TRUST_RATE_WINDOW_STATUS_POST', 120);
+    }
+}
+
+/*
+ * The "only public posts can be reposted" gate (F-346, user decision
+ * 2026-11-18).
+ *
+ * ⭐ DOUBLED HERE DELIBERATELY, and the split is the point: this suite tests
+ * that the ENDPOINT asks the question, in the right ORDER, and honours the
+ * answer. Whether the predicate itself correctly reads `public_all`, the
+ * syndication gate and the §F-02 ladder is `FeedItemReportVisibility`'s own
+ * question, and it has its own tests — a doubled gate here cannot and must
+ * not speak to it.
+ */
+namespace BCC\Trust\Core\Services {
+    if (!class_exists(__NAMESPACE__ . '\\FeedItemReportVisibility', false)) {
+        class FeedItemReportVisibility
+        {
+            public static function isPublicToEveryMember(object $activity): bool
+            {
+                $actId = (int) ($activity->act_id ?? 0);
+                \bcc_repost_trace('isPublicToEveryMember', $actId);
+
+                return !in_array($actId, (array) ($GLOBALS['__bcc_repost_not_public'] ?? []), true);
+            }
+        }
     }
 }
