@@ -76,6 +76,14 @@ final class PendingEmailService
      * owner), and none owns it until one proves the inbox. A holder past the
      * bound can still verify with its emailed link, which names it.
      *
+     * Only a sign-up whose user_email is still the wallet placeholder holds
+     * it: that is when the pending address is the one its verification
+     * proves (AuthSupport::verificationAddress()). A sign-up that moved off
+     * the placeholder may keep a leftover pending address, but it is no
+     * holder. That is filtered HERE, in the query, BEFORE the bound. Filtered
+     * after it, five such leftovers (the oldest first) could fill the bound
+     * and push a live holder out.
+     *
      * @return list<int>
      */
     public static function pendingSignupHolders(string $email): array
@@ -85,12 +93,17 @@ final class PendingEmailService
             return [];
         }
         $ids = get_users([
-            'meta_key'   => self::META_PENDING_SIGNUP_EMAIL,
-            'meta_value' => $email,
-            'fields'     => 'ID',
-            'orderby'    => 'ID',
-            'order'      => 'ASC',
-            'number'     => self::MAX_PENDING_SIGNUP_HOLDERS,
+            'meta_key'       => self::META_PENDING_SIGNUP_EMAIL,
+            'meta_value'     => $email,
+            // `user_email LIKE '%@noreply.bcc.local'`, the same test as
+            // AccountRecoveryService::isPlaceholderEmail(). The column's
+            // collation ignores letter case, as that test's strtolower() does.
+            'search'         => '*@' . AccountRecoveryService::PLACEHOLDER_EMAIL_DOMAIN,
+            'search_columns' => ['user_email'],
+            'fields'         => 'ID',
+            'orderby'        => 'ID',
+            'order'          => 'ASC',
+            'number'         => self::MAX_PENDING_SIGNUP_HOLDERS,
         ]);
         $holders = [];
         foreach ($ids as $id) {
