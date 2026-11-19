@@ -10,7 +10,10 @@
  *
  * Wraps {@see BlogCoverImageWriter::upload()}; this handler's job is
  * to extract the file from $_FILES, narrow the unknown WP_REST_Request
- * shape, and translate the service envelope into ApiResponse.
+ * shape, and translate the service envelope into ApiResponse. A service
+ * error's status comes from the shared
+ * {@see ApiResponse::statusForServiceCode()}, the same map PostsEndpoint
+ * uses (`bcc_permission_denied` and `bcc_feature_disabled` are 403).
  *
  * Validation lives in the writer:
  *   - mime ∈ {jpeg, png, webp, gif}
@@ -108,37 +111,11 @@ final class BlogCoverImageEndpoint
         $result = Plugin::instance()->blogCoverImageWriter()->upload($viewerId, $file);
 
         if (isset($result['error'])) {
-            return self::forwardServiceError($result);
+            return ApiResponse::fromServiceError($result);
         }
 
         $response = ApiResponse::ok($result);
         $response->header('Cache-Control', 'no-store');
         return $response;
-    }
-
-    private static function statusForCode(string $code): int
-    {
-        return match ($code) {
-            'bcc_unauthorized'    => 401,
-            'bcc_forbidden'       => 403,
-            'bcc_not_found'       => 404,
-            'bcc_invalid_request' => 400,
-            'bcc_rate_limited'    => 429,
-            'bcc_unavailable'     => 503,
-            default               => 400,
-        };
-    }
-
-    /**
-     * @param array<string, mixed> $result
-     */
-    private static function forwardServiceError(array $result): WP_REST_Response
-    {
-        $code    = (string) ($result['error'] ?? 'bcc_unavailable');
-        $message = (string) ($result['message'] ?? '');
-        $status  = self::statusForCode($code);
-        /** @var array<string, mixed>|null $data */
-        $data = isset($result['data']) && is_array($result['data']) ? $result['data'] : null;
-        return ApiResponse::error($code, $message, $status, $data);
     }
 }

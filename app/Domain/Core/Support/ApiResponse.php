@@ -125,13 +125,15 @@ final class ApiResponse
      * caller therefore needs this translation, and before this it was a
      * PRIVATE copy inside each endpoint that needed it.
      *
-     * ⚠ The map is PostsEndpoint's, which is the SUPERSET of the two that
-     * existed. It is deliberately NOT applied to the other two copies in
-     * this PR: `BlogCoverImageEndpoint::statusForCode()` is a strict subset,
-     * so routing it here would change its answer for
-     * `bcc_permission_denied` and `bcc_feature_disabled` from 400 to 403 —
-     * a real behaviour change to an endpoint this PR has no business
-     * touching. Migrating those two is a follow-up of its own.
+     * Used by RepostEndpoint, PostsEndpoint and BlogCoverImageEndpoint.
+     * The map is PostsEndpoint's old one, the superset; BlogCoverImage's old
+     * copy was a strict subset, so moving it here made
+     * `bcc_permission_denied` and `bcc_feature_disabled` 403 there rather
+     * than 400 (approved; its writer emits neither today).
+     *
+     * ⚠ Other endpoints keep private maps that DISAGREE with this one (a
+     * 500 or 503 default, 409/410/422 arms). Moving one here changes its
+     * answers, so each needs its own decision, not a drive-by.
      *
      * @param array<string, mixed> $result a service result carrying 'error'
      */
