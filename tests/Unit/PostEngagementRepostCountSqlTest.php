@@ -155,6 +155,78 @@ final class PostEngagementRepostCountSqlTest extends TestCase
         self::assertStringContainsString('INNER JOIN wp_posts p ON p.ID = a.act_external_id', $sql);
     }
 
+    // ── the X model: plain is capped, quotes are not ────────────────
+
+    /**
+     * ⭐ `repost_count` is PLAIN reposts only (user decision 2026-11-18:
+     * one plain repost per member per root, unlimited quotes).
+     *
+     * The discriminator is `post_content`, and it is PeepSo's own rule
+     * rather than a convention invented here: `PeepSoActivity::add_post()`
+     * REFUSES empty content unless a repost is set, and stores the content
+     * already trimmed. So among rows carrying `act_repost_id`, empty content
+     * is reachable ONLY as a plain repost.
+     */
+    public function testTheRepostCountExcludesQuotes(): void
+    {
+        PostEngagementRepository::repostCount(9091);
+
+        $sql = self::countSql();
+        self::assertStringContainsString("p.post_content = ''", $sql, 'plain reposts only');
+        self::assertStringNotContainsString("p.post_content <> ''", $sql);
+    }
+
+    /**
+     * And the quote count is its mirror: a RAW total, not distinct members,
+     * because a member may quote the same post as often as they like and
+     * each quote is its own post.
+     */
+    public function testTheQuoteCountCountsQuoteRowsNotDistinctMembers(): void
+    {
+        PostEngagementRepository::quoteCount(9091);
+
+        $sql = self::countSql();
+        self::assertNotSame('', $sql, 'no COUNT query was prepared');
+        self::assertStringContainsString("p.post_content <> ''", $sql, 'quotes only');
+        self::assertStringContainsString('COUNT(*)', $sql);
+        self::assertStringNotContainsString('COUNT(DISTINCT', $sql, 'quotes are not deduplicated by member');
+        // The shared predicates must not have drifted either.
+        self::assertStringContainsString('a.act_repost_id = %d', $sql);
+        self::assertStringContainsString("p.post_status = 'publish'", $sql);
+    }
+
+    /**
+     * ⚠ The two predicates must be EXCLUSIVE. If both read `= ''` or both
+     * `<> ''`, one of the two numbers is silently the other, and no single
+     * query's assertions above would notice.
+     */
+    public function testThePlainAndQuotePredicatesAreOpposites(): void
+    {
+        global $wpdb;
+
+        PostEngagementRepository::repostCount(9091);
+        $plainSql = self::countSql();
+
+        // ⚠ countSql() returns the FIRST captured COUNT query, so the
+        // capture has to be cleared between the two reads — without this
+        // both variables hold the plain query and the comparison below
+        // passes for the wrong reason.
+        $wpdb->prepared = [];
+
+        PostEngagementRepository::quoteCount(9091);
+        $quoteSql = self::countSql();
+
+        self::assertNotSame($plainSql, $quoteSql, 'the two counts must not run the same query');
+        self::assertStringContainsString("p.post_content = ''", $plainSql);
+        self::assertStringContainsString("p.post_content <> ''", $quoteSql);
+    }
+
+    public function testANonPositiveIdIsUnknownForTheQuoteCountToo(): void
+    {
+        self::assertNull(PostEngagementRepository::quoteCount(0));
+        self::assertNull(PostEngagementRepository::quoteCount(-1));
+    }
+
     /** A read still returns the number it was given. */
     public function testTheCountIsReturned(): void
     {

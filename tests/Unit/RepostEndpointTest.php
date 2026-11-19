@@ -65,6 +65,10 @@ final class RepostEndpointTest extends TestCase
         // F-346 review: the root's SHAPE and the reposter's READ access.
         $GLOBALS['__bcc_repost_comment_acts'] = [];
         $GLOBALS['__bcc_repost_unreadable']   = [];
+
+        // F-346 X model: quotes are unlimited and counted separately.
+        $GLOBALS['__bcc_repost_quote_count'] = 7;
+        $GLOBALS['__bcc_repost_quote_error'] = null;
     }
 
     // ── helpers ──────────────────────────────────────────────────────
@@ -77,6 +81,11 @@ final class RepostEndpointTest extends TestCase
     private static function delete(int $id): WP_REST_Response
     {
         return (new RepostEndpoint())->removeRepost(new WP_REST_Request(['id' => $id]));
+    }
+
+    private static function quote(int $id, string $body): WP_REST_Response
+    {
+        return (new RepostEndpoint())->addQuote(new WP_REST_Request(['id' => $id, 'body' => $body]));
     }
 
     /** @return list<mixed> */
@@ -146,20 +155,37 @@ final class RepostEndpointTest extends TestCase
 
     // ── routes ───────────────────────────────────────────────────────
 
-    public function testBothRoutesAreRegisteredOnTheSamePath(): void
+    /**
+     * ⭐ THREE routes, and the QUOTE one is deliberately its own path.
+     *
+     * Under the X model a plain repost is capped at one per member per root
+     * while a quote is unlimited, so the two cannot share a route whose
+     * once-rule turns on the presence of a body: a client sending
+     * `body: ""` rather than omitting it would silently cross between
+     * "capped, 409s" and "unlimited". Asserted as an exact, ordered list so
+     * a fourth route, a changed method or a renamed path cannot slip in.
+     */
+    public function testTheThreeRoutesAreRegisteredWithTheirOwnPathsAndMethods(): void
     {
         RepostEndpoint::register();
 
         /** @var list<array{namespace: string, route: string, methods: mixed}> $routes */
         $routes = $GLOBALS['__bcc_repost_routes'];
 
-        self::assertCount(2, $routes);
+        self::assertSame(
+            [
+                ['POST',   '/feed/(?P<id>\d+)/repost'],
+                ['DELETE', '/feed/(?P<id>\d+)/repost'],
+                ['POST',   '/feed/(?P<id>\d+)/quote'],
+            ],
+            array_map(
+                static fn(array $r): array => [(string) $r['methods'], $r['route']],
+                $routes
+            )
+        );
         foreach ($routes as $route) {
             self::assertSame('bcc/v1', $route['namespace']);
-            self::assertSame('/feed/(?P<id>\d+)/repost', $route['route']);
         }
-        self::assertSame('POST', $routes[0]['methods']);
-        self::assertSame('DELETE', $routes[1]['methods']);
     }
 
     // ── POST: the gate ladder ────────────────────────────────────────
@@ -809,6 +835,190 @@ final class RepostEndpointTest extends TestCase
         self::assertNotContains('FeedRankingService::getActivityById', self::events());
         self::assertNotContains('CommentRepository::getCommentMeta', self::events());
         self::assertContains('trash', self::events());
+    }
+
+    // ── POST /quote — the X model (user decision 2026-11-18) ────────
+
+    /**
+     * ⭐ THE DIFFERENCE THAT DEFINES THIS ROUTE: a quote is UNLIMITED, so
+     * nothing here may take the lock or run the once-only check. Two quotes
+     * in a row both succeed, and neither sees a 409.
+     *
+     * The lock in addRepost() exists only to make "once per member per root"
+     * true. There is no "once" here to protect, and a lock would serialise
+     * unrelated writes for no reason.
+     */
+    public function testAQuoteIsNotCappedAndTakesNoLock(): void
+    {
+        $first  = self::quote(self::A_REPOST, 'first thoughts');
+        $second = self::quote(self::A_REPOST, 'more thoughts');
+
+        self::assertSame(200, $first->get_status());
+        self::assertSame(200, $second->get_status());
+        self::assertNotContains('lock_acquire', self::events(), 'a quote must not take the repost lock');
+
+        // ⚠ `viewerReposts` DOES appear here, and must: buildStateResponse
+        // reads it to answer `viewer_has_reposted`. What would make it a cap
+        // is reading it BEFORE the write and refusing on it, so the property
+        // worth pinning is the ORDER — the write happens first, so no read
+        // of the member's existing reposts can gate a quote.
+        $events = self::events();
+        $write  = array_search('createStatus', $events, true);
+        $read   = array_search('viewerReposts', $events, true);
+        self::assertIsInt($write);
+        self::assertIsInt($read);
+        self::assertLessThan($read, $write, 'the quote is written before its state is read back');
+    }
+
+    /**
+     * ⚠ The write is DELEGATED to PostsService::createStatus(), which is
+     * what makes a quote obey every status rule (the §D2 cap, mentions,
+     * moderation, the §A3 event) instead of this handler re-validating
+     * content. So what is asserted here is the delegation, and that it
+     * receives the TRIMMED body and the resolved ROOT.
+     */
+    public function testTheQuoteIsWrittenThroughTheStatusPathWithTheRootAndTrimmedBody(): void
+    {
+        self::quote(self::A_REPOST, '  worth reading  ');
+
+        self::assertSame(
+            ['author' => self::VIEWER, 'content' => 'worth reading', 'root' => self::ROOT],
+            self::detailOf('createStatus')
+        );
+        self::assertNotContains('createSelfStatus', self::events(), 'the status path owns the write, not this route');
+    }
+
+    /** A quote with nothing in it is a plain repost, and that is the other route. */
+    public function testAnEmptyOrWhitespaceQuoteIsRefused(): void
+    {
+        foreach (['', '   ', "\n\t "] as $blank) {
+            $response = self::quote(self::A_REPOST, $blank);
+
+            self::assertSame(400, $response->get_status(), 'blank quote must be refused');
+            self::assertSame('bcc_invalid_request', self::errorCode($response));
+            self::assertNotContains('createStatus', self::events(), 'nothing may be written');
+        }
+    }
+
+    /** A service-side refusal (the cap, mentions, moderation) is forwarded as-is. */
+    public function testAStatusRefusalIsForwardedWithItsOwnCodeAndStatus(): void
+    {
+        $GLOBALS['__bcc_repost_quote_error'] = [
+            'error'   => 'bcc_too_many_mentions',
+            'message' => 'Too many mentions.',
+        ];
+
+        $response = self::quote(self::A_REPOST, '@a @b @c');
+
+        self::assertSame(400, $response->get_status());
+        self::assertSame('bcc_too_many_mentions', self::errorCode($response));
+    }
+
+    /**
+     * ⚠ THROTTLED BEFORE THE GATES. The seatbelt inside createStatus()
+     * guards the write, but it is only reached once the gates have
+     * answered — so without this, act ids could be probed through the quote
+     * route at full speed. Same numbers as a status post, because a quote
+     * is one.
+     */
+    public function testTheQuoteRouteThrottlesOnItsOwnKeyBeforeTheGates(): void
+    {
+        self::quote(self::A_REPOST, 'hello');
+
+        self::assertSame(
+            ['quote_' . self::VIEWER, 5, 120],
+            self::detailOf('throttle'),
+            'the quote route uses the STATUS-post limits, on its own key'
+        );
+        self::assertSame('throttle', self::events()[0] ?? null, 'and it runs first');
+    }
+
+    public function testAThrottledQuoteWritesNothing(): void
+    {
+        $GLOBALS['__bcc_repost_throttled'] = true;
+
+        $response = self::quote(self::A_REPOST, 'hello');
+
+        self::assertSame(429, $response->get_status());
+        self::assertSame(['throttle'], self::events());
+    }
+
+    /**
+     * ⭐ The quote route runs the SAME root ladder as the plain one — the
+     * double gate, the comment refusal and the read check — because both
+     * answer the same question about WHAT is being republished. They share
+     * one helper for exactly this reason.
+     */
+    public function testTheQuoteRouteRunsTheSameRootLadder(): void
+    {
+        $GLOBALS['__bcc_repost_unreadable'] = [self::ROOT];
+        self::assertSame(404, self::quote(self::A_REPOST, 'hi')->get_status(), 'unreadable root');
+        self::assertNotContains('createStatus', self::events());
+
+        $GLOBALS['__bcc_repost_unreadable']   = [];
+        $GLOBALS['__bcc_repost_trace']        = [];
+        $GLOBALS['__bcc_repost_comment_acts'] = [self::ROOT];
+        self::assertSame(404, self::quote(self::A_REPOST, 'hi')->get_status(), 'comment root');
+        self::assertNotContains('createStatus', self::events());
+
+        $GLOBALS['__bcc_repost_comment_acts'] = [];
+        $GLOBALS['__bcc_repost_trace']        = [];
+        $GLOBALS['__bcc_repost_refuse_group'] = [self::ROOT];
+        self::assertSame(404, self::quote(self::A_REPOST, 'hi')->get_status(), 'group gate on the root');
+        self::assertNotContains('createStatus', self::events());
+    }
+
+    public function testAnonymousCannotQuote(): void
+    {
+        $GLOBALS['__bcc_repost_user'] = 0;
+
+        $response = self::quote(self::A_REPOST, 'hi');
+
+        self::assertSame(401, $response->get_status());
+        self::assertSame([], self::events());
+    }
+
+    /**
+     * The response carries the new post's id so a client can link to it,
+     * plus the same count block the plain route returns.
+     */
+    public function testTheQuoteResponseCarriesTheNewPostIdAndBothCounts(): void
+    {
+        $GLOBALS['__bcc_repost_count']       = 4;
+        $GLOBALS['__bcc_repost_quote_count'] = 9;
+
+        $payload = self::payload(self::quote(self::A_REPOST, 'hi'));
+
+        self::assertSame('feed_' . self::ROOT, $payload['root_feed_id']);
+        self::assertSame('feed_9100', $payload['quote_feed_id'], 'the new quote post');
+        self::assertSame(4, $payload['repost_count']);
+        self::assertSame(9, $payload['quote_count']);
+    }
+
+    /**
+     * ⚠ The two counts are SEPARATE reads with separate meanings, so a
+     * handler that answered one for the other would be caught here: the
+     * dials are set to different values on purpose.
+     */
+    public function testQuoteCountIsOnThePlainRepostResponseToo(): void
+    {
+        $GLOBALS['__bcc_repost_count']       = 2;
+        $GLOBALS['__bcc_repost_quote_count'] = 11;
+
+        $payload = self::payload(self::post(self::PLAIN));
+
+        self::assertSame(2, $payload['repost_count']);
+        self::assertSame(11, $payload['quote_count']);
+    }
+
+    /** null is "could not read", never 0 — for the quote count as well. */
+    public function testAnUnreadableQuoteCountIsNullNotZero(): void
+    {
+        $GLOBALS['__bcc_repost_quote_count'] = null;
+
+        $payload = self::payload(self::quote(self::A_REPOST, 'hi'));
+
+        self::assertNull($payload['quote_count']);
     }
 
     // ── anti-vacuity ─────────────────────────────────────────────────

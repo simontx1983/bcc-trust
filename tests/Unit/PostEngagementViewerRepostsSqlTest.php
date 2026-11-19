@@ -158,6 +158,29 @@ final class PostEngagementViewerRepostsSqlTest extends TestCase
      * (`p.post_author`) would make the two reads disagree about who has
      * reposted, and nothing else in the suite would notice.
      */
+    /**
+     * ⭐ PLAIN reposts only (the X model, user decision 2026-11-18).
+     *
+     * This read answers TWO questions and both are plain-only: "has this
+     * member already reposted" (the once-only rule, which caps plain
+     * reposts and not quotes) and "which posts does DELETE trash". So a
+     * member's QUOTE of the same root must not appear here — otherwise
+     * their quote would block a plain repost they are entitled to, and
+     * `DELETE /repost` would trash the quote along with it.
+     *
+     * The discriminator is PeepSo's own: `add_post()` refuses empty content
+     * unless a repost is set, so empty content is reachable only as a plain
+     * repost.
+     */
+    public function testTheReadIsPlainRepostsOnlyAndNeverAQuote(): void
+    {
+        PostEngagementRepository::viewerReposts(700, 42);
+
+        $sql = self::sql();
+        self::assertStringContainsString("p.post_content = ''", $sql);
+        self::assertStringNotContainsString("p.post_content <> ''", $sql);
+    }
+
     public function testTheOwnerPredicateIsNotOnThePostAuthor(): void
     {
         PostEngagementRepository::viewerReposts(self::ROOT, self::OWNER);

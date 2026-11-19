@@ -288,6 +288,26 @@ namespace BCC\Trust\Core\Repositories {
                 return $mine;
             }
 
+            /**
+             * ⚠ A SEPARATE dial from the repost count on purpose. The X
+             * model caps plain reposts and leaves quotes unlimited, so a
+             * test must be able to set them to DIFFERENT values — one dial
+             * driving both would hide a handler that read the wrong one.
+             */
+            public static function quoteCount(int $actId): ?int
+            {
+                \bcc_repost_trace('quoteCount', $actId);
+
+                if (!array_key_exists('__bcc_repost_quote_count', $GLOBALS)) {
+                    return 0;
+                }
+
+                /** @var int|null $count */
+                $count = $GLOBALS['__bcc_repost_quote_count'];
+
+                return $count;
+            }
+
             public static function repostCount(int $actId): ?int
             {
                 \bcc_repost_trace('repostCount', $actId);
@@ -519,6 +539,77 @@ namespace BCC\Trust\Core {
             {
                 return new RepostStubFeedRankingService();
             }
+
+            public function postsService(): Services\RepostStubPostsService
+            {
+                return new Services\RepostStubPostsService();
+            }
         }
+    }
+}
+
+/*
+ * The QUOTE write path (F-346, X model).
+ *
+ * ⭐ The quote route deliberately does NOT write through PeepSoStatusWriter
+ * itself — it delegates to PostsService::createStatus(), so the §D2 cap,
+ * mention validation, moderation and the §A3 event all apply by
+ * construction. So what the endpoint tests can observe is the DELEGATION:
+ * that createStatus was called, with the trimmed body and the resolved
+ * ROOT. The status rules themselves have PostsService's own suites.
+ */
+namespace BCC\Trust\Core\Services {
+    if (!class_exists(__NAMESPACE__ . '\\RepostStubPostsService', false)) {
+        final class RepostStubPostsService
+        {
+            /** @return array<string, mixed> */
+            public function createStatus(
+                int $authorId,
+                string $content,
+                int $groupId = 0,
+                string $visibility = 'members_only',
+                string $hallFeed = 'main',
+                int $targetPageId = 0,
+                int $repostOfRootActId = 0
+            ): array {
+                \bcc_repost_trace('createStatus', [
+                    'author'  => $authorId,
+                    'content' => $content,
+                    'root'    => $repostOfRootActId,
+                ]);
+
+                /** @var array<string, mixed>|null $forced */
+                $forced = $GLOBALS['__bcc_repost_quote_error'] ?? null;
+                if (is_array($forced)) {
+                    return $forced;
+                }
+
+                return [
+                    'feed_id' => 'feed_9100',
+                    'post_id' => 9101,
+                    'act_id'  => 9100,
+                ];
+            }
+        }
+    }
+
+    if (!class_exists(__NAMESPACE__ . '\\PostsService', false)) {
+        final class PostsService
+        {
+            public const VISIBILITY_DEFAULT = 'members_only';
+            public const HALL_FEED_MAIN     = 'main';
+        }
+    }
+}
+
+namespace {
+    // The quote route reads the STATUS-POST limits, because a quote is a
+    // status post. They live in includes/config/limits.php, which the unit
+    // bootstrap does not load, and an undefined constant is fatal in PHP 8.
+    if (!defined('BCC_TRUST_RATE_LIMIT_STATUS_POST')) {
+        define('BCC_TRUST_RATE_LIMIT_STATUS_POST', 5);
+    }
+    if (!defined('BCC_TRUST_RATE_WINDOW_STATUS_POST')) {
+        define('BCC_TRUST_RATE_WINDOW_STATUS_POST', 120);
     }
 }

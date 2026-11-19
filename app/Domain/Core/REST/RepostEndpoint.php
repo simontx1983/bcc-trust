@@ -97,6 +97,31 @@ final class RepostEndpoint
                 'permission_callback' => '__return_true',
             ]
         );
+
+        // F-346 — a QUOTE is its own route, not a body on /repost.
+        //
+        // ⭐ WHY SEPARATE, since one route with an optional body looks
+        // tidier: under the ratified X model the two actions have DIFFERENT
+        // limit rules — a plain repost is once per member per root and 409s
+        // on a second, a quote is unlimited. One route whose once-rule
+        // flipped on the presence of a body would mean a client sending
+        // `body: ""` instead of omitting it silently crossed between
+        // "capped" and "unlimited". Two routes, two rules, nothing inferred.
+        register_rest_route(
+            self::ROUTE_NAMESPACE,
+            '/feed/(?P<id>\d+)/quote',
+            [
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => [$instance, 'addQuote'],
+                'permission_callback' => '__return_true',
+                'args'                => [
+                    'body' => [
+                        'required' => true,
+                        'type'     => 'string',
+                    ],
+                ],
+            ]
+        );
     }
 
     /**
@@ -131,89 +156,17 @@ final class RepostEndpoint
 
         // The SUBMITTED id first: it must be something this route may touch
         // and this viewer may interact with, exactly as Stoke requires.
-        $submittedRefusal = self::gateInteraction($userId, $actId);
-        if ($submittedRefusal !== null) {
-            return $submittedRefusal;
+        // ⭐ The ROOT ladder — the double gate, the comment refusal and the
+        // read check — lives in one helper shared with the QUOTE route.
+        // Everything after this point differs between the two (this route
+        // locks and enforces once-only; a quote does neither), but what
+        // decides WHAT is being republished must not, and two copies of it
+        // is exactly how the root's copy would quietly lose a check.
+        $root = self::resolveQuotableRoot($userId, $actId);
+        if ($root instanceof WP_REST_Response) {
+            return $root;
         }
-
-        $rootActId = PeepSoActivityRepository::resolveRepostRoot($actId);
-        if ($rootActId <= 0) {
-            // Fails closed: the activity or its backing post is gone.
-            return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
-        }
-
-        // ⚠⚠ THE ROOT MUST BE A TOP-LEVEL POST, NOT A COMMENT.
-        // PeepSo writes an activities row for EVERY comment and stores
-        // `act_module_id = PeepSoActivity::MODULE_ID` (1) on it — the SAME
-        // module a status post carries ("comments always belong to the
-        // activity module"). So a comment act id IS on the public-feed
-        // module allowlist and passes FeedItemGate, and
-        // GroupInteractionGate deliberately ADMITS a comment act by gating
-        // it on its parent post, because reacting to a comment is a
-        // supported shape. Neither gate is wrong; neither answers this.
-        //
-        // The feed's own candidate query is where the rule lives: it
-        // carries an explicit `act_comment_object_id = 0` predicate
-        // precisely because those rows otherwise "INNER JOIN a published
-        // wp_post and leak into the feed as if they were top-level posts"
-        // (PeepSoActivityRepository::getActivities()). A repost row keyed
-        // on a comment is that leak made durable — it would publish
-        // someone's comment as a standalone feed item.
-        //
-        // ⚠ Checked on the ROOT, which is what gets STORED and rendered.
-        // A comment can only ever be its own root — PeepSo's comment
-        // insert writes no `act_repost_id` — so the root is also the only
-        // place a comment can arrive here.
-        $commentRoot = self::rootIsComment($rootActId);
-        if ($commentRoot !== null) {
-            return $commentRoot;
-        }
-
-        // ⚠⚠ THE SECOND GATE, ON THE ROOT. Without it, reposting someone
-        // else's repost republishes content from a group this member cannot
-        // read: the SUBMITTED post is the repost, which sits on its author's
-        // own wall and passes every check above, while the content it
-        // carries belongs to the root's audience. The submitted gate alone
-        // is therefore not a gate on the thing being republished.
-        //
-        // Skipped when the submitted id IS the root — the gate above already
-        // answered for it, and asking twice costs a second set of queries
-        // for the same verdict.
-        if ($rootActId !== $actId) {
-            $rootRefusal = self::gateInteraction($userId, $rootActId);
-            if ($rootRefusal !== null) {
-                return $rootRefusal;
-            }
-        }
-
-        // ⚠⚠ CAN THE REPOSTER ACTUALLY SEE THE ROOT? Everything above
-        // answers "may this member INTERACT here" — §4.7.6 group
-        // membership, the post's §F-02 audience, the no-engagement rule.
-        // None of it applies the viewer-specific presentation filters, and
-        // FeedItemReportVisibility says so outright: mutual-block
-        // invisibility and caution-tier shadow limiting live in
-        // FeedRankingService's exclusion lists, and are deliberately NOT
-        // applied to REPORTING, because "a member who blocked an author
-        // may still need to report what that author posted".
-        //
-        // ⭐ That rationale does not survive the move to REPOSTING. A
-        // report discloses nothing and republishes nothing; a repost takes
-        // another member's post and puts it on your own wall. So this
-        // route asks the PERMALINK's question instead, through the
-        // permalink's own seam (§11 — one ladder, not a second copy):
-        // blocks in BOTH directions, the caution tier, the moderation hide
-        // list, §F-02 with its group carve-out, and the group's own rule
-        // for a members_only post.
-        //
-        // Last because it is the most expensive step — it hydrates an item
-        // whose payload is then discarded. A repost is throttled to
-        // REPOST_RATE_LIMIT per member per window and is once-per-post, so
-        // this is a bounded cost on a rare write.
-        if (!self::viewerCanReadRoot($userId, $rootActId)) {
-            // The same 404 as every other refusal on this route: it must
-            // never distinguish "blocked you" from "does not exist".
-            return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
-        }
+        $rootActId = $root;
 
         // ⚠ ONE LOCK PER (MEMBER, ROOT), held across the check-then-write.
         // The check and the create are two statements and nothing in the
@@ -425,6 +378,134 @@ final class RepostEndpoint
     }
 
     /**
+     * POST /feed/{id}/quote — repost WITH something to say.
+     *
+     * ⭐ UNLIMITED, which is the whole difference from {@see addRepost()}.
+     * Under the X model (user decision, 2026-11-18) a member gets ONE plain
+     * repost per root but as many quotes as they like, so this route takes
+     * NO advisory lock, runs NO once-only check and can never answer 409.
+     * The lock in addRepost() exists solely to make "once" true; there is no
+     * "once" here to protect.
+     *
+     * ⚠⚠ THE WRITE IS DELEGATED TO PostsService::createStatus(), on purpose.
+     * A quote IS a status post that also carries `act_repost_id`, so every
+     * status rule has to apply to it: the §D2 500-character cap, mention
+     * validation, the sanitising, the moderation hooks, the status burst
+     * seatbelt and the §A3 `bcc_post_created` event. Re-implementing any of
+     * that here is exactly the duplication §11 forbids, and the copy that
+     * drifts is always the one in the REST layer.
+     *
+     * What this handler owns is the part createStatus() knows nothing about:
+     * that `:id` resolves to a repostable ROOT this member may interact with
+     * and can actually read.
+     */
+    public function addQuote(WP_REST_Request $request): WP_REST_Response
+    {
+        $userId = get_current_user_id();
+        if ($userId <= 0) {
+            return ApiResponse::error('bcc_unauthorized', 'Sign in to repost.', 401);
+        }
+
+        // ⚠ A THROTTLE OF ITS OWN, BEFORE THE GATES, and not redundant with
+        // the seatbelt inside createStatus(). That one guards the WRITE, and
+        // it is only reached after the gates below have answered — so
+        // without this, act ids could be probed through this route at full
+        // speed. Same numbers as a status post, because a quote is one.
+        if (!\BCC\Core\Security\Throttle::allow(
+            'quote_' . $userId,
+            BCC_TRUST_RATE_LIMIT_STATUS_POST,
+            BCC_TRUST_RATE_WINDOW_STATUS_POST
+        )) {
+            return ApiResponse::error('bcc_rate_limited', 'Slow down a moment.', 429);
+        }
+
+        $actId = (int) $request->get_param('id');
+        if ($actId <= 0) {
+            return ApiResponse::error('bcc_invalid_request', 'A post id is required.', 400);
+        }
+
+        $refusal = self::resolveQuotableRoot($userId, $actId);
+        if ($refusal instanceof WP_REST_Response) {
+            return $refusal;
+        }
+        $rootActId = $refusal;
+
+        // The route's OWN requirement: a quote with nothing in it is a plain
+        // repost, and that is the other route. createStatus() would also
+        // refuse empty content, but with a status-shaped message.
+        $bodyRaw = $request->get_param('body');
+        $body    = is_string($bodyRaw) ? trim($bodyRaw) : '';
+        if ($body === '') {
+            return ApiResponse::error(
+                'bcc_invalid_request',
+                'A quote needs something to say — use repost for a plain one.',
+                400
+            );
+        }
+
+        // ⚠ NAMED argument for the root, so visibility, hall feed and page
+        // target keep createStatus()'s OWN defaults. Passing them
+        // positionally would mean restating them here — and
+        // `VISIBILITY_DEFAULT` is private to PostsService anyway, so a
+        // positional call cannot even name it. The member's stored default
+        // audience (F-291) is applied further down, inside the writer.
+        $result = Plugin::instance()->postsService()->createStatus(
+            $userId,
+            $body,
+            repostOfRootActId: $rootActId
+        );
+        if (isset($result['error'])) {
+            return ApiResponse::fromServiceError($result);
+        }
+
+        // The new post's own feed id rides along so a client can link
+        // straight to the quote it just made.
+        return self::buildStateResponse($rootActId, $userId, [
+            'quote_feed_id' => (string) ($result['feed_id'] ?? ''),
+        ]);
+    }
+
+    /**
+     * The shared "is `:id` a root this member may quote or repost" ladder:
+     * the resolved ROOT act id, or the WP_REST_Response to refuse with.
+     *
+     * Extracted so {@see addQuote()} and {@see addRepost()} cannot drift on
+     * the part that decides WHAT is being republished — the double gate, the
+     * comment refusal and the read check. Everything after it differs
+     * between the two routes; everything in it must not.
+     */
+    private static function resolveQuotableRoot(int $userId, int $actId): WP_REST_Response|int
+    {
+        $submittedRefusal = self::gateInteraction($userId, $actId);
+        if ($submittedRefusal !== null) {
+            return $submittedRefusal;
+        }
+
+        $rootActId = PeepSoActivityRepository::resolveRepostRoot($actId);
+        if ($rootActId <= 0) {
+            return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
+        }
+
+        $commentRoot = self::rootIsComment($rootActId);
+        if ($commentRoot !== null) {
+            return $commentRoot;
+        }
+
+        if ($rootActId !== $actId) {
+            $rootRefusal = self::gateInteraction($userId, $rootActId);
+            if ($rootRefusal !== null) {
+                return $rootRefusal;
+            }
+        }
+
+        if (!self::viewerCanReadRoot($userId, $rootActId)) {
+            return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
+        }
+
+        return $rootActId;
+    }
+
+    /**
      * The interaction gate applied to an act id: route scope, then
      * audience + group membership, then the no-engagement rule.
      *
@@ -499,13 +580,23 @@ final class RepostEndpoint
      * are two reads); that is honest rather than a contradiction, and the
      * client shows no number rather than a wrong one.
      */
-    private static function buildStateResponse(int $rootActId, int $viewerId): WP_REST_Response
+    /**
+     * @param array<string, mixed> $extra route-specific fields merged on top
+     *   of the shared state block, so both write routes answer the SAME
+     *   shape plus whatever only one of them can say.
+     */
+    private static function buildStateResponse(int $rootActId, int $viewerId, array $extra = []): WP_REST_Response
     {
         $mine = PostEngagementRepository::viewerReposts($rootActId, $viewerId);
 
-        $response = ApiResponse::ok([
+        $response = ApiResponse::ok($extra + [
             'root_feed_id'        => 'feed_' . $rootActId,
+            // ⚠ PLAIN reposts only, distinct members. A quote is not counted
+            // here and is not capped — see quoteCount().
             'repost_count'        => PostEngagementRepository::repostCount($rootActId),
+            // A raw total, not distinct members: quotes are unlimited per
+            // member, so two quotes by one member are two posts.
+            'quote_count'         => PostEngagementRepository::quoteCount($rootActId),
             // null (unreadable) renders as false: the viewer's own affordance
             // must not latch on an error, and the next read corrects it.
             'viewer_has_reposted' => is_array($mine) && $mine !== [],

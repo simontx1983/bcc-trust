@@ -119,7 +119,8 @@ final class PostEngagementRepository
                FROM {$activities} a
                INNER JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
               WHERE a.act_repost_id = %d
-                AND p.post_status = 'publish'",
+                AND p.post_status = 'publish'
+                AND p.post_content = ''",
             $actId
         ));
     }
@@ -220,6 +221,7 @@ final class PostEngagementRepository
               WHERE a.act_repost_id = %d
                 AND a.act_owner_id = %d
                 AND p.post_status = 'publish'
+                AND p.post_content = ''
               ORDER BY a.act_id ASC
               LIMIT %d",
             $rootActId,
@@ -287,6 +289,53 @@ final class PostEngagementRepository
      *
      * @return list<object>|null
      */
+    /**
+     * How many QUOTE reposts of this root exist — a raw total, not distinct
+     * members, because quotes are UNLIMITED per member (the X model, user
+     * decision 2026-11-18) and two quotes by one member are two posts.
+     *
+     * ⭐ PLAIN vs QUOTE is `post_content`, and that is PeepSo's own rule
+     * rather than a convention invented here: `PeepSoActivity::add_post()`
+     * REFUSES empty content unless a repost is set
+     * (`if (!maybe_strlen($content) && NULL === $repost ...) return;`), and
+     * it stores the content already trimmed. So among rows carrying
+     * `act_repost_id`, empty content is reachable ONLY as a plain repost,
+     * and anything non-empty is a quote.
+     *
+     * ⚠ A RAW count, deliberately not filtered to what the viewer can see.
+     * It is the same posture {@see repostCount()} already has, and the
+     * reason is the same: a per-viewer count cannot be cached or batched
+     * without an N+1, and the number discloses no identity. Filtering one
+     * and not the other would be the inconsistency.
+     *
+     * Returns null when the count could not be READ — never 0. See
+     * {@see readCount()}; 0 and "unknown" are different answers and the
+     * contract makes clients render them differently.
+     */
+    public static function quoteCount(int $actId): ?int
+    {
+        if ($actId <= 0) {
+            return null;
+        }
+
+        $activities = self::activitiesTable();
+        if (!TableRegistry::exists($activities)) {
+            return null;
+        }
+
+        global $wpdb;
+
+        return self::readCount($wpdb->prepare(
+            "SELECT COUNT(*) AS n
+               FROM {$activities} a
+               INNER JOIN {$wpdb->posts} p ON p.ID = a.act_external_id
+              WHERE a.act_repost_id = %d
+                AND p.post_status = 'publish'
+                AND p.post_content <> ''",
+            $actId
+        ));
+    }
+
     private static function readRows(string $sql): ?array
     {
         global $wpdb;
