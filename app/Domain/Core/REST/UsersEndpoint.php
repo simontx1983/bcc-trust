@@ -25,6 +25,7 @@
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Core\Repositories\PeepSoPageRepository;
 use BCC\Core\Security\Throttle;
 use BCC\Trust\Core\Plugin;
@@ -33,6 +34,7 @@ use BCC\Trust\Core\Repositories\XRepository;
 use BCC\Trust\Core\Services\Mentions\MentionSearchService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\BoundedIntParam;
+use BCC\Trust\Core\Support\FeedUnavailable;
 use BCC\Trust\Core\Support\MemberCardPrefetcher;
 use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\UserSlugResolver;
@@ -547,12 +549,17 @@ final class UsersEndpoint
         $cursor      = is_string($cursorParam) && $cursorParam !== '' ? $cursorParam : null;
 
         $viewerId = get_current_user_id();
-        $payload  = Plugin::instance()->feedRankingService()->getActivityForAuthor(
-            $userId,
-            $viewerId,
-            $cursor,
-            $limit
-        );
+        try {
+            $payload = Plugin::instance()->feedRankingService()->getActivityForAuthor(
+                $userId,
+                $viewerId,
+                $cursor,
+                $limit
+            );
+        } catch (ActivityReadFailedException) {
+            // F-275: a read that did not run, never an empty Activity tab.
+            return FeedUnavailable::response();
+        }
 
         $response = ApiResponse::ok($payload);
         // Same posture as /feed and the blog tab — per-viewer (block list,

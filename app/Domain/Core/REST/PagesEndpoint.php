@@ -37,11 +37,13 @@
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Core\DB\AdvisoryLock;
 use BCC\Core\Log\Logger;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Services\BlogCoverImageWriter;
 use BCC\Trust\Core\Support\ApiResponse;
+use BCC\Trust\Core\Support\FeedUnavailable;
 use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
 use BCC\Trust\Onchain\Services\ClaimService;
@@ -218,12 +220,17 @@ final class PagesEndpoint
             $limit = self::MAX_FEED_LIMIT;
         }
 
-        $payload = Plugin::instance()->feedRankingService()->getActivityForPage(
-            $pageId,
-            get_current_user_id(),
-            $cursor,
-            $limit
-        );
+        try {
+            $payload = Plugin::instance()->feedRankingService()->getActivityForPage(
+                $pageId,
+                get_current_user_id(),
+                $cursor,
+                $limit
+            );
+        } catch (ActivityReadFailedException) {
+            // F-275: a read that did not run, never an empty page stream.
+            return FeedUnavailable::response();
+        }
 
         $response = ApiResponse::ok($payload);
         // Same policy as /groups/{id}/feed: per-viewer exclusions (block
