@@ -105,10 +105,18 @@ if (!defined('ABSPATH')) {
 
 final class NotificationDispatcher
 {
+    /**
+     * @param \Closure(int, int): bool $canViewActivity may this member
+     *        (2nd argument) open this activity's permalink (1st)? The
+     *        permalink's own gate, FeedRankingService::canView(); a mention
+     *        bell is owed only on a yes (dispatchMentionsFor()). May throw
+     *        when the read did not run.
+     */
     public function __construct(
         private readonly PageOwnerResolver $pageOwnerResolver,
         private readonly PushDispatcher $pushDispatcher,
         private readonly CommentRepository $commentRepository,
+        private readonly \Closure $canViewActivity,
     ) {
     }
 
@@ -700,6 +708,17 @@ final class NotificationDispatcher
      * to the originating write. Per-mentionee failures are already
      * caught inside onMentioned.
      *
+     * ⚠ AUDIENCE (bug finder, 2026-11-18). MentionPolicy checks only WHO
+     * may be mentioned, never whether they can see the post. A post in a
+     * secret or closed group, or one its author restricted, could ping ANY
+     * mentionable member with a bell, a push and a link to the post. The
+     * permalink itself stayed gated, but the bell told them the hidden post
+     * exists, who wrote it, when, and its act id. So a mentionee is now
+     * notified only when the permalink the bell links to ($actId: the post,
+     * or for a comment its parent post) would show it to them
+     * (mentioneeCanSee()). Anyone else is dropped SILENTLY: the author is
+     * never told why, as in the DM recipient picker.
+     *
      * @param int    $authorId   user_id of the post/comment author
      * @param int    $postId     wp_post.ID of the post containing the body
      *                           (used as `external_id` in the bell row)
@@ -740,6 +759,11 @@ final class NotificationDispatcher
                 return;
             }
             foreach ($allowed as $mentioneeId) {
+                // Self-mentions are skipped in onMentioned(); skipping them
+                // here as well saves a permalink check per post.
+                if ($mentioneeId === $authorId || !$this->mentioneeCanSee($actId, $mentioneeId)) {
+                    continue;
+                }
                 $this->onMentioned($authorId, $mentioneeId, $postId, $actId, $isComment);
             }
         } catch (\Throwable $e) {
@@ -749,6 +773,32 @@ final class NotificationDispatcher
                 'is_comment' => $isComment,
                 'error'      => $e->getMessage(),
             ]);
+        }
+    }
+
+    /**
+     * May $mentioneeId open the permalink a mention bell would link to?
+     * The permalink's own gate (GET /feed/{id}), so the bell can never
+     * reach anyone the link would answer 404.
+     *
+     * Fails CLOSED: with no act id there is no permalink to show, and a
+     * read that did not run is not a yes. A dropped bell is the cheap
+     * mistake; a bell about a hidden post is the leak this prevents.
+     */
+    private function mentioneeCanSee(int $actId, int $mentioneeId): bool
+    {
+        if ($actId <= 0) {
+            return false;
+        }
+        try {
+            return ($this->canViewActivity)($actId, $mentioneeId) === true;
+        } catch (\Throwable $e) {
+            Logger::warning('[NotificationDispatcher] mention audience check failed; no bell', [
+                'act_id'       => $actId,
+                'mentionee_id' => $mentioneeId,
+                'error'        => $e->getMessage(),
+            ]);
+            return false;
         }
     }
 

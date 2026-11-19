@@ -496,16 +496,21 @@ final class ProfileAccess
      * invisible until peepso-friends is installed; and installing it
      * would retroactively WIDEN the posts already written at level 30.
      *
-     * ⚠ The exemption reads the CURRENT user, not `$viewerId`. Every
-     * caller is a request path whose `$viewerId` came from the same
-     * place, so they agree — but a caller that passes a viewer id it did
-     * not get from the request would gate for one identity and exempt on
-     * another. A globally cached, viewer-independent payload must not
-     * call this at all; it passes `true` directly.
+     * ⚠ By default the exemption reads the CURRENT user, not `$viewerId`.
+     * A request path's `$viewerId` came from the same place, so they agree.
+     * A caller asking about a viewer who is NOT the request's user MUST pass
+     * that viewer's own exemption as `$viewerIsExempt`
+     * ({@see userIsExemptFromVisibility()}), or it gates for one identity
+     * and exempts on another. `FeedRankingService::canView()` is that
+     * caller: it asks about a mentionee during the AUTHOR's request, and an
+     * admin author must not read a member's audience unenforced. A globally
+     * cached, viewer-independent payload must not call this at all; it
+     * passes `true` directly.
      *
+     * @param bool|null $viewerIsExempt the viewer's exemption; null = the current user's
      * @return array{0: list<int>|null, 1: bool} [friend ids or null, enforce]
      */
-    public static function postVisibilityArgs(int $viewerId): array
+    public static function postVisibilityArgs(int $viewerId, ?bool $viewerIsExempt = null): array
     {
         $friendIds = $viewerId > 0
             ? PeepSoFriendGate::viewerFriendIdList($viewerId)
@@ -513,8 +518,19 @@ final class ProfileAccess
 
         return [
             $friendIds === [] ? null : $friendIds,
-            !self::viewerIsExemptFromVisibility(),
+            !($viewerIsExempt ?? self::viewerIsExemptFromVisibility()),
         ];
+    }
+
+    /**
+     * Is $userId exempt from §F-02 visibility filtering? The same rule as
+     * {@see viewerIsExemptFromVisibility()} (`manage_options`), asked about
+     * a given user instead of the request's. For a caller whose viewer is
+     * not the request's user; see {@see postVisibilityArgs()}.
+     */
+    public static function userIsExemptFromVisibility(int $userId): bool
+    {
+        return $userId > 0 && user_can($userId, 'manage_options');
     }
 
     /**

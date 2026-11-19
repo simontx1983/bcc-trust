@@ -856,6 +856,57 @@ final class FeedRankingService
      */
     public function getActivityById(int $actId, int $viewerId): ?array
     {
+        // The permalink's viewer IS the request's user: the exemption is theirs.
+        $item = $this->visibleActivity($actId, $viewerId, null);
+        if ($item === null) {
+            return null;
+        }
+
+        $hydrated = $this->hydrationPipeline->hydrate([$item], $viewerId);
+        return $hydrated[0] ?? null;
+    }
+
+    /**
+     * May $viewerId open $actId's permalink? Exactly what `getActivityById()`
+     * answers when $viewerId makes the request (every gate is in
+     * visibleActivity(); hydration only decorates and never drops an item),
+     * without paying for the hydration.
+     *
+     * For a caller that needs only the yes/no: a mention bell is owed only
+     * to a member the post's own permalink would show it to
+     * (NotificationDispatcher::dispatchMentionsFor()).
+     *
+     * ⚠ $viewerId is usually NOT the request's user: a mentionee, asked
+     * about during the author's request. So the admin exemption is the
+     * VIEWER's own, never the current user's. Taken from an admin author,
+     * it would read a member's audience unenforced (a followers-only post
+     * would bell a non-friend) and skip the group second look (a room post
+     * would bell no member at all).
+     *
+     * Throws ActivityReadFailedException, as getActivityById() does, when
+     * the read did not run: "unknown" is not "no", and each caller decides
+     * which way to fail.
+     */
+    public function canView(int $actId, int $viewerId): bool
+    {
+        return $this->visibleActivity(
+            $actId,
+            $viewerId,
+            ProfileAccess::userIsExemptFromVisibility($viewerId)
+        ) !== null;
+    }
+
+    /**
+     * The permalink's visibility gates, before hydration: the shared core of
+     * getActivityById() and canView(), so the two cannot disagree. See
+     * getActivityById() for what each gate is.
+     *
+     * @param bool|null $viewerIsExempt the viewer's admin exemption; null =
+     *        the current user's (only when the viewer is the request's user)
+     * @return array<string, mixed>|null
+     */
+    private function visibleActivity(int $actId, int $viewerId, ?bool $viewerIsExempt): ?array
+    {
         $excluded = self::mergeExclusions(
             $this->cautionListExceptViewer($viewerId),
             $viewerId > 0 ? PeepSoBlockRepository::getBlockedIds($viewerId) : [],
@@ -867,7 +918,7 @@ final class FeedRankingService
         // what the feed withholds is the whole reason bcc-core puts this
         // predicate in both readers; enforcing on the feed alone would
         // move the leak rather than close it.
-        [$friendIds, $enforceF02] = ProfileAccess::postVisibilityArgs($viewerId);
+        [$friendIds, $enforceF02] = ProfileAccess::postVisibilityArgs($viewerId, $viewerIsExempt);
 
         $item = $this->activityFeed->getActivityById(
             $actId,
@@ -898,8 +949,7 @@ final class FeedRankingService
             return null;
         }
 
-        $hydrated = $this->hydrationPipeline->hydrate([$item], $viewerId);
-        return $hydrated[0] ?? null;
+        return $item;
     }
 
     /**
