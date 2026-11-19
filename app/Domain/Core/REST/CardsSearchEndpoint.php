@@ -136,10 +136,12 @@ final class CardsSearchEndpoint
         // the pages pipeline entirely — a scoped keystroke costs
         // exactly one vertical query.
         if ($kindParam === 'community') {
-            return self::okItems($this->communitySuggestions($query, self::MAX_ITEMS));
+            $communities = $this->communitySuggestions($query, self::MAX_ITEMS);
+            return self::okItems($communities ?? [], $communities === null);
         }
         if ($kindParam === 'member') {
-            return self::okItems($this->memberSuggestions($query, self::MAX_ITEMS));
+            $members = $this->memberSuggestions($query, self::MAX_ITEMS);
+            return self::okItems($members ?? [], $members === null);
         }
 
         // Translate canonical kind → bcc-search's category_slug
@@ -162,21 +164,24 @@ final class CardsSearchEndpoint
         }
         $upstream = rest_do_request($internal);
 
+        $incomplete = false;
         if ($upstream->is_error()) {
             // bcc-search returns 503 on degraded paths and 429 when the
             // shared `search` throttle bucket is exhausted (trending +
             // the /search Projects tab debit the same bucket).
             if ($kindParam !== '') {
                 // Page-kind scope: pages ARE the response — degrade to
-                // an empty list; autocomplete never blocks mid-type.
-                return self::okEmpty();
+                // an empty list; autocomplete never blocks mid-type. F-421:
+                // flagged incomplete, so it does not read as "no matches".
+                return self::okItems([], true);
             }
-            // All scope: a degraded pages vertical must be silently
-            // ABSENT from the merge, not authoritative emptiness — the
-            // §4.9 contract promises communities/members still appear.
-            // (Pre-fix this returned okEmpty() and blanked the whole
-            // dropdown whenever the pages bucket 429'd.)
-            $rows = [];
+            // All scope: a degraded pages vertical must be ABSENT from the
+            // merge, not authoritative emptiness — the §4.9 contract
+            // promises communities/members still appear. (Pre-fix this
+            // returned okEmpty() and blanked the whole dropdown whenever
+            // the pages bucket 429'd.) F-421: absent, but no longer silent.
+            $rows       = [];
+            $incomplete = true;
         } else {
             $body = $upstream->get_data();
             $rows = is_array($body) && isset($body['results']) && is_array($body['results'])
@@ -221,16 +226,19 @@ final class CardsSearchEndpoint
 
         // Page-kind scope: pages only, capped.
         if ($kindParam !== '') {
-            return self::okItems(array_slice($items, 0, self::MAX_ITEMS));
+            return self::okItems(array_slice($items, 0, self::MAX_ITEMS), false);
         }
 
         // All scope (v1.70): merge in the community + member verticals
-        // under the deterministic floor/quota allocation (§4.9).
+        // under the deterministic floor/quota allocation (§4.9). A vertical
+        // that could not be read (null) is absent from the merge and makes
+        // the answer incomplete (F-421).
         $communities = $this->communitySuggestions($query, self::COMMUNITY_QUOTA);
         $members     = $this->memberSuggestions($query, self::MEMBER_QUOTA);
 
         return self::okItems(
-            self::allocateSuggestions($items, $communities, $members, self::MAX_ITEMS)
+            self::allocateSuggestions($items, $communities ?? [], $members ?? [], self::MAX_ITEMS),
+            $incomplete || $communities === null || $members === null
         );
     }
 
@@ -313,9 +321,10 @@ final class CardsSearchEndpoint
      * in the proxied payload (bcc-search batches the kind meta in its
      * single three-JOIN query).
      *
-     * @return list<array<string, mixed>>
+     * @return list<array<string, mixed>>|null null when the groups vertical
+     *         could not be read (F-421); [] means it found nothing
      */
-    private function communitySuggestions(string $query, int $limit): array
+    private function communitySuggestions(string $query, int $limit): ?array
     {
         $internal = new WP_REST_Request('GET', '/bcc/v1/search/groups');
         $internal->set_param('q', $query);
@@ -323,9 +332,10 @@ final class CardsSearchEndpoint
         $upstream = rest_do_request($internal);
 
         if ($upstream->is_error()) {
-            // Degraded / rate-limited vertical → silently absent from
-            // the merge (same "never block mid-type" rule as pages).
-            return [];
+            // Degraded / rate-limited vertical → absent from the merge
+            // (same "never block mid-type" rule as pages). F-421: null, not
+            // [], so the caller can flag the answer incomplete.
+            return null;
         }
 
         $body = $upstream->get_data();
@@ -355,9 +365,15 @@ final class CardsSearchEndpoint
      * per-row getTier()/getScore() reads below are free — the
      * MemberCardPrefetcher::primeFor pattern. No per-row queries.
      *
-     * @return list<array<string, mixed>>
+     * ⚠ F-421 follow-up: a DB failure INSIDE member matching is not seen
+     * here. bcc-search delegates matching to MemberSearchCandidates::ids(),
+     * whose get_users() returns nothing on a DB error, so bcc-search
+     * answers 200 with no results and this reads as "found nothing".
+     *
+     * @return list<array<string, mixed>>|null null when the users vertical
+     *         could not be read (F-421); [] means it found nothing
      */
-    private function memberSuggestions(string $query, int $limit): array
+    private function memberSuggestions(string $query, int $limit): ?array
     {
         $internal = new WP_REST_Request('GET', '/bcc/v1/search/users');
         $internal->set_param('q', $query);
@@ -365,7 +381,8 @@ final class CardsSearchEndpoint
         $upstream = rest_do_request($internal);
 
         if ($upstream->is_error()) {
-            return [];
+            // F-421: null, not [], as for communitySuggestions().
+            return null;
         }
 
         $body = $upstream->get_data();
@@ -524,12 +541,22 @@ final class CardsSearchEndpoint
     }
 
     /**
+     * F-421: `incomplete` is ALWAYS present. true = a vertical this request
+     * searched could not be read (bcc-search answered 503 degraded, or 429
+     * from the shared `search` throttle bucket), so `items` holds only what
+     * the other verticals found, possibly nothing. A client then shows
+     * "suggestions unavailable", not "no matches". Still 200: autocomplete
+     * never blocks mid-type.
+     *
+     * An incomplete answer is `private, no-store`, so the browser does not
+     * replay it for the same query after the vertical recovers.
+     *
      * @param list<array<string, mixed>> $items
      */
-    private static function okItems(array $items): WP_REST_Response
+    private static function okItems(array $items, bool $incomplete): WP_REST_Response
     {
-        $response = ApiResponse::ok(['items' => $items]);
-        $response->header('Cache-Control', 'private, max-age=15');
+        $response = ApiResponse::ok(['items' => $items, 'incomplete' => $incomplete]);
+        $response->header('Cache-Control', $incomplete ? 'private, no-store' : 'private, max-age=15');
         return $response;
     }
 
@@ -620,10 +647,9 @@ final class CardsSearchEndpoint
         ];
     }
 
+    /** A query too short to search: nothing was searched, so nothing is missing. */
     private static function okEmpty(): WP_REST_Response
     {
-        $response = ApiResponse::ok(['items' => []]);
-        $response->header('Cache-Control', 'private, max-age=15');
-        return $response;
+        return self::okItems([], false);
     }
 }

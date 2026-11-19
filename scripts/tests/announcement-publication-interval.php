@@ -39,6 +39,8 @@ if (!defined('ABSPATH')) {
     exit(1);
 }
 
+require_once __DIR__ . '/lib/act-as.php'; // F-441: a member signs in by bearer, as in the app
+
 use BCC\Trust\Core\Announcements\AnnouncementPostType as CPT;
 use BCC\Trust\Core\Announcements\AnnouncementPublicationGuard as GUARD;
 use BCC\Trust\Core\Announcements\AnnouncementVisibility as VIS;
@@ -69,7 +71,7 @@ function ck(string $label, $expected, $actual): void
 
 function pubIds(string $route, int $pageId): array
 {
-    wp_set_current_user(0);
+    bcc_harness_act_as(0);
     $req = new WP_REST_Request('GET', $route);
     $req->set_param('pageId', $pageId);
     $res  = rest_get_server()->dispatch($req);
@@ -169,7 +171,7 @@ add_action('transition_post_status', function ($new, $old, $post) use ($pageId, 
     ];
 
     // detail, dispatched anonymously inside the interval
-    wp_set_current_user(0);
+    bcc_harness_act_as(0);
     $req = new WP_REST_Request('GET', $base . '/' . $id);
     $req->set_param('pageId', $pageId);
     $req->set_param('id', $id);
@@ -340,7 +342,7 @@ $wpdb->update($wpdb->prefix . 'bcc_onchain_claims', ['status' => 'verified'], ['
 wp_cache_flush();
 ck('authority restored for the A3-path cases', 'operator', AUTH::decide($pageId, $op)['decision']);
 
-wp_set_current_user($op);
+bcc_harness_act_as($op);
 $req = new WP_REST_Request('POST', $base);
 $req->set_param('pageId', $pageId);
 $req->set_param('status', 'schedule');
@@ -382,7 +384,7 @@ echo "\n=== CASE H. The cron path still publishes, with the marker written at PR
 $wpdb->update($wpdb->prefix . 'bcc_onchain_claims', ['status' => 'verified'], ['id' => $claimId]);
 wp_cache_flush();
 
-wp_set_current_user($op);
+bcc_harness_act_as($op);
 $req = new WP_REST_Request('POST', $base);
 $req->set_param('pageId', $pageId);
 $req->set_param('status', 'schedule');

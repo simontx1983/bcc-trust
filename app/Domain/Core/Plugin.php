@@ -705,7 +705,11 @@ final class Plugin
         return $this->notificationDispatcher ??= new Services\NotificationDispatcher(
             $this->pageOwnerResolver(),
             $this->pushDispatcher(),
-            $this->commentRepository()
+            $this->commentRepository(),
+            // A mention bell is owed only to a member the post's own
+            // permalink would show it to. Resolved lazily, so building the
+            // dispatcher does not build the feed stack.
+            fn (int $actId, int $viewerId): bool => $this->feedRankingService()->canView($actId, $viewerId)
         );
     }
 

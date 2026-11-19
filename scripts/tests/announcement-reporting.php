@@ -58,6 +58,8 @@ if (!defined('ABSPATH')) {
     return;
 }
 
+require_once __DIR__ . '/lib/act-as.php'; // F-441: a member signs in by bearer, as in the app
+
 $pageId     = (int) getenv('BCC_PROBE_PAGE_ID');
 $reporterId = (int) getenv('BCC_PROBE_REPORTER_ID');
 
@@ -388,9 +390,9 @@ foreach ($idForms as $label => [$value, $expected]) {
     ]));
 
     $previous = get_current_user_id();
-    wp_set_current_user($reporterId);
+    bcc_harness_act_as($reporterId);
     $res = rest_do_request($req);
-    wp_set_current_user($previous);
+    bcc_harness_act_as($previous);
 
     $check(sprintf('target_id as %-16s', $label), $expected, $res->get_status());
 

@@ -19,6 +19,8 @@
  *     test can see that a hidden page's reads still RUN (a failing database
  *     must answer 503 for a hidden page exactly as for a missing one).
  *   - the operator authority, the viewer standing and bcc-core's throttle.
+ *   - for ContentReportService: the report repository (records each
+ *     `report:create:<id>`), bcc-core's Logger and WordPress's do_action.
  *
  * Fixture ($GLOBALS['__bcc_ann']):
  *   rows     => array<int, list<object>>  pageId => list/rotator rows
@@ -42,6 +44,13 @@ namespace {
             public string $post_title = '';
             public int $post_author = 0;
             public int $post_parent = 0;
+        }
+    }
+
+    if (!function_exists('do_action')) {
+        /** @param mixed ...$args */
+        function do_action(string $hook, ...$args): void
+        {
         }
     }
 
@@ -94,6 +103,28 @@ namespace BCC\Core\Repositories {
                 $secret = $GLOBALS['__bcc_ann']['secret'] ?? [];
 
                 return !isset($secret[$pageId]) || in_array($viewerId, $secret[$pageId], true);
+            }
+        }
+    }
+}
+
+namespace BCC\Core\Log {
+    if (!class_exists(__NAMESPACE__ . '\\Logger', false)) {
+        final class Logger
+        {
+            /** @param array<string, mixed> $context */
+            public static function info(string $message, array $context = []): void
+            {
+            }
+
+            /** @param array<string, mixed> $context */
+            public static function warning(string $message, array $context = []): void
+            {
+            }
+
+            /** @param array<string, mixed> $context */
+            public static function error(string $message, array $context = []): void
+            {
             }
         }
     }
@@ -178,6 +209,23 @@ namespace BCC\Trust\Core\Repositories {
                 if (!empty($GLOBALS['__bcc_ann']['fail'])) {
                     throw new RepositoryException('announcement_read_failed');
                 }
+            }
+        }
+    }
+
+    if (!class_exists(__NAMESPACE__ . '\\ContentReportRepository', false)) {
+        final class ContentReportRepository
+        {
+            public function create(int $reporterUserId, string $targetKind, int $targetId, string $reasonCode, string $comment): int
+            {
+                $GLOBALS['__bcc_ann']['calls'][] = 'report:create:' . $targetId;
+
+                return 1;
+            }
+
+            public function exists(int $reporterUserId, string $targetKind, int $targetId): bool
+            {
+                return false;
             }
         }
     }

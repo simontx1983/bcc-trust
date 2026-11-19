@@ -11,7 +11,10 @@ use PHPUnit\Framework\TestCase;
  * into 503 `bcc_unavailable`, never an empty page or a 404.
  *
  * Plugin::feedRankingService() builds bcc-core's ActivityFeedService to THROW
- * ActivityReadFailedException on a failed read. That is only safe if every
+ * ActivityReadFailedException on a failed read. The profile Blog tab
+ * (BlogService) and the cold-start panel's `recent_action` line
+ * (FeedColdStartService) read bcc-core's repository directly and pass the
+ * same flag. That is only safe if every
  * caller catches it: an uncaught exception in a REST callback is a PHP fatal
  * (a 500, and WordPress's recovery-mode email to the admin). So this pins:
  *
@@ -34,12 +37,17 @@ final class FeedReadFailureWiringTest extends TestCase
         'FeedEndpoint.php'          => ['hot', 'tagFeed', 'feed', 'respondWithFeedItem'],
         'GroupsDetailEndpoint.php'  => ['feed'],
         'PagesEndpoint.php'         => ['feed'],
-        'UsersEndpoint.php'         => ['activity'],
+        'UsersEndpoint.php'         => ['blog', 'activity'],
         'FeedColdStartEndpoint.php' => ['handle'],
     ];
 
-    /** A feed read: the ranking service's getters, or the cold-start panel. */
-    private const CALL = '/(?:feedRankingService\(\)|feedColdStartService\(\))\s*->\s*get\w*\s*\(/';
+    /**
+     * A feed read: the ranking service's getters, the cold-start panel, or
+     * the profile Blog tab. Only `getUserBlog` on the blog service: its
+     * other getter (`getBlogForEdit`, the editor's single-draft read) does
+     * not read the activity stream and does not throw.
+     */
+    private const CALL = '/(?:(?:feedRankingService\(\)|feedColdStartService\(\))\s*->\s*get\w*|blogService\(\)\s*->\s*getUserBlog)\s*\(/';
 
     /**
      * `try { … } catch (ActivityReadFailedException) { … }`, capturing both
@@ -104,6 +112,16 @@ final class FeedReadFailureWiringTest extends TestCase
         $body = '{ try { $p = Plugin::instance()->feedRankingService()->getFeed($v, $s); } catch (ActivityReadFailedException) { return ApiResponse::ok([\'items\' => []]); } }';
 
         self::assertCount(1, self::unguardedCalls($body));
+    }
+
+    /** The Blog tab's read is a feed read; the editor's draft read is not. */
+    public function testTheMatcherSeesTheBlogTabReadButNotTheDraftRead(): void
+    {
+        $tab   = '{ $p = Plugin::instance()->blogService()->getUserBlog($u, $v, $c, $l); return ApiResponse::ok($p); }';
+        $draft = '{ $r = Plugin::instance()->blogService()->getBlogForEdit($id, $v); return ApiResponse::ok($r); }';
+
+        self::assertCount(1, self::unguardedCalls($tab));
+        self::assertSame([], self::unguardedCalls($draft));
     }
 
     public function testTheMatcherAcceptsTheGuard(): void
