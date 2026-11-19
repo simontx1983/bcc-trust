@@ -41,7 +41,11 @@ final class TokenErrorCodesTest extends TestCase
         parent::setUp();
         require_once __DIR__ . '/../Stubs/envelope-meta-stubs.php';
         require_once __DIR__ . '/../Stubs/account-prehijack-stubs.php';
+        require_once __DIR__ . '/../Stubs/rest-request-stubs.php';
         $GLOBALS['__bcc_envelope_meta_throttle'] = ['allow' => true];
+        // The bearer counts on a REST request only (BearerAuthRestOnlyTest).
+        $_SERVER['SCRIPT_NAME'] = '/index.php';
+        $_SERVER['REQUEST_URI'] = '/wp-json/bcc/v1/me/account';
         $GLOBALS['__bcc_ph'] = [
             'users'      => [self::USER => ['email' => 'u90@example.com', 'login' => 'u90', 'display' => 'U90']],
             'meta'       => [self::USER => ['bcc_handle' => 'handle90']],
