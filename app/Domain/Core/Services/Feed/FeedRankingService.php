@@ -640,7 +640,11 @@ final class FeedRankingService
      */
     public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20): array
     {
-        if ($scope === ActivityFeedService::SCOPE_GROUPS) {
+        // ⚠ The LITERAL, not ActivityFeedService::SCOPE_GROUPS: this line
+        // runs on EVERY scope, and against a bcc-core that predates F-416 the
+        // constant does not exist, so naming it here would turn every feed
+        // read into a fatal error instead of failing only the new scope.
+        if ($scope === 'groups') {
             return $this->getMyGroupsFeed($viewerId, $cursor, $limit);
         }
 
