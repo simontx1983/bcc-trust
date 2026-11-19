@@ -1659,10 +1659,10 @@ add_filter('bcc.trust.admin_report_penalty_applied', function (bool $applied, in
 \BCC\Trust\Core\Security\SuspendedWriteGate::register();
 
 // Security review 2026-11-18: non-admins may call BCC's own REST namespaces
-// only (signed out: also GET elsewhere, except /wp/v2/users*), and only
-// admins get application passwords. A member's bearer token reaches every
-// REST route, and core's let it change the account's password or email
-// around every BCC step-up; see RestRouteAllowlist.
+// only, reads included (signed out: also RestRouteAllowlist::EXEMPT_ROUTES,
+// none today), and only admins get application passwords. A member's bearer
+// token reaches every REST route, and core's let it change the account's
+// password or email around every BCC step-up; see RestRouteAllowlist.
 \BCC\Trust\Core\Security\RestRouteAllowlist::register();
 
 // Validator announcements, unit A1 (api-contract-v1.md §4.32): the private

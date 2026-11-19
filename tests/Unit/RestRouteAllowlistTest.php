@@ -16,8 +16,10 @@ use PHPUnit\Framework\TestCase;
  * the password or email around every BCC step-up) and every other plugin's.
  * RestRouteAllowlist opens only BCC's namespaces to non-admins:
  *   - members: `/bcc/v1` and `/bcc-trust/v1` only; anything else is 403;
- *   - signed out: BCC's namespaces, plus GET/HEAD elsewhere except
- *     `/wp/v2/users*`; anything else is 401;
+ *   - signed out: BCC's namespaces plus the exact EXEMPT_ROUTES (none
+ *     today); anything else is 401, reads included (the allowlist's own
+ *     review: `/wp/v2/media` listed every member's blog-cover upload with
+ *     its author id);
  *   - admins: untouched.
  * Application passwords are for admins only.
  *
@@ -28,6 +30,9 @@ use PHPUnit\Framework\TestCase;
 final class RestRouteAllowlistTest extends TestCase
 {
     private const ALL_METHODS = ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'];
+
+    /** A stand-in exemption list: one QUIC.cloud-style signed callback. */
+    private const SAMPLE_EXEMPTIONS = ['POST /litespeed/v1/notify_img'];
 
     protected function setUp(): void
     {
@@ -93,6 +98,7 @@ final class RestRouteAllowlistTest extends TestCase
         yield 'any letter case (core is case-blind)' => ['/BCC/V1/Posts'];
         yield 'bcc-trust, any letter case'   => ['/Bcc-Trust/V1/vote'];
         yield 'a users-looking BCC route'    => ['/bcc-trust/v1/users/me'];
+        yield 'the deploy health probe'      => ['/bcc/v1/ranks'];
     }
 
     #[DataProvider('bccRoutes')]
@@ -110,8 +116,11 @@ final class RestRouteAllowlistTest extends TestCase
     #[DataProvider('bccRoutes')]
     public function testASignedOutCallerReachesBccRoutesWithAnyMethod(string $route): void
     {
+        $earlier = new \stdClass();
+
         foreach (self::ALL_METHODS as $method) {
             self::assertNull(self::dispatch($route, $method), "{$method} {$route}");
+            self::assertSame($earlier, self::dispatch($route, $method, $earlier), 'whatever answered before stands');
         }
     }
 
@@ -160,7 +169,7 @@ final class RestRouteAllowlistTest extends TestCase
         self::assertRefused(self::dispatch('/wp/v2/users/me', 'PUT', new \stdClass()), 403, 'earlier answer');
     }
 
-    // ── Signed out: GET/HEAD outside BCC, except /wp/v2/users ─────────────
+    // ── Signed out: nothing outside BCC's namespaces, reads included ──────
 
     /** @return iterable<string, array{0: string}> */
     public static function coreUsersRoutes(): iterable
@@ -186,31 +195,48 @@ final class RestRouteAllowlistTest extends TestCase
     }
 
     /** @return iterable<string, array{0: string}> */
-    public static function readableElsewhere(): iterable
+    public static function readsOutsideBcc(): iterable
     {
-        yield 'core posts'         => ['/wp/v2/posts'];
-        yield 'the REST index'     => ['/'];
-        yield 'oembed'             => ['/oembed/1.0/embed'];
-        yield 'a longer name'      => ['/wp/v2/usersx'];
-        yield 'a shorter name'     => ['/wp/v2/user'];
-        yield 'another namespace'  => ['/wp/v3/users'];
+        // The review's finding: every member's blog-cover upload, with its
+        // author id.
+        yield 'core media'                => ['/wp/v2/media'];
+        yield 'a media item'              => ['/wp/v2/media/123'];
+        yield 'media, any letter case'    => ['/WP/V2/Media'];
+        yield 'core comments'             => ['/wp/v2/comments'];
+        yield 'core search'               => ['/wp/v2/search'];
+        yield 'the REST index'            => ['/'];
+        yield 'core posts'                => ['/wp/v2/posts'];
+        yield 'core types'                => ['/wp/v2/types'];
+        yield 'oembed'                    => ['/oembed/1.0/embed'];
+        yield 'batch'                     => ['/batch/v1'];
+        yield 'near users: longer name'   => ['/wp/v2/usersx'];
+        yield 'near users: shorter name'  => ['/wp/v2/user'];
+        yield 'another namespace'         => ['/wp/v3/users'];
+        yield 'PeepSo'                    => ['/peepso/v1/activity'];
+        yield 'LiteSpeed'                 => ['/litespeed/v1/guest/sync'];
+        yield 'Akismet'                   => ['/akismet/v1/alert'];
+        yield 'a look-alike namespace'    => ['/bcc/v1x/posts'];
+        yield '//bcc/v1/posts'            => ['//bcc/v1/posts'];
+        yield 'no leading slash'          => ['bcc/v1/posts'];
     }
 
-    #[DataProvider('readableElsewhere')]
-    public function testASignedOutCallerMayStillReadOutsideBcc(string $route): void
+    #[DataProvider('readsOutsideBcc')]
+    public function testASignedOutCallerMayNotReadOutsideBccWith401(string $route): void
     {
-        $earlier = new \stdClass();
-
-        foreach (['GET', 'HEAD', 'get'] as $method) {
-            self::assertNull(self::dispatch($route, $method), "{$method} {$route}");
-            self::assertSame($earlier, self::dispatch($route, $method, $earlier), 'whatever answered before stands');
+        foreach (['GET', 'HEAD', 'get', 'head'] as $method) {
+            self::assertRefused(self::dispatch($route, $method), 401, "{$method} {$route}");
         }
     }
 
-    /** @return iterable<string, array{0: string}> */
+    public function testASignedOutRefusalWinsOverAnEarlierAnswer(): void
+    {
+        self::assertRefused(self::dispatch('/wp/v2/media', 'GET', new \stdClass()), 401, 'earlier answer');
+    }
+
+    /** @return iterable<string, array{0: string, 1: string}> */
     public static function anonymousWrites(): iterable
     {
-        foreach (['/wp/v2/comments', '/wp/v2/posts', '/batch/v1', '/litespeed/v3/ping', '/akismet/v1/webhook', '/peepso/v1/post', '/bcc/v1x/posts'] as $route) {
+        foreach (['/wp/v2/comments', '/wp/v2/posts', '/batch/v1', '/litespeed/v3/ping', '/litespeed/v1/notify_img', '/akismet/v1/webhook', '/peepso/v1/post', '/bcc/v1x/posts'] as $route) {
             foreach (['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'post'] as $method) {
                 yield "{$method} {$route}" => [$route, $method];
             }
@@ -223,6 +249,69 @@ final class RestRouteAllowlistTest extends TestCase
         self::assertRefused(self::dispatch($route, $method), 401, "{$method} {$route}");
     }
 
+    // ── Exemptions: exact method and route, signed out only ───────────────
+
+    public function testNothingOutsideBccIsExemptToday(): void
+    {
+        self::assertSame(
+            [],
+            RestRouteAllowlist::EXEMPT_ROUTES,
+            'nothing outside BCC is open to a signed-out caller; an entry needs a real caller and a test of its own'
+        );
+    }
+
+    /** @return iterable<string, array{0: string, 1: string}> */
+    public static function exemptSpellings(): iterable
+    {
+        yield 'as listed'                         => ['POST', '/litespeed/v1/notify_img'];
+        yield 'method in lower case'              => ['post', '/litespeed/v1/notify_img'];
+        yield 'route in any case (core is case-blind)' => ['POST', '/LiteSpeed/V1/Notify_Img'];
+    }
+
+    #[DataProvider('exemptSpellings')]
+    public function testASignedOutCallerReachesAnExemptRoute(string $method, string $route): void
+    {
+        self::assertNull(RestRouteAllowlist::refusal($route, $method, false, self::SAMPLE_EXEMPTIONS), "{$method} {$route}");
+    }
+
+    /** @return iterable<string, array{0: string, 1: string}> */
+    public static function nearlyExempt(): iterable
+    {
+        yield 'GET of a POST exemption'      => ['GET', '/litespeed/v1/notify_img'];
+        yield 'HEAD of a POST exemption'     => ['HEAD', '/litespeed/v1/notify_img'];
+        yield 'PUT of a POST exemption'      => ['PUT', '/litespeed/v1/notify_img'];
+        yield 'OPTIONS of a POST exemption'  => ['OPTIONS', '/litespeed/v1/notify_img'];
+        yield 'a route under it'             => ['POST', '/litespeed/v1/notify_img/x'];
+        yield 'a longer name'                => ['POST', '/litespeed/v1/notify_imgx'];
+        yield 'its namespace'                => ['POST', '/litespeed/v1'];
+        yield 'a sibling'                    => ['POST', '/litespeed/v3/ping'];
+        yield 'a trailing slash'             => ['POST', '/litespeed/v1/notify_img/'];
+        yield 'a doubled leading slash'      => ['POST', '//litespeed/v1/notify_img'];
+        yield 'no leading slash'             => ['POST', 'litespeed/v1/notify_img'];
+        yield 'a doubled inner slash'        => ['POST', '/litespeed//v1/notify_img'];
+    }
+
+    #[DataProvider('nearlyExempt')]
+    public function testOnlyTheExactMethodAndRouteAreExempt(string $method, string $route): void
+    {
+        self::assertRefused(RestRouteAllowlist::refusal($route, $method, false, self::SAMPLE_EXEMPTIONS), 401, "{$method} {$route}");
+    }
+
+    public function testAMemberGetsNoExemption(): void
+    {
+        self::assertRefused(
+            RestRouteAllowlist::refusal('/litespeed/v1/notify_img', 'POST', true, self::SAMPLE_EXEMPTIONS),
+            403,
+            'a signed-in member, on an exempt route'
+        );
+    }
+
+    public function testWithoutAnExemptionListEveryRouteIsRefused(): void
+    {
+        self::assertRefused(RestRouteAllowlist::refusal('/litespeed/v1/notify_img', 'POST', false), 401, 'the real (empty) list');
+        self::assertRefused(RestRouteAllowlist::refusal('/litespeed/v1/notify_img', 'POST', false, []), 401, 'an empty list');
+    }
+
     // ── Admins: untouched ─────────────────────────────────────────────────
 
     /** @return iterable<string, array{0: string}> */
@@ -231,6 +320,9 @@ final class RestRouteAllowlistTest extends TestCase
         yield from self::coreUsersRoutes();
         yield from self::nonBccRoutes();
         yield from self::bccRoutes();
+        foreach (self::readsOutsideBcc() as $name => $args) {
+            yield "read: {$name}" => $args;
+        }
     }
 
     #[DataProvider('everyKindOfRoute')]
