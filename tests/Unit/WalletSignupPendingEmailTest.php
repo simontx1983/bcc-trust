@@ -610,6 +610,39 @@ final class WalletSignupPendingEmailTest extends TestCase
         self::assertSame(self::TYPED, self::email(15));
     }
 
+    /**
+     * The bound counts holders only. Five older sign-ups that moved off the
+     * wallet placeholder but kept a leftover pending address are filtered
+     * out BEFORE the bound is applied, so they cannot fill it and push a
+     * live holder out (review agent 2, on #744).
+     */
+    public function testFiveStaleHoldersCannotPushALiveOnePastTheBound(): void
+    {
+        foreach ([10, 11, 12, 13, 14] as $id) {
+            self::pendingAccount($id, self::TYPED);
+            $GLOBALS['__bcc_ph']['users'][$id]['email'] = "real{$id}@example.net";
+        }
+        self::signup(); // NEW, the newest: a live holder
+        $code = self::lastCodeTo(self::TYPED);
+        $GLOBALS['__bcc_ph']['throttle_counting'] = true;
+
+        self::assertSame([self::NEW], PendingEmailService::pendingSignupHolders(self::TYPED), 'the live one, and only it');
+
+        // A resend by the address mails the live holder alone.
+        $before = count($GLOBALS['__bcc_ph']['mail']);
+        self::assertSame(200, self::resend(['email' => self::TYPED]));
+        self::assertCount($before + 1, $GLOBALS['__bcc_ph']['mail'], 'one mail, to the live holder');
+        self::assertNotSame($code, $code = self::lastCodeTo(self::TYPED), 'a fresh code');
+
+        // Its code verifies it as the one holder: no address budget.
+        self::assertSame(200, self::verify(['email' => self::TYPED, 'code' => $code])->get_status());
+        self::assertSame(self::TYPED, self::email(self::NEW));
+        self::assertArrayNotHasKey(self::addressBudgetKey(), $GLOBALS['__bcc_ph']['throttle_hits'] ?? []);
+        foreach ([10, 11, 12, 13, 14] as $id) {
+            self::assertSame("real{$id}@example.net", self::email($id), "{$id} is untouched");
+        }
+    }
+
     public function testTheAccountWhoseEmailItIsStillWinsOverPendingHolders(): void
     {
         $GLOBALS['__bcc_ph']['users'][self::OTHER] = ['email' => self::TYPED, 'login' => 'u3', 'display' => 'Three'];
