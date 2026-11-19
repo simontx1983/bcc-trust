@@ -361,19 +361,7 @@ final class PagePostsIntegrationTest extends TestCase
     /** The blog tab builds FeedItems itself, outside the hydration pipeline. */
     public function testBlogTabItemsCarryANullPageContextKey(): void
     {
-        global $wpdb;
-        self::assertNotFalse($wpdb->insert($wpdb->posts, [
-            'post_type'    => 'peepso-post',
-            'post_status'  => 'publish',
-            'post_author'  => self::OPERATOR,
-            'post_content' => 'Long form',
-            'post_excerpt' => 'Short form',
-        ]), 'blog post fixture: ' . $wpdb->last_error);
-        self::assertNotFalse($wpdb->insert($wpdb->prefix . 'peepso_activities', [
-            'act_owner_id'    => self::OPERATOR,
-            'act_module_id'   => 204, // what PeepSoActivityWriter stamps on a blog (F-392)
-            'act_external_id' => (int) $wpdb->insert_id,
-        ]), 'blog activity fixture: ' . $wpdb->last_error);
+        $this->blogFixture(self::OPERATOR);
 
         $items = Plugin::instance()->blogService()->getUserBlog(self::OPERATOR, 0)['items'];
 
@@ -688,6 +676,51 @@ final class PagePostsIntegrationTest extends TestCase
         }
     }
 
+    /**
+     * The profile Blog tab reads bcc-core's repository itself, outside the
+     * ranking service, so it opts in on its own (UsersEndpoint::blog's
+     * catch is pinned by FeedReadFailureWiringTest). Before, a failed read
+     * showed a member who HAS written a blog as having written nothing.
+     */
+    public function testAFailedBlogTabReadIsReportedNotShownAsNoBlogs(): void
+    {
+        $this->blogFixture(self::OPERATOR);
+        $GLOBALS['wpdb']->failQueriesMatching = self::ACTIVITY_READ;
+
+        try {
+            Plugin::instance()->blogService()->getUserBlog(self::OPERATOR, 0);
+            self::fail('the Blog tab answered a page for a read that did not run');
+        } catch (\BCC\Core\Contracts\ActivityReadFailedException) {
+            self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures, 'the fault really hit the blog read');
+        }
+    }
+
+    /**
+     * The cold-start panel's `recent_action` line reads each operator's
+     * latest activity. Before, a failed read gave them the fallback line,
+     * as if they had done nothing. The panel's endpoint already turns the
+     * exception into 503 (FeedReadFailureWiringTest).
+     *
+     * Driven directly: the panel only reaches this read for operators who
+     * clear PeepSo's member search, which this harness does not carry, and
+     * the hot-posts block would throw first under the same fault anyway.
+     */
+    public function testAFailedRecentActionReadIsReportedNotShownAsTheFallbackLine(): void
+    {
+        $this->postedActId(self::OPERATOR);
+        $read = new \ReflectionMethod(\BCC\Trust\Core\Services\FeedColdStartService::class, 'resolveRecentAction');
+
+        self::assertSame('POSTED a status', $read->invoke(null, self::OPERATOR), 'control: no fault, the real verb');
+
+        $GLOBALS['wpdb']->failQueriesMatching = self::ACTIVITY_READ;
+        try {
+            $read->invoke(null, self::OPERATOR);
+            self::fail('recent_action answered for a read that did not run');
+        } catch (\BCC\Core\Contracts\ActivityReadFailedException) {
+            self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures, 'the fault really hit the read');
+        }
+    }
+
     /** The control: with no fault, the same routes still answer 200. */
     public function testWithoutAFaultTheSameRoutesStillAnswer(): void
     {
@@ -818,6 +851,24 @@ final class PagePostsIntegrationTest extends TestCase
         self::assertSame(200, $response->get_status(), (string) json_encode($response->get_data()));
 
         return (int) $response->get_data()['data']['act_id'];
+    }
+
+    /** One published blog post by `$authorId`, with its activity row. */
+    private function blogFixture(int $authorId): void
+    {
+        global $wpdb;
+        self::assertNotFalse($wpdb->insert($wpdb->posts, [
+            'post_type'    => 'peepso-post',
+            'post_status'  => 'publish',
+            'post_author'  => $authorId,
+            'post_content' => 'Long form',
+            'post_excerpt' => 'Short form',
+        ]), 'blog post fixture: ' . $wpdb->last_error);
+        self::assertNotFalse($wpdb->insert($wpdb->prefix . 'peepso_activities', [
+            'act_owner_id'    => $authorId,
+            'act_module_id'   => 204, // what PeepSoActivityWriter stamps on a blog (F-392)
+            'act_external_id' => (int) $wpdb->insert_id,
+        ]), 'blog activity fixture: ' . $wpdb->last_error);
     }
 
     private function feed(int $pageId, ?string $cursor = null, ?int $limit = null): \WP_REST_Response

@@ -509,7 +509,13 @@ final class UsersEndpoint
         // so it belongs with the read rather than with one route — a gate
         // here would be bypassed the moment a second caller appeared, which
         // is exactly the F-283 failure.
-        $payload  = Plugin::instance()->blogService()->getUserBlog($userId, $viewerId, $cursor, $limit);
+        try {
+            $payload = Plugin::instance()->blogService()->getUserBlog($userId, $viewerId, $cursor, $limit);
+        } catch (ActivityReadFailedException) {
+            // F-275: a read that did not run is "try again", never an
+            // empty Blog tab ("this member has written nothing").
+            return FeedUnavailable::response();
+        }
 
         $response = ApiResponse::ok($payload);
         // Same posture as /feed — per-viewer + scope-filtered, short shared

@@ -68,9 +68,11 @@ final class FeedColdStartEndpoint
                 ->feedColdStartService()
                 ->getColdStart($viewerId > 0 ? $viewerId : null);
         } catch (ActivityReadFailedException) {
-            // F-275: the hot-posts block reads the feed. A read that did not
-            // run answers "try again" for the panel, never a panel whose
-            // posts block is silently empty.
+            // F-275: the hot-posts block reads the feed, and each operator
+            // row's `recent_action` reads that member's latest activity. A
+            // read that did not run answers "try again" for the panel, never
+            // a panel whose posts block is silently empty or whose operators
+            // carry the fallback line as if they had posted nothing.
             return FeedUnavailable::response();
         }
 
