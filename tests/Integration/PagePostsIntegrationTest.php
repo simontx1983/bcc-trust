@@ -365,7 +365,7 @@ final class PagePostsIntegrationTest extends TestCase
         ]), 'blog post fixture: ' . $wpdb->last_error);
         self::assertNotFalse($wpdb->insert($wpdb->prefix . 'peepso_activities', [
             'act_owner_id'    => self::OPERATOR,
-            'act_module_id'   => 'blog',
+            'act_module_id'   => 204, // what PeepSoActivityWriter stamps on a blog (F-392)
             'act_external_id' => (int) $wpdb->insert_id,
         ]), 'blog activity fixture: ' . $wpdb->last_error);
 
