@@ -732,11 +732,22 @@ final class FeedRankingService
      * read that did not run THROWS, so the endpoint answers a retryable 503
      * instead of telling a member they are in no group.
      *
+     * ⚠ Needs bcc-core with F-416 (deploy order: core first). An older core
+     * has none of this scope's API, so the scope answers the same retryable
+     * 503 until core deploys, never an uncaught Error (a 500 plus WordPress's
+     * recovery-mode email). Every other scope is unaffected.
+     *
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      * @throws ActivityReadFailedException
      */
     private function getMyGroupsFeed(int $viewerId, ?string $cursor, int $limit): array
     {
+        if (!self::coreServesMyGroups()) {
+            throw new ActivityReadFailedException(
+                '[bcc-trust] FeedRankingService: "My Groups" needs bcc-core with F-416 (ActivityFeedService::SCOPE_GROUPS); this core predates it.'
+            );
+        }
+
         $empty = ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
         if ($viewerId <= 0) {
             return $empty;
@@ -804,6 +815,17 @@ final class FeedRankingService
     private static function roomLiftsShadowLimit(?GroupContext $ctx): bool
     {
         return $ctx !== null && $ctx->isHolderGroup();
+    }
+
+    /**
+     * Does the installed bcc-core serve "My Groups" (F-416)? SCOPE_GROUPS
+     * ships in the same core change as getActiveMemberGroupIdsOrFail(),
+     * MEMBER_GROUPS_CAP and getFeed()'s three new parameters, so it stands
+     * for all of them. The same probe as AccountCredentialCheck::coreHasPurposes().
+     */
+    private static function coreServesMyGroups(): bool
+    {
+        return defined(ActivityFeedService::class . '::SCOPE_GROUPS');
     }
 
     /**

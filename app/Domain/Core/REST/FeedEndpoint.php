@@ -61,9 +61,10 @@ final class FeedEndpoint
     /** @var list<string> */
     /**
      * 'groups' = "My Groups" (F-416): posts from the groups and Halls the
-     * viewer belongs to. ⚠ Needs bcc-core's SCOPE_GROUPS: against an older
-     * core the scope would fall back to for_you silently, so core deploys
-     * first.
+     * viewer belongs to. ⚠ Needs bcc-core with F-416, so core deploys first:
+     * against an older core this scope answers the retryable 503
+     * `bcc_unavailable` (FeedRankingService::getMyGroupsFeed() checks the
+     * core), and every other scope is unaffected.
      */
     private const VALID_SCOPES = ['for_you', 'following', 'signals', 'groups'];
 
