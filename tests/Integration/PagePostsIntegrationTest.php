@@ -509,6 +509,125 @@ final class PagePostsIntegrationTest extends TestCase
         self::assertCount(1, $this->ids($this->feed(self::PAGE_A)), 'the flagged author still sees their own post');
     }
 
+    // ── F-275: a feed read that did not run ─────────────────────────────
+    //
+    // The real Plugin wiring, the real bcc-core read and the real endpoints,
+    // with ONE statement broken by the harness: the activity candidate read
+    // (`FROM …peepso_activities a`, shared by the list reads and getById).
+    // Before F-275 each of these answered 200 with an empty page, or 404.
+
+    private const ACTIVITY_READ = '/FROM\s+\S*peepso_activities\s+a\s/';
+
+    public function testAFailedPageFeedReadIsA503NotAnEmptyPage(): void
+    {
+        $this->postedActId(self::OPERATOR, self::PAGE_A);
+        $GLOBALS['wpdb']->failQueriesMatching = self::ACTIVITY_READ;
+
+        $response = $this->feed(self::PAGE_A);
+
+        self::assertUnavailable($response, 'The feed is temporarily unavailable. Please try again.');
+        self::assertGreaterThan(0, $GLOBALS['wpdb']->injectedFailures, 'the fault really hit the feed read');
+    }
+
+    /**
+     * ⚠ wpdb's SILENT failure paths return false with no `last_error` and
+     * leave the previous query's rows in `last_result`. bcc-core's trusted
+     * read checks `query()`'s own return, so this is still a 503.
+     */
+    public function testASilentFailedReadIsA503Too(): void
+    {
+        $this->postedActId(self::OPERATOR, self::PAGE_A);
+        $GLOBALS['wpdb']->failSilentlyMatching = self::ACTIVITY_READ;
+
+        self::assertUnavailable($this->feed(self::PAGE_A), 'The feed is temporarily unavailable. Please try again.');
+        self::assertGreaterThan(0, $GLOBALS['wpdb']->silentFailures);
+    }
+
+    /** A read that did not run is not "this post does not exist". */
+    public function testAFailedPermalinkReadIsA503NotA404(): void
+    {
+        $actId = $this->postedActId(self::OPERATOR, self::PAGE_A);
+        $GLOBALS['wpdb']->failQueriesMatching = self::ACTIVITY_READ;
+
+        $response = (new FeedEndpoint())->feedItem(new \WP_REST_Request(['id' => $actId]));
+
+        self::assertUnavailable($response, 'This post is temporarily unavailable. Please try again.');
+    }
+
+    /**
+     * ⚠⚠ The hot feed's success is `public, max-age=60` and its first page is
+     * held in a cache shared by every reader. A failed build must be neither:
+     * not shared-cacheable, and not stored, or every reader would get an
+     * empty hot feed for the cache TTL after the database recovered.
+     */
+    public function testAFailedHotFeedIsNeverCachedAnywhere(): void
+    {
+        $actId = $this->postedActId(self::OPERATOR, self::PAGE_A);
+        $GLOBALS['__bcc_current_user']        = 0;
+        $GLOBALS['wpdb']->failQueriesMatching = self::ACTIVITY_READ;
+
+        $failed = (new FeedEndpoint())->hot(new \WP_REST_Request([]));
+
+        self::assertUnavailable($failed, 'The feed is temporarily unavailable. Please try again.');
+
+        $GLOBALS['wpdb']->clearFaultInjection();
+        $recovered = (new FeedEndpoint())->hot(new \WP_REST_Request([]));
+
+        self::assertSame(200, $recovered->get_status());
+        self::assertSame(['feed_' . $actId], $this->ids($recovered), 'the outage was not cached as an empty page');
+    }
+
+    public function testAFailedPersonalOrTagFeedReadIsA503(): void
+    {
+        $this->postedActId(self::OPERATOR, self::PAGE_A);
+        $GLOBALS['wpdb']->failQueriesMatching = self::ACTIVITY_READ;
+
+        $endpoint = new FeedEndpoint();
+        self::assertUnavailable(
+            $endpoint->feed(new \WP_REST_Request(['scope' => 'for_you'])),
+            'The feed is temporarily unavailable. Please try again.'
+        );
+        self::assertUnavailable(
+            $endpoint->tagFeed(new \WP_REST_Request(['tag' => 'validators'])),
+            'The feed is temporarily unavailable. Please try again.'
+        );
+    }
+
+    /**
+     * The author wall and the group room read through the same service; the
+     * real Plugin builds it to report the failure (their endpoints' catch is
+     * pinned by FeedReadFailureWiringTest).
+     */
+    public function testTheWallAndTheRoomReportTheFailureRatherThanAnEmptyPage(): void
+    {
+        $GLOBALS['wpdb']->failQueriesMatching = self::ACTIVITY_READ;
+        $ranking = Plugin::instance()->feedRankingService();
+
+        foreach ([
+            'wall' => static fn () => $ranking->getActivityForAuthor(self::OPERATOR, 0),
+            'room' => static fn () => $ranking->getGroupFeed(self::STRANGER, 77),
+        ] as $surface => $read) {
+            try {
+                $read();
+                self::fail($surface . ' answered a page for a read that did not run');
+            } catch (\BCC\Core\Contracts\ActivityReadFailedException) {
+                // expected
+            }
+        }
+    }
+
+    /** The control: with no fault, the same routes still answer 200. */
+    public function testWithoutAFaultTheSameRoutesStillAnswer(): void
+    {
+        $actId = $this->postedActId(self::OPERATOR, self::PAGE_A);
+
+        self::assertSame(['feed_' . $actId], $this->ids($this->feed(self::PAGE_A)));
+        self::assertSame(
+            200,
+            (new FeedEndpoint())->feedItem(new \WP_REST_Request(['id' => $actId]))->get_status()
+        );
+    }
+
     // ── the card ────────────────────────────────────────────────────────
 
     /**
@@ -636,6 +755,18 @@ final class PagePostsIntegrationTest extends TestCase
             'cursor' => $cursor,
             'limit'  => $limit,
         ]));
+    }
+
+    /** F-275: the retryable refusal, with nothing cached and no page in it. */
+    private static function assertUnavailable(\WP_REST_Response $response, string $message): void
+    {
+        self::assertSame(503, $response->get_status());
+        self::assertSame(
+            ['code' => 'bcc_unavailable', 'message' => $message, 'status' => 503],
+            $response->get_data()['error']
+        );
+        self::assertArrayNotHasKey('data', $response->get_data(), 'no page, not even an empty one');
+        self::assertSame(['Cache-Control' => 'private, no-store'], $response->get_headers());
     }
 
     /** @return list<string> */
