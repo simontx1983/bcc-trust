@@ -188,10 +188,28 @@ final class JwtToken
      */
     public static function revokeAllForUser(int $userId): int
     {
-        $current = self::currentTokenVersion($userId);
-        $next    = $current + 1;
+        // F-462: +1 on the GUARDED read. +1 on a failed or poisoned read
+        // (tv 0) wrote tv 1 over, say, 5: a LOWER version, under which a
+        // still-live tv-1 token worked again. When the version is unknown,
+        // jump to one no outstanding token can carry, so a revocation (a
+        // password change, a suspension, a user-lifecycle hook) never fails
+        // and never goes backwards.
+        $known = self::tokenVersion($userId);
+        $next  = $known !== null ? $known + 1 : self::versionNoTokenCanHold();
         update_user_meta($userId, self::TOKEN_VERSION_META_KEY, $next);
         return $next;
+    }
+
+    /**
+     * F-462: a token version above every one ever issued: the current time
+     * in milliseconds. Real versions are small counters, or an earlier
+     * value of this, so none can equal it. tv is compared for equality only,
+     * so writing it revokes every outstanding token; the next known
+     * revocation counts on from it.
+     */
+    private static function versionNoTokenCanHold(): int
+    {
+        return (int) floor(microtime(true) * 1000);
     }
 
     /**
@@ -643,14 +661,29 @@ final class JwtToken
     }
 
     /**
-     * Read the user's revocation counter as int. Missing meta → 0.
-     * Cached transparently by WP's user-meta cache; no extra plumbing.
-     * Public for F-294: the oauth-complete replay is refused once this has
-     * moved (a "sign out everywhere" since the sign-up).
+     * Read the user's revocation counter as int, for MINTING. Missing
+     * meta → 0. Public for F-294: the oauth-complete replay marker records
+     * it (the replay itself checks tokenVersion()).
      */
     public static function currentTokenVersion(int $userId): int
     {
-        return (int) get_user_meta($userId, self::TOKEN_VERSION_META_KEY, true);
+        // F-462: the guarded read when it works. Only MINTS read this
+        // (encode()'s `tv` claim, the OAuth replay marker), so when that read
+        // fails the meta cache's answer is used: a token minted with a wrong
+        // tv just fails decode, which reads the database. A CHECK must use
+        // tokenVersion() and refuse on null.
+        return self::tokenVersion($userId) ?? (int) get_user_meta($userId, self::TOKEN_VERSION_META_KEY, true);
+    }
+
+    /**
+     * F-462: the user's token version from the guarded database read, or
+     * null when it could not be read. For checks, which must refuse on null.
+     */
+    public static function tokenVersion(int $userId): ?int
+    {
+        $state = self::state($userId);
+
+        return $state === null ? null : $state['tv'];
     }
 
     private static function secret(): string

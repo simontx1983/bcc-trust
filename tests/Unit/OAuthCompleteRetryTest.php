@@ -165,6 +165,16 @@ final class OAuthCompleteRetryTest extends TestCase
         self::assertSame([], self::retryAudits());
     }
 
+    /** F-462: a token version that can't be read is not "unchanged": no replay. */
+    public function testAnUnreadableTokenVersionKillsTheReplay(): void
+    {
+        self::complete();
+        $GLOBALS['__bcc_token_state'] = ['reads' => [], 'fail' => true];
+
+        self::assertSpent(self::complete(), 'unknown is refused, never taken as unchanged');
+        self::assertSame([], self::retryAudits());
+    }
+
     public function testAMarkerThatCannotBeDeletedIsNotHonoured(): void
     {
         self::complete();

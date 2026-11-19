@@ -211,6 +211,51 @@ final class TokenStatePoisonTest extends TestCase
         self::assertSame($earlier, BearerAuth::refuseUnknownTokenState($earlier));
     }
 
+    // ── Revoking and minting read the database too ────────────────────────
+
+    /** +1 on the poisoned cache's 0 would write 1 over 5: a LOWER version. */
+    public function testRevokeCountsOnFromTheDatabaseNotThePoisonedCache(): void
+    {
+        $this->db->put(self::USER, 'bcc_token_version', 5);
+
+        self::assertSame(6, JwtToken::revokeAllForUser(self::USER));
+        self::assertSame('6', (string) $GLOBALS['__bcc_ph']['meta'][self::USER]['bcc_token_version']);
+    }
+
+    /** Unknown: still revoke, with a version no outstanding token can carry. */
+    public function testRevokeWithAnUnknownVersionJumpsAboveEveryToken(): void
+    {
+        $this->db->put(self::USER, 'bcc_token_version', 5);
+        $this->db->mode = 'error';
+        $floor = (int) floor(microtime(true) * 1000);
+
+        $next = JwtToken::revokeAllForUser(self::USER);
+
+        self::assertGreaterThanOrEqual($floor, $next, 'above every counter and every earlier jump');
+        self::assertSame((string) $next, (string) $GLOBALS['__bcc_ph']['meta'][self::USER]['bcc_token_version'], 'and written: the revocation happened');
+    }
+
+    /** Before, a sign-in during the poison minted tv 0, and the token failed at once. */
+    public function testASignInDuringThePoisonMintsTheDatabaseVersion(): void
+    {
+        $this->db->put(self::USER, 'bcc_token_version', 5);
+
+        $token = JwtToken::encodeNewSession(self::USER, 'h' . self::USER);
+
+        self::assertSame(5, $this->payloadOf($token)['tv']);
+    }
+
+    /** A mint whose version can't be read still mints, and that token fails closed. */
+    public function testAMintWithAnUnknownVersionFailsClosed(): void
+    {
+        $this->db->put(self::USER, 'bcc_token_version', 5);
+        $this->db->mode = 'error';
+        $token = JwtToken::encodeNewSession(self::USER, 'h' . self::USER);
+        $this->db->mode = 'ok';
+
+        self::assertSame(JwtToken::ERR_REVOKED, JwtToken::decode($token)['error'] ?? null, 'the cache said 0; the database says 5');
+    }
+
     // ── Never write over a list that could not be read ────────────────────
 
     public function testLogOutWritesNothingWhenTheDenylistCannotBeRead(): void
