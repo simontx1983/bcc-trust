@@ -79,7 +79,7 @@ final class JwtToken
      * before this claim shipped have an absent / zero `tv` and still
      * verify cleanly until a revocation bump arms the gate.
      */
-    public const TOKEN_VERSION_META_KEY = 'bcc_token_version';
+    public const TOKEN_VERSION_META_KEY = \BCC\Trust\Core\Repositories\TokenStateRepository::TOKEN_VERSION_KEY;
 
     public const ERR_MALFORMED     = 'jwt_malformed';
     public const ERR_BAD_ALGORITHM = 'jwt_bad_algorithm';
@@ -95,6 +95,14 @@ final class JwtToken
     public const ERR_LOGGED_OUT    = 'jwt_logged_out';
     /** F-282: this token was exchanged by POST /auth/refresh and its overlap has passed. */
     public const ERR_SUPERSEDED    = 'jwt_superseded';
+    /**
+     * F-462: the user's token state (tv, the sign-out denylist, the refresh
+     * retired list) could not be READ, so whether this token was revoked,
+     * signed out or retired is unknown. Refused: never "treat as empty".
+     * Not the token's fault either, so callers answer 503, never a 401
+     * that tells the app to sign the member out.
+     */
+    public const ERR_STATE_UNAVAILABLE = 'jwt_state_unavailable';
 
     /**
      * F-253: mint the token for a REAL sign-in (password + 2FA, OAuth,
@@ -307,13 +315,21 @@ final class JwtToken
             return ['ok' => false, 'error' => self::ERR_MISSING_CLAIM];
         }
 
+        // F-462: tv, the denylist and the retired list in ONE guarded read
+        // (TokenStateRepository), never through the meta cache, which holds
+        // an EMPTY array after a failed SELECT and so would read as "never
+        // revoked, never signed out". Unknown state refuses the token.
+        $state = self::state($userId);
+        if ($state === null) {
+            return ['ok' => false, 'error' => self::ERR_STATE_UNAVAILABLE, 'user_id' => $userId];
+        }
+
         // Per-user revocation gate. A bumped bcc_token_version on the
         // user's wp_usermeta invalidates every token minted before the
         // bump. Default 0 on both sides (token claim absent, meta unset)
         // means existing tokens remain valid until first revocation.
         $tokenTv   = isset($payload['tv']) ? (int) $payload['tv'] : 0;
-        $currentTv = self::currentTokenVersion($userId);
-        if ($tokenTv !== $currentTv) {
+        if ($tokenTv !== $state['tv']) {
             // The user id rides along (signature, issuer, audience and
             // version are already verified at this point) so /auth/refresh
             // can say WHY: a suspension revokes every token (F-119), and
@@ -326,18 +342,15 @@ final class JwtToken
         // used anyway (exp + skew + refresh grace). Checked here — the path
         // both decode() and decodeForRefresh() share — so a logged-out token
         // can neither authenticate nor be refreshed.
-        // The denylist lives in the user's own meta, which currentTokenVersion()
-        // above has just loaded into WP's per-request meta cache — so this
-        // check costs no extra query on the hot path (staging/prod run with
-        // no persistent object cache, where a transient would be one DB query
-        // per authenticated request).
+        // The denylist lives in the user's own meta, read by the same guarded
+        // query as tv above, so this check costs no extra query.
         $jti = (string) ($payload['jti'] ?? '');
-        if ($jti !== '' && self::isLoggedOut($userId, $jti)) {
+        if ($jti !== '' && self::isLoggedOut($state['denylist'], $jti)) {
             return ['ok' => false, 'error' => self::ERR_LOGGED_OUT];
         }
         // F-282: a token exchanged by /auth/refresh dies once its overlap
-        // has passed (same per-request meta cache, no extra query).
-        if ($jti !== '' && self::isSuperseded($userId, $jti)) {
+        // has passed (same read, no extra query).
+        if ($jti !== '' && self::isSuperseded($state['retired'], $jti)) {
             return ['ok' => false, 'error' => self::ERR_SUPERSEDED];
         }
 
@@ -382,7 +395,7 @@ final class JwtToken
     }
 
     /** User-meta key holding the user's single-token-logout denylist. */
-    public const DENYLIST_META_KEY = 'bcc_jwt_denylist';
+    public const DENYLIST_META_KEY = \BCC\Trust\Core\Repositories\TokenStateRepository::DENYLIST_KEY;
 
     /** Most entries kept per user (oldest-expiring dropped beyond it). */
     public const DENYLIST_MAX_ENTRIES = 100;
@@ -397,14 +410,19 @@ final class JwtToken
      * Stored as user meta `{ sha256(jti)[0..40] => until_ts }`, pruned of
      * expired entries on every write and capped at DENYLIST_MAX_ENTRIES.
      *
+     * F-462: returns false, and writes NOTHING, when the current list cannot
+     * be read. Writing then would replace the user's whole denylist with
+     * this one entry, bringing every other signed-out token back.
+     *
      * @param array<string, mixed> $payload a payload returned by decode()/decodeForRefresh()
+     * @return bool true when the token is signed out (or there was nothing to do)
      */
-    public static function logOut(array $payload): void
+    public static function logOut(array $payload): bool
     {
         $jti    = (string) ($payload['jti'] ?? '');
         $userId = (int) ($payload['user_id'] ?? 0);
         if ($jti === '' || $userId <= 0) {
-            return;
+            return true;
         }
 
         // Read-modify-write: serialise per user so two concurrent logouts
@@ -423,8 +441,13 @@ final class JwtToken
             // concurrent writer's update.
             wp_cache_delete($userId, 'user_meta');
 
+            $state = self::state($userId);
+            if ($state === null) {
+                return false;
+            }
+
             $now  = time();
-            $list = self::denylist($userId);
+            $list = $state['denylist'];
             foreach ($list as $hash => $until) {
                 if ($until < $now) {
                     unset($list[$hash]);
@@ -436,6 +459,8 @@ final class JwtToken
                 $list = array_slice($list, -self::DENYLIST_MAX_ENTRIES, null, true);
             }
             update_user_meta($userId, self::DENYLIST_META_KEY, $list);
+
+            return true;
         } finally {
             if ($locked) {
                 \BCC\Core\DB\AdvisoryLock::release($lockKey);
@@ -444,7 +469,7 @@ final class JwtToken
     }
 
     /** User-meta key holding tokens retired by a refresh (F-282). */
-    public const RETIRED_META_KEY = 'bcc_jwt_retired';
+    public const RETIRED_META_KEY = \BCC\Trust\Core\Repositories\TokenStateRepository::RETIRED_KEY;
 
     /**
      * How long a refreshed token keeps working after the refresh (F-282).
@@ -470,14 +495,19 @@ final class JwtToken
      *
      * Same per-user lock and pruning as logOut(); best-effort like it.
      *
+     * F-462: returns false, and writes NOTHING, when the current list cannot
+     * be read (writing would drop every other retired token). The refresh
+     * then mints nothing.
+     *
      * @param array<string, mixed> $payload a payload returned by decodeForRefresh()
+     * @return bool true when the token is retired (or there was nothing to do)
      */
-    public static function retireAfterRefresh(array $payload): void
+    public static function retireAfterRefresh(array $payload): bool
     {
         $jti    = (string) ($payload['jti'] ?? '');
         $userId = (int) ($payload['user_id'] ?? 0);
         if ($jti === '' || $userId <= 0) {
-            return;
+            return true;
         }
 
         $lockKey = self::DENYLIST_LOCK_PREFIX . $userId;
@@ -489,8 +519,13 @@ final class JwtToken
         try {
             wp_cache_delete($userId, 'user_meta');
 
+            $state = self::state($userId);
+            if ($state === null) {
+                return false;
+            }
+
             $now  = time();
-            $list = self::retiredList($userId);
+            $list = $state['retired'];
             foreach ($list as $hash => $entry) {
                 if ($entry['until'] < $now) {
                     unset($list[$hash]);
@@ -508,6 +543,8 @@ final class JwtToken
                 $list = array_slice($list, -self::DENYLIST_MAX_ENTRIES, null, true);
             }
             update_user_meta($userId, self::RETIRED_META_KEY, $list);
+
+            return true;
         } finally {
             if ($locked) {
                 \BCC\Core\DB\AdvisoryLock::release($lockKey);
@@ -515,9 +552,10 @@ final class JwtToken
         }
     }
 
-    private static function isSuperseded(int $userId, string $jti): bool
+    /** @param array<string, array{from: int, until: int}> $retired */
+    private static function isSuperseded(array $retired, string $jti): bool
     {
-        $entry = self::retiredList($userId)[self::denylistHash($jti)] ?? null;
+        $entry = $retired[self::denylistHash($jti)] ?? null;
         if ($entry === null) {
             return false;
         }
@@ -525,10 +563,12 @@ final class JwtToken
         return $entry['from'] <= $now && $now <= $entry['until'];
     }
 
-    /** @return array<string, array{from: int, until: int}> */
-    private static function retiredList(int $userId): array
+    /**
+     * @param mixed $raw the stored retired list, as read
+     * @return array<string, array{from: int, until: int}>
+     */
+    private static function retiredFrom($raw): array
     {
-        $raw = get_user_meta($userId, self::RETIRED_META_KEY, true);
         if (!is_array($raw)) {
             return [];
         }
@@ -552,16 +592,19 @@ final class JwtToken
         return max(1, $exp - time() + self::SKEW_SECONDS + self::REFRESH_GRACE_SECONDS);
     }
 
-    private static function isLoggedOut(int $userId, string $jti): bool
+    /** @param array<string, int> $denylist */
+    private static function isLoggedOut(array $denylist, string $jti): bool
     {
-        $until = self::denylist($userId)[self::denylistHash($jti)] ?? null;
+        $until = $denylist[self::denylistHash($jti)] ?? null;
         return $until !== null && $until >= time();
     }
 
-    /** @return array<string, int> */
-    private static function denylist(int $userId): array
+    /**
+     * @param mixed $raw the stored denylist, as read
+     * @return array<string, int>
+     */
+    private static function denylistFrom($raw): array
     {
-        $raw = get_user_meta($userId, self::DENYLIST_META_KEY, true);
         if (!is_array($raw)) {
             return [];
         }
@@ -570,6 +613,28 @@ final class JwtToken
             $out[(string) $hash] = (int) $until;
         }
         return $out;
+    }
+
+    /**
+     * F-462: the user's token state from ONE guarded read
+     * (TokenStateRepository), or null when it could not be read. Never
+     * get_user_meta(): its cache answers "empty" after a failed SELECT.
+     *
+     * @return array{tv: int, denylist: array<string, int>, retired: array<string, array{from: int, until: int}>}|null
+     */
+    private static function state(int $userId): ?array
+    {
+        $raw = \BCC\Trust\Core\Repositories\TokenStateRepository::read($userId);
+        if ($raw === null) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] token state read failed; token refused', ['user_id' => $userId]);
+            return null;
+        }
+
+        return [
+            'tv'       => $raw['tv'],
+            'denylist' => self::denylistFrom($raw['denylist']),
+            'retired'  => self::retiredFrom($raw['retired']),
+        ];
     }
 
     private static function denylistHash(string $jti): string
