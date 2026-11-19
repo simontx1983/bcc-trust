@@ -341,6 +341,28 @@ final class OutOfBandEmailChangeTest extends TestCase
         self::assertArrayNotHasKey('token', self::googleSignIn(self::VICTIM), 'and Google still links nothing');
     }
 
+    /**
+     * The revocation voids what was mailed before it, as such: not merely
+     * because the address moved. Pointed elsewhere and back, the address is
+     * the one the code and link were bound to again, and both still fail.
+     */
+    public function testWhatWasMailedBeforeAChangeStaysVoidEvenIfTheAddressComesBack(): void
+    {
+        self::account(self::USER, self::OWN, '0');
+        $mailed = self::mailVerification(self::USER, self::OWN);
+
+        self::changeOutsideBcc(self::USER, self::VICTIM);
+        self::changeOutsideBcc(self::USER, self::OWN);
+
+        $byCode = self::verify(['email' => self::OWN, 'code' => $mailed['code']]);
+        self::assertSame(400, $byCode->get_status());
+        self::assertSame('bcc_invalid_otp', self::errorCode($byCode), 'the code was burned');
+        $byLink = self::verify(['token' => $mailed['token']]);
+        self::assertSame(400, $byLink->get_status());
+        self::assertSame('bcc_invalid_verify_token', self::errorCode($byLink), 'the link is from an older generation');
+        self::assertSame('0', self::flag(self::USER));
+    }
+
     public function testALinkMailedAfterTheChangeStillVerifiesIt(): void
     {
         self::account(self::USER, self::OWN, '1');
