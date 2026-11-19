@@ -469,8 +469,10 @@ final class EmailVerificationController
             $user    = $ownerId !== null ? get_userdata($ownerId) : false;
             $email   = '';
             if ($user instanceof \WP_User) {
-                $pending = \BCC\Trust\Core\Services\PendingEmailService::pendingSignupEmail((int) $user->ID);
-                $email   = $pending !== '' ? $pending : (string) $user->user_email;
+                // H1: the address a verification of this account would
+                // prove, the same rule verify binds to. A pending address
+                // left behind after user_email changed is not it.
+                $email = AuthSupport::verificationAddress((int) $user->ID);
             }
             // The resolved inbox's own cap still binds, so alternating the
             // email and handle forms cannot double the mail to one address.
@@ -500,10 +502,14 @@ final class EmailVerificationController
             // account — verifying here is how it gets there. Already-verified
             // accounts and wallet placeholder addresses (an internal
             // noreply.bcc.local alias, no inbox) are silently skipped; the
-            // anti-enumeration response hides which.
+            // anti-enumeration response hides which. H1: so is an address
+            // that is not the account's verification address (a pending one
+            // left behind after user_email changed): its code would be
+            // refused by verify, so it is never mailed one.
             if (
                 ($emailVerified === '0' || $emailVerified === '')
                 && !AccountRecoveryService::isPlaceholderEmail($email)
+                && AuthSupport::isVerificationAddress($userId, $email)
             ) {
                 // Overwrites the existing OTP (if any) so the previous code
                 // immediately stops working — only the new email is valid.

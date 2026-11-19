@@ -21,7 +21,12 @@ use PHPUnit\Framework\TestCase;
  *   - admins: untouched.
  * Application passwords are for admins only.
  *
- * Runs the real filters over minimal WordPress doubles defined here.
+ * A refusal is a core `rest_forbidden` RESPONSE, never a bare WP_Error: a
+ * bare one inside a `/batch/v1` call makes core's batch handler fatal (500).
+ *
+ * Runs the real filters over minimal WordPress doubles defined here and in
+ * tests/Stubs/rest-batch-stubs.php (WP_Error, the response conversion and
+ * the batch handler's per-request tail, mirroring WordPress 7.0.2).
  */
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
@@ -33,11 +38,9 @@ final class RestRouteAllowlistTest extends TestCase
     {
         parent::setUp();
         $GLOBALS['__cug'] = ['user' => 0, 'caps' => [], 'filters' => [], 'user_caps' => []];
+        require_once __DIR__ . '/../Stubs/rest-batch-stubs.php';
         if (!class_exists('WP_REST_Request', false)) {
             eval('class WP_REST_Request { public function __construct(private string $method = "GET", private string $route = "") {} public function get_route(): string { return $this->route; } public function get_method(): string { return $this->method; } }');
-        }
-        if (!class_exists('WP_Error', false)) {
-            eval('class WP_Error { public function __construct(public string $code = "", public string $message = "", public mixed $data = null) {} public function get_error_code(): string { return $this->code; } public function get_error_data(): mixed { return $this->data; } }');
         }
         if (!class_exists('WP_User', false)) {
             eval('class WP_User { public function __construct(public int $ID = 0) {} }');
@@ -73,11 +76,17 @@ final class RestRouteAllowlistTest extends TestCase
         $GLOBALS['__cug']['caps'] = ['manage_options'];
     }
 
+    /** Core's rest_forbidden answer, as error_to_response() would render it. */
+    private static function refusalBody(int $status): array
+    {
+        return ['code' => 'rest_forbidden', 'message' => 'Sorry, you are not allowed to do that.', 'data' => ['status' => $status]];
+    }
+
     private static function assertRefused(mixed $res, int $status, string $what): void
     {
-        self::assertInstanceOf(\WP_Error::class, $res, $what);
-        self::assertSame('rest_forbidden', $res->get_error_code(), $what);
-        self::assertSame(['status' => $status], $res->get_error_data(), $what);
+        self::assertInstanceOf(\WP_REST_Response::class, $res, $what . ': a response, never a bare WP_Error');
+        self::assertSame($status, $res->get_status(), $what);
+        self::assertSame(self::refusalBody($status), $res->get_data(), $what);
     }
 
     // ── BCC's namespaces: open to everyone ────────────────────────────────
@@ -251,6 +260,72 @@ final class RestRouteAllowlistTest extends TestCase
         $earlier = new \stdClass();
 
         self::assertSame($earlier, RestRouteAllowlist::filter($earlier, null, 'not a request'));
+    }
+
+    // ── /batch/v1: a refused sub-request never fails the whole batch ──────
+
+    /**
+     * Runs a batch through the registered filters and the batch handler's
+     * per-request tail. A sub-request nothing refuses gets $answer.
+     *
+     * @param list<array{0: string, 1: string}> $calls [method, route]
+     * @return list<array{body: mixed, status: int, headers: array<string, mixed>}>
+     */
+    private static function batch(array $calls, ?\WP_REST_Response $answer = null): array
+    {
+        RestRouteAllowlist::register();
+        $answer ??= new \WP_REST_Response(['ok' => true], 200);
+
+        $res = bcc_test_serve_batch(
+            array_map(static fn(array $c): \WP_REST_Request => new \WP_REST_Request($c[0], $c[1]), $calls),
+            static fn(): \WP_REST_Response => $answer
+        );
+
+        self::assertSame(207, $res->get_status(), 'a batch answers 207, never 500');
+        return $res->get_data()['responses'];
+    }
+
+    public function testAMembersBatchAnswers207WithEachRefusedSubRequestsOwn403(): void
+    {
+        self::member();
+
+        $responses = self::batch([['PUT', '/wp/v2/users/me'], ['POST', '/peepso/v1/post'], ['POST', '/wp/v2/posts']]);
+
+        self::assertCount(3, $responses);
+        foreach ($responses as $i => $r) {
+            self::assertSame(403, $r['status'], "sub-request {$i}");
+            self::assertSame(self::refusalBody(403), $r['body'], "sub-request {$i}");
+        }
+    }
+
+    public function testASignedOutBatchAnswers207WithEachRefusedSubRequestsOwn401(): void
+    {
+        $responses = self::batch([['POST', '/wp/v2/comments'], ['DELETE', '/wp/v2/users/7']]);
+
+        self::assertSame([401, 401], array_column($responses, 'status'));
+        self::assertSame(self::refusalBody(401), $responses[1]['body']);
+    }
+
+    public function testAnAdminsBatchIsDispatchedUntouched(): void
+    {
+        self::admin();
+
+        $responses = self::batch([['PUT', '/wp/v2/users/me'], ['POST', '/wp/v2/posts']], new \WP_REST_Response(['id' => 7], 201));
+
+        self::assertSame([201, 201], array_column($responses, 'status'));
+        self::assertSame(['id' => 7], $responses[0]['body']);
+    }
+
+    public function testTheBatchDoubleFailsOnABareWpErrorAsCoreDoes(): void
+    {
+        // The control: a bare WP_Error from rest_pre_dispatch reaches
+        // get_data() in the batch handler, which WP_Error does not have.
+        // That fatal is the 500 this class avoids.
+        $GLOBALS['__cug']['filters'][] = ['rest_pre_dispatch', static fn(): \WP_Error => new \WP_Error('rest_forbidden', 'no', ['status' => 403]), 1, 1];
+
+        $this->expectException(\Error::class);
+        $this->expectExceptionMessageMatches('/WP_Error::get_data\(\)/');
+        bcc_test_serve_batch([new \WP_REST_Request('PUT', '/wp/v2/users/me')], static fn(): \WP_REST_Response => new \WP_REST_Response(null, 200));
     }
 
     // ── Application passwords: admins only ────────────────────────────────
