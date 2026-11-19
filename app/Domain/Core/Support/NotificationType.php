@@ -28,7 +28,9 @@
  *                     (original-write only — edits do not re-dispatch;
  *                     dedup'd to one bell row per (post, mentioner,
  *                     mentionee) by MentionExtractor::extractUserIds'
- *                     unique-id contract).
+ *                     unique-id contract, and to one per (mentioner,
+ *                     mentionee) per 5-min window across posts, comments
+ *                     and quotes, F-415).
  *   - HALL_POST      — someone posted in the Hall you've designated
  *                     as your primary (`bcc_primary_hall_group_id`).
  *                     Fan-out to all primary-members; async via
