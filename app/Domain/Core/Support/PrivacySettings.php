@@ -443,6 +443,15 @@ final class PrivacySettings
         // legacy opt-out into the one flag, keep honouring the legacy key
         // too, so nobody hidden before the deploy is listed meanwhile. A
         // migration that never completes keeps this on: fail closed.
+        //
+        // ⚠ NOTHING WRITES the legacy key any more — this is a READ that
+        // exists only until the fold completes, not a second live setting.
+        // Worth saying, because the clause below looks like one: a reader
+        // who takes it for a setting still in use will add it to cache-bust
+        // lists and invalidation triggers, where it would be dead weight
+        // implying a dependency that no longer exists. When
+        // FOLD_DONE_OPTION is set this whole branch stops running, and the
+        // rows can then be dropped.
         if (!get_option(self::FOLD_DONE_OPTION)) {
             $bccClauses[] = [
                 'relation' => 'OR',
