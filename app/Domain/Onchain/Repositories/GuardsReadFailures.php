@@ -182,4 +182,17 @@ trait GuardsReadFailures
 
         return isset($wpdb->last_error) ? (string) $wpdb->last_error : '';
     }
+
+    /**
+     * Start a read from a clean `last_error`, so guardRead*() never blames
+     * it for an error an earlier, unrelated query left behind. For reads that
+     * go through a WordPress API rather than runRead() (which resets itself),
+     * e.g. MemberSearchCandidates' get_users() lookups (F-432).
+     */
+    private static function clearReadError(): void
+    {
+        global $wpdb;
+
+        $wpdb->last_error = '';
+    }
 }
