@@ -8,6 +8,7 @@ use BCC\Trust\Core\Repositories\PushSubscriptionRepository;
 use BCC\Trust\Core\Services\PushDispatcher;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
+use GuzzleHttp\Psr7\Uri;
 use Minishlink\WebPush\MessageSentReport;
 use Minishlink\WebPush\Subscription;
 use Minishlink\WebPush\SubscriptionInterface;
@@ -79,9 +80,47 @@ final class PushLogNoEndpointTest extends TestCase
     }
 
     /**
+     * #739 review: Guzzle quotes the URI it built, which lower-cases the
+     * host and percent-encodes "|" and "^", so its copy no longer matches
+     * the stored endpoint byte for byte. A failed REPORT is already safe
+     * (sendOne redacts it with the report's own URI, Guzzle's form), but a
+     * flush EXCEPTION only has the stored endpoint to match. The message
+     * quotes Guzzle's own Uri, as its exceptions do. A URL on another host,
+     * and the message's own backticks, are left alone.
+     */
+    public function testAReEncodedCopyOfTheUrlIsTakenOutToo(): void
+    {
+        $endpoint = 'https://FCM.googleapis.com/fcm/send/dEvIcE|ToKeN^a1b2';
+        $guzzle   = (string) new Uri($endpoint);
+        self::assertNotSame($endpoint, $guzzle, 'precondition: Guzzle re-encodes this endpoint');
+
+        self::send(null, new \RuntimeException(
+            'Server error: `POST ' . $guzzle . '` resulted in a `500 Internal Server Error` response; see https://example.invalid/help'
+        ), $endpoint);
+
+        [, , $ctx] = self::onlyLine();
+        self::assertSame(
+            'Server error: `POST [endpoint]` resulted in a `500 Internal Server Error` response; see https://example.invalid/help',
+            $ctx['error']
+        );
+        $flat = (string) json_encode($ctx, JSON_UNESCAPED_SLASHES);
+        self::assertStringNotContainsString('ToKeN', $flat);
+        self::assertStringNotContainsString('/fcm/send/', $flat);
+    }
+
+    public function testACopyOfTheUrlWithAPortIsTakenOutToo(): void
+    {
+        self::send(null, new \RuntimeException('cURL error 7: Failed to connect to https://fcm.googleapis.com:443/fcm/send/' . self::TOKEN));
+
+        [, , $ctx] = self::onlyLine();
+        self::assertSame('cURL error 7: Failed to connect to [endpoint]', $ctx['error']);
+        self::assertNoEndpointIn($ctx);
+    }
+
+    /**
      * @param (\Closure(string): MessageSentReport)|null $report
      */
-    private static function send(?\Closure $report, ?\Throwable $throw = null): void
+    private static function send(?\Closure $report, ?\Throwable $throw = null, string $endpoint = self::ENDPOINT): void
     {
         $factory = static function () use ($report, $throw): WebPush {
             if ($throw !== null) {
@@ -108,7 +147,7 @@ final class PushLogNoEndpointTest extends TestCase
 
         $dispatcher = new PushDispatcher(new PushSubscriptionRepository(), $factory);
         $sub        = Subscription::create([
-            'endpoint'        => self::ENDPOINT,
+            'endpoint'        => $endpoint,
             'publicKey'       => 'BPcMbnWQL5GOYX/5LKZXT6sLmHiMsJSiEvIFvfcDvX7IZ9qqtq68onpTPEYmyxSQNiH7UD/98AUcQ12kBoFVgUQ',
             'authToken'       => 'BTBZMqHH6r4Tts7J_aSIgg',
             'contentEncoding' => 'aes128gcm',

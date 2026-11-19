@@ -504,10 +504,32 @@ final class PushDispatcher
      * A library message with every copy of the endpoint taken out. Guzzle's
      * errors quote the request line ("POST https://…/send/<token> resulted
      * in …"), and WebPush passes them on as the report's reason.
+     *
+     * Two passes. The exact copy goes first. Then any URL on the endpoint's
+     * own host goes too, because Guzzle quotes the URI it BUILT, not the
+     * string it was given: it lower-cases the host and percent-encodes what
+     * RFC 3986 does not allow raw ("|" becomes "%7C", a space "%20"), so its
+     * copy can differ from $endpoint and slip past the exact match. The
+     * host itself is not secret (endpointForLog() logs it). The URL's tail
+     * stops at a quote, backtick or angle bracket, which a URI cannot hold
+     * raw, so the message keeps its own punctuation. If the pattern cannot
+     * run, the message is withheld rather than logged half-redacted.
      */
     private static function withoutEndpoint(string $message, string $endpoint): string
     {
-        return $endpoint === '' ? $message : str_replace($endpoint, '[endpoint]', $message);
+        if ($endpoint === '') {
+            return $message;
+        }
+        $message = str_replace($endpoint, '[endpoint]', $message);
+        $host    = (string) wp_parse_url($endpoint, PHP_URL_HOST);
+        if ($host === '') {
+            return $message;
+        }
+        return preg_replace(
+            '~https?://' . preg_quote($host, '~') . '(?::\d+)?[/?#][^\s`\'"<>]*~i',
+            '[endpoint]',
+            $message
+        ) ?? '[message withheld]';
     }
 
     /**
