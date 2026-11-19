@@ -167,7 +167,7 @@ final class EmailVerificationController
             return self::invalidOtp();
         }
         if (count($accounts) > 1) {
-            return self::verifyCodeForHolders($accounts, $code);
+            return self::verifyCodeForHolders($accounts, $code, $email);
         }
 
         $userId = (int) $accounts[0]->ID;
@@ -186,14 +186,19 @@ final class EmailVerificationController
     private const CODE_WRONG    = 'wrong';
     private const CODE_BURNED   = 'burned';   // the attempt cap burned it; no new code yet
     private const CODE_VERIFIED = 'verified'; // the account's email is already verified
+    private const CODE_ADDRESS_SPENT = 'address_spent'; // the address's shared budget is spent; nothing compared
 
     /**
      * One code attempt against one account, with that account's own
      * attempt cap. Consumes the code on a match.
      *
+     * $addressKey (several holders only): the comparison is ALSO charged to
+     * that address's shared budget, first; when it is spent nothing is
+     * compared or charged and the answer is CODE_ADDRESS_SPENT.
+     *
      * @return self::CODE_*
      */
-    private static function tryCode(int $userId, string $code): string
+    private static function tryCode(int $userId, string $code, ?string $addressKey = null): string
     {
         $emailVerified = (string) get_user_meta($userId, AuthSupport::META_EMAIL_VERIFIED, true);
         if ($emailVerified === '1') {
@@ -212,6 +217,25 @@ final class EmailVerificationController
         // even under concurrent guesses; an attempt beyond it burns the code
         // without comparing. Same generic answer. Only while a code is pending.
         $otpId = AuthSupport::emailOtpIdentity($userId);
+
+        // F-294 (review): with several holders, each comparison also counts
+        // against ONE budget for the address, VERIFY_EMAIL_MAX_FAILURES per
+        // code lifetime across all of them, checked before this holder's own
+        // count. Otherwise the guesses per inbox would scale with the holder
+        // count, which whoever creates wallet sign-ups controls (five holders
+        // = five codes tested per guess, re-armed by every resend). It is
+        // keyed on the address alone, so a resend does not re-arm it. A
+        // denied call still counts (a guesser gets nothing while it keeps
+        // going). The emailed links are not affected.
+        if ($otpId !== null && $addressKey !== null && !\BCC\Core\Security\Throttle::allow(
+            'verify_email_addr',
+            AuthSupport::VERIFY_EMAIL_MAX_FAILURES,
+            AuthSupport::OTP_TTL,
+            $addressKey
+        )) {
+            return self::CODE_ADDRESS_SPENT;
+        }
+
         if ($otpId !== null && !\BCC\Core\Security\Throttle::allow(
             'verify_email_attempt',
             AuthSupport::VERIFY_EMAIL_MAX_FAILURES,
@@ -256,17 +280,27 @@ final class EmailVerificationController
      * match is the generic answer, or "request a new code" only when every
      * holder's code is burned.
      *
+     * Every comparison also counts against one budget for the address
+     * (tryCode()), so the guesses per inbox stay at one account's level
+     * however many holders there are. Once it is spent, no further holder is
+     * tried and the answer is "request a new code" (the new mail's link
+     * works at once).
+     *
      * @param list<\WP_User> $holders
      */
-    private static function verifyCodeForHolders(array $holders, string $code): WP_REST_Response
+    private static function verifyCodeForHolders(array $holders, string $code, string $email): WP_REST_Response
     {
-        $tried  = 0;
-        $burned = 0;
+        $addressKey = AuthSupport::emailThrottleKey('verify_email_addr', $email);
+        $tried      = 0;
+        $burned     = 0;
         foreach ($holders as $holder) {
             $holderId = (int) $holder->ID;
-            $outcome  = self::tryCode($holderId, $code);
+            $outcome  = self::tryCode($holderId, $code, $addressKey);
             if ($outcome === self::CODE_MATCHED) {
                 return self::completeVerification($holderId);
+            }
+            if ($outcome === self::CODE_ADDRESS_SPENT) {
+                return self::otpExhausted();
             }
             if ($outcome === self::CODE_VERIFIED) {
                 continue; // nothing pending to prove for this one
