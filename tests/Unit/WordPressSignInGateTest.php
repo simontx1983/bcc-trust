@@ -344,6 +344,18 @@ final class WordPressSignInGateTest extends TestCase
     public function testNoAdminAjaxActionIsOpenToMembers(): void
     {
         self::assertSame([], WordPressSignInGate::MEMBER_AJAX_ACTIONS);
+        self::assertFalse(WordPressSignInGate::allowsMemberAjax('peepso_embed_content'), 'the real (empty) list');
+    }
+
+    /** If the list ever gains an entry, only that exact action opens. */
+    public function testAnAllowlistEntryOpensOnlyThatExactAction(): void
+    {
+        $sample = ['as_async_request_queue_runner'];
+
+        self::assertTrue(WordPressSignInGate::allowsMemberAjax('as_async_request_queue_runner', $sample));
+        foreach (['AS_ASYNC_REQUEST_QUEUE_RUNNER', 'as_async_request_queue_runner_x', 'as_async_request', ' as_async_request_queue_runner', 'peepso_embed_content', ''] as $other) {
+            self::assertFalse(WordPressSignInGate::allowsMemberAjax($other, $sample), var_export($other, true));
+        }
     }
 
     /** @return array<string, array{int}> */

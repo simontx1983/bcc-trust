@@ -255,11 +255,22 @@ final class WordPressSignInGate
     private static function refuseMemberAjaxUnlessAllowed(): void
     {
         $action = $_REQUEST['action'] ?? null;
-        if (is_string($action) && in_array($action, self::MEMBER_AJAX_ACTIONS, true)) {
+        if (is_string($action) && self::allowsMemberAjax($action)) {
             return;
         }
 
         self::refuseBare();
+    }
+
+    /**
+     * Is this admin-ajax action open to a signed-in member? Only an exact
+     * entry of the list: no prefix, no case folding.
+     *
+     * @param list<string> $allowed MEMBER_AJAX_ACTIONS; a test passes its own
+     */
+    public static function allowsMemberAjax(string $action, array $allowed = self::MEMBER_AJAX_ACTIONS): bool
+    {
+        return in_array($action, $allowed, true);
     }
 
     /**
