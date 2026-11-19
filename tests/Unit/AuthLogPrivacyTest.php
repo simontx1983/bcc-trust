@@ -6,6 +6,7 @@ namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Core\Controllers\GitHubController;
 use BCC\Trust\Core\Controllers\XController;
+use BCC\Trust\Core\REST\Auth\AuthSupport;
 use BCC\Trust\Core\REST\Auth\PasswordAuthController;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -20,7 +21,9 @@ use PHPUnit\Framework\TestCase;
  *     can echo request details (codes, tokens, URLs, response bodies).
  * Now a sign-up failure logs the WordPress error code and message only,
  * and the controllers log the exception's class and code, never its
- * message.
+ * message. AuthSupport's three best-effort fallbacks (trusted login
+ * network, in_good_standing, linked wallet count) followed in the #735
+ * review: same class-and-code shape.
  *
  * Runs the REAL handlers over a recording Logger, defined here before
  * any stub file so it is the one that loads, and over provider services
@@ -115,6 +118,90 @@ final class AuthLogPrivacyTest extends TestCase
             $src = (string) file_get_contents(__DIR__ . '/../../app/Domain/Core/Controllers/' . $file . '.php');
             self::assertStringNotContainsString('getMessage()', $src, $file);
         }
+    }
+
+    public function testATrustedNetworkRecordFailureLogsItsClassAndCodeNeverItsMessage(): void
+    {
+        $GLOBALS['__bcc_ph']['meta'] = self::throwingStore();
+
+        AuthSupport::recordTrustedLoginNetwork(42);
+
+        self::assertOnlyLine('[bcc-trust] trusted login network not recorded');
+    }
+
+    public function testAGoodStandingLookupFailureLogsItsClassAndCodeNeverItsMessage(): void
+    {
+        $GLOBALS['wpdb'] = new class (self::SECRET) {
+            public string $prefix = 'wp_';
+
+            public function __construct(private string $secret)
+            {
+            }
+
+            /** @param array<int, mixed> $args */
+            public function __call(string $name, array $args): never
+            {
+                throw new \RuntimeException($this->secret, 7);
+            }
+        };
+
+        self::assertTrue(AuthSupport::resolveInGoodStanding(42), 'still fails open');
+        self::assertOnlyLine('[AuthEndpoint] in_good_standing lookup failed; fail-open');
+    }
+
+    public function testALinkedWalletCountFailureLogsItsClassAndCodeNeverItsMessage(): void
+    {
+        $GLOBALS['__bcc_ph']['wallets'] = self::throwingStore();
+
+        $count = (new \ReflectionMethod(AuthSupport::class, 'linkedWalletCount'))->invoke(null, 42);
+
+        self::assertSame(0, $count, 'the verification still completes');
+        self::assertOnlyLine('[bcc-trust] verify-email: linked wallet count unavailable');
+    }
+
+    public function testAuthSupportLogsNoExceptionMessageAnywhere(): void
+    {
+        // The three fallbacks above are the only catch blocks that log.
+        // This keeps a new one from going back to the message.
+        $src = (string) file_get_contents(__DIR__ . '/../../app/Domain/Core/REST/Auth/AuthSupport.php');
+        self::assertStringNotContainsString('getMessage()', $src);
+    }
+
+    private static function assertOnlyLine(string $message): void
+    {
+        self::assertCount(1, $GLOBALS['__bcc_log'], 'exactly one log line');
+        [, $logged, $context] = $GLOBALS['__bcc_log'][0];
+        self::assertSame($message, $logged);
+        self::assertSame(['user_id' => 42, 'exception' => 'RuntimeException', 'code' => 7], $context);
+        self::assertStringNotContainsString('SECRET', self::logText(), 'no exception text in the log');
+    }
+
+    /** A store whose every read throws with the secret in the message (code 7). */
+    private static function throwingStore(): \ArrayAccess
+    {
+        return new class (self::SECRET) implements \ArrayAccess {
+            public function __construct(private string $secret)
+            {
+            }
+
+            public function offsetExists(mixed $offset): bool
+            {
+                throw new \RuntimeException($this->secret, 7);
+            }
+
+            public function offsetGet(mixed $offset): mixed
+            {
+                throw new \RuntimeException($this->secret, 7);
+            }
+
+            public function offsetSet(mixed $offset, mixed $value): void
+            {
+            }
+
+            public function offsetUnset(mixed $offset): void
+            {
+            }
+        };
     }
 
     private static function fakeProviderServices(string $ns): void

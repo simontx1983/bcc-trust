@@ -178,8 +178,12 @@ class UserLifecycleService
      * attestations, a deleted user's vouches must stop counting
      * immediately, not at the next nightly decay sweep.
      *
-     * When the delete did not run (logged by the repository) the rows still
-     * exist, so there is nothing to recompute: answers false and skips it.
+     * The repository answers per leg (and logs each failed one):
+     *   - CAST leg did not run: the rows the user cast still count, so
+     *     there is nothing to recompute. Answers false and skips it;
+     *   - TARGETED leg did not run: the cast rows ARE gone, so their
+     *     targets are still re-synthesized; answers false afterwards, as the
+     *     rows cast against the profile survive.
      */
     public function purgeAttestationsFor(int $userId): bool
     {
@@ -190,7 +194,8 @@ class UserLifecycleService
             $castTargets[$row->target_kind . ':' . $row->target_id] = [$row->target_kind, $row->target_id];
         }
 
-        if (!$plugin->attestationRepository()->deleteForUser($userId)) {
+        $legs = $plugin->attestationRepository()->deleteForUser($userId);
+        if (!$legs['cast']) {
             \BCC\Core\Log\Logger::error('[bcc-trust] user-delete attestation purge failed — target recompute skipped', [
                 'user_id' => $userId,
             ]);
@@ -209,7 +214,7 @@ class UserLifecycleService
             }
         }
 
-        return true;
+        return $legs['targeted'];
     }
 
     public function onUserDelete(int $userId): void

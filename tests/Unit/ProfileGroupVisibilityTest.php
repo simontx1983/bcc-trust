@@ -472,4 +472,138 @@ final class ProfileGroupVisibilityTest extends TestCase
         self::assertCount(4, $ids, 'and nothing else was dropped by the junk');
     }
 
+    // ── F-401: the home-Hall CHIP, not the list ──────────────────────
+    //
+    // `primary_hall` is the same membership fact as one row of the list
+    // above, published as a single field on the directory card, the
+    // member card and the profile header. Rule 4 drops it from the
+    // LIST; until F-401 the chip answered to nothing, so a member who
+    // hid their home Hall still had it rendered in the most prominent
+    // place it appears.
+
+    /**
+     * ⭐ THE FEATURE. The hidden Hall is the member's primary, and the
+     * chip is withheld from another viewer.
+     */
+    public function testAHiddenPrimaryHallIsWithheldFromAnotherViewer(): void
+    {
+        self::hideForOwner([self::G_HALL]);
+
+        self::assertTrue(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::VIEWER)
+        );
+    }
+
+    /**
+     * ⭐ CONTROL. The owner keeps their own chip. They chose the setting
+     * and the settings screen must not lie to them about what it did.
+     */
+    public function testTheOwnerStillSeesTheirOwnHiddenChip(): void
+    {
+        self::hideForOwner([self::G_HALL]);
+
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::OWNER)
+        );
+    }
+
+    /** ⭐ CONTROL. The §F-02 admin exemption reaches the chip too. */
+    public function testAnAdminStillSeesAHiddenChip(): void
+    {
+        $GLOBALS['__bcc_pgv']['is_admin'] = true;
+        self::hideForOwner([self::G_HALL]);
+
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::VIEWER)
+        );
+    }
+
+    /**
+     * ⭐ CONTROL, and the anti-vacuity one. An untouched account keeps
+     * its chip: a rule that answered TRUE unconditionally would satisfy
+     * the feature test above and blank the chip on every profile in the
+     * system.
+     */
+    public function testAnUntouchedHideListLeavesTheChipAlone(): void
+    {
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::VIEWER)
+        );
+    }
+
+    /**
+     * An anonymous reader is refused it as well. The chip is rendered on
+     * signed-out profile views, so a rule keyed on `$viewerId > 0` would
+     * have left it visible to exactly the widest audience.
+     */
+    public function testAnAnonymousViewerIsAlsoRefusedTheChip(): void
+    {
+        self::hideForOwner([self::G_HALL]);
+
+        self::assertTrue(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::ANON)
+        );
+    }
+
+    /**
+     * ⭐ The rule is keyed on the ID, not on "this member hid SOMETHING".
+     * Hiding one Hall must not blank the chip of a member whose primary
+     * is a different Hall — that is the difference between a deny list
+     * and a kill switch.
+     */
+    public function testHidingOneHallDoesNotWithholdADifferentPrimary(): void
+    {
+        self::hideForOwner([self::G_HALL]);
+
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_PLAIN, self::VIEWER)
+        );
+    }
+
+    /**
+     * A numeric STRING in the stored list still hides the chip —
+     * WordPress round-trips a serialized list and the ints can come back
+     * as strings. The int form is deliberately absent so string support
+     * is the only thing that can make this pass.
+     */
+    public function testANumericStringStoredIdStillWithholdsTheChip(): void
+    {
+        self::hideForOwner([(string) self::G_HALL]);
+
+        self::assertTrue(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::VIEWER)
+        );
+    }
+
+    /**
+     * ⚠ A corrupt stored row hides NOTHING rather than everything. Same
+     * direction as {@see ProfileAccess::hiddenHallIds()}: a bad meta row
+     * must not blank a member's profile.
+     */
+    public function testAMalformedHideListLeavesTheChipAlone(): void
+    {
+        self::hideForOwner('not-an-array');
+
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, self::G_HALL, self::VIEWER)
+        );
+    }
+
+    /**
+     * Degenerate ids answer FALSE, so a member with no primary Hall (the
+     * pointer absent, resolved to 0) is never reported as hiding one.
+     */
+    public function testDegenerateIdsAreNotTreatedAsHidden(): void
+    {
+        self::hideForOwner([self::G_HALL]);
+
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(self::OWNER, 0, self::VIEWER),
+            'no primary Hall is not a hidden primary Hall'
+        );
+        self::assertFalse(
+            ProfileGroupVisibility::hidesPrimaryHall(0, self::G_HALL, self::VIEWER),
+            'no owner resolves to nothing hidden'
+        );
+    }
 }

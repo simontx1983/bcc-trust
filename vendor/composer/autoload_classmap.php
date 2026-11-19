@@ -354,6 +354,7 @@ return array(
     'BCC\\Trust\\Core\\Support\\DigestSettings' => $baseDir . '/app/Domain/Core/Support/DigestSettings.php',
     'BCC\\Trust\\Core\\Support\\Encryption' => $baseDir . '/app/Domain/Core/Support/Encryption.php',
     'BCC\\Trust\\Core\\Support\\FeedItemGate' => $baseDir . '/app/Domain/Core/Support/FeedItemGate.php',
+    'BCC\\Trust\\Core\\Support\\FeedUnavailable' => $baseDir . '/app/Domain/Core/Support/FeedUnavailable.php',
     'BCC\\Trust\\Core\\Support\\Formatting' => $baseDir . '/app/Domain/Core/Support/Formatting.php',
     'BCC\\Trust\\Core\\Support\\FraudClassification' => $baseDir . '/app/Domain/Core/Support/FraudClassification.php',
     'BCC\\Trust\\Core\\Support\\FrontendOrigin' => $baseDir . '/app/Domain/Core/Support/FrontendOrigin.php',
