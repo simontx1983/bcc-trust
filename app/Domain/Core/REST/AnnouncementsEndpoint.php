@@ -27,6 +27,16 @@
  * which validators are contested, and a distinguishable `claim_absent`
  * would map the unclaimed ones.
  *
+ * ── ⚠ SECRET PAGES ──────────────────────────────────────────────────────
+ * A SECRET page's announcements are seen by whoever may see the page
+ * ({@see \BCC\Trust\Core\Support\PageAccess}: its author, site admins, its
+ * members and invitees). Everyone else gets what a page that does not exist
+ * gets: the public list and the rotator an EMPTY page (a missing page has no
+ * announcements; it is not a 404), detail the same 404. The repository reads
+ * still run first, so a failing database answers 503 for a hidden page
+ * exactly as for a missing one. This is page VISIBILITY, not the §4.32.2
+ * operator authorization below, which is unchanged.
+ *
  * ── ⚠ THE ENDPOINT DECIDES NOTHING ──────────────────────────────────────
  * It parses, calls, and serialises. Ownership comes from
  * {@see \BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority}, rows
@@ -61,6 +71,7 @@ use BCC\Trust\Core\Repositories\AnnouncementRepository;
 use BCC\Trust\Core\Services\AnnouncementViewService;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\KeysetCursor;
+use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority as Authority;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -275,6 +286,11 @@ final class AnnouncementsEndpoint
             $page = $archived
                 ? $repo->listArchived($pageId, $limit, $cursor)
                 : $repo->listActive($pageId, $limit, $cursor);
+            // A SECRET page the viewer may not see reads as a page with no
+            // announcements, after the read (see the header).
+            if (!PageAccess::viewerMaySeeId($pageId, get_current_user_id())) {
+                $page = ['rows' => [], 'has_more' => false];
+            }
             $counts = $repo->commentCountsFor(self::idsOf($page['rows']));
         } catch (RepositoryException) {
             // ⚠ A read failure is NOT an empty list. §4.32 makes an empty
@@ -301,8 +317,9 @@ final class AnnouncementsEndpoint
         //
         // §4.32.11 says the public list is "safely cacheable and its cache
         // key needs no viewer component." That is a statement about CACHE
-        // KEYS, and it is still honoured here: no `Vary`, because nothing
-        // in this response varies by viewer. It is NOT a freshness
+        // KEYS. ⚠ Since the secret-page rule (see the header) the answer
+        // DOES vary by viewer for a secret page — empty for one viewer, the
+        // list for a member — so `Vary` is sent below. It is NOT a freshness
         // guarantee, and §1.6's endpoint-kind TTL table has no
         // announcements row — so a shared `max-age` would be an invention,
         // not a contract.
@@ -326,9 +343,9 @@ final class AnnouncementsEndpoint
         //
         // Claim revocation is deliberately NOT on that list. This response
         // carries no viewer-dependent field, so revoking a claim cannot
-        // change it — which is exactly why detail and the owner list carry
-        // `Vary` and this does not.
+        // change it. The `Vary` is for the secret-page rule alone.
         $response->header('Cache-Control', 'no-store');
+        $response->header('Vary', 'Authorization, Cookie');
 
         return $response;
     }
@@ -355,7 +372,10 @@ final class AnnouncementsEndpoint
         $repo = new AnnouncementRepository();
 
         try {
-            $rows   = $repo->rotator($pageId);
+            $rows = $repo->rotator($pageId);
+            if (!PageAccess::viewerMaySeeId($pageId, get_current_user_id())) {
+                $rows = [];
+            }
             $counts = $repo->commentCountsFor(self::idsOf($rows));
         } catch (RepositoryException) {
             return self::unavailable();
@@ -365,11 +385,12 @@ final class AnnouncementsEndpoint
             AnnouncementViewService::rotatorPage($rows, $counts, self::slugFor($pageId))
         );
         // Same data, same rule, same reasoning as the public list above —
-        // including that the ABSENCE of `Vary` is the viewer-independence
-        // guarantee and the ABSENCE of a TTL is the freshness one. The
-        // rotator is the surface where a stale pin would be most visible:
-        // it is at most five rows and pinned-first is its whole ordering.
+        // including the `Vary` for a secret page and the ABSENCE of a TTL as
+        // the freshness guarantee. The rotator is the surface where a stale
+        // pin would be most visible: it is at most five rows and pinned-first
+        // is its whole ordering.
         $response->header('Cache-Control', 'no-store');
+        $response->header('Vary', 'Authorization, Cookie');
 
         return $response;
     }
@@ -424,6 +445,12 @@ final class AnnouncementsEndpoint
             $counts = $repo->commentCountsFor([$id]);
         } catch (RepositoryException) {
             return self::unavailable();
+        }
+
+        // A SECRET page the viewer may not see: the same 404 as a missing
+        // announcement, after the reads (see the header).
+        if (!PageAccess::viewerMaySeeId($pageId, $viewerId)) {
+            return self::notFound();
         }
 
         $payload = AnnouncementViewService::detail(
