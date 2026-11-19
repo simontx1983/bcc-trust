@@ -344,6 +344,38 @@ final class ProfileAccess
     }
 
     /**
+     * The canonical profile rung for a MEMBER, or null when it cannot be
+     * read.
+     *
+     * Wraps {@see canonicalProfileLevel()} together with the PeepSo read,
+     * so callers outside this class never touch `PeepSoUser` or a raw
+     * `usr_profile_acc` themselves — the snapping is the whole point, and
+     * a caller comparing the raw value would disagree with the feed on the
+     * stray values that snapping exists to tame (an author at 15 reads as
+     * the MEMBERS rung in bcc-core's range ladder; unsnapped, a naive
+     * `=== 10` check would call it non-public and a `<= 20` check would
+     * call it public by accident rather than by rule).
+     *
+     * ⚠ NULL IS "CANNOT TELL", never a level. PeepSo absent, a
+     * non-positive id, or a non-numeric column all answer null, and every
+     * caller must fail CLOSED on it. Returning 40 instead would be
+     * indistinguishable from a member who chose "only me".
+     */
+    public static function canonicalProfileLevelFor(int $ownerId): ?int
+    {
+        if ($ownerId <= 0 || !class_exists('\\PeepSoUser')) {
+            return null;
+        }
+
+        $acc = \PeepSoUser::get_instance($ownerId)->get_profile_accessibility();
+        if (!is_numeric($acc)) {
+            return null;
+        }
+
+        return self::canonicalProfileLevel((int) $acc);
+    }
+
+    /**
      * Snap a raw `usr_profile_acc` to the nearest STRICTER canonical rung
      * before the ladder sees it: `<= 10` → 10, `<= 20` → 20, `<= 30` →
      * 30, anything higher → 40.

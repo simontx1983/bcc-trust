@@ -475,6 +475,19 @@ final class GroupInteractionGateTest extends TestCase
             'ReactionsEndpoint.php'   => 2, // set + remove
             'StokeEndpoint.php'       => 2, // add + remove
             'HelpfulMarkEndpoint.php' => 1, // the shared post branch
+            // F-346. ONE call site, reached TWICE per request: the repost
+            // route gates the submitted id and then the resolved repost
+            // ROOT, through one shared helper so the two cannot drift.
+            // Counting the helper's single call site is what this guard can
+            // see; that BOTH ids actually reach it, and that the refusal is
+            // honoured for each, is asserted behaviourally in
+            // RepostEndpointTest over a real call trace.
+            //
+            // ⛔ removeRepost deliberately calls NO audience gate — a root
+            // can stop being readable, and gating the un-repost would strand
+            // the member with a post on their own wall they cannot remove.
+            // Its 404-when-nothing-of-yours is what replaces the gate.
+            'RepostEndpoint.php'      => 1,
         ];
         foreach ($expected as $file => $count) {
             $src = (string) file_get_contents($rest . $file);

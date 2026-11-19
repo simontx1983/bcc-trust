@@ -34,6 +34,9 @@ final class FeedReadFailureWiringTest extends TestCase
         'FeedEndpoint.php'          => ['hot', 'tagFeed', 'feed', 'respondWithFeedItem'],
         'GroupsDetailEndpoint.php'  => ['feed'],
         'PagesEndpoint.php'         => ['feed'],
+        // F-346: the repost/quote routes re-gate the ROOT per viewer through
+        // the permalink's own seam, so they read a feed too.
+        'RepostEndpoint.php'        => ['viewerCanReadRoot'],
         'UsersEndpoint.php'         => ['activity'],
         'FeedColdStartEndpoint.php' => ['handle'],
     ];
