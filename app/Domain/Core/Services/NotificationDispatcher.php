@@ -985,13 +985,7 @@ final class NotificationDispatcher
                 $groupId
             );
 
-            $coalesced = get_transient($transientKey) !== false;
-            if (!$coalesced) {
-                // Set the gate BEFORE the dispatch so a second concurrent
-                // post for the same (recipient, group) sees the lock
-                // even if the bell write is still in flight.
-                set_transient($transientKey, 1, self::HALL_POST_BELL_WINDOW_SECS);
-
+            if (self::claimBellWindow($transientKey, self::HALL_POST_BELL_WINDOW_SECS)) {
                 $message = $hallName !== ''
                     ? sprintf('@%s posted in %s.', $authorHandle, $hallName)
                     : sprintf('@%s posted in your Hall.', $authorHandle);
@@ -1206,13 +1200,7 @@ final class NotificationDispatcher
             $parentPostId
         );
 
-        $coalesced = get_transient($transientKey) !== false;
-        if (!$coalesced) {
-            // Set the gate BEFORE the dispatch so a second concurrent
-            // comment for the same (recipient, post) sees the lock
-            // even if the bell write is still in flight.
-            set_transient($transientKey, 1, self::COMMENT_RECEIVED_BELL_WINDOW_SECS);
-
+        if (self::claimBellWindow($transientKey, self::COMMENT_RECEIVED_BELL_WINDOW_SECS)) {
             $this->dispatch(
                 $commenterId,
                 $recipientId,
@@ -1334,22 +1322,18 @@ final class NotificationDispatcher
      * time ("vouched for you", "revoked their vouch", "vouched for you", …).
      * Push already self-debounces (PushDispatcher, 5 min); the bell did not.
      *
-     * Same shape as the hall-post and comment-received bell gates: a
-     * transient set BEFORE the write, so a concurrent toggle sees it. Keyed
-     * per EVENT, so a storm leaves at most one "vouched" and one "revoked"
-     * bell per attestor→recipient pair and kind per day, while a genuine
-     * first vouch and a genuine revoke still each notify. The profile, not
-     * the bell, is the source of truth for the current state.
+     * The same gate as the hall-post and comment-received bells
+     * (claimBellWindow()). Keyed per EVENT, so a storm leaves at most one
+     * "vouched" and one "revoked" bell per attestor→recipient pair and kind
+     * per day, while a genuine first vouch and a genuine revoke still each
+     * notify. The profile, not the bell, is the source of truth for the
+     * current state.
      */
     private function attestationBellOpen(string $event, int $attestorId, int $recipientId, string $kind): bool
     {
         $key = sprintf('bcc_attest_bell_%s_%s_%d_%d', $event, $kind, $attestorId, $recipientId);
-        if (get_transient($key) !== false) {
-            return false;
-        }
-        set_transient($key, 1, self::ATTESTATION_BELL_WINDOW_SECS);
 
-        return true;
+        return self::claimBellWindow($key, self::ATTESTATION_BELL_WINDOW_SECS);
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -2005,6 +1989,27 @@ final class NotificationDispatcher
     // ──────────────────────────────────────────────────────────────────
     // Shared write path
     // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * The one bell-coalescing gate: claim the window $key for $windowSecs
+     * and say whether this caller got it (true = write the bell; false =
+     * one was already written in this window). The hall-post,
+     * comment-received and F-78 attestation bells all go through it.
+     *
+     * The window is set BEFORE the caller's bell write, so a concurrent
+     * event for the same key sees it even while that write is in flight.
+     * A read that fails returns false from get_transient(), the same as no
+     * window, so a broken cache errs toward the bell, never away from it.
+     */
+    private static function claimBellWindow(string $key, int $windowSecs): bool
+    {
+        if (get_transient($key) !== false) {
+            return false;
+        }
+        set_transient($key, 1, $windowSecs);
+
+        return true;
+    }
 
     private function dispatch(
         int $fromUserId,
