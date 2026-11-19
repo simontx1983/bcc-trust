@@ -35,6 +35,8 @@ if (!defined('ABSPATH')) {
     exit(1);
 }
 
+require_once __DIR__ . '/lib/act-as.php'; // F-441: a member signs in by bearer, as in the app
+
 use BCC\Trust\Core\Announcements\AnnouncementPostType as CPT;
 use BCC\Trust\Core\Announcements\AnnouncementVisibility as VIS;
 use BCC\Trust\Onchain\Services\ValidatorPageOperatorAuthority as AUTH;
@@ -64,7 +66,7 @@ function ck(string $label, $expected, $actual): void
 /** Dispatch and return status + the error code + the reason_code + raw data. */
 function dsp(string $method, string $route, array $params = [], int $asUser = 0): array
 {
-    wp_set_current_user($asUser);
+    bcc_harness_act_as($asUser);
     $req = new WP_REST_Request($method, $route);
     foreach ($params as $k => $v) {
         $req->set_param($k, $v);
