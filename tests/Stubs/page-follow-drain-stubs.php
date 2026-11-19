@@ -239,6 +239,13 @@ namespace BCC\Trust\Core\Repositories {
             }
 
             // F-334: a released page no longer counts for its old owner.
+            public function transferPageOwnership(int $oldOwnerId, int $newOwnerId, int $pageId): bool
+            {
+                $GLOBALS['__bcc_drain']['page_count_drops'][] = [$oldOwnerId, $pageId];
+                $GLOBALS['__bcc_drain']['page_counts'][]      = [$newOwnerId, $pageId];
+                return true;
+            }
+
             public function decrementPageCount(int $userId, int $pageId): void
             {
                 $GLOBALS['__bcc_drain']['page_count_drops'][] = [$userId, $pageId];
@@ -259,6 +266,25 @@ namespace BCC\Trust\Core\Repositories {
             public function updateOwner(int $pageId, int $ownerId): void
             {
                 $GLOBALS['__bcc_drain']['score_owner'][$pageId] = $ownerId;
+            }
+
+            public function existsForPage(int $pageId): bool
+            {
+                return array_key_exists($pageId, $GLOBALS['__bcc_drain']['score_owner'] ?? []);
+            }
+
+            /** The guarded UPDATE: only rows still keyed to $fromOwner move (`release_owner_fails` = throw). */
+            public function releaseOwner(int $pageId, int $fromOwner, int $toOwner): int
+            {
+                $GLOBALS['__bcc_drain']['release_owner_calls'][] = [$pageId, $fromOwner, $toOwner];
+                if (!empty($GLOBALS['__bcc_drain']['release_owner_fails'])) {
+                    throw new \RuntimeException('update failed');
+                }
+                if (($GLOBALS['__bcc_drain']['score_owner'][$pageId] ?? null) !== $fromOwner) {
+                    return 0;
+                }
+                $GLOBALS['__bcc_drain']['score_owner'][$pageId] = $toOwner;
+                return 1;
             }
         }
     }

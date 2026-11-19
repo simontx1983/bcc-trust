@@ -112,12 +112,15 @@ final class PageOwnerResolver implements PageOwnerResolverInterface
             return $pageId;
         }
 
-        // Fallback: WordPress API.
+        // Fallback: WordPress API. The oldest page, like the scores read
+        // (get_posts defaults to the NEWEST).
         $posts = get_posts([
             'author'         => $userId,
             'post_type'      => 'peepso-page',
             'post_status'    => 'publish',
             'posts_per_page' => 1,
+            'orderby'        => 'ID',
+            'order'          => 'ASC',
             'fields'         => 'ids',
         ]);
 
