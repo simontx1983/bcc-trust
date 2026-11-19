@@ -107,6 +107,10 @@ namespace {
          *
          * `update_fails` (F-294) makes the write fail like core's WP_Error.
          *
+         * `on_profile_update` (H1): a callable listener. When set, the write
+         * then fires it like core fires `profile_update`: ($id, the WP_User
+         * read BEFORE the write). Unset, nothing fires (every other suite).
+         *
          * @param array<string, mixed> $data
          * @return int|\WP_Error
          */
@@ -115,10 +119,15 @@ namespace {
             if (!empty($GLOBALS['__bcc_ph']['update_fails'])) {
                 return new \WP_Error('stub_update_failed', 'stub');
             }
-            $id = (int) $data['ID'];
+            $id       = (int) $data['ID'];
+            $listener = $GLOBALS['__bcc_ph']['on_profile_update'] ?? null;
+            $before   = is_callable($listener) ? get_userdata($id) : false;
             if (isset($data['user_email'])) {
                 $GLOBALS['__bcc_ph']['core_email_notice'][] = (bool) apply_filters('send_email_change_email', true, [], $data);
                 $GLOBALS['__bcc_ph']['users'][$id]['email'] = (string) $data['user_email'];
+            }
+            if (is_callable($listener)) {
+                $listener($id, $before);
             }
             return $id;
         }

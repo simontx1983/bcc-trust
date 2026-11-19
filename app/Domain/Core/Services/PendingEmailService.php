@@ -93,6 +93,15 @@ final class PendingEmailService
     }
 
     /**
+     * applyPendingSignupEmail() outcome (H1): a pending address was held but
+     * user_email is no longer the wallet placeholder, because it was changed
+     * outside BCC meanwhile. The code or link proved the PENDING inbox, not
+     * the address now in user_email, so the caller must not finalise. The
+     * pending one is dropped.
+     */
+    public const SIGNUP_EMAIL_REFUSED = 'refused';
+
+    /**
      * On a proven inbox (a correct sign-up code, or the link): move the
      * pending sign-up address into user_email. Only while user_email is
      * still the wallet placeholder; the address is re-checked first, and if
@@ -106,9 +115,13 @@ final class PendingEmailService
             return self::SIGNUP_EMAIL_NONE;
         }
         $user = get_userdata($userId);
-        if (!$user instanceof \WP_User || !AccountRecoveryService::isPlaceholderEmail((string) $user->user_email)) {
+        if (!$user instanceof \WP_User) {
             delete_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL);
             return self::SIGNUP_EMAIL_NONE;
+        }
+        if (!AccountRecoveryService::isPlaceholderEmail((string) $user->user_email)) {
+            delete_user_meta($userId, self::META_PENDING_SIGNUP_EMAIL);
+            return self::SIGNUP_EMAIL_REFUSED;
         }
         $holder = email_exists($pending);
         if ($holder !== false && (int) $holder !== $userId) {
@@ -117,12 +130,7 @@ final class PendingEmailService
         }
         // The old address is the placeholder: WordPress core's "Email
         // Changed" mail would go to a dead inbox, so it is off for this write.
-        add_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
-        try {
-            $result = wp_update_user(['ID' => $userId, 'user_email' => $pending]);
-        } finally {
-            remove_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
-        }
+        $result = self::writeEmail($userId, $pending);
         if (is_wp_error($result)) {
             return self::SIGNUP_EMAIL_FAILED;
         }
@@ -197,12 +205,7 @@ final class PendingEmailService
         // The old address gets BCC's own notice (the caller's job). WordPress
         // core would send a second "Email Changed" mail from the same update
         // (F-294), so its notice is switched off for THIS write only.
-        add_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
-        try {
-            $result = wp_update_user(['ID' => $userId, 'user_email' => $pending['email']]);
-        } finally {
-            remove_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
-        }
+        $result = self::writeEmail($userId, $pending['email']);
         if (is_wp_error($result)) {
             return ['ok' => false, 'error' => self::ERR_WRITE_FAILED];
         }
@@ -228,6 +231,48 @@ final class PendingEmailService
             return '***';
         }
         return substr($email, 0, 1) . str_repeat('*', max(1, $at - 1)) . substr($email, $at);
+    }
+
+    /**
+     * H1: the address this service is writing to user_email right now, per
+     * user. Set only for the duration of writeEmail()'s wp_update_user().
+     *
+     * @var array<int, string>
+     */
+    private static array $writing = [];
+
+    /**
+     * H1: is this email change PendingEmailService's own write of $email for
+     * $userId? UserLifecycleService asks on `profile_update`: every other
+     * user_email change is an address nobody proved, and revokes the
+     * account's email verification. True only inside writeEmail(), for that
+     * user and that address.
+     */
+    public static function isOwnWrite(int $userId, string $email): bool
+    {
+        return isset(self::$writing[$userId])
+            && strtolower(trim(self::$writing[$userId])) === strtolower(trim($email));
+    }
+
+    /**
+     * Write a PROVEN address to user_email, with WordPress core's "Email
+     * Changed" notice off for this write (both callers send their own, or
+     * none). Marked as this service's own write while wp_update_user() runs,
+     * so the `profile_update` it fires does not revoke the verification
+     * (isOwnWrite).
+     *
+     * @return int|\WP_Error
+     */
+    private static function writeEmail(int $userId, string $email)
+    {
+        self::$writing[$userId] = $email;
+        add_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
+        try {
+            return wp_update_user(['ID' => $userId, 'user_email' => $email]);
+        } finally {
+            remove_filter('send_email_change_email', '__return_false', PHP_INT_MAX);
+            unset(self::$writing[$userId]);
+        }
     }
 
     /** @return array{email: string, otp_hash: string}|null */

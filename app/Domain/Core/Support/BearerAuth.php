@@ -70,6 +70,20 @@ final class BearerAuth
         return self::$presentedTokenFailure;
     }
 
+    /**
+     * The user THIS request's bearer token authenticated, or 0 when the
+     * bearer did not decide: no token, a bad one, or an earlier login (a
+     * WordPress cookie, an application password) had already won.
+     * Request-scoped; read by WordPressSignInGate, which lets a member onto
+     * a bcc route only when the bearer is what signed them in.
+     */
+    private static int $authenticatedUserId = 0;
+
+    public static function authenticatedUserId(): int
+    {
+        return self::$authenticatedUserId;
+    }
+
     public static function register(): void
     {
         add_filter('determine_current_user', [self::class, 'authenticateBearer'], 30);
@@ -97,9 +111,14 @@ final class BearerAuth
      */
     public static function authenticateBearer($userId)
     {
+        // Each decision stands alone: only a token verified below marks the
+        // request as bearer-authenticated.
+        self::$authenticatedUserId = 0;
+
         // If a previous filter (cookie auth, application password, etc.)
         // already authenticated the request, leave it alone — Bearer is
-        // a secondary path, not an override.
+        // a secondary path, not an override. (On a bcc route that is an
+        // admin only: WordPressSignInGate refuses a member signed in this way.)
         if (is_int($userId) && $userId > 0) {
             return $userId;
         }
@@ -142,6 +161,7 @@ final class BearerAuth
         }
 
         self::$presentedTokenFailure = null;
+        self::$authenticatedUserId   = $tokenUserId;
         return $tokenUserId;
     }
 

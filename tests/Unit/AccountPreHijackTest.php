@@ -386,9 +386,11 @@ final class AccountPreHijackTest extends TestCase
         self::assertSame('owner@example.com', $mail['to']);
         self::assertSame('[BCC] Verify your email address', $mail['subject']);
 
-        // OTP: the mailed code is the one stored (as its HMAC).
+        // OTP: the mailed code is the one stored (as its HMAC), bound to the
+        // address it was mailed to (H1, a keyed hash of the address).
+        $addressMac = hash_hmac('sha256', 'bcc-verify-address|owner@example.com', 'test-salt-prehijack');
         self::assertSame(
-            hash_hmac('sha256', self::otpFrom($mail['html']), 'test-salt-prehijack'),
+            hash_hmac('sha256', self::otpFrom($mail['html']), 'test-salt-prehijack') . ':' . $addressMac,
             $GLOBALS['__bcc_ph']['transients']['bcc_otp_' . self::OWNER] ?? null
         );
 
@@ -398,7 +400,7 @@ final class AccountPreHijackTest extends TestCase
             static fn(string $k): bool => str_starts_with($k, 'bcc_vt_')
         ));
         self::assertCount(1, $tokens);
-        self::assertSame((string) self::OWNER, $GLOBALS['__bcc_ph']['transients'][$tokens[0]]);
+        self::assertSame(self::OWNER . ':0:' . $addressMac, $GLOBALS['__bcc_ph']['transients'][$tokens[0]]);
         $token = substr($tokens[0], strlen('bcc_vt_'));
         // F-410: the token, and nothing but the token.
         self::assertStringContainsString(

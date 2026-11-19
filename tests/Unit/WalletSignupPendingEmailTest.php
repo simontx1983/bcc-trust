@@ -147,7 +147,7 @@ final class WalletSignupPendingEmailTest extends TestCase
     private static function tokenFor(int $userId): string
     {
         foreach ($GLOBALS['__bcc_ph']['transients'] as $key => $value) {
-            if (str_starts_with((string) $key, 'bcc_vt_') && (string) $value === (string) $userId) {
+            if (str_starts_with((string) $key, 'bcc_vt_') && explode(':', (string) $value)[0] === (string) $userId) {
                 return substr((string) $key, strlen('bcc_vt_'));
             }
         }
@@ -293,7 +293,7 @@ final class WalletSignupPendingEmailTest extends TestCase
         $GLOBALS['__bcc_ph']['users'][self::OTHER] = ['email' => 'real@example.com', 'login' => 'u3', 'display' => 'Three'];
         $GLOBALS['__bcc_ph']['meta'][self::OTHER]  = [PendingEmailService::META_PENDING_SIGNUP_EMAIL => self::TYPED];
 
-        self::assertSame(PendingEmailService::SIGNUP_EMAIL_NONE, PendingEmailService::applyPendingSignupEmail(self::OTHER));
+        self::assertSame(PendingEmailService::SIGNUP_EMAIL_REFUSED, PendingEmailService::applyPendingSignupEmail(self::OTHER), 'H1: refused, never finalised');
         self::assertSame('real@example.com', self::email(self::OTHER));
         self::assertNull(self::pending(self::OTHER), 'the stale pending address is cleared');
     }
