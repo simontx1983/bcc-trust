@@ -54,6 +54,11 @@
  * it off.
  */
 
+if (!defined('ABSPATH')) {
+    fwrite(STDERR, "must run inside WordPress\n");
+    exit(1);
+}
+
 use BCC\Trust\Core\Announcements\AnnouncementPostType as CPT;
 use BCC\Trust\Core\Announcements\AnnouncementVisibility as VIS;
 use BCC\Trust\Core\Repositories\AnnouncementRepository as REPO;
