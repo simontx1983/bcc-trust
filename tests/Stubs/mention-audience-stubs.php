@@ -1,16 +1,26 @@
 <?php
 /**
- * Stubs for MentionAudienceTest. Loaded ONLY inside a PHPUnit subprocess
- * (RunTestsInSeparateProcesses), so nothing here leaks into other suites.
+ * Stubs for MentionAudienceTest and BellWindowGateTest. Loaded ONLY inside a
+ * PHPUnit subprocess (RunTestsInSeparateProcesses), so nothing here leaks
+ * into other suites.
  *
- * Real code under test: NotificationDispatcher::dispatchMentionsFor() and
- * onMentioned(), MentionExtractor, MentionPolicy, NotificationPrefs and
- * PushDispatcher::enqueue(). Doubles, in $GLOBALS['__bcc_mna']:
+ * Real code under test: NotificationDispatcher (the mention, hall-post and
+ * comment-received bells and their windows), MentionExtractor,
+ * MentionPolicy, NotificationPrefs and PushDispatcher::enqueue(). Doubles, in
+ * $GLOBALS['__bcc_mna']:
  *   meta           array<int, array<string, string>>  user meta (bell/push prefs, handles)
  *   unmentionable  list<int>   ids PeepSoUserSearch filters out (MentionPolicy's gate)
  *   bells          list<array{to: int, from: int, type: string, external_id: int, act_id: int}>
- *   pushes         list<string>  push queue keys written (set_transient)
+ *   pushes         list<string>  every transient key written (set_transient), in order
+ *   transients     array<string, array{value: mixed, ttl: int, expires: int}>  the store
+ *                  get_transient() reads; an expired entry reads as absent
+ *   now            int         the store's clock (default: time())
+ *   deleted        list<string>  keys passed to delete_transient()
+ *   transient_read_fails  bool  every get_transient() answers false
+ *   bell_write_fails      bool  PeepSoNotificationWriter refuses the write
  *   logs           list<string>  Logger messages
+ *
+ * Tests: MentionAudienceTest, BellWindowGateTest, MentionBellWindowTest.
  */
 
 declare(strict_types=1);
@@ -35,10 +45,23 @@ namespace {
         }
     }
     if (!function_exists('get_transient')) {
-        /** @return mixed */
+        /** @return mixed false when absent or expired, as WordPress answers */
         function get_transient(string $key)
         {
-            return false;
+            if (!empty($GLOBALS['__bcc_mna']['transient_read_fails'])) {
+                // A cache read that fails: WordPress answers false, the same
+                // as "no such transient".
+                return false;
+            }
+            $entry = $GLOBALS['__bcc_mna']['transients'][$key] ?? null;
+            if (!is_array($entry)) {
+                return false;
+            }
+            $now = $GLOBALS['__bcc_mna']['now'] ?? time();
+            if ($entry['expires'] !== 0 && $entry['expires'] <= $now) {
+                return false;
+            }
+            return $entry['value'];
         }
     }
     if (!function_exists('set_transient')) {
@@ -46,6 +69,20 @@ namespace {
         function set_transient(string $key, $value, int $ttl = 0): bool
         {
             $GLOBALS['__bcc_mna']['pushes'][] = $key;
+            $now = $GLOBALS['__bcc_mna']['now'] ?? time();
+            $GLOBALS['__bcc_mna']['transients'][$key] = [
+                'value'   => $value,
+                'ttl'     => $ttl,
+                'expires' => $ttl > 0 ? $now + $ttl : 0,
+            ];
+            return true;
+        }
+    }
+    if (!function_exists('delete_transient')) {
+        function delete_transient(string $key): bool
+        {
+            $GLOBALS['__bcc_mna']['deleted'][] = $key;
+            unset($GLOBALS['__bcc_mna']['transients'][$key]);
             return true;
         }
     }
@@ -70,9 +107,17 @@ namespace BCC\Core\PeepSo {
     if (!class_exists(__NAMESPACE__ . '\PeepSoNotificationWriter', false)) {
         final class PeepSoNotificationWriter
         {
-            /** @return array{ok: bool} */
+            /**
+             * `bell_write_fails` (bool): the write is refused, as PeepSo's
+             * writer answers a failed insert, and no bell is recorded.
+             *
+             * @return array{ok: bool, reason?: string}
+             */
             public static function addNotification(int $from, int $to, string $message, string $type, int $moduleId, int $externalId, int $actId): array
             {
+                if (!empty($GLOBALS['__bcc_mna']['bell_write_fails'])) {
+                    return ['ok' => false, 'reason' => 'simulated write failure'];
+                }
                 $GLOBALS['__bcc_mna']['bells'][] = ['to' => $to, 'from' => $from, 'type' => $type, 'external_id' => $externalId, 'act_id' => $actId];
                 return ['ok' => true];
             }

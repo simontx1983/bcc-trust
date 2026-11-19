@@ -363,6 +363,25 @@ namespace {
                     $out[] = (int) $id;
                 }
             }
+            // Like core's WP_User_Query: `search` on `search_columns`
+            // ['user_email'], where a leading or trailing `*` is a LIKE
+            // wildcard. It's applied BEFORE `number`, as in SQL. Letter case
+            // is ignored, as under the column's `_ci` collation.
+            if (isset($args['search']) && ($args['search_columns'] ?? []) === ['user_email']) {
+                $term     = (string) $args['search'];
+                $leading  = str_starts_with($term, '*');
+                $trailing = str_ends_with($term, '*');
+                $needle   = strtolower(trim($term, '*'));
+                $out = array_values(array_filter($out, static function (int $id) use ($needle, $leading, $trailing): bool {
+                    $mail = strtolower((string) ($GLOBALS['__bcc_ph']['users'][$id]['email'] ?? ''));
+                    return match (true) {
+                        $leading && $trailing => str_contains($mail, $needle),
+                        $leading              => str_ends_with($mail, $needle),
+                        $trailing             => str_starts_with($mail, $needle),
+                        default               => $mail === $needle,
+                    };
+                }));
+            }
             // Like core: `orderby` ID (else the seeded order) and a `number` cap.
             if (($args['orderby'] ?? '') === 'ID') {
                 sort($out);
