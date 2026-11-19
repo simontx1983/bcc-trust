@@ -29,8 +29,12 @@ use PHPUnit\Framework\TestCase;
  *     and core's "Email Changed" mail (to the dead placeholder) stays off;
  *   - taken meanwhile → 409 and the pending address is dropped; a failed
  *     write keeps it for a retry;
- *   - two sign-ups holding it → the address resolves to nobody (the link
- *     still works);
+ *   - several sign-ups holding it → the code is checked against each
+ *     (oldest first, at most five), each under its own attempt cap, and
+ *     verifies only the account it was sent for; every comparison also
+ *     counts against one budget for the address (five per code lifetime,
+ *     not re-armed by a resend); a resend mails each its own code; the
+ *     account whose email it is still wins;
  *   - resend by that address or by handle mails the pending address;
  *   - confirming a recovery email clears it.
  *
@@ -270,22 +274,357 @@ final class WalletSignupPendingEmailTest extends TestCase
         self::assertSame('0', self::flag(self::NEW));
     }
 
-    public function testAnAddressTwoSignupsHoldPendingResolvesToNobody(): void
+    // ── several sign-ups holding one address ────────────────────────────
+
+    /**
+     * An older wallet sign-up (OTHER) and a newer one (NEW) both typed the
+     * address; each was mailed its own code. Returns [OTHER's, NEW's].
+     *
+     * @return array{0: string, 1: string}
+     */
+    private static function twoHolders(): array
     {
         self::pendingAccount(self::OTHER, self::TYPED);
+        AuthSupport::beginEmailVerification(self::OTHER, self::TYPED);
+        $other = self::lastCodeTo(self::TYPED);
         self::signup();
-        $mailsBefore = count($GLOBALS['__bcc_ph']['mail']);
+        $new = self::lastCodeTo(self::TYPED);
+        self::assertNotSame($other, $new, 'precondition: two different codes');
+        return [$other, $new];
+    }
 
-        $byCode = self::verify(['email' => self::TYPED, 'code' => self::lastCodeTo(self::TYPED)]);
-        self::assertSame(400, $byCode->get_status(), 'ambiguous = nobody');
-        self::assertSame('bcc_invalid_otp', self::errorCode($byCode));
+    private static function assertStillPending(int $id): void
+    {
+        self::assertStringEndsWith('@' . AccountRecoveryService::PLACEHOLDER_EMAIL_DOMAIN, self::email($id), "{$id} keeps its placeholder");
+        self::assertSame(self::TYPED, self::pending($id), "{$id} still holds it pending");
+        self::assertSame('0', self::flag($id), "{$id} is not verified");
+    }
 
-        self::assertSame(200, self::resend(['email' => self::TYPED]));
-        self::assertCount($mailsBefore, $GLOBALS['__bcc_ph']['mail'], 'resend to an ambiguous address mails no one');
+    /** A code burned by the attempt cap, as exhaustOtp() leaves it. */
+    private static function burn(int $id): void
+    {
+        AuthSupport::burnEmailOtp($id);
+        $GLOBALS['__bcc_ph']['transients']['bcc_otp_exhausted_' . $id] = '1';
+    }
 
-        // The link names its account, so it still works.
+    private static function wrongCode(string ...$codes): string
+    {
+        for ($n = 100000; ; $n++) {
+            if (!in_array((string) $n, $codes, true)) {
+                return (string) $n;
+            }
+        }
+    }
+
+    public function testWithTwoHoldersTheNewerOnesCodeVerifiesOnlyTheNewerOne(): void
+    {
+        [, $new] = self::twoHolders();
+
+        $res = self::verify(['email' => self::TYPED, 'code' => $new]);
+
+        self::assertSame(200, $res->get_status(), 'the code proves the inbox for the account it was sent for');
+        self::assertSame(self::TYPED, self::email(self::NEW));
+        self::assertSame('1', self::flag(self::NEW));
+        self::assertStillPending(self::OTHER);
+    }
+
+    public function testWithTwoHoldersTheOlderOnesCodeVerifiesOnlyTheOlderOne(): void
+    {
+        [$other] = self::twoHolders();
+
+        $res = self::verify(['email' => self::TYPED, 'code' => $other]);
+
+        self::assertSame(200, $res->get_status());
+        self::assertSame(self::TYPED, self::email(self::OTHER));
+        self::assertSame('1', self::flag(self::OTHER));
+        self::assertStillPending(self::NEW);
+    }
+
+    public function testAWrongCodeIsGenericAndCountsOnceAgainstEveryHolder(): void
+    {
+        [$other, $new] = self::twoHolders();
+        $GLOBALS['__bcc_ph']['throttle_counting'] = true;
+
+        $res = self::verify(['email' => self::TYPED, 'code' => self::wrongCode($other, $new)]);
+
+        self::assertSame(400, $res->get_status());
+        self::assertSame('bcc_invalid_otp', self::errorCode($res));
+        foreach ([self::OTHER, self::NEW] as $id) {
+            $fails = array_filter(
+                $GLOBALS['__bcc_ph']['throttle_hits'],
+                static fn(int $hits, string $bucket): bool => str_starts_with($bucket, "verify_email_fail:{$id}:") && $hits === 1,
+                ARRAY_FILTER_USE_BOTH
+            );
+            self::assertCount(1, $fails, "one failure on {$id}'s own code");
+        }
+        self::assertStillPending(self::OTHER);
+        self::assertStillPending(self::NEW);
+    }
+
+    private static function addressBudgetKey(): string
+    {
+        return AuthSupport::emailThrottleKey('verify_email_addr', self::TYPED);
+    }
+
+    /** How many comparisons $id's own attempt bucket (for its current code) has counted. */
+    private static function attemptsOn(int $id): int
+    {
+        $otpId = AuthSupport::emailOtpIdentity($id);
+        self::assertNotNull($otpId, "{$id} has a pending code");
+        return (int) ($GLOBALS['__bcc_ph']['throttle_hits']['verify_email_attempt:' . $id . ':' . $otpId] ?? 0);
+    }
+
+    public function testTheAddressAllowsFiveComparisonsAcrossAllItsHoldersWhicheverHolder(): void
+    {
+        [$other, $new] = self::twoHolders();
+        $GLOBALS['__bcc_ph']['throttle_counting'] = true;
+        $wrong = self::wrongCode($other, $new);
+
+        // Two wrong guesses = four comparisons.
+        self::assertSame('bcc_invalid_otp', self::errorCode(self::verify(['email' => self::TYPED, 'code' => $wrong])));
+        self::assertSame('bcc_invalid_otp', self::errorCode(self::verify(['email' => self::TYPED, 'code' => $wrong])));
+
+        // NEW's right code: OTHER (older) is the fifth comparison, NEW would be the sixth.
+        $res = self::verify(['email' => self::TYPED, 'code' => $new]);
+        self::assertSame('bcc_otp_exhausted', self::errorCode($res), 'the sixth comparison is refused, whichever holder it is for');
+        self::assertStillPending(self::NEW);
+        self::assertSame(3, self::attemptsOn(self::OTHER), 'OTHER was compared all three times');
+        self::assertSame(2, self::attemptsOn(self::NEW), 'NEW was not compared, or charged, the third time');
+        self::assertSame(6, $GLOBALS['__bcc_ph']['throttle_hits'][self::addressBudgetKey()], 'a refused comparison still counts');
+        self::assertSame(AuthSupport::VERIFY_EMAIL_MAX_FAILURES, $GLOBALS['__bcc_ph']['throttle_limits'][self::addressBudgetKey()]);
+        self::assertSame(AuthSupport::OTP_TTL, $GLOBALS['__bcc_ph']['throttle_windows'][self::addressBudgetKey()], 'the budget lasts as long as a code does');
+
+        // The link names its account and is not affected.
         self::assertSame(200, self::verify(['token' => self::tokenFor(self::NEW)])->get_status());
         self::assertSame(self::TYPED, self::email(self::NEW));
+    }
+
+    public function testWithFiveHoldersOneWrongGuessSpendsTheAddressesBudget(): void
+    {
+        $codes = [];
+        foreach ([10, 11, 12, 13, 14] as $id) {
+            self::pendingAccount($id, self::TYPED);
+            AuthSupport::beginEmailVerification($id, self::TYPED);
+            $codes[$id] = self::lastCodeTo(self::TYPED);
+        }
+        $GLOBALS['__bcc_ph']['throttle_counting'] = true;
+
+        self::assertSame('bcc_invalid_otp', self::errorCode(self::verify(['email' => self::TYPED, 'code' => self::wrongCode(...array_values($codes))])), 'five comparisons');
+        foreach ($codes as $id => $c) {
+            self::assertSame(1, self::attemptsOn($id), "{$id} was compared once");
+        }
+
+        // The sixth comparison is refused whichever holder's code it is.
+        foreach ([10, 14] as $id) {
+            self::assertSame('bcc_otp_exhausted', self::errorCode(self::verify(['email' => self::TYPED, 'code' => $codes[$id]])), "{$id}'s right code");
+            self::assertStillPending($id);
+            self::assertSame(1, self::attemptsOn($id), "{$id} was not compared again");
+        }
+
+        // Once the window has passed, a holder's code works again.
+        $GLOBALS['__bcc_ph']['throttle_hits'][self::addressBudgetKey()] = 0;
+        self::assertSame(200, self::verify(['email' => self::TYPED, 'code' => $codes[14]])->get_status());
+        self::assertSame(self::TYPED, self::email(14));
+        self::assertStillPending(10);
+    }
+
+    public function testTheAddressesBudgetIgnoresLetterCase(): void
+    {
+        // The holders are found in any letter case (MySQL's collation), so
+        // the budget must be one budget in any letter case too: otherwise
+        // alternating the case would give a guesser a fresh one each time.
+        [$other, $new] = self::twoHolders();
+        $GLOBALS['__bcc_ph']['throttle_counting'] = true;
+        $wrong = self::wrongCode($other, $new);
+
+        self::assertSame('bcc_invalid_otp', self::errorCode(self::verify(['email' => self::TYPED, 'code' => $wrong])));
+        self::assertSame('bcc_invalid_otp', self::errorCode(self::verify(['email' => strtoupper(self::TYPED), 'code' => $wrong])), 'found in upper case too');
+
+        $res = self::verify(['email' => ucfirst(self::TYPED), 'code' => $new]);
+        self::assertSame('bcc_otp_exhausted', self::errorCode($res), 'the same budget, whatever the case');
+        self::assertStillPending(self::NEW);
+    }
+
+    public function testAResendDoesNotReArmTheAddressesBudget(): void
+    {
+        [$other, $new] = self::twoHolders();
+        $GLOBALS['__bcc_ph']['throttle_counting'] = true;
+        $wrong = self::wrongCode($other, $new);
+        for ($i = 0; $i < 3; $i++) {
+            self::verify(['email' => self::TYPED, 'code' => $wrong]);
+        }
+
+        self::assertSame(200, self::resend(['email' => self::TYPED]));
+        $fresh = self::lastCodeTo(self::TYPED); // NEW's fresh code (oldest first, so NEW's is last)
+        self::assertNotSame($new, $fresh);
+
+        self::assertSame('bcc_otp_exhausted', self::errorCode(self::verify(['email' => self::TYPED, 'code' => $fresh])), 'still spent');
+        self::assertStillPending(self::NEW);
+        self::assertSame(200, self::verify(['token' => self::tokenFor(self::NEW)])->get_status(), 'the new mail\'s link works at once');
+    }
+
+    /**
+     * H1 (#766) on the several-holder path. A sign-up whose user_email is no
+     * longer the wallet placeholder still carries a stale pending address,
+     * but that is no longer its verification address, so it is NOT a
+     * holder: only NEW holds the address. The single-holder path answers,
+     * no address budget is charged, and a resend mails NEW alone. OTHER's
+     * code proves only the inbox it was mailed to, and there #748's refusal
+     * answers instead of applying the stale address.
+     */
+    public function testAHolderWhoseEmailIsNoLongerThePlaceholderIsNoLongerAHolder(): void
+    {
+        self::twoHolders();
+        $GLOBALS['__bcc_ph']['users'][self::OTHER]['email'] = 'real@example.net';
+        AuthSupport::beginEmailVerification(self::OTHER, 'real@example.net');
+        $otherCode = self::lastCodeTo('real@example.net');
+        $GLOBALS['__bcc_ph']['throttle_counting'] = true;
+
+        // By the pending address, OTHER's code is no holder's: the generic answer.
+        $res = self::verify(['email' => self::TYPED, 'code' => $otherCode]);
+        self::assertSame(400, $res->get_status());
+        self::assertSame('bcc_invalid_otp', self::errorCode($res));
+        self::assertSame(0, self::attemptsOn(self::OTHER), 'OTHER was not compared');
+        self::assertSame(1, self::attemptsOn(self::NEW), 'NEW, the one holder, was');
+        self::assertArrayNotHasKey(self::addressBudgetKey(), $GLOBALS['__bcc_ph']['throttle_hits'], 'one holder: no address budget');
+        self::assertSame('0', self::flag(self::OTHER));
+        self::assertSame('real@example.net', self::email(self::OTHER));
+
+        // A resend by that address mails NEW alone.
+        $before = count($GLOBALS['__bcc_ph']['mail']);
+        self::assertSame(200, self::resend(['email' => self::TYPED]));
+        self::assertCount($before + 1, $GLOBALS['__bcc_ph']['mail'], 'one mail, to the one holder');
+        self::assertStringContainsString('@newhandle', end($GLOBALS['__bcc_ph']['mail'])['html']);
+
+        // NEW still verifies, with its fresh code.
+        self::assertSame(200, self::verify(['email' => self::TYPED, 'code' => self::lastCodeTo(self::TYPED)])->get_status());
+        self::assertSame(self::TYPED, self::email(self::NEW));
+        self::assertSame('1', self::flag(self::NEW));
+
+        // #748, by the inbox OTHER's code was mailed to: the stale pending
+        // address is refused, never applied.
+        $res = self::verify(['email' => 'real@example.net', 'code' => $otherCode]);
+        self::assertSame(409, $res->get_status());
+        self::assertSame('bcc_invalid_state', self::errorCode($res));
+        self::assertSame('0', self::flag(self::OTHER), 'nothing finalized');
+        self::assertSame('real@example.net', self::email(self::OTHER), 'the real address is never replaced');
+        self::assertArrayNotHasKey(PendingEmailService::META_PENDING_SIGNUP_EMAIL, $GLOBALS['__bcc_ph']['meta'][self::OTHER], 'the stale pending address is dropped');
+    }
+
+    public function testOneAccountIsNotChargedToAnAddressBudget(): void
+    {
+        $GLOBALS['__bcc_ph']['throttle_counting'] = true;
+
+        // One wallet sign-up holding the address.
+        self::signup();
+        self::verify(['email' => self::TYPED, 'code' => self::wrongCode(self::lastCodeTo(self::TYPED))]);
+
+        // The account whose email it is.
+        $GLOBALS['__bcc_ph']['users'][self::OTHER] = ['email' => 'owner@example.com', 'login' => 'u3', 'display' => 'Three'];
+        $GLOBALS['__bcc_ph']['meta'][self::OTHER]  = ['bcc_handle' => 'three', AuthSupport::META_EMAIL_VERIFIED => '0'];
+        AuthSupport::beginEmailVerification(self::OTHER, 'owner@example.com');
+        self::verify(['email' => 'owner@example.com', 'code' => self::wrongCode(self::lastCodeTo('owner@example.com'))]);
+
+        $addressBuckets = array_filter(
+            $GLOBALS['__bcc_ph']['throttle_keys'],
+            static fn(string $k): bool => str_starts_with($k, 'bcc_throttle_verify_email_addr_')
+        );
+        self::assertSame([], array_values($addressBuckets), 'one account keeps its own per-code cap only');
+    }
+
+    public function testItSaysExhaustedOnlyWhenEveryHoldersCodeIsBurned(): void
+    {
+        [$other, $new] = self::twoHolders();
+        self::burn(self::OTHER);
+
+        $res = self::verify(['email' => self::TYPED, 'code' => self::wrongCode($other, $new)]);
+        self::assertSame('bcc_invalid_otp', self::errorCode($res), "NEW's code is still live");
+
+        self::assertSame(200, self::verify(['email' => self::TYPED, 'code' => $new])->get_status());
+        self::assertSame(self::TYPED, self::email(self::NEW));
+    }
+
+    public function testAVerifiedHolderIsPassedOverNotAnswered(): void
+    {
+        [$other, $new] = self::twoHolders();
+        $GLOBALS['__bcc_ph']['meta'][self::OTHER][AuthSupport::META_EMAIL_VERIFIED] = '1';
+
+        $res = self::verify(['email' => self::TYPED, 'code' => self::wrongCode($other, $new)]);
+        self::assertSame('bcc_invalid_otp', self::errorCode($res), 'not 409: nothing is pending for that one');
+
+        // With NEW's code burned too, the only holder with a code is burned.
+        self::burn(self::NEW);
+        $res = self::verify(['email' => self::TYPED, 'code' => self::wrongCode($other, $new)]);
+        self::assertSame('bcc_otp_exhausted', self::errorCode($res), 'a verified holder does not count as a live code');
+    }
+
+    public function testAResendMailsEveryHolderItsOwnFreshCode(): void
+    {
+        [$other, $new] = self::twoHolders();
+        $before = count(self::mailTo(self::TYPED));
+
+        self::assertSame(200, self::resend(['email' => self::TYPED]));
+
+        $mails = self::mailTo(self::TYPED);
+        self::assertCount($before + 2, $mails, 'one code for each holder');
+        self::assertCount($before + 2, $GLOBALS['__bcc_ph']['mail']);
+        self::assertSame('bcc_invalid_otp', self::errorCode(self::verify(['email' => self::TYPED, 'code' => $new])), 'the old codes are replaced');
+        self::assertSame('bcc_invalid_otp', self::errorCode(self::verify(['email' => self::TYPED, 'code' => $other])));
+
+        // Each mail names the account its code confirms (the handles are
+        // unique; the display names are whatever each sign-up chose).
+        $names = static fn(int $at): string => 'This code confirms the email for <strong>@' . ($at === $before ? 'handle' . self::OTHER : 'newhandle') . '</strong>';
+        self::assertStringContainsString($names($before), $mails[$before]['html']);
+        self::assertStringContainsString($names($before + 1), $mails[$before + 1]['html']);
+        self::assertStringNotContainsString('@newhandle', $mails[$before]['html']);
+        self::assertStringNotContainsString('@handle' . self::OTHER, $mails[$before + 1]['html']);
+
+        // Oldest first: OTHER's fresh code, then NEW's.
+        self::assertSame(1, preg_match('/>\s*(\d{6})\s*</', $mails[$before]['html'], $m));
+        self::assertSame(200, self::verify(['email' => self::TYPED, 'code' => $m[1]])->get_status());
+        self::assertSame(self::TYPED, self::email(self::OTHER));
+        self::assertStillPending(self::NEW);
+    }
+
+    public function testOnlyTheOldestFiveHoldersAreLookedAtAndTheLinkStillWorksPastThem(): void
+    {
+        // Seeded out of id order: the oldest five are 10–14, whatever order
+        // the rows come back in.
+        foreach ([15, 12, 10, 14, 11, 13] as $id) {
+            self::pendingAccount($id, self::TYPED);
+        }
+        self::assertSame(5, PendingEmailService::MAX_PENDING_SIGNUP_HOLDERS);
+
+        self::assertSame(200, self::resend(['email' => self::TYPED]));
+
+        self::assertCount(5, self::mailTo(self::TYPED));
+        foreach ([10, 11, 12, 13, 14] as $id) {
+            self::assertNotNull(AuthSupport::emailOtpIdentity($id), "{$id} was mailed a code");
+        }
+        self::assertNull(AuthSupport::emailOtpIdentity(15), 'the sixth was not');
+
+        // The sixth's own code (from its sign-up) is not looked at; its link is.
+        AuthSupport::beginEmailVerification(15, self::TYPED);
+        self::assertSame('bcc_invalid_otp', self::errorCode(self::verify(['email' => self::TYPED, 'code' => self::lastCodeTo(self::TYPED)])));
+        self::assertSame(200, self::verify(['token' => self::tokenFor(15)])->get_status());
+        self::assertSame(self::TYPED, self::email(15));
+    }
+
+    public function testTheAccountWhoseEmailItIsStillWinsOverPendingHolders(): void
+    {
+        $GLOBALS['__bcc_ph']['users'][self::OTHER] = ['email' => self::TYPED, 'login' => 'u3', 'display' => 'Three'];
+        $GLOBALS['__bcc_ph']['meta'][self::OTHER]  = ['bcc_handle' => 'three', AuthSupport::META_EMAIL_VERIFIED => '0'];
+        self::pendingAccount(20, self::TYPED);
+        AuthSupport::beginEmailVerification(20, self::TYPED);
+        $holderCode = self::lastCodeTo(self::TYPED);
+        $before     = count($GLOBALS['__bcc_ph']['mail']);
+
+        self::assertSame('bcc_invalid_otp', self::errorCode(self::verify(['email' => self::TYPED, 'code' => $holderCode])), 'the code is checked against the owner only');
+        self::assertStillPending(20);
+
+        self::assertSame(200, self::resend(['email' => self::TYPED]));
+        self::assertCount($before + 1, $GLOBALS['__bcc_ph']['mail'], 'one mail, the owner\'s');
+        self::assertNotNull(AuthSupport::emailOtpIdentity(self::OTHER));
     }
 
     public function testARealAddressIsNeverReplacedByAStalePending(): void

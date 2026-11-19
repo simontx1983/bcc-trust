@@ -144,4 +144,23 @@ final class BlogTabPostVisibilityWiringTest extends TestCase
         self::assertSame(0, $call['viewer']);
         self::assertNull($call['friends']);
     }
+
+    /**
+     * F-275: the Blog tab asks bcc-core to REPORT a read that did not run,
+     * so it reaches the member as 503 "try again" rather than an empty tab.
+     * The flag is positional (an older bcc-core ignores it); this also pins
+     * that moving the two gate arguments from named to positional left
+     * them in their own slots.
+     */
+    public function testTheBlogTabAsksBccCoreToReportAFailedRead(): void
+    {
+        $GLOBALS['__bcc_f02blog']['friends_by'] = [self::SESSION => [self::FRIEND]];
+
+        $this->service()->getUserBlog(self::AUTHOR, self::SESSION);
+        $call = $this->onlyCall();
+
+        self::assertTrue($call['throw'], 'the read must throw on failure, not answer []');
+        self::assertTrue($call['enforce']);
+        self::assertSame([self::FRIEND], $call['friends']);
+    }
 }

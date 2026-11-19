@@ -112,9 +112,11 @@ namespace BCC\Core\Repositories {
         public const PAGE_TARGET_META         = '_bcc_page_target';
 
         /**
-         * Same parameter ORDER and the same NAMES for the last two as the
-         * real method, because production passes them by name. Everything
-         * else is discarded.
+         * Same parameter ORDER as the real method, because production now
+         * passes the tail POSITIONALLY (F-275: so an older bcc-core can
+         * ignore the appended flag instead of fataling on its name). The
+         * gate arguments and the F-275 flag are recorded; everything else
+         * is discarded.
          *
          * @return list<object>
          */
@@ -137,7 +139,8 @@ namespace BCC\Core\Repositories {
             ?array $memberGroupIds = null,
             int $viewerId = 0,
             ?array $viewerFriendIds = null,
-            bool $enforcePostVisibility = false
+            bool $enforcePostVisibility = false,
+            bool $throwOnReadFailure = false
         ): array {
             unset(
                 $authorIds, $modules, $cursorTime, $cursorActId, $limit,
@@ -151,6 +154,7 @@ namespace BCC\Core\Repositories {
                 'viewer'  => $viewerId,
                 'friends' => $viewerFriendIds,
                 'enforce' => $enforcePostVisibility,
+                'throw'   => $throwOnReadFailure,
             ];
 
             return [];

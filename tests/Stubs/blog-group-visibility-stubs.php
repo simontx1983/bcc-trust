@@ -75,19 +75,23 @@ namespace BCC\Core\Repositories {
                 ?array $viewerMemberGroupIds = null,
                 int $viewerId = 0,
                 // §F-02 per-post visibility, present so this stub still
-                // matches the real signature. BlogService passes these two
-                // BY NAME, and a stub missing them makes every test in
+                // matches the real signature. BlogService used to pass these
+                // two BY NAME, and a stub missing them made every test in
                 // this file ERROR with "Unknown named parameter" instead
                 // of failing an assertion — which is how the whole class
-                // went red when the gate was wired.
+                // went red when the gate was wired. Since F-275 it passes
+                // them, and the appended `throwOnReadFailure`, positionally
+                // (BlogTabPostVisibilityWiringTest pins the flag).
                 //
                 // Recorded, because the group gate and the profile gate
                 // STACK and a reader here benefits from seeing both, but
                 // nothing in this file asserts on them:
                 // BlogTabPostVisibilityWiringTest owns that.
                 ?array $viewerFriendIds = null,
-                bool $enforcePostVisibility = false
+                bool $enforcePostVisibility = false,
+                bool $throwOnReadFailure = false
             ): array {
+                unset($throwOnReadFailure);
                 self::$calls[] = [
                     'authorIds'             => $authorIds,
                     'moduleIds'             => $moduleIds,
