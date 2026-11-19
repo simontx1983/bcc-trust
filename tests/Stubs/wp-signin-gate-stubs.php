@@ -9,6 +9,7 @@
  *   - 'hooks'   every add_filter / add_action call, recorded
  *   - 'die' / 'redirect'  the last wp_die() / wp_redirect() /
  *               wp_safe_redirect() call: [where it really went, status]
+ *   - 'redirect_by'  the last wp_redirect()'s X-Redirect-By
  *   - 'allowed_redirect_hosts'  hosts that filter adds (none at admin_init:
  *               FrontendRedirect only registers it on rest_api_init)
  *   - 'reset_keys'   user ids get_password_reset_key() minted a key for
@@ -125,7 +126,8 @@ namespace {
         /** @return never */
         function wp_redirect(string $location, int $status = 302, string $by = 'WordPress')
         {
-            $GLOBALS['__bcc_sig']['redirect'] = [$location, $status];
+            $GLOBALS['__bcc_sig']['redirect']    = [$location, $status];
+            $GLOBALS['__bcc_sig']['redirect_by'] = $by;
             throw new \SignInGateHalt('redirect');
         }
     }
