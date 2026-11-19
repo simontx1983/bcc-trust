@@ -12,6 +12,17 @@
  * token are present (same-origin admin tooling). For headless Next.js
  * traffic there's no cookie, so the Bearer path always handles auth.
  *
+ * ⚠ REST REQUESTS ONLY (security review, 2026-11-19). The bearer is the
+ * app's credential for `/wp-json/…`, and nothing else. Before this it
+ * signed a member in on EVERY request type: cms HTML (a 404 page printed
+ * a peepso_nonce minted for them), admin-ajax and PeepSo's /peepsoajax/
+ * (which then answered for that member). {@see isRestRequestFor()}
+ * decides from the request alone, because REST_REQUEST is not defined
+ * yet when core first resolves the user (WP::init(), before
+ * parse_request). Anything it cannot place as a REST request through the
+ * front controller fails closed: the token is ignored, the request is
+ * signed out.
+ *
  * ────────────────────────────────────────────────────────────────────
  *  HEADER FORWARDING — PRODUCTION REQUIREMENT (read this)
  * ────────────────────────────────────────────────────────────────────
@@ -123,6 +134,12 @@ final class BearerAuth
             return $userId;
         }
 
+        // Not a REST request: the bearer does not count here, whatever it
+        // carries. (See the class note.)
+        if (!self::isRestRequest()) {
+            return is_int($userId) ? $userId : false;
+        }
+
         $token = self::readBearerToken();
         if ($token === null) {
             // No bearer token — pass through whatever upstream filters decided.
@@ -163,6 +180,80 @@ final class BearerAuth
         self::$presentedTokenFailure = null;
         self::$authenticatedUserId   = $tokenUserId;
         return $tokenUserId;
+    }
+
+    /**
+     * Is THIS request a REST request? Read from the request and WordPress's
+     * configuration; see {@see isRestRequestFor()}.
+     */
+    public static function isRestRequest(): bool
+    {
+        $scriptName = $_SERVER['SCRIPT_NAME'] ?? ($_SERVER['PHP_SELF'] ?? '');
+        $requestUri = $_SERVER['REQUEST_URI'] ?? '';
+        $homePath   = wp_parse_url((string) home_url(), PHP_URL_PATH);
+
+        return self::isRestRequestFor(
+            is_string($scriptName) ? $scriptName : '',
+            is_string($requestUri) ? $requestUri : '',
+            is_string($homePath) ? $homePath : '',
+            (string) rest_get_url_prefix(),
+            is_admin() || wp_doing_ajax() || wp_doing_cron() || (defined('XMLRPC_REQUEST') && XMLRPC_REQUEST)
+        );
+    }
+
+    /**
+     * The REST-request rule, a pure function of its inputs. True only when
+     * ALL of these hold:
+     *
+     *   - the request ran the FRONT CONTROLLER: the script is `…/index.php`
+     *     and it is not an admin, ajax, cron or XML-RPC request. Only
+     *     index.php runs parse_request, so only there does a path become a
+     *     REST dispatch. admin-ajax.php, admin-post.php, wp-login.php,
+     *     wp-cron.php and xmlrpc.php never qualify, whatever they carry;
+     *   - the request path, as WP::parse_request reads it (before `?`,
+     *     slashes trimmed, the home path taken off the front when it is
+     *     there, as core does), is the REST
+     *     prefix itself or starts with the prefix and a `/`. Those are
+     *     core's two REST rewrite rules (`^{prefix}/?$`, `^{prefix}/(.*)?`).
+     *
+     * Everything else is false, and that is the safe direction, because
+     * false only means the bearer is ignored:
+     *
+     *   - `?rest_route=` is not honoured (nothing BCC sends uses it);
+     *   - nor is `/index.php/{prefix}/…` (PATH_INFO);
+     *   - nor is a percent-encoded or differently-cased prefix.
+     *
+     * The app and its NextAuth server call `{BCC_API_URL}/wp-json/…` only.
+     *
+     * @param string $scriptName  SCRIPT_NAME (else PHP_SELF)
+     * @param string $requestUri  REQUEST_URI, raw
+     * @param string $homePath    home_url()'s path, '' at the root
+     * @param string $restPrefix  rest_get_url_prefix()
+     * @param bool   $otherEntry  an admin, ajax, cron or XML-RPC request
+     */
+    public static function isRestRequestFor(string $scriptName, string $requestUri, string $homePath, string $restPrefix, bool $otherEntry): bool
+    {
+        if ($otherEntry || !str_ends_with($scriptName, '/index.php')) {
+            return false;
+        }
+
+        $prefix = trim($restPrefix, '/');
+        if ($prefix === '' || $requestUri === '') {
+            return false;
+        }
+
+        $path = trim(explode('?', $requestUri, 2)[0], '/');
+
+        $home = trim($homePath, '/');
+        if ($home !== '') {
+            if (strcasecmp($path, $home) === 0) {
+                $path = '';
+            } elseif (stripos($path, $home . '/') === 0) {
+                $path = trim(substr($path, strlen($home) + 1), '/');
+            }
+        }
+
+        return $path === $prefix || str_starts_with($path, $prefix . '/');
     }
 
     /**
