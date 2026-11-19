@@ -6,6 +6,7 @@ namespace BCC\Trust\Core\Tests\Unit;
 
 use BCC\Trust\Core\REST\Auth\AuthSupport;
 use BCC\Trust\Core\REST\Auth\WalletAuthController;
+use BCC\Trust\Core\Services\HandleService;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -25,7 +26,12 @@ use PHPUnit\Framework\TestCase;
  *     (so concurrent requests can't race past it), and the MAX-th bad
  *     signature deletes the challenge so the owner can get a fresh one;
  *   - up to MAX-1 bad signatures then the right one still signs in;
- *   - a fresh challenge starts a fresh count.
+ *   - a fresh challenge starts a fresh count;
+ *   - (security review of #708) the buckets count COMPLETED sign-ins only:
+ *     a VALID signature that then ends 404 (no account uses the wallet),
+ *     409 (the account has no handle) or 400 (the challenge was consumed by
+ *     a concurrent request) gives both slots back too, so throwaway wallets
+ *     can't fill the 300/min ceiling. A completed sign-in still counts.
  *
  * ## Isolation
  * Subprocess-only; setUp() loads tests/Stubs/wallet-signup-stubs.php (its DB
@@ -55,8 +61,9 @@ final class WalletLoginChallengeCapTest extends TestCase
             'consumed'   => [],
             'verified'   => [],
         ];
-        // A verified signature goes on to the wallet lookup: no account is
-        // linked, so it ends 404 bcc_wallet_not_linked.
+        // A verified signature goes on to the wallet lookup. By default no
+        // account is linked, so it ends 404 bcc_wallet_not_linked; linked()
+        // makes the lookup find one.
         $GLOBALS['wpdb'] = new class {
             public string $prefix = 'wp_';
             /** @param mixed ...$args */
@@ -64,10 +71,11 @@ final class WalletLoginChallengeCapTest extends TestCase
             {
                 return $sql;
             }
-            /** @return null */
+            /** @return string|null */
             public function get_var(string $sql)
             {
-                return null;
+                $id = $GLOBALS['__bcc_wl']['user_id'] ?? null;
+                return $id === null ? null : (string) $id;
             }
             /** @param array<int, mixed> $args */
             public function __call(string $name, array $args): never
@@ -81,6 +89,21 @@ final class WalletLoginChallengeCapTest extends TestCase
     {
         $req = new \WP_REST_Request(['wallet_address' => self::ADDR, 'signature' => $sig]);
         return (new WalletAuthController())->walletLogin($req)->get_status();
+    }
+
+    /** The wallet lookup finds account $userId, with $handle ('' = none). */
+    private static function linked(int $userId, string $handle): void
+    {
+        $GLOBALS['__bcc_wl']['user_id'] = $userId;
+        $GLOBALS['__bcc_ph']['meta'][$userId][HandleService::META_HANDLE] = $handle;
+    }
+
+    /** A fresh live challenge, and the one signature that verifies against it. */
+    private static function freshChallenge(string $tag): string
+    {
+        $GLOBALS['__bcc_wl']['challenges'][self::ADDR] = [['chain_id' => 7, 'message' => 'msg-' . $tag]];
+        $GLOBALS['__bcc_wl']['valid'][] = 'evm|msg-' . $tag . '|sig-' . $tag;
+        return 'sig-' . $tag;
     }
 
     private static function hits(string $bucket): int
@@ -139,8 +162,7 @@ final class WalletLoginChallengeCapTest extends TestCase
         }
 
         self::assertSame(404, self::login('good-sig'), 'verified and consumed, then "no account linked"');
-        self::assertSame(1, self::hits(self::walletKey()), 'a verified sign-in counts');
-        self::assertSame(1, self::hits('wallet_login_global'));
+        self::assertSame([self::ADDR . '#7'], $GLOBALS['__bcc_wl']['consumed'], 'the right one was accepted');
     }
 
     public function testAChallengeOverTheAttemptCapIsDeletedWithoutVerifying(): void
@@ -185,17 +207,58 @@ final class WalletLoginChallengeCapTest extends TestCase
         self::assertSame(404, self::login('good-sig-2'), 'and the owner signs in');
     }
 
-    public function testVerifiedSignInsStillCountPerWallet(): void
+    public function testCompletedSignInsStillCountPerWallet(): void
     {
+        self::linked(42, 'alice');
         $limit = AuthSupport::WALLET_LOGIN_RATE_LIMIT;
         for ($i = 1; $i <= $limit; $i++) {
-            $GLOBALS['__bcc_wl']['challenges'][self::ADDR] = [['chain_id' => 7, 'message' => 'msg-v' . $i]];
-            $GLOBALS['__bcc_wl']['valid'][] = 'evm|msg-v' . $i . '|sig-v' . $i;
-            self::assertSame(404, self::login('sig-v' . $i), "verified sign-in #$i");
+            self::assertSame(200, self::login(self::freshChallenge('v' . $i)), "completed sign-in #$i");
+        }
+        self::assertSame($limit, self::hits(self::walletKey()), 'each completed sign-in counts');
+        self::assertSame($limit, self::hits('wallet_login_global'), 'against the ceiling too');
+
+        self::freshChallenge('over');
+        self::assertSame(429, self::login('sig-over'), 'the 6th within the minute is limited');
+    }
+
+    /**
+     * Security review of #708: VALID signatures from wallets no account uses
+     * (throwaway wallets) used to keep both slots, so enough of them filled
+     * the route's 300/min and locked every wallet out. Now a 404 gives both
+     * back — however many there are.
+     */
+    public function testAValidSignatureFromAWalletNoAccountUsesGivesBothSlotsBack(): void
+    {
+        for ($i = 1; $i <= 3 * AuthSupport::WALLET_LOGIN_RATE_LIMIT; $i++) {
+            self::assertSame(404, self::login(self::freshChallenge('t' . $i)), "throwaway sign-in #$i");
         }
 
-        $GLOBALS['__bcc_wl']['challenges'][self::ADDR] = [['chain_id' => 7, 'message' => 'msg-over']];
-        self::assertSame(429, self::login('anything'), 'the 6th within the minute is limited');
+        self::assertSame(0, self::hits(self::walletKey()), "never limited by the wallet's own bucket");
+        self::assertSame(0, self::hits('wallet_login_global'), 'and the route ceiling stays empty');
+    }
+
+    public function testAnAccountWithNoHandleGivesBothSlotsBack(): void
+    {
+        self::linked(42, '');
+
+        self::assertSame(409, self::login('good-sig'));
+
+        self::assertSame(0, self::hits(self::walletKey()));
+        self::assertSame(0, self::hits('wallet_login_global'));
+    }
+
+    public function testALostConsumeRaceGivesBothSlotsBack(): void
+    {
+        // A replay, or a concurrent request with the same signature consumed
+        // the challenge first; that one is the sign-in that counts.
+        self::linked(42, 'alice');
+        $GLOBALS['__bcc_wl']['consume_fails'] = true;
+
+        self::assertSame(400, self::login('good-sig'));
+
+        self::assertCount(1, $GLOBALS['__bcc_wl']['verified'], 'the signature did verify');
+        self::assertSame(0, self::hits(self::walletKey()));
+        self::assertSame(0, self::hits('wallet_login_global'));
     }
 
     public function testARefusedCallIsNotRecorded(): void

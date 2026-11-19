@@ -47,6 +47,7 @@ use BCC\Trust\Core\Repositories\VoteRepository;
 use BCC\Trust\Core\Support\CardUrlMap;
 use BCC\Trust\Core\Support\CountPrivacy;
 use BCC\Trust\Core\Support\PageTypeMap;
+use BCC\Trust\Core\Support\PageAccess;
 use BCC\Trust\Core\Support\Permission as PermissionShape;
 use BCC\Trust\Core\Support\ReputationTierMap;
 use BCC\Trust\Onchain\Repositories\ClaimRepository;
@@ -207,6 +208,16 @@ final class CardViewService
 
         $post = self::resolvePagePost($id);
         if ($post === null) {
+            return null;
+        }
+
+        // ⚠ SECRET PAGES on the single card (no prefetch bundle: only
+        // getCard() calls this way). A viewer PageAccess refuses gets the same
+        // null, and so the same 404, as for a page that does not exist. List
+        // callers pass a bundle and take their ids from discovery queries that
+        // already apply PeepSoPagePrivacy::notSecretSql(), so they skip this
+        // per-page read rather than pay one query per card.
+        if ($prefetched === null && !PageAccess::viewerMaySee($post, $viewerId)) {
             return null;
         }
 

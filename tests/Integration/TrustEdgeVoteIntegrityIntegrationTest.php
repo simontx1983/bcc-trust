@@ -158,6 +158,31 @@ final class TrustEdgeVoteIntegrityIntegrationTest extends TestCase
         self::assertSame(['weight' => 2.5, 'vote_count' => 1], $this->edge(), 'F-142: the backfill joins the canonical row only');
     }
 
+    /** Owner-0: a released page's rows belong to nobody, and nobody is not a trust target. */
+    public function testTheBackfillDrawsNoEdgeToAReleasedPage(): void
+    {
+        global $wpdb;
+        $wpdb->update($wpdb->prefix . 'bcc_trust_page_scores', ['page_owner_id' => 0], ['page_id' => $this->page]);
+
+        $this->edges->backfillFromSources();
+
+        self::assertSame(0, (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM `{$wpdb->prefix}bcc_trust_edges` WHERE source_user_id = %d",
+            self::VOTER
+        )));
+    }
+
+    /** Owner-0: BehavioralAnalyzer's single-owner focus counts owned pages only. */
+    public function testAReleasedPageIsNotAVotedPageWithAnOwner(): void
+    {
+        global $wpdb;
+        self::assertCount(1, $this->votes->getVotedPagesWithOwners(self::VOTER), 'control: an owned page');
+
+        $wpdb->update($wpdb->prefix . 'bcc_trust_page_scores', ['page_owner_id' => 0], ['page_id' => $this->page]);
+
+        self::assertSame([], $this->votes->getVotedPagesWithOwners(self::VOTER));
+    }
+
     public function testAHiddenReviewConfersNoTrustAndRestoringItDoes(): void
     {
         $this->edges->recalculateVoteEdge(self::VOTER, self::OWNER);

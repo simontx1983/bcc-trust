@@ -347,19 +347,11 @@ final class MyAccountEndpoint
         if ($confirmedBy instanceof WP_REST_Response) {
             return $confirmedBy;
         }
-        // wp_set_password rotates the hash AND clears the user's session
-        // tokens, which logs them out everywhere except the current
-        // session (we re-establish that below).
+        // wp_set_password rotates the hash AND destroys every WordPress
+        // cookie session of the user. Nothing is re-issued: the caller's
+        // session is its bearer token, continued below (no client ever
+        // stored a WordPress cookie from this route).
         wp_set_password($newPassword, $userId);
-
-        // wp_set_password destroys all session tokens. Re-issue ours so
-        // the user isn't kicked back to the login screen mid-flow.
-        $user = get_user_by('id', $userId);
-        if ($user instanceof \WP_User) {
-            wp_clear_auth_cookie();
-            wp_set_current_user($userId);
-            wp_set_auth_cookie($userId, false);
-        }
 
         // Revoke every outstanding bearer JWT (bump the token-version counter)
         // so a token stolen before this rotation can't outlive the password

@@ -280,6 +280,29 @@ final class OnchainAdminConfirmationRenderTest extends TestCase
         $this->assertStringContainsString('a NEW billable webhook', NftIndexerStatusView::heliusConfirmations()['reregister']);
     }
 
+    /**
+     * F-314 follow-up: a failed or timed-out check says "couldn't check"
+     * and when, never "missing"; only a 404 reads as missing.
+     */
+    public function testAFailedHeliusCheckSaysCouldNotCheckWithItsTime(): void
+    {
+        $at = gmmktime(9, 30, 5, 11, 18, 2026);
+
+        $warning = (string) NftIndexerStatusView::heliusRemoteWarning('unreachable', null, $at);
+        $this->assertStringStartsWith("Couldn't check (2026-11-18 09:30:05 UTC)", $warning);
+        $this->assertStringNotContainsString('deleted', $warning);
+        $this->assertSame("couldn't check (2026-11-18 09:30:05 UTC)", NftIndexerStatusView::heliusCheckedLine('unreachable', $at));
+
+        $this->assertStringContainsString('deleted on Helius', (string) NftIndexerStatusView::heliusRemoteWarning('missing', null, $at));
+        $this->assertSame('2026-11-18 09:30:05 UTC', NftIndexerStatusView::heliusCheckedLine('missing', $at));
+        $this->assertSame(
+            '2026-11-18 09:30:05 UTC (kept for up to 60 seconds)',
+            NftIndexerStatusView::heliusCheckedLine('ok', $at)
+        );
+        $this->assertNull(NftIndexerStatusView::heliusRemoteWarning('ok', true, $at));
+        $this->assertSame('—', NftIndexerStatusView::heliusCheckedLine('not_provisioned', null));
+    }
+
     public function testHeliusConfirmationsDiscloseThatTheyMutateRemoteState(): void
     {
         $confirms = NftIndexerStatusView::heliusConfirmations();

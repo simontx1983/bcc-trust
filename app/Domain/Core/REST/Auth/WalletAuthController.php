@@ -495,12 +495,17 @@ final class WalletAuthController
         // junk request touches no bucket. Lower-casing makes case-distinct
         // base58/SS58 addresses share a bucket: fail-closed, never looser.
         //
-        // Both buckets count VERIFIED sign-ins only. A refused call is not
-        // recorded (countDenied = false), and a signature that verifies
-        // against none of the address's challenges gives both slots back
-        // below. Before, anyone could spend one wallet's 5/min — or the whole
-        // route's 300/min, locking every wallet out — with junk signatures.
-        // The bound on junk is now the per-challenge cap below.
+        // Both buckets count COMPLETED sign-ins only. A refused call is not
+        // recorded (countDenied = false), and every other exit that does not
+        // sign someone in gives both slots back below: a signature that
+        // verifies against none of the address's challenges, a challenge
+        // already consumed, and (security review of #708) a VALID signature
+        // from a wallet no account uses, or an account with no handle.
+        // Otherwise anyone could spend one wallet's 5/min, or the whole
+        // route's 300/min and lock every wallet out, with junk signatures or
+        // with real ones from throwaway wallets. The bound on junk is the
+        // per-challenge cap below; on throwaway wallets, the nonce route's
+        // own limits.
         $identity = strtolower($walletAddress);
         if (!AuthSupport::allowIdentityAttempt(
             'wallet_login',
@@ -535,7 +540,9 @@ final class WalletAuthController
         [, $chain] = $match;
 
         if (WalletIdentityService::consumeAnonymousChallenge($walletAddress, (int) $chain->id) === null) {
-            // Replayed, or a concurrent request with the same signature won.
+            // Replayed, or a concurrent request with the same signature won
+            // (and that one is the sign-in that counts).
+            AuthSupport::releaseIdentityAttempt('wallet_login', $identity);
             return ApiResponse::error(
                 'bcc_invalid_request',
                 'Challenge not found or expired. Please request a new nonce.',
@@ -560,6 +567,7 @@ final class WalletAuthController
             // /signup (or the wallet-signup flow) with the wallet
             // pre-attached. Per Decision B(a) we surface this as a
             // distinct, recoverable code rather than auto-promoting.
+            AuthSupport::releaseIdentityAttempt('wallet_login', $identity);
             return ApiResponse::error(
                 'bcc_wallet_not_linked',
                 'No account is linked to this wallet.',
@@ -573,6 +581,7 @@ final class WalletAuthController
             // was created outside the BCC signup flow. Per §B6 the JWT
             // contract requires a handle — fail loud so the frontend
             // can route through a handle-claim surface.
+            AuthSupport::releaseIdentityAttempt('wallet_login', $identity);
             return ApiResponse::error(
                 'bcc_invalid_state',
                 'Account is missing a handle — set one before logging in.',
@@ -580,9 +589,9 @@ final class WalletAuthController
             );
         }
 
-        // Cookie + JWT, identical to /auth/login.
+        // JWT only, identical to /auth/login: no WordPress auth cookie (see
+        // SessionController::logoutEverywhere).
         wp_set_current_user($userId);
-        wp_set_auth_cookie($userId, true);
 
         $token = JwtToken::encodeNewSession($userId, $handle);
 
@@ -686,31 +695,37 @@ final class WalletAuthController
         // an orphaned WP user from a prior signup whose wallet-link
         // step failed — handled below by rolling back wp_insert_user
         // on link failure).
+        // F-294: a typed address is held PENDING (PendingEmailService::
+        // META_PENDING_SIGNUP_EMAIL) and user_email is the wallet placeholder
+        // until the code or link proves the inbox. An unverified address in
+        // user_email reserved it against its real owner (user_email is
+        // UNIQUE) with nothing able to reclaim it.
+        $typedEmail = '';
         if ($emailRaw !== '') {
-            $email = sanitize_email($emailRaw);
-            if ($email === '' || !is_email($email)) {
+            $typedEmail = sanitize_email($emailRaw);
+            if ($typedEmail === '' || !is_email($typedEmail)) {
                 return ApiResponse::error('bcc_invalid_request', 'Email is not a valid format.', 400);
             }
-        } else {
-            // Placeholder derivation keys on wp_salt('auth'). If the salt
-            // is unreadable it throws — and we fail closed HERE, which is
-            // BEFORE the nonce is consumed (just below) and BEFORE any WP
-            // user is minted (further below). So a misconfigured salt can
-            // never leave a half-created account or a spent nonce behind.
-            // Logs the chain only, never the address.
-            try {
-                $email = AuthSupport::placeholderEmailForWallet($walletAddress);
-            } catch (\RuntimeException $e) {
-                Logger::error(
-                    '[bcc-trust] wallet-signup: cannot mint placeholder email (auth salt unavailable)',
-                    ['chain' => (string) $chain->slug]
-                );
-                return ApiResponse::error(
-                    'bcc_internal_error',
-                    'Account creation is temporarily unavailable. Please try again later.',
-                    500
-                );
-            }
+        }
+
+        // Placeholder derivation keys on wp_salt('auth'). If the salt
+        // is unreadable it throws — and we fail closed HERE, which is
+        // BEFORE the nonce is consumed (just below) and BEFORE any WP
+        // user is minted (further below). So a misconfigured salt can
+        // never leave a half-created account or a spent nonce behind.
+        // Logs the chain only, never the address.
+        try {
+            $email = AuthSupport::placeholderEmailForWallet($walletAddress);
+        } catch (\RuntimeException $e) {
+            Logger::error(
+                '[bcc-trust] wallet-signup: cannot mint placeholder email (auth salt unavailable)',
+                ['chain' => (string) $chain->slug]
+            );
+            return ApiResponse::error(
+                'bcc_internal_error',
+                'Account creation is temporarily unavailable. Please try again later.',
+                500
+            );
         }
 
         // Point of no return for the nonce: consume the challenge the
@@ -721,12 +736,8 @@ final class WalletAuthController
         // again just to be told. Checked here instead: after the signature
         // verified (no wallet proof, no address probe), before the consume.
         // The race (taken between here and the insert) still 409s below.
-        if (email_exists($email) !== false) {
-            return ApiResponse::error(
-                'bcc_conflict',
-                $emailRaw !== '' ? 'An account with that email already exists.' : 'Account creation failed; contact support.',
-                409
-            );
+        if ($typedEmail !== '' && email_exists($typedEmail) !== false) {
+            return ApiResponse::error('bcc_conflict', 'An account with that email already exists.', 409);
         }
 
         if (WalletIdentityService::consumeAnonymousChallenge($walletAddress, (int) $chain->id) === null) {
@@ -776,10 +787,9 @@ final class WalletAuthController
                 return ApiResponse::error('bcc_conflict', 'That handle is already taken.', 409);
             }
             if ($code === 'existing_user_email') {
-                $msg = $emailRaw !== ''
-                    ? 'An account with that email already exists.'
-                    : 'Account creation failed; contact support.';
-                return ApiResponse::error('bcc_conflict', $msg, 409);
+                // user_email is always the placeholder now (F-294), so this
+                // is this wallet's own orphaned row, not someone's address.
+                return ApiResponse::error('bcc_conflict', 'Account creation failed; contact support.', 409);
             }
             Logger::error('[bcc-trust] wallet-signup wp_insert_user failed', [
                 'code'  => $code,
@@ -801,6 +811,9 @@ final class WalletAuthController
         // verification email (real addresses only) is sent once the wallet
         // link below commits — see startWalletSignupEmailVerification().
         update_user_meta($userIdInt, AuthSupport::META_EMAIL_VERIFIED, '0');
+        if ($typedEmail !== '') {
+            update_user_meta($userIdInt, \BCC\Trust\Core\Services\PendingEmailService::META_PENDING_SIGNUP_EMAIL, $typedEmail);
+        }
 
         // Link the wallet via the canonical write contract. If this
         // fails (concurrent signup race claimed the same wallet between
@@ -866,10 +879,11 @@ final class WalletAuthController
 
         // The account is now committed (the link-race rollback above can no
         // longer delete it), so it is safe to mail.
-        AuthSupport::startWalletSignupEmailVerification($userIdInt, $email);
+        AuthSupport::startWalletSignupEmailVerification($userIdInt, $typedEmail !== '' ? $typedEmail : $email);
 
+        // Bearer only, no WordPress auth cookie (see
+        // SessionController::logoutEverywhere).
         wp_set_current_user($userIdInt);
-        wp_set_auth_cookie($userIdInt, true);
 
         $token = JwtToken::encodeNewSession($userIdInt, $handle);
 

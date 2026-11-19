@@ -164,7 +164,19 @@ final class PageReadModelSync
 
             self::syncPageImmediate($pageId);
         }
+
+        // The owner fields (verified, GitHub/X, wallet, followers) render on
+        // EVERY page this owner owns, not only the bonus page: mark the rest
+        // dirty for the deferred sync. Bounded — a member owns a handful.
+        foreach (Plugin::instance()->scoreRepository()->getOwnedPageIds($userId, self::OWNER_PAGES_SYNC_MAX) as $ownedPageId) {
+            if ($ownedPageId !== $pageId) {
+                self::markDirty($ownedPageId);
+            }
+        }
     }
+
+    /** Owned pages onOwnerDataChanged() marks dirty, at most. */
+    private const OWNER_PAGES_SYNC_MAX = 50;
 
     /**
      * Daily full sync — catches any drift.

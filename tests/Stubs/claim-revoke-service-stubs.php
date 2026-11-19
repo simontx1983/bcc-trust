@@ -38,10 +38,25 @@ namespace {
         public static array $fail = [];
         /** @var list<array{int, int}> F-334: [pageId, userId] per releaseClaimedPage() */
         public static array $released = [];
+        /** @var int post_author a release leaves (0 = freed; anything else = kept or reassigned) */
+        public static int $authorAfterRelease = 0;
+        /** @var array<int, int> pageId => post_author */
+        public static array $postAuthor = [];
+        /** @var list<int> pages whose post_author the clear step read */
+        public static array $authorReads = [];
+        /** @var list<int> pages BonusService::clearForUnownedPage() was called for */
+        public static array $cleared = [];
+        /** @var list<string> post-commit work in the order it ran */
+        public static array $order = [];
 
         public static function reset(): void
         {
             self::$released = [];
+            self::$authorAfterRelease = 0;
+            self::$postAuthor = [];
+            self::$authorReads = [];
+            self::$cleared = [];
+            self::$order = [];
             self::$result = null;
             self::$throw = null;
             self::$revokeCalls = [];
@@ -59,6 +74,14 @@ namespace {
             if (isset(self::$fail[$step])) {
                 throw new \RuntimeException($step . ' failed');
             }
+        }
+    }
+
+    if (!function_exists('get_post_field')) {
+        function get_post_field(string $field, int $postId): int
+        {
+            \ClaimRevokeWorld::$authorReads[] = $postId;
+            return \ClaimRevokeWorld::$postAuthor[$postId] ?? 5; // the claimant, until a release
         }
     }
 
@@ -97,6 +120,14 @@ namespace BCC\Trust\Onchain\Services {
             {
                 \ClaimRevokeWorld::maybeFail('bonus');
                 \ClaimRevokeWorld::$recomputes[] = [$pageId, $userId];
+                \ClaimRevokeWorld::$order[]      = 'bonus:' . $pageId;
+            }
+
+            public static function clearForUnownedPage(int $pageId): void
+            {
+                \ClaimRevokeWorld::maybeFail('page_bonus_clear');
+                \ClaimRevokeWorld::$cleared[] = $pageId;
+                \ClaimRevokeWorld::$order[]   = 'page_bonus_clear:' . $pageId;
             }
         }
     }
@@ -162,7 +193,9 @@ namespace BCC\Trust\Core {
                     public function releaseClaimedPage(int $pageId, int $userId): bool
                     {
                         \ClaimRevokeWorld::maybeFail('page_release');
-                        \ClaimRevokeWorld::$released[] = [$pageId, $userId];
+                        \ClaimRevokeWorld::$released[]         = [$pageId, $userId];
+                        \ClaimRevokeWorld::$postAuthor[$pageId] = \ClaimRevokeWorld::$authorAfterRelease;
+                        \ClaimRevokeWorld::$order[]             = 'page_release:' . $pageId;
                         return true;
                     }
                 };

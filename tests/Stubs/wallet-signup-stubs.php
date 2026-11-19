@@ -89,10 +89,16 @@ namespace {
          */
         function wp_insert_user(array $data)
         {
-            $GLOBALS['__bcc_wl']['inserted'][] = (string) $data['user_login'];
+            $GLOBALS['__bcc_wl']['inserted'][]       = (string) $data['user_login'];
+            $GLOBALS['__bcc_wl']['inserted_email'][] = (string) ($data['user_email'] ?? '');
             // F-294 tests opt in to a successful insert (user 500) to reach
             // the wallet-link step; everything else keeps the old failure.
             if (!empty($GLOBALS['__bcc_wl']['insert_ok'])) {
+                $GLOBALS['__bcc_ph']['users'][500] = [
+                    'email'   => (string) ($data['user_email'] ?? ''),
+                    'login'   => (string) $data['user_login'],
+                    'display' => (string) ($data['display_name'] ?? ''),
+                ];
                 return 500;
             }
             return new \WP_Error('stub_insert_failed', 'stub');
