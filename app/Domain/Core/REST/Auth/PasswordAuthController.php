@@ -782,7 +782,10 @@ final class PasswordAuthController
             // get_password_reset_key writes a hash + timestamp to the
             // user_activation_key column. WP's own /wp-login.php?action=rp
             // flow reads from the same column — our path coexists with it.
-            $key = get_password_reset_key($user);
+            // ⚠ Through WordPressSignInGate::appResetKey(): this is the one
+            // flow allowed to mint a reset key (H2). A bare
+            // get_password_reset_key() is refused for every role.
+            $key = \BCC\Trust\Core\Security\WordPressSignInGate::appResetKey($user);
             if (!is_wp_error($key) && is_string($key) && $key !== '') {
                 $login = (string) $user->user_login;
                 $path  = '/reset-password?key=' . rawurlencode($key) . '&login=' . rawurlencode($login);
@@ -799,8 +802,8 @@ final class PasswordAuthController
                     'email_hash' => sha1($email),
                 ], 'user', $userId);
             } else {
-                // Key generation failed (e.g. user is admin and a filter
-                // blocks resets). Still respond ok=true — same anti-
+                // Key generation failed (an `allow_password_reset` filter,
+                // e.g. PeepSo's, refused it). Still respond ok=true — same anti-
                 // enumeration discipline. Log so ops can see why no mail
                 // went out.
                 Logger::warning('[bcc-trust] get_password_reset_key returned WP_Error / empty', [

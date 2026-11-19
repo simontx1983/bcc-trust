@@ -24,15 +24,19 @@ if (!defined('ABSPATH')) {
  * earlier login. So a stuffed password skipped every sign-in defence BCC
  * has.
  *
- * Three doors close here for anyone without `manage_options`:
+ * Four doors close here. The first three are for anyone without
+ * `manage_options`; the fourth is for every role:
  *
  * 1. `authenticate`, as the LAST filter: wp-login.php, XML-RPC and any other
  *    wp_signon() caller (PeepSo's own login form included) refuse a member
- *    account with "sign in at the app". The answer is the same whether or
- *    not the password was right, so this door cannot be used to test
- *    passwords either. It also refuses the cookie re-login
- *    (`wp_authenticate_cookie`, priority 30). BCC's own sign-ins never call
- *    wp_authenticate(): they check the password themselves.
+ *    account, including the cookie re-login (`wp_authenticate_cookie`,
+ *    priority 30). BCC's own sign-ins never call wp_authenticate(): they
+ *    check the password themselves. The answer gives nothing away: a
+ *    member's sign-in and every failed one (a wrong password, an unknown
+ *    name or email, admin or member alike) all get the same "that sign-in
+ *    didn't work" answer, so the form tests neither passwords nor which
+ *    logins are admins. Every other answer (an empty field, Wordfence's
+ *    "enter your 2FA code" for an admin) passes through untouched.
  * 2. `admin_init`: a signed-in member is sent from wp-admin and
  *    admin-post.php to the app, and refused at admin-ajax.php (403). No
  *    admin-ajax action is needed by a member. The app talks to BCC's REST
@@ -45,9 +49,17 @@ if (!defined('ABSPATH')) {
  *    `bcc_unauthorized`. The frontend never sends cookies
  *    (`credentials: "omit"`), so no client loses anything. Batch
  *    sub-requests and internal dispatches pass through this filter too.
+ * 4. `allow_password_reset`: only the app's own forgot-password flow
+ *    (POST /auth/forgot-password, with its throttles) mints a password
+ *    reset key, for every role. wp-login.php's lost-password form, PeepSo's
+ *    recover-password page and anything else that asks for a key get
+ *    "reset your password at the app" instead. For every role, because a
+ *    form that emails admins and turns members away would tell anyone
+ *    which logins are admins. Admins reset at the app too; ops' wp-cli is
+ *    the fallback.
  *
- * Admins keep all three: wp-login.php, wp-admin, and cookie-plus-nonce calls
- * to bcc routes from wp-admin tooling.
+ * Admins keep the first three: wp-login.php, wp-admin, and cookie-plus-nonce
+ * calls to bcc routes from wp-admin tooling.
  */
 final class WordPressSignInGate
 {
@@ -60,45 +72,64 @@ final class WordPressSignInGate
      */
     public const AUTHENTICATE_PRIORITY = PHP_INT_MAX;
 
-    /** Early, beside CoreUsersRouteGuard: a refused request reaches no handler. */
+    /** Early, beside RestRouteAllowlist: a refused request reaches no handler. */
     public const REST_PRIORITY = 1;
+
+    /** The last word on whether a reset key may be minted. */
+    public const RESET_PRIORITY = PHP_INT_MAX;
 
     public const ERROR_CODE = 'bcc_sign_in_at_app';
 
+    public const RESET_ERROR_CODE = 'bcc_reset_at_app';
+
     public const REST_MESSAGE = 'Sign in at the app.';
+
+    /**
+     * Core's answers to a failed sign-in, each naming its own cause. Next
+     * to the refusal a member gets, they would tell an admin login from a
+     * member one, so they get the refusal's wording instead.
+     */
+    public const FAILED_SIGN_IN_CODES = ['incorrect_password', 'invalid_username', 'invalid_email'];
+
+    /** True only while the app's forgot-password flow mints its key. */
+    private static bool $mintingAppResetKey = false;
 
     public static function register(): void
     {
         add_filter('authenticate', [self::class, 'refuseMemberSignIn'], self::AUTHENTICATE_PRIORITY, 3);
         add_action('admin_init', [self::class, 'keepMembersOutOfAdmin'], 1);
         add_filter('rest_pre_dispatch', [self::class, 'filterRest'], self::REST_PRIORITY, 3);
+        add_filter('allow_password_reset', [self::class, 'allowPasswordReset'], self::RESET_PRIORITY, 2);
     }
 
     /**
-     * `authenticate` filter: a member account never signs in here.
+     * `authenticate` filter: a member account never signs in here, and no
+     * failed sign-in says why it failed.
      *
-     * The account is the one an earlier filter signed in or, when the
-     * sign-in failed, the one the username (or email) names. Either way a
-     * member gets the same refusal, so a wrong password and a right one look
-     * alike. An admin, an unknown name and an empty form pass through
-     * untouched.
+     *   - signed in so far (a WP_User): an admin passes; a member gets the
+     *     refusal;
+     *   - failed with one of FAILED_SIGN_IN_CODES: the refusal, whatever
+     *     the role, so a member's right password, a member's wrong one and
+     *     an admin's wrong one all read the same;
+     *   - anything else (nothing yet, an empty field, another plugin's
+     *     answer such as Wordfence's 2FA prompt): untouched.
      *
      * @param mixed $user     WP_User, WP_Error or null from earlier filters
-     * @param mixed $username already sanitize_user()'d by wp_authenticate()
+     * @param mixed $username
      * @param mixed $password
      * @return mixed
      */
     public static function refuseMemberSignIn($user, $username = '', $password = '')
     {
-        unset($password);
-        $account = $user instanceof \WP_User
-            ? $user
-            : self::accountNamed(is_string($username) ? $username : '');
-        if ($account === null || user_can($account, self::CAPABILITY)) {
-            return $user;
+        unset($username, $password);
+        if ($user instanceof \WP_User) {
+            return user_can($user, self::CAPABILITY) ? $user : self::signInRefusal();
+        }
+        if ($user instanceof \WP_Error && in_array($user->get_error_code(), self::FAILED_SIGN_IN_CODES, true)) {
+            return self::signInRefusal();
         }
 
-        return new \WP_Error(self::ERROR_CODE, self::signInMessage());
+        return $user;
     }
 
     /**
@@ -116,7 +147,15 @@ final class WordPressSignInGate
             wp_die('-1', 403);
         }
 
-        wp_safe_redirect(FrontendRedirect::defaultReturn('/'));
+        // ⚠ wp_redirect, NOT wp_safe_redirect. The target is built here from
+        // BCC_FRONTEND_ORIGIN, never from the request. wp_safe_redirect only
+        // trusts the frontend's host once FrontendRedirect's
+        // `allowed_redirect_hosts` filter is in place, which happens on
+        // rest_api_init, never on an admin request. Until then it swaps
+        // the target for admin_url(), which lands back here: an endless
+        // redirect wherever the frontend's host is not WordPress's home
+        // (staging, local).
+        wp_redirect(FrontendRedirect::defaultReturn('/'));
         exit;
     }
 
@@ -174,27 +213,49 @@ final class WordPressSignInGate
         return preg_match('#^/bcc(?:-[a-z0-9-]+)?/#', $normalised) === 1;
     }
 
-    /** The member a username or email names, or null. */
-    private static function accountNamed(string $username): ?\WP_User
+    /**
+     * The reset key for the app's forgot-password flow: the only caller
+     * allowPasswordReset() lets through.
+     *
+     * @return string|\WP_Error what get_password_reset_key() returns
+     */
+    public static function appResetKey(\WP_User $user)
     {
-        $name = trim($username);
-        if ($name === '') {
-            return null;
+        self::$mintingAppResetKey = true;
+        try {
+            return get_password_reset_key($user);
+        } finally {
+            self::$mintingAppResetKey = false;
         }
-
-        $user = get_user_by('login', $name);
-        if (!$user instanceof \WP_User && is_email($name) !== false) {
-            $user = get_user_by('email', $name);
-        }
-
-        return $user instanceof \WP_User ? $user : null;
     }
 
-    private static function signInMessage(): string
+    /**
+     * `allow_password_reset`: no reset key except the app's (see
+     * appResetKey()), for every role. Inside the app's flow, whatever the
+     * earlier filters decided (PeepSo's own checks) stands.
+     *
+     * @param mixed $allow
+     * @param mixed $userId
+     * @return mixed
+     */
+    public static function allowPasswordReset($allow, $userId = 0)
     {
-        return sprintf(
-            'Members sign in at <a href="%s">the app</a>.',
+        unset($userId);
+        if (self::$mintingAppResetKey) {
+            return $allow;
+        }
+
+        return new \WP_Error(self::RESET_ERROR_CODE, sprintf(
+            'Reset your password at <a href="%s">the app</a>.',
+            esc_url(FrontendRedirect::defaultReturn('/forgot-password'))
+        ));
+    }
+
+    private static function signInRefusal(): \WP_Error
+    {
+        return new \WP_Error(self::ERROR_CODE, sprintf(
+            'That sign-in didn\'t work. Members sign in at <a href="%s">the app</a>.',
             esc_url(FrontendRedirect::defaultReturn('/login'))
-        );
+        ));
     }
 }

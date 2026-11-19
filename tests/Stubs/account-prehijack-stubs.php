@@ -265,9 +265,6 @@ namespace {
                 if ($field === 'id' && (int) $id === (int) $value) {
                     return new \WP_User($id, $u['email'], $u['login'], $u['display']);
                 }
-                if ($field === 'login' && $u['login'] === (string) $value) {
-                    return new \WP_User($id, $u['email'], $u['login'], $u['display']);
-                }
             }
             return false;
         }
