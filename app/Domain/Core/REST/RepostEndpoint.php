@@ -37,6 +37,7 @@
 
 namespace BCC\Trust\Core\REST;
 
+use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Core\DB\AdvisoryLock;
 use BCC\Core\Log\Logger;
 use BCC\Core\PeepSo\PeepSoStatusWriter;
@@ -46,6 +47,7 @@ use BCC\Trust\Core\Services\FeedItemReportVisibility;
 use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\FeedItemGate;
+use BCC\Trust\Core\Support\FeedUnavailable;
 use BCC\Trust\Core\Support\GroupInteractionGate;
 use BCC\Trust\Core\Support\NoReactionsGate;
 use WP_REST_Request;
@@ -387,9 +389,28 @@ final class RepostEndpoint
      * is the safe direction, so it is recorded here instead of worked
      * around.
      */
-    private static function viewerCanReadRoot(int $userId, int $rootActId): bool
+    private static function viewerCanReadRoot(int $userId, int $rootActId): ?WP_REST_Response
     {
-        return Plugin::instance()->feedRankingService()->getActivityById($rootActId, $userId) !== null;
+        // ⚠⚠ F-275 — a read that DID NOT RUN is not "not visible".
+        // `getActivityById()` throws rather than answering null for a failed
+        // read (bcc-core, via #732), and turning that into this route's 404
+        // would tell the member their post is gone because the database
+        // hiccuped. It is a retryable 503, matching the once-only check's
+        // own `bcc_unavailable` on the same route.
+        //
+        // ⚠ The try and catch bodies are single statements on purpose:
+        // FeedReadFailureWiringTest's matcher allows no braces inside
+        // either, so a nested block here would fail that guard loudly
+        // instead of passing on a guess.
+        try {
+            $item = Plugin::instance()->feedRankingService()->getActivityById($rootActId, $userId);
+        } catch (ActivityReadFailedException) {
+            return FeedUnavailable::response(FeedUnavailable::POST_MESSAGE);
+        }
+
+        return $item === null
+            ? ApiResponse::error('bcc_not_found', 'Post not found.', 404)
+            : null;
     }
 
     /**
@@ -513,8 +534,9 @@ final class RepostEndpoint
             }
         }
 
-        if (!self::viewerCanReadRoot($userId, $rootActId)) {
-            return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
+        $unreadable = self::viewerCanReadRoot($userId, $rootActId);
+        if ($unreadable !== null) {
+            return $unreadable;
         }
 
         // ⭐ ONLY PUBLIC POSTS MAY BE REPOSTED OR QUOTED (user decision

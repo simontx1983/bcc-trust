@@ -540,6 +540,13 @@ namespace BCC\Trust\Core {
             {
                 \bcc_repost_trace('FeedRankingService::getActivityById', [$actId, $viewerId]);
 
+                // F-275: a read that DID NOT RUN throws; it does not answer
+                // null. The two are different outcomes on this route (503 vs
+                // 404), so they need separate dials.
+                if (in_array($actId, (array) ($GLOBALS['__bcc_repost_read_throws'] ?? []), true)) {
+                    throw new \BCC\Core\Contracts\ActivityReadFailedException('read failed');
+                }
+
                 if (in_array($actId, (array) ($GLOBALS['__bcc_repost_unreadable'] ?? []), true)) {
                     return null;
                 }
@@ -664,6 +671,37 @@ namespace BCC\Trust\Core\Services {
                 \bcc_repost_trace('isPublicToEveryMember', $actId);
 
                 return !in_array($actId, (array) ($GLOBALS['__bcc_repost_not_public'] ?? []), true);
+            }
+        }
+    }
+}
+
+/*
+ * F-275's signal. bcc-core's ActivityFeedService throws this rather than
+ * answering null when a feed read did not run, and the repost route has to
+ * turn it into a retryable 503 instead of its usual not-found 404.
+ */
+namespace BCC\Core\Contracts {
+    if (!class_exists(__NAMESPACE__ . '\ActivityReadFailedException', false)) {
+        final class ActivityReadFailedException extends \RuntimeException
+        {
+        }
+    }
+}
+
+namespace BCC\Trust\Core\Support {
+    if (!class_exists(__NAMESPACE__ . '\FeedUnavailable', false)) {
+        final class FeedUnavailable
+        {
+            public const MESSAGE      = 'The feed is temporarily unavailable. Please try again.';
+            public const POST_MESSAGE = 'This post is temporarily unavailable. Please try again.';
+
+            public static function response(string $message = self::MESSAGE): \WP_REST_Response
+            {
+                $response = ApiResponse::error('bcc_unavailable', $message, 503);
+                $response->header('Cache-Control', 'private, no-store');
+
+                return $response;
             }
         }
     }

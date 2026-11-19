@@ -65,6 +65,7 @@ final class RepostEndpointTest extends TestCase
         // F-346 review: the root's SHAPE and the reposter's READ access.
         $GLOBALS['__bcc_repost_comment_acts'] = [];
         $GLOBALS['__bcc_repost_unreadable']   = [];
+        $GLOBALS['__bcc_repost_read_throws']   = [];
 
         // F-346 X model: quotes are unlimited and counted separately.
         $GLOBALS['__bcc_repost_quote_count'] = 7;
@@ -1159,6 +1160,65 @@ final class RepostEndpointTest extends TestCase
         self::assertSame(200, self::quote(self::A_REPOST, 'hi')->get_status());
         self::assertContains('createStatus', self::events());
     }
+
+    // ── F-275: a read that did NOT RUN is not "not visible" ─────────
+
+    /**
+     * ⚠⚠ 503, NOT 404. bcc-core's feed read THROWS rather than answering
+     * null when the read did not run (#732), and this route must not fold
+     * that into its not-found answer — that would tell a member their post
+     * is gone because the database hiccuped. It matches the once-only
+     * check's own `bcc_unavailable` on this same route: fail closed, and
+     * say "try again".
+     *
+     * ⚠ FeedReadFailureWiringTest pins that the SOURCE carries the catch.
+     * This pins that the ROUTE answers with it — a source-text guard can
+     * only see shape, never behaviour.
+     */
+    public function testAFeedReadThatDidNotRunAnswers503NotNotFound(): void
+    {
+        $GLOBALS['__bcc_repost_read_throws'] = [self::ROOT];
+
+        $response = self::post(self::A_REPOST);
+
+        self::assertSame(503, $response->get_status());
+        self::assertSame('bcc_unavailable', self::errorCode($response));
+        self::assertNotContains('createSelfStatus', self::events(), 'nothing may be written');
+        self::assertNotContains('lock_acquire', self::events(), 'and the lock is not taken');
+    }
+
+    public function testAFeedReadFailureOnTheQuoteRouteAlsoAnswers503(): void
+    {
+        $GLOBALS['__bcc_repost_read_throws'] = [self::ROOT];
+
+        $response = self::quote(self::A_REPOST, 'worth sharing');
+
+        self::assertSame(503, $response->get_status());
+        self::assertSame('bcc_unavailable', self::errorCode($response));
+        self::assertNotContains('createStatus', self::events());
+    }
+
+    /**
+     * ⭐ The two outcomes must stay DISTINGUISHABLE, which is the whole
+     * point of F-275: "I could not read it" is retryable, "you may not see
+     * it" is not. A handler that collapsed them would satisfy the tests
+     * above only by answering 503 everywhere, and the unreadable-root tests
+     * only by answering 404 everywhere — so this asserts both at once.
+     */
+    public function testAnUnreadableRootAndAFailedReadAnswerDifferently(): void
+    {
+        $GLOBALS['__bcc_repost_unreadable'] = [self::ROOT];
+        $notVisible                         = self::post(self::A_REPOST);
+
+        $GLOBALS['__bcc_repost_unreadable']  = [];
+        $GLOBALS['__bcc_repost_trace']       = [];
+        $GLOBALS['__bcc_repost_read_throws'] = [self::ROOT];
+        $readFailed                          = self::post(self::A_REPOST);
+
+        self::assertSame(404, $notVisible->get_status(), 'not visible');
+        self::assertSame(503, $readFailed->get_status(), 'could not read');
+    }
+
 
     // ── anti-vacuity ─────────────────────────────────────────────────
 
