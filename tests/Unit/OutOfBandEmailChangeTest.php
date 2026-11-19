@@ -416,29 +416,58 @@ final class OutOfBandEmailChangeTest extends TestCase
     }
 
     /**
+     * A pending address left behind after user_email changed (here by a
+     * write that fires no hook, so nothing dropped it) is not the account's
+     * verification address. The REAL resend never mails it: the handle form
+     * mails the address on file instead, and the email form mails nothing
+     * for it, while still mailing the address on file. Resend and verify
+     * share one rule (AuthSupport::verificationAddress), so a resend never
+     * mails a code that verify would refuse.
+     */
+    public function testAResendNeverMailsAStalePendingAddress(): void
+    {
+        self::walletSignup(self::USER, self::OWN);
+        self::writeEmailWithoutAnyHook(self::USER, self::VICTIM);
+
+        self::resend(['identifier' => '@handle' . self::USER]);
+        self::assertSame(0, self::mailsTo(self::OWN), 'the handle form does not mail the stale pending address');
+        self::assertSame(1, self::mailsTo(self::VICTIM), 'it mails the address on file');
+
+        self::resend(['email' => self::OWN]);
+        self::assertSame(0, self::mailsTo(self::OWN), 'the email form mails the stale pending address nothing');
+
+        self::resend(['email' => self::VICTIM]);
+        self::assertSame(2, self::mailsTo(self::VICTIM), 'control: the email form still mails the address on file');
+    }
+
+    /** The resend's address check is the inbox's: the address typed in another case is still mailed. */
+    public function testAResendByTheAddressInAnotherCaseStillMailsIt(): void
+    {
+        self::account(self::USER, self::OWN, '0');
+
+        self::resend(['email' => 'Me@Example.COM']);
+
+        self::assertSame(1, self::mailsTo('Me@Example.COM'));
+    }
+
+    /**
      * The same chain from a state this fix does not leave behind: the typed
      * address is still pending although user_email is now the victim's (a
-     * change made before the fix shipped). The REAL resend mails the typed
-     * inbox, by that address and by handle, and neither its link nor its
-     * code verifies: each proves the typed inbox, not the address now on
-     * the account.
+     * change made before the fix shipped). A link and a code mailed to the
+     * typed inbox (by a resend before this fix) do not verify: each proves
+     * the typed inbox, not the address now on the account.
      */
     public function testAStalePendingAddressCannotBeVerifiedIntoTheNewEmail(): void
     {
         self::walletSignup(self::USER, self::OWN);
         self::changeOutsideBcc(self::USER, self::VICTIM);
         $GLOBALS['__bcc_ph']['meta'][self::USER][PendingEmailService::META_PENDING_SIGNUP_EMAIL] = self::OWN;
+        $mailed = self::mailVerification(self::USER, self::OWN);
 
-        self::resend(['identifier' => '@handle' . self::USER]);
-        $link = self::lastTokenTo(self::OWN);
-        self::resend(['email' => self::OWN]);
-        $code = self::lastCodeTo(self::OWN);
-        self::assertSame(2, self::mailsTo(self::OWN), 'control: both forms mailed the typed inbox');
-
-        $byLink = self::verify(['token' => $link]);
+        $byLink = self::verify(['token' => $mailed['token']]);
         self::assertSame(400, $byLink->get_status());
         self::assertSame('bcc_invalid_verify_token', self::errorCode($byLink));
-        $byCode = self::verify(['email' => self::OWN, 'code' => $code]);
+        $byCode = self::verify(['email' => self::OWN, 'code' => $mailed['code']]);
         self::assertSame(400, $byCode->get_status());
         self::assertSame('bcc_invalid_otp', self::errorCode($byCode));
 

@@ -730,11 +730,44 @@ final class AuthSupport
     }
 
     /**
-     * H1: is $addressMac the address a verification of $userId would prove
-     * NOW? That is the wallet sign-up's pending address while user_email is
-     * still the wallet placeholder (applyPendingSignupEmail then moves it
-     * into user_email), and user_email in every other case, including a
-     * pending address left behind after user_email changed.
+     * H1: the address a verification of $userId would prove NOW: the wallet
+     * sign-up's pending address while user_email is still the wallet
+     * placeholder (applyPendingSignupEmail then moves it into user_email),
+     * and user_email in every other case, including a pending address left
+     * behind after user_email changed. '' when there is no such user.
+     *
+     * The ONE rule for which address a verification is about. Verify binds
+     * to it (isBoundToVerificationTarget) and resend mails only it
+     * (EmailVerificationController::resendVerification), so a resend never
+     * mails an address whose code verify would refuse.
+     */
+    public static function verificationAddress(int $userId): string
+    {
+        $user = get_userdata($userId);
+        if (!$user instanceof \WP_User) {
+            return '';
+        }
+        $address = (string) $user->user_email;
+        $pending = PendingEmailService::pendingSignupEmail($userId);
+        if ($pending !== '' && AccountRecoveryService::isPlaceholderEmail($address)) {
+            $address = $pending;
+        }
+        return $address;
+    }
+
+    /**
+     * H1: is $email, case- and space-insensitively, the address a
+     * verification of $userId would prove now (verificationAddress)?
+     */
+    public static function isVerificationAddress(int $userId, string $email): bool
+    {
+        $target = self::verificationAddress($userId);
+        return $target !== '' && hash_equals(self::addressMac($target), self::addressMac($email));
+    }
+
+    /**
+     * H1: was $addressMac (stored with a code or link) the address a
+     * verification of $userId would prove now (verificationAddress)?
      *
      * A code or link proves only the inbox it was mailed to. Without this a
      * code or link mailed to one address could mark another verified once
@@ -747,15 +780,7 @@ final class AuthSupport
         if ($addressMac === '') {
             return false;
         }
-        $user = get_userdata($userId);
-        if (!$user instanceof \WP_User) {
-            return false;
-        }
-        $target  = (string) $user->user_email;
-        $pending = PendingEmailService::pendingSignupEmail($userId);
-        if ($pending !== '' && AccountRecoveryService::isPlaceholderEmail($target)) {
-            $target = $pending;
-        }
+        $target = self::verificationAddress($userId);
         return $target !== '' && hash_equals(self::addressMac($target), $addressMac);
     }
 
