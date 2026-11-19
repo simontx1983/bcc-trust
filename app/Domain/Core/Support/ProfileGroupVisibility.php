@@ -36,6 +36,23 @@
  *      qualifying NFT on a named chain; that they delegate to a named
  *      validator), and the rows carry the chain slug, so publishing them
  *      to anonymous readers was the disclosure F-270 was filed about.
+ *   4. (F-341 PR 3) An individual HALL the owner has hidden is dropped,
+ *      even while the Halls section itself is shown. Absent meta means
+ *      nothing is hidden.
+ *
+ *      ⚠ This is NOT dominated by rule 1's toggle, which is the opposite
+ *      of what a reader might assume. Toggle OFF leaves halls — and ONLY
+ *      halls — visible, so with it off the hidden ones are the only
+ *      choice still doing any work. It therefore applies in both states.
+ *
+ *      ⚠ Scoped to `GroupType::Hall` deliberately, matching the ratified
+ *      name `bcc_hidden_hall_ids`. The check is keyed on group id, so
+ *      widening it to any group is a one-line change IF that is ever
+ *      decided — but it must be decided, not drifted into, because the
+ *      meta name would then be misleading and this codebase has already
+ *      paid for two of those (`halls` carrying every group;
+ *      `manual_collection_discovery_enabled` authorising nothing
+ *      chain-wide).
  *
  * ⚠ An empty result is NOT an error and must not become a 403. A refusal
  * would itself disclose that there are groups being withheld; an empty
@@ -97,11 +114,28 @@ final class ProfileGroupVisibility
 
         $showGroups = ProfileAccess::showsGroupsOnProfile($ownerId);
         $anonymous  = $viewerId <= 0;
+        // ONE read for the whole page, after the owner and admin
+        // short-circuits above — neither of them is filtered, so neither
+        // should pay for this.
+        $hiddenHalls = ProfileAccess::hiddenHallIds($ownerId);
 
         $secretIds = [];
         foreach ($contexts as $groupId => $ctx) {
             // Rule 1 — toggle OFF: halls survive, nothing else does.
             if (!$showGroups && $ctx->type !== GroupType::Hall) {
+                unset($contexts[$groupId]);
+                continue;
+            }
+
+            // Rule 4 — this HALL was hidden individually. Checked after
+            // rule 1 but before the queries below, keeping the ordering
+            // promise in the docblock: every in-memory drop happens
+            // before the membership read, so a hidden secret Hall never
+            // reaches it.
+            if ($hiddenHalls !== []
+                && $ctx->type === GroupType::Hall
+                && in_array($groupId, $hiddenHalls, true)
+            ) {
                 unset($contexts[$groupId]);
                 continue;
             }

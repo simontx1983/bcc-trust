@@ -113,6 +113,32 @@ final class ProfileAccess
     public const META_SHOW_GROUPS = 'bcc_show_groups_on_profile';
 
     /**
+     * F-341 PR 3 — individual Halls the owner has hidden from their
+     * profile while the Halls section itself stays SHOWN.
+     *
+     * Stored as a list of group ids. ABSENT MEANS NOTHING IS HIDDEN, the
+     * same absent-means-permissive convention as every other F-341 key,
+     * so no existing profile changes until its owner opts out.
+     */
+    public const META_HIDDEN_HALL_IDS = 'bcc_hidden_hall_ids';
+
+    /**
+     * Largest hide-list the WRITE path will store.
+     *
+     * ⚠⚠ ENFORCED ON WRITE, NEVER ON READ, and the asymmetry is the
+     * point. For a DENY list, truncating is the unsafe direction: it
+     * would silently un-hide the Halls past the cap and publish exactly
+     * what the member asked to hide. So {@see hiddenHallIds()} returns
+     * everything stored, however long, and the endpoint refuses to store
+     * more than this.
+     *
+     * Contrast {@see FILTER_VISIBLE_MAX} and the §F-02 friend-id cap,
+     * which guard an ALLOW list — there, dropping entries hides more,
+     * which is the harmless direction.
+     */
+    public const HIDDEN_HALL_IDS_MAX = 200;
+
+    /**
      * Largest id set {@see filterVisible} will judge in one call.
      *
      * A list page is a few dozen rows, so this is a defensive bound on
@@ -396,6 +422,47 @@ final class ProfileAccess
         }
 
         return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    /**
+     * F-341 PR 3 — the Halls this owner has hidden individually.
+     *
+     * ⚠ Returns the WHOLE stored list, never a truncated one. This is a
+     * DENY list: dropping entries would re-expose Halls the member chose
+     * to hide, so the bound lives on the write path
+     * ({@see HIDDEN_HALL_IDS_MAX}). A list that somehow grew past the cap
+     * still hides every id in it.
+     *
+     * ⚠ Absent, malformed or non-array meta means NOTHING is hidden, not
+     * "hide everything". A corrupt row must not blank a member's profile;
+     * the write path is the only thing that can hide a Hall, and it
+     * validates. Same absent-means-permissive rule as the rest of F-341.
+     *
+     * @return list<int> unique, positive, in stored order
+     */
+    public static function hiddenHallIds(int $ownerId): array
+    {
+        if ($ownerId <= 0) {
+            return [];
+        }
+
+        $raw = get_user_meta($ownerId, self::META_HIDDEN_HALL_IDS, true);
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        $ids = [];
+        foreach ($raw as $id) {
+            if (!is_int($id) && !(is_string($id) && $id !== '' && ctype_digit($id))) {
+                continue;
+            }
+            $value = (int) $id;
+            if ($value > 0) {
+                $ids[$value] = true;
+            }
+        }
+
+        return array_keys($ids);
     }
 
     /**
