@@ -88,6 +88,41 @@ final class FeedItemGateTest extends TestCase
         }
     }
 
+    /**
+     * PeepSo's own NON-POST modules are not feed items — asserted against
+     * the REAL allowlist, with no double in the way.
+     *
+     * ⚠ Module 6 is DIRECT MESSAGES, and it is the one that matters most:
+     * every one of these activities lives in the SAME `peepso_activities`
+     * table as a status post, so a bare act id says nothing about what it
+     * is. A route that acted on an arbitrary act id would reach a private
+     * conversation through it. F-346's repost route is the sharpest case —
+     * reposting a DM act id would republish a private message as a feed
+     * post — and it relies on exactly this property, so the property is
+     * pinned here rather than inside that route's doubled suite
+     * ({@see RepostEndpointTest::testAMessageActivityIsRefusedBeforeAnythingIsWritten()}).
+     *
+     * The ids come from `publicFeedModuleIds()`'s own fail-closed contract
+     * note, which names them: 6 DMs, 8 group-join stream, 9 page-wall, 30
+     * polls, 111 post-backgrounds, 6661 peepso-blog.
+     */
+    public function testPeepSoNonPostModulesAreNotFeedItems(): void
+    {
+        foreach ([6, 8, 9, 30, 111, 6661] as $moduleId) {
+            self::assertFalse(
+                FeedItemGate::isFeedModule($moduleId),
+                "module {$moduleId} must never be a feed item"
+            );
+            self::assertFalse(
+                FeedItemGate::isFeedModule((string) $moduleId),
+                "module {$moduleId} as a string must never be a feed item either"
+            );
+        }
+
+        // Anti-vacuity: the predicate is not simply false for everything.
+        self::assertTrue(FeedItemGate::isFeedModule(1), 'a status post IS a feed item');
+    }
+
     // ── the callers (a gate nothing calls is a defect no behaviour test sees) ──
 
     public function testEveryFeedEngagementWritePathConsultsTheGateBeforeItWrites(): void

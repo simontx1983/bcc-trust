@@ -42,6 +42,7 @@ use BCC\Core\Log\Logger;
 use BCC\Core\PeepSo\PeepSoStatusWriter;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Trust\Core\Repositories\PostEngagementRepository;
+use BCC\Trust\Core\Plugin;
 use BCC\Trust\Core\Support\ApiResponse;
 use BCC\Trust\Core\Support\FeedItemGate;
 use BCC\Trust\Core\Support\GroupInteractionGate;
@@ -141,6 +142,33 @@ final class RepostEndpoint
             return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
         }
 
+        // ⚠⚠ THE ROOT MUST BE A TOP-LEVEL POST, NOT A COMMENT.
+        // PeepSo writes an activities row for EVERY comment and stores
+        // `act_module_id = PeepSoActivity::MODULE_ID` (1) on it — the SAME
+        // module a status post carries ("comments always belong to the
+        // activity module"). So a comment act id IS on the public-feed
+        // module allowlist and passes FeedItemGate, and
+        // GroupInteractionGate deliberately ADMITS a comment act by gating
+        // it on its parent post, because reacting to a comment is a
+        // supported shape. Neither gate is wrong; neither answers this.
+        //
+        // The feed's own candidate query is where the rule lives: it
+        // carries an explicit `act_comment_object_id = 0` predicate
+        // precisely because those rows otherwise "INNER JOIN a published
+        // wp_post and leak into the feed as if they were top-level posts"
+        // (PeepSoActivityRepository::getActivities()). A repost row keyed
+        // on a comment is that leak made durable — it would publish
+        // someone's comment as a standalone feed item.
+        //
+        // ⚠ Checked on the ROOT, which is what gets STORED and rendered.
+        // A comment can only ever be its own root — PeepSo's comment
+        // insert writes no `act_repost_id` — so the root is also the only
+        // place a comment can arrive here.
+        $commentRoot = self::rootIsComment($rootActId);
+        if ($commentRoot !== null) {
+            return $commentRoot;
+        }
+
         // ⚠⚠ THE SECOND GATE, ON THE ROOT. Without it, reposting someone
         // else's repost republishes content from a group this member cannot
         // read: the SUBMITTED post is the repost, which sits on its author's
@@ -156,6 +184,35 @@ final class RepostEndpoint
             if ($rootRefusal !== null) {
                 return $rootRefusal;
             }
+        }
+
+        // ⚠⚠ CAN THE REPOSTER ACTUALLY SEE THE ROOT? Everything above
+        // answers "may this member INTERACT here" — §4.7.6 group
+        // membership, the post's §F-02 audience, the no-engagement rule.
+        // None of it applies the viewer-specific presentation filters, and
+        // FeedItemReportVisibility says so outright: mutual-block
+        // invisibility and caution-tier shadow limiting live in
+        // FeedRankingService's exclusion lists, and are deliberately NOT
+        // applied to REPORTING, because "a member who blocked an author
+        // may still need to report what that author posted".
+        //
+        // ⭐ That rationale does not survive the move to REPOSTING. A
+        // report discloses nothing and republishes nothing; a repost takes
+        // another member's post and puts it on your own wall. So this
+        // route asks the PERMALINK's question instead, through the
+        // permalink's own seam (§11 — one ladder, not a second copy):
+        // blocks in BOTH directions, the caution tier, the moderation hide
+        // list, §F-02 with its group carve-out, and the group's own rule
+        // for a members_only post.
+        //
+        // Last because it is the most expensive step — it hydrates an item
+        // whose payload is then discarded. A repost is throttled to
+        // REPOST_RATE_LIMIT per member per window and is once-per-post, so
+        // this is a bounded cost on a rare write.
+        if (!self::viewerCanReadRoot($userId, $rootActId)) {
+            // The same 404 as every other refusal on this route: it must
+            // never distinguish "blocked you" from "does not exist".
+            return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
         }
 
         // ⚠ ONE LOCK PER (MEMBER, ROOT), held across the check-then-write.
@@ -313,6 +370,58 @@ final class RepostEndpoint
         } finally {
             self::releaseLock($lockKey);
         }
+    }
+
+    /**
+     * The 404 for a root that is a COMMENT activity rather than a top-level
+     * post, or null when it is a post.
+     *
+     * Reuses `CommentRepository::getCommentMeta()` — the same seam
+     * `GroupInteractionGate::resolveLiveTarget()` already uses to tell a
+     * comment act from a post act (§11), rather than a second hand-rolled
+     * `act_comment_object_id` read that could drift from it.
+     *
+     * ⚠ `getCommentMeta()` answers only for a PUBLISHED comment, so an
+     * unpublished one returns null here and is NOT caught by this check.
+     * That is already covered and needs no second guard: the gate above
+     * resolves the same act through `PeepSoActivityRepository::getById()`,
+     * whose `act_status` is `wp_posts.post_status` under an alias, and
+     * refuses anything that is not `publish`.
+     */
+    private static function rootIsComment(int $rootActId): ?WP_REST_Response
+    {
+        $comment = Plugin::instance()->commentRepository()->getCommentMeta($rootActId);
+        if ($comment === null) {
+            return null;
+        }
+
+        return ApiResponse::error('bcc_not_found', 'Post not found.', 404);
+    }
+
+    /**
+     * May this member READ the root — the permalink's whole question.
+     *
+     * `FeedRankingService::getActivityById()` is the single-item gate
+     * `GET /feed/{id}` itself uses, so a post this member cannot open by
+     * link is a post they cannot repost — by construction, with no second
+     * ladder to fall out of step with it.
+     *
+     * ⚠ Fails CLOSED: it answers null both for "not visible" and for a
+     * read it could not complete, and the caller turns both into one 404.
+     *
+     * ⚠ KNOWN, ACCEPTED NARROWING FOR AN ADMINISTRATOR. A §F-02-exempt
+     * reader skips the profile gate, and the permalink's group-tagged
+     * recovery pass only runs when that gate actually ran — so bcc-core's
+     * `isVisibleGlobally()` refuses a `members_only` group post for an
+     * admin and nothing recovers it. An admin therefore cannot repost a
+     * members_only group post. That is a pre-existing property of the
+     * permalink rather than something this route introduces, and refusing
+     * is the safe direction, so it is recorded here instead of worked
+     * around.
+     */
+    private static function viewerCanReadRoot(int $userId, int $rootActId): bool
+    {
+        return Plugin::instance()->feedRankingService()->getActivityById($rootActId, $userId) !== null;
     }
 
     /**

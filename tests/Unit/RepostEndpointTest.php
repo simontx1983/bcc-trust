@@ -61,6 +61,10 @@ final class RepostEndpointTest extends TestCase
         $GLOBALS['__bcc_repost_refuse_feed_item']    = [];
         $GLOBALS['__bcc_repost_refuse_group']        = [];
         $GLOBALS['__bcc_repost_refuse_no_reactions'] = [];
+
+        // F-346 review: the root's SHAPE and the reposter's READ access.
+        $GLOBALS['__bcc_repost_comment_acts'] = [];
+        $GLOBALS['__bcc_repost_unreadable']   = [];
     }
 
     // ── helpers ──────────────────────────────────────────────────────
@@ -108,6 +112,24 @@ final class RepostEndpointTest extends TestCase
         $data = $response->get_data();
 
         return $data['data'] ?? [];
+    }
+
+    /**
+     * The details of EVERY traced $event, in order — for asserting WHICH
+     * ids a repeated collaborator was asked about, not merely that it ran.
+     *
+     * @return list<mixed>
+     */
+    private static function detailsOf(string $event): array
+    {
+        $out = [];
+        foreach (self::trace() as $entry) {
+            if (is_array($entry) && $entry[0] === $event) {
+                $out[] = $entry[1];
+            }
+        }
+
+        return $out;
     }
 
     /** The detail of the first traced $event, or null. */
@@ -612,6 +634,181 @@ final class RepostEndpointTest extends TestCase
 
         self::assertSame(401, $response->get_status());
         self::assertSame([], self::events());
+    }
+
+    // ── POST: the ROOT must be a TOP-LEVEL post (F-346 review) ──────
+
+    /**
+     * ⚠⚠ THE FAILURE THIS CLOSES. PeepSo writes an activities row for
+     * EVERY comment and stores `act_module_id = 1` on it — the same module
+     * a status post carries. So a comment act id is ON the public-feed
+     * module allowlist and passes FeedItemGate, and GroupInteractionGate
+     * deliberately ADMITS a comment act by gating it on its parent post.
+     * Nothing upstream refuses it, and a repost row keyed on a comment
+     * would publish that comment as a standalone feed item.
+     */
+    public function testACommentRootIsRefusedAndNothingIsWritten(): void
+    {
+        $GLOBALS['__bcc_repost_comment_acts'] = [self::ROOT];
+
+        $response = self::post(self::A_REPOST);
+
+        self::assertSame(404, $response->get_status());
+        self::assertSame('bcc_not_found', self::errorCode($response));
+        self::assertNotContains('createSelfStatus', self::events(), 'a comment must never be reposted');
+    }
+
+    /** The same refusal when the comment id is submitted directly. */
+    public function testACommentSubmittedDirectlyIsRefused(): void
+    {
+        $GLOBALS['__bcc_repost_comment_acts'] = [self::PLAIN];
+
+        $response = self::post(self::PLAIN);
+
+        self::assertSame(404, $response->get_status());
+        self::assertNotContains('createSelfStatus', self::events());
+    }
+
+    /**
+     * ⚠ Before the LOCK, not merely before the write: a refusal that took
+     * the lock first would let a comment id contend for — and briefly hold
+     * — the lock of the root it resolves to.
+     */
+    public function testTheCommentCheckRunsBeforeTheLockIsTaken(): void
+    {
+        $GLOBALS['__bcc_repost_comment_acts'] = [self::ROOT];
+
+        self::post(self::A_REPOST);
+
+        self::assertNotContains('lock_acquire', self::events());
+        self::assertContains('CommentRepository::getCommentMeta', self::events());
+    }
+
+    /**
+     * ⭐ Asked about the ROOT, which is the id that gets STORED. Keyed on
+     * the submitted id instead, the check is bypassed by reposting a
+     * comment through any id that resolves to it.
+     */
+    public function testTheCommentCheckIsAskedAboutTheRootNotTheSubmittedId(): void
+    {
+        self::post(self::A_REPOST);
+
+        self::assertSame(
+            [self::ROOT],
+            self::detailsOf('CommentRepository::getCommentMeta'),
+            'the shape check must name the root'
+        );
+    }
+
+    /**
+     * A DM activity (PeepSo module 6) never reaches the writer.
+     *
+     * ⚠ HONEST SCOPE: FeedItemGate is DOUBLED here, so this pins only that
+     * the endpoint honours its refusal. The load-bearing half — that
+     * PeepSo's non-post modules really are off the public-feed allowlist,
+     * so a DM act id really does get refused — is asserted against the
+     * REAL allowlist in FeedItemGateTest
+     * ({@see FeedItemGateTest::testPeepSoNonPostModulesAreNotFeedItems()}).
+     * Neither test is worth much without the other.
+     */
+    public function testAMessageActivityIsRefusedBeforeAnythingIsWritten(): void
+    {
+        $dmActId = 6006;
+        $GLOBALS['__bcc_repost_refuse_feed_item'] = [$dmActId];
+
+        $response = self::post($dmActId);
+
+        self::assertSame(404, $response->get_status());
+        self::assertSame('bcc_not_found', self::errorCode($response));
+        self::assertNotContains('createSelfStatus', self::events());
+        self::assertNotContains('lock_acquire', self::events());
+    }
+
+    // ── POST: the reposter must be able to READ the root ─────────────
+
+    /**
+     * ⚠⚠ A DIFFERENT QUESTION FROM THE GATES ABOVE, which answer "may this
+     * member INTERACT here". They do not apply the viewer-specific
+     * presentation filters — mutual blocks either way, the caution tier,
+     * the moderation hide list — because FeedItemReportVisibility
+     * deliberately skips them for REPORTING. Reposting republishes, so this
+     * route asks the permalink's question too.
+     */
+    public function testARootTheMemberCannotReadIsRefusedAndNothingIsWritten(): void
+    {
+        $GLOBALS['__bcc_repost_unreadable'] = [self::ROOT];
+
+        $response = self::post(self::A_REPOST);
+
+        self::assertSame(404, $response->get_status());
+        self::assertSame('bcc_not_found', self::errorCode($response));
+        self::assertNotContains('createSelfStatus', self::events());
+    }
+
+    /** Before the lock, for the same reason the shape check is. */
+    public function testTheReadCheckRunsBeforeTheLockIsTaken(): void
+    {
+        $GLOBALS['__bcc_repost_unreadable'] = [self::ROOT];
+
+        self::post(self::A_REPOST);
+
+        self::assertNotContains('lock_acquire', self::events());
+        self::assertContains('FeedRankingService::getActivityById', self::events());
+    }
+
+    /**
+     * ⭐ Asked about the ROOT, and about the ROOT ONLY — the root carries
+     * the content being republished. Keyed on the submitted id, a member
+     * could republish a post they are blocked from by going through
+     * somebody else's repost of it.
+     */
+    public function testTheReadCheckIsAskedAboutTheRootAndNamesTheViewer(): void
+    {
+        self::post(self::A_REPOST);
+
+        self::assertSame(
+            [[self::ROOT, self::VIEWER]],
+            self::detailsOf('FeedRankingService::getActivityById'),
+            'the read gate must name the root and the viewer'
+        );
+    }
+
+    /**
+     * ⚠ Anti-vacuity for BOTH new dials: with them off, the ordinary path
+     * still reaches the write. Without this, a check that refused
+     * everything would satisfy every test above.
+     */
+    public function testAReadableTopLevelRootStillReachesTheWrite(): void
+    {
+        $response = self::post(self::A_REPOST);
+
+        self::assertSame(200, $response->get_status());
+        self::assertContains('createSelfStatus', self::events());
+        self::assertContains('CommentRepository::getCommentMeta', self::events());
+        self::assertContains('FeedRankingService::getActivityById', self::events());
+    }
+
+    // ── DELETE skips both, deliberately ─────────────────────────────
+
+    /**
+     * ⚠ Un-repost is NOT audience-gated (the ratified divergence from
+     * /stoke), and neither new check applies to it either: it only ever
+     * trashes rows this member owns, and a root that became unreadable —
+     * or that was never a post — must not strand them with a repost on
+     * their own wall they cannot remove.
+     */
+    public function testUnRepostConsultsNeitherNewCheck(): void
+    {
+        $GLOBALS['__bcc_repost_mine']          = [['act_id' => 601, 'post_id' => 9601]];
+        $GLOBALS['__bcc_repost_unreadable']    = [self::ROOT];
+        $GLOBALS['__bcc_repost_comment_acts']  = [self::ROOT];
+
+        $response = self::delete(self::A_REPOST);
+
+        self::assertSame(200, $response->get_status());
+        self::assertNotContains('FeedRankingService::getActivityById', self::events());
+        self::assertNotContains('CommentRepository::getCommentMeta', self::events());
+        self::assertContains('trash', self::events());
     }
 
     // ── anti-vacuity ─────────────────────────────────────────────────

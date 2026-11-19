@@ -438,3 +438,87 @@ namespace BCC\Core\PeepSo {
         }
     }
 }
+
+/*
+ * F-346 root-shape + read-visibility collaborators.
+ *
+ * `Plugin::instance()` is the accessor seam the endpoint uses for both, so
+ * the double mirrors the shape tests/Stubs/group-interaction-gate-stubs.php
+ * already established: one stub Plugin whose accessors hand back stub
+ * collaborators.
+ *
+ * ⚠ Both guards pass `false` to class_exists for the reason this file's
+ * header gives: the default would AUTOLOAD the real class and then skip the
+ * double, and the test would silently exercise production code.
+ */
+namespace BCC\Trust\Core {
+    if (!class_exists('BCC\Trust\Core\RepostStubCommentRepository', false)) {
+        /**
+         * Stands in for CommentRepository. Only `getCommentMeta()` matters
+         * here: non-null means "this act is a COMMENT", which is what the
+         * endpoint refuses on.
+         */
+        final class RepostStubCommentRepository
+        {
+            public function getCommentMeta(int $actId): ?object
+            {
+                \bcc_repost_trace('CommentRepository::getCommentMeta', $actId);
+
+                if (!in_array($actId, (array) ($GLOBALS['__bcc_repost_comment_acts'] ?? []), true)) {
+                    return null;
+                }
+
+                return (object) [
+                    'act_id'         => $actId,
+                    'parent_post_id' => 9000 + $actId,
+                    'parent_act_id'  => 8000 + $actId,
+                ];
+            }
+        }
+    }
+
+    if (!class_exists('BCC\Trust\Core\RepostStubFeedRankingService', false)) {
+        /**
+         * Stands in for FeedRankingService. `getActivityById()` is the
+         * permalink's visibility answer: null = this viewer may not read it
+         * (blocked either way, caution-tier, moderation-hidden, §F-02, or an
+         * unreadable group post), which the endpoint turns into a 404.
+         */
+        final class RepostStubFeedRankingService
+        {
+            /** @return array<string, mixed>|null */
+            public function getActivityById(int $actId, int $viewerId): ?array
+            {
+                \bcc_repost_trace('FeedRankingService::getActivityById', [$actId, $viewerId]);
+
+                if (in_array($actId, (array) ($GLOBALS['__bcc_repost_unreadable'] ?? []), true)) {
+                    return null;
+                }
+
+                return ['feed_id' => 'feed_' . $actId, 'external_id' => 9000 + $actId];
+            }
+        }
+    }
+
+    if (!class_exists('BCC\Trust\Core\Plugin', false)) {
+        final class Plugin
+        {
+            private static ?self $instance = null;
+
+            public static function instance(): self
+            {
+                return self::$instance ??= new self();
+            }
+
+            public function commentRepository(): RepostStubCommentRepository
+            {
+                return new RepostStubCommentRepository();
+            }
+
+            public function feedRankingService(): RepostStubFeedRankingService
+            {
+                return new RepostStubFeedRankingService();
+            }
+        }
+    }
+}
