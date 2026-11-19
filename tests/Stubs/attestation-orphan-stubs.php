@@ -18,8 +18,10 @@ namespace {
     {
         /** @var array<int, list<object{target_kind: string, target_id: int}>> attestor => active rows */
         public static array $active = [];
-        /** @var list<int> users whose deleteForUser() answers false */
+        /** @var list<int> users whose deleteForUser() CAST leg fails */
         public static array $deleteFails = [];
+        /** @var list<int> users whose deleteForUser() TARGETED leg fails */
+        public static array $targetedFails = [];
         /** @var list<int> */
         public static array $deleted = [];
         /** @var list<array{string, int}> */
@@ -66,10 +68,14 @@ namespace BCC\Trust\Core {
                         return \OrphanWorld::$active[$userId] ?? [];
                     }
 
-                    public function deleteForUser(int $userId): bool
+                    /** @return array{cast: bool, targeted: bool} */
+                    public function deleteForUser(int $userId): array
                     {
                         \OrphanWorld::$deleted[] = $userId;
-                        return !in_array($userId, \OrphanWorld::$deleteFails, true);
+                        return [
+                            'cast'     => !in_array($userId, \OrphanWorld::$deleteFails, true),
+                            'targeted' => !in_array($userId, \OrphanWorld::$targetedFails, true),
+                        ];
                     }
 
                     /** @return list<int> */

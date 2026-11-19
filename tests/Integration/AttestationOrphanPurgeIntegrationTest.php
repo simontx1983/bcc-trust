@@ -12,13 +12,13 @@ use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Attestation rows of deleted accounts (2026-11-18): two such rows survived
- * on production, so the account-deletion purge is hardened and the
+ * Attestation rows of deleted accounts (2026-11-18): such rows can outlive
+ * the account, so the account-deletion purge is hardened and the
  * survivors get a dry-run-first prune.
  *
  *   - deleteForUser() runs BOTH legs (rows cast, rows cast against the
- *     profile) and answers false, logged with the failing leg, when either
- *     did not run. A failure used to be ignored;
+ *     profile) and answers PER LEG whether it ran, logging each failed leg.
+ *     A failure used to be ignored;
  *   - findOrphanedUserIds() / countOrphanedRows() find the accounts that no
  *     longer exist but still hold rows, cast or targeted, for the prune CLI.
  *
@@ -38,6 +38,8 @@ final class AttestationOrphanPurgeIntegrationTest extends TestCase
 
     /** The attestor-keyed DELETE in deleteForUser(). */
     private const CAST_DELETE = '/^DELETE FROM\s+`?\S*bcc_trust_attestations`?\s+WHERE\s+`?attestor_user_id`?\s*=/';
+    /** The profile-keyed DELETE in deleteForUser(). */
+    private const TARGETED_DELETE = '/^DELETE FROM\s+`?\S*bcc_trust_attestations`?\s+WHERE\s+`?target_kind`?\s*=/';
 
     private AttestationRepository $repo;
     private bool $createdTable = false;
@@ -134,8 +136,8 @@ final class AttestationOrphanPurgeIntegrationTest extends TestCase
         $this->vouch(self::LIVE, 'user_profile', self::GONE_TARGET);
         $this->vouch(self::LIVE, 'user_profile', self::LIVE_OTHER);
 
-        self::assertTrue($this->repo->deleteForUser(self::GONE_ATTESTOR));
-        self::assertTrue($this->repo->deleteForUser(self::GONE_TARGET));
+        self::assertSame(['cast' => true, 'targeted' => true], $this->repo->deleteForUser(self::GONE_ATTESTOR));
+        self::assertSame(['cast' => true, 'targeted' => true], $this->repo->deleteForUser(self::GONE_TARGET));
 
         self::assertSame([], $this->myOrphans());
         self::assertSame(0, $this->rowsInvolving(self::GONE_ATTESTOR));
@@ -151,21 +153,48 @@ final class AttestationOrphanPurgeIntegrationTest extends TestCase
 
         $wpdb->failQueriesMatching = self::CAST_DELETE;
         try {
-            $ok = $this->repo->deleteForUser(self::GONE_ATTESTOR);
+            $legs = $this->repo->deleteForUser(self::GONE_ATTESTOR);
         } finally {
             $hits = $wpdb->injectedFailures;
             $wpdb->clearFaultInjection();
         }
 
         self::assertSame(1, $hits, 'precondition: the cast DELETE was the query failed');
-        self::assertFalse($ok, 'a delete that did not run is reported, never assumed');
+        self::assertSame(['cast' => false, 'targeted' => true], $legs, 'a delete that did not run is reported, never assumed');
         self::assertSame(1, $this->rowsInvolving(self::GONE_ATTESTOR), 'the targeted leg still ran; the cast row survived');
+        self::assertSame(['cast'], $this->failedLegsLogged());
+    }
 
-        $errors = array_values(array_filter(
-            Logger::$lines,
-            static fn (array $l): bool => $l['level'] === 'error' && $l['message'] === '[bcc-trust] attestation purge failed for a deleted account'
-        ));
-        self::assertCount(1, $errors);
-        self::assertSame('cast', $errors[0]['context']['leg']);
+    /** Reported per leg: the caller still re-synthesizes the targets of the cast rows that did go. */
+    public function testAFailedTargetedLegIsReportedApartFromTheCastLeg(): void
+    {
+        global $wpdb;
+        $this->vouch(self::GONE_ATTESTOR, 'user_profile', self::LIVE);
+        $this->vouch(self::LIVE, 'user_profile', self::GONE_ATTESTOR);
+
+        $wpdb->failQueriesMatching = self::TARGETED_DELETE;
+        try {
+            $legs = $this->repo->deleteForUser(self::GONE_ATTESTOR);
+        } finally {
+            $hits = $wpdb->injectedFailures;
+            $wpdb->clearFaultInjection();
+        }
+
+        self::assertSame(1, $hits, 'precondition: the targeted DELETE was the query failed');
+        self::assertSame(['cast' => true, 'targeted' => false], $legs);
+        self::assertSame(1, $this->rowsInvolving(self::GONE_ATTESTOR), 'the cast leg ran; the row against the profile survived');
+        self::assertSame(['targeted'], $this->failedLegsLogged());
+    }
+
+    /** @return list<string> */
+    private function failedLegsLogged(): array
+    {
+        $legs = [];
+        foreach (Logger::$lines as $l) {
+            if ($l['level'] === 'error' && $l['message'] === '[bcc-trust] attestation purge failed for a deleted account') {
+                $legs[] = (string) $l['context']['leg'];
+            }
+        }
+        return $legs;
     }
 }

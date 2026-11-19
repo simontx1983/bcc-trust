@@ -60,10 +60,16 @@ if (!defined('ABSPATH')) {
  * never decide a security boundary).
  *
  * A refusal wins over whatever an earlier filter answered. It is the core
- * `rest_forbidden` shape: 401 signed out, 403 signed in. It is a
- * WP_REST_Response, never a bare WP_Error: core's /batch/v1 loop reads
- * get_status() off whatever this filter answers, so a WP_Error there is a
- * fatal and the whole batch a 500.
+ * `rest_forbidden` shape: 401 signed out, 403 signed in.
+ *
+ * A refusal is returned as a RESPONSE (`rest_convert_error_to_response()`),
+ * never a bare `WP_Error`. At the top level core converts either one to the
+ * same answer. Inside a `/batch/v1` call it does not: core passes the
+ * filter's result through `rest_ensure_response()`, which returns a
+ * `WP_Error` unchanged, into `envelope_response()`, which calls
+ * `get_status()` on it. That is a fatal, so the whole batch answers 500
+ * instead of 207 with the refused sub-request's own status. (Found by ops
+ * while installing the production mitigation.)
  *
  * Production had an mu-plugin as the immediate mitigation for the users
  * routes; this is the permanent version, widened.
@@ -131,6 +137,7 @@ final class RestRouteAllowlist
             return null;
         }
 
+        // A response, not a bare WP_Error: see the class note on /batch/v1.
         return rest_convert_error_to_response(new \WP_Error(
             'rest_forbidden',
             'Sorry, you are not allowed to do that.',

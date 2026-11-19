@@ -65,7 +65,11 @@ final class CommentOnReviewReplyTest extends TestCase
         }
     }
 
-    private static function service(): CommentService
+    /**
+     * @param list<int> $commentActs act ids the repository should report as
+     *   PUBLISHED COMMENTS (what FeedItemGate::isCommentAct asks it)
+     */
+    private static function service(array $commentActs = []): CommentService
     {
         // Visible and live: only the module rule can refuse.
         $visibility = new class extends FeedItemReportVisibility {
@@ -87,7 +91,16 @@ final class CommentOnReviewReplyTest extends TestCase
         $class   = new ReflectionClass(CommentService::class);
         $service = $class->newInstanceWithoutConstructor();
         $class->getProperty('visibility')->setValue($service, $visibility);
-        $class->getProperty('commentRepo')->setValue($service, new CommentRepository());
+        $repo = new CommentRepository();
+        foreach ($commentActs as $commentActId) {
+            $repo->metaByActId[$commentActId] = (object) [
+                'act_id'         => $commentActId,
+                'parent_post_id' => self::PARENT_POST,
+                'parent_act_id'  => 777,
+                'author_id'      => 9,
+            ];
+        }
+        $class->getProperty('commentRepo')->setValue($service, $repo);
 
         return $service;
     }
@@ -123,6 +136,65 @@ final class CommentOnReviewReplyTest extends TestCase
         self::parent(self::REVIEW_REPLY_MODULE, false);
 
         self::assertSame(self::NOT_FOUND_POST, self::service()->listByFeedId('feed_' . self::PARENT_ACT, self::VIEWER, 'oldest', null, 20));
+    }
+
+    // ── a COMMENT act id is not a post either ───────────────────────
+
+    /**
+     * ⚠⚠ A SECOND SHAPE OF THE SAME HOLE, and the module rule cannot see it.
+     *
+     * The review-reply case above works because module 206 is off the
+     * allowlist. A COMMENT is different: PeepSo stores
+     * `act_module_id = 1` on it — the SAME module a status post carries
+     * ("comments always belong to the activity module") — so a comment act
+     * id PASSES the module check, and the liveness and visibility rules
+     * admit it too, exactly as they admitted a reply.
+     *
+     * Left open, a comment act id could be used as a comment PARENT: a
+     * thread hanging under a comment, which this codebase's flat comment
+     * model has no notion of, reachable by anyone holding the id.
+     */
+    public function testACommentActIdHasNoThreadToList(): void
+    {
+        self::parent(self::STATUS_MODULE);
+
+        self::assertSame(
+            self::NOT_FOUND_POST,
+            self::service([self::PARENT_ACT])->listByFeedId('feed_' . self::PARENT_ACT, self::VIEWER, 'oldest', null, 20)
+        );
+        self::assertSame(
+            self::NOT_FOUND_POST,
+            self::service([self::PARENT_ACT])->listByFeedId('feed_' . self::PARENT_ACT, 0, 'oldest', null, 20),
+            'anonymous too'
+        );
+    }
+
+    public function testNobodyCanCommentOnAComment(): void
+    {
+        self::parent(self::STATUS_MODULE);
+
+        self::assertSame(
+            self::NOT_FOUND_POST,
+            self::service([self::PARENT_ACT])->createComment('feed_' . self::PARENT_ACT, self::VIEWER, 'hello')
+        );
+    }
+
+    /**
+     * ⭐ The control that makes the two above mean something. The SAME act,
+     * the SAME module, the SAME liveness — the only difference is whether
+     * the repository reports it as a comment. If this reached the 404 too,
+     * the tests above would be passing on the module rule and proving
+     * nothing about the comment check.
+     */
+    public function testTheSameActIsNotRefusedWhenItIsNotAComment(): void
+    {
+        self::parent(self::STATUS_MODULE);
+
+        self::assertSame(
+            ['error' => 'bcc_forbidden', 'message' => 'You do not have access to this discussion.'],
+            self::service()->listByFeedId('feed_' . self::PARENT_ACT, self::VIEWER, 'oldest', null, 20),
+            'without the comment row it must reach the membership gate'
+        );
     }
 
     // ── POST /posts/:feed_id/comments ────────────────────────────────
