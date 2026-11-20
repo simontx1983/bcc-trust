@@ -837,14 +837,28 @@ final class ModerationService
         return ['new_score' => $entry['new_score'], 'at' => $entry['at'], 'reason' => $entry['reason']];
     }
 
-    /** Re-evaluate a page's elite flag (it honours the pin). */
+    /**
+     * Re-evaluate a page's elite flag (it honours the pin).
+     *
+     * F-466: the recompute THROWS when an input it persists from can't be
+     * read. Then nothing is written for this page: its flag stays as it was,
+     * and the nightly sweep re-evaluates it (its elite_eligible_at stamp did
+     * not move). The admin action carries on with its other pages.
+     */
     private function recomputeElite(int $pageId): void
     {
         if ($this->eliteRecompute !== null) {
             ($this->eliteRecompute)($pageId);
             return;
         }
-        \BCC\Trust\Core\Plugin::instance()->eliteEligibilityService()->recomputeFor($pageId);
+        try {
+            \BCC\Trust\Core\Plugin::instance()->eliteEligibilityService()->recomputeFor($pageId);
+        } catch (\BCC\Trust\Onchain\Repositories\RepositoryReadFailure $e) {
+            \BCC\Core\Log\Logger::error('[bcc-trust] elite recompute skipped: an input could not be read', [
+                'page_id' => $pageId,
+                'error'   => $e->getMessage(),
+            ]);
+        }
     }
 
     // ──────────────────────────────────────────────────────────────

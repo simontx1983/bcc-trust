@@ -391,6 +391,13 @@ class PollService
         // lists (listActiveConfirmed + listActiveSuspected) for every poll
         // it closed — up to 2 × (200 binding + 200 expiry) identical reads
         // per hourly tick.
+        //
+        // F-464 / F-466: both reads THROW on failure, and they run before
+        // any poll is evaluated, so a failed read closes NOTHING this tick
+        // (RankScheduler records rank_scoring/poll_close_failed; the next
+        // tick retries): the close is final, so it never runs on "no
+        // clusters". A failed ballot read (evaluatePoll) stops the sweep the
+        // same way.
         $confirmedByMember = $this->indexConfirmedByMember();
         $suspectedByMember = $this->indexSuspectedByMember();
 
@@ -552,7 +559,8 @@ class PollService
      */
     private function evaluatePoll(int $pollId, array $confirmedByMember, array $suspectedByMember): array
     {
-        $rows = $this->ballots->listActiveForPoll($pollId);
+        // Fail-closed: a failed ballot read throws (the close is final).
+        $rows = $this->ballots->listActiveForPollOrFail($pollId);
 
         /** @var list<EvaluatedBallot> $evaluated */
         $evaluated       = [];
