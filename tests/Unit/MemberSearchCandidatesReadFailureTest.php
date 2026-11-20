@@ -6,6 +6,7 @@ namespace BCC\Trust\Tests\Unit;
 
 use BCC\Trust\Core\Support\MemberSearchCandidates;
 use BCC\Trust\Onchain\Repositories\RepositoryReadFailure;
+use BCC\Trust\Tests\Support\UserMetaWpdb;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -75,9 +76,13 @@ final class MemberSearchCandidatesReadFailureTest extends TestCase
         if (!class_exists('BCC\\Core\\Log\\Logger', false)) {
             eval('namespace BCC\\Core\\Log; final class Logger { public static array $lines = []; public static function error(string $m, array $c = []): void { self::$lines[] = $m . " " . json_encode($c); } public static function warning(string $m, array $c = []): void {} public static function info(string $m, array $c = []): void {} }');
         }
-        $GLOBALS['wpdb'] = new class () {
-            public string $last_error = '';
-        };
+        // F-512: the real-name flags are read through bcc-core's REAL
+        // UserMetaRepository; this double answers that read from ->meta (no
+        // flag rows by default) and keeps `last_error` for the simulated
+        // queries below.
+        require_once dirname(__DIR__) . '/Support/UserMetaWpdb.php';
+        UserMetaWpdb::loadCore();
+        $GLOBALS['wpdb'] = new UserMetaWpdb();
         eval(<<<'PHP'
             /** One simulated query: clears last_error first (wpdb::flush()), then fails if it is the configured one. */
             function msc_query(string $which): bool
@@ -271,6 +276,91 @@ final class MemberSearchCandidatesReadFailureTest extends TestCase
     public function testNobodyMatchingIsAnAnswerNotAFailure(): void
     {
         self::assertSame([], MemberSearchCandidates::ids('zzz', MemberSearchCandidates::MAX_CANDIDATES, true));
+    }
+
+    // ── F-512: any truthy real_name_hidden row hides the name ───────────
+    //
+    // 'ali' matches 7 (Alice Smith, handle alice) by name AND handle, and 8
+    // (Bob Alison, handle bobby) by name only, so 8 is the one to watch.
+
+    private static function flags(): UserMetaWpdb
+    {
+        $wpdb = $GLOBALS['wpdb'];
+        self::assertInstanceOf(UserMetaWpdb::class, $wpdb);
+        return $wpdb;
+    }
+
+    /** @return array<string, array{list<string>}> */
+    public static function rowsThatHide(): array
+    {
+        return [
+            "'1' then '0'"    => [['1', '0']],
+            "'0' then '1'"    => [['0', '1']],
+            "'1' only"        => [['1']],
+            // Truthy as PrivacySettings::flag() parses it (FILTER_VALIDATE_BOOLEAN).
+            "'true' then '0'" => [['true', '0']],
+        ];
+    }
+
+    /** @param list<string> $rows */
+    #[DataProvider('rowsThatHide')]
+    public function testAnyTruthyRowKeepsTheNameOutOfSearch(array $rows): void
+    {
+        self::flags()->meta[8] = ['bcc_privacy_real_name_hidden' => $rows];
+
+        self::assertSame([7], self::sorted(MemberSearchCandidates::ids('ali')));
+        self::assertSame([7], self::sorted(MemberSearchCandidates::ids('ali', MemberSearchCandidates::MAX_CANDIDATES, true)));
+    }
+
+    /** @return array<string, array{list<string>}> */
+    public static function rowsThatShow(): array
+    {
+        return [
+            'no row'        => [[]],
+            "'0' only"      => [['0']],
+            "'0' twice"     => [['0', '0']],
+            'an empty row'  => [['']],
+        ];
+    }
+
+    /** @param list<string> $rows */
+    #[DataProvider('rowsThatShow')]
+    public function testOnlyFalsyRowsKeepTheNameSearchable(array $rows): void
+    {
+        self::flags()->meta[8] = ['bcc_privacy_real_name_hidden' => $rows];
+
+        self::assertSame([7, 8], self::sorted(MemberSearchCandidates::ids('ali')));
+    }
+
+    /** One read for every name match, never one per member. */
+    public function testTheFlagsAreReadOnceForAllNameMatches(): void
+    {
+        MemberSearchCandidates::ids('ali');
+
+        self::assertSame(1, self::flags()->reads);
+    }
+
+    /**
+     * An unreadable flag read keeps NO name match, so only handle matches
+     * remain (7, through "alice"); a caller that opted in gets the throw.
+     */
+    public function testAnUnreadableFlagReadKeepsOnlyHandleMatches(): void
+    {
+        self::flags()->failRead = true;
+
+        self::assertSame([7], MemberSearchCandidates::ids('ali'));
+
+        $this->expectException(RepositoryReadFailure::class);
+        MemberSearchCandidates::ids('ali', MemberSearchCandidates::MAX_CANDIDATES, true);
+    }
+
+    /** A pre-flush bail with an earlier query's rows still in last_result is unreadable too. */
+    public function testAPreFlushBailIsAnUnreadableFlagRead(): void
+    {
+        self::flags()->last_result     = [];
+        self::flags()->bailBeforeFlush = true;
+
+        self::assertSame([7], MemberSearchCandidates::ids('ali'));
     }
 
     /**
