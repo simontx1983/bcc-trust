@@ -46,6 +46,18 @@ require_once __DIR__ . '/Support/EngagementWriteRoutes.php';
 // assume, so this makes the harness deterministic without changing behaviour.
 require_once __DIR__ . '/Stubs/cron-schedule-stubs.php';
 
+// PrivacySettings reads through bcc-core's UserMetaRepository, which
+// queries `$wpdb` directly, and unit suites drive privacy flags with
+// get_user_meta() shims. So every unit process can autoload a double that
+// reads through those same shims (see the file). An autoloader, not a
+// declaration: a suite that wants core's real class requires it through
+// CoreSibling before first use and gets it.
+spl_autoload_register(static function (string $class): void {
+    if ($class === 'BCC\\Core\\Repositories\\UserMetaRepository') {
+        require_once __DIR__ . '/Stubs/user-meta-repository-double.php';
+    }
+});
+
 // Global `wp_json_encode`, declared here for the same load-order reason as
 // the shims above — and with WordPress's real signature.
 //

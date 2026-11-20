@@ -31,11 +31,17 @@
  * convention as UserViewService::metaFlag — wp_usermeta stores strings,
  * so a `(bool)` cast on "false" or "0" surfaces phantom truthy values.
  *
+ * ⚠ Reads go through bcc-core's UserMetaRepository, never get_user_meta(),
+ * so a flag that could not be read is known to be unread, and it reads as
+ * hidden; see flag(). Rationale: M3 (private tracker).
+ *
  * @package BCC\Trust\Core\Support
  * @since V1 (2026-04, §K2 privacy UI)
  */
 
 namespace BCC\Trust\Core\Support;
+
+use BCC\Core\Repositories\UserMetaRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -137,29 +143,58 @@ final class PrivacySettings
      */
     public static function readProfile(int $userId): array
     {
+        $flags = self::flagsOrClosed($userId);
+
         return [
-            'watching_hidden'       => self::flag($userId, 'watching_hidden'),
-            'reviews_hidden'        => self::flag($userId, 'reviews_hidden'),
-            'disputes_hidden'       => self::flag($userId, 'disputes_hidden'),
-            'delegations_hidden'    => self::flag($userId, 'delegations_hidden'),
-            'follower_count_hidden' => self::flag($userId, 'follower_count_hidden'),
-            'real_name_hidden'      => self::flag($userId, 'real_name_hidden'),
-            'email_hidden'          => self::flag($userId, 'email_hidden'),
+            'watching_hidden'       => $flags['watching_hidden'],
+            'reviews_hidden'        => $flags['reviews_hidden'],
+            'disputes_hidden'       => $flags['disputes_hidden'],
+            'delegations_hidden'    => $flags['delegations_hidden'],
+            'follower_count_hidden' => $flags['follower_count_hidden'],
+            'real_name_hidden'      => $flags['real_name_hidden'],
+            'email_hidden'          => $flags['email_hidden'],
         ];
     }
 
     /**
      * Read all flags for the /me/privacy endpoint response.
      *
+     * An unreadable set shows every toggle ON for that response (see
+     * {@see flag()}). Nothing is persisted from it: PATCH /me/privacy is
+     * a partial write of only the keys the member sends.
+     *
      * @return array<string, bool>
      */
     public static function readAll(int $userId): array
     {
+        $flags = self::flagsOrClosed($userId);
+
         $out = [];
         foreach (self::ALL_KEYS as $key) {
-            $out[$key] = self::flag($userId, $key);
+            $out[$key] = $flags[$key];
         }
         return $out;
+    }
+
+    /**
+     * Read many members' flags in one query (per UserMetaRepository::BATCH_MAX),
+     * so a list that renders each member through {@see flag()} or
+     * {@see readProfile()} costs one read rather than one per member.
+     * Optional: an unprimed member is read on first use.
+     *
+     * @param list<int> $userIds
+     */
+    public static function prime(array $userIds): void
+    {
+        $ids = [];
+        foreach ($userIds as $id) {
+            if ($id > 0) {
+                $ids[$id] = $id;
+            }
+        }
+        foreach (array_chunk(array_values($ids), UserMetaRepository::BATCH_MAX) as $chunk) {
+            UserMetaRepository::valuesOrUnknown($chunk, self::metaKeys());
+        }
     }
 
     /**
@@ -182,6 +217,9 @@ final class PrivacySettings
             // and round-trips through FILTER_VALIDATE_BOOLEAN cleanly).
             update_user_meta($userId, self::metaKey($key), $value ? '1' : '0');
         }
+        // The repository also forgets on the user-meta write hooks; this
+        // covers a runtime where those hooks are not wired.
+        UserMetaRepository::forget($userId);
 
         // F-294: let caches that embed a member's name or listing react to a
         // privacy change (the anon hot feed, on real_name_hidden). Only the
@@ -194,14 +232,97 @@ final class PrivacySettings
 
     /**
      * Single-flag read. Boolean-truthy parsing per UserViewService::metaFlag.
+     *
+     * ⚠⚠ AN UNREADABLE FLAG READS AS ON, i.e. HIDDEN. Every key here is a
+     * "hide this" switch, so ON is the closed answer. {@see flagOrUnknown()}
+     * gives the three-way answer for a caller that wants to choose.
+     * Rationale: M3 (private tracker).
      */
     public static function flag(int $userId, string $key): bool
+    {
+        return self::flagOrUnknown($userId, $key) ?? true;
+    }
+
+    /**
+     * true / false when the member's setting was READ; null when the read
+     * cannot be trusted (see UserMetaRepository). No member (id <= 0) has
+     * nothing hidden, as before.
+     *
+     * Duplicate rows for one key: the strictest wins (any ON row means
+     * ON), the direction that hides rather than leaks. WordPress's
+     * update_user_meta() rewrites every row, so they only diverge when
+     * something called add_user_meta() directly.
+     */
+    public static function flagOrUnknown(int $userId, string $key): ?bool
     {
         if ($userId <= 0) {
             return false;
         }
-        $raw = get_user_meta($userId, self::metaKey($key), true);
-        return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+        $metaKey = self::metaKey($key);
+        $keys    = self::metaKeys();
+        if (!in_array($metaKey, $keys, true)) {
+            $keys = [$metaKey];
+        }
+
+        $values = UserMetaRepository::valuesOrUnknown([$userId], $keys);
+        if ($values === null) {
+            return null;
+        }
+
+        return self::strictest($values[$userId][$metaKey] ?? []);
+    }
+
+    /**
+     * Every public flag for one member, read once. An unreadable set reads
+     * as ALL HIDDEN, as {@see flag()} does.
+     *
+     * @return array<string, bool> public key => hidden
+     */
+    private static function flagsOrClosed(int $userId): array
+    {
+        if ($userId <= 0) {
+            return array_fill_keys(self::ALL_KEYS, false);
+        }
+
+        $values = UserMetaRepository::valuesOrUnknown([$userId], self::metaKeys());
+        if ($values === null) {
+            return array_fill_keys(self::ALL_KEYS, true);
+        }
+
+        $flags = [];
+        foreach (self::ALL_KEYS as $key) {
+            $flags[$key] = self::strictest($values[$userId][self::metaKey($key)] ?? []);
+        }
+
+        return $flags;
+    }
+
+    /** @param list<string> $rawValues */
+    private static function strictest(array $rawValues): bool
+    {
+        foreach ($rawValues as $raw) {
+            if (filter_var($raw, FILTER_VALIDATE_BOOLEAN)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The meta keys behind ALL_KEYS, read together so one query (and one
+     * memo entry) serves every flag of a member.
+     *
+     * @return list<string>
+     */
+    private static function metaKeys(): array
+    {
+        $keys = [];
+        foreach (self::ALL_KEYS as $key) {
+            $keys[] = self::metaKey($key);
+        }
+
+        return $keys;
     }
 
 
