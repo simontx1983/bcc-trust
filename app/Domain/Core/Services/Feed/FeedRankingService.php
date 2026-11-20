@@ -45,6 +45,7 @@ use BCC\Trust\Core\Repositories\ReputationRepository;
 use BCC\Trust\Core\Services\FeedItemReportVisibility;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Support\PeepSoFriendGate;
+use BCC\Trust\Core\Support\PrivacySettings;
 use BCC\Trust\Core\Support\ProfileAccess;
 use BCC\Trust\Core\Support\ProfileSectionVisibility;
 use BCC\Trust\Core\Support\RestrictedGroups;
@@ -217,10 +218,35 @@ final class FeedRankingService
         // never reaches this write. Keep the write after the build: caching
         // a failed build would serve an empty hot feed to every reader for
         // HOT_CACHE_TTL after the database recovered.
-        $payload = $this->buildHotFeed(null, $limit);
-        wp_cache_set($key, $payload, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
+        [$payload, $cacheable] = $this->buildHotFeedForSharedCache($limit);
+        if ($cacheable) {
+            wp_cache_set($key, $payload, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
+        }
 
         return $payload;
+    }
+
+    /**
+     * Build the shared hot page and say whether it may be CACHED for
+     * everyone: not when bcc-core had to mask author names during the build
+     * because their name inputs could not be read
+     * ({@see ActivityFeedService::authorReadFailures()}, a per-request count
+     * snapshotted around the build, so a build that reads several pages is
+     * covered), and not when bcc-trust masked a name the same way during the
+     * build ({@see PrivacySettings::unreadReads()}: the reactor faces read
+     * through PublicIdentity::visibleName()). Such a page is served to this
+     * request only, and the next
+     * request builds again. Needs bcc-core #158 (deployed first).
+     * Rationale: M3 (private tracker).
+     *
+     * @return array{0: array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}, 1: bool}
+     */
+    private function buildHotFeedForSharedCache(int $limit): array
+    {
+        $before  = [ActivityFeedService::authorReadFailures(), PrivacySettings::unreadReads()];
+        $payload = $this->buildHotFeed(null, $limit);
+
+        return [$payload, [ActivityFeedService::authorReadFailures(), PrivacySettings::unreadReads()] === $before];
     }
 
     /**
@@ -232,11 +258,16 @@ final class FeedRankingService
      * ⚠ F-275: a feed read that did not run throws out of the build, BEFORE
      * the write, so a failed tick leaves the last good page in place rather
      * than overwriting it with an empty one. CronService catches and logs.
+     *
+     * A build with masked author names is not stored either
+     * ({@see buildHotFeedForSharedCache()}): the last good page stays.
      */
     public function warmHotFeed(int $limit = self::HOT_WARM_LIMIT): void
     {
-        $payload = $this->buildHotFeed(null, $limit);
-        wp_cache_set(self::hotFeedCacheKey($limit), $payload, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
+        [$payload, $cacheable] = $this->buildHotFeedForSharedCache($limit);
+        if ($cacheable) {
+            wp_cache_set(self::hotFeedCacheKey($limit), $payload, self::HOT_CACHE_GROUP, self::HOT_CACHE_TTL);
+        }
     }
 
     /**

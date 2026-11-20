@@ -83,7 +83,8 @@ final class RealNameHiddenEverywhereTest extends TestCase
             'comments'           => ['app/Domain/Core/Services/CommentService.php', 'visibleName('],
             'messages'           => ['app/Domain/Core/Services/MessagesService.php', 'visibleName('],
             'blocks list'        => ['app/Domain/Core/Services/MyBlocksService.php', 'visibleName('],
-            'notifications'      => ['app/Domain/Core/Services/NotificationViewService.php', 'forUser($user)'],
+            // F-513: the bell's reader (its recipient) is the viewer.
+            'notifications'      => ['app/Domain/Core/Services/NotificationViewService.php', 'forUser($user, $viewerId)'],
             'mentions overlay'   => ['app/Domain/Core/Services/Mentions/MentionOverlayService.php', 'forUser($user)'],
             'mention picker'     => ['app/Domain/Core/Services/Mentions/MentionSearchService.php', 'forUser($user)'],
             'attestations'       => ['app/Domain/Core/Services/AttestationService.php', 'forUser($user)'],

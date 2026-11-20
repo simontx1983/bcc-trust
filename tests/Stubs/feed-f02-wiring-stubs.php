@@ -160,6 +160,17 @@ namespace BCC\Core\Feed {
         public const SCOPE_GROUPS    = 'groups';
         public const MEMBER_GROUPS_CAP = 200;
 
+        /**
+         * Core's per-request count of author batches whose names it masked.
+         * getFeed() bumps it when a test sets `mask_authors`.
+         */
+        public static int $authorReadFailures = 0;
+
+        public static function authorReadFailures(): int
+        {
+            return self::$authorReadFailures;
+        }
+
         /** @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}} */
         public function getFeed(
             int $viewerId,
@@ -179,6 +190,15 @@ namespace BCC\Core\Feed {
             ?array $softExcludedAuthorIds = null,
             ?array $softExclusionExemptGroupIds = null
         ): array {
+            if (!empty($GLOBALS['__bcc_f02feed']['mask_authors'])) {
+                self::$authorReadFailures++;
+            }
+            // A trust-side mask during the build: a privacy flag read for a
+            // member whose read the test made fail (UserMetaRepository double).
+            if (!empty($GLOBALS['__bcc_f02feed']['mask_trust_for'])) {
+                \BCC\Trust\Core\Support\PrivacySettings::flag((int) $GLOBALS['__bcc_f02feed']['mask_trust_for'], 'real_name_hidden');
+            }
+
             // F-276: every argument, in call order, so a surface's
             // limit / cursor / hashtag can be asserted and a refactor
             // can be diffed call for call.

@@ -204,7 +204,8 @@ final class NotificationViewService
             update_meta_cache('user', $ids);          // primes bcc_handle reads
             $avatarById = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrlBulk($ids);
             foreach ($ids as $id) {
-                $actorsById[$id] = self::resolveActor($id, $avatarById[$id] ?? '');
+                // The recipient is the viewer: their own name stays theirs (F-513).
+                $actorsById[$id] = self::resolveActor($id, $avatarById[$id] ?? '', $userId);
             }
         }
 
@@ -290,7 +291,8 @@ final class NotificationViewService
             return null;
         }
 
-        $actor   = $actorsById[$fromUserId] ?? self::resolveActor($fromUserId, '');
+        $recipientId = isset($row->not_user_id) ? (int) $row->not_user_id : 0;
+        $actor   = $actorsById[$fromUserId] ?? self::resolveActor($fromUserId, '', $recipientId);
         $link    = self::resolveLink($type, $externalId, $actId, $actor['handle']);
         $message = self::withCurrentActorHandle($message, $actor['handle']);
 
@@ -355,11 +357,13 @@ final class NotificationViewService
     }
 
     /**
+     * @param int    $viewerId  Who reads the bell (the recipient): a member sees
+     *                          their own real name; others see the §K2 mask.
      * @param string $avatarUrl Pre-resolved (bulk) avatar; '' lets callers
      *                          on the single-actor path pass empty.
      * @return array{id: int, handle: string, display_name: string, avatar_url: string}
      */
-    private static function resolveActor(int $userId, string $avatarUrl): array
+    private static function resolveActor(int $userId, string $avatarUrl, int $viewerId = 0): array
     {
         if ($userId <= 0) {
             return [
@@ -378,7 +382,7 @@ final class NotificationViewService
                 'avatar_url'   => '',
             ];
         }
-        $identity    = \BCC\Trust\Core\Support\PublicIdentity::forUser($user);
+        $identity    = \BCC\Trust\Core\Support\PublicIdentity::forUser($user, $viewerId);
         $handle      = $identity['handle'];
         $displayName = $identity['display_name'];
 

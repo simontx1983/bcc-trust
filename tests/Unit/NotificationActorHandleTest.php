@@ -94,6 +94,25 @@ final class NotificationActorHandleTest extends TestCase
         self::assertSame('', $shaped['actor']['handle']);
     }
 
+    /**
+     * F-513: the bell's reader is its recipient. A member's own action on
+     * their own bell shows their own name, even with "Hide my real name"
+     * on and even when that flag can't be read; another actor's hidden
+     * name stays masked.
+     */
+    public function testASelfSentBellShowsTheMembersOwnName(): void
+    {
+        $GLOBALS['__bcc_nah']['users'][self::RECIPIENT] = ['login' => 'u9', 'display' => 'Nine'];
+        $GLOBALS['__bcc_nah']['meta'][self::RECIPIENT]  = ['bcc_handle' => 'nine', 'bcc_privacy_real_name_hidden' => '1'];
+        $GLOBALS['__bcc_nah']['meta'][self::OTHER]['bcc_privacy_real_name_hidden'] = '1';
+
+        self::assertSame('Nine', self::shape(self::row(self::RECIPIENT, '@nine earned a rank.'))['actor']['display_name']);
+        self::assertSame('@otherone', self::shape(self::row(self::OTHER, '@otherone vouched for you.'))['actor']['display_name'], 'control: another member stays masked');
+
+        \BCC\Core\Repositories\UserMetaRepository::$unreadable = [self::RECIPIENT => true];
+        self::assertSame('Nine', self::shape(self::row(self::RECIPIENT, '@nine earned a rank.'))['actor']['display_name'], 'unreadable: still their own name');
+    }
+
     // ── the digest ──────────────────────────────────────────────────────
 
     public function testTheDigestNamesEachActorByTheirCurrentHandle(): void

@@ -93,6 +93,16 @@ final class DelegatorGroupIntegrationTest extends TestCase
         $GLOBALS['__bcc_hooks']          = [];
         $GLOBALS['__bcc_posts']          = [];
         $GLOBALS['__bcc_usermeta']       = [];
+        // The §K2 privacy flags are read from the real wp_usermeta (created
+        // by the bootstrap), never through the stub above. Start this suite's
+        // members from "nothing hidden" whatever an earlier suite left.
+        global $wpdb;
+        $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->usermeta} WHERE user_id BETWEEN %d AND %d AND meta_key LIKE %s",
+            self::OPERATOR,
+            self::WELL_STAKED,
+            $wpdb->esc_like('bcc_privacy_') . '%'
+        ));
         $GLOBALS['__bcc_lcd']            = [];
         $GLOBALS['__bcc_lcd_calls']      = [];
         $GLOBALS['__bcc_group_creates']  = [];
