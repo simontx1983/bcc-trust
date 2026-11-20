@@ -1286,6 +1286,14 @@ class VoteRepository {
      *   illegal-mix-of-collations error on MySQL 8.
      * - Without PeepSo's activities table there are no review activities
      *   to hide, and the join would error, so the predicate is a no-op.
+     *   ⚠ ONLY when a table is CONFIRMED missing. When the existence probe
+     *   cannot be trusted, the exclusion is still emitted, so no read or
+     *   recalc built on it counts a hidden review on an unknown. The
+     *   statement itself then proves the tables: exact when they exist.
+     *   When they really are missing it fails, and each read's own failure
+     *   handling takes over: the recalc's runRead() throws before anything
+     *   is saved, and an edge recalc throws before it writes.
+     *   Rationale: M7 (private tracker).
      *
      * PUBLIC so the scoring follow-up (a moderation-hidden review stops
      * counting toward scores and tallies while hidden; user decision) can
@@ -1300,8 +1308,9 @@ class VoteRepository {
         global $wpdb;
         $activities = $wpdb->prefix . 'peepso_activities';
         $hidden     = \BCC\Trust\Core\Database\TableRegistry::hiddenActivities();
-        if (!\BCC\Trust\Core\Database\TableRegistry::exists($activities)
-            || !\BCC\Trust\Core\Database\TableRegistry::exists($hidden)) {
+        // `=== false`, never `!`: null (unknown) must keep the exclusion.
+        if (\BCC\Trust\Core\Database\TableRegistry::existsOrUnknown($activities) === false
+            || \BCC\Trust\Core\Database\TableRegistry::existsOrUnknown($hidden) === false) {
             return '1 = 1';
         }
 
@@ -1340,7 +1349,10 @@ class VoteRepository {
         }
         global $wpdb;
         $activities = $wpdb->prefix . 'peepso_activities';
-        if (!\BCC\Trust\Core\Database\TableRegistry::exists($activities)) {
+        // Only a CONFIRMED missing table means "not a review". An unknown
+        // probe runs the lookup, so a hide still finds its page; a missing
+        // table then errors and throws below. Rationale: M7 (private tracker).
+        if (\BCC\Trust\Core\Database\TableRegistry::existsOrUnknown($activities) === false) {
             return null;
         }
 
