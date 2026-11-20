@@ -815,9 +815,11 @@ final class FeedRankingService
      * Does this ROOM lift the §O4.1 reputation shadow-limit for its own
      * posts? The ONE decision {@see getGroupFeed()},
      * {@see getMyGroupsFeed()} and the permalink ({@see visibleActivity()},
-     * for the room's active members, F-451) share, so a post can never be
-     * shown in its room and hidden in "My Groups" or 404 by link, or the
-     * reverse.
+     * F-451) share. So a room's ACTIVE MEMBER never sees a post in the room
+     * that "My Groups" hides or that 404s by link. The permalink lifts the
+     * limit for active members only: a non-member who can read a
+     * non-secret room's feed sees the post there but still gets a 404 by
+     * link. That split is intended, the fail-safe direction.
      *
      * Today: NFT holder rooms. There the on-chain gate plus membership IS the
      * moderation boundary, so a verified low-trust holder is not hidden from
