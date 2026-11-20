@@ -336,4 +336,32 @@ final class PendingEmailSignupTest extends TestCase
         self::assertCount(1, $GLOBALS['__bcc_ph']['mail']);
         self::assertStringContainsString('Only the most recent link works', (string) $GLOBALS['__bcc_ph']['mail'][0]['html']);
     }
+
+    // ── F-458: the reserved placeholder domain is never a typed address ──
+
+    /** @return iterable<string, array{0: string, 1: bool}> */
+    public static function typedAddresses(): iterable
+    {
+        yield 'a real address'                   => ['alice@example.test', true];
+        yield 'the reserved domain'              => ['alice@' . AccountRecoveryService::PLACEHOLDER_EMAIL_DOMAIN, false];
+        yield 'the reserved domain, any case'    => ['alice@NoReply.BCC.Local', false];
+        yield 'a subdomain is a different domain' => ['alice@x.noreply.bcc.local.example.test', true];
+        yield 'not an address'                   => ['not-an-email', false];
+        yield 'empty'                            => ['', false];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('typedAddresses')]
+    public function testTheSharedRuleForATypedAddress(string $email, bool $usable): void
+    {
+        self::assertSame($usable, AccountRecoveryService::isUsableEmail($email));
+    }
+
+    public function testPasswordSignupRefusesAnAddressOnTheReservedDomain(): void
+    {
+        $out = self::signup('alice', 'alice@NoReply.BCC.Local');
+
+        self::assertSame(400, $out['status']);
+        self::assertSame('A valid email is required.', $out['message'], 'the same answer as any unusable address');
+        self::assertSame([], $GLOBALS['__bcc_ph']['users'], 'no account');
+    }
 }
