@@ -226,9 +226,9 @@ final class BearerAuth
      * the token state unknown after the door, or could not record a
      * revocation: private, never stored, and varying by token.
      */
-    public static function unavailableResponse(): \WP_REST_Response
+    public static function unavailableResponse(string $message = self::UNAVAILABLE_MESSAGE): \WP_REST_Response
     {
-        $response = ApiResponse::error('bcc_unavailable', self::UNAVAILABLE_MESSAGE, 503);
+        $response = ApiResponse::error('bcc_unavailable', $message, 503);
         $response->header('Cache-Control', 'private, no-store');
         $response->header('Vary', 'Authorization');
 
