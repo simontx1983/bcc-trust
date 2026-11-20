@@ -11,6 +11,7 @@ use BCC\Trust\Core\Services\FeedItemReportVisibility;
 use BCC\Trust\Core\Services\GroupContextResolver;
 use BCC\Trust\Core\Services\GroupsService;
 use BCC\Trust\Tests\Support\CoreSibling;
+use BCC\Trust\Tests\Support\PostGroupFactsWpdb;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
@@ -129,6 +130,23 @@ final class FeedItemReportVisibilityTest extends TestCase
             /** @var list<int> act ids CommentRepository::getCommentMeta() finds as comments */
             public array $commentActs = [];
 
+            /**
+             * F-461: PostGroupFactsRepository reads the post's group facts
+             * through query() + the public last_result. By default they
+             * come from the same halls fixture get_post_meta() reads, so
+             * every test keeps its meaning; $dbRows is what the DATABASE
+             * holds when a test makes get_post_meta() disagree with it.
+             *
+             * @var mixed
+             */
+            public $last_result = [];
+            public string $postmeta = 'wp_postmeta';
+            /** @var array<int, list<object>> */
+            public array $dbRows = [];
+            public bool $failFacts = false;
+            public bool $bailFacts = false;
+            public int $factsReads = 0;
+
             public function prepare(string $sql, mixed ...$args): string
             {
                 $this->args = $args;
@@ -144,6 +162,9 @@ final class FeedItemReportVisibilityTest extends TestCase
              */
             public function query(string $sql): int|false
             {
+                if (PostGroupFactsWpdb::isFactsRead($sql)) {
+                    return $this->factsRead((int) ($this->args[0] ?? 0));
+                }
                 $this->last_error = '';
                 $value = $this->resolve($sql);
                 $this->lastResult = $value === null ? [] : [[$value]];
@@ -179,6 +200,26 @@ final class FeedItemReportVisibilityTest extends TestCase
                     $this->query($sql);
                 }
                 return array_map(static fn (array $r): string => $r[0], $this->lastResult);
+            }
+
+            /** Real wpdb shapes: see PostGroupFactsWpdb. A pre-flush bail leaves last_result alone. */
+            private function factsRead(int $postId): int|false
+            {
+                $this->factsReads++;
+                if ($this->bailFacts) {
+                    return false;
+                }
+                if ($this->failFacts) {
+                    $this->last_error  = 'MySQL server has gone away';
+                    $this->last_result = [];
+                    return false;
+                }
+                $this->last_error  = '';
+                $this->last_result = $this->dbRows[$postId] ?? PostGroupFactsWpdb::rowsFromMeta(
+                    $postId,
+                    static fn (int $id, string $key): mixed => $GLOBALS['__bcc_halls_gate_fixture'][$id]['meta'][$key] ?? ''
+                );
+                return count($this->last_result);
             }
 
             private function resolve(string $sql): ?string
@@ -613,6 +654,113 @@ final class FeedItemReportVisibilityTest extends TestCase
         foreach (['1', '4', '202', '204'] as $module) { // status, photo, review, blog_excerpt
             self::assertTrue($this->gate()->canSee(self::VIEWER, $this->activity(module: $module)), "module {$module}");
         }
+    }
+
+    // ── F-461: the group facts come from the database, never get_post_meta() ──
+    //
+    // In each test below get_post_meta() says the post has no meta at all,
+    // while the DATABASE says what the post is. The gate follows the database.
+
+    /** @return list<object> what the database holds for POST */
+    private static function groupRows(string $visibility, ?string $privacyAtPost = null): array
+    {
+        $rows = [
+            PostGroupFactsWpdb::row('peepso_group_id', (string) self::GROUP),
+            PostGroupFactsWpdb::row('_bcc_post_visibility', $visibility),
+        ];
+        if ($privacyAtPost !== null) {
+            $rows[] = PostGroupFactsWpdb::row('_bcc_post_group_privacy_at_post', $privacyAtPost);
+        }
+        return $rows;
+    }
+
+    public function testAClosedGroupPostByTheDatabaseIsNotReportable(): void
+    {
+        $this->group(self::PRIVACY['closed']);
+        $this->post([]); // get_post_meta(): "not a group post"
+        self::assertTrue($this->gate()->canSee(self::VIEWER, $this->activity()), 'control: what the cache alone describes is visible');
+
+        $this->wpdb()->dbRows[self::POST] = self::groupRows('members_only');
+
+        self::assertFalse($this->gate()->canSee(self::VIEWER, $this->activity()));
+    }
+
+    public function testThePermalinkFollowsTheDatabasesGroupFacts(): void
+    {
+        $this->group(self::PRIVACY['secret']);
+        $this->post([]);
+        $this->wpdb()->dbRows[self::POST] = self::groupRows('public_group');
+
+        self::assertFalse($this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => self::POST]));
+        self::assertFalse($this->gate()->canSeeHydratedItem(0, ['external_id' => self::POST]));
+    }
+
+    /**
+     * The syndication check reads the same facts. Made public_all while the
+     * group was open, the group now secret: refused to outsiders.
+     */
+    public function testTheSyndicationCheckReadsTheDatabasesGroupIds(): void
+    {
+        $this->group(self::PRIVACY['secret']);
+        $this->post([]);
+        $this->wpdb()->dbRows[self::POST] = self::groupRows('public_all', '0');
+        \bcc_test_seed_nonopen_groups([self::GROUP]);
+
+        self::assertFalse($this->gate()->canSeeHydratedItem(0, ['external_id' => self::POST]));
+        self::assertFalse($this->gate()->canSee(self::VIEWER, $this->activity()));
+    }
+
+    /** ...and a deliberate non-open syndication still syndicates: privacy-at-post comes from the database too. */
+    public function testADeliberateNonOpenSyndicationReadsItsPrivacyFromTheDatabase(): void
+    {
+        $this->group(self::PRIVACY['secret']);
+        $this->post([]);
+        $this->wpdb()->dbRows[self::POST] = self::groupRows('public_all', '2');
+        \bcc_test_seed_nonopen_groups([self::GROUP]);
+
+        self::assertTrue($this->gate()->canSeeHydratedItem(0, ['external_id' => self::POST]));
+    }
+
+    /**
+     * The audience carve-out reads them too: a post the DATABASE puts in a
+     * group is the group's to decide, so a member sees it whatever its
+     * author's profile audience says (ratified 2026-11-12).
+     */
+    public function testTheAudienceCarveOutFollowsTheDatabasesGroupFacts(): void
+    {
+        $this->group(self::PRIVACY['open']);
+        $this->post([]);
+        $this->wpdb()->dbRows[self::POST] = self::groupRows('public_group');
+        $this->wpdb()->members[self::VIEWER . ':' . self::GROUP] = 'member';
+        $GLOBALS['__bcc_aud']['hidden'] = [(int) $this->activity()->act_id];
+
+        self::assertTrue($this->gate()->canSee(self::VIEWER, $this->activity()));
+        self::assertTrue(FeedItemReportVisibility::audienceAllows(self::VIEWER, self::ACT, self::POST));
+    }
+
+    /** Unreadable group facts are "not visible", even for an ordinary post that otherwise is. */
+    public function testUnreadableGroupFactsAreNotVisible(): void
+    {
+        $this->post([]);
+        self::assertTrue($this->gate()->canSee(self::VIEWER, $this->activity()), 'control');
+        self::assertTrue($this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => self::POST]), 'control');
+        self::assertTrue(FeedItemReportVisibility::audienceAllows(self::VIEWER, self::ACT, self::POST), 'control');
+
+        $this->wpdb()->failFacts = true;
+
+        self::assertFalse($this->gate()->canSee(self::VIEWER, $this->activity()));
+        self::assertFalse($this->gate()->canSeeHydratedItem(self::VIEWER, ['external_id' => self::POST]));
+        self::assertFalse(FeedItemReportVisibility::audienceAllows(self::VIEWER, self::ACT, self::POST));
+    }
+
+    /** One decision, one read: the group rule and the audience rule share it. */
+    public function testOneDecisionRestsOnOneFactsRead(): void
+    {
+        $this->group(self::PRIVACY['open']);
+        $this->post(['peepso_group_id' => (string) self::GROUP, '_bcc_post_visibility' => 'public_group']);
+
+        self::assertTrue($this->gate()->canSee(self::VIEWER, $this->activity()));
+        self::assertSame(1, $this->wpdb()->factsReads);
     }
 
     private function gate(): FeedItemReportVisibility

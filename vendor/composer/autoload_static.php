@@ -321,6 +321,7 @@ class ComposerStaticInit713d41a3a7dbe16aa8cdd972ed759308
         'BCC\\Trust\\Core\\Repositories\\PhotoAltRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/PhotoAltRepository.php',
         'BCC\\Trust\\Core\\Repositories\\PhotoRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/PhotoRepository.php',
         'BCC\\Trust\\Core\\Repositories\\PostEngagementRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/PostEngagementRepository.php',
+        'BCC\\Trust\\Core\\Repositories\\PostGroupFactsRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/PostGroupFactsRepository.php',
         'BCC\\Trust\\Core\\Repositories\\PostReachRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/PostReachRepository.php',
         'BCC\\Trust\\Core\\Repositories\\PostShortcodeRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/PostShortcodeRepository.php',
         'BCC\\Trust\\Core\\Repositories\\PushSubscriptionRepository' => __DIR__ . '/../..' . '/app/Domain/Core/Repositories/PushSubscriptionRepository.php',
